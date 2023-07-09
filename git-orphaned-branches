@@ -1,0 +1,44 @@
+#!/bin/sh
+
+# This command lists directories named *-branch-* that are git clones of
+# branches that have been deleted in the remote repository.  Only directories
+# below the current directory are considered.  Newly-created branches are not
+# listed, only branches that have been deleted in the remote (for example,
+# because a pull request has been merged).
+#
+# Typical usage is:  rm -rf $(git-orphaned-branches)
+
+# DEBUG=1
+
+if [ "$#" -ne 0 ]; then
+  echo "Usage: $0" >&2
+  exit 1
+fi
+
+dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
+find . -name '*-branch-*' -type d > "${dirs_file}"
+
+while IFS= read -r dir
+do
+  if [ ! -d "$dir" ] ; then continue; fi
+  if [ -n "$DEBUG" ] ; then echo "checking: $dir"; fi
+  if ! git -C "$dir" ls-remote -h "$(git -C "$dir" config --get remote.origin.url)" > /dev/null 2>&1 ; then
+    echo "Did not find remote repository for $dir: $(git -C \""$dir"\" config --get remote.origin.url)"
+  else
+    # The remote repository exists
+    if [ -n "$DEBUG" ] ; then echo "remote repository exists: $dir"; fi
+    # Don't match on "There is no tracking information for the current branch.", which is output
+    # for both a new branch and a deleted branch where the repository has been pruned.
+    
+    # If grep matches `git pull` output, print directory name.
+    if git -C "$dir" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)' ; then
+      realpath "$dir"
+    else
+      # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
+      # git -C "$dir" remote prune origin 2>&1 > /dev/null
+      true
+    fi
+  fi
+done < "${dirs_file}"
+
+rm -f "${dirs_file}"

@@ -1,0 +1,62 @@
+#!/bin/sh
+
+# Pull from another directory into the current repository.  Fails if
+# the resulting merge does not compile.
+# 
+# Usage:
+#   git-pull-from OTHER-REPO-DIR
+# 
+# Run this command from within a repository.  OTHER-REPO-DIR may be an absolute
+# or relative pathname.
+
+# This script does the following:
+#  * pull another directory from its remote,
+#  * pull that other directory into this one,
+#  * build this one using `compile-project` (see its documentation),
+#  * push this one to its remote if the build succeeds.
+#
+# Calling `git-push-to` is often more readable, because it makes both directory names explicit.
+
+
+if [ "$#" -ne 1 ]; then
+  echo "Usage: $0 OTHER-REPO-DIR" >&2
+  exit 1
+fi
+
+from="$1"
+from_absolute="$(realpath --relative-to="." "$from")"
+
+
+if [ ! -d "${from}" ]; then
+  if [ "${from}" = "${from_absolute}" ] ; then
+    echo "$0: no such directory: $from"
+  else
+    echo "$0: no such directory: ${from} = ${from_absolute}"
+  fi  
+  exit 1
+fi
+
+if ! git pull -q; then
+  echo "$0: problem pulling $(pwd)"
+  exit 1
+fi
+
+if ! git -C "$from" pull -q ; then
+  echo "$0: problem pulling ${from}"
+  exit 1
+fi
+
+if ! git pull -q "${from_absolute}"; then
+  echo "$0: problem pulling ${from_absolute} into $(pwd)"
+  exit 1
+fi
+
+if ! compile-project ; then
+  echo "$0: unable to build in $(pwd)"
+  exit 1
+fi
+
+if ! git push; then
+  echo "$0: problem pushing from $(pwd)"
+  exit 1
+fi

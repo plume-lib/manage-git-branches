@@ -1,0 +1,58 @@
+#!/bin/sh
+
+# Checks out an existing branch of the current repository,
+# in a sibling directory named REPONAME-branch-BRANCHNAME/.
+#
+# Usage:
+#   git-checkout-branch BRANCHNAME
+
+if [ "$#" -ne 1 ]; then
+  echo "Usage: $0 BRANCHNAME" >&2
+  exit 1
+fi
+
+if ! cd "$(git rev-parse --show-toplevel)" ; then
+    echo "$0: Cannot determine top-level directory of git repository"
+    git rev-parse --show-toplevel
+    return 1
+fi
+
+REPO=$(basename "$(pwd)")
+BRANCHNAME="$1"
+BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
+BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
+
+git pull -q > /dev/null 2>&1 || true
+
+if [ -z "$(git branch -r --list "origin/${BRANCHNAME}")" ] ; then
+    if ! git ls-remote --exit-code origin "${BRANCHNAME}" ; then
+	echo "$0: ERROR: branch ${BRANCHNAME} does not exist."
+	return 1
+    fi
+fi
+
+if [ -e "${BRANCHDIR}" ] ; then
+  echo "$0: ERROR: directory exists: ${BRANCHDIR}"
+  exit 1
+fi
+
+if ! \cp -Rp . "${BRANCHDIR}" ; then
+    echo "$0: ERROR: cannot copy $(pwd) to ${BRANCHDIR}"
+    return 1
+fi
+if ! cd "${BRANCHDIR}" ; then
+    echo "$0: ERROR in: cd \"${BRANCHDIR}\""
+    return 1
+fi
+if ! git checkout "${BRANCHNAME}" -- ; then
+    echo "$0: ERROR in: git checkout \"${BRANCHNAME}\" --"
+    return 1
+fi
+
+git pull -q > /dev/null 2>&1 || true
+
+echo "Success: checked out to ${BRANCHDIR}"
+
+
+## This does not work; I'm not sure why.
+# gitcheckoutbranch_worktree () { cd "$(git rev-parse --show-toplevel)" && git diff --exit-code && git pull -q && (git ls-remote --exit-code origin "$1" || (echo "ERROR: Branch $1 does not exist" && false)) && REPO=$(basename "$(pwd)") && BRANCHNOSLASH=$(echo "$1" | sed -e "s:/:-:g") && BRANCHDIR="../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}" && git worktree add "${BRANCHDIR}" "$1" && cd "${BRANCHDIR}" && true ; }

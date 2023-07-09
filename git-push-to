@@ -1,0 +1,145 @@
+#!/bin/sh
+
+# Push one git repository into another, from local clones.  Fails if the
+# resulting merge does not compile.  If more than two repositories are given,
+# each is pushed into the next in turn.
+#
+# Usage:
+#   git-push-to FROM_DIR TO_DIR ...
+#
+# Both arguments are directory names for working copies (that is, clones).
+# They may be absolute directory names or relative to the current directory.
+#
+# This script does the following:
+#  * pull FROM_DIR and TO_DIR from their remotes,
+#  * pull FROM_DIR into TO_DIR,
+#  * build TO_DIR using `compile-project` (see its documentation),
+#  * push TO_DIR to its remote if the build succeeds.
+#
+# If more than two directories are supplied, the procedure is performed on each
+# pair of adjacent directories in turn.
+
+# Here is an example of use.
+#
+# Suppose you have a branch named "allchanges".  It contains a main set of
+# changes, but also two sets of sets of independent changes that should be
+# pull-requested separately.  The first part of the changes consists of 3
+# subparts that build upon one another, and the second part of the changes
+# consists of 2 subparts that build upon one another.
+#
+# So, you have the following branches.
+#  * allchanges
+#     * part1   -- a subset of "all-changes"
+#        * part1-step1  -- a subset of "part1-step2"
+#        * part1-step2  -- a subset of "part1"
+#     * part2   -- a subset of "all-changes"
+#        * part2-step1  -- a subset of "part2"
+#
+# You would make 6 pull requests, in order to make each one address just one
+# concern.  This makes the pull requests easier to review, and it makes the
+# version control history easier to understand.
+#
+# Assume that you have each of these branches checked out in its own directory.
+# To keep all of these branches in sync, whenever you make a change to any
+# branch (including merging a pull request into your main branch), you would run
+# the following commands:
+#
+#   git-push-to \
+#     MYDIR/myrepo-branch-main \
+#     MYDIR/myrepo-branch-part1-step1 \
+#     MYDIR/myrepo-branch-part1-step2 \
+#     MYDIR/myrepo-branch-part1 \
+#     MYDIR/myrepo-branch-allchanges && \
+#   git-push-to \
+#     MYDIR/myrepo-branch-main \
+#     MYDIR/myrepo-branch-part2-step1 \
+#     MYDIR/myrepo-branch-part2 \
+#     MYDIR/myrepo-branch-allchanges
+#
+# This helps to ensure that you will resolve each merge conflict just once.
+#
+# The history of the branches will contain many merges (most of which will be
+# clean merges that do not require your attention).  The branch history does not
+# matter.  If you are using the standard squash-and-merge handling of of pull
+# requests, the branch history will not be reflected in your final repository.
+
+
+## A helper function that works on exactly two repositories.
+git_push_to () {
+
+from="$1"
+from_absolute="$(realpath "$from")"
+to="$2"
+to_absolute="$(realpath "$to")"
+
+if [ ! -d "${from}" ]; then
+  if [ "${from}" = "${from_absolute}" ] ; then
+    echo "$0: no such directory: $from"
+  else
+    echo "$0: no such directory: ${from} = ${from_absolute}"
+  fi  
+  return 1
+fi
+if [ ! -d "$to" ]; then
+  if [ "${to}" = "${to_absolute}" ] ; then
+    echo "$0: no such directory: $to"
+  else
+    echo "$0: no such directory: ${to} = ${to_absolute}"
+  fi  
+  return 1
+fi
+
+if ! git -C "$from_absolute" pull -q ; then
+  echo "$0: problem pulling ${from_absolute}"
+  return 1
+fi
+
+orig_dir=$(pwd)
+
+if ! cd "$to_absolute" ; then
+  echo "$0: cannot cd to ${to_absolute}"
+  return 1
+fi
+
+if ! git pull -q ; then
+  echo "$0: problem pulling in ${to_absolute}"
+  return 1
+fi
+
+if ! git pull -q "${from_absolute}" ; then
+  echo "$0: problem pulling ${from_absolute} into $(pwd)"
+  return 1
+fi
+
+if ! compile-project ; then
+  echo "$0: unable to build in $(pwd)"
+  return 1
+fi
+
+if ! git push; then
+  echo "$0: problem pushing from $(pwd)"
+  return 1
+fi
+
+if ! cd "${orig_dir}" ; then
+  echo "$0: cannot cd back to ${orig_dir}"
+  return 1
+fi
+
+}
+
+## Main program starts here.
+
+if [ "$#" -lt 2 ]; then
+  echo "Usage: $0 FROM_DIR TO_DIR ..." >&2
+  exit 1
+fi
+
+for arg; do
+  if [ -n "$prev" ] ; then
+    if ! git_push_to "$prev" "$arg" ; then
+      exit 1
+    fi
+  fi
+  prev="$arg"
+done

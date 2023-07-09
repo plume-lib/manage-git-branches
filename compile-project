@@ -1,0 +1,38 @@
+#!/bin/sh
+
+# Compile the project that contains the current directory.
+# Usage:
+#   compile-project
+#
+# Supports Gradle and Maven projects.
+# If variable GIT_ASSEMBLE_FLAGS is defined, it is used during Gradle compilation.
+# If variable MVN_COMPILE_FLAGS is defined, it is used during Maven compilation.
+#
+# This command does not need to be run in the top-level directory of the project;
+# it will discover the top-level directory on its own and run the command there.
+
+# TODO: Handle other build systems too.
+# TODO: Have a list of per-directory or per-repository commands, to override the default.
+
+if [ "$#" -ne 0 ]; then
+  echo "Usage: $0" >&2
+  exit 1
+fi
+
+# shellcheck disable=SC2034 # Variable not used yet.
+toplevel="$(git rev-parse --show-toplevel)"
+
+if [ -f "$toplevel/gradlew" ]; then
+  # shellcheck disable=SC2086 # Word splitting is desirable here.
+  "$toplevel/gradlew" --project-dir "$toplevel" assemble -q ${GIT_ASSEMBLE_FLAGS}
+elif [ -f "$toplevel/build.gradle" ]; then
+  # shellcheck disable=SC2086 # Word splitting is desirable here.
+  gradle --project-dir "$toplevel" assemble -q ${GIT_ASSEMBLE_FLAGS}
+elif [ -f "$toplevel/mvnw" ]; then
+  # shellcheck disable=SC2086 # Word splitting is desirable here.
+  (cd $toplevel && ./mvnw compile -q ${MVN_COMPILE_FLAGS})
+elif [ -f "$toplevel/pom.xml" ]; then
+  # shellcheck disable=SC2086 # Word splitting is desirable here.
+  (cd $toplevel && mvn compile -q ${MVN_COMPILE_FLAGS})
+fi
+
