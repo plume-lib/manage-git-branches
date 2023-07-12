@@ -7,12 +7,12 @@
 #   git-new-branch NEWBRANCHNAME
 
 if [ "$#" -ne 1 ]; then
-  echo "Usage: $0 NEWBRANCHNAME" >&2
+  echo "Usage: $(basename "$0") NEWBRANCHNAME" >&2
   exit 1
 fi
 
 if ! cd "$(git rev-parse --show-toplevel)" ; then
-    echo "$0: Cannot determine top-level directory of git repository"
+    echo "$(basename "$0"): Cannot determine top-level directory of git repository"
     git rev-parse --show-toplevel
     return 1
 fi
@@ -26,39 +26,39 @@ TMPDIR="${BRANCHDIR}-TMP"
 git pull -q > /dev/null 2>&1 || true
 
 if [ -n "$(git branch -r --list "origin/${BRANCHNAME}")" ] ; then
-    echo "$0: ERROR: branch ${BRANCHNAME} already exists."
+    echo "$(basename "$0"): ERROR: branch ${BRANCHNAME} already exists."
     return 1
 else
     if git ls-remote --exit-code origin "${BRANCHNAME}" ; then
-	echo "$0: ERROR: branch ${BRANCHNAME} already exists."
+	echo "$(basename "$0"): ERROR: branch ${BRANCHNAME} already exists."
 	return 1
     fi
 fi
 
 if [ -e "${BRANCHDIR}" ] ; then
-  echo "$0: ERROR: directory exists: ${BRANCHDIR}"
+  echo "$(basename "$0"): ERROR: directory exists: ${BRANCHDIR}"
   exit 1
 fi
 if [ -e "${TMPDIR}" ] ; then
-  echo "$0: ERROR: directory exists: ${TMPDIR}"
+  echo "$(basename "$0"): ERROR: directory exists: ${TMPDIR}"
   exit 1
 fi
 
 if ! \cp -Rp . "${TMPDIR}" ; then
-    echo "$0: ERROR: cannot copy $(pwd) to ${TMPDIR}"
+    echo "$(basename "$0"): ERROR: cannot copy $(pwd) to ${TMPDIR}"
     return 1
 fi
 if ! (cd "${TMPDIR}" && git checkout -b "${BRANCHNAME}" -q) ; then
-    echo "$0: ERROR in: (cd \"${TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)"
+    echo "$(basename "$0"): ERROR in: (cd \"${TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)"
     return 1
 fi
 if ! mv "${TMPDIR}" "${BRANCHDIR}" ; then
-    echo "$0: ERROR in: mv \"${TMPDIR}\" \"${BRANCHDIR}\""
+    echo "$(basename "$0"): ERROR in: mv \"${TMPDIR}\" \"${BRANCHDIR}\""
     return 1
 fi
 
 if ! cd "${BRANCHDIR}" ; then
-    echo "$0: ERROR in: cd \"${BRANCHDIR}\""
+    echo "$(basename "$0"): ERROR in: cd \"${BRANCHDIR}\""
     return 1
 fi
 

@@ -19,7 +19,7 @@
 
 
 if [ "$#" -ne 1 ]; then
-  echo "Usage: $0 OTHER-REPO-DIR" >&2
+  echo "Usage: $(basename "$0") OTHER-REPO-DIR" >&2
   exit 1
 fi
 
@@ -29,34 +29,34 @@ from_absolute="$(realpath --relative-to="." "$from")"
 
 if [ ! -d "${from}" ]; then
   if [ "${from}" = "${from_absolute}" ] ; then
-    echo "$0: no such directory: $from"
+    echo "$(basename "$0"): no such directory: $from"
   else
-    echo "$0: no such directory: ${from} = ${from_absolute}"
+    echo "$(basename "$0"): no such directory: ${from} = ${from_absolute}"
   fi  
   exit 1
 fi
 
 if ! git pull -q; then
-  echo "$0: problem pulling $(pwd)"
+  echo "$(basename "$0"): problem pulling $(pwd)"
   exit 1
 fi
 
 if ! git -C "$from" pull -q ; then
-  echo "$0: problem pulling ${from}"
+  echo "$(basename "$0"): problem pulling ${from}"
   exit 1
 fi
 
 if ! git pull -q "${from_absolute}"; then
-  echo "$0: problem pulling ${from_absolute} into $(pwd)"
+  echo "$(basename "$0"): problem pulling ${from_absolute} into $(pwd)"
   exit 1
 fi
 
 if ! compile-project ; then
-  echo "$0: unable to build in $(pwd)"
+  echo "$(basename "$0"): unable to build in $(pwd)"
   exit 1
 fi
 
 if ! git push; then
-  echo "$0: problem pushing from $(pwd)"
+  echo "$(basename "$0"): problem pushing from $(pwd)"
   exit 1
 fi

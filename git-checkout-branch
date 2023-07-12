@@ -7,12 +7,12 @@
 #   git-checkout-branch BRANCHNAME
 
 if [ "$#" -ne 1 ]; then
-  echo "Usage: $0 BRANCHNAME" >&2
+  echo "Usage: $(basename "$0") BRANCHNAME" >&2
   exit 1
 fi
 
 if ! cd "$(git rev-parse --show-toplevel)" ; then
-    echo "$0: Cannot determine top-level directory of git repository"
+    echo "$(basename "$0"): Cannot determine top-level directory of git repository"
     git rev-parse --show-toplevel
     return 1
 fi
@@ -26,26 +26,26 @@ git pull -q > /dev/null 2>&1 || true
 
 if [ -z "$(git branch -r --list "origin/${BRANCHNAME}")" ] ; then
     if ! git ls-remote --exit-code origin "${BRANCHNAME}" ; then
-	echo "$0: ERROR: branch ${BRANCHNAME} does not exist."
+	echo "$(basename "$0"): ERROR: branch ${BRANCHNAME} does not exist."
 	return 1
     fi
 fi
 
 if [ -e "${BRANCHDIR}" ] ; then
-  echo "$0: ERROR: directory exists: ${BRANCHDIR}"
+  echo "$(basename "$0"): ERROR: directory exists: ${BRANCHDIR}"
   exit 1
 fi
 
 if ! \cp -Rp . "${BRANCHDIR}" ; then
-    echo "$0: ERROR: cannot copy $(pwd) to ${BRANCHDIR}"
+    echo "$(basename "$0"): ERROR: cannot copy $(pwd) to ${BRANCHDIR}"
     return 1
 fi
 if ! cd "${BRANCHDIR}" ; then
-    echo "$0: ERROR in: cd \"${BRANCHDIR}\""
+    echo "$(basename "$0"): ERROR in: cd \"${BRANCHDIR}\""
     return 1
 fi
 if ! git checkout "${BRANCHNAME}" -- ; then
-    echo "$0: ERROR in: git checkout \"${BRANCHNAME}\" --"
+    echo "$(basename "$0"): ERROR in: git checkout \"${BRANCHNAME}\" --"
     return 1
 fi
 

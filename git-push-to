@@ -74,55 +74,55 @@ to_absolute="$(realpath "$to")"
 
 if [ ! -d "${from}" ]; then
   if [ "${from}" = "${from_absolute}" ] ; then
-    echo "$0: no such directory: $from"
+    echo "$(basename "$0"): no such directory: $from"
   else
-    echo "$0: no such directory: ${from} = ${from_absolute}"
+    echo "$(basename "$0"): no such directory: ${from} = ${from_absolute}"
   fi  
   return 1
 fi
 if [ ! -d "$to" ]; then
   if [ "${to}" = "${to_absolute}" ] ; then
-    echo "$0: no such directory: $to"
+    echo "$(basename "$0"): no such directory: $to"
   else
-    echo "$0: no such directory: ${to} = ${to_absolute}"
+    echo "$(basename "$0"): no such directory: ${to} = ${to_absolute}"
   fi  
   return 1
 fi
 
 if ! git -C "$from_absolute" pull -q ; then
-  echo "$0: problem pulling ${from_absolute}"
+  echo "$(basename "$0"): problem pulling ${from_absolute}"
   return 1
 fi
 
 orig_dir=$(pwd)
 
 if ! cd "$to_absolute" ; then
-  echo "$0: cannot cd to ${to_absolute}"
+  echo "$(basename "$0"): cannot cd to ${to_absolute}"
   return 1
 fi
 
 if ! git pull -q ; then
-  echo "$0: problem pulling in ${to_absolute}"
+  echo "$(basename "$0"): problem pulling in ${to_absolute}"
   return 1
 fi
 
 if ! git pull -q "${from_absolute}" ; then
-  echo "$0: problem pulling ${from_absolute} into $(pwd)"
+  echo "$(basename "$0"): problem pulling ${from_absolute} into $(pwd)"
   return 1
 fi
 
 if ! compile-project ; then
-  echo "$0: unable to build in $(pwd)"
+  echo "$(basename "$0"): unable to build in $(pwd)"
   return 1
 fi
 
 if ! git push; then
-  echo "$0: problem pushing from $(pwd)"
+  echo "$(basename "$0"): problem pushing from $(pwd)"
   return 1
 fi
 
 if ! cd "${orig_dir}" ; then
-  echo "$0: cannot cd back to ${orig_dir}"
+  echo "$(basename "$0"): cannot cd back to ${orig_dir}"
   return 1
 fi
 
@@ -131,7 +131,7 @@ fi
 ## Main program starts here.
 
 if [ "$#" -lt 2 ]; then
-  echo "Usage: $0 FROM_DIR TO_DIR ..." >&2
+  echo "Usage: $(basename "$0") FROM_DIR TO_DIR ..." >&2
   exit 1
 fi
 

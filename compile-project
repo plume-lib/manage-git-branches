@@ -16,7 +16,7 @@
 # TODO: Have a list of per-directory or per-repository commands, to override the default.
 
 if [ "$#" -ne 0 ]; then
-  echo "Usage: $0" >&2
+  echo "Usage: $(basename "$0")" >&2
   exit 1
 fi
 
