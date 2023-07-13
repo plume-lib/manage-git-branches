@@ -33,10 +33,10 @@ elif [ -f "$toplevel/build.gradle" ]; then
   gradle --project-dir "$toplevel" assemble -q ${GRADLE_ASSEMBLE_FLAGS}
 elif [ -f "$toplevel/mvnw" ]; then
   # shellcheck disable=SC2086 # Word splitting is desirable here.
-  (cd "$toplevel" && ./mvnw compile -q ${MVN_COMPILE_FLAGS})
+  (cd "$toplevel" && ./mvnw -q compile ${MVN_COMPILE_FLAGS})
 elif [ -f "$toplevel/pom.xml" ]; then
   # shellcheck disable=SC2086 # Word splitting is desirable here.
-  (cd "$toplevel" && mvn compile -q ${MVN_COMPILE_FLAGS})
+  (cd "$toplevel" && mvn -q compile ${MVN_COMPILE_FLAGS})
 elif [ -f "$toplevel/Makefile" ]; then
   # shellcheck disable=SC2086 # Word splitting is desirable here.
   (cd "$toplevel" && make ${MAKE_FLAGS})
