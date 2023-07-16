@@ -22,7 +22,7 @@
 # Here is an example of use.
 #
 # Suppose you have a branch named "allchanges".  It contains a main set of
-# changes, but also two sets of sets of independent changes that should be
+# changes, but also two sets of independent changes that should be
 # pull-requested separately.  The first part of the changes consists of 3
 # subparts that build upon one another, and the second part of the changes
 # consists of 2 subparts that build upon one another.
@@ -60,7 +60,7 @@
 #
 # The history of the branches will contain many merges (most of which will be
 # clean merges that do not require your attention).  The branch history does not
-# matter.  If you are using the standard squash-and-merge handling of of pull
+# matter.  If you are using the standard squash-and-merge handling of pull
 # requests, the branch history will not be reflected in your final repository.
 
 
