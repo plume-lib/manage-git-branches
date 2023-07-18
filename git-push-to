@@ -21,6 +21,27 @@
 
 # Here is an example of use.
 #
+# Suppose you have 3 branches names "part1", "part2", and "part3".  Each one
+# contains the changes in the previous part, plus more.  Each branches is
+# checked out in its own directory.  To keep all of these branches in sync,
+# whenever you make a change to any branch (including to the main branch), run
+# the following command:
+#
+#   git-push-to \
+#     MYDIR/myrepo-branch-main \
+#     MYDIR/myrepo-branch-part1 \
+#     MYDIR/myrepo-branch-part2 \
+#     MYDIR/myrepo-branch-part3
+#
+# This helps to ensure that you will resolve each merge conflict just once.
+#
+# The history of the branches will contain many merges (most of which will be
+# clean merges that do not require your attention).  If you are using the
+# standard squash-and-merge handling of pull requests, the branch history will
+# not be reflected in your final repository.
+
+# Here is a more complex example of use.
+#
 # Suppose you have a branch named "allchanges".  It contains a main set of
 # changes, but also two sets of independent changes that should be
 # pull-requested separately.  The first part of the changes consists of 3
@@ -41,8 +62,7 @@
 #
 # Assume that you have each of these branches checked out in its own directory.
 # To keep all of these branches in sync, whenever you make a change to any
-# branch (including merging a pull request into your main branch), you would run
-# the following commands:
+# branch (including to the main branch), you would run the following commands:
 #
 #   git-push-to \
 #     MYDIR/myrepo-branch-main \
@@ -55,13 +75,6 @@
 #     MYDIR/myrepo-branch-part2-step1 \
 #     MYDIR/myrepo-branch-part2 \
 #     MYDIR/myrepo-branch-allchanges
-#
-# This helps to ensure that you will resolve each merge conflict just once.
-#
-# The history of the branches will contain many merges (most of which will be
-# clean merges that do not require your attention).  The branch history does not
-# matter.  If you are using the standard squash-and-merge handling of pull
-# requests, the branch history will not be reflected in your final repository.
 
 
 ## A helper function that works on exactly two repositories.
