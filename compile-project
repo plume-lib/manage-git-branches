@@ -12,7 +12,7 @@
 # This command does not need to be run in the top-level directory of the project;
 # it will discover the top-level directory on its own and run the command there.
 
-# TODO: Handle other build systems too.
+# TODO: Handle other build systems too, such as Ant.
 # TODO: Have a list of per-directory or per-repository commands, to override the default.
 
 if [ "$#" -ne 0 ]; then
