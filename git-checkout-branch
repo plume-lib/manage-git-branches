@@ -27,7 +27,7 @@ git pull -q > /dev/null 2>&1 || true
 if [ -z "$(git branch -r --list "origin/${BRANCHNAME}")" ] ; then
     if ! git ls-remote --exit-code origin "${BRANCHNAME}" ; then
 	echo "$(basename "$0"): ERROR: branch ${BRANCHNAME} does not exist."
-	return 1
+	exit 1
     fi
 fi
 
@@ -38,15 +38,15 @@ fi
 
 if ! \cp -Rp . "${BRANCHDIR}" ; then
     echo "$(basename "$0"): ERROR: cannot copy $(pwd) to ${BRANCHDIR}"
-    return 1
+    exit 1
 fi
 if ! cd "${BRANCHDIR}" ; then
     echo "$(basename "$0"): ERROR in: cd \"${BRANCHDIR}\""
-    return 1
+    exit 1
 fi
 if ! git checkout "${BRANCHNAME}" -- ; then
     echo "$(basename "$0"): ERROR in: git checkout \"${BRANCHNAME}\" --"
-    return 1
+    exit 1
 fi
 
 git pull -q > /dev/null 2>&1 || true
