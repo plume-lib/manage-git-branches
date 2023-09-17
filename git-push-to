@@ -14,6 +14,8 @@
 #  * pull FROM_DIR and TO_DIR from their remotes,
 #  * pull FROM_DIR into TO_DIR,
 #  * build TO_DIR using `compile-project` (see its documentation),
+#    (Skips the compilation step if environment variable
+#    MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set.)
 #  * push TO_DIR to its remote if the build succeeds.
 #
 # If more than two directories are supplied, the procedure is performed on each
@@ -124,9 +126,11 @@ if ! git pull -q "${from_absolute}" ; then
   return 1
 fi
 
-if ! compile-project ; then
-  echo "$(basename "$0"): unable to build in $(pwd)"
-  return 1
+if [ -z "$MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT" ] ; then
+  if ! compile-project ; then
+    echo "$(basename "$0"): unable to build in $(pwd)"
+    return 1
+  fi
 fi
 
 if ! git push; then

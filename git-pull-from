@@ -1,7 +1,9 @@
 #!/bin/sh
 
 # Pull from another directory into the current repository.  Fails if
-# the resulting merge does not compile.
+# the resulting merge does not compile.  (Skips the compilation step
+# if environment variable MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is
+# set.)
 # 
 # Usage:
 #   git-pull-from OTHER-REPO-DIR
@@ -51,9 +53,11 @@ if ! git pull -q "${from_absolute}"; then
   exit 1
 fi
 
-if ! compile-project ; then
-  echo "$(basename "$0"): unable to build in $(pwd)"
-  exit 1
+if [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ] ; then
+  if ! compile-project ; then
+    echo "$(basename "$0"): unable to build in $(pwd)"
+    exit 1
+  fi
 fi
 
 if ! git push; then
