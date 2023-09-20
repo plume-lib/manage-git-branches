@@ -1,12 +1,17 @@
 #!/bin/sh
 
 # Compile the project that contains the current directory.
-# The exit status is the result of the build if a buildfile exists,
-# otherwise 0 (success) unless ERR_IF_NO_BUILDFILE is set to a non-empty value
+#
+# Supports Gradle, Maven, and Make projects.  If no buildfile is found
+# at the top level, searches at (only) the next level down.
+#
+# The exit status is failure if any build fails.  If no buildfile is
+# found and ERR_IF_NO_BUILDFILE is set to a non-empty value, then the
+# exit status is failure.
+#
 # Usage:
 #   compile-project
 #
-# Supports Gradle, Maven, and Make projects.
 # If variable GRADLE_ASSEMBLE_FLAGS is defined, it is passed to `gradle assemble`.
 # If variable MVN_COMPILE_FLAGS is defined, it is passed to `mvn compile`.
 # If variable MAKE_FLAGS is defined, it is passed to `make`.
@@ -25,29 +30,63 @@ fi
 
 echo "Running compile-project in $(pwd)"
 
-# shellcheck disable=SC2034 # Variable not used yet.
-toplevel="$(git rev-parse --show-toplevel)"
+# $toplevel does not have a trailing "/" character
+toplevel="$(git rev-parse --show-toplevel 2>&1)"
+case $toplevel in
+    "fatal: not a git repository"*) toplevel=$(pwd) ;;
+esac
 
-if [ -f "$toplevel/gradlew" ]; then
-  # shellcheck disable=SC2086 # Word splitting is desirable here.
-  "$toplevel/gradlew" --project-dir "$toplevel" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
-elif [ -f "$toplevel/build.gradle" ]; then
-  # shellcheck disable=SC2086 # Word splitting is desirable here.
-  gradle --project-dir "$toplevel" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
-elif [ -f "$toplevel/mvnw" ]; then
-  # shellcheck disable=SC2086 # Word splitting is desirable here.
-  (cd "$toplevel" && ./mvnw -q compile ${MVN_COMPILE_FLAGS})
-elif [ -f "$toplevel/pom.xml" ]; then
-  # shellcheck disable=SC2086 # Word splitting is desirable here.
-  (cd "$toplevel" && mvn -q compile ${MVN_COMPILE_FLAGS})
-elif [ -f "$toplevel/Makefile" ]; then
-  # shellcheck disable=SC2086 # Word splitting is desirable here.
-  (cd "$toplevel" && make ${MAKE_FLAGS})
-else
-  echo "compile-project found no buildfile in $(pwd)"
-  if [ -n "$ERR_IF_NO_BUILDFILE" ]; then
+# Returns a status code indicating success or failure, or 222 if no buildfile was found.
+compile_in_directory() {
+  if [ "$#" -ne 1 ] ; then
+    echo "compile_in_directory got $# arguments: $*"
     exit 1
+  fi
+  dir="$1"
+
+  if [ -f "$dir/gradlew" ]; then
+    # shellcheck disable=SC2086 # Word splitting is desirable here.
+    "$dir/gradlew" --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
+    return $?
+  elif [ -f "$dir/build.gradle" ]; then
+    # shellcheck disable=SC2086 # Word splitting is desirable here.
+    gradle --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
+    return $?
+  elif [ -f "$dir/mvnw" ]; then
+    # shellcheck disable=SC2086 # Word splitting is desirable here.
+    (cd "$dir" && ./mvnw -q compile ${MVN_COMPILE_FLAGS})
+    return $?
+  elif [ -f "$dir/pom.xml" ]; then
+    # shellcheck disable=SC2086 # Word splitting is desirable here.
+    (cd "$dir" && mvn -q compile ${MVN_COMPILE_FLAGS})
+    return $?
+  elif [ -f "$dir/Makefile" ]; then
+    # shellcheck disable=SC2086 # Word splitting is desirable here.
+    (cd "$dir" && make ${MAKE_FLAGS})
+    return $?
   else
-    exit 0
+    # No buildfile was found.
+    return 222
+  fi
+}
+
+compile_in_directory "$toplevel"
+result=$?
+
+if [ "$result" = 222 ] ; then
+  buildfile_found=0
+  for subdir in "$toplevel"/*/ ; do
+    compile_in_directory "$subdir"
+    result=$?
+    if [ "$result" = 222 ] ; then
+      continue
+    fi
+    buildfile_found=1
+    if [ ! $result ] ; then
+      exit $result
+    fi
+  done
+  if [ "$buildfile_found" = 0 ] && [ -n "$ERR_IF_NO_BUILDFILE" ]; then
+    exit 1
   fi
 fi
