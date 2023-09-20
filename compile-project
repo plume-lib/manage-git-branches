@@ -89,4 +89,7 @@ if [ "$result" = 222 ] ; then
   if [ "$buildfile_found" = 0 ] && [ -n "$ERR_IF_NO_BUILDFILE" ]; then
     exit 1
   fi
+else
+  # A buildfile was found, exit with the exit code of the compilation step.
+  exit $result
 fi
