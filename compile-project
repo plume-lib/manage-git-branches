@@ -1,6 +1,8 @@
 #!/bin/sh
 
 # Compile the project that contains the current directory.
+# The exit status is the result of the build if a buildfile exists,
+# otherwise 0 (success) unless ERR_IF_NO_BUILDFILE is set to a non-empty value
 # Usage:
 #   compile-project
 #
@@ -8,6 +10,7 @@
 # If variable GRADLE_ASSEMBLE_FLAGS is defined, it is passed to `gradle assemble`.
 # If variable MVN_COMPILE_FLAGS is defined, it is passed to `mvn compile`.
 # If variable MAKE_FLAGS is defined, it is passed to `make`.
+# If variable ERR_IF_NO_BUILDFILE is non-empty, the script fails if no buildfile is found.
 #
 # This command does not need to be run in the top-level directory of the project;
 # it will discover the top-level directory on its own and run the command there.
@@ -27,10 +30,10 @@ toplevel="$(git rev-parse --show-toplevel)"
 
 if [ -f "$toplevel/gradlew" ]; then
   # shellcheck disable=SC2086 # Word splitting is desirable here.
-  "$toplevel/gradlew" --project-dir "$toplevel" assemble -q ${GRADLE_ASSEMBLE_FLAGS}
+  "$toplevel/gradlew" --project-dir "$toplevel" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
 elif [ -f "$toplevel/build.gradle" ]; then
   # shellcheck disable=SC2086 # Word splitting is desirable here.
-  gradle --project-dir "$toplevel" assemble -q ${GRADLE_ASSEMBLE_FLAGS}
+  gradle --project-dir "$toplevel" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
 elif [ -f "$toplevel/mvnw" ]; then
   # shellcheck disable=SC2086 # Word splitting is desirable here.
   (cd "$toplevel" && ./mvnw -q compile ${MVN_COMPILE_FLAGS})
@@ -41,6 +44,10 @@ elif [ -f "$toplevel/Makefile" ]; then
   # shellcheck disable=SC2086 # Word splitting is desirable here.
   (cd "$toplevel" && make ${MAKE_FLAGS})
 else
-  echo "compile-project did nothing in $(pwd)"
+  echo "compile-project found no buildfile in $(pwd)"
+  if [ -n "$ERR_IF_NO_BUILDFILE" ]; then
+    exit 1
+  else
+    exit 0
+  fi
 fi
-
