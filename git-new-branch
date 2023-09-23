@@ -11,7 +11,7 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
-if ! cd "$(git rev-parse --show-toplevel)" ; then
+if ! cd "$(git rev-parse --show-toplevel 2>&1)" ; then
     echo "$(basename "$0"): Cannot determine top-level directory of git repository"
     git rev-parse --show-toplevel
     return 1
@@ -63,19 +63,3 @@ if ! cd "${BRANCHDIR}" ; then
 fi
 
 echo "Success: created ${BRANCHDIR}"
-
-
-## This does not work; I'm not sure why.
-# gitnewbranch_worktree () {
-#   # Permit failure if not connected to the Internet.
-#   cd "$(git rev-parse --show-toplevel)" && \
-#   git pull -q > /dev/null 2>&1 && \
-#   ( ! git ls-remote --exit-code origin "$1" \
-#     || (echo "ERROR: Branch $1 already exists" && false)) && \
-#   REPO=$(basename "$(pwd)") && \
-#   BRANCHNOSLASH=$(echo "$1" | sed -e "s:/:-:g") && \
-#   BRANCHDIR="../${REPO%%-branch-*}-branch-$BRANCHNOSLASH" && \
-#   git worktree add -b "$1" "${BRANCHDIR}" && \
-#   cd "${BRANCHDIR}" && \
-#   true ;
-# }

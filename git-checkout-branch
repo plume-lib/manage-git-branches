@@ -11,7 +11,7 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
-if ! cd "$(git rev-parse --show-toplevel)" ; then
+if ! cd "$(git rev-parse --show-toplevel 2>&1)" ; then
     echo "$(basename "$0"): Cannot determine top-level directory of git repository"
     git rev-parse --show-toplevel
     return 1
@@ -52,7 +52,3 @@ fi
 git pull -q > /dev/null 2>&1 || true
 
 echo "Success: checked out to ${BRANCHDIR}"
-
-
-## This does not work; I'm not sure why.
-# gitcheckoutbranch_worktree () { cd "$(git rev-parse --show-toplevel)" && git diff --exit-code && git pull -q && (git ls-remote --exit-code origin "$1" || (echo "ERROR: Branch $1 does not exist" && false)) && REPO=$(basename "$(pwd)") && BRANCHNOSLASH=$(echo "$1" | sed -e "s:/:-:g") && BRANCHDIR="../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}" && git worktree add "${BRANCHDIR}" "$1" && cd "${BRANCHDIR}" && true ; }
