@@ -28,10 +28,11 @@ if [ "$#" -ne 0 ]; then
   exit 1
 fi
 
-echo "Running compile-project in $(pwd)"
-
 # $toplevel does not have a trailing "/" character
 toplevel="$(git rev-parse --show-toplevel 2>&1)"
+
+echo "Running compile-project in $toplevel, called from $(pwd)"
+
 case $toplevel in
     "fatal: not a git repository"*) toplevel=$(pwd) ;;
 esac
@@ -91,6 +92,7 @@ else
     fi
   done
   if [ "$buildfile_found" = 0 ] && [ -n "$ERR_IF_NO_BUILDFILE" ]; then
+    echo "compile-project did nothing in $(pwd)"
     exit 1
   fi
 fi
