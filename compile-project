@@ -23,21 +23,21 @@
 # TODO: Handle other build systems too, such as Ant.
 # TODO: Have a list of per-directory or per-repository commands, to override the default.
 
+# $toplevel does not have a trailing "/" character
 if [ "$#" -eq 0 ]; then
-  # $toplevel does not have a trailing "/" character
-  toplevel="$(git rev-parse --show-toplevel 2>&1)"
+  if toplevel="$(git rev-parse --show-toplevel 2>&1)" ; then
+    echo "Running $(basename "$0") in $toplevel, called from $(pwd)"
+  else
+    toplevel=$(pwd)
+    echo "Running $(basename "$0") in $toplevel"
+  fi
 elif [ "$#" -eq 1 ]; then
   toplevel="$1"
-elif [ "$#" -ne 1 ]; then
+  echo "Running $(basename "$0") in $toplevel"
+else
   echo "Usage: $(basename "$0") [<directory>]" >&2
   exit 1
 fi
-
-echo "Running compile-project in $toplevel from $(pwd)"
-
-case $toplevel in
-    "fatal: not a git repository"*) toplevel=$(pwd) ;;
-esac
 
 # Returns a status code indicating success or failure, or 222 if no buildfile was found.
 compile_in_directory() {
@@ -77,7 +77,7 @@ compile_in_directory "$toplevel"
 result=$?
 
 if [ "$result" != 222 ] ; then
-  # A buildfile was found, exit with the exit code of the compilation step.
+  # A buildfile was found; exit with the exit code of the compilation step.
   exit $result
 else
   # Call compile_in_directory in subdirectories.
