@@ -121,7 +121,10 @@ if ! git pull -q ; then
   return 1
 fi
 
-if ! git pull -q "${from_absolute}" ; then
+from_relative="$(realpath --relative-to="$to_absolute" "$from_absolute")"
+
+if ! git pull -q "${from_relative}" ; then
+  # Note: pwd=to_absolute
   echo "$(basename "$0"): problem pulling ${from_absolute} into $(pwd)"
   return 1
 fi
