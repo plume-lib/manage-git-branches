@@ -5,10 +5,11 @@
 # each is pushed into the next in turn.
 #
 # Usage:
-#   git-push-to FROM_DIR TO_DIR ...
+#   git-push-to [--nocompile] FROM_DIR TO_DIR ...
 #
-# Both arguments are directory names for working copies (that is, clones).
+# The arguments are directory names for working copies (that is, clones).
 # They may be absolute directory names or relative to the current directory.
+# The first argument may be "--nocompile" to skip the compilation step.
 #
 # This script does the following:
 #  * pull FROM_DIR and TO_DIR from their remotes,
@@ -79,6 +80,9 @@
 #     MYDIR/myrepo-branch-allchanges
 
 
+nocompile=0
+
+
 ## A helper function that works on exactly two repositories.
 git_push_to () {
 
@@ -129,14 +133,14 @@ if ! git pull -q "${from_relative}" ; then
   return 1
 fi
 
-if [ -z "$MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT" ] ; then
+if [ "$nocompile" -eq 0 ] && [ -z "$MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT" ] ; then
   if ! compile-project ; then
     echo "$(basename "$0"): unable to build in $(pwd)"
     return 1
   fi
 fi
 
-if ! git push; then
+if ! git push --quiet; then
   echo "$(basename "$0"): problem pushing from $(pwd)"
   return 1
 fi
@@ -149,6 +153,11 @@ fi
 }
 
 ## Main program starts here.
+
+if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
+  nocompile=1
+  shift
+fi
 
 if [ "$#" -lt 2 ]; then
   echo "Usage: $(basename "$0") FROM_DIR TO_DIR ..." >&2
