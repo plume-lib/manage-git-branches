@@ -160,7 +160,7 @@ if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
 fi
 
 if [ "$#" -lt 2 ]; then
-  echo "Usage: $(basename "$0") FROM_DIR TO_DIR ..." >&2
+  echo "Usage: $(basename "$0") [--nocompile] FROM_DIR TO_DIR ..." >&2
   exit 1
 fi
 
