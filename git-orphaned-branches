@@ -16,7 +16,7 @@ if [ "$#" -ne 0 ]; then
 fi
 
 dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
-find . -name '*-branch-*' -type d >"${dirs_file}"
+find . -name '*-branch-*' -type d > "${dirs_file}"
 
 while IFS= read -r dir; do
   if [ ! -d "$dir" ]; then continue; fi
