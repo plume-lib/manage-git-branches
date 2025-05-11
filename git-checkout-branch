@@ -22,7 +22,7 @@ BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
 BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
 
-git pull -q >/dev/null 2>&1 || true
+git pull -q > /dev/null 2>&1 || true
 
 if [ -z "$(git branch -r --list "origin/${BRANCHNAME}")" ]; then
   if ! git ls-remote --exit-code origin "${BRANCHNAME}"; then
@@ -49,6 +49,6 @@ if ! git checkout "${BRANCHNAME}" --; then
   exit 1
 fi
 
-git pull -q >/dev/null 2>&1 || true
+git pull -q > /dev/null 2>&1 || true
 
 echo "Success: checked out to ${BRANCHDIR}"

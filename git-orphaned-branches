@@ -16,12 +16,12 @@ if [ "$#" -ne 0 ]; then
 fi
 
 dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
-find . -name '*-branch-*' -type d >"${dirs_file}"
+find . -name '*-branch-*' -type d > "${dirs_file}"
 
 while IFS= read -r dir; do
   if [ ! -d "$dir" ]; then continue; fi
   if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
-  if ! git -C "$dir" ls-remote -h "$(git -C "$dir" config --get remote.origin.url)" >/dev/null 2>&1; then
+  if ! git -C "$dir" ls-remote -h "$(git -C "$dir" config --get remote.origin.url)" > /dev/null 2>&1; then
     if [ -n "$DEBUG" ]; then
       echo "Did not find remote repository for $dir; this command failed: git -C \"$dir\" config --get remote.origin.url"
     fi
@@ -41,6 +41,6 @@ while IFS= read -r dir; do
       true
     fi
   fi
-done <"${dirs_file}"
+done < "${dirs_file}"
 
 rm -f "${dirs_file}"
