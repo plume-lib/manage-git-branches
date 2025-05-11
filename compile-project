@@ -24,8 +24,8 @@
 # TODO: Handle other build systems too, such as Ant.
 # TODO: Have a list of per-directory or per-repository commands, to override the default.
 
-if [ "$#" -ge 1 ] ; then
-  if [ "$1" = "--clean" ] ; then
+if [ "$#" -ge 1 ]; then
+  if [ "$1" = "--clean" ]; then
     CLEAN="$1"
     shift
   fi
@@ -33,7 +33,7 @@ fi
 
 # $toplevel does not have a trailing "/" character
 if [ "$#" -eq 0 ]; then
-  if toplevel="$(git rev-parse --show-toplevel 2>&1)" ; then
+  if toplevel="$(git rev-parse --show-toplevel 2>&1)"; then
     echo "Running $(basename "$0") in $toplevel, called from $(pwd)"
   else
     toplevel=$(pwd)
@@ -49,42 +49,42 @@ fi
 
 # Returns a status code indicating success or failure, or 222 if no buildfile was found.
 compile_in_directory() {
-  if [ "$#" -ne 1 ] ; then
+  if [ "$#" -ne 1 ]; then
     echo "compile_in_directory got $# arguments: $*"
     exit 1
   fi
   dir="$1"
 
   if [ -f "$dir/gradlew" ]; then
-    if [ -n "$CLEAN" ] ; then
-      "$dir/gradlew" --project-dir "$dir" clean -q < /dev/null
+    if [ -n "$CLEAN" ]; then
+      "$dir/gradlew" --project-dir "$dir" clean -q </dev/null
     fi
     # shellcheck disable=SC2086 # Word splitting is desirable here.
-    "$dir/gradlew" --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
+    "$dir/gradlew" --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} </dev/null
     return $?
   elif [ -f "$dir/build.gradle" ]; then
-    if [ -n "$CLEAN" ] ; then
-      gradle --project-dir "$dir" clean -q < /dev/null
+    if [ -n "$CLEAN" ]; then
+      gradle --project-dir "$dir" clean -q </dev/null
     fi
     # shellcheck disable=SC2086 # Word splitting is desirable here.
-    gradle --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
+    gradle --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} </dev/null
     return $?
   elif [ -f "$dir/mvnw" ]; then
-    if [ -n "$CLEAN" ] ; then
+    if [ -n "$CLEAN" ]; then
       (cd "$dir" && ./mvnw -q clean)
     fi
     # shellcheck disable=SC2086 # Word splitting is desirable here.
     (cd "$dir" && ./mvnw -q compile ${MVN_COMPILE_FLAGS})
     return $?
   elif [ -f "$dir/pom.xml" ]; then
-    if [ -n "$CLEAN" ] ; then
+    if [ -n "$CLEAN" ]; then
       (cd "$dir" && mvn -q clean)
     fi
     # shellcheck disable=SC2086 # Word splitting is desirable here.
     (cd "$dir" && mvn -q compile ${MVN_COMPILE_FLAGS})
     return $?
   elif [ -f "$dir/Makefile" ]; then
-    if [ -n "$CLEAN" ] ; then
+    if [ -n "$CLEAN" ]; then
       (cd "$dir" && make clean)
     fi
     # shellcheck disable=SC2086 # Word splitting is desirable here.
@@ -99,20 +99,20 @@ compile_in_directory() {
 compile_in_directory "$toplevel"
 result=$?
 
-if [ "$result" != 222 ] ; then
+if [ "$result" != 222 ]; then
   # A buildfile was found; exit with the exit code of the compilation step.
   exit $result
 else
   # Call compile_in_directory in subdirectories.
   buildfile_found=0
-  for subdir in "$toplevel"/*/ ; do
+  for subdir in "$toplevel"/*/; do
     compile_in_directory "$subdir"
     result=$?
-    if [ "$result" = 222 ] ; then
+    if [ "$result" = 222 ]; then
       continue
     fi
     buildfile_found=1
-    if [ ! $result ] ; then
+    if [ ! $result ]; then
       exit $result
     fi
   done

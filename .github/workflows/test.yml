@@ -1,0 +1,22 @@
+name: Run Small test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        show-progress: false
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11.4'
+    - name: Run tests
+      run: |
+        git config --global user.email "example@example.com"
+        git config --global user.name "Example Example"
+        make test

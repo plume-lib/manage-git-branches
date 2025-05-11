@@ -11,10 +11,10 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
-if ! cd "$(git rev-parse --show-toplevel 2>&1)" ; then
-    echo "$(basename "$0"): Cannot determine top-level directory of git repository"
-    git rev-parse --show-toplevel
-    return 1
+if ! cd "$(git rev-parse --show-toplevel 2>&1)"; then
+  echo "$(basename "$0"): Cannot determine top-level directory of git repository"
+  git rev-parse --show-toplevel
+  return 1
 fi
 
 REPO=$(basename "$(pwd)")
@@ -22,33 +22,33 @@ BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
 BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
 
-git pull -q > /dev/null 2>&1 || true
+git pull -q >/dev/null 2>&1 || true
 
-if [ -z "$(git branch -r --list "origin/${BRANCHNAME}")" ] ; then
-    if ! git ls-remote --exit-code origin "${BRANCHNAME}" ; then
-	echo "$(basename "$0"): ERROR: branch ${BRANCHNAME} does not exist."
-	exit 1
-    fi
+if [ -z "$(git branch -r --list "origin/${BRANCHNAME}")" ]; then
+  if ! git ls-remote --exit-code origin "${BRANCHNAME}"; then
+    echo "$(basename "$0"): ERROR: branch ${BRANCHNAME} does not exist."
+    exit 1
+  fi
 fi
 
-if [ -e "${BRANCHDIR}" ] ; then
+if [ -e "${BRANCHDIR}" ]; then
   echo "$(basename "$0"): ERROR: directory exists: ${BRANCHDIR}"
   exit 1
 fi
 
-if ! \cp -Rp . "${BRANCHDIR}" ; then
-    echo "$(basename "$0"): ERROR: cannot copy $(pwd) to ${BRANCHDIR}"
-    exit 1
+if ! \cp -Rp . "${BRANCHDIR}"; then
+  echo "$(basename "$0"): ERROR: cannot copy $(pwd) to ${BRANCHDIR}"
+  exit 1
 fi
-if ! cd "${BRANCHDIR}" ; then
-    echo "$(basename "$0"): ERROR in: cd \"${BRANCHDIR}\""
-    exit 1
+if ! cd "${BRANCHDIR}"; then
+  echo "$(basename "$0"): ERROR in: cd \"${BRANCHDIR}\""
+  exit 1
 fi
-if ! git checkout "${BRANCHNAME}" -- ; then
-    echo "$(basename "$0"): ERROR in: git checkout \"${BRANCHNAME}\" --"
-    exit 1
+if ! git checkout "${BRANCHNAME}" --; then
+  echo "$(basename "$0"): ERROR in: git checkout \"${BRANCHNAME}\" --"
+  exit 1
 fi
 
-git pull -q > /dev/null 2>&1 || true
+git pull -q >/dev/null 2>&1 || true
 
 echo "Success: checked out to ${BRANCHDIR}"

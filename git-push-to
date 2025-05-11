@@ -79,76 +79,74 @@
 #     MYDIR/myrepo-branch-part2 \
 #     MYDIR/myrepo-branch-allchanges
 
-
 nocompile=0
 
-
 ## A helper function that works on exactly two repositories.
-git_push_to () {
+git_push_to() {
 
-from="$1"
-from_absolute="$(realpath "$from")"
-to="$2"
-to_absolute="$(realpath "$to")"
+  from="$1"
+  from_absolute="$(realpath "$from")"
+  to="$2"
+  to_absolute="$(realpath "$to")"
 
-if [ ! -d "${from}" ]; then
-  if [ "${from}" = "${from_absolute}" ] ; then
-    echo "$(basename "$0"): no such directory: $from"
-  else
-    echo "$(basename "$0"): no such directory: ${from} = ${from_absolute}"
-  fi  
-  return 1
-fi
-if [ ! -d "$to" ]; then
-  if [ "${to}" = "${to_absolute}" ] ; then
-    echo "$(basename "$0"): no such directory: $to"
-  else
-    echo "$(basename "$0"): no such directory: ${to} = ${to_absolute}"
-  fi  
-  return 1
-fi
-
-if ! git -C "$from_absolute" pull -q ; then
-  echo "$(basename "$0"): problem pulling ${from_absolute}"
-  return 1
-fi
-
-orig_dir=$(pwd)
-
-if ! cd "$to_absolute" ; then
-  echo "$(basename "$0"): cannot cd to ${to_absolute}"
-  return 1
-fi
-
-if ! git pull -q ; then
-  echo "$(basename "$0"): problem pulling in ${to_absolute}"
-  return 1
-fi
-
-from_relative="$(realpath --relative-to="$to_absolute" "$from_absolute")"
-
-if ! git pull -q "${from_relative}" ; then
-  # Note: pwd=to_absolute
-  echo "$(basename "$0"): problem pulling ${from_absolute} into $(pwd)"
-  return 1
-fi
-
-if [ "$nocompile" -eq 0 ] && [ -z "$MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT" ] ; then
-  if ! compile-project ; then
-    echo "$(basename "$0"): unable to build in $(pwd)"
+  if [ ! -d "${from}" ]; then
+    if [ "${from}" = "${from_absolute}" ]; then
+      echo "$(basename "$0"): no such directory: $from"
+    else
+      echo "$(basename "$0"): no such directory: ${from} = ${from_absolute}"
+    fi
     return 1
   fi
-fi
+  if [ ! -d "$to" ]; then
+    if [ "${to}" = "${to_absolute}" ]; then
+      echo "$(basename "$0"): no such directory: $to"
+    else
+      echo "$(basename "$0"): no such directory: ${to} = ${to_absolute}"
+    fi
+    return 1
+  fi
 
-if ! git push --quiet; then
-  echo "$(basename "$0"): problem pushing from $(pwd)"
-  return 1
-fi
+  if ! git -C "$from_absolute" pull -q; then
+    echo "$(basename "$0"): problem pulling ${from_absolute}"
+    return 1
+  fi
 
-if ! cd "${orig_dir}" ; then
-  echo "$(basename "$0"): cannot cd back to ${orig_dir}"
-  return 1
-fi
+  orig_dir=$(pwd)
+
+  if ! cd "$to_absolute"; then
+    echo "$(basename "$0"): cannot cd to ${to_absolute}"
+    return 1
+  fi
+
+  if ! git pull -q; then
+    echo "$(basename "$0"): problem pulling in ${to_absolute}"
+    return 1
+  fi
+
+  from_relative="$(realpath --relative-to="$to_absolute" "$from_absolute")"
+
+  if ! git pull -q "${from_relative}"; then
+    # Note: pwd=to_absolute
+    echo "$(basename "$0"): problem pulling ${from_absolute} into $(pwd)"
+    return 1
+  fi
+
+  if [ "$nocompile" -eq 0 ] && [ -z "$MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT" ]; then
+    if ! compile-project; then
+      echo "$(basename "$0"): unable to build in $(pwd)"
+      return 1
+    fi
+  fi
+
+  if ! git push --quiet; then
+    echo "$(basename "$0"): problem pushing from $(pwd)"
+    return 1
+  fi
+
+  if ! cd "${orig_dir}"; then
+    echo "$(basename "$0"): cannot cd back to ${orig_dir}"
+    return 1
+  fi
 
 }
 
@@ -165,8 +163,8 @@ if [ "$#" -lt 2 ]; then
 fi
 
 for arg; do
-  if [ -n "$prev" ] ; then
-    if ! git_push_to "$prev" "$arg" ; then
+  if [ -n "$prev" ]; then
+    if ! git_push_to "$prev" "$arg"; then
       exit 1
     fi
   fi
