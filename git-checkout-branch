@@ -11,44 +11,61 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
+STARTDIR="${PWD}"
+
 if ! cd "$(git rev-parse --show-toplevel 2>&1)"; then
   echo "$(basename "$0"): Cannot determine top-level directory of git repository"
   git rev-parse --show-toplevel
-  return 1
+  cd "${STARTDIR}" || exit 1
+  exit 1
 fi
 
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
 BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
+TMPDIR="${BRANCHDIR}-TMP"
 
 git pull -q > /dev/null 2>&1 || true
 
 if [ -z "$(git branch -r --list "origin/${BRANCHNAME}")" ]; then
   if ! git ls-remote --exit-code origin "${BRANCHNAME}"; then
     echo "$(basename "$0"): ERROR: branch ${BRANCHNAME} does not exist."
+    cd "${STARTDIR}" || exit 1
     exit 1
   fi
 fi
 
 if [ -e "${BRANCHDIR}" ]; then
   echo "$(basename "$0"): ERROR: directory exists: ${BRANCHDIR}"
+  cd "${STARTDIR}" || exit 1
+  exit 1
+fi
+if [ -e "${TMPDIR}" ]; then
+  echo "$(basename "$0"): ERROR: directory exists: ${TMPDIR}"
+  cd "${STARTDIR}" || exit 1
   exit 1
 fi
 
-if ! \cp -Rp . "${BRANCHDIR}"; then
-  echo "$(basename "$0"): ERROR: cannot copy $(pwd) to ${BRANCHDIR}"
+if ! \cp -Rp . "${TMPDIR}"; then
+  echo "$(basename "$0"): ERROR: cannot copy $(pwd) to ${TMPDIR}"
+  cd "${STARTDIR}" || exit 1
   exit 1
 fi
-if ! cd "${BRANCHDIR}"; then
-  echo "$(basename "$0"): ERROR in: cd \"${BRANCHDIR}\""
-  exit 1
-fi
-if ! git checkout "${BRANCHNAME}" --; then
-  echo "$(basename "$0"): ERROR in: git checkout \"${BRANCHNAME}\" --"
+if ! (cd "${TMPDIR}" && git checkout "${BRANCHNAME}" -q); then
+  echo "$(basename "$0"): ERROR in: (cd \"${TMPDIR}\" && git checkout \"${BRANCHNAME}\" -q)"
+  cd "${STARTDIR}" || exit 1
   exit 1
 fi
 
 git pull -q > /dev/null 2>&1 || true
 
+if ! mv "${TMPDIR}" "${BRANCHDIR}"; then
+  echo "$(basename "$0"): ERROR in: mv \"${TMPDIR}\" \"${BRANCHDIR}\""
+  cd "${STARTDIR}" || exit 1
+  exit 1
+fi
+
 echo "Success: checked out to ${BRANCHDIR}"
+
+cd "${STARTDIR}" || exit 1
