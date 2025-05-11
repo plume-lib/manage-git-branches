@@ -16,25 +16,24 @@ if [ "$#" -ne 0 ]; then
 fi
 
 dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
-find . -name '*-branch-*' -type d > "${dirs_file}"
+find . -name '*-branch-*' -type d >"${dirs_file}"
 
-while IFS= read -r dir
-do
-  if [ ! -d "$dir" ] ; then continue; fi
-  if [ -n "$DEBUG" ] ; then echo "checking: $dir"; fi
-  if ! git -C "$dir" ls-remote -h "$(git -C "$dir" config --get remote.origin.url)" > /dev/null 2>&1 ; then
-    if [ -n "$DEBUG" ] ; then
+while IFS= read -r dir; do
+  if [ ! -d "$dir" ]; then continue; fi
+  if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
+  if ! git -C "$dir" ls-remote -h "$(git -C "$dir" config --get remote.origin.url)" >/dev/null 2>&1; then
+    if [ -n "$DEBUG" ]; then
       echo "Did not find remote repository for $dir; this command failed: git -C \"$dir\" config --get remote.origin.url"
     fi
   else
     # The remote repository exists
-    if [ -n "$DEBUG" ] ; then echo "remote repository exists: $dir"; fi
+    if [ -n "$DEBUG" ]; then echo "remote repository exists: $dir"; fi
     # Don't match on "There is no tracking information for the current branch.", which is output
     # for both a new branch and a deleted branch where the repository has been pruned.
-    
+
     # If grep matches `git pull` output, print directory name.
     # `grep -q` means no output, just status code.
-    if git -C "$dir" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)' ; then
+    if git -C "$dir" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'; then
       realpath "$dir"
     else
       # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
@@ -42,6 +41,6 @@ do
       true
     fi
   fi
-done < "${dirs_file}"
+done <"${dirs_file}"
 
 rm -f "${dirs_file}"
