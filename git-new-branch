@@ -23,7 +23,7 @@ BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
 BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
 TMPDIR="${BRANCHDIR}-TMP"
 
-git pull -q > /dev/null 2>&1 || true
+git pull -q >/dev/null 2>&1 || true
 
 if [ -n "$(git branch -r --list "origin/${BRANCHNAME}")" ]; then
   echo "$(basename "$0"): ERROR: branch ${BRANCHNAME} already exists."
