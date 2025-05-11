@@ -57,17 +57,17 @@ compile_in_directory() {
 
   if [ -f "$dir/gradlew" ]; then
     if [ -n "$CLEAN" ]; then
-      "$dir/gradlew" --project-dir "$dir" clean -q </dev/null
+      "$dir/gradlew" --project-dir "$dir" clean -q < /dev/null
     fi
     # shellcheck disable=SC2086 # Word splitting is desirable here.
-    "$dir/gradlew" --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} </dev/null
+    "$dir/gradlew" --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
     return $?
   elif [ -f "$dir/build.gradle" ]; then
     if [ -n "$CLEAN" ]; then
-      gradle --project-dir "$dir" clean -q </dev/null
+      gradle --project-dir "$dir" clean -q < /dev/null
     fi
     # shellcheck disable=SC2086 # Word splitting is desirable here.
-    gradle --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} </dev/null
+    gradle --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
     return $?
   elif [ -f "$dir/mvnw" ]; then
     if [ -n "$CLEAN" ]; then
