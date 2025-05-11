@@ -11,13 +11,6 @@ jobs:
       with:
         fetch-depth: 1
         show-progress: false
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11.5'
-    - run: python --version
-    - name: Install Python programs
-      run: pip install ruff
     - name: Install shellcheck and checkbashisms
       run: sudo apt install shfmt shellcheck devscripts
     - name: Check style
