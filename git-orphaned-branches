@@ -5,6 +5,7 @@
 # below the current directory are considered.  Newly-created branches are not
 # listed, only branches that have been deleted in the remote (for example,
 # because a pull request has been merged).
+# Also deletes directories containing nothing but a .project/ subdirectory.
 #
 # Typical usage is:  rm -rf $(git-orphaned-branches)
 
@@ -21,24 +22,35 @@ find . -name '*-branch-*' -type d > "${dirs_file}"
 while IFS= read -r dir; do
   if [ ! -d "$dir" ]; then continue; fi
   if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
-  if ! git -C "$dir" ls-remote -h "$(git -C "$dir" config --get remote.origin.url)" > /dev/null 2>&1; then
-    if [ -n "$DEBUG" ]; then
-      echo "Did not find remote repository for $dir; this command failed: git -C \"$dir\" config --get remote.origin.url"
+  if [ -d "$dir/.git" ]; then
+    # There is a .git subdirectory.
+    if ! git -C "$dir" ls-remote -h "$(git -C "$dir" config --get remote.origin.url)" > /dev/null 2>&1; then
+      if [ -n "$DEBUG" ]; then
+        echo "Did not find remote repository for $dir; this command failed: git -C \"$dir\" config --get remote.origin.url"
+      fi
+    else
+      # The remote repository exists
+      if [ -n "$DEBUG" ]; then echo "remote repository exists: $dir"; fi
+      # Don't match on "There is no tracking information for the current branch.", which is output
+      # for both a new branch and a deleted branch where the repository has been pruned.
+
+      # If grep matches `git pull` output, print directory name.
+      # `grep -q` means no output, just status code.
+      if git -C "$dir" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'; then
+        realpath "$dir"
+      else
+        # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
+        # git -C "$dir" remote prune origin 2>&1 > /dev/null
+        true
+      fi
     fi
   else
-    # The remote repository exists
-    if [ -n "$DEBUG" ]; then echo "remote repository exists: $dir"; fi
-    # Don't match on "There is no tracking information for the current branch.", which is output
-    # for both a new branch and a deleted branch where the repository has been pruned.
-
-    # If grep matches `git pull` output, print directory name.
-    # `grep -q` means no output, just status code.
-    if git -C "$dir" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'; then
-      realpath "$dir"
-    else
-      # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
-      # git -C "$dir" remote prune origin 2>&1 > /dev/null
-      true
+    # There is no .git subdirectory.
+    if [ -f "$dir/.project" ]; then
+      if [ "$(find "$dir" -maxdepth 1 -printf %y)" = "df" ]; then
+        # It has only one subdirectory and no other content
+        realpath "$dir"
+      fi
     fi
   fi
 done < "${dirs_file}"
