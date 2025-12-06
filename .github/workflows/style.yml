@@ -12,6 +12,8 @@ jobs:
           fetch-depth: 1
           show-progress: false
       - name: Install shellcheck and checkbashisms
-        run: sudo apt install shfmt shellcheck devscripts
+        run: apt -y install shfmt shellcheck devscripts npm
+      - name: Install markdownlint
+        run: npm install markdownlint-cli2 --global
       - name: Check style
         run: make style-check
