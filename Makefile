@@ -1,4 +1,5 @@
 default: style-check
+all: style-fix style-check
 
 # Code style; defines `style-check` and `style-fix`.
 ifeq (,$(wildcard .plume-scripts))
