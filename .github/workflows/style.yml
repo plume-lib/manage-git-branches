@@ -11,8 +11,9 @@ jobs:
         with:
           fetch-depth: 1
           show-progress: false
+      - run: sudo apt update
       - name: Install shellcheck and checkbashisms
-        run: sudo apt -y install shfmt shellcheck devscripts npm
+        run: sudo apt -y install shfmt shellcheck devscripts
       - name: Install markdownlint
         run: sudo npm install markdownlint-cli2 --global
       - name: Install uv
