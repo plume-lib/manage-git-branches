@@ -1,5 +1,5 @@
 [project]
-name = "manage-git-branches-branch-style-mak-2"
+name = "manage-git-branches"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
