@@ -15,5 +15,7 @@ jobs:
         run: sudo apt -y install shfmt shellcheck devscripts npm
       - name: Install markdownlint
         run: sudo npm install markdownlint-cli2 --global
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
       - name: Check style
         run: make style-check
