@@ -1,2 +1,5 @@
+# For style checking.
 .plume-scripts
+.markdownlint-cli2.yaml
+.pymarkdown
 .ruff.toml
