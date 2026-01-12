@@ -31,19 +31,22 @@ if [ "$#" -ge 1 ]; then
   fi
 fi
 
+# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
 # $toplevel does not have a trailing "/" character
 if [ "$#" -eq 0 ]; then
   if toplevel="$(git rev-parse --show-toplevel 2>&1)"; then
-    echo "Running $(basename "$0") in $toplevel, called from $(pwd)"
+    echo "Running ${SCRIPT_NAME} in $toplevel, called from $(pwd)"
   else
     toplevel=$(pwd)
-    echo "Running $(basename "$0") in $toplevel"
+    echo "Running ${SCRIPT_NAME} in $toplevel"
   fi
 elif [ "$#" -eq 1 ]; then
   toplevel="$1"
-  echo "Running $(basename "$0") in $toplevel"
+  echo "Running ${SCRIPT_NAME} in $toplevel"
 else
-  echo "Usage: $(basename "$0") [<directory>]" >&2
+  echo "Usage: ${SCRIPT_NAME} [<directory>]" >&2
   exit 1
 fi
 

@@ -81,6 +81,9 @@
 
 nocompile=0
 
+# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
@@ -91,35 +94,35 @@ git_push_to() {
 
   if [ ! -d "${from}" ]; then
     if [ "${from}" = "${from_absolute}" ]; then
-      echo "$(basename "$0"): no such directory: $from"
+      echo "${SCRIPT_NAME}: no such directory: $from"
     else
-      echo "$(basename "$0"): no such directory: ${from} = ${from_absolute}"
+      echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}"
     fi
     return 1
   fi
   if [ ! -d "$to" ]; then
     if [ "${to}" = "${to_absolute}" ]; then
-      echo "$(basename "$0"): no such directory: $to"
+      echo "${SCRIPT_NAME}: no such directory: $to"
     else
-      echo "$(basename "$0"): no such directory: ${to} = ${to_absolute}"
+      echo "${SCRIPT_NAME}: no such directory: ${to} = ${to_absolute}"
     fi
     return 1
   fi
 
   if ! git -C "$from_absolute" pull -q; then
-    echo "$(basename "$0"): problem pulling ${from_absolute}"
+    echo "${SCRIPT_NAME}: problem pulling ${from_absolute}"
     return 1
   fi
 
   orig_dir=$(pwd)
 
   if ! cd "$to_absolute"; then
-    echo "$(basename "$0"): cannot cd to ${to_absolute}"
+    echo "${SCRIPT_NAME}: cannot cd to ${to_absolute}"
     return 1
   fi
 
   if ! git pull -q; then
-    echo "$(basename "$0"): problem pulling in ${to_absolute}"
+    echo "${SCRIPT_NAME}: problem pulling in ${to_absolute}"
     return 1
   fi
 
@@ -127,24 +130,24 @@ git_push_to() {
 
   if ! git pull -q "${from_relative}"; then
     # Note: pwd=to_absolute
-    echo "$(basename "$0"): problem pulling ${from_absolute} into $(pwd)"
+    echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)"
     return 1
   fi
 
   if [ "$nocompile" -eq 0 ] && [ -z "$MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT" ]; then
     if ! compile-project; then
-      echo "$(basename "$0"): unable to build in $(pwd)"
+      echo "${SCRIPT_NAME}: unable to build in $(pwd)"
       return 1
     fi
   fi
 
   if ! git push --quiet; then
-    echo "$(basename "$0"): problem pushing from $(pwd)"
+    echo "${SCRIPT_NAME}: problem pushing from $(pwd)"
     return 1
   fi
 
   if ! cd "${orig_dir}"; then
-    echo "$(basename "$0"): cannot cd back to ${orig_dir}"
+    echo "${SCRIPT_NAME}: cannot cd back to ${orig_dir}"
     return 1
   fi
 
@@ -158,7 +161,7 @@ if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
 fi
 
 if [ "$#" -lt 2 ]; then
-  echo "Usage: $(basename "$0") [--nocompile] FROM_DIR TO_DIR ..." >&2
+  echo "Usage: ${SCRIPT_NAME} [--nocompile] FROM_DIR TO_DIR ..." >&2
   exit 1
 fi
 
