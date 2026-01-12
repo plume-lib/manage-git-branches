@@ -120,7 +120,7 @@ else
     fi
   done
   if [ "$buildfile_found" = 0 ] && [ -n "$ERR_IF_NO_BUILDFILE" ]; then
-    echo "compile-project did nothing in $(pwd)"
+    echo "${SCRIPT_NAME} did nothing in $(pwd)"
     exit 1
   fi
 fi
