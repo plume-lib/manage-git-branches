@@ -6,15 +6,18 @@
 # Usage:
 #   git-checkout-branch BRANCHNAME
 
+# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
 if [ "$#" -ne 1 ]; then
-  echo "Usage: $(basename "$0") BRANCHNAME" >&2
+  echo "Usage: ${SCRIPT_NAME} BRANCHNAME" >&2
   exit 1
 fi
 
 STARTDIR="${PWD}"
 
 if ! cd "$(git rev-parse --show-toplevel 2>&1)"; then
-  echo "$(basename "$0"): Cannot determine top-level directory of git repository"
+  echo "${SCRIPT_NAME}: Cannot determine top-level directory of git repository"
   git rev-parse --show-toplevel
   cd "${STARTDIR}" || exit 1
   exit 1
@@ -30,30 +33,30 @@ git pull -q > /dev/null 2>&1 || true
 
 if [ -z "$(git branch -r --list "origin/${BRANCHNAME}")" ]; then
   if ! git ls-remote --exit-code origin "${BRANCHNAME}"; then
-    echo "$(basename "$0"): ERROR: branch ${BRANCHNAME} does not exist."
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist."
     cd "${STARTDIR}" || exit 1
     exit 1
   fi
 fi
 
 if [ -e "${BRANCHDIR}" ]; then
-  echo "$(basename "$0"): ERROR: directory exists: ${BRANCHDIR}"
+  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}"
   cd "${STARTDIR}" || exit 1
   exit 1
 fi
 if [ -e "${TMPDIR}" ]; then
-  echo "$(basename "$0"): ERROR: directory exists: ${TMPDIR}"
+  echo "${SCRIPT_NAME}: ERROR: directory exists: ${TMPDIR}"
   cd "${STARTDIR}" || exit 1
   exit 1
 fi
 
 if ! \cp -Rp . "${TMPDIR}"; then
-  echo "$(basename "$0"): ERROR: cannot copy $(pwd) to ${TMPDIR}"
+  echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${TMPDIR}"
   cd "${STARTDIR}" || exit 1
   exit 1
 fi
 if ! (cd "${TMPDIR}" && git checkout "${BRANCHNAME}" -q); then
-  echo "$(basename "$0"): ERROR in: (cd \"${TMPDIR}\" && git checkout \"${BRANCHNAME}\" -q)"
+  echo "${SCRIPT_NAME}: ERROR in: (cd \"${TMPDIR}\" && git checkout \"${BRANCHNAME}\" -q)"
   cd "${STARTDIR}" || exit 1
   exit 1
 fi
@@ -61,7 +64,7 @@ fi
 git pull -q > /dev/null 2>&1 || true
 
 if ! mv "${TMPDIR}" "${BRANCHDIR}"; then
-  echo "$(basename "$0"): ERROR in: mv \"${TMPDIR}\" \"${BRANCHDIR}\""
+  echo "${SCRIPT_NAME}: ERROR in: mv \"${TMPDIR}\" \"${BRANCHDIR}\""
   cd "${STARTDIR}" || exit 1
   exit 1
 fi

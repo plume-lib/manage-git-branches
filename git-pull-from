@@ -19,8 +19,11 @@
 #
 # Calling `git-push-to` is often more readable, because it makes both directory names explicit.
 
+# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
 if [ "$#" -ne 1 ]; then
-  echo "Usage: $(basename "$0") OTHER-REPO-DIR" >&2
+  echo "Usage: ${SCRIPT_NAME} OTHER-REPO-DIR" >&2
   exit 1
 fi
 
@@ -29,36 +32,36 @@ from_absolute="$(realpath --relative-to="." "$from")"
 
 if [ ! -d "${from}" ]; then
   if [ "${from}" = "${from_absolute}" ]; then
-    echo "$(basename "$0"): no such directory: $from"
+    echo "${SCRIPT_NAME}: no such directory: $from"
   else
-    echo "$(basename "$0"): no such directory: ${from} = ${from_absolute}"
+    echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}"
   fi
   exit 1
 fi
 
 if ! git pull -q; then
-  echo "$(basename "$0"): problem pulling $(pwd)"
+  echo "${SCRIPT_NAME}: problem pulling $(pwd)"
   exit 1
 fi
 
 if ! git -C "$from" pull -q; then
-  echo "$(basename "$0"): problem pulling ${from}"
+  echo "${SCRIPT_NAME}: problem pulling ${from}"
   exit 1
 fi
 
 if ! git pull -q "${from_absolute}"; then
-  echo "$(basename "$0"): problem pulling ${from_absolute} into $(pwd)"
+  echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)"
   exit 1
 fi
 
 if [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
   if ! compile-project; then
-    echo "$(basename "$0"): unable to build in $(pwd)"
+    echo "${SCRIPT_NAME}: unable to build in $(pwd)"
     exit 1
   fi
 fi
 
 if ! git push; then
-  echo "$(basename "$0"): problem pushing from $(pwd)"
+  echo "${SCRIPT_NAME}: problem pushing from $(pwd)"
   exit 1
 fi
