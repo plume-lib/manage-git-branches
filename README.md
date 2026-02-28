@@ -13,12 +13,12 @@ Its key principles are:
 1. Do not run git commands in the master branch, except `git pull`.  (Or,
    use [`mvc pull`](https://github.com/mernst/multi-version-control).)
 2. Do not change branches in any working copy.
-   That is, never run `git checkout`.
+   That is, never run `git checkout`, and never run `git stash`.
 3. To create a new branch, run command `gnb` or `git-new-branch`.  It
    creates a new directory holding a new branch that starts as a copy of
    the branch from which you ran `gnb`.
-4. To clone/checkout an existing branch, run `gcb`.  It creates a new
-   directory and checks out the branch there.
+4. To clone/checkout an existing branch, run `gcb` or `git-checkout-branch`.
+   It creates a new directory and checks out the branch there.
 
 ## Commands
 
@@ -83,11 +83,11 @@ This convention enables you to easily work on multiple branches at a time:
 
 * No confusion about which fork or branch you are on:  this information is
   evident in the directory name.
-* No need to switch branches with `git checkout`.  (Just use file system
-  operations such as `cd` and `ln`.)
+* No need to switch branches with `git checkout`.  Just use file system
+  operations such as `cd` and `ln`.
 * No need to commit or stash changes before switching branches, which would
   otherwise be necessary to avoid accidentally mixing work between
-  branches.
+  branches.  Never run `git stash` again!
 * Faster builds, because each branch has its own version of built executables,
   avoiding the need for your build system to recompile everything when
   switching branches.
