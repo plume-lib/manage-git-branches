@@ -31,7 +31,7 @@ BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
 git pull -q > /dev/null 2>&1 || true
 
-if ! git ls-remote --exit-code origin "${BRANCHNAME}" > /dev/null 2>&1; then
+if ! git ls-remote --exit-code origin "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist." >&2
   exit 1
 fi
