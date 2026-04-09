@@ -15,11 +15,11 @@ if [ "$#" -ne 1 ]; then
 fi
 
 STARTDIR="${PWD}"
+trap 'cd "${STARTDIR}" || true' EXIT
 
-if ! cd "$(git rev-parse --show-toplevel 2>&1)"; then
-  echo "${SCRIPT_NAME}: Cannot determine top-level directory of git repository"
-  git rev-parse --show-toplevel
-  cd "${STARTDIR}" || exit 1
+if ! cd "$(git rev-parse --show-toplevel 2> /dev/null)"; then
+  echo "${SCRIPT_NAME}: Cannot determine top-level directory of git repository" >&2
+  git rev-parse --show-toplevel >&2
   exit 1
 fi
 
@@ -27,48 +27,36 @@ REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
 BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
-TMPDIR="${BRANCHDIR}-TMP"
+BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
 git pull -q > /dev/null 2>&1 || true
 
-if [ -z "$(git branch -r --list "origin/${BRANCHNAME}")" ]; then
-  if ! git ls-remote --exit-code origin "${BRANCHNAME}"; then
-    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist."
-    cd "${STARTDIR}" || exit 1
-    exit 1
-  fi
+if ! git ls-remote --exit-code origin "${BRANCHNAME}" > /dev/null 2>&1; then
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist." >&2
+  exit 1
 fi
 
 if [ -e "${BRANCHDIR}" ]; then
-  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}"
-  cd "${STARTDIR}" || exit 1
+  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
   exit 1
 fi
-if [ -e "${TMPDIR}" ]; then
-  echo "${SCRIPT_NAME}: ERROR: directory exists: ${TMPDIR}"
-  cd "${STARTDIR}" || exit 1
-  exit 1
-fi
-
-if ! \cp -Rp . "${TMPDIR}"; then
-  echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${TMPDIR}"
-  cd "${STARTDIR}" || exit 1
-  exit 1
-fi
-if ! (cd "${TMPDIR}" && git checkout "${BRANCHNAME}" -q); then
-  echo "${SCRIPT_NAME}: ERROR in: (cd \"${TMPDIR}\" && git checkout \"${BRANCHNAME}\" -q)"
-  cd "${STARTDIR}" || exit 1
+if [ -e "${BRANCH_TMPDIR}" ]; then
+  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
   exit 1
 fi
 
-git pull -q > /dev/null 2>&1 || true
+if ! \cp -Rp . "${BRANCH_TMPDIR}"; then
+  echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
+  exit 1
+fi
+if ! (cd "${BRANCH_TMPDIR}" && git checkout "${BRANCHNAME}" -q); then
+  echo "${SCRIPT_NAME}: ERROR in: (cd \"${BRANCH_TMPDIR}\" && git checkout \"${BRANCHNAME}\" -q)" >&2
+  exit 1
+fi
 
-if ! mv "${TMPDIR}" "${BRANCHDIR}"; then
-  echo "${SCRIPT_NAME}: ERROR in: mv \"${TMPDIR}\" \"${BRANCHDIR}\""
-  cd "${STARTDIR}" || exit 1
+if ! mv "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
+  echo "${SCRIPT_NAME}: ERROR in: mv \"${BRANCH_TMPDIR}\" \"${BRANCHDIR}\"" >&2
   exit 1
 fi
 
 echo "Success: checked out to ${BRANCHDIR}"
-
-cd "${STARTDIR}" || exit 1
