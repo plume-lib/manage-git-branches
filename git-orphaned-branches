@@ -17,6 +17,7 @@ if [ "$#" -ne 0 ]; then
 fi
 
 dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
+trap 'rm -f "${dirs_file}"' EXIT INT TERM
 find . -name '*-branch-*' -type d > "${dirs_file}"
 
 while IFS= read -r dir; do
@@ -38,21 +39,17 @@ while IFS= read -r dir; do
       # `grep -q` means no output, just status code.
       if git -C "$dir" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'; then
         realpath "$dir"
-      else
-        # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
-        # git -C "$dir" remote prune origin 2>&1 > /dev/null
-        true
       fi
+      # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
+      # git -C "$dir" remote prune origin 2>&1 > /dev/null
     fi
   else
     # There is no .git subdirectory.
     if [ -f "$dir/.project" ]; then
       if [ "$(find "$dir" -maxdepth 1 -printf %y)" = "df" ]; then
-        # It has only one subdirectory and no other content
+        # It has only one file and no other content
         realpath "$dir"
       fi
     fi
   fi
 done < "${dirs_file}"
-
-rm -f "${dirs_file}"

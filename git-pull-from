@@ -32,36 +32,36 @@ from_absolute="$(realpath --relative-to="." "$from")"
 
 if [ ! -d "${from}" ]; then
   if [ "${from}" = "${from_absolute}" ]; then
-    echo "${SCRIPT_NAME}: no such directory: $from"
+    echo "${SCRIPT_NAME}: no such directory: $from" >&2
   else
-    echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}"
+    echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}" >&2
   fi
   exit 1
 fi
 
 if ! git pull -q; then
-  echo "${SCRIPT_NAME}: problem pulling $(pwd)"
+  echo "${SCRIPT_NAME}: problem pulling $(pwd)" >&2
   exit 1
 fi
 
 if ! git -C "$from" pull -q; then
-  echo "${SCRIPT_NAME}: problem pulling ${from}"
+  echo "${SCRIPT_NAME}: problem pulling ${from}" >&2
   exit 1
 fi
 
 if ! git pull -q "${from_absolute}"; then
-  echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)"
+  echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
   exit 1
 fi
 
 if [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
   if ! compile-project; then
-    echo "${SCRIPT_NAME}: unable to build in $(pwd)"
+    echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
     exit 1
   fi
 fi
 
-if ! git push; then
-  echo "${SCRIPT_NAME}: problem pushing from $(pwd)"
+if ! git push --quiet; then
+  echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
   exit 1
 fi
