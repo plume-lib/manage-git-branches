@@ -94,35 +94,35 @@ git_push_to() {
 
   if [ ! -d "${from}" ]; then
     if [ "${from}" = "${from_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: $from"
+      echo "${SCRIPT_NAME}: no such directory: $from" >&2
     else
-      echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}"
+      echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}" >&2
     fi
     return 1
   fi
   if [ ! -d "$to" ]; then
     if [ "${to}" = "${to_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: $to"
+      echo "${SCRIPT_NAME}: no such directory: $to" >&2
     else
-      echo "${SCRIPT_NAME}: no such directory: ${to} = ${to_absolute}"
+      echo "${SCRIPT_NAME}: no such directory: ${to} = ${to_absolute}" >&2
     fi
     return 1
   fi
 
   if ! git -C "$from_absolute" pull -q; then
-    echo "${SCRIPT_NAME}: problem pulling ${from_absolute}"
+    echo "${SCRIPT_NAME}: problem pulling ${from_absolute}" >&2
     return 1
   fi
 
   orig_dir=$(pwd)
 
   if ! cd "$to_absolute"; then
-    echo "${SCRIPT_NAME}: cannot cd to ${to_absolute}"
+    echo "${SCRIPT_NAME}: cannot cd to ${to_absolute}" >&2
     return 1
   fi
 
   if ! git pull -q; then
-    echo "${SCRIPT_NAME}: problem pulling in ${to_absolute}"
+    echo "${SCRIPT_NAME}: problem pulling in ${to_absolute}" >&2
     return 1
   fi
 
@@ -130,24 +130,24 @@ git_push_to() {
 
   if ! git pull -q "${from_relative}"; then
     # Note: pwd=to_absolute
-    echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)"
+    echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
     return 1
   fi
 
   if [ "$nocompile" -eq 0 ] && [ -z "$MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT" ]; then
     if ! compile-project; then
-      echo "${SCRIPT_NAME}: unable to build in $(pwd)"
+      echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
       return 1
     fi
   fi
 
   if ! git push --quiet; then
-    echo "${SCRIPT_NAME}: problem pushing from $(pwd)"
+    echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
     return 1
   fi
 
   if ! cd "${orig_dir}"; then
-    echo "${SCRIPT_NAME}: cannot cd back to ${orig_dir}"
+    echo "${SCRIPT_NAME}: cannot cd back to ${orig_dir}" >&2
     return 1
   fi
 

@@ -36,7 +36,7 @@ SCRIPT_NAME="$(basename -- "$0")"
 
 # $toplevel does not have a trailing "/" character
 if [ "$#" -eq 0 ]; then
-  if toplevel="$(git rev-parse --show-toplevel 2>&1)"; then
+  if toplevel="$(git rev-parse --show-toplevel 2> /dev/null)"; then
     echo "Running ${SCRIPT_NAME} in $toplevel, called from $(pwd)"
   else
     toplevel=$(pwd)
@@ -52,10 +52,6 @@ fi
 
 # Returns a status code indicating success or failure, or 222 if no buildfile was found.
 compile_in_directory() {
-  if [ "$#" -ne 1 ]; then
-    echo "compile_in_directory got $# arguments: $*"
-    exit 1
-  fi
   dir="$1"
 
   if [ -f "$dir/gradlew" ]; then
@@ -115,7 +111,7 @@ else
       continue
     fi
     buildfile_found=1
-    if [ ! $result ]; then
+    if [ "$result" -ne 0 ]; then
       exit $result
     fi
   done
