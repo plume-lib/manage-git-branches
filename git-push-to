@@ -161,6 +161,7 @@ if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
 fi
 
 if [ "$#" -lt 2 ]; then
+  echo "${SCRIPT_NAME}: not enough arguments" >&2
   echo "Usage: ${SCRIPT_NAME} [--nocompile] FROM_DIR TO_DIR ..." >&2
   exit 1
 fi
