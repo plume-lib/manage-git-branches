@@ -46,7 +46,7 @@ while IFS= read -r dir; do
   else
     # There is no .git subdirectory.
     if [ -f "$dir/.project" ]; then
-      if [ "$(find "$dir" -maxdepth 1 -printf %y)" = "df" ]; then
+      if [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
         # It has only one file and no other content
         realpath "$dir"
       fi

@@ -166,6 +166,7 @@ if [ "$#" -lt 2 ]; then
   exit 1
 fi
 
+prev=''
 for arg; do
   if [ -n "$prev" ]; then
     if ! git_push_to "$prev" "$arg"; then

@@ -27,8 +27,8 @@ The commands are:
 * [`git-checkout-branch`](git-checkout-branch)`BRANCHNAME`:
   Checks out the given branch of the repository in a new working copy
   directory.  Run this command from within a working copy; the new
-  directory is a sibling of it.  Below is a definition for an alias `gnb`.
-* [`git-new-branch`](git-new-branch)`BRANCHNME`:
+  directory is a sibling of it.  Below is a definition for an alias `gcb`.
+* [`git-new-branch`](git-new-branch)`BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new
   working copy directory.  Run this command from within a working copy; the
   new directory is a sibling of it.  Below is a definition for an alias
