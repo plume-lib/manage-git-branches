@@ -24,8 +24,8 @@
 
 # Here is an example of use.
 #
-# Suppose you have 3 branches names "part1", "part2", and "part3".  Each one
-# contains the changes in the previous part, plus more.  Each branches is
+# Suppose you have 3 branches named "part1", "part2", and "part3".  Each one
+# contains the changes in the previous part, plus more.  Each branch is
 # checked out in its own directory.  To keep all of these branches in sync,
 # whenever you make a change to any branch (including to the main branch), run
 # the following command:
@@ -53,10 +53,10 @@
 #
 # So, you have the following branches.
 #  * allchanges
-#     * part1   -- a subset of "all-changes"
+#     * part1   -- a subset of "allchanges"
 #        * part1-step1  -- a subset of "part1-step2"
 #        * part1-step2  -- a subset of "part1"
-#     * part2   -- a subset of "all-changes"
+#     * part2   -- a subset of "allchanges"
 #        * part2-step1  -- a subset of "part2"
 #
 # You would make 6 pull requests, in order to make each one address just one

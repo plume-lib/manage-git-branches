@@ -2,10 +2,10 @@
 
 # This command lists directories named *-branch-* that are git clones of
 # branches that have been deleted in the remote repository.  Only directories
-# below the current directory are considered.  Newly-created branches are not
+# below the current directory are considered.  Newly created branches are not
 # listed, only branches that have been deleted in the remote (for example,
 # because a pull request has been merged).
-# Also deletes directories containing nothing but a .project/ subdirectory.
+# Also deletes directories containing nothing but a `.project` file.
 #
 # Typical usage is:  rm -rf $(git-orphaned-branches)
 

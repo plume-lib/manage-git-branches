@@ -1,7 +1,7 @@
 [project]
 name = "manage-git-branches"
 version = "0.1.0"
-description = "Add your description here"
+description = "Scripts to support managing multiple branches of a git repository."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
