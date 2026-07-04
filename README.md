@@ -10,7 +10,7 @@ It replaces mechanisms such as `git stash`.
 
 Its key principles are:
 
-1. Do not run git commands in the master branch, except `git pull`.  (Or,
+1. Do not run git commands in the main branch, except `git pull`.  (Or,
    use [`mvc pull`](https://github.com/mernst/multi-version-control).)
 2. Do not change branches in any working copy.
    That is, never run `git checkout`, and never run `git stash`.
@@ -24,21 +24,21 @@ Its key principles are:
 
 The commands are:
 
-* [`git-checkout-branch`](git-checkout-branch)`BRANCHNAME`:
+* [`git-checkout-branch`](git-checkout-branch) `BRANCHNAME`:
   Checks out the given branch of the repository in a new working copy
   directory.  Run this command from within a working copy; the new
   directory is a sibling of it.  Below is a definition for an alias `gcb`.
-* [`git-new-branch`](git-new-branch)`BRANCHNAME`:
+* [`git-new-branch`](git-new-branch) `BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new
   working copy directory.  Run this command from within a working copy; the
   new directory is a sibling of it.  Below is a definition for an alias
   `gnb`.
-* [`git-push-to`](git-push-to)`FROMDIR TODIR ...`:
+* [`git-push-to`](git-push-to) `FROMDIR TODIR ...`:
   Pull from FROMDIR into TODIR, compile it, then push TODIR to its remote
   if compilation succeeded.
   The two directories should be working copies (that is, git clones).
   You may also pass a list of directories: each is pushed into the subsequent one.
-* [`git-pull-from`](git-pull-from)`FROMDIR`:
+* [`git-pull-from`](git-pull-from) `FROMDIR`:
   Pull from FROMDIR into the current directory, compile it, then push it to its
   remote if compilation succeeded.
   The two directories should be working copies (that is, git clones).
