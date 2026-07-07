@@ -15,7 +15,11 @@ if [ "$#" -ne 1 ]; then
 fi
 
 STARTDIR="${PWD}"
-trap 'cd "${STARTDIR}" || true' EXIT
+# Set to the temporary directory once we have created it, so that the EXIT
+# trap removes it if the script fails partway through.  Left empty otherwise,
+# so the trap never removes a pre-existing directory that we did not create.
+TMPDIR_TO_CLEAN=""
+trap 'cd "${STARTDIR}" 2> /dev/null || true; if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf "${TMPDIR_TO_CLEAN}"; fi' EXIT
 
 if ! cd "$(git rev-parse --show-toplevel 2> /dev/null)"; then
   echo "${SCRIPT_NAME}: Cannot determine top-level directory of git repository" >&2
@@ -49,6 +53,7 @@ if ! \cp -Rp . "${BRANCH_TMPDIR}"; then
   echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
   exit 1
 fi
+TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
 if ! (cd "${BRANCH_TMPDIR}" && git checkout -b "${BRANCHNAME}" -q); then
   echo "${SCRIPT_NAME}: ERROR in: (cd \"${BRANCH_TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)" >&2
   exit 1
@@ -58,5 +63,6 @@ if ! mv "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
   echo "${SCRIPT_NAME}: ERROR in: mv \"${BRANCH_TMPDIR}\" \"${BRANCHDIR}\"" >&2
   exit 1
 fi
+TMPDIR_TO_CLEAN=""
 
 echo "Success: created ${BRANCHDIR}"
