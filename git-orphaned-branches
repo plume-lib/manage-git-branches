@@ -11,8 +11,11 @@
 
 # DEBUG=1
 
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
 if [ "$#" -ne 0 ]; then
-  echo "Usage: $(basename "$0")" >&2
+  echo "Usage: ${SCRIPT_NAME}" >&2
   exit 1
 fi
 
@@ -37,7 +40,7 @@ while IFS= read -r dir; do
 
       # If grep matches `git pull` output, print directory name.
       # `grep -q` means no output, just status code.
-      if git -C "$dir" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'; then
+      if "${SCRIPT_DIR}"/is-deleted-branch "$dir"; then
         realpath "$dir"
       fi
       # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
@@ -47,7 +50,7 @@ while IFS= read -r dir; do
     # There is no .git subdirectory.
     if [ -f "$dir/.project" ]; then
       if [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
-        # It has only one file and no other content
+        # It has only one `.project/` directory and no other content
         realpath "$dir"
       fi
     fi

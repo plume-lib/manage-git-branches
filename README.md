@@ -42,6 +42,8 @@ The commands are:
   Pull from FROMDIR into the current directory, compile it, then push it to its
   remote if compilation succeeded.
   The two directories should be working copies (that is, git clones).
+* [`is-deleted-branch`](is-deleted-branch):
+  Given a directory name, tests whether it is on a deleted branch.
 * [`git-orphaned-branches`](git-orphaned-branches):
   Lists directories named `*-branch-*` that are a working copy for a branch
   that was deleted in the remote.  Typical usage is `rm -rf

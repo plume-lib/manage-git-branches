@@ -1,0 +1,10 @@
+#!/bin/sh
+
+# Tests whether a directory is on a deleted branch.
+
+if [ "$#" -ne 1 ]; then
+  echo "Usage: ${SCRIPT_NAME} DIRECTORY" >&2
+  exit 1
+fi
+
+git -C "$0" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'

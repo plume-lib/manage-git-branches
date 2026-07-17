@@ -81,7 +81,7 @@
 
 nocompile=0
 
-# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
 ## A helper function that works on exactly two repositories.
@@ -109,6 +109,11 @@ git_push_to() {
     return 1
   fi
 
+  if "${SCRIPT_DIR}"/is-deleted-branch "from_absolute"; then
+    echo "${SCRIPT_NAME}: is a deleted branch: ${to_absolute}" >&2
+    return 1
+  fi
+
   if ! git -C "$from_absolute" pull -q; then
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute}" >&2
     return 1
@@ -118,6 +123,11 @@ git_push_to() {
 
   if ! cd "$to_absolute"; then
     echo "${SCRIPT_NAME}: cannot cd to ${to_absolute}" >&2
+    return 1
+  fi
+
+  if is-deleted-branch "to_absolute"; then
+    echo "${SCRIPT_NAME}: is a deleted branch: ${to_absolute}" >&2
     return 1
   fi
 
@@ -151,6 +161,7 @@ git_push_to() {
     return 1
   fi
 
+  return 0
 }
 
 ## Main program starts here.
