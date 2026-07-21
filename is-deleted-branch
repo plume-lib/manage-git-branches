@@ -1,6 +1,9 @@
 #!/bin/sh
 
 # Tests whether a directory is on a deleted branch.
+# Status code is 0 (true) if on a deleted branch OR a non-clone, 1 (false) if not.
+
+SCRIPT_NAME="$(basename -- "$0")"
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} DIRECTORY" >&2
@@ -8,4 +11,4 @@ if [ "$#" -ne 1 ]; then
 fi
 
 # Exit status is 0 if a line is selected.
-git -C "$0" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'
+git -C "$1" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'
