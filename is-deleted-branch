@@ -7,4 +7,5 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
-git -C "$0" pull 2>&1 | grep -v -q '\(no such ref was fetched\|fatal: not a git repository\)'
+# Exit status is 0 if a line is selected.
+git -C "$0" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'
