@@ -1,3 +1,5 @@
+.PHONY: all test clean default
+
 default: style-check
 all: style-fix style-check
 

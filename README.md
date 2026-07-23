@@ -64,7 +64,8 @@ Clone this repository:
 git clone https://github.com/mernst/manage-git-branches.git
 ```
 
-For convenience, add the following commands to your shell startup file, such as `~/.profile`.
+For convenience, add the following commands to your shell startup file,
+such as `~/.profile`.
 
 ```sh
 export PATH="/path/to/manage-git-branches:${PATH}"
