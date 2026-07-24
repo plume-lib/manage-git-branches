@@ -126,7 +126,7 @@ git_push_to() {
     return 1
   fi
 
-  if is-deleted-branch "${to_absolute}"; then
+  if "${SCRIPT_DIR}"/is-deleted-branch "${to_absolute}"; then
     echo "${SCRIPT_NAME}: is a deleted branch: ${to_absolute}" >&2
     return 1
   fi

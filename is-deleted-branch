@@ -11,4 +11,5 @@ if [ "$#" -ne 1 ]; then
 fi
 
 # Exit status is 0 if a line is selected.
-git -C "$1" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'
+# Force LC_ALL=C so that git's diagnostics are in English, which the grep matches.
+LC_ALL=C git -C "$1" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'
