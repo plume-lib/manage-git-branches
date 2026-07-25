@@ -49,7 +49,7 @@ The commands are:
   that was deleted in the remote.  Typical usage is `rm -rf
   $(git-orphaned-branches)` or `rmgob` (see alias below).
 * [`compile-project`](compile-project):
-  Runs a Gradle or Maven command to compile the project that contains the
+  Runs a Gradle, Maven, or Make command to compile the project that contains the
   current directory.
   The command-line arguments for the compilation can be customized.
 

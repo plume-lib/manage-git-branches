@@ -21,9 +21,15 @@ STARTDIR="${PWD}"
 TMPDIR_TO_CLEAN=""
 trap 'cd "${STARTDIR}" 2> /dev/null || true; if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf "${TMPDIR_TO_CLEAN}"; fi' EXIT
 
-if ! cd "$(git rev-parse --show-toplevel 2> /dev/null)"; then
+# Capture the top level first: under a POSIX `sh` (e.g., dash), `cd ""` succeeds
+# as a no-op, so testing `cd "$(...)"` directly would not catch an empty result.
+if ! TOPLEVEL="$(git rev-parse --show-toplevel 2> /dev/null)" || [ -z "${TOPLEVEL}" ]; then
   echo "${SCRIPT_NAME}: Cannot determine top-level directory of git repository" >&2
   git rev-parse --show-toplevel >&2
+  exit 1
+fi
+if ! cd "${TOPLEVEL}"; then
+  echo "${SCRIPT_NAME}: Cannot cd to top-level directory: ${TOPLEVEL}" >&2
   exit 1
 fi
 
