@@ -15,6 +15,14 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
+# A directory that does not exist -- or that is not a directory at all -- is
+# certainly not a clone.  Test this explicitly, because git's diagnostic for a
+# nonexistent path ("cannot change to ...: No such file or directory") differs
+# from its diagnostic for a directory that is not a clone.
+if [ ! -d "$1" ]; then
+  exit 0
+fi
+
 # Exit status is 0 if a line is selected.
 # Force LC_ALL=C so that git's diagnostics are in English, which the grep matches.
 LC_ALL=C git -C "$1" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'
