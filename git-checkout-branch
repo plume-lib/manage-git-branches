@@ -6,6 +6,9 @@
 # Usage:
 #   git-checkout-branch BRANCHNAME
 
+# Fail on the use of an unset variable, which is usually a typo.
+set -u
+
 # SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
@@ -36,7 +39,13 @@ fi
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
-BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
+# `set -u` does not catch a failing `realpath`, whose empty output is set.
+# Without this check, BRANCH_TMPDIR would be the literal "-TMP", a directory
+# in the current directory that the script would create and then remove.
+if ! BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}") || [ -z "${BRANCHDIR}" ]; then
+  echo "${SCRIPT_NAME}: cannot determine the directory for branch ${BRANCHNAME}" >&2
+  exit 1
+fi
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
 git pull -q > /dev/null 2>&1 || true

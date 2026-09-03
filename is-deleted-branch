@@ -8,6 +8,9 @@
 # The status code is 0 (true) if the directory is on a deleted branch or is
 # not a clone, and 1 (false) otherwise.
 
+# Fail on the use of an unset variable, which is usually a typo.
+set -u
+
 SCRIPT_NAME="$(basename -- "$0")"
 
 if [ "$#" -ne 1 ]; then
