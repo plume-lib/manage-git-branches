@@ -41,8 +41,17 @@ BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
 git pull -q > /dev/null 2>&1 || true
 
-if ! git ls-remote --exit-code origin "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist." >&2
+# Succeeds if the given branch exists: locally, as a remote-tracking branch of
+# `origin`, or on `origin`.  The local tests come first because they need no
+# network access, and they succeed in a repository that has no remote `origin`.
+branch_exists() {
+  git rev-parse --verify --quiet "refs/heads/$1" > /dev/null \
+    || git rev-parse --verify --quiet "refs/remotes/origin/$1" > /dev/null \
+    || git ls-remote --exit-code origin "refs/heads/$1" > /dev/null 2>&1
+}
+
+if ! branch_exists "${BRANCHNAME}"; then
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist, locally or on origin." >&2
   exit 1
 fi
 
