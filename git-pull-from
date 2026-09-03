@@ -27,6 +27,16 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
+## A helper function that tests whether a directory is within a git working copy.
+is_working_copy() {
+  [ "$(git -C "$1" rev-parse --is-inside-work-tree 2> /dev/null)" = "true" ]
+}
+
+if ! is_working_copy "."; then
+  echo "${SCRIPT_NAME}: not a git working copy: $(pwd)" >&2
+  exit 1
+fi
+
 from="$1"
 from_absolute="$(realpath "$from")"
 from_relative="$(realpath --relative-to="." "$from")"
@@ -37,6 +47,10 @@ if [ ! -d "${from}" ]; then
   else
     echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}" >&2
   fi
+  exit 1
+fi
+if ! is_working_copy "${from_absolute}"; then
+  echo "${SCRIPT_NAME}: not a git working copy: ${from_absolute}" >&2
   exit 1
 fi
 
