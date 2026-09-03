@@ -1,4 +1,5 @@
 {
+  "$comment": "This file is shared, nearly verbatim, across all of the author's repositories.  Most of the permissions and plugins below concern languages, build systems, and tools that do not appear in this repository.  A permission is therefore not evidence that this repository uses the command it names.  (JSON has no comment syntax and Claude Code cannot parse a settings file that contains one, so this note is a key that Claude Code ignores.)",
   "permissions": {
     "allow": [
       "Agent(*)",

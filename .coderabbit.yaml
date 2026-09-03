@@ -1,4 +1,9 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# This file is shared, nearly verbatim, across all of the author's
+# repositories.  Most of the filters below concern languages, ecosystems, and
+# files that do not appear in this repository.  A filter is therefore not
+# evidence that this repository contains such a file.
 
 language: "en-US"
 
