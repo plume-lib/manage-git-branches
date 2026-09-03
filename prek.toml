@@ -98,6 +98,14 @@ hooks = [
 # rev = "v1.3.0"
 # hooks = [{ id = "circleci_validate", args = ["--org=gh/mernst"] }]
 
+## Claude Code
+
+[[repos]]
+repo = "local"
+hooks = [
+  { id = "check-claude-settings", name = "Claude Code permissions", language = "unsupported", entry = "sh -c 'if [ -x tests/check-claude-settings ] ; then tests/check-claude-settings; fi'", pass_filenames = false },
+]
+
 ## GitHub Actions
 
 [[repos]]

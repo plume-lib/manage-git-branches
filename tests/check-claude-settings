@@ -1,0 +1,49 @@
+#!/bin/sh
+
+# Checks that .claude/settings.json does not pre-approve the git commands that
+# this project's work style forbids, and that it denies them.  See principle 2
+# in README.md: never run `git checkout`, and never run `git stash`.
+#
+# Usage:
+#   tests/check-claude-settings
+#
+# The status code is 0 if the settings file is consistent with README.md, and
+# 1 otherwise.
+
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
+if [ "$#" -ne 0 ]; then
+  echo "Usage: ${SCRIPT_NAME}" >&2
+  exit 1
+fi
+
+settings="${SCRIPT_DIR}/../.claude/settings.json"
+if [ ! -f "${settings}" ]; then
+  echo "${SCRIPT_NAME}: ERROR: no such file: ${settings}" >&2
+  exit 1
+fi
+
+# Prints the lines of the JSON array whose key is the argument.
+json_array() {
+  sed -n "/\"$1\": \[/,/\]/p" "${settings}"
+}
+
+allow="$(json_array allow)"
+deny="$(json_array deny)"
+
+status=0
+for command in "git branch" "git checkout" "git stash" "git switch"; do
+  if printf '%s\n' "${allow}" | grep -qF "\"Bash(${command}"; then
+    echo "${SCRIPT_NAME}: ERROR: ${settings} allows \"${command}\", which README.md forbids." >&2
+    status=1
+  fi
+  for permission in "Bash(${command})" "Bash(${command}:*)"; do
+    if ! printf '%s\n' "${deny}" | grep -qF "\"${permission}\""; then
+      echo "${SCRIPT_NAME}: ERROR: ${settings} does not deny \"${permission}\"." >&2
+      status=1
+    fi
+  done
+done
+
+exit "${status}"
