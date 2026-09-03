@@ -44,8 +44,11 @@ fi
 
 # `git ls-remote --exit-code` exits with status 2 if no matching ref exists.
 # GIT_TERMINAL_PROMPT=0 makes an authentication failure an error rather than
-# an interactive prompt.
-GIT_TERMINAL_PROMPT=0 git -C "${dir}" ls-remote --exit-code --heads "${remote}" "${upstream_ref}" > /dev/null 2>&1
+# an interactive prompt.  `-o BatchMode=yes` does the same for SSH
+# authentication and host-key prompts.
+ssh_command="${GIT_SSH_COMMAND:-$(git -C "${dir}" config --get core.sshCommand)}"
+GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${ssh_command:-ssh} -o BatchMode=yes" \
+  git -C "${dir}" ls-remote --exit-code --heads "${remote}" "${upstream_ref}" > /dev/null 2>&1
 status="$?"
 case "${status}" in
   0)

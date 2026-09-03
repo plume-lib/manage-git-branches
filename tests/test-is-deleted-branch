@@ -35,6 +35,24 @@ expect_status() {
   fi
 }
 
+# Usage: expect_failure_message COMMAND DIRECTORY DESCRIPTION
+# Runs `COMMAND DIRECTORY`, and checks that it exits with status 1 and
+# complains on standard error that it cannot list the remote's branches.
+expect_failure_message() {
+  cmd="$1"
+  dir="$2"
+  description="$3"
+  stderr_file="${testdir}/stderr"
+  "${cmd}" "${dir}" > /dev/null 2> "${stderr_file}"
+  actual="$?"
+  if [ "${actual}" -ne 1 ]; then
+    fail "${description}: expected status 1, got ${actual}"
+  fi
+  if ! grep -q 'cannot list branches of remote' "${stderr_file}"; then
+    fail "${description}: expected \"cannot list branches of remote\" on standard error, got [$(cat "${stderr_file}")]"
+  fi
+}
+
 # Usage: repo_state DIRECTORY
 # Prints a summary of everything that `is-deleted-branch` must not change:
 # the commits that are reachable from any ref, and the working tree status.
@@ -98,6 +116,15 @@ git -C "${testdir}/setup" push -q origin --delete dead
 git clone -q "${remote}" "${testdir}/myrepo-branch-brandnew"
 git -C "${testdir}/myrepo-branch-brandnew" checkout -q -b brandnew
 
+## A working copy with a detached HEAD, which is on no branch at all.
+git clone -q "${remote}" "${testdir}/myrepo-branch-detached"
+git -C "${testdir}/myrepo-branch-detached" checkout -q --detach HEAD
+
+## A working copy whose remote repository cannot be reached.
+git clone -q -b live "${remote}" "${testdir}/myrepo-branch-unreachable"
+git -C "${testdir}/myrepo-branch-unreachable" remote set-url origin \
+  "${testdir}/no-such-repo.git"
+
 ## A directory that is not a clone.
 mkdir "${testdir}/myrepo-branch-notaclone"
 
@@ -122,15 +149,31 @@ done
 expect_status 1 "${testdir}/myrepo-branch-live" 'branch that exists in the remote'
 expect_status 0 "${testdir}/myrepo-branch-dead" 'branch that was deleted in the remote'
 expect_status 1 "${testdir}/myrepo-branch-brandnew" 'branch that was never pushed'
+expect_status 1 "${testdir}/myrepo-branch-detached" 'working copy with a detached HEAD'
 expect_status 0 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
+expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+  'is-deleted-branch on a working copy whose remote cannot be reached'
 
 # `git-orphaned-branches` must list exactly the deleted branch, and must not
 # modify any of the directories that it inspects.
-before="$(repo_state "${testdir}/myrepo-branch-live")"
-orphans="$(cd "${testdir}" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"
-after="$(repo_state "${testdir}/myrepo-branch-live")"
-if [ "${before}" != "${after}" ]; then
-  fail "git-orphaned-branches modified ${testdir}/myrepo-branch-live"
+scanned_clones='live dead brandnew detached unreachable'
+for branch in ${scanned_clones}; do
+  repo_state "${testdir}/myrepo-branch-${branch}" > "${testdir}/before-${branch}"
+done
+orphans_stderr="${testdir}/orphans-stderr"
+orphans="$(cd "${testdir}" && "${GIT_ORPHANED_BRANCHES}" 2> "${orphans_stderr}")"
+for branch in ${scanned_clones}; do
+  repo_state "${testdir}/myrepo-branch-${branch}" > "${testdir}/after-${branch}"
+  if ! cmp -s "${testdir}/before-${branch}" "${testdir}/after-${branch}"; then
+    fail "git-orphaned-branches modified ${testdir}/myrepo-branch-${branch}"
+    echo "before:" >&2
+    cat "${testdir}/before-${branch}" >&2
+    echo "after:" >&2
+    cat "${testdir}/after-${branch}" >&2
+  fi
+done
+if ! grep -q 'cannot list branches of remote' "${orphans_stderr}"; then
+  fail "git-orphaned-branches: expected \"cannot list branches of remote\" on standard error, got [$(cat "${orphans_stderr}")]"
 fi
 expected_orphans="$(cd "${testdir}" && realpath myrepo-branch-dead)"
 if [ "${orphans}" != "${expected_orphans}" ]; then
