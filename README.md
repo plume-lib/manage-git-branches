@@ -54,10 +54,29 @@ The commands are:
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
-  The command-line arguments for the compilation can be customized.
+  The command-line arguments for the compilation can be customized, using the
+  environment variables described below.
 
 More documentation of each script appears at the top of the script.
 Click the command names above to see that documentation.
+
+## Environment variables
+
+These environment variables customize the behavior of the commands.  Each one
+takes effect when it is set to a non-empty value.
+
+* `GRADLE_ASSEMBLE_FLAGS`: `compile-project` passes this to `gradlew assemble`
+  or `gradle assemble`.
+* `MVN_COMPILE_FLAGS`: `compile-project` passes this to `mvnw compile` or
+  `mvn compile`.
+* `MAKE_FLAGS`: `compile-project` passes this to `make`.
+* `ERR_IF_NO_BUILDFILE`: `compile-project` fails if it finds no buildfile.
+  Otherwise, `compile-project` succeeds when it finds no buildfile.
+* `MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT`: `git-push-to` and
+  `git-pull-from` skip the compilation step, and push whenever the merge
+  succeeds.
+* `DEBUG`: `git-orphaned-branches` prints a message about each directory that
+  it examines.
 
 ## Installation
 
