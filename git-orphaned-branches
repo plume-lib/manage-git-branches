@@ -23,7 +23,10 @@ dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
 trap 'rm -f "${dirs_file}"' EXIT INT TERM
 find . -name '*-branch-*' -type d > "${dirs_file}"
 
-while IFS= read -r dir; do
+# Read from file descriptor 3 rather than stdin, so that a child process (such
+# as the `git pull` within `is-deleted-branch`) cannot consume the directory
+# names that the loop has not yet read.
+while IFS= read -r dir <&3; do
   if [ ! -d "$dir" ]; then continue; fi
   if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
   if [ -d "$dir/.git" ]; then
@@ -54,4 +57,4 @@ while IFS= read -r dir; do
       fi
     fi
   fi
-done < "${dirs_file}"
+done 3< "${dirs_file}"
