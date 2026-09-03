@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Pull from another directory into the current repository.  Fails if
+# Pulls from another directory into the current repository.  Fails if
 # the resulting merge does not compile.  (Skips the compilation step
 # if environment variable MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is
 # set.)

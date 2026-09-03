@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Push one git repository into another, from local clones.  Fails if the
+# Pushes one git repository into another, from local clones.  Fails if the
 # resulting merge does not compile.  If more than two repositories are given,
 # each is pushed into the next in turn.
 #

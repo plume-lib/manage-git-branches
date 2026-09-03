@@ -6,18 +6,18 @@ git repository.
 The scripts support a work style in which you have a separate working copy
 (a.k.a. "clone") for each branch that you work on.  You never switch
 branches within a working copy.  I find that this reduces branch confusion.
-It replaces mechanisms such as `git stash`.
+This work style replaces mechanisms such as `git stash`.
 
-Its key principles are:
+The key principles of this work style are:
 
 1. Do not run git commands in the main branch, except `git pull`.  (Or,
-   use [`mvc pull`](https://github.com/mernst/multi-version-control).)
+   use [`mvc pull`](https://github.com/plume-lib/multi-version-control).)
 2. Do not change branches in any working copy.
    That is, never run `git checkout`, and never run `git stash`.
-3. To create a new branch, run command `gnb` or `git-new-branch`.  It
+3. To create a new branch, run the command `gnb` or `git-new-branch`.  It
    creates a new directory holding a new branch that starts as a copy of
    the branch from which you ran `gnb`.
-4. To clone/checkout an existing branch, run `gcb` or `git-checkout-branch`.
+4. To check out an existing branch, run `gcb` or `git-checkout-branch`.
    It creates a new directory and checks out the branch there.
 
 ## Commands
@@ -26,31 +26,34 @@ The commands are:
 
 * [`git-checkout-branch`](git-checkout-branch) `BRANCHNAME`:
   Checks out the given branch of the repository in a new working copy
-  directory.  Run this command from within a working copy; the new
-  directory is a sibling of it.  Below is a definition for an alias `gcb`.
+  directory.  Run this command from within a working copy; the new directory
+  is a sibling of the working copy.  Below is a definition for an alias
+  `gcb`.
 * [`git-new-branch`](git-new-branch) `BRANCHNAME`:
-  Creates and checks out the given branch of the repository in a new
-  working copy directory.  Run this command from within a working copy; the
-  new directory is a sibling of it.  Below is a definition for an alias
-  `gnb`.
-* [`git-push-to`](git-push-to) `FROMDIR TODIR ...`:
-  Pull from FROMDIR into TODIR, compile it, then push TODIR to its remote
-  if compilation succeeded.
+  Creates and checks out the given branch of the repository in a new working
+  copy directory.  Run this command from within a working copy; the new
+  directory is a sibling of the working copy.  Below is a definition for an
+  alias `gnb`.
+* [`git-push-to`](git-push-to) `[--nocompile] FROM_DIR TO_DIR ...`:
+  Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
+  its remote if compilation succeeds.
   The two directories should be working copies (that is, git clones).
   You may also pass a list of directories: each is pushed into the subsequent one.
-* [`git-pull-from`](git-pull-from) `FROMDIR`:
-  Pull from FROMDIR into the current directory, compile it, then push it to its
-  remote if compilation succeeded.
+* [`git-pull-from`](git-pull-from) `OTHER-REPO-DIR`:
+  Pulls from OTHER-REPO-DIR into the current directory, compiles the current
+  directory, then pushes the current directory to its remote if compilation
+  succeeds.
   The two directories should be working copies (that is, git clones).
-* [`is-deleted-branch`](is-deleted-branch):
-  Given a directory name, tests whether it is on a deleted branch.
+* [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
+  Tests whether the given directory is on a deleted branch.
 * [`git-orphaned-branches`](git-orphaned-branches):
-  Lists directories named `*-branch-*` that are a working copy for a branch
-  that was deleted in the remote.  Typical usage is `rm -rf
-  $(git-orphaned-branches)` or `rmgob` (see alias below).
-* [`compile-project`](compile-project):
-  Runs a Gradle, Maven, or Make command to compile the project that contains the
-  current directory.
+  Lists directories named `*-branch-*`, below the current directory, that are
+  working copies for branches that were deleted in the remote repository.
+  Typical usage is `rm -rf $(git-orphaned-branches)` or `rmgob` (see alias
+  below).
+* [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
+  Runs a Gradle, Maven, or Make command to compile the project that contains
+  the given directory, which defaults to the current directory.
   The command-line arguments for the compilation can be customized.
 
 More documentation of each script appears at the top of the script.
@@ -97,19 +100,20 @@ This convention enables you to easily work on multiple branches at a time:
 * Easier non-git operations:  comparing branches using your favorite tool,
   searching multiple branches, reconciling branches, copying text between
   them, etc.
-* Greater disk usage than if you have a single clone and you switch
-  branches within that clone.  Usually, disk space is plentiful and the
-  foregoing advantages are worthwhile.  If you have very large repositories
-  and limited disk space, however, this approach may be undesirable.
+* A disadvantage is greater disk usage than if you have a single clone and
+  you switch branches within that clone.  Usually, disk space is plentiful
+  and the foregoing advantages are worthwhile.  If you have very large
+  repositories and limited disk space, however, this approach may be
+  undesirable.
 
 If other programs need a specific name for your repository, then you may wish to
 make the directory `REPONAME` be a symbolic link to whichever branch you are
 working on at the time, such as `REPONAME-branch-main` when you want to use the
 main branch.
 
-## Programs for managing multiple Git clones
+## Programs for managing multiple git clones
 
 The
 [multi-version-control](https://github.com/plume-lib/multi-version-control)
-program manages multiple clones, much as this repository manages multiple
-branches.
+program manages multiple clones, much as the scripts in this repository
+manage multiple branches.

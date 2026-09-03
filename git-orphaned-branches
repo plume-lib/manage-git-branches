@@ -33,13 +33,12 @@ while IFS= read -r dir; do
         echo "Did not find remote repository for $dir; this command failed: git -C \"$dir\" config --get remote.origin.url"
       fi
     else
-      # The remote repository exists
+      # The remote repository exists.
       if [ -n "$DEBUG" ]; then echo "remote repository exists: $dir"; fi
       # Don't match on "There is no tracking information for the current branch.", which is output
       # for both a new branch and a deleted branch where the repository has been pruned.
 
-      # If grep matches `git pull` output, print directory name.
-      # `grep -q` means no output, just status code.
+      # If the branch was deleted in the remote, print the directory name.
       if "${SCRIPT_DIR}"/is-deleted-branch "$dir"; then
         realpath "$dir"
       fi
@@ -50,7 +49,7 @@ while IFS= read -r dir; do
     # There is no .git subdirectory.
     if [ -f "$dir/.project" ]; then
       if [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
-        # It has only the `.project` file and no other content
+        # It has only the `.project` file and no other content.
         realpath "$dir"
       fi
     fi

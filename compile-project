@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Compile the project that contains the current or given directory.
+# Compiles the project that contains the current or given directory.
 #
 # Supports Gradle, Maven, and Make projects.  If no buildfile is found
 # at the top level, searches at (only) the next level down.
@@ -46,7 +46,7 @@ elif [ "$#" -eq 1 ]; then
   toplevel="$1"
   echo "Running ${SCRIPT_NAME} in $toplevel"
 else
-  echo "Usage: ${SCRIPT_NAME} [<directory>]" >&2
+  echo "Usage: ${SCRIPT_NAME} [--clean] [<directory>]" >&2
   exit 1
 fi
 

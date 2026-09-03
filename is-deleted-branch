@@ -1,7 +1,12 @@
 #!/bin/sh
 
 # Tests whether a directory is on a deleted branch.
-# Status code is 0 (true) if on a deleted branch OR a non-clone, 1 (false) if not.
+#
+# Usage:
+#   is-deleted-branch DIRECTORY
+#
+# The status code is 0 (true) if the directory is on a deleted branch or is
+# not a clone, and 1 (false) otherwise.
 
 SCRIPT_NAME="$(basename -- "$0")"
 
