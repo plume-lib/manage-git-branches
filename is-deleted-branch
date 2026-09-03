@@ -7,6 +7,12 @@
 #
 # The status code is 0 (true) if the directory is on a deleted branch or is
 # not a clone, and 1 (false) otherwise.
+#
+# This command is read-only:  it never modifies DIRECTORY.  It queries the
+# remote repository, but only to list the remote's branches.
+#
+# A branch that has never been pushed is not a deleted branch, so this
+# command returns 1 (false) for it.
 
 SCRIPT_NAME="$(basename -- "$0")"
 
@@ -15,6 +21,43 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
-# Exit status is 0 if a line is selected.
-# Force LC_ALL=C so that git's diagnostics are in English, which the grep matches.
-LC_ALL=C git -C "$1" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'
+dir="$1"
+
+# A directory that is not a clone.
+if ! git -C "${dir}" rev-parse --git-dir > /dev/null 2>&1; then
+  exit 0
+fi
+
+# A detached HEAD is not on a branch, so it is not on a deleted branch.
+if ! branch="$(git -C "${dir}" symbolic-ref --quiet --short HEAD 2> /dev/null)"; then
+  exit 1
+fi
+
+# The branch's upstream, as a remote name and a ref such as "refs/heads/BRANCH".
+remote="$(git -C "${dir}" config --get "branch.${branch}.remote")"
+upstream_ref="$(git -C "${dir}" config --get "branch.${branch}.merge")"
+if [ -z "${remote}" ] || [ -z "${upstream_ref}" ]; then
+  # The branch has no upstream, so it was never pushed:  it is a new branch
+  # rather than a deleted one.
+  exit 1
+fi
+
+# `git ls-remote --exit-code` exits with status 2 if no matching ref exists.
+# GIT_TERMINAL_PROMPT=0 makes an authentication failure an error rather than
+# an interactive prompt.
+GIT_TERMINAL_PROMPT=0 git -C "${dir}" ls-remote --exit-code --heads "${remote}" "${upstream_ref}" > /dev/null 2>&1
+status="$?"
+case "${status}" in
+  0)
+    # The branch still exists in the remote.
+    exit 1
+    ;;
+  2)
+    # The branch was deleted in the remote.
+    exit 0
+    ;;
+  *)
+    echo "${SCRIPT_NAME}: cannot list branches of remote ${remote} for ${dir}" >&2
+    exit 1
+    ;;
+esac
