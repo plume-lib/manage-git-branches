@@ -22,6 +22,17 @@
 # SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+## If a merge in the given directory left conflicts, says so, lists the
+## conflicted files, and says how to complete or abandon the merge.
+report_conflicts() {
+  conflicted="$(git -C "$1" diff --name-only --diff-filter=U)"
+  if [ -n "${conflicted}" ]; then
+    echo "${SCRIPT_NAME}: the merge left conflicts in $1:" >&2
+    echo "${conflicted}" | sed 's/^/  /' >&2
+    echo "${SCRIPT_NAME}: resolve the conflicts and commit, or abandon the merge:  git -C $1 merge --abort" >&2
+  fi
+}
+
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} OTHER-REPO-DIR" >&2
   exit 1
@@ -42,16 +53,19 @@ fi
 
 if ! git pull -q; then
   echo "${SCRIPT_NAME}: problem pulling $(pwd)" >&2
+  report_conflicts "$(pwd)"
   exit 1
 fi
 
 if ! git -C "$from_absolute" pull -q; then
   echo "${SCRIPT_NAME}: problem pulling ${from_absolute}" >&2
+  report_conflicts "${from_absolute}"
   exit 1
 fi
 
 if ! git pull -q "${from_relative}"; then
   echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
+  report_conflicts "$(pwd)"
   exit 1
 fi
 
