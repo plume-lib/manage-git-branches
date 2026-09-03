@@ -7,17 +7,41 @@
 # because a pull request has been merged).
 # Also lists directories containing nothing but a `.project` file.
 #
-# Typical usage is:  rm -rf $(git-orphaned-branches)
+# Usage:
+#   git-orphaned-branches [--print0]
+#
+# With --print0 (or -0), the directories are separated by a NUL character
+# rather than by a newline, which is safe for directory names that contain
+# whitespace or a glob metacharacter.
+#
+# Typical usage is:  git-orphaned-branches --print0 | xargs -0 rm -rf
 
 # DEBUG=1
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+# If non-empty, separate the output directories by NUL rather than by newline.
+print0=""
+if [ "$#" -ge 1 ] && { [ "$1" = "--print0" ] || [ "$1" = "-0" ]; }; then
+  print0="$1"
+  shift
+fi
+
 if [ "$#" -ne 0 ]; then
-  echo "Usage: ${SCRIPT_NAME}" >&2
+  echo "Usage: ${SCRIPT_NAME} [--print0]" >&2
   exit 1
 fi
+
+# Prints its argument, followed by a NUL character if --print0 was given and by
+# a newline otherwise.
+print_dir() {
+  if [ -n "$print0" ]; then
+    printf '%s\0' "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
 
 dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
 trap 'rm -f "${dirs_file}"' EXIT INT TERM
@@ -40,7 +64,7 @@ while IFS= read -r dir; do
 
       # If the branch was deleted in the remote, print the directory name.
       if "${SCRIPT_DIR}"/is-deleted-branch "$dir"; then
-        realpath "$dir"
+        print_dir "$(realpath "$dir")"
       fi
       # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
       # git -C "$dir" remote prune origin 2>&1 > /dev/null
@@ -50,7 +74,7 @@ while IFS= read -r dir; do
     if [ -f "$dir/.project" ]; then
       if [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
         # It has only the `.project` file and no other content.
-        realpath "$dir"
+        print_dir "$(realpath "$dir")"
       fi
     fi
   fi
