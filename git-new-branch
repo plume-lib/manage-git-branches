@@ -41,8 +41,20 @@ BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
 git pull -q > /dev/null 2>&1 || true
 
-if git ls-remote --exit-code origin "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists." >&2
+# Succeeds if the given branch exists: locally, as a remote-tracking branch of
+# `origin`, or on `origin`.  The local tests come first because they need no
+# network access, and because `git checkout -b` fails on a local branch even
+# when `origin` has no branch of that name.
+branch_exists() {
+  git rev-parse --verify --quiet "refs/heads/$1" > /dev/null \
+    || git rev-parse --verify --quiet "refs/remotes/origin/$1" > /dev/null \
+    || git ls-remote --exit-code origin "refs/heads/$1" > /dev/null 2>&1
+}
+
+# This test precedes the copy of the working copy, so that a name collision
+# does not cost the user a full copy of the repository.
+if branch_exists "${BRANCHNAME}"; then
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists, locally or on origin." >&2
   exit 1
 fi
 
