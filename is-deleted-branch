@@ -6,13 +6,23 @@
 #   is-deleted-branch DIRECTORY
 #
 # The status code is 0 (true) if the directory is on a deleted branch or is
-# not a clone, and 1 (false) otherwise.
+# not a clone, and 1 (false) otherwise.  A directory that lies within a clone,
+# but is not the clone's top level, is not a clone.
 
 SCRIPT_NAME="$(basename -- "$0")"
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} DIRECTORY" >&2
   exit 1
+fi
+
+# `git -C DIR pull` walks up the directory tree, so for a directory that lies
+# within a clone but is not the clone's top level, git would operate on the
+# enclosing clone.  Such a directory is not itself a clone, so the status is 0
+# (true), and no git command is run in the enclosing clone.
+toplevel="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)"
+if [ -n "${toplevel}" ] && [ "$(realpath -- "$1")" != "$(realpath -- "${toplevel}")" ]; then
+  exit 0
 fi
 
 # Exit status is 0 if a line is selected.
