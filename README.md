@@ -43,7 +43,8 @@ The commands are:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
   succeeds.
-  The two directories should be working copies (that is, git clones).
+  OTHER-REPO-DIR and the current directory should both be working copies (that
+  is, git clones).
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is on a deleted branch.
 * [`git-orphaned-branches`](git-orphaned-branches):
