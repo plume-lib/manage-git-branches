@@ -45,7 +45,9 @@ The commands are:
   succeeds.
   The two directories should be working copies (that is, git clones).
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
-  Tests whether the given directory is on a deleted branch.
+  Tests whether the given directory is on a deleted branch.  If the remote
+  repository cannot be queried, this command reports the problem rather than
+  an answer.
 * [`git-orphaned-branches`](git-orphaned-branches):
   Lists directories named `*-branch-*`, below the current directory, that are
   working copies for branches that were deleted in the remote repository.
@@ -75,6 +77,15 @@ export PATH="/path/to/manage-git-branches:${PATH}"
 alias gcb=git-checkout-branch
 alias gnb=git-new-branch
 alias rmgob='rm -rf $(git-orphaned-branches)'
+```
+
+## Testing
+
+The tests are shell scripts in the [`tests`](tests) directory.  Run them all
+with:
+
+```sh
+for test in tests/test-*; do "$test"; done
 ```
 
 ## One branch per directory
