@@ -32,7 +32,9 @@ The commands are:
 * [`git-new-branch`](git-new-branch) `BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   copy directory.  Run this command from within a working copy; the new
-  directory is a sibling of the working copy.  Below is a definition for an
+  directory is a sibling of the working copy.  The new branch is pushed to
+  `origin`, which gives it an upstream branch so that `git-push-to` and
+  `git-pull-from` can use the new working copy.  Below is a definition for an
   alias `gnb`.
 * [`git-push-to`](git-push-to) `[--nocompile] FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
@@ -76,6 +78,11 @@ alias gcb=git-checkout-branch
 alias gnb=git-new-branch
 alias rmgob='rm -rf $(git-orphaned-branches)'
 ```
+
+## Testing
+
+To run the tests, run `tests/run-tests.sh`.  Each test creates its
+repositories under a temporary directory and removes them afterward.
 
 ## One branch per directory
 

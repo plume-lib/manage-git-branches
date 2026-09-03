@@ -9,6 +9,8 @@
 #
 # The arguments are directory names for working copies (that is, clones).
 # They may be absolute directory names or relative to the current directory.
+# Each working copy must be on a branch that has an upstream branch;
+# `git-new-branch` and `git-checkout-branch` create such working copies.
 # The first argument may be "--nocompile" to skip the compilation step.
 #
 # This script does the following:
@@ -84,6 +86,20 @@ nocompile=0
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+## Tests whether the working copy in the given directory has an upstream
+## branch, which `git pull` and `git push` require.  If it does not, prints an
+## explanation and returns 1.
+check_upstream() {
+  # If the directory is not a working copy, let a subsequent command diagnose that.
+  branch="$(git -C "$1" rev-parse --abbrev-ref HEAD 2> /dev/null)" || return 0
+  if git -C "$1" rev-parse --symbolic-full-name "@{upstream}" > /dev/null 2>&1; then
+    return 0
+  fi
+  echo "${SCRIPT_NAME}: branch ${branch} in $1 has no upstream branch, so it cannot be pulled or pushed" >&2
+  echo "${SCRIPT_NAME}: to give it one, run: git -C $1 push --set-upstream origin ${branch}" >&2
+  return 1
+}
+
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
@@ -114,6 +130,10 @@ git_push_to() {
     return 1
   fi
 
+  if ! check_upstream "${from_absolute}"; then
+    return 1
+  fi
+
   if ! git -C "$from_absolute" pull -q; then
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute}" >&2
     return 1
@@ -128,6 +148,10 @@ git_push_to() {
 
   if "${SCRIPT_DIR}"/is-deleted-branch "${to_absolute}"; then
     echo "${SCRIPT_NAME}: is a deleted branch: ${to_absolute}" >&2
+    return 1
+  fi
+
+  if ! check_upstream "${to_absolute}"; then
     return 1
   fi
 
