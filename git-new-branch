@@ -39,7 +39,22 @@ BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
 BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
-git pull -q > /dev/null 2>&1 || true
+# Bring this working copy up to date, so that the branch is based on the most
+# recent commit.  A failed pull is not fatal, because the repository might have
+# no remote or the current branch might have no upstream, but it is reported:
+# the branch will be based on a possibly stale commit.
+if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
+  echo "${SCRIPT_NAME}: warning: \`git pull\` failed in ${TOPLEVEL}:" >&2
+  if [ -n "${PULL_OUTPUT}" ]; then
+    echo "${PULL_OUTPUT}" >&2
+  fi
+  if [ -n "$(git ls-files --unmerged)" ]; then
+    echo "${SCRIPT_NAME}: ERROR: the failed pull left conflicts in ${TOPLEVEL}." >&2
+    echo "${SCRIPT_NAME}: Resolve them, or run \`git merge --abort\`, then re-run ${SCRIPT_NAME}." >&2
+    exit 1
+  fi
+  echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
+fi
 
 if git ls-remote --exit-code origin "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists." >&2
