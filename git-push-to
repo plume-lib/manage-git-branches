@@ -148,7 +148,7 @@ git_push_to() {
   fi
 
   if [ "$nocompile" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT:-}" ]; then
-    if ! compile-project; then
+    if ! "${SCRIPT_DIR}"/compile-project; then
       echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
       return 1
     fi
