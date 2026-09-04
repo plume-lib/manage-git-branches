@@ -15,11 +15,23 @@ if [ "$#" -ne 1 ]; then
 fi
 
 STARTDIR="${PWD}"
-# Set to the temporary directory once we have created it, so that the EXIT
-# trap removes it if the script fails partway through.  Left empty otherwise,
-# so the trap never removes a pre-existing directory that we did not create.
+# Set to the temporary directory just before we create it, so that the traps
+# remove it if the script fails or is interrupted partway through.  Left empty
+# otherwise, so the traps never remove a pre-existing directory that we did not
+# create.
 TMPDIR_TO_CLEAN=""
-trap 'cd "${STARTDIR}" 2> /dev/null || true; if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf "${TMPDIR_TO_CLEAN}"; fi' EXIT
+cleanup() {
+  cd "${STARTDIR}" 2> /dev/null || true
+  if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf "${TMPDIR_TO_CLEAN}"; fi
+}
+# A POSIX shell such as dash does not run an EXIT trap when the shell is killed
+# by a signal, so trap the signals too.  Each signal handler restores the
+# default disposition and re-sends the signal to this shell, so that the caller
+# still sees the exit status that the signal produces.
+trap cleanup EXIT
+trap 'cleanup; trap - HUP EXIT; kill -s HUP "$$"' HUP
+trap 'cleanup; trap - INT EXIT; kill -s INT "$$"' INT
+trap 'cleanup; trap - TERM EXIT; kill -s TERM "$$"' TERM
 
 # Capture the top level first: under a POSIX `sh` (e.g., dash), `cd ""` succeeds
 # as a no-op, so testing `cd "$(...)"` directly would not catch an empty result.
@@ -55,11 +67,14 @@ if [ -e "${BRANCH_TMPDIR}" ]; then
   exit 1
 fi
 
+# We just checked that ${BRANCH_TMPDIR} does not exist, so whatever the copy
+# leaves at that location was created by this script and the traps may remove
+# it, even if the copy is interrupted before it finishes.
+TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
 if ! \cp -Rp . "${BRANCH_TMPDIR}"; then
   echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
   exit 1
 fi
-TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
 if ! (cd "${BRANCH_TMPDIR}" && git checkout "${BRANCHNAME}" -q); then
   echo "${SCRIPT_NAME}: ERROR in: (cd \"${BRANCH_TMPDIR}\" && git checkout \"${BRANCHNAME}\" -q)" >&2
   exit 1
