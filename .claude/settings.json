@@ -1,4 +1,5 @@
 {
+  "$comment": "This file is shared across multiple repositories.  Not all settings are necessarily relevant to the repository where you are reading this comment.",
   "permissions": {
     "allow": [
       "Agent(*)",
