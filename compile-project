@@ -14,8 +14,8 @@
 #
 # If --clean is passed, then the project is cleaned before being compiled.
 # If the clean fails, the project is not compiled and the exit status is failure.
-# If variable GRADLE_ASSEMBLE_FLAGS is defined, it is passed to `gradle assemble`.
-# If variable MVN_COMPILE_FLAGS is defined, it is passed to `mvn compile`.
+# If variable GRADLE_ASSEMBLE_FLAGS is defined, it is passed to `gradlew assemble` or `gradle assemble`.
+# If variable MVN_COMPILE_FLAGS is defined, it is passed to `mvnw compile` or `mvn compile`.
 # If variable MAKE_FLAGS is defined, it is passed to `make`.
 # If variable ERR_IF_NO_BUILDFILE is non-empty, the script fails if no buildfile is found.
 #
