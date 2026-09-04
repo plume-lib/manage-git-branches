@@ -1,6 +1,9 @@
 # Configuration file for `prek`, a git hook framework written in Rust.
 # See https://prek.j178.dev for more information.
 #:schema https://www.schemastore.org/prek.json
+#
+# This file is shared across multiple repositories.  Not all settings are
+# necessarily relevant to the repository where you are reading this comment.
 
 exclude = { glob = [
   "**/*.diff",
