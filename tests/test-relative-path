@@ -1,0 +1,76 @@
+#!/bin/sh
+
+# Tests the `relative-path` script.
+
+TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+TOPLEVEL="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)"
+RELATIVE_PATH="${TOPLEVEL}/relative-path"
+
+status=0
+
+work="$(realpath "$(mktemp -d)")"
+trap 'rm -rf "${work}"' EXIT INT TERM
+
+mkdir -p "${work}/a/b/c" "${work}/a/x" "${work}/d e/f"
+ln -s "${work}/a/x" "${work}/link-to-x"
+
+# Checks that `relative-path BASE TARGET` prints EXPECTED.
+# Arguments: BASE TARGET EXPECTED
+check() {
+  if ! actual="$("${RELATIVE_PATH}" "$1" "$2")"; then
+    echo "FAIL: relative-path '$1' '$2' exited with a failure status"
+    status=1
+    return
+  fi
+  if [ "${actual}" != "$3" ]; then
+    echo "FAIL: relative-path '$1' '$2' printed '${actual}' rather than '$3'"
+    status=1
+  fi
+}
+
+check "${work}/a/b" "${work}/a/b/c" "c"
+check "${work}/a/b" "${work}/a/b" "."
+check "${work}/a/b/c" "${work}/a/x" "../../x"
+check "${work}/a/b/c" "${work}/a" "../.."
+check "${work}/a/b/c" "${work}" "../../.."
+check "${work}/a" "${work}/d e/f" "../d e/f"
+check "${work}/d e/f" "${work}/a/b" "../../a/b"
+check "${work}/a/b" "${work}/link-to-x" "../x"
+check "/" "${work}/a" "${work#/}/a"
+
+# Relative arguments are interpreted with respect to the current directory.
+if ! actual="$(cd "${work}/a/b" && "${RELATIVE_PATH}" . c)"; then
+  echo "FAIL: relative-path . c exited with a failure status"
+  status=1
+elif [ "${actual}" != "c" ]; then
+  echo "FAIL: relative-path . c printed '${actual}' rather than 'c'"
+  status=1
+fi
+
+# The output agrees with GNU `realpath --relative-to`, where that is available.
+if realpath --relative-to="${work}" "${work}/a" > /dev/null 2>&1; then
+  for base in "${work}" "${work}/a" "${work}/a/b/c" "${work}/d e" "/"; do
+    for target in "${work}" "${work}/a/x" "${work}/a/b/c" "${work}/d e/f" "/"; do
+      mine="$("${RELATIVE_PATH}" "${base}" "${target}")"
+      gnu="$(realpath --relative-to="${base}" "${target}")"
+      if [ "${mine}" != "${gnu}" ]; then
+        echo "FAIL: from '${base}' to '${target}': relative-path printed '${mine}' but realpath --relative-to printed '${gnu}'"
+        status=1
+      fi
+    done
+  done
+fi
+
+# A wrong number of arguments is an error.
+if "${RELATIVE_PATH}" "${work}" > /dev/null 2>&1; then
+  echo "FAIL: relative-path with 1 argument exited with a success status"
+  status=1
+fi
+
+# A pathname whose directory does not exist is an error.
+if "${RELATIVE_PATH}" "${work}" "${work}/no-such-directory/f" > /dev/null 2>&1; then
+  echo "FAIL: relative-path on a nonexistent target exited with a success status"
+  status=1
+fi
+
+exit "${status}"

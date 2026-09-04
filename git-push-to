@@ -136,7 +136,7 @@ git_push_to() {
     return 1
   fi
 
-  from_relative="$(realpath --relative-to="$to_absolute" "$from_absolute")"
+  from_relative="$("${SCRIPT_DIR}"/relative-path "$to_absolute" "$from_absolute")"
 
   if ! git pull -q "${from_relative}"; then
     # Note: pwd=to_absolute
