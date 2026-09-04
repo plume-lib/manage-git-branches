@@ -26,8 +26,12 @@ find . -name '*-branch-*' -type d > "${dirs_file}"
 while IFS= read -r dir; do
   if [ ! -d "$dir" ]; then continue; fi
   if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
-  if [ -d "$dir/.git" ]; then
-    # There is a .git subdirectory.
+  # Use the toplevel rather than testing for a `.git` subdirectory, because in
+  # a linked worktree or a submodule, `.git` is a file rather than a directory.
+  # Comparing against "$dir" rejects a subdirectory of a working tree, for which
+  # `rev-parse` reports the enclosing working tree.
+  if [ "$(git -C "$dir" rev-parse --show-toplevel 2> /dev/null)" = "$(realpath "$dir")" ]; then
+    # The directory is the top level of a git working tree.
     if ! git -C "$dir" ls-remote -h "$(git -C "$dir" config --get remote.origin.url)" > /dev/null 2>&1; then
       if [ -n "$DEBUG" ]; then
         echo "Did not find remote repository for $dir; this command failed: git -C \"$dir\" config --get remote.origin.url"
@@ -46,7 +50,7 @@ while IFS= read -r dir; do
       # git -C "$dir" remote prune origin 2>&1 > /dev/null
     fi
   else
-    # There is no .git subdirectory.
+    # The directory is not the top level of a git working tree.
     if [ -f "$dir/.project" ]; then
       if [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
         # It has only the `.project` file and no other content.
