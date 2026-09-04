@@ -69,7 +69,25 @@ fi
 
 # A pathname whose directory does not exist is an error.
 if "${RELATIVE_PATH}" "${work}" "${work}/no-such-directory/f" > /dev/null 2>&1; then
-  echo "FAIL: relative-path on a nonexistent target exited with a success status"
+  echo "FAIL: relative-path on a target in a nonexistent directory exited with a success status"
+  status=1
+fi
+
+# A pathname whose final component does not exist is an error.
+if "${RELATIVE_PATH}" "${work}" "${work}/no-such-file" > /dev/null 2>&1; then
+  echo "FAIL: relative-path on a nonexistent final component exited with a success status"
+  status=1
+fi
+
+# A symbolic link whose target does not exist is an error, as it is for
+# `realpath -e`.
+ln -s "${work}/no-such-file" "${work}/dangling-link"
+if "${RELATIVE_PATH}" "${work}" "${work}/dangling-link" > /dev/null 2>&1; then
+  echo "FAIL: relative-path on a dangling symbolic link exited with a success status"
+  status=1
+fi
+if "${RELATIVE_PATH}" "${work}/no-such-file" "${work}" > /dev/null 2>&1; then
+  echo "FAIL: relative-path on a nonexistent base exited with a success status"
   status=1
 fi
 

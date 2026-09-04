@@ -9,9 +9,11 @@
 # be absolute or relative to the current directory.  The output is a relative
 # pathname:  interpreting it with respect to BASE yields TARGET.
 #
-# This is a portable version of `realpath --relative-to=BASE TARGET`.  The
+# This is a portable version of `realpath -e --relative-to=BASE TARGET`.  The
 # `--relative-to` option is a GNU extension that the BSD and macOS versions of
-# `realpath` do not support.
+# `realpath` do not support.  Like `realpath -e` and unlike plain `realpath`,
+# this script rejects a pathname that does not resolve to an existing file,
+# such as a symbolic link whose target does not exist.
 
 SCRIPT_NAME="$(basename -- "$0")"
 
@@ -20,11 +22,13 @@ if [ "$#" -ne 2 ]; then
   exit 1
 fi
 
-if ! base="$(realpath -- "$1")"; then
+# The `[ -e ... ]` tests reject a pathname whose final component does not
+# exist.  `realpath -e` would do so, but `-e` is a GNU extension.
+if ! [ -e "$1" ] || ! base="$(realpath -- "$1")"; then
   echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
   exit 1
 fi
-if ! target="$(realpath -- "$2")"; then
+if ! [ -e "$2" ] || ! target="$(realpath -- "$2")"; then
   echo "${SCRIPT_NAME}: cannot canonicalize: $2" >&2
   exit 1
 fi

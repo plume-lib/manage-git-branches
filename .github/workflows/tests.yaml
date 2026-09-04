@@ -18,5 +18,4 @@ jobs:
           fetch-depth: 1
           show-progress: false
           persist-credentials: false
-      - run: tests/run-tests.sh
       - run: tests/run-tests

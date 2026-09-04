@@ -21,8 +21,8 @@ STARTDIR="${PWD}"
 # create.
 TMPDIR_TO_CLEAN=""
 cleanup() {
-  cd "${STARTDIR}" 2> /dev/null || true
-  if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf "${TMPDIR_TO_CLEAN}"; fi
+  cd -- "${STARTDIR}" 2> /dev/null || true
+  if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf -- "${TMPDIR_TO_CLEAN}"; fi
 }
 # A POSIX shell such as dash does not run an EXIT trap when the shell is killed
 # by a signal, so trap the signals too.  Each signal handler restores the
@@ -48,7 +48,14 @@ fi
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
-BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
+# Canonicalize the parent directory rather than ${BRANCHDIR} itself:
+# ${BRANCHDIR} does not exist yet, and the BSD and macOS versions of `realpath`
+# fail on a pathname whose final component does not exist.
+if ! PARENTDIR="$(realpath ..)" || [ -z "${PARENTDIR}" ]; then
+  echo "${SCRIPT_NAME}: Cannot canonicalize the parent directory of $(pwd)" >&2
+  exit 1
+fi
+BRANCHDIR="${PARENTDIR%/}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
 git pull -q > /dev/null 2>&1 || true
@@ -71,17 +78,17 @@ fi
 # leaves at that location was created by this script and the traps may remove
 # it, even if the copy is interrupted before it finishes.
 TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
-if ! \cp -Rp . "${BRANCH_TMPDIR}"; then
+if ! \cp -Rp -- . "${BRANCH_TMPDIR}"; then
   echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
   exit 1
 fi
-if ! (cd "${BRANCH_TMPDIR}" && git checkout "${BRANCHNAME}" -q); then
-  echo "${SCRIPT_NAME}: ERROR in: (cd \"${BRANCH_TMPDIR}\" && git checkout \"${BRANCHNAME}\" -q)" >&2
+if ! (cd -- "${BRANCH_TMPDIR}" && git checkout "${BRANCHNAME}" -q); then
+  echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout \"${BRANCHNAME}\" -q)" >&2
   exit 1
 fi
 
-if ! mv "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
-  echo "${SCRIPT_NAME}: ERROR in: mv \"${BRANCH_TMPDIR}\" \"${BRANCHDIR}\"" >&2
+if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
+  echo "${SCRIPT_NAME}: ERROR in: mv -- \"${BRANCH_TMPDIR}\" \"${BRANCHDIR}\"" >&2
   exit 1
 fi
 TMPDIR_TO_CLEAN=""

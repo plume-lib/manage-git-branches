@@ -47,7 +47,10 @@ touch "${work}/p-branch-no-project/other"
 mkdir -p "${work}/p-plain-project"
 touch "${work}/p-plain-project/.project"
 
-output="$(cd "${work}" && "${GIT_ORPHANED_BRANCHES}")"
+if ! output="$(cd "${work}" && "${GIT_ORPHANED_BRANCHES}")"; then
+  echo "FAIL: git-orphaned-branches exited with a failure status"
+  exit 1
+fi
 
 # Checks whether `git-orphaned-branches` listed a directory.
 # Arguments: DIRECTORY-NAME  "listed" or "unlisted"
