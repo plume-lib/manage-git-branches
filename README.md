@@ -43,7 +43,8 @@ The commands are:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
   succeeds.
-  The two directories should be working copies (that is, git clones).
+  OTHER-REPO-DIR and the current directory should both be working copies (that
+  is, git clones).
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is on a deleted branch.  This command
   queries the remote repository, but it does not modify the given directory.
@@ -129,3 +130,7 @@ The
 [multi-version-control](https://github.com/plume-lib/multi-version-control)
 program manages multiple clones, much as the scripts in this repository
 manage multiple branches.
+
+## License
+
+This package is distributed under the [MIT License](LICENSE).
