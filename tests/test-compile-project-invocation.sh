@@ -14,7 +14,7 @@ set -e
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
-REPO_DIR="$(dirname -- "${SCRIPT_DIR}")"
+REPO_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 
 fail() {
   echo "${SCRIPT_NAME}: FAILED: $1" >&2
