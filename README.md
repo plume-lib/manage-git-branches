@@ -118,3 +118,7 @@ The
 [multi-version-control](https://github.com/plume-lib/multi-version-control)
 program manages multiple clones, much as the scripts in this repository
 manage multiple branches.
+
+## License
+
+This package is distributed under the [MIT License](LICENSE).
