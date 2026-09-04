@@ -40,6 +40,11 @@ if [ ! -d "${from}" ]; then
   exit 1
 fi
 
+if [ "${from_absolute}" = "$(pwd -P)" ]; then
+  echo "${SCRIPT_NAME}: OTHER-REPO-DIR is the current directory: ${from_absolute}" >&2
+  exit 1
+fi
+
 if ! git pull -q; then
   echo "${SCRIPT_NAME}: problem pulling $(pwd)" >&2
   exit 1
