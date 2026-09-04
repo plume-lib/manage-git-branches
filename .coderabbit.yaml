@@ -1,4 +1,7 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# This file is shared across multiple repositories.  Not all settings are
+# necessarily relevant to the repository where you are reading this comment.
 
 language: "en-US"
 
