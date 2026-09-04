@@ -2,10 +2,8 @@
 # See https://prek.j178.dev for more information.
 #:schema https://www.schemastore.org/prek.json
 #
-# This file is shared, nearly verbatim, across all of the author's
-# repositories.  Most of the excludes and hooks below concern files that do not
-# exist in this repository.  An exclude is therefore not evidence that this
-# repository contains such a file.
+# This file is shared across multiple repositories.  Not all settings are
+# necessarily relevant to the repository where you are reading this comment.
 
 exclude = { glob = [
   "**/*.diff",
