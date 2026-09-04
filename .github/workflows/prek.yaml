@@ -6,9 +6,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      # prek.toml runs checkbashisms, which is part of the devscripts package.
+        with:
+          fetch-depth: 1
+          show-progress: false
+          persist-credentials: false
+      - uses: j178/prek-action@v3.0.0
       - name: Install checkbashisms
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends devscripts
-      - uses: j178/prek-action@v3.0.0
       - name: Test the checkbashisms configuration
         run: ./tests/test-checkbashisms.sh
