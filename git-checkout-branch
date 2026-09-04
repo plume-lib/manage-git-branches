@@ -35,7 +35,7 @@ fi
 
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
-BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
+BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
 BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
