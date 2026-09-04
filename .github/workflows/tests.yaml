@@ -1,0 +1,15 @@
+name: Tests
+"on": [push, pull_request]
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The scripts are POSIX shell and use no GNU-only utility options, so
+        # they must work on macOS as well as on Linux.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: tests/run-tests
