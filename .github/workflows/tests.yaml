@@ -8,5 +8,5 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: Run tests
-        run: tests/test-git-checkout-branch.sh
+      - run: tests/run-tests.sh
+      - run: tests/test-git-checkout-branch.sh
