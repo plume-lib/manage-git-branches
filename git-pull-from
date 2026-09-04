@@ -19,7 +19,7 @@
 #
 # Calling `git-push-to` is often more readable, because it makes both directory names explicit.
 
-# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
 ## If a merge in the given directory left conflicts, says so, lists the
@@ -70,7 +70,7 @@ if ! git pull -q "${from_relative}"; then
 fi
 
 if [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
-  if ! compile-project; then
+  if ! "${SCRIPT_DIR}"/compile-project; then
     echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
     exit 1
   fi
