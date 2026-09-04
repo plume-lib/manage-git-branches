@@ -2,6 +2,11 @@ name: Prek checks
 "on": [push, pull_request]
 jobs:
   prek:
+    # Run for every push, and for a pull request only when it comes from a
+    # fork.  A pull request from a branch of this repository fires both the
+    # push event and the pull_request event; without this condition, the job
+    # would run twice on the same commit.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
