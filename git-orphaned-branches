@@ -21,7 +21,9 @@ fi
 
 dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
 trap 'rm -f "${dirs_file}"' EXIT INT TERM
-find . -name '*-branch-*' -type d > "${dirs_file}"
+# Do not descend into a matched directory: its subdirectories belong to that
+# clone, not to a separate branch.  Do not descend into git metadata either.
+find . -name .git -prune -o -name '*-branch-*' -type d -prune -print > "${dirs_file}"
 
 while IFS= read -r dir; do
   if [ ! -d "$dir" ]; then continue; fi
