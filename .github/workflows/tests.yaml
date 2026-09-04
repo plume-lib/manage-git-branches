@@ -8,4 +8,5 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - run: tests/run-tests.sh
       - run: tests/env-vars-documented.sh
