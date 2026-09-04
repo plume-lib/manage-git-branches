@@ -77,6 +77,10 @@ alias gnb=git-new-branch
 alias rmgob='rm -rf $(git-orphaned-branches)'
 ```
 
+Alternately, symbolically link the scripts into a directory that is already
+on your PATH, such as `~/bin`.  A symbolic link to an individual script works:
+a script resolves symbolic links to itself when looking for `is-deleted-branch`.
+
 ## One branch per directory
 
 If you use `git-checkout-branch` and `git-new-branch`, then you will never

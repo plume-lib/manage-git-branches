@@ -81,8 +81,27 @@
 
 nocompile=0
 
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
+
+# The directory that contains this script.  `pwd -P` resolves symlinks to
+# directories, but not a symlink to the script file itself, so follow those
+# first: an individual script may be symlinked onto the PATH.
+script_path="$0"
+symlinks=0
+while [ -L "${script_path}" ]; do
+  symlinks=$((symlinks + 1))
+  if [ "${symlinks}" -gt 100 ]; then
+    echo "${SCRIPT_NAME}: too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  script_dir="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
+  script_path="$(readlink -- "${script_path}")"
+  case "${script_path}" in
+    /*) ;;
+    *) script_path="${script_dir}/${script_path}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 
 ## A helper function that works on exactly two repositories.
 git_push_to() {
