@@ -1,5 +1,7 @@
 name: Tests
 "on": [push, pull_request]
+permissions:
+  contents: read
 jobs:
   tests:
     strategy:
@@ -12,4 +14,5 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - run: tests/run-tests.sh
       - run: tests/run-tests
