@@ -9,6 +9,8 @@
 #
 # The exit status is 0 if every such variable is documented, and 1 otherwise.
 
+# TODO: If this is generally useful, move it into plume-scripts or elsewhere.
+
 set -eu
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
