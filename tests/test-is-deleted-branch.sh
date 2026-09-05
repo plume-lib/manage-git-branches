@@ -3,7 +3,7 @@
 # Tests `is-deleted-branch` and the way `git-orphaned-branches` uses it.
 #
 # Usage:
-#   tests/test-is-deleted-branch
+#   tests/test-is-deleted-branch.sh
 #
 # The status code is 0 if all tests pass and 1 otherwise.
 #
@@ -73,6 +73,7 @@ GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
 GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
 export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+unset GIT_SSH GIT_SSH_COMMAND
 : > "${GIT_CONFIG_GLOBAL}"
 
 ## Create a remote repository with branches "main", "live", and "dead".
@@ -97,6 +98,8 @@ git clone -q "${remote}" "${testdir}/setup" 2> /dev/null
 ## Create a working copy for each branch.
 for branch in live dead; do
   git clone -q -b "${branch}" "${remote}" "${testdir}/myrepo-branch-${branch}"
+  # Exercise branch-name lookup when a tag makes the short ref ambiguous.
+  git -C "${testdir}/myrepo-branch-${branch}" tag "${branch}"
 done
 
 ## Make the remote's "live" branch have a commit that the working copy lacks.
@@ -166,6 +169,22 @@ expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreacha
   'is-deleted-branch on a working copy whose remote cannot be reached'
 if ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
   fail 'SSH invocation did not include "-o BatchMode=yes"'
+fi
+
+# GIT_SSH is another Git-supported way to select an SSH wrapper.  It must be
+# retained when is-deleted-branch adds BatchMode to the command.
+: > "${ssh_arguments}"
+git -C "${testdir}/myrepo-branch-unreachable" config --unset core.sshCommand
+GIT_SSH="${fake_ssh}"
+export GIT_SSH
+expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+  'is-deleted-branch with an SSH wrapper selected by GIT_SSH'
+unset GIT_SSH
+git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${fake_ssh}"
+if [ ! -s "${ssh_arguments}" ]; then
+  fail 'SSH wrapper selected by GIT_SSH was not invoked'
+elif ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
+  fail 'GIT_SSH invocation did not include "-o BatchMode=yes"'
 fi
 
 # `git-orphaned-branches` must list exactly the deleted branch, and must not

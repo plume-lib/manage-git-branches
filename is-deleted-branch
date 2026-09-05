@@ -29,9 +29,12 @@ if ! git -C "${dir}" rev-parse --git-dir > /dev/null 2>&1; then
 fi
 
 # A detached HEAD is not on a branch, so it is not on a deleted branch.
-if ! branch="$(git -C "${dir}" symbolic-ref --quiet --short HEAD 2> /dev/null)"; then
+# Strip the known prefix ourselves: `symbolic-ref --short` can return
+# "heads/BRANCH" when a tag and the branch have the same name.
+if ! branch_ref="$(git -C "${dir}" symbolic-ref --quiet HEAD 2> /dev/null)"; then
   exit 1
 fi
+branch="${branch_ref#refs/heads/}"
 
 # The branch's upstream, as a remote name and a ref such as "refs/heads/BRANCH".
 remote="$(git -C "${dir}" config --get "branch.${branch}.remote")"
@@ -47,7 +50,8 @@ fi
 # an interactive prompt.  `-o BatchMode=yes` does the same for SSH
 # authentication and host-key prompts.
 ssh_command="${GIT_SSH_COMMAND:-$(git -C "${dir}" config --get core.sshCommand)}"
-GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${ssh_command:-ssh} -o BatchMode=yes" \
+ssh_command="${ssh_command:-${GIT_SSH:-ssh}}"
+GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${ssh_command} -o BatchMode=yes" \
   git -C "${dir}" ls-remote --exit-code --heads "${remote}" "${upstream_ref}" > /dev/null 2>&1
 status="$?"
 case "${status}" in
