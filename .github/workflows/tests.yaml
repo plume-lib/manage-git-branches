@@ -7,8 +7,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The scripts are POSIX shell and use no GNU-only utility options, so
-        # they must work on macOS as well as on Linux.
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
