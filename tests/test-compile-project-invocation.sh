@@ -95,4 +95,4 @@ if [ ! -f "${workdir}/to2/compile-project-ran" ]; then
   fail "git-pull-from did not run compile-project"
 fi
 
-echo "${SCRIPT_NAME}: OK"
+echo "${SCRIPT_NAME}: PASS"
