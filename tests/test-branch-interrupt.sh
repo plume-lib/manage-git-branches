@@ -34,6 +34,8 @@ fail() {
 REMOTE="${WORK_DIR}/myrepo.git"
 MAIN_DIR="${WORK_DIR}/myrepo-branch-main"
 FAKE_BIN="${WORK_DIR}/fakebin"
+SYSTEM_REALPATH="$(command -v realpath)"
+export SYSTEM_REALPATH
 
 ## Creates a remote repository with a `main` and a `feature1` branch, and a
 ## clone of it in MAIN_DIR.
@@ -67,6 +69,16 @@ echo "partial copy" > "${dest}/partial-file"
 kill -s INT "${PPID}"
 INNER
   chmod +x "${FAKE_BIN}/cp"
+
+  # Behave like macOS realpath, which rejects a nonexistent final component.
+  cat > "${FAKE_BIN}/realpath" << 'INNER'
+#!/bin/sh
+target=""
+for arg in "$@"; do target="${arg}"; done
+if [ ! -e "${target}" ]; then exit 1; fi
+exec "${SYSTEM_REALPATH}" "$@"
+INNER
+  chmod +x "${FAKE_BIN}/realpath"
 }
 
 ## Runs the given branch script on the given branch, in MAIN_DIR and with the
