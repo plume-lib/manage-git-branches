@@ -51,7 +51,6 @@ make_clone "${workdir}/to"
 date > "${workdir}/from/change.txt"
 git -C "${workdir}/from" add change.txt
 git -C "${workdir}/from" commit -q -m "a change"
-git -C "${workdir}/from" push -q
 
 if ! (cd "${workdir}/to" && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from"); then
   fail "git-pull-from --nocompile failed"
