@@ -27,6 +27,7 @@
 # Fail on the use of an unset variable, which is usually a typo.
 set -u
 
+CLEAN=""
 if [ "$#" -ge 1 ]; then
   if [ "$1" = "--clean" ]; then
     CLEAN="$1"
