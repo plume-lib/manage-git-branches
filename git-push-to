@@ -136,9 +136,7 @@ git_push_to() {
     return 1
   fi
 
-  from_relative="$("${SCRIPT_DIR}"/relative-path "$to_absolute" "$from_absolute")"
-
-  if ! git pull -q "${from_relative}"; then
+  if ! git pull -q "${from_absolute}"; then
     # Note: pwd=to_absolute
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
     return 1
