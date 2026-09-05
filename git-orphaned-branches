@@ -19,7 +19,7 @@ if [ "$#" -ne 0 ]; then
   exit 1
 fi
 
-dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
+dirs_file=$(mktemp "${TMPDIR:-/tmp}/git-orphaned-branches.XXXXXX")
 trap 'rm -f "${dirs_file}"' EXIT INT TERM
 find . -name '*-branch-*' -type d > "${dirs_file}"
 
