@@ -40,6 +40,7 @@ check_branch_directory() {
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "${workdir}"' EXIT INT TERM
+workdir="$(CDPATH='' cd -- "${workdir}" && pwd -P)"
 
 GIT_AUTHOR_NAME='manage-git-branches test'
 GIT_AUTHOR_EMAIL='test@example.com'
