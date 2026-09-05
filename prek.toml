@@ -255,23 +255,22 @@ hooks = [
   ] } },
 ]
 
-# `checkbashisms` is part of the Debian `devscripts` package; it is not
-# distributed as a prek/pre-commit repository, so run the installed program.
-# `-l` reports the file and line of each bashism.  `checkbashisms` ignores
-# scripts whose shebang names an interpreter other than `sh`.
-[[repos]]
-repo = "local"
-hooks = [
-  { id = "checkbashisms", name = "checkbashisms", language = "system", entry = "checkbashisms -l", types = [
-    "shell",
-  ], exclude = { glob = [
-    "share/addrfilter",
-    "share/print-mail",
-    "share/myxapps",
-    "share/javapp",
-    "gradlew",
-  ] } },
-]
+# TODO: checkbashisms. I need to write my own, probably. Like other
+# prek configuration, it must install the needed tool, not assume it
+# is already installed.
+# [[repos]]
+# repo = "TODO"
+# hooks = [
+#   { id = "checkbashisms", types = [
+#     "shell",
+#   ], exclude = { glob = [
+#     "share/addrfilter",
+#     "share/print-mail",
+#     "share/myxapps",
+#     "share/javapp",
+#     "gradlew",
+#   ] } },
+# ]
 
 # Problems:
 # * False positives for E011.
