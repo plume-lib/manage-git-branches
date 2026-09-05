@@ -16,6 +16,9 @@ TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
+# On macOS, TMPDIR may name a path below /var even though /var is a symlink to
+# /private/var.  Match the canonical paths reported by the commands under test.
+WORK_DIR="$(CDPATH='' cd -- "${WORK_DIR}" && pwd -P)"
 trap 'rm -rf "${WORK_DIR}"' EXIT INT TERM
 
 # A committer identity, in case the user running the test has none.
