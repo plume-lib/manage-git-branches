@@ -78,14 +78,6 @@ alias gnb=git-new-branch
 alias rmgob='rm -rf $(git-orphaned-branches)'
 ```
 
-## Testing
-
-The [`tests`](tests) directory contains test scripts.  Run each one directly:
-
-```sh
-tests/test-compile-project-invocation.sh
-```
-
 ## One branch per directory
 
 If you use `git-checkout-branch` and `git-new-branch`, then you will never
