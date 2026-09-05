@@ -1,0 +1,80 @@
+#!/bin/sh
+
+# Tests `git-orphaned-branches`, in particular its --print0 option.
+#
+# Usage:
+#   tests/test-git-orphaned-branches
+#
+# The status code is 0 if all the tests pass, and nonzero otherwise.
+#
+# The test creates its own scratch git repositories under a temporary
+# directory; it does not touch any repository outside that directory.
+
+set -e
+
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+REPO_DIR="$(dirname -- "${SCRIPT_DIR}")"
+
+if [ "$#" -ne 0 ]; then
+  echo "Usage: ${SCRIPT_NAME}" >&2
+  exit 1
+fi
+
+fail() {
+  echo "${SCRIPT_NAME}: FAILED: $1" >&2
+  exit 1
+}
+
+testdir="$(mktemp -d "${TMPDIR:-/tmp}/test-git-orphaned-branches.XXXXXX")"
+trap 'rm -rf "${testdir}"' EXIT INT TERM
+
+# Do not depend on the user's git identity or on any repository-local config.
+GIT_AUTHOR_NAME="Test"
+GIT_AUTHOR_EMAIL="test@example.com"
+GIT_COMMITTER_NAME="Test"
+GIT_COMMITTER_EMAIL="test@example.com"
+export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+
+# Create a remote repository with branches "main" and "feat2".
+git init -q --bare -b main "${testdir}/remote.git"
+# Redirect stderr to suppress the "you appear to have cloned an empty repository" warning.
+git clone -q "${testdir}/remote.git" "${testdir}/seed" 2> /dev/null
+echo "hello" > "${testdir}/seed/file.txt"
+git -C "${testdir}/seed" add file.txt
+git -C "${testdir}/seed" commit -q -m "Initial commit"
+git -C "${testdir}/seed" push -q origin main
+git -C "${testdir}/seed" push -q origin main:refs/heads/feat2
+
+# The orphan directory's name, and the name of its parent directory, contain a
+# space; the parent's first space-separated component names a sibling
+# directory that must not be deleted.
+mkdir -p "${testdir}/scan/my"
+mkdir -p "${testdir}/scan/my dir"
+orphan="${testdir}/scan/my dir/my repo-branch-feat2"
+git clone -q -b feat2 "${testdir}/remote.git" "${orphan}"
+
+# Delete branch "feat2" in the remote, orphaning the clone.
+git -C "${testdir}/seed" push -q origin --delete feat2
+
+cd "${testdir}/scan"
+
+# Test 1: --print0 emits the directory names separated by NUL.
+printf '%s\0' "$(realpath "${orphan}")" > "${testdir}/print0.goal"
+"${REPO_DIR}"/git-orphaned-branches --print0 > "${testdir}/print0.actual"
+cmp -s "${testdir}/print0.goal" "${testdir}/print0.actual" \
+  || fail "--print0 output differs from ${testdir}/print0.goal"
+
+# Test 2: without --print0, the directory names are separated by newlines.
+printf '%s\n' "$(realpath "${orphan}")" > "${testdir}/print-newline.goal"
+"${REPO_DIR}"/git-orphaned-branches > "${testdir}/print-newline.actual"
+cmp -s "${testdir}/print-newline.goal" "${testdir}/print-newline.actual" \
+  || fail "default output differs from ${testdir}/print-newline.goal"
+
+# Test 3: the recommended cleanup command deletes the orphan and nothing else.
+"${REPO_DIR}"/git-orphaned-branches --print0 | xargs -0 rm -rf
+[ ! -e "${orphan}" ] || fail "cleanup did not delete ${orphan}"
+[ -d "${testdir}/scan/my" ] || fail "cleanup deleted ${testdir}/scan/my"
+[ -d "${testdir}/scan/my dir" ] || fail "cleanup deleted ${testdir}/scan/my dir"
+
+echo "${SCRIPT_NAME}: all tests passed"
