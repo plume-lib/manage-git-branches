@@ -48,6 +48,7 @@ fi
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
+PARENTDIR=$(CDPATH='' cd .. && pwd -P)
 # Canonicalize the parent directory rather than ${BRANCHDIR} itself.  The
 # destination does not exist yet, and macOS realpath rejects nonexistent paths.
 if ! PARENTDIR="$(realpath ..)" || [ -z "${PARENTDIR}" ]; then
