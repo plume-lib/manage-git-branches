@@ -84,6 +84,17 @@ nocompile=0
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+## If a merge in the given directory left conflicts, says so, lists the
+## conflicted files, and says how to complete or abandon the merge.
+report_conflicts() {
+  conflicted="$(git -C "$1" diff --name-only --diff-filter=U)"
+  if [ -n "${conflicted}" ]; then
+    echo "${SCRIPT_NAME}: the merge left conflicts in $1:" >&2
+    echo "${conflicted}" | sed 's/^/  /' >&2
+    echo "${SCRIPT_NAME}: resolve the conflicts and commit, or abandon the merge:  git -C $1 merge --abort" >&2
+  fi
+}
+
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
@@ -116,6 +127,7 @@ git_push_to() {
 
   if ! git -C "$from_absolute" pull -q; then
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute}" >&2
+    report_conflicts "${from_absolute}"
     return 1
   fi
 
@@ -133,12 +145,14 @@ git_push_to() {
 
   if ! git pull -q; then
     echo "${SCRIPT_NAME}: problem pulling in ${to_absolute}" >&2
+    report_conflicts "${to_absolute}"
     return 1
   fi
 
   if ! git pull -q "${from_absolute}"; then
     # Note: pwd=to_absolute
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
+    report_conflicts "${to_absolute}"
     return 1
   fi
 
