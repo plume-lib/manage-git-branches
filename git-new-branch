@@ -51,10 +51,8 @@ fi
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
-# `set -u` does not catch a failing `realpath`, whose empty output is set.
-# Without this check, BRANCH_TMPDIR would be the literal "-TMP", a directory
-# in the current directory that the script would create and then remove.
-if ! BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}") || [ -z "${BRANCHDIR}" ]; then
+PARENTDIR=$(CDPATH='' cd .. && pwd -P)
+if ! BRANCHDIR="${PARENTDIR}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}" || [ -z "${BRANCHDIR}" ]; then
   echo "${SCRIPT_NAME}: cannot determine the directory for branch ${BRANCHNAME}" >&2
   exit 1
 fi
