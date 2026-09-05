@@ -16,7 +16,7 @@ TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
-WORK_DIR="$(realpath "${WORK_DIR}")"
+WORK_DIR="$(CDPATH='' cd -- "${WORK_DIR}" && pwd -P)"
 trap 'rm -rf "${WORK_DIR}"' EXIT INT TERM
 
 # A committer identity, in case the user running the test has none.
