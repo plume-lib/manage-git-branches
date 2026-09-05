@@ -50,7 +50,7 @@ for script in ${SCRIPTS}; do
     case " ${STANDARD_VARIABLES} " in
       *" ${variable} "*) continue ;;
     esac
-    if ! grep -qF "${variable}" "${README}"; then
+    if ! grep -qF "\`${variable}\`" "${README}"; then
       echo "${SCRIPT_NAME}: ${script} reads ${variable}, which README.md does not document" >&2
       status=1
     fi
