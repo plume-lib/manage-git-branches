@@ -24,6 +24,8 @@
 # TODO: Handle other build systems too, such as Ant.
 # TODO: Have a list of per-directory or per-repository commands, to override the default.
 
+# Ignore any value of CLEAN that was inherited from the environment.
+CLEAN=""
 if [ "$#" -ge 1 ]; then
   if [ "$1" = "--clean" ]; then
     CLEAN="$1"

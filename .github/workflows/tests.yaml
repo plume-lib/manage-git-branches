@@ -17,3 +17,4 @@ jobs:
           show-progress: false
           persist-credentials: false
       - run: tests/run-tests.sh
+      - run: tests/test-compile-project.sh
