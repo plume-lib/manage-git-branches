@@ -5,9 +5,10 @@
 # Supports Gradle, Maven, and Make projects.  If no buildfile is found
 # at the top level, searches at (only) the next level down.
 #
-# The exit status is failure if any build fails.  If no buildfile is
-# found and ERR_IF_NO_BUILDFILE is set to a non-empty value, then the
-# exit status is failure.
+# The exit status is failure if any build fails, or if <directory> is
+# given but is not a directory.  If no buildfile is found and
+# ERR_IF_NO_BUILDFILE is set to a non-empty value, then the exit status
+# is failure.
 #
 # Usage:
 #   compile-project [--clean] [<directory>]
@@ -44,6 +45,10 @@ if [ "$#" -eq 0 ]; then
   fi
 elif [ "$#" -eq 1 ]; then
   toplevel="$1"
+  if [ ! -d "$toplevel" ]; then
+    echo "${SCRIPT_NAME}: not a directory: $toplevel" >&2
+    exit 1
+  fi
   echo "Running ${SCRIPT_NAME} in $toplevel"
 else
   echo "Usage: ${SCRIPT_NAME} [--clean] [<directory>]" >&2
