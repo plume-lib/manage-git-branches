@@ -1,0 +1,221 @@
+#!/bin/sh
+
+# Tests `is-deleted-branch` and the way `git-orphaned-branches` uses it.
+#
+# Usage:
+#   tests/test-is-deleted-branch.sh
+#
+# The status code is 0 if all tests pass and 1 otherwise.
+#
+# The tests use a local "remote" repository, so they do not access the network.
+
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+IS_DELETED_BRANCH="$(dirname -- "${SCRIPT_DIR}")/is-deleted-branch"
+GIT_ORPHANED_BRANCHES="$(dirname -- "${SCRIPT_DIR}")/git-orphaned-branches"
+
+failures=0
+
+# Prints a message and records a test failure.
+fail() {
+  echo "${SCRIPT_NAME}: FAIL: $1" >&2
+  failures=$((failures + 1))
+}
+
+# Usage: expect_status EXPECTED DIRECTORY DESCRIPTION
+# Runs `is-deleted-branch DIRECTORY` and checks its status code.
+expect_status() {
+  expected="$1"
+  dir="$2"
+  description="$3"
+  "${IS_DELETED_BRANCH}" "${dir}" > /dev/null 2>&1
+  actual="$?"
+  if [ "${actual}" -ne "${expected}" ]; then
+    fail "${description}: expected status ${expected}, got ${actual}"
+  fi
+}
+
+# Usage: expect_failure_message COMMAND DIRECTORY DESCRIPTION
+# Runs `COMMAND DIRECTORY`, and checks that it exits with status 1 and
+# complains on standard error that it cannot list the remote's branches.
+expect_failure_message() {
+  cmd="$1"
+  dir="$2"
+  description="$3"
+  stderr_file="${testdir}/stderr"
+  "${cmd}" "${dir}" > /dev/null 2> "${stderr_file}"
+  actual="$?"
+  if [ "${actual}" -ne 1 ]; then
+    fail "${description}: expected status 1, got ${actual}"
+  fi
+  if ! grep -q 'cannot list branches of remote' "${stderr_file}"; then
+    fail "${description}: expected \"cannot list branches of remote\" on standard error, got [$(cat "${stderr_file}")]"
+  fi
+}
+
+# Usage: repo_state DIRECTORY
+# Prints a summary of everything that `is-deleted-branch` must not change:
+# the commits that are reachable from any ref, and the working tree status.
+repo_state() {
+  git -C "$1" log --all --format='%H %d' 2>&1
+  git -C "$1" status --porcelain 2>&1
+}
+
+testdir="$(mktemp -d)"
+trap 'rm -rf "${testdir}"' EXIT INT TERM
+
+# Make the tests independent of the user's git configuration.
+GIT_CONFIG_GLOBAL="${testdir}/gitconfig"
+GIT_CONFIG_SYSTEM=/dev/null
+GIT_AUTHOR_NAME='Test Person'
+GIT_AUTHOR_EMAIL='test@example.com'
+GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
+GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
+export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+unset GIT_SSH GIT_SSH_COMMAND
+: > "${GIT_CONFIG_GLOBAL}"
+
+## Create a remote repository with branches "main", "live", and "dead".
+remote="${testdir}/myrepo-remote.git"
+git init -q --bare -b main "${remote}"
+git clone -q "${remote}" "${testdir}/setup" 2> /dev/null
+(
+  cd "${testdir}/setup" || exit 1
+  echo 'first' > file.txt
+  git add file.txt
+  git commit -q -m 'First commit'
+  git push -q -u origin main
+  for branch in live dead; do
+    git checkout -q -b "${branch}" main
+    echo "${branch}" > "${branch}.txt"
+    git add "${branch}.txt"
+    git commit -q -m "Commit on ${branch}"
+    git push -q -u origin "${branch}"
+  done
+) || exit 1
+
+## Create a working copy for each branch.
+for branch in live dead; do
+  git clone -q -b "${branch}" "${remote}" "${testdir}/myrepo-branch-${branch}"
+  # Exercise branch-name lookup when a tag makes the short ref ambiguous.
+  git -C "${testdir}/myrepo-branch-${branch}" tag "${branch}"
+done
+
+## Make the remote's "live" branch have a commit that the working copy lacks.
+## A `git pull` in the working copy would fetch this commit.
+(
+  cd "${testdir}/setup" || exit 1
+  git checkout -q live
+  echo 'more' >> live.txt
+  git commit -q -a -m 'Another commit on live'
+  git push -q origin live
+) || exit 1
+
+## Delete the "dead" branch in the remote.
+git -C "${testdir}/setup" push -q origin --delete dead
+
+## A working copy whose branch was never pushed.
+git clone -q "${remote}" "${testdir}/myrepo-branch-brandnew"
+git -C "${testdir}/myrepo-branch-brandnew" checkout -q -b brandnew
+
+## A working copy with a detached HEAD, which is on no branch at all.
+git clone -q "${remote}" "${testdir}/myrepo-branch-detached"
+git -C "${testdir}/myrepo-branch-detached" checkout -q --detach HEAD
+
+## A working copy whose remote repository cannot be reached.
+git clone -q -b live "${remote}" "${testdir}/myrepo-branch-unreachable"
+ssh_arguments="${testdir}/ssh-arguments"
+fake_ssh="${testdir}/fake-ssh"
+cat > "${fake_ssh}" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "${SSH_ARGUMENTS_FILE}"
+exit 1
+EOF
+chmod +x "${fake_ssh}"
+SSH_ARGUMENTS_FILE="${ssh_arguments}"
+export SSH_ARGUMENTS_FILE
+git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${fake_ssh}"
+git -C "${testdir}/myrepo-branch-unreachable" remote set-url origin \
+  'ssh://example.invalid/no-such-repo.git'
+
+## A directory that is not a clone.
+mkdir "${testdir}/myrepo-branch-notaclone"
+
+## The tests.
+
+# `is-deleted-branch` must not modify the directory that it inspects.  This is
+# the test that fails when `is-deleted-branch` is implemented using `git pull`.
+for branch in live dead brandnew; do
+  dir="${testdir}/myrepo-branch-${branch}"
+  before="$(repo_state "${dir}")"
+  "${IS_DELETED_BRANCH}" "${dir}" > /dev/null 2>&1
+  after="$(repo_state "${dir}")"
+  if [ "${before}" != "${after}" ]; then
+    fail "is-deleted-branch modified ${dir}"
+    echo "before:" >&2
+    echo "${before}" >&2
+    echo "after:" >&2
+    echo "${after}" >&2
+  fi
+done
+
+expect_status 1 "${testdir}/myrepo-branch-live" 'branch that exists in the remote'
+expect_status 0 "${testdir}/myrepo-branch-dead" 'branch that was deleted in the remote'
+expect_status 1 "${testdir}/myrepo-branch-brandnew" 'branch that was never pushed'
+expect_status 1 "${testdir}/myrepo-branch-detached" 'working copy with a detached HEAD'
+expect_status 0 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
+expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+  'is-deleted-branch on a working copy whose remote cannot be reached'
+if ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
+  fail 'SSH invocation did not include "-o BatchMode=yes"'
+fi
+
+# GIT_SSH is another Git-supported way to select an SSH wrapper.  It must be
+# retained when is-deleted-branch adds BatchMode to the command.
+: > "${ssh_arguments}"
+git -C "${testdir}/myrepo-branch-unreachable" config --unset core.sshCommand
+GIT_SSH="${fake_ssh}"
+export GIT_SSH
+expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+  'is-deleted-branch with an SSH wrapper selected by GIT_SSH'
+unset GIT_SSH
+git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${fake_ssh}"
+if [ ! -s "${ssh_arguments}" ]; then
+  fail 'SSH wrapper selected by GIT_SSH was not invoked'
+elif ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
+  fail 'GIT_SSH invocation did not include "-o BatchMode=yes"'
+fi
+
+# `git-orphaned-branches` must list exactly the deleted branch, and must not
+# modify any of the directories that it inspects.
+scanned_clones='live dead brandnew detached unreachable'
+for branch in ${scanned_clones}; do
+  repo_state "${testdir}/myrepo-branch-${branch}" > "${testdir}/before-${branch}"
+done
+orphans_stderr="${testdir}/orphans-stderr"
+orphans="$(cd "${testdir}" && "${GIT_ORPHANED_BRANCHES}" 2> "${orphans_stderr}")"
+for branch in ${scanned_clones}; do
+  repo_state "${testdir}/myrepo-branch-${branch}" > "${testdir}/after-${branch}"
+  if ! cmp -s "${testdir}/before-${branch}" "${testdir}/after-${branch}"; then
+    fail "git-orphaned-branches modified ${testdir}/myrepo-branch-${branch}"
+    echo "before:" >&2
+    cat "${testdir}/before-${branch}" >&2
+    echo "after:" >&2
+    cat "${testdir}/after-${branch}" >&2
+  fi
+done
+if ! grep -q 'cannot list branches of remote' "${orphans_stderr}"; then
+  fail "git-orphaned-branches: expected \"cannot list branches of remote\" on standard error, got [$(cat "${orphans_stderr}")]"
+fi
+expected_orphans="$(cd "${testdir}" && realpath myrepo-branch-dead)"
+if [ "${orphans}" != "${expected_orphans}" ]; then
+  fail "git-orphaned-branches printed [${orphans}], expected [${expected_orphans}]"
+fi
+
+if [ "${failures}" -ne 0 ]; then
+  echo "${SCRIPT_NAME}: ${failures} test(s) failed" >&2
+  exit 1
+fi
+
+echo "${SCRIPT_NAME}: all tests passed"

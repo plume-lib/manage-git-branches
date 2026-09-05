@@ -49,7 +49,13 @@ REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
 PARENTDIR=$(CDPATH='' cd .. && pwd -P)
-BRANCHDIR="${PARENTDIR}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
+# Canonicalize the parent directory rather than ${BRANCHDIR} itself.  The
+# destination does not exist yet, and macOS realpath rejects nonexistent paths.
+if ! PARENTDIR="$(realpath ..)" || [ -z "${PARENTDIR}" ]; then
+  echo "${SCRIPT_NAME}: Cannot canonicalize the parent directory of $(pwd)" >&2
+  exit 1
+fi
+BRANCHDIR="${PARENTDIR%/}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
 git pull -q > /dev/null 2>&1 || true
