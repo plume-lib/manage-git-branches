@@ -39,7 +39,6 @@ fi
 
 from="$1"
 from_absolute="$(realpath "$from")"
-from_relative="$(realpath --relative-to="." "$from")"
 
 if [ ! -d "${from}" ]; then
   if [ "${from}" = "${from_absolute}" ]; then
@@ -64,7 +63,7 @@ if ! git -C "$from_absolute" pull -q; then
   exit 1
 fi
 
-if ! git pull -q "${from_relative}"; then
+if ! git pull -q "${from_absolute}"; then
   echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
   exit 1
 fi
