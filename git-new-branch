@@ -6,6 +6,9 @@
 # Usage:
 #   git-new-branch NEWBRANCHNAME
 
+# Fail on the use of an unset variable, which is usually a typo.
+set -u
+
 # SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
@@ -48,7 +51,10 @@ fi
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
-PARENTDIR=$(CDPATH='' cd .. && pwd -P)
+if ! PARENTDIR=$(CDPATH='' cd .. && pwd -P) || [ -z "${PARENTDIR}" ]; then
+  echo "${SCRIPT_NAME}: cannot determine the directory for branch ${BRANCHNAME}" >&2
+  exit 1
+fi
 BRANCHDIR="${PARENTDIR}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
