@@ -51,11 +51,11 @@ fi
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
-PARENTDIR=$(CDPATH='' cd .. && pwd -P)
-if ! BRANCHDIR="${PARENTDIR}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}" || [ -z "${BRANCHDIR}" ]; then
+if ! PARENTDIR=$(CDPATH='' cd .. && pwd -P) || [ -z "${PARENTDIR}" ]; then
   echo "${SCRIPT_NAME}: cannot determine the directory for branch ${BRANCHNAME}" >&2
   exit 1
 fi
+BRANCHDIR="${PARENTDIR}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
 git pull -q > /dev/null 2>&1 || true

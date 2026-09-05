@@ -1,9 +1,8 @@
 #!/bin/sh
 
 # Tests that every command enables `set -u`, that the commands nonetheless work
-# when their optional environment variables are unset, and that a command
-# diagnoses an empty branch directory rather than operating on a directory
-# named "-TMP".
+# when their optional environment variables are unset, and that the branch
+# commands do not depend on `realpath`, which is unavailable on some systems.
 #
 # Usage:
 #   tests/test-unset-variables.sh
@@ -57,6 +56,7 @@ create_directories() {
   git -C "${WORK_DIR}/seed" remote add origin "${REMOTE}"
   git -C "${WORK_DIR}/seed" push -q --set-upstream origin main
   git -C "${WORK_DIR}/seed" push -q origin main:feature
+  git -C "${WORK_DIR}/seed" push -q origin main:checkoutbranch
   rm -rf "${WORK_DIR}/seed"
   git clone -q "${REMOTE}" "${MAIN_DIR}"
   git clone -q -b feature "${REMOTE}" "${FEATURE_DIR}"
@@ -144,29 +144,26 @@ if [ "${status}" -ne 0 ]; then
 $(cat "${STDERR_FILE}")"
 fi
 
-## Part 3: a failing `realpath` is diagnosed, rather than yielding a branch
-## directory named "-TMP" in the current directory.
+## Part 3: a failing `realpath` does not affect the branch commands.  They
+## canonicalize the existing parent directory with POSIX `pwd -P` instead.
 
 ## Runs command $1 on branch $2, with a `realpath` that fails.  Fails the test
-## unless the command reports that it cannot determine the branch directory.
-check_realpath_failure() {
+## unless the command succeeds and creates the expected branch directory.
+check_without_realpath() {
   status=0
   (cd "${MAIN_DIR}" && PATH="${FAKE_BIN}:${PATH}" "${COMMANDS_DIR}/$1" "$2") \
     > /dev/null 2> "${STDERR_FILE}" || status="$?"
-  if [ "${status}" -eq 0 ]; then
-    fail "$1 succeeded even though realpath failed"
-  fi
-  if ! grep -q "cannot determine the directory for branch $2" "${STDERR_FILE}"; then
-    fail "$1 did not report an undeterminable branch directory; its stderr was:
+  if [ "${status}" -ne 0 ]; then
+    fail "$1 failed because realpath was unavailable; its stderr was:
 $(cat "${STDERR_FILE}")"
   fi
-  if [ -e "${MAIN_DIR}/-TMP" ] || [ -e "${WORK_DIR}/-TMP" ]; then
-    fail "$1 created a directory named \"-TMP\""
+  if [ ! -d "${WORK_DIR}/myrepo-branch-$2" ]; then
+    fail "$1 did not create ${WORK_DIR}/myrepo-branch-$2"
   fi
 }
 
-# `newbranch` does not exist in the remote, and `feature` does.
-check_realpath_failure git-new-branch newbranch
-check_realpath_failure git-checkout-branch feature
+# `newbranch` does not exist in the remote, and `checkoutbranch` does.
+check_without_realpath git-new-branch newbranch
+check_without_realpath git-checkout-branch checkoutbranch
 
 echo "${SCRIPT_NAME}: PASS"
