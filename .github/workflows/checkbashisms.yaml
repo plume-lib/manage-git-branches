@@ -1,0 +1,16 @@
+name: Checkbashisms
+"on": [push, pull_request]
+jobs:
+  prek:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          show-progress: false
+          persist-credentials: false
+      - name: Install checkbashisms
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends devscripts
+      - name: Test the checkbashisms configuration
+        run: ./tests/test-checkbashisms.sh

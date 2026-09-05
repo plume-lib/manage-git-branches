@@ -11,7 +11,3 @@ jobs:
           show-progress: false
           persist-credentials: false
       - uses: j178/prek-action@v3.0.0
-      - name: Install checkbashisms
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends devscripts
-      - name: Test the checkbashisms configuration
-        run: ./tests/test-checkbashisms.sh
