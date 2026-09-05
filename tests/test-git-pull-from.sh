@@ -27,7 +27,9 @@ make_clone() {
 }
 
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
-trap 'rm -rf "${workdir}"' EXIT INT TERM
+trap 'rm -rf "${workdir}"' EXIT
+trap 'rm -rf "${workdir}"; exit 130' INT
+trap 'rm -rf "${workdir}"; exit 143' TERM
 
 GIT_AUTHOR_NAME='manage-git-branches test'
 GIT_AUTHOR_EMAIL='test@example.com'
