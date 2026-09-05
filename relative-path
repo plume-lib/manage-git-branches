@@ -1,0 +1,46 @@
+#!/bin/sh
+
+# Prints the pathname of TARGET, relative to BASE.
+#
+# Usage:
+#   relative-path BASE TARGET
+#
+# BASE and TARGET must name existing files or directories.  The output is a
+# portable replacement for GNU `realpath --relative-to=BASE TARGET`.
+
+SCRIPT_NAME="$(basename -- "$0")"
+
+if [ "$#" -ne 2 ]; then
+  echo "Usage: ${SCRIPT_NAME} BASE TARGET" >&2
+  exit 1
+fi
+
+if [ ! -e "$1" ] || ! base="$(realpath -- "$1")"; then
+  echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
+  exit 1
+fi
+if [ ! -e "$2" ] || ! target="$(realpath -- "$2")"; then
+  echo "${SCRIPT_NAME}: cannot canonicalize: $2" >&2
+  exit 1
+fi
+
+target_slash="${target%/}/"
+up=""
+common="${base}"
+while :; do
+  prefix="${common%/}"
+  case "${target_slash}" in
+    "${prefix}"/*) break ;;
+  esac
+  up="../${up}"
+  common="$(dirname -- "${common}")"
+done
+
+down="${target_slash#"${prefix}"/}"
+result="${up}${down}"
+result="${result%/}"
+if [ -z "${result}" ]; then
+  result="."
+fi
+
+printf '%s\n' "${result}"

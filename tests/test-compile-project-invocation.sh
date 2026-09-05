@@ -11,6 +11,8 @@ set -e
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 REPO_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+SYSTEM_REALPATH="$(command -v realpath)"
+export SYSTEM_REALPATH
 
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $1" >&2
@@ -52,6 +54,19 @@ commit_and_push() {
 workdir="$(mktemp -d)"
 trap 'rm -rf "${workdir}"' EXIT INT TERM
 
+# Put a BSD-compatible realpath stand-in on PATH.  This makes the Linux test
+# reject GNU-only options in the same way that macOS does.
+fakebin="${workdir}/fakebin"
+mkdir "${fakebin}"
+cat > "${fakebin}/realpath" << 'INNER'
+#!/bin/sh
+case "${1-}" in
+  --relative-to | --relative-to=*) exit 64 ;;
+esac
+exec "${SYSTEM_REALPATH}" "$@"
+INNER
+chmod +x "${fakebin}/realpath"
+
 GIT_AUTHOR_NAME='manage-git-branches test'
 GIT_AUTHOR_EMAIL='test@example.com'
 GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
@@ -69,7 +84,7 @@ git -C "${workdir}/from" add Makefile
 git -C "${workdir}/from" commit -q -m "initial commit"
 git -C "${workdir}/from" push -q -u origin main
 
-clean_path="$(path_without_repo_dir)"
+clean_path="${fakebin}:$(path_without_repo_dir)"
 
 ## Test git-push-to.
 
