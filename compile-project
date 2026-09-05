@@ -50,9 +50,14 @@ else
   exit 1
 fi
 
-# Returns a status code indicating success or failure, or 222 if no buildfile was found.
+# Compiles the project in directory $1, if that directory contains a buildfile.
+# Returns the status code of the build command, or 0 if no buildfile was found.
+# Sets buildfile_in_directory to 1 if a buildfile was found, to 0 if not.
+# (A status code cannot indicate "no buildfile was found", because every status
+# code is a status code that some build command might exit with.)
 compile_in_directory() {
   dir="$1"
+  buildfile_in_directory=1
 
   if [ -f "$dir/gradlew" ]; then
     if [ -n "$CLEAN" ]; then
@@ -91,14 +96,15 @@ compile_in_directory() {
     return $?
   else
     # No buildfile was found.
-    return 222
+    buildfile_in_directory=0
+    return 0
   fi
 }
 
 compile_in_directory "$toplevel"
 result=$?
 
-if [ "$result" != 222 ]; then
+if [ "$buildfile_in_directory" = 1 ]; then
   # A buildfile was found; exit with the exit code of the compilation step.
   exit $result
 else
@@ -107,7 +113,7 @@ else
   for subdir in "$toplevel"/*/; do
     compile_in_directory "$subdir"
     result=$?
-    if [ "$result" = 222 ]; then
+    if [ "$buildfile_in_directory" = 0 ]; then
       continue
     fi
     buildfile_found=1
