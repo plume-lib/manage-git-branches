@@ -5,6 +5,10 @@
 #
 # Usage:
 #   git-new-branch NEWBRANCHNAME
+#
+# If the repository has a remote named "origin", the new branch is pushed to
+# it, with the remote branch as the new branch's upstream.  The upstream is
+# what lets `git-push-to` and `git-pull-from` pull and push the new branch.
 
 # SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
@@ -79,6 +83,16 @@ fi
 if ! (cd "${BRANCH_TMPDIR}" && git checkout -b "${BRANCHNAME}" -q); then
   echo "${SCRIPT_NAME}: ERROR in: (cd \"${BRANCH_TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)" >&2
   exit 1
+fi
+
+# Give the new branch an upstream.  Without one, `git pull` and `git push` in
+# the new directory fail with "There is no tracking information for the
+# current branch", so `git-push-to` and `git-pull-from` cannot use it.
+if git remote get-url origin > /dev/null 2>&1; then
+  if ! (cd "${BRANCH_TMPDIR}" && git push -q --set-upstream origin "${BRANCHNAME}"); then
+    echo "${SCRIPT_NAME}: ERROR in: (cd \"${BRANCH_TMPDIR}\" && git push --set-upstream origin \"${BRANCHNAME}\")" >&2
+    exit 1
+  fi
 fi
 
 if ! mv "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
