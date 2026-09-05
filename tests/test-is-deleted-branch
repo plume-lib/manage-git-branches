@@ -122,8 +122,19 @@ git -C "${testdir}/myrepo-branch-detached" checkout -q --detach HEAD
 
 ## A working copy whose remote repository cannot be reached.
 git clone -q -b live "${remote}" "${testdir}/myrepo-branch-unreachable"
+ssh_arguments="${testdir}/ssh-arguments"
+fake_ssh="${testdir}/fake-ssh"
+cat > "${fake_ssh}" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "${SSH_ARGUMENTS_FILE}"
+exit 1
+EOF
+chmod +x "${fake_ssh}"
+SSH_ARGUMENTS_FILE="${ssh_arguments}"
+export SSH_ARGUMENTS_FILE
+git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${fake_ssh}"
 git -C "${testdir}/myrepo-branch-unreachable" remote set-url origin \
-  "${testdir}/no-such-repo.git"
+  'ssh://example.invalid/no-such-repo.git'
 
 ## A directory that is not a clone.
 mkdir "${testdir}/myrepo-branch-notaclone"
@@ -153,6 +164,9 @@ expect_status 1 "${testdir}/myrepo-branch-detached" 'working copy with a detache
 expect_status 0 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
   'is-deleted-branch on a working copy whose remote cannot be reached'
+if ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
+  fail 'SSH invocation did not include "-o BatchMode=yes"'
+fi
 
 # `git-orphaned-branches` must list exactly the deleted branch, and must not
 # modify any of the directories that it inspects.
