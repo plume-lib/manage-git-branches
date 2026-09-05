@@ -84,6 +84,11 @@ nocompile=0
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+## A helper function that tests whether a directory is within a git working copy.
+is_working_copy() {
+  [ "$(git -C "$1" rev-parse --is-inside-work-tree 2> /dev/null)" = "true" ]
+}
+
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
@@ -100,12 +105,20 @@ git_push_to() {
     fi
     return 1
   fi
+  if ! is_working_copy "${from_absolute}"; then
+    echo "${SCRIPT_NAME}: not a git working copy: ${from_absolute}" >&2
+    return 1
+  fi
   if [ ! -d "$to" ]; then
     if [ "${to}" = "${to_absolute}" ]; then
       echo "${SCRIPT_NAME}: no such directory: $to" >&2
     else
       echo "${SCRIPT_NAME}: no such directory: ${to} = ${to_absolute}" >&2
     fi
+    return 1
+  fi
+  if ! is_working_copy "${to_absolute}"; then
+    echo "${SCRIPT_NAME}: not a git working copy: ${to_absolute}" >&2
     return 1
   fi
 
