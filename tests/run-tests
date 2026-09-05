@@ -1,0 +1,25 @@
+#!/bin/sh
+
+# Runs every test in this directory.  A test is an executable file whose name
+# starts with `test-`; it passes if it exits with status 0.
+#
+# Usage:
+#   tests/run-tests
+
+TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+
+status=0
+
+for test in "${TESTS_DIR}"/test-*; do
+  # Skips an executable directory, and the pattern itself when the pattern
+  # matches nothing and the shell leaves it unexpanded.
+  if [ ! -f "${test}" ] || [ ! -x "${test}" ]; then continue; fi
+  test_name="$(basename -- "${test}")"
+  echo "Running ${test_name}"
+  if ! "${test}"; then
+    echo "FAIL: ${test_name}"
+    status=1
+  fi
+done
+
+exit "${status}"

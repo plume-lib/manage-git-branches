@@ -1,0 +1,63 @@
+#!/bin/sh
+
+# Prints the pathname of TARGET, relative to BASE.
+#
+# Usage:
+#   relative-path BASE TARGET
+#
+# BASE and TARGET are pathnames of existing files or directories.  Either may
+# be absolute or relative to the current directory.  The output is a relative
+# pathname:  interpreting it with respect to BASE yields TARGET.
+#
+# This is a portable version of `realpath -e --relative-to=BASE TARGET`.  The
+# `--relative-to` option is a GNU extension that the BSD and macOS versions of
+# `realpath` do not support.  Like `realpath -e` and unlike plain `realpath`,
+# this script rejects a pathname that does not resolve to an existing file,
+# such as a symbolic link whose target does not exist.
+
+SCRIPT_NAME="$(basename -- "$0")"
+
+if [ "$#" -ne 2 ]; then
+  echo "Usage: ${SCRIPT_NAME} BASE TARGET" >&2
+  exit 1
+fi
+
+# The `[ -e ... ]` tests reject a pathname whose final component does not
+# exist.  `realpath -e` would do so, but `-e` is a GNU extension.
+if ! [ -e "$1" ] || ! base="$(realpath -- "$1")"; then
+  echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
+  exit 1
+fi
+if ! [ -e "$2" ] || ! target="$(realpath -- "$2")"; then
+  echo "${SCRIPT_NAME}: cannot canonicalize: $2" >&2
+  exit 1
+fi
+
+# TARGET with exactly one trailing "/".  Comparing that against the pattern
+# "${prefix}"/* makes TARGET match its own directory prefix, and makes the loop
+# below terminate at the root directory, where ${prefix} is the empty string.
+target_slash="${target%/}/"
+
+# Walk up from BASE until reaching a directory that contains TARGET, recording
+# one ".." for each level.
+up=""
+common="${base}"
+while :; do
+  prefix="${common%/}"
+  case "${target_slash}" in
+    "${prefix}"/*) break ;;
+  esac
+  up="../${up}"
+  common="$(dirname -- "${common}")"
+done
+
+# The part of TARGET that is below the common ancestor.
+down="${target_slash#"${prefix}"/}"
+
+result="${up}${down}"
+result="${result%/}"
+if [ -z "${result}" ]; then
+  result="."
+fi
+
+printf '%s\n' "${result}"

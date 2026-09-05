@@ -59,6 +59,9 @@ create_interrupting_cp() {
   mkdir -p "${FAKE_BIN}"
   cat > "${FAKE_BIN}/cp" << 'INNER'
 #!/bin/sh
+# Exit rather than sending the interrupt if the partial copy cannot be made,
+# so that the test cannot pass without an interrupt actually occurring.
+set -e
 # The destination is the last argument.
 dest=""
 for arg in "$@"; do dest="${arg}"; done

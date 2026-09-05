@@ -19,6 +19,21 @@ if [ "$#" -ne 0 ]; then
   exit 1
 fi
 
+# Returns 0 (true) if directory $1 contains no entry other than `.project`.
+# `find "$1" -mindepth 1 -maxdepth 1` would be simpler, but the `-mindepth` and
+# `-maxdepth` options are GNU extensions that POSIX `find` does not support.
+only_dot_project() {
+  for entry in "$1"/* "$1"/.*; do
+    case "${entry##*/}" in
+      '.' | '..' | '.project') continue ;;
+    esac
+    # When a pattern matches nothing, the shell leaves it unexpanded.
+    if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then continue; fi
+    return 1
+  done
+  return 0
+}
+
 dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
 trap 'rm -f "${dirs_file}"' EXIT INT TERM
 find . -name '*-branch-*' -type d > "${dirs_file}"
@@ -47,11 +62,9 @@ while IFS= read -r dir; do
     fi
   else
     # There is no .git subdirectory.
-    if [ -f "$dir/.project" ]; then
-      if [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
-        # It has only the `.project` file and no other content.
-        realpath "$dir"
-      fi
+    if [ -f "$dir/.project" ] && only_dot_project "$dir"; then
+      # It has only the `.project` file and no other content.
+      realpath "$dir"
     fi
   fi
 done < "${dirs_file}"
