@@ -7,8 +7,8 @@
 # because a pull request has been merged).
 # Also lists directories containing nothing but a `.project` file.
 #
-# This command is read-only:  it queries each remote repository, but it
-# never modifies any of the directories that it inspects.
+# This command is read-only:  it never modifies any of the directories
+# that it inspects.
 #
 # Typical usage is:  rm -rf $(git-orphaned-branches)
 

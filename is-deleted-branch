@@ -8,8 +8,7 @@
 # The status code is 0 (true) if the directory is on a deleted branch or is
 # not a clone, and 1 (false) otherwise.
 #
-# This command is read-only:  it never modifies DIRECTORY.  It queries the
-# remote repository, but only to list the remote's branches.
+# This command is read-only:  it never modifies DIRECTORY.
 #
 # A branch that has never been pushed is not a deleted branch, so this
 # command returns 1 (false) for it.
