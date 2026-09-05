@@ -255,7 +255,9 @@ hooks = [
   ] } },
 ]
 
-# TODO: checkbashisms (I need to write my own).
+# TODO: checkbashisms. I need to write my own, probably. Like other
+# prek configuration, it must install the needed tool, not assume it
+# is already installed.
 # [[repos]]
 # repo = "TODO"
 # hooks = [
