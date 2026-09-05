@@ -48,6 +48,7 @@ create_repositories() {
   git -C "${WORK_DIR}/seed" push -q origin main:feature2
   rm -rf "${WORK_DIR}/seed"
   git clone -q "${REMOTE}" "${MAIN_DIR}"
+  git -C "${MAIN_DIR}" config pull.rebase false
 }
 
 ## Makes `git pull` in MAIN_DIR fail with a merge conflict, by committing a
