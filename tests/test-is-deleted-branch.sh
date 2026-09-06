@@ -136,6 +136,7 @@ chmod +x "${fake_ssh}"
 SSH_ARGUMENTS_FILE="${ssh_arguments}"
 export SSH_ARGUMENTS_FILE
 git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${fake_ssh}"
+git -C "${testdir}/myrepo-branch-unreachable" config ssh.variant ssh
 git -C "${testdir}/myrepo-branch-unreachable" remote set-url origin \
   'ssh://example.invalid/no-such-repo.git'
 
@@ -171,20 +172,51 @@ if ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
   fail 'SSH invocation did not include "-o BatchMode=yes"'
 fi
 
-# GIT_SSH is another Git-supported way to select an SSH wrapper.  It must be
-# retained when is-deleted-branch adds BatchMode to the command.
+# GIT_SSH is an executable path, so a path containing spaces must remain a
+# single executable name when is-deleted-branch adds BatchMode.
 : > "${ssh_arguments}"
 git -C "${testdir}/myrepo-branch-unreachable" config --unset core.sshCommand
-GIT_SSH="${fake_ssh}"
-export GIT_SSH
+git -C "${testdir}/myrepo-branch-unreachable" config --unset ssh.variant
+git_ssh_with_spaces="${testdir}/fake ssh"
+cp "${fake_ssh}" "${git_ssh_with_spaces}"
+GIT_SSH="${git_ssh_with_spaces}"
+GIT_SSH_VARIANT=ssh
+export GIT_SSH GIT_SSH_VARIANT
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
-  'is-deleted-branch with an SSH wrapper selected by GIT_SSH'
-unset GIT_SSH
-git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${fake_ssh}"
+  'is-deleted-branch with a spaced executable path selected by GIT_SSH'
+unset GIT_SSH GIT_SSH_VARIANT
 if [ ! -s "${ssh_arguments}" ]; then
   fail 'SSH wrapper selected by GIT_SSH was not invoked'
 elif ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
   fail 'GIT_SSH invocation did not include "-o BatchMode=yes"'
+fi
+
+# Plink and the other non-OpenSSH variants do not accept OpenSSH's `-o`
+# option.  Git must receive the configured command unchanged.
+: > "${ssh_arguments}"
+git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${fake_ssh}"
+git -C "${testdir}/myrepo-branch-unreachable" config ssh.variant plink
+expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+  'is-deleted-branch with a Plink-style core.sshCommand'
+if [ ! -s "${ssh_arguments}" ]; then
+  fail 'SSH wrapper selected by core.sshCommand was not invoked'
+elif grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
+  fail 'Plink-style core.sshCommand invocation included "-o BatchMode=yes"'
+fi
+
+# GIT_SSH_COMMAND takes precedence over core.sshCommand and observes the same
+# variant restriction.
+: > "${ssh_arguments}"
+GIT_SSH_COMMAND="${fake_ssh}"
+GIT_SSH_VARIANT=plink
+export GIT_SSH_COMMAND GIT_SSH_VARIANT
+expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+  'is-deleted-branch with a Plink-style GIT_SSH_COMMAND'
+unset GIT_SSH_COMMAND GIT_SSH_VARIANT
+if [ ! -s "${ssh_arguments}" ]; then
+  fail 'SSH wrapper selected by GIT_SSH_COMMAND was not invoked'
+elif grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
+  fail 'Plink-style GIT_SSH_COMMAND invocation included "-o BatchMode=yes"'
 fi
 
 # `git-orphaned-branches` must list exactly the deleted branch, and must not

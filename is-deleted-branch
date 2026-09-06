@@ -46,13 +46,74 @@ fi
 
 # `git ls-remote --exit-code` exits with status 2 if no matching ref exists.
 # GIT_TERMINAL_PROMPT=0 makes an authentication failure an error rather than
-# an interactive prompt.  `-o BatchMode=yes` does the same for SSH
+# an interactive prompt.  OpenSSH's `-o BatchMode=yes` does the same for SSH
 # authentication and host-key prompts.
 ssh_command="${GIT_SSH_COMMAND:-$(git -C "${dir}" config --get core.sshCommand)}"
-ssh_command="${ssh_command:-${GIT_SSH:-ssh}}"
-GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${ssh_command} -o BatchMode=yes" \
-  git -C "${dir}" ls-remote --exit-code --heads "${remote}" "${upstream_ref}" > /dev/null 2>&1
-status="$?"
+ssh_variant="${GIT_SSH_VARIANT:-$(git -C "${dir}" config --get ssh.variant)}"
+
+# Git accepts several SSH implementations, but only OpenSSH accepts `-o`.
+# When no variant is specified, recognize the standard OpenSSH command and
+# otherwise leave Git's own variant detection in charge.
+use_batch_mode=false
+case "${ssh_variant}" in
+  ssh)
+    use_batch_mode=true
+    ;;
+  '' | auto)
+    if [ -z "${ssh_command}" ]; then
+      if [ -z "${GIT_SSH:-}" ]; then
+        use_batch_mode=true
+      else
+        case "$(basename -- "${GIT_SSH}")" in
+          ssh | ssh.exe)
+            use_batch_mode=true
+            ;;
+        esac
+      fi
+    else
+      case "${ssh_command}" in
+        ssh | ssh\ * | */ssh | */ssh\ * | ssh.exe | ssh.exe\ * | */ssh.exe | */ssh.exe\ *)
+          use_batch_mode=true
+          ;;
+      esac
+    fi
+    ;;
+esac
+
+if ${use_batch_mode}; then
+  if [ -n "${ssh_command}" ]; then
+    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${ssh_command} -o BatchMode=yes" \
+      git -C "${dir}" ls-remote --exit-code --heads "${remote}" "${upstream_ref}" > /dev/null 2>&1
+    status="$?"
+  elif [ -n "${GIT_SSH:-}" ]; then
+    # GIT_SSH is an executable path rather than a shell command.  A wrapper
+    # adds the option without changing the way the path is parsed.
+    ssh_wrapper_dir="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" || {
+      echo "${SCRIPT_NAME}: cannot create temporary SSH wrapper" >&2
+      exit 1
+    }
+    ssh_wrapper="${ssh_wrapper_dir}/ssh"
+    cat > "${ssh_wrapper}" <<'EOF'
+#!/bin/sh
+exec "${IS_DELETED_BRANCH_GIT_SSH}" -o BatchMode=yes "$@"
+EOF
+    chmod +x "${ssh_wrapper}"
+    IS_DELETED_BRANCH_GIT_SSH="${GIT_SSH}"
+    export IS_DELETED_BRANCH_GIT_SSH
+    GIT_TERMINAL_PROMPT=0 GIT_SSH="${ssh_wrapper}" \
+      git -C "${dir}" ls-remote --exit-code --heads "${remote}" "${upstream_ref}" > /dev/null 2>&1
+    status="$?"
+    rm -rf -- "${ssh_wrapper_dir}"
+  else
+    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' \
+      git -C "${dir}" ls-remote --exit-code --heads "${remote}" "${upstream_ref}" > /dev/null 2>&1
+    status="$?"
+  fi
+else
+  GIT_TERMINAL_PROMPT=0 \
+    git -C "${dir}" ls-remote --exit-code --heads "${remote}" "${upstream_ref}" > /dev/null 2>&1
+  status="$?"
+fi
 case "${status}" in
   0)
     # The branch still exists in the remote.
