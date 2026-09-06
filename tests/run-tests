@@ -4,7 +4,7 @@
 # starts with `test-`; it passes if it exits with status 0.
 #
 # Usage:
-#   tests/run-tests.sh
+#   tests/run-tests
 
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 

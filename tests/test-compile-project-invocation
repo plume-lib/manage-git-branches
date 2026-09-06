@@ -4,7 +4,7 @@
 # the manage-git-branches directory is not on the PATH.
 #
 # Usage:
-#   tests/test-compile-project-invocation.sh
+#   tests/test-compile-project-invocation
 
 set -e
 

@@ -5,7 +5,7 @@
 # subsequent invocation is not blocked by a leftover directory.
 #
 # Usage:
-#   tests/test-branch-interrupt.sh
+#   tests/test-branch-interrupt
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
