@@ -96,8 +96,10 @@ check_push_to_rejects "adjacent duplicates among three directories" \
 if output="$(cd "${CLONE}" && "${COMMANDS_DIR}/git-pull-from" . 2>&1)"; then
   fail "git-pull-from accepted the current directory"
 fi
+## `git-pull-from` delegates to `git-push-to`, so the diagnostic mentions the
+## latter.
 case "${output}" in
-  *"current directory"*) ;;
+  *"same directory"*) ;;
   *) fail "git-pull-from gave an unexpected message: ${output}" ;;
 esac
 
