@@ -8,11 +8,25 @@ RELATIVE_PATH="${TOPLEVEL}/relative-path"
 
 status=0
 
-work="$(realpath "$(mktemp -d)")"
+if ! work="$(mktemp -d)" || [ -z "${work}" ]; then
+  echo "$0: cannot create a temporary directory" >&2
+  exit 1
+fi
 trap 'rm -rf "${work}"' EXIT INT TERM
+if ! resolved="$(realpath "${work}")" || [ -z "${resolved}" ]; then
+  echo "$0: cannot resolve '${work}'" >&2
+  exit 1
+fi
+work="${resolved}"
 
-mkdir -p "${work}/a/b/c" "${work}/a/x" "${work}/d e/f"
-ln -s "${work}/a/x" "${work}/link-to-x"
+if ! mkdir -p "${work}/a/b/c" "${work}/a/x" "${work}/d e/f"; then
+  echo "$0: cannot create directories under '${work}'" >&2
+  exit 1
+fi
+if ! ln -s "${work}/a/x" "${work}/link-to-x"; then
+  echo "$0: cannot create symbolic link '${work}/link-to-x'" >&2
+  exit 1
+fi
 
 # Checks that `relative-path BASE TARGET` prints EXPECTED.
 # Arguments: BASE TARGET EXPECTED
