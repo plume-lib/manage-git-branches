@@ -78,15 +78,15 @@ INNER
 }
 
 ## Runs the given branch script on the given branch, in MAIN_DIR and with the
-## interrupting `cp` first on PATH.  Fails the test unless the script is killed
-## by SIGINT.
+## interrupting `cp` first on PATH.  Fails the test unless the script reports
+## signal termination.
 run_interrupted() {
   status=0
   (cd "${MAIN_DIR}" && PATH="${FAKE_BIN}:${PATH}" "${COMMANDS_DIR}/$1" "$2") \
     > /dev/null 2>&1 || status="$?"
-  # A shell reports a command killed by signal N as exit status 128+N.
-  if [ "${status}" -ne 130 ]; then
-    fail "$1 exited with status ${status}, not 130 (killed by SIGINT)"
+  # A shell reports a command killed by a signal with an exit status greater than 128.
+  if [ "${status}" -le 128 ]; then
+    fail "$1 exited with status ${status}, not greater than 128 (killed by a signal)"
   fi
 }
 

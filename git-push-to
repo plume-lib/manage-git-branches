@@ -148,7 +148,7 @@ git_push_to() {
   # `git pull` passes the repository to `git fetch`, which parses options again
   # and interprets a colon in a bare pathname as an scp-style URL.
   case "${from_relative}" in
-    . | ./* | ../*) ;;
+    ./* | ../* | .) ;;
     *) from_relative="./${from_relative}" ;;
   esac
 
