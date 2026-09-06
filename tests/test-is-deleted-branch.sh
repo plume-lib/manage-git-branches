@@ -73,7 +73,7 @@ GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
 GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
 export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-unset GIT_SSH GIT_SSH_COMMAND
+unset DEBUG GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT
 : > "${GIT_CONFIG_GLOBAL}"
 
 ## Create a remote repository with branches "main", "live", and "dead".
@@ -123,6 +123,13 @@ git -C "${testdir}/myrepo-branch-brandnew" checkout -q -b brandnew
 git clone -q "${remote}" "${testdir}/myrepo-branch-detached"
 git -C "${testdir}/myrepo-branch-detached" checkout -q --detach HEAD
 
+## A working copy whose branch tracks a non-head ref in the remote.
+git -C "${testdir}/setup" tag upstream-tag
+git -C "${testdir}/setup" push -q origin upstream-tag
+git clone -q -b live "${remote}" "${testdir}/myrepo-branch-tag-upstream"
+git -C "${testdir}/myrepo-branch-tag-upstream" config branch.live.merge \
+  refs/tags/upstream-tag
+
 ## A working copy whose remote repository cannot be reached.
 git clone -q -b live "${remote}" "${testdir}/myrepo-branch-unreachable"
 ssh_arguments="${testdir}/ssh-arguments"
@@ -165,6 +172,8 @@ expect_status 1 "${testdir}/myrepo-branch-live" 'branch that exists in the remot
 expect_status 0 "${testdir}/myrepo-branch-dead" 'branch that was deleted in the remote'
 expect_status 1 "${testdir}/myrepo-branch-brandnew" 'branch that was never pushed'
 expect_status 1 "${testdir}/myrepo-branch-detached" 'working copy with a detached HEAD'
+expect_status 1 "${testdir}/myrepo-branch-tag-upstream" \
+  'branch whose upstream is an existing non-head ref'
 expect_status 1 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
   'is-deleted-branch on a working copy whose remote cannot be reached'
@@ -189,6 +198,21 @@ if [ ! -s "${ssh_arguments}" ]; then
   fail 'SSH wrapper selected by GIT_SSH was not invoked'
 elif ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
   fail 'GIT_SSH invocation did not include "-o BatchMode=yes"'
+fi
+
+# An empty GIT_SSH_COMMAND does not override a nonempty GIT_SSH.
+: > "${ssh_arguments}"
+GIT_SSH="${git_ssh_with_spaces}"
+GIT_SSH_COMMAND=''
+GIT_SSH_VARIANT=ssh
+export GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT
+expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+  'is-deleted-branch with empty GIT_SSH_COMMAND and nonempty GIT_SSH'
+unset GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT
+if [ ! -s "${ssh_arguments}" ]; then
+  fail 'SSH wrapper selected by GIT_SSH was not invoked when GIT_SSH_COMMAND was empty'
+elif ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
+  fail 'GIT_SSH invocation did not include "-o BatchMode=yes" when GIT_SSH_COMMAND was empty'
 fi
 
 # Plink and the other non-OpenSSH variants do not accept OpenSSH's `-o`

@@ -49,8 +49,7 @@ REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
 PARENTDIR=$(CDPATH='' cd .. && pwd -P)
-# Canonicalize the parent directory rather than ${BRANCHDIR} itself.  The
-# destination does not exist yet, and macOS realpath rejects nonexistent paths.
+# Canonicalize the parent directory.  ${BRANCHDIR} itself not exist yet.
 if ! PARENTDIR="$(realpath ..)" || [ -z "${PARENTDIR}" ]; then
   echo "${SCRIPT_NAME}: Cannot canonicalize the parent directory of $(pwd)" >&2
   exit 1
