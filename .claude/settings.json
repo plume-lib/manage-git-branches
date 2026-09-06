@@ -80,6 +80,14 @@
       "Write(*)"
     ],
     "deny": [
+      "Bash(git -C * branch)",
+      "Bash(git -C * branch:*)",
+      "Bash(git -C * checkout)",
+      "Bash(git -C * checkout:*)",
+      "Bash(git -C * stash)",
+      "Bash(git -C * stash:*)",
+      "Bash(git -C * switch)",
+      "Bash(git -C * switch:*)",
       "Bash(git branch)",
       "Bash(git branch:*)",
       "Bash(git checkout)",
