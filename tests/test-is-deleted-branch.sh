@@ -164,7 +164,7 @@ expect_status 1 "${testdir}/myrepo-branch-live" 'branch that exists in the remot
 expect_status 0 "${testdir}/myrepo-branch-dead" 'branch that was deleted in the remote'
 expect_status 1 "${testdir}/myrepo-branch-brandnew" 'branch that was never pushed'
 expect_status 1 "${testdir}/myrepo-branch-detached" 'working copy with a detached HEAD'
-expect_status 0 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
+expect_status 1 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
   'is-deleted-branch on a working copy whose remote cannot be reached'
 if ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then

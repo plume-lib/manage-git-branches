@@ -5,8 +5,8 @@
 # Usage:
 #   is-deleted-branch DIRECTORY
 #
-# The status code is 0 (true) if the directory is on a deleted branch or is
-# not a clone, and 1 (false) otherwise.
+# The status code is 0 (true) if the directory is on a deleted branch, and 1
+# (false) otherwise, including any directory that is not a clone.
 #
 # This command does not modify the directory.
 #
@@ -24,7 +24,7 @@ dir="$1"
 
 if ! git -C "${dir}" rev-parse --git-dir > /dev/null 2>&1; then
   # Not a clone, so not a deleted branch.
-  exit 0
+  exit 1
 fi
 
 # A detached HEAD is not on a branch, so it is not on a deleted branch.
