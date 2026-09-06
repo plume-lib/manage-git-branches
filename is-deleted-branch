@@ -12,6 +12,8 @@
 # the remote repository is unreachable or requires credentials.  In that case,
 # this command prints an explanation to standard error.  This command never
 # prompts for credentials, so it does not block for input.
+#
+# This command does not modify the directory.
 
 SCRIPT_NAME="$(basename -- "$0")"
 
