@@ -95,6 +95,13 @@
       "Write(*)"
     ],
     "deny": [
+      "Bash(git * branch:*)",
+      "Bash(git * checkout)",
+      "Bash(git * checkout:*)",
+      "Bash(git * stash)",
+      "Bash(git * stash:*)",
+      "Bash(git * switch)",
+      "Bash(git * switch:*)",
       "Bash(git --no-pager checkout)",
       "Bash(git --no-pager checkout:*)",
       "Bash(git --no-pager stash)",
@@ -126,6 +133,7 @@
       "Bash(git -c * stash:*)",
       "Bash(git -c * switch)",
       "Bash(git -c * switch:*)",
+      "Bash(git branch:*)",
       "Bash(git branch --copy:*)",
       "Bash(git branch --delete:*)",
       "Bash(git branch --force:*)",

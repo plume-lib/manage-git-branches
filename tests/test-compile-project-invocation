@@ -1,7 +1,8 @@
 #!/bin/sh
 
 # Tests that `git-push-to` and `git-pull-from` run `compile-project` even when
-# the manage-git-branches directory is not on the PATH.
+# the manage-git-branches directory is not on the PATH, and that `git-push-to`
+# accepts an option-like relative source pathname.
 #
 # Usage:
 #   tests/test-compile-project-invocation
@@ -95,6 +96,22 @@ if ! (cd "${workdir}/to2" && PATH="${clean_path}" "${REPO_DIR}/git-pull-from" "$
 fi
 if [ ! -f "${workdir}/to2/compile-project-ran" ]; then
   fail "git-pull-from did not run compile-project"
+fi
+
+# Test a source whose pathname relative to the destination looks like a Git
+# option.  The source must still be pulled rather than being parsed as an
+# option to `git pull`.
+make_clone "${workdir}/to-option-source"
+make_clone "${workdir}/to-option-source/--no-tags"
+date > "${workdir}/to-option-source/--no-tags/option-like-pathname-change.txt"
+git -C "${workdir}/to-option-source/--no-tags" add option-like-pathname-change.txt
+git -C "${workdir}/to-option-source/--no-tags" commit -q -m "option-like pathname change"
+
+if ! "${REPO_DIR}/git-push-to" --nocompile "${workdir}/to-option-source/--no-tags" "${workdir}/to-option-source"; then
+  fail "git-push-to failed for an option-like relative pathname"
+fi
+if [ ! -f "${workdir}/to-option-source/option-like-pathname-change.txt" ]; then
+  fail "git-push-to did not pull from the option-like relative pathname"
 fi
 
 echo "${SCRIPT_NAME}: PASS"

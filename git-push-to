@@ -145,8 +145,12 @@ git_push_to() {
     echo "${SCRIPT_NAME}: cannot express ${from_absolute} relative to ${to_absolute}" >&2
     return 1
   fi
+  # `git pull` passes the repository to `git fetch`, which parses options again.
+  case "${from_relative}" in
+    -*) from_relative="./${from_relative}" ;;
+  esac
 
-  if ! git pull -q "${from_relative}"; then
+  if ! git pull -q -- "${from_relative}"; then
     # Note: pwd=to_absolute
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
     return 1

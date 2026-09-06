@@ -19,7 +19,7 @@ if ! resolved="$(realpath "${work}")" || [ -z "${resolved}" ]; then
 fi
 work="${resolved}"
 
-if ! mkdir -p "${work}/a/b/c" "${work}/a/x" "${work}/d e/f"; then
+if ! mkdir -p "${work}/a/b/c" "${work}/a/x" "${work}/d e/f" "${work}/-base" "${work}/-target"; then
   echo "$0: cannot create directories under '${work}'" >&2
   exit 1
 fi
@@ -58,6 +58,15 @@ if ! actual="$(cd "${work}/a/b" && "${RELATIVE_PATH}" . c)"; then
   status=1
 elif [ "${actual}" != "c" ]; then
   echo "FAIL: relative-path . c printed '${actual}' rather than 'c'"
+  status=1
+fi
+
+# Relative arguments that begin with "-" are pathnames, not options.
+if ! actual="$(cd "${work}" && "${RELATIVE_PATH}" -base -target)"; then
+  echo "FAIL: relative-path -base -target exited with a failure status"
+  status=1
+elif [ "${actual}" != "../-target" ]; then
+  echo "FAIL: relative-path -base -target printed '${actual}' rather than '../-target'"
   status=1
 fi
 
