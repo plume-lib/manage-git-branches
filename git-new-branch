@@ -48,7 +48,10 @@ fi
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
-PARENTDIR=$(CDPATH='' cd .. && pwd -P)
+if ! PARENTDIR=$(CDPATH='' cd .. && pwd -P) || [ -z "${PARENTDIR}" ]; then
+  echo "${SCRIPT_NAME}: Cannot determine parent directory of $(pwd)" >&2
+  exit 1
+fi
 BRANCHDIR="${PARENTDIR}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
