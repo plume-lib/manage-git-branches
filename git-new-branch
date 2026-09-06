@@ -50,7 +50,7 @@ fi
 
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
-BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
+BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
 if ! PARENTDIR=$(CDPATH='' cd .. && pwd -P) || [ -z "${PARENTDIR}" ]; then
   echo "${SCRIPT_NAME}: cannot determine the directory for branch ${BRANCHNAME}" >&2
   exit 1
