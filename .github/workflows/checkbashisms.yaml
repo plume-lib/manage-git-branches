@@ -1,6 +1,9 @@
 name: Shell Linting
 
-on: [push, pull_request]
+"on": [push, pull_request]
+
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -12,7 +15,7 @@ jobs:
           fetch-depth: 1
           show-progress: false
           persist-credentials: false
+      # No "sh_checker_only_diff: true" because the workflow also runs on `push`.
       - uses: luizm/action-sh-checker@v0.10.0
         with:
-          sh_checker_only_diff: true
           sh_checker_checkbashisms_enable: true
