@@ -15,7 +15,10 @@ jobs:
           fetch-depth: 1
           show-progress: false
           persist-credentials: false
-      # No "sh_checker_only_diff: true" because the workflow also runs on `push`.
       - uses: luizm/action-sh-checker@v0.10.0
         with:
+          # No "sh_checker_only_diff: true" because the workflow also runs on `push`.
           sh_checker_checkbashisms_enable: true
+          # shfmt and shellcheck are run by `prek`.
+          sh_checker_shfmt_disable: true
+          sh_checker_shellcheck_disable: true
