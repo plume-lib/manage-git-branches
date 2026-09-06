@@ -67,4 +67,4 @@ if [ "$(git -C "${remote}" rev-parse main)" != "$(git -C "${workdir}/to" rev-par
   fail "git-pull-from --nocompile did not push"
 fi
 
-echo "${SCRIPT_NAME}: OK"
+echo "${SCRIPT_NAME}: PASS"
