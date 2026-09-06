@@ -23,6 +23,10 @@ fi
 # `find "$1" -mindepth 1 -maxdepth 1` would be simpler, but the `-mindepth` and
 # `-maxdepth` options are GNU extensions that POSIX `find` does not support.
 only_dot_project() {
+  # In a directory that cannot be listed (but can be searched, such as one with
+  # mode 711), every glob below expands to nothing, which is indistinguishable
+  # from an empty directory.  Do not claim that such a directory is empty.
+  if [ ! -r "$1" ]; then return 1; fi
   for entry in "$1"/* "$1"/.*; do
     case "${entry##*/}" in
       '.' | '..' | '.project') continue ;;

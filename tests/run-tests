@@ -15,6 +15,8 @@ for test_script_absolute in "${TESTS_DIR}"/test-*; do
   # matches nothing and the shell leaves it unexpanded.
   if [ ! -f "${test_script_absolute}" ] || [ ! -x "${test_script_absolute}" ]; then continue; fi
   test_script="$(basename -- "${test_script_absolute}")"
+  # Skips editor backup files, such as `test-foo~` and `test-foo.~1~`.
+  case "${test_script}" in *'~'*) continue ;; esac
   echo "Running ${test_script}"
   if ! "${test_script_absolute}"; then
     echo "FAILED: ${test_script}"

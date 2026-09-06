@@ -5,7 +5,7 @@
 # user-visible interface, so the README must describe it.
 #
 # Usage:
-#   tests/env-vars-documented
+#   tests/test-env-vars-documented
 #
 # The exit status is 0 if every such variable is documented, and 1 otherwise.
 
@@ -19,7 +19,7 @@ SCRIPT_NAME="$(basename -- "$0")"
 
 README="${TOPLEVEL}/README.md"
 
-SCRIPTS="compile-project git-checkout-branch git-new-branch git-orphaned-branches git-pull-from git-push-to is-deleted-branch"
+SCRIPTS="compile-project git-checkout-branch git-new-branch git-orphaned-branches git-pull-from git-push-to is-deleted-branch relative-path"
 
 # Variables that the shell or the operating system sets, which are therefore
 # not part of the interface of these scripts.

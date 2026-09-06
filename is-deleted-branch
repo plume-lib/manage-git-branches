@@ -19,7 +19,7 @@ fi
 
 dir="$1"
 
-if ! git -C "${dir}" rev-parse --git-dir >/dev/null 2>&1; then
+if ! git -C "${dir}" rev-parse --git-dir > /dev/null 2>&1; then
   # Not a clone.
   exit 0
 fi
@@ -34,7 +34,7 @@ remote_ref="$(git -C "${dir}" config --get "branch.${branch}.merge")" || exit 1
 
 # `git ls-remote --exit-code` exits with status 2 if the remote has no
 # matching ref, and with some other nonzero status if it cannot be contacted.
-git -C "${dir}" ls-remote --quiet --exit-code "${remote}" "${remote_ref}" >/dev/null 2>&1
+git -C "${dir}" ls-remote --quiet --exit-code "${remote}" "${remote_ref}" > /dev/null 2>&1
 ls_remote_status=$?
 if [ "${ls_remote_status}" -eq 2 ]; then
   exit 0

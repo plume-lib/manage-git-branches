@@ -136,7 +136,17 @@ git_push_to() {
     return 1
   fi
 
-  if ! git pull -q "${from_absolute}"; then
+  # Pull from a relative pathname, so that the merge commit message that git
+  # generates does not embed this machine's directory layout in shared history.
+  # `relative-path` is a portable version of `realpath --relative-to`, whose
+  # `--relative-to` option the BSD and macOS versions of `realpath` lack.
+  # Note: pwd=to_absolute
+  if ! from_relative="$("${SCRIPT_DIR}"/relative-path "${to_absolute}" "${from_absolute}")"; then
+    echo "${SCRIPT_NAME}: cannot express ${from_absolute} relative to ${to_absolute}" >&2
+    return 1
+  fi
+
+  if ! git pull -q "${from_relative}"; then
     # Note: pwd=to_absolute
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
     return 1

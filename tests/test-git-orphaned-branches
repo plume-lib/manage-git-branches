@@ -13,7 +13,9 @@ GIT_ORPHANED_BRANCHES="${TOPLEVEL}/git-orphaned-branches"
 status=0
 
 work="$(realpath "$(mktemp -d)")"
-trap 'rm -rf "${work}"' EXIT INT TERM
+# Restore the permissions of the deliberately unlistable directory created
+# below, so that `rm -rf` can remove it.
+trap 'chmod 755 "${work}/p-branch-unlistable" 2> /dev/null; rm -rf "${work}"' EXIT INT TERM
 
 # Contains nothing but a `.project` file.
 mkdir -p "${work}/p-branch-only-project"
@@ -47,7 +49,20 @@ touch "${work}/p-branch-no-project/other"
 mkdir -p "${work}/p-plain-project"
 touch "${work}/p-plain-project/.project"
 
-if ! output="$(cd "${work}" && "${GIT_ORPHANED_BRANCHES}")"; then
+# Contains a `.project` file and a regular file, but cannot be listed:  it can
+# be searched but not read.  Every glob in such a directory expands to nothing,
+# which must not be mistaken for "contains nothing but a `.project` file".
+# The superuser can read any directory, so skip this case when running as root.
+unlistable=0
+if [ "$(id -u)" -ne 0 ]; then
+  unlistable=1
+  mkdir -p "${work}/p-branch-unlistable"
+  touch "${work}/p-branch-unlistable/.project" "${work}/p-branch-unlistable/other"
+  chmod 111 "${work}/p-branch-unlistable"
+fi
+
+# `find` warns that it cannot list `p-branch-unlistable`, so discard stderr.
+if ! output="$(cd "${work}" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
   echo "FAIL: git-orphaned-branches exited with a failure status"
   exit 1
 fi
@@ -74,5 +89,8 @@ check "p-branch-plus-dangling-symlink" "unlisted"
 check "p-branch-empty" "unlisted"
 check "p-branch-no-project" "unlisted"
 check "p-plain-project" "unlisted"
+if [ "${unlistable}" -eq 1 ]; then
+  check "p-branch-unlistable" "unlisted"
+fi
 
 exit "${status}"
