@@ -44,9 +44,12 @@ if (PATH="${PATH_WITHOUT_COMPILE_PROJECT}" && export PATH && command -v compile-
 fi
 
 work_dir="$(mktemp -d)"
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
 trap 'rm -rf "${work_dir}"' EXIT
-trap 'rm -rf "${work_dir}"; exit 130' INT
-trap 'rm -rf "${work_dir}"; exit 143' TERM
+trap 'rm -rf "${work_dir}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${work_dir}"; trap - TERM; kill -s TERM "$$"' TERM
 
 # Do not depend on the invoking user's git identity.
 GIT_AUTHOR_NAME='manage-git-branches test'
