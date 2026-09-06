@@ -9,6 +9,7 @@
 # and 1 (false) otherwise, including any branch that has never been
 # pushed and any directory that is not a clone.
 
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
 if [ "$#" -ne 1 ]; then
@@ -89,22 +90,11 @@ if ${ssh_supports_option_o}; then
   elif [ -n "${GIT_SSH:-}" ]; then
     # GIT_SSH is an executable path rather than a shell command.  A wrapper
     # adds the option without changing the way the path is parsed.
-    ssh_wrapper_dir="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" || {
-      echo "${SCRIPT_NAME}: cannot create temporary SSH wrapper" >&2
-      exit 1
-    }
-    ssh_wrapper="${ssh_wrapper_dir}/ssh"
-    cat > "${ssh_wrapper}" <<'EOF'
-#!/bin/sh
-exec "${IS_DELETED_BRANCH_GIT_SSH}" -o BatchMode=yes "$@"
-EOF
-    chmod +x "${ssh_wrapper}"
     IS_DELETED_BRANCH_GIT_SSH="${GIT_SSH}"
     export IS_DELETED_BRANCH_GIT_SSH
-    GIT_TERMINAL_PROMPT=0 GIT_SSH="${ssh_wrapper}" \
+    GIT_TERMINAL_PROMPT=0 GIT_SSH="${SCRIPT_DIR}/is-deleted-branch-ssh-wrapper" \
       git -C "${dir}" ls-remote --exit-code "${remote}" "${upstream_ref}" > /dev/null 2>&1
     status="$?"
-    rm -rf -- "${ssh_wrapper_dir}"
   else
     GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' \
       git -C "${dir}" ls-remote --exit-code "${remote}" "${upstream_ref}" > /dev/null 2>&1

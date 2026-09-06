@@ -190,10 +190,13 @@ git_ssh_with_spaces="${testdir}/fake ssh"
 cp "${fake_ssh}" "${git_ssh_with_spaces}"
 GIT_SSH="${git_ssh_with_spaces}"
 GIT_SSH_VARIANT=ssh
-export GIT_SSH GIT_SSH_VARIANT
+# A nonexistent TMPDIR verifies that is-deleted-branch uses the committed
+# wrapper rather than creating a temporary wrapper.
+TMPDIR="${testdir}/nonexistent-tmpdir"
+export GIT_SSH GIT_SSH_VARIANT TMPDIR
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
   'is-deleted-branch with a spaced executable path selected by GIT_SSH'
-unset GIT_SSH GIT_SSH_VARIANT
+unset GIT_SSH GIT_SSH_VARIANT TMPDIR
 if [ ! -s "${ssh_arguments}" ]; then
   fail 'SSH wrapper selected by GIT_SSH was not invoked'
 elif ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
