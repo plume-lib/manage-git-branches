@@ -1,14 +1,11 @@
 #!/bin/sh
 
-# Tests that `git-push-to` and `git-pull-from` run `compile-project` even when
-# `compile-project` is not on the PATH.  Both scripts resolve their sibling
-# scripts relative to their own location, so invoking them by an absolute
-# pathname must work.
+# Tests that `git-push-to` and `git-pull-from` run `compile-project`
+# even when `compile-project` is not on the PATH.  Also tests invoking
+# the scripts by an absolute pathname.
 #
 # Usage:
 #   tests/test-compile-project-invocation.sh
-#
-# The exit status is 0 if the test passes and 1 if it fails.
 
 set -e
 
@@ -116,4 +113,4 @@ if [ ! -f "${work_dir}/main/compiled-marker" ]; then
   fail 'git-pull-from did not run compile-project'
 fi
 
-echo "${SCRIPT_NAME}: PASSED"
+echo "${SCRIPT_NAME}: OK"

@@ -117,4 +117,4 @@ if [ ! -d "${CHECKOUT_DIR}" ]; then
   fail "git-checkout-branch did not create ${CHECKOUT_DIR}"
 fi
 
-echo "${SCRIPT_NAME}: PASS"
+echo "${SCRIPT_NAME}: OK"

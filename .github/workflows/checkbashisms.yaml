@@ -1,4 +1,4 @@
-name: Shell Linting
+name: checkbashisms
 
 "on": [push, pull_request]
 

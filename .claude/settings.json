@@ -81,7 +81,6 @@
       "WebSearch(*)",
       "Write(*)"
     ],
-    "$comment-deny": "README.md forbids changing the branch of a working copy (`git checkout`, `git switch`) and forbids stashing.  Each command is denied both as written and in the `git -* ...` form, which covers options that precede the subcommand, such as `git -C DIR checkout` and `git -c pull.rebase=true switch`.  The stash subcommands are listed individually because the read-only `git stash list` is permitted above; `git -* stash` denies every other spelling of a stash command, `git stash list` included.",
     "deny": [
       "Bash(git -* checkout)",
       "Bash(git -* checkout:*)",
