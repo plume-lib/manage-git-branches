@@ -78,6 +78,8 @@ takes effect when it is set to a non-empty value.
   succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
+* `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch` uses these standard Git
+  variables to select the SSH command when it queries a remote repository.
 
 ## Installation
 
