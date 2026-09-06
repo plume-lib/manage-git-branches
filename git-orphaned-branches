@@ -31,10 +31,6 @@ while IFS= read -r dir; do
   if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
   if [ -d "$dir/.git" ]; then
     # There is a .git subdirectory.
-    # `is-deleted-branch` queries the remote repository once, and warns on
-    # standard error if the remote cannot be reached.  It does not report a
-    # branch that was never pushed, because such a branch is new rather than
-    # deleted.
 
     # If the branch was deleted in the remote, print the directory name.
     if "${SCRIPT_DIR}"/is-deleted-branch "$dir"; then

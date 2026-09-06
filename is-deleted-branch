@@ -5,13 +5,9 @@
 # Usage:
 #   is-deleted-branch DIRECTORY
 #
-# The status code is 0 (true) if the directory is on a deleted branch, and 1
-# (false) otherwise, including any directory that is not a clone.
-#
-# This command does not modify the directory.
-#
-# A branch that has never been pushed is not a deleted branch, so this
-# command returns 1 (false) for it.
+# The status code is 0 (true) if the directory is on a deleted branch,
+# and 1 (false) otherwise, including any branch that has never been
+# pushed and any directory that is not a clone.
 
 SCRIPT_NAME="$(basename -- "$0")"
 
@@ -28,7 +24,7 @@ if ! git -C "${dir}" rev-parse --git-dir > /dev/null 2>&1; then
 fi
 
 # A detached HEAD is not on a branch, so it is not on a deleted branch.
-# Strip the known prefix ourselves: `symbolic-ref --short` can return
+# Strip the known prefix ourselves, because `symbolic-ref --short` can return
 # "heads/BRANCH" when a tag and the branch have the same name.
 if ! branch_ref="$(git -C "${dir}" symbolic-ref --quiet HEAD 2> /dev/null)"; then
   exit 1
@@ -44,46 +40,48 @@ if [ -z "${remote}" ] || [ -z "${upstream_ref}" ]; then
   exit 1
 fi
 
-# `git ls-remote --exit-code` exits with status 2 if no matching ref exists.
-# GIT_TERMINAL_PROMPT=0 makes an authentication failure an error rather than
-# an interactive prompt.  OpenSSH's `-o BatchMode=yes` does the same for SSH
-# authentication and host-key prompts.
 if [ -z "${GIT_SSH_COMMAND:-}" ]; then
   unset GIT_SSH_COMMAND
 fi
 ssh_command="${GIT_SSH_COMMAND:-$(git -C "${dir}" config --get core.sshCommand)}"
 ssh_variant="${GIT_SSH_VARIANT:-$(git -C "${dir}" config --get ssh.variant)}"
 
+# `ssh_supports_option_o` is true if ssh accepts `-o`.
 # Git accepts several SSH implementations, but only OpenSSH accepts `-o`.
 # When no variant is specified, recognize the standard OpenSSH command and
 # otherwise leave Git's own variant detection in charge.
-use_batch_mode=false
+ssh_supports_option_o=false
 case "${ssh_variant}" in
   ssh)
-    use_batch_mode=true
+    ssh_supports_option_o=true
     ;;
   '' | auto)
     if [ -z "${ssh_command}" ]; then
       if [ -z "${GIT_SSH:-}" ]; then
-        use_batch_mode=true
+        ssh_supports_option_o=true
       else
         case "$(basename -- "${GIT_SSH}")" in
           ssh | ssh.exe)
-            use_batch_mode=true
+            ssh_supports_option_o=true
             ;;
         esac
       fi
     else
       case "${ssh_command}" in
         ssh | ssh\ * | */ssh | */ssh\ * | ssh.exe | ssh.exe\ * | */ssh.exe | */ssh.exe\ *)
-          use_batch_mode=true
+          ssh_supports_option_o=true
           ;;
       esac
     fi
     ;;
 esac
 
-if ${use_batch_mode}; then
+# `git ls-remote --exit-code` exits with status 2 if no matching ref exists.
+# GIT_TERMINAL_PROMPT=0 makes an authentication failure an error rather than
+# an interactive prompt.  OpenSSH's `-o BatchMode=yes` does the same for SSH
+# authentication and host-key prompts.
+
+if ${ssh_supports_option_o}; then
   if [ -n "${ssh_command}" ]; then
     GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${ssh_command} -o BatchMode=yes" \
       git -C "${dir}" ls-remote --exit-code "${remote}" "${upstream_ref}" > /dev/null 2>&1
