@@ -155,4 +155,35 @@ if grep -q 'left conflicts' "${STDERR_FILE}"; then
 $(cat "${STDERR_FILE}")"
 fi
 
+# A rebase conflict from the initial pull occurs in MAIN_DIR while the script's
+# current directory is elsewhere.
+UPSTREAM_DIR="${WORK_DIR}/upstream"
+git clone -q "${REMOTE}" "${UPSTREAM_DIR}"
+echo "upstream main line" > "${UPSTREAM_DIR}/-n"
+git -C "${UPSTREAM_DIR}" commit -q -a -m "Upstream change on main"
+git -C "${UPSTREAM_DIR}" push -q
+echo "local main line" > "${MAIN_DIR}/-n"
+git -C "${MAIN_DIR}" commit -q -a -m "Local change on main"
+git -C "${MAIN_DIR}" config pull.rebase true
+
+status=0
+(cd "${WORK_DIR}" &&
+  "${COMMANDS_DIR}/git-push-to" --nocompile "${MAIN_DIR}" "${FEATURE_DIR}") \
+  > /dev/null 2> "${STDERR_FILE}" || status="$?"
+if [ "${status}" -eq 0 ]; then
+  fail "git-push-to succeeded despite a conflicted source-directory rebase"
+fi
+if ! grep -q 'the rebase left conflicts' "${STDERR_FILE}"; then
+  fail "git-push-to did not identify the source-directory rebase; its stderr was:
+$(cat "${STDERR_FILE}")"
+fi
+if grep -q 'merge --abort' "${STDERR_FILE}"; then
+  fail "git-push-to printed merge recovery instructions for a source-directory rebase; its stderr was:
+$(cat "${STDERR_FILE}")"
+fi
+abort_command="$(sed -n 's/^.*abandon the rebase:  //p' "${STDERR_FILE}")"
+if ! sh -c "${abort_command}"; then
+  fail "git-push-to did not print a usable rebase-abort command: ${abort_command}"
+fi
+
 echo "${SCRIPT_NAME}: PASS"

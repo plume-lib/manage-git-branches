@@ -84,39 +84,6 @@ nocompile=0
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-## Prints a string as one shell-safe, single-quoted word.
-shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
-}
-
-## If a pull in the given directory left conflicts, says so, lists the
-## conflicted files, and says how to complete or abandon the active operation.
-report_conflicts() {
-  conflicted="$(git -C "$1" diff --name-only --diff-filter=U)"
-  if [ -n "${conflicted}" ]; then
-    rebase_merge_path="$(git -C "$1" rev-parse --git-path rebase-merge)"
-    rebase_apply_path="$(git -C "$1" rev-parse --git-path rebase-apply)"
-    if [ -d "${rebase_merge_path}" ] || [ -d "${rebase_apply_path}" ]; then
-      printf '%s: the rebase left conflicts in %s:\n' "${SCRIPT_NAME}" "$1" >&2
-      printf '%s\n' "${conflicted}" | sed 's/^/  /' >&2
-      printf '%s: resolve and stage the conflicts, then continue the rebase:  git -C ' "${SCRIPT_NAME}" >&2
-      shell_quote "$1" >&2
-      printf ' rebase --continue\n' >&2
-      printf '%s: or abandon the rebase:  git -C ' "${SCRIPT_NAME}" >&2
-      shell_quote "$1" >&2
-      printf ' rebase --abort\n' >&2
-    else
-      printf '%s: the merge left conflicts in %s:\n' "${SCRIPT_NAME}" "$1" >&2
-      printf '%s\n' "${conflicted}" | sed 's/^/  /' >&2
-      printf '%s: resolve the conflicts and commit, or abandon the merge:  git -C ' "${SCRIPT_NAME}" >&2
-      shell_quote "$1" >&2
-      printf ' merge --abort\n' >&2
-    fi
-  fi
-}
-
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
@@ -149,7 +116,6 @@ git_push_to() {
 
   if ! git -C "$from_absolute" pull -q; then
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute}" >&2
-    report_conflicts "${from_absolute}"
     return 1
   fi
 
@@ -167,14 +133,12 @@ git_push_to() {
 
   if ! git pull -q; then
     echo "${SCRIPT_NAME}: problem pulling in ${to_absolute}" >&2
-    report_conflicts "${to_absolute}"
     return 1
   fi
 
   if ! git pull -q "${from_absolute}"; then
     # Note: pwd=to_absolute
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
-    report_conflicts "${to_absolute}"
     return 1
   fi
 
