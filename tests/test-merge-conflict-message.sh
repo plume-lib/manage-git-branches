@@ -36,7 +36,7 @@ fail() {
 
 REMOTE="${WORK_DIR}/myrepo.git"
 MAIN_DIR="${WORK_DIR}/myrepo-branch-main"
-FEATURE_DIR="${WORK_DIR}/myrepo-branch-feature"
+FEATURE_DIR="${WORK_DIR}/my repo's; feature"
 STDERR_FILE="${WORK_DIR}/stderr.txt"
 
 ## Creates a remote repository with a `main` and a `feature` branch, and a
@@ -44,8 +44,8 @@ STDERR_FILE="${WORK_DIR}/stderr.txt"
 create_repositories() {
   git init -q --bare -b main "${REMOTE}"
   git init -q -b main "${WORK_DIR}/seed"
-  echo "first line" > "${WORK_DIR}/seed/file.txt"
-  git -C "${WORK_DIR}/seed" add file.txt
+  echo "first line" > "${WORK_DIR}/seed/-n"
+  git -C "${WORK_DIR}/seed" add -- -n
   git -C "${WORK_DIR}/seed" commit -q -m "Initial commit"
   git -C "${WORK_DIR}/seed" remote add origin "${REMOTE}"
   git -C "${WORK_DIR}/seed" push -q --set-upstream origin main
@@ -58,14 +58,14 @@ create_repositories() {
   git -C "${FEATURE_DIR}" config pull.rebase false
 }
 
-## Commits a change to file.txt in each clone, and pushes each change to the
+## Commits a change to -n in each clone, and pushes each change to the
 ## clone's own branch, so that merging `main` into `feature` conflicts but
 ## pulling either branch from `origin` succeeds.
 create_conflicting_commits() {
-  echo "main line" > "${MAIN_DIR}/file.txt"
+  echo "main line" > "${MAIN_DIR}/-n"
   git -C "${MAIN_DIR}" commit -q -a -m "Change on main"
   git -C "${MAIN_DIR}" push -q
-  echo "feature line" > "${FEATURE_DIR}/file.txt"
+  echo "feature line" > "${FEATURE_DIR}/-n"
   git -C "${FEATURE_DIR}" commit -q -a -m "Change on feature"
   git -C "${FEATURE_DIR}" push -q
 }
@@ -77,7 +77,7 @@ check_conflict_reported() {
     fail "$1 did not report the conflicts left by the merge; its stderr was:
 $(cat "${STDERR_FILE}")"
   fi
-  if ! grep -q 'file.txt' "${STDERR_FILE}"; then
+  if ! grep -Fqx -- '  -n' "${STDERR_FILE}"; then
     fail "$1 did not name the conflicted file; its stderr was:
 $(cat "${STDERR_FILE}")"
   fi
@@ -102,7 +102,10 @@ if [ -z "$(git -C "${FEATURE_DIR}" diff --name-only --diff-filter=U)" ]; then
   fail "the test did not produce a conflicted merge in ${FEATURE_DIR}"
 fi
 
-git -C "${FEATURE_DIR}" merge --abort
+abort_command="$(sed -n 's/^.*abandon the merge:  //p' "${STDERR_FILE}")"
+if ! sh -c "${abort_command}"; then
+  fail "git-push-to did not print a usable merge-abort command: ${abort_command}"
+fi
 
 # `git-pull-from` merges MAIN_DIR into the current directory, which conflicts.
 status=0
@@ -114,6 +117,29 @@ fi
 check_conflict_reported git-pull-from
 
 git -C "${FEATURE_DIR}" merge --abort
+
+# Inherited rebase configuration makes the pull rebase instead of merge.
+git -C "${FEATURE_DIR}" config pull.rebase true
+status=0
+"${COMMANDS_DIR}/git-push-to" --nocompile "${MAIN_DIR}" "${FEATURE_DIR}" \
+  > /dev/null 2> "${STDERR_FILE}" || status="$?"
+if [ "${status}" -eq 0 ]; then
+  fail "git-push-to succeeded despite a conflicted rebase"
+fi
+if ! grep -q 'the rebase left conflicts' "${STDERR_FILE}"; then
+  fail "git-push-to did not identify the conflicted rebase; its stderr was:
+$(cat "${STDERR_FILE}")"
+fi
+if ! grep -q 'rebase --continue' "${STDERR_FILE}" ||
+    ! grep -q 'rebase --abort' "${STDERR_FILE}"; then
+  fail "git-push-to did not print rebase recovery instructions; its stderr was:
+$(cat "${STDERR_FILE}")"
+fi
+if grep -q 'merge --abort' "${STDERR_FILE}"; then
+  fail "git-push-to printed merge recovery instructions for a rebase; its stderr was:
+$(cat "${STDERR_FILE}")"
+fi
+git -C "${FEATURE_DIR}" rebase --abort
 
 # A pull that fails for a reason other than a conflict is not reported as a
 # conflict.
