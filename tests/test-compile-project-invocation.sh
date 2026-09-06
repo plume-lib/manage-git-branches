@@ -44,7 +44,9 @@ if (PATH="${PATH_WITHOUT_COMPILE_PROJECT}" && export PATH && command -v compile-
 fi
 
 work_dir="$(mktemp -d)"
-trap 'rm -rf "${work_dir}"' EXIT INT TERM
+trap 'rm -rf "${work_dir}"' EXIT
+trap 'rm -rf "${work_dir}"; exit 130' INT
+trap 'rm -rf "${work_dir}"; exit 143' TERM
 
 # Do not depend on the invoking user's git identity.
 GIT_AUTHOR_NAME='manage-git-branches test'
