@@ -1,6 +1,9 @@
 name: Shell Linting
 
-on: [push, pull_request]
+"on": [push, pull_request]
+
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -12,7 +15,15 @@ jobs:
           fetch-depth: 1
           show-progress: false
           persist-credentials: false
+      # This step runs only `checkbashisms`.  `prek` (see prek.yaml) already
+      # runs `shellcheck` and `shfmt`, with this repository's own options,
+      # which differ from the ones that this action would use.
+      #
+      # Do not set `sh_checker_only_diff`, which requires a `GITHUB_TOKEN` in
+      # the environment.  Without one, the action silently finds no files to
+      # check and the job passes without running any checker at all.
       - uses: luizm/action-sh-checker@v0.10.0
         with:
-          sh_checker_only_diff: true
           sh_checker_checkbashisms_enable: true
+          sh_checker_shellcheck_disable: true
+          sh_checker_shfmt_disable: true
