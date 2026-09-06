@@ -4,20 +4,20 @@
 # starts with `test-`; it passes if it exits with status 0.
 #
 # Usage:
-#   tests/run-tests
+#   tests/run-tests.sh
 
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 
 status=0
 
-for test in "${TESTS_DIR}"/test-*; do
+for test_script_absolute in "${TESTS_DIR}"/test-*; do
   # Skips an executable directory, and the pattern itself when the pattern
   # matches nothing and the shell leaves it unexpanded.
-  if [ ! -f "${test}" ] || [ ! -x "${test}" ]; then continue; fi
-  test_name="$(basename -- "${test}")"
-  echo "Running ${test_name}"
-  if ! "${test}"; then
-    echo "FAIL: ${test_name}"
+  if [ ! -f "${test_script_absolute}" ] || [ ! -x "${test_script_absolute}" ]; then continue; fi
+  test_script="$(basename -- "${test_script_absolute}")"
+  echo "Running ${test_script}"
+  if ! "${test_script_absolute}"; then
+    echo "FAILED: ${test_script}"
     status=1
   fi
 done
