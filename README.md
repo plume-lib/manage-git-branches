@@ -39,7 +39,7 @@ The commands are:
   its remote if compilation succeeds.
   The two directories should be working copies (that is, git clones).
   You may also pass a list of directories: each is pushed into the subsequent one.
-* [`git-pull-from`](git-pull-from) `OTHER-REPO-DIR`:
+* [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
   succeeds.

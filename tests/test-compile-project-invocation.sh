@@ -52,7 +52,9 @@ commit_and_push() {
 }
 
 workdir="$(mktemp -d)"
-trap 'rm -rf "${workdir}"' EXIT INT TERM
+trap 'rm -rf "${workdir}"' EXIT
+trap 'rm -rf "${workdir}"; exit 130' INT
+trap 'rm -rf "${workdir}"; exit 143' TERM
 
 # Put a BSD-compatible realpath stand-in on PATH.  This makes the Linux test
 # reject GNU-only options in the same way that macOS does.
