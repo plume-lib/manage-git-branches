@@ -12,10 +12,29 @@ GIT_ORPHANED_BRANCHES="${TOPLEVEL}/git-orphaned-branches"
 
 status=0
 
-work="$(realpath "$(mktemp -d)")"
-# Restore the permissions of the deliberately unlistable directory created
+if ! work="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${work}" ]; then
+  echo "$0: cannot create a temporary directory" >&2
+  exit 1
+fi
+
+# Restores the permissions of the deliberately unlistable directory created
 # below, so that `rm -rf` can remove it.
-trap 'chmod 755 "${work}/p-branch-unlistable" 2> /dev/null; rm -rf "${work}"' EXIT INT TERM
+# shellcheck disable=SC2329 # Is called from traps.
+cleanup() {
+  chmod 755 "${work}/p-branch-unlistable" 2> /dev/null
+  rm -rf "${work}"
+}
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
+trap 'cleanup' EXIT
+trap 'cleanup; trap - INT; kill -s INT "$$"' INT
+trap 'cleanup; trap - TERM; kill -s TERM "$$"' TERM
+
+if ! work="$(realpath "${work}")" || [ -z "${work}" ]; then
+  echo "$0: cannot resolve the temporary directory" >&2
+  exit 1
+fi
 
 # Contains nothing but a `.project` file.
 mkdir -p "${work}/p-branch-only-project"

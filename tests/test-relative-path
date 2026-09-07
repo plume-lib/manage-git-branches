@@ -8,11 +8,16 @@ RELATIVE_PATH="${TOPLEVEL}/relative-path"
 
 status=0
 
-if ! work="$(mktemp -d)" || [ -z "${work}" ]; then
+if ! work="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${work}" ]; then
   echo "$0: cannot create a temporary directory" >&2
   exit 1
 fi
-trap 'rm -rf "${work}"' EXIT INT TERM
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
+trap 'rm -rf "${work}"' EXIT
+trap 'rm -rf "${work}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${work}"; trap - TERM; kill -s TERM "$$"' TERM
 if ! resolved="$(realpath "${work}")" || [ -z "${resolved}" ]; then
   echo "$0: cannot resolve '${work}'" >&2
   exit 1
