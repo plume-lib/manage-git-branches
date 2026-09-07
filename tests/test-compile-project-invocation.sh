@@ -62,6 +62,7 @@ esac
 exec "${SYSTEM_REALPATH}" "$@"
 INNER
 chmod +x "${fakebin}/realpath"
+TEST_PATH="${fakebin}:${PATH_WITHOUT_COMPILE_PROJECT}"
 
 # Do not depend on the invoking user's git identity.
 GIT_AUTHOR_NAME='manage-git-branches test'
@@ -106,7 +107,7 @@ git -C "${work_dir}/feature" push -q -u origin feature
 # Give the main branch a commit of its own, so that the merge is a real merge.
 commit_in "${work_dir}/main" main-1
 
-if ! PATH="${PATH_WITHOUT_COMPILE_PROJECT}" "${REPO_DIR}/git-push-to" \
+if ! PATH="${TEST_PATH}" "${REPO_DIR}/git-push-to" \
   "${work_dir}/feature" "${work_dir}/main"; then
   fail "git-push-to did not succeed when compile-project is not on the PATH"
 fi
@@ -121,7 +122,7 @@ commit_in "${work_dir}/feature" feature-2
 git -C "${work_dir}/feature" push -q
 
 if ! (cd "${work_dir}/main" \
-  && PATH="${PATH_WITHOUT_COMPILE_PROJECT}" "${REPO_DIR}/git-pull-from" "${work_dir}/feature"); then
+  && PATH="${TEST_PATH}" "${REPO_DIR}/git-pull-from" "${work_dir}/feature"); then
   fail "git-pull-from did not succeed when compile-project is not on the PATH"
 fi
 if [ ! -f "${work_dir}/main/compiled-marker" ]; then

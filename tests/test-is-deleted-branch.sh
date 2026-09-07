@@ -130,6 +130,15 @@ git clone -q -b live "${remote}" "${testdir}/myrepo-branch-tag-upstream"
 git -C "${testdir}/myrepo-branch-tag-upstream" config branch.live.merge \
   refs/tags/upstream-tag
 
+## A working copy with multiple configured upstream refs, one deleted and one
+## live.  The branch is active if any configured upstream ref exists.
+git clone -q -b live "${remote}" "${testdir}/myrepo-branch-multiple-upstreams"
+git -C "${testdir}/myrepo-branch-multiple-upstreams" config --unset-all branch.live.merge
+git -C "${testdir}/myrepo-branch-multiple-upstreams" config --add branch.live.merge \
+  refs/heads/dead
+git -C "${testdir}/myrepo-branch-multiple-upstreams" config --add branch.live.merge \
+  refs/heads/live
+
 ## A working copy whose remote repository cannot be reached.
 git clone -q -b live "${remote}" "${testdir}/myrepo-branch-unreachable"
 ssh_arguments="${testdir}/ssh-arguments"
@@ -149,6 +158,10 @@ git -C "${testdir}/myrepo-branch-unreachable" remote set-url origin \
 
 ## A directory that is not a clone.
 mkdir "${testdir}/myrepo-branch-notaclone"
+
+## A subdirectory of a clone whose branch was deleted.  It is not itself a
+## clone, even though git commands run in it operate on the clone.
+mkdir "${testdir}/myrepo-branch-dead/subdirectory"
 
 ## The tests.
 
@@ -174,7 +187,11 @@ expect_status 1 "${testdir}/myrepo-branch-brandnew" 'branch that was never pushe
 expect_status 1 "${testdir}/myrepo-branch-detached" 'working copy with a detached HEAD'
 expect_status 1 "${testdir}/myrepo-branch-tag-upstream" \
   'branch whose upstream is an existing non-head ref'
+expect_status 1 "${testdir}/myrepo-branch-multiple-upstreams" \
+  'branch with deleted and existing configured upstream refs'
 expect_status 1 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
+expect_status 1 "${testdir}/myrepo-branch-dead/subdirectory" \
+  'subdirectory of a clone whose branch was deleted'
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
   'is-deleted-branch on a working copy whose remote cannot be reached'
 if ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
@@ -203,6 +220,34 @@ elif ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
   fail 'GIT_SSH invocation did not include "-o BatchMode=yes"'
 fi
 
+# Git guesses the SSH variant from the basename of GIT_SSH, so the wrapper must
+# also announce the variant.  Otherwise Git guesses the "simple" variant, which
+# cannot pass a port to SSH, and a remote URL with a port fails to connect.
+: > "${ssh_arguments}"
+git -C "${testdir}/myrepo-branch-unreachable" remote set-url origin \
+  'ssh://example.invalid:2222/no-such-repo.git'
+# The basename is "ssh", which is how is-deleted-branch recognizes OpenSSH when
+# no variant is configured.
+mkdir -p "${testdir}/openssh-bin"
+cp "${fake_ssh}" "${testdir}/openssh-bin/ssh"
+GIT_SSH="${testdir}/openssh-bin/ssh"
+export GIT_SSH
+expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+  'is-deleted-branch with GIT_SSH and a remote URL with a port'
+unset GIT_SSH
+git -C "${testdir}/myrepo-branch-unreachable" remote set-url origin \
+  'ssh://example.invalid/no-such-repo.git'
+# Git runs the SSH command with `-G` to guess its variant, and that invocation
+# also carries the port.  Require the invocation that requests the branch list,
+# which is the one that the "simple" variant never reaches.
+if [ ! -s "${ssh_arguments}" ]; then
+  fail 'SSH wrapper selected by GIT_SSH was not invoked for a remote URL with a port'
+elif ! grep -q -- '-p 2222 .*git-upload-pack' "${ssh_arguments}"; then
+  fail "GIT_SSH invocation did not request git-upload-pack with \"-p 2222\", got [$(cat "${ssh_arguments}")]"
+elif ! grep -q -- '-o BatchMode=yes.*git-upload-pack' "${ssh_arguments}"; then
+  fail 'GIT_SSH invocation with a port did not include "-o BatchMode=yes"'
+fi
+
 # An empty GIT_SSH_COMMAND does not override a nonempty GIT_SSH.
 : > "${ssh_arguments}"
 GIT_SSH="${git_ssh_with_spaces}"
@@ -218,8 +263,8 @@ elif ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
   fail 'GIT_SSH invocation did not include "-o BatchMode=yes" when GIT_SSH_COMMAND was empty'
 fi
 
-# Plink and the other non-OpenSSH variants do not accept OpenSSH's `-o`
-# option.  Git must receive the configured command unchanged.
+# Plink and Putty do not accept OpenSSH's `-o` option.  They use `-batch` to
+# disable interactive prompts.
 : > "${ssh_arguments}"
 git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${fake_ssh}"
 git -C "${testdir}/myrepo-branch-unreachable" config ssh.variant plink
@@ -229,6 +274,8 @@ if [ ! -s "${ssh_arguments}" ]; then
   fail 'SSH wrapper selected by core.sshCommand was not invoked'
 elif grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
   fail 'Plink-style core.sshCommand invocation included "-o BatchMode=yes"'
+elif ! grep -q -- '-batch' "${ssh_arguments}"; then
+  fail 'Plink-style core.sshCommand invocation did not include "-batch"'
 fi
 
 # GIT_SSH_COMMAND takes precedence over core.sshCommand and observes the same
@@ -244,6 +291,25 @@ if [ ! -s "${ssh_arguments}" ]; then
   fail 'SSH wrapper selected by GIT_SSH_COMMAND was not invoked'
 elif grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
   fail 'Plink-style GIT_SSH_COMMAND invocation included "-o BatchMode=yes"'
+elif ! grep -q -- '-batch' "${ssh_arguments}"; then
+  fail 'Plink-style GIT_SSH_COMMAND invocation did not include "-batch"'
+fi
+
+# A Putty-style GIT_SSH executable path uses the wrapper to preserve the path
+# as one executable name while adding `-batch`.
+: > "${ssh_arguments}"
+GIT_SSH="${git_ssh_with_spaces}"
+GIT_SSH_VARIANT=putty
+export GIT_SSH GIT_SSH_VARIANT
+expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+  'is-deleted-branch with a Putty-style GIT_SSH executable path'
+unset GIT_SSH GIT_SSH_VARIANT
+if [ ! -s "${ssh_arguments}" ]; then
+  fail 'SSH wrapper selected by Putty-style GIT_SSH was not invoked'
+elif grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
+  fail 'Putty-style GIT_SSH invocation included "-o BatchMode=yes"'
+elif ! grep -q -- '-batch' "${ssh_arguments}"; then
+  fail 'Putty-style GIT_SSH invocation did not include "-batch"'
 fi
 
 # `git-orphaned-branches` must list exactly the deleted branch, and must not
