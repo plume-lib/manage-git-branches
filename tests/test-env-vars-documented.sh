@@ -58,7 +58,7 @@ for script in ${SCRIPTS}; do
 done
 
 if [ "${status}" -eq 0 ]; then
-  echo "${SCRIPT_NAME}: PASS"
+  echo "${SCRIPT_NAME}: OK"
 fi
 
 exit "${status}"
