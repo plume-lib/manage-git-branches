@@ -50,6 +50,10 @@ elif [ "$#" -eq 1 ]; then
     echo "${SCRIPT_NAME}: not a directory: $toplevel" >&2
     exit 1
   fi
+  # Maintain the invariant that $toplevel has no trailing "/" character.
+  while [ "$toplevel" != "/" ] && [ "${toplevel%/}" != "$toplevel" ]; do
+    toplevel="${toplevel%/}"
+  done
   echo "Running ${SCRIPT_NAME} in $toplevel"
 else
   echo "Usage: ${SCRIPT_NAME} [--clean] [<directory>]" >&2
@@ -122,7 +126,7 @@ else
     fi
   done
   if [ "$buildfile_found" = 0 ] && [ -n "$ERR_IF_NO_BUILDFILE" ]; then
-    echo "${SCRIPT_NAME} did nothing in $(pwd)" >&2
+    echo "${SCRIPT_NAME} did nothing in $toplevel" >&2
     exit 1
   fi
 fi

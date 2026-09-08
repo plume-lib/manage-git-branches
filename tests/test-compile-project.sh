@@ -17,8 +17,25 @@ fail() {
   status=1
 }
 
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "${tmpdir}"' EXIT INT TERM
+# Do not let the invoking environment change what the script under test does.
+# The flag variables could keep `compile-project` from creating the marker file
+# that the tests look for, and ERR_IF_NO_BUILDFILE would make it fail in the
+# directory that has no buildfile.
+unset MAKE_FLAGS
+unset GRADLE_ASSEMBLE_FLAGS
+unset MVN_COMPILE_FLAGS
+unset ERR_IF_NO_BUILDFILE
+
+if ! tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${tmpdir}" ]; then
+  echo "$0: cannot create a temporary directory" >&2
+  exit 1
+fi
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
+trap 'rm -rf "${tmpdir}"' EXIT
+trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
 
 # A directory that does not exist is an error.
 nonexistent="${tmpdir}/does-not-exist"
