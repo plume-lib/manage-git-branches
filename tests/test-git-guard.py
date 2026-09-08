@@ -5,7 +5,7 @@
 That hook forbids changing the branch of a working copy.
 
 Usage:
-  tests/test-git-guard-one-branch-per-directory.py
+  tests/test-git-guard.py
 """
 
 from __future__ import annotations
@@ -62,6 +62,19 @@ FORBIDDEN = (
     "GIT_PAGER=cat git branch newbranch",
     "sudo -u nobody git checkout main",
     "timeout 300 git stash",
+    # A shell's command option may be part of a cluster.
+    "bash -lc 'git checkout main'",
+    "sh -xc 'git stash'",
+    "sh -cx 'git branch newbranch'",
+    # A newline separates one command from the next, so a later line is a command too.
+    "git status\ngit checkout main",
+    "git status\ngit branch newbranch",
+    "git log --oneline\n\ngit stash",
+    "cd /some/dir\ngit switch main\nmake",
+    # A here-document that feeds a shell is a script.
+    "sh <<'EOF'\ngit checkout main\nEOF",
+    "bash <<EOF\ngit stash\nEOF",
+    "bash <<'EOF'\ngit status\ngit checkout main\nEOF",
     # Unparsable, but it mentions a forbidden operation.
     "git checkout 'main",
 )
@@ -105,10 +118,21 @@ PERMITTED = (
     "git-new-branch newbranch",
     "git-checkout-branch existingbranch",
     "./git-new-branch newbranch",
+    # Every line of a multi-line command, and only the commands.
+    "git status\ngit log --oneline",
+    "git commit -m 'first line\nsecond line'",
+    # A shell option that is not a command option.
+    "bash -s < script.sh",
+    "sh -n script.sh",
     # Commands that merely mention a forbidden operation.
     "echo 'git branch newbranch'",
     "grep -n 'git checkout' README.md",
     "cat .claude/hooks/git-guard-one-branch-per-directory.py",
+    # A here-document body that no shell runs is data, not commands, even when an
+    # apostrophe in it makes the whole command unparsable as shell words.
+    "cat > notes.md <<'EOF'\nDo not run `git branch NEWBRANCH` here.\nEOF",
+    "cat > notes.md <<'EOF'\nThe user's rules deny `git checkout`.\nEOF",
+    "python3 - <<'EOF'\nprint('git stash')\nEOF",
     # Unparsable, and mentioning nothing forbidden.
     "echo 'unterminated",
 )
@@ -187,6 +211,18 @@ def main() -> int:
     if completed.returncode != 0 or completed.stdout.strip() != "":
         print("FAILED: made a decision about a tool other than Bash")
         failures += 1
+
+    # A tool input of an unexpected shape is ignored rather than crashing the hook.
+    for tool_input in ("git branch newbranch", ["git", "branch"], None, {"command": 3}):
+        request = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": tool_input,
+        }
+        completed = run_guard(json.dumps(request))
+        if completed.returncode != 0 or completed.stdout.strip() != "":
+            print(f"FAILED: not ignored: tool_input {tool_input!r}: {completed.stderr}")
+            failures += 1
 
     # Malformed input is reported, but does not block the tool call.
     for hook_input in ("not json", "null"):

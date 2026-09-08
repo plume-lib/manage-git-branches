@@ -3,16 +3,24 @@
 """A Claude Code PreToolUse hook that enforces one-branch-per-directory work style.
 
 README.md forbids switching the branch of a working copy and forbids stashing.  The
-permission patterns of `.claude/settings.json` cannot express that policy: they match a
-command prefix word by word, so a pattern that rejects `git branch NEWBRANCH` (which
-creates a branch) also rejects `git branch --show-current` (which is read-only), and no
-pattern covers forms such as `git stash -- FILE` or `git -c core.pager=cat -C DIR
-checkout BRANCH`.  This hook parses the command instead, and denies:
+permission patterns of `.claude/settings.json` cannot express that policy.  A pattern is
+a literal command prefix or a whole-command glob (one that ends in a space and a star is
+tried both ways), so a pattern that rejects `git branch NEWBRANCH` (which creates a
+branch) also rejects `git branch --show-current` (which is read-only); and a pattern that
+has both an interior `*` and a trailing `:*`, which is what covering
+`git -c core.pager=cat -C DIR checkout BRANCH` would take, matches nothing at all.  This
+hook parses the command instead, and denies:
 
   * `git checkout` and `git switch` in any form.
   * `git stash` in any form except `list` and `show`.
   * `git branch` in any form other than listing, including the positional forms
     `git branch NEWBRANCH` and `git branch -- NEWBRANCH`.
+
+The hook inspects the literal `git` invocations of a command: those of a command list,
+of a shell's `-c` argument, and of a here-document that feeds a shell.  It does not
+follow `eval`, command substitution, or a command such as `xargs` or `find -exec` that
+receives `git` as data.  A command that the hook cannot analyze is denied if it mentions
+a restricted subcommand.
 
 The hook only ever denies.  A permitted command produces no decision, so the `allow` and
 `deny` lists of `.claude/settings.json` still govern it.
@@ -36,6 +44,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+# This script's name, for its messages on standard error.
+PROGRAM = "git-guard-one-branch-per-directory.py"
+
 # Shells whose `-c` argument is itself parsed as a command.
 SHELLS = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
 
@@ -47,8 +58,10 @@ WRAPPERS = frozenset(
     {"command", "env", "exec", "nice", "nohup", "stdbuf", "sudo", "time", "timeout"}
 )
 
-# Characters that make up a shell operator token, such as `;` or `&&`.
-OPERATOR_CHARS = frozenset("();<>|&")
+# Characters that make up a shell operator token, such as `;` or `&&`.  A newline
+# separates one command from the next, so it is an operator rather than whitespace.
+OPERATOR_CHARACTERS = "();<>|&\n"
+OPERATOR_CHARS = frozenset(OPERATOR_CHARACTERS)
 
 # Shell keywords that separate one command from another.
 KEYWORDS = frozenset(
@@ -74,7 +87,16 @@ KEYWORDS = frozenset(
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*=.*", re.DOTALL)
 
 # A git subcommand that this hook restricts, in a command it could not parse.
-FORBIDDEN_MENTION = re.compile(r"\bgit\b.*\b(branch|checkout|stash|switch)\b")
+FORBIDDEN_MENTION = re.compile(r"\bgit\s+((-{1,2}\S+|\S+=\S+)\s+)*(branch|checkout|stash|switch)\b")
+
+# A here-document: the redirection operator, the delimiter word, the body, and the
+# line that holds the delimiter alone.  A `<<-` here-document permits leading tabs
+# on that line.
+HEREDOC = re.compile(
+    r"<<-?[ \t]*(?P<quote>['\"]?)(?P<delimiter>\w+)(?P=quote)"
+    r"(?P<body>.*?)^[\t]*(?P=delimiter)[ \t]*$",
+    re.DOTALL | re.MULTILINE,
+)
 
 # Git options that precede the subcommand and take a separate value, as in
 # `git -C DIR branch`.  The `--option=value` form is handled separately.
@@ -153,7 +175,9 @@ def _tokenize(command: str) -> list[str]:
     Returns:
         The tokens of the command.
     """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATOR_CHARACTERS)
+    # A newline is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
+    lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     try:
         return list(lexer)
@@ -222,6 +246,39 @@ def _strip_prefixes(words: list[str]) -> list[str]:
     return argv
 
 
+def _remove_heredoc_bodies(command: str) -> tuple[str, list[str]]:
+    """Take the here-document bodies out of a shell command.
+
+    A here-document body is data, not shell syntax, so parsing it as a command would
+    misread the text that a command such as `cat > file <<EOF` merely writes.
+
+    Args:
+        command: a shell command.
+
+    Returns:
+        The command without its here-document bodies, and those bodies.
+    """
+    bodies: list[str] = []
+
+    def take(match: re.Match[str]) -> str:
+        bodies.append(match.group("body"))
+        return "<<"
+
+    return HEREDOC.sub(take, command), bodies
+
+
+def _is_shell_command_option(token: str) -> bool:
+    """Tell whether a shell option introduces a command, as `-c` and the cluster `-lc` do.
+
+    Args:
+        token: an argument of a shell.
+
+    Returns:
+        True if the shell runs the following argument as a command.
+    """
+    return token.startswith("-") and not token.startswith("--") and "c" in token[1:]
+
+
 def _git_invocations(command: str) -> Iterator[list[str]]:
     """Find the git invocations in a shell command.
 
@@ -231,19 +288,26 @@ def _git_invocations(command: str) -> Iterator[list[str]]:
     Yields:
         The argument list of each `git` invocation.
     """
-    for words in _simple_commands(_tokenize(command)):
+    without_bodies, bodies = _remove_heredoc_bodies(command)
+    programs = set()
+    for words in _simple_commands(_tokenize(without_bodies)):
         argv = _strip_prefixes(words)
         if not argv:
             continue
         program = PurePath(argv[0]).name
+        programs.add(program)
         if program == "git":
             yield argv
         elif program in SHELLS:
             # Parses the argument of `-c`, as in `sh -c 'git checkout main'`.
             for index in range(1, len(argv) - 1):
-                if argv[index] == "-c":
+                if _is_shell_command_option(argv[index]):
                     yield from _git_invocations(argv[index + 1])
                     break
+    if programs & SHELLS:
+        # A here-document that feeds a shell is a script, as in `sh <<'EOF'`.
+        for body in bodies:
+            yield from _git_invocations(body)
 
 
 def _subcommand(argv: list[str]) -> tuple[str | None, list[str]]:
@@ -330,25 +394,33 @@ def _stash_denial(args: list[str]) -> str | None:
     return f"`git stash {args[0]}` changes the stash or the working copy."
 
 
-def denial(command: str) -> str | None:
-    """Decide whether a shell command changes the branch of a working copy.
+def _unanalyzable_denial(command: str) -> str | None:
+    """Decide about a command that this hook could not analyze.
 
     Args:
         command: the command that the Bash tool was asked to run.
 
     Returns:
-        Why the command is forbidden, or None if it is permitted.
+        Why the command is forbidden, or None if it mentions nothing forbidden.
     """
-    try:
-        invocations = list(_git_invocations(command))
-    except UnparsableCommandError:
-        if FORBIDDEN_MENTION.search(command):
-            return (
-                "This command could not be parsed, and it might change the branch of"
-                " this working copy."
-            )
-        return None
-    for argv in invocations:
+    if FORBIDDEN_MENTION.search(command):
+        return (
+            "This command could not be analyzed, and it might change the branch of"
+            " this working copy."
+        )
+    return None
+
+
+def _denials(command: str) -> Iterator[str]:
+    """Find the reasons that a shell command is forbidden.
+
+    Args:
+        command: the command that the Bash tool was asked to run.
+
+    Yields:
+        Why each forbidden git invocation of the command is forbidden.
+    """
+    for argv in _git_invocations(command):
         name, args = _subcommand(argv)
         if name in ("checkout", "switch"):
             reason = f"`git {name}` switches the branch of this working copy."
@@ -359,8 +431,27 @@ def denial(command: str) -> str | None:
         else:
             reason = None
         if reason is not None:
-            return reason
-    return None
+            yield reason
+
+
+def denial(command: str) -> str | None:
+    """Decide whether a shell command changes the branch of a working copy.
+
+    Args:
+        command: the command that the Bash tool was asked to run.
+
+    Returns:
+        Why the command is forbidden, or None if it is permitted.
+    """
+    try:
+        return next(_denials(command), None)
+    except UnparsableCommandError:
+        return _unanalyzable_denial(command)
+    except Exception as exception:  # ruff: ignore[blind-except]
+        # The catch is deliberately blind: a defect in this hook must report itself
+        # rather than permit a command that changes the branch of this working copy.
+        print(f"{PROGRAM}: cannot analyze {command!r}: {exception!r}", file=sys.stderr)
+        return _unanalyzable_denial(command)
 
 
 def main() -> int:
@@ -372,20 +463,15 @@ def main() -> int:
     try:
         request = json.load(sys.stdin)
     except (json.JSONDecodeError, UnicodeDecodeError) as exception:
-        print(
-            f"git-guard-one-branch-per-directory.py: cannot parse hook input: {exception}",
-            file=sys.stderr,
-        )
+        print(f"{PROGRAM}: cannot parse hook input: {exception}", file=sys.stderr)
         return 1
     if not isinstance(request, dict):
-        print(
-            f"git-guard-one-branch-per-directory.py: hook input is not an object: {request!r}",
-            file=sys.stderr,
-        )
+        print(f"{PROGRAM}: hook input is not an object: {request!r}", file=sys.stderr)
         return 1
     if request.get("tool_name") != "Bash":
         return 0
-    command = request.get("tool_input", {}).get("command", "")
+    tool_input = request.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return 0
     reason = denial(command)
