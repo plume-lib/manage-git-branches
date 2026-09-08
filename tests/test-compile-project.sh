@@ -17,8 +17,26 @@ fail() {
   status=1
 }
 
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "${tmpdir}"' EXIT INT TERM
+# Do not let the invoking environment change what the script under test does.
+# These flag variables are passed to the build tool, so they could keep
+# `compile-project` from writing the log lines that the tests look for.
+# `CLEAN` is deliberately not unset:  the last test below checks that
+# `compile-project` ignores it.
+unset MAKE_FLAGS
+unset GRADLE_ASSEMBLE_FLAGS
+unset MVN_COMPILE_FLAGS
+unset ERR_IF_NO_BUILDFILE
+
+if ! tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${tmpdir}" ]; then
+  echo "$0: cannot create a temporary directory" >&2
+  exit 1
+fi
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
+trap 'rm -rf "${tmpdir}"' EXIT
+trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
 
 # Creates, in the given directory, a Makefile whose "all" target writes
 # "built" and whose "clean" target writes "cleaned", to a file named "log".
