@@ -87,7 +87,9 @@ KEYWORDS = frozenset(
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*=.*", re.DOTALL)
 
 # A git subcommand that this hook restricts, in a command it could not parse.
-FORBIDDEN_MENTION = re.compile(r"\bgit\s+((-{1,2}\S+|\S+=\S+)\s+)*(branch|checkout|stash|switch)\b")
+FORBIDDEN_MENTION = re.compile(
+    r"\bgit\s+((-{1,2}\S+|\S+=\S+)\s+)*(branch|checkout|stash|switch)\b"
+)
 
 # A here-document: the redirection operator, the delimiter word, the body, and the
 # line that holds the delimiter alone.  A `<<-` here-document permits leading tabs

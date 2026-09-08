@@ -172,9 +172,7 @@ def decision(command: str) -> str | None:
     }
     completed = run_guard(json.dumps(request))
     if completed.returncode != 0:
-        message = (
-            f"{GUARD} exited with status {completed.returncode} on {command!r}: {completed.stderr}"
-        )
+        message = f"{GUARD} exited with status {completed.returncode} on {command!r}: {completed.stderr}"
         sys.exit(message)
     if completed.stdout.strip() == "":
         return None
