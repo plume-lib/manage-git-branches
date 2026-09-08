@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import subprocess
@@ -75,6 +76,22 @@ FORBIDDEN = (
     "sh <<'EOF'\ngit checkout main\nEOF",
     "bash <<EOF\ngit stash\nEOF",
     "bash <<'EOF'\ngit status\ngit checkout main\nEOF",
+    # What follows a here-document's delimiter word on that line is not the body.
+    "cat > notes.md <<EOF && git checkout main\nnotes\nEOF",
+    "cat > notes.md <<'EOF'; git switch main\nnotes\nEOF",
+    "cat > notes.md <<-EOF | git stash\n\tnotes\n\tEOF",
+    # A command that receives `git` as data and then runs it.
+    "eval git checkout main",
+    'eval "git checkout main"',
+    "eval 'git stash; git status'",
+    "echo main | xargs git checkout",
+    "echo main | xargs -n 1 git switch",
+    "find . -name '*.java' -exec git checkout main \\;",
+    "find . -type d -execdir git stash \\;",
+    "find . -name x -exec git branch newbranch +",
+    "ssh host git checkout main",
+    "ssh -p 22 host git branch newbranch",
+    "env xargs git switch main",
     # Unparsable, but it mentions a forbidden operation.
     "git checkout 'main",
 )
@@ -107,9 +124,11 @@ PERMITTED = (
     # Reading the stash.
     "git stash list",
     "git stash show -p",
-    # Other git commands.
+    # Other git commands, including ones that merely name a forbidden subcommand.
     "git status",
     "git log --oneline",
+    "git log --grep checkout HEAD",
+    "git log --grep stash",
     "git commit -m 'Do not stash or checkout'",
     "git diff --stat",
     "git rev-parse --abbrev-ref HEAD",
@@ -133,6 +152,13 @@ PERMITTED = (
     "cat > notes.md <<'EOF'\nDo not run `git branch NEWBRANCH` here.\nEOF",
     "cat > notes.md <<'EOF'\nThe user's rules deny `git checkout`.\nEOF",
     "python3 - <<'EOF'\nprint('git stash')\nEOF",
+    "cat > notes.md <<'EOF' && echo done\ngit checkout main\nEOF",
+    # A command that receives a forbidden operation as data but does not run it.
+    "find . -name '*.md' -exec grep 'git checkout' {} +",
+    "echo '*.md' | xargs grep 'git stash'",
+    "eval git status",
+    "ssh host git branch --show-current",
+    "find . -name '*.py' -type f",
     # Unparsable, and mentioning nothing forbidden.
     "echo 'unterminated",
 )
@@ -172,12 +198,55 @@ def decision(command: str) -> str | None:
     }
     completed = run_guard(json.dumps(request))
     if completed.returncode != 0:
-        message = f"{GUARD} exited with status {completed.returncode} on {command!r}: {completed.stderr}"
+        message = (
+            f"{GUARD} exited with status {completed.returncode} on {command!r}: {completed.stderr}"
+        )
         sys.exit(message)
     if completed.stdout.strip() == "":
         return None
     output = json.loads(completed.stdout)
     return output["hookSpecificOutput"]["permissionDecision"]
+
+
+def deny_pattern_matches(pattern: str, command: str) -> bool:
+    """Tell whether a `deny` permission pattern of `.claude/settings.json` matches.
+
+    A pattern that ends in `:*` is a literal command prefix.  Any other pattern is a
+    glob for the whole command, whose `*` spans words; one that ends in a space and a
+    star is tried both with and without that suffix.  A pattern with both an interior
+    `*` and a trailing `:*` matches nothing at all.
+
+    Args:
+        pattern: the text between `Bash(` and `)` of a permission pattern.
+        command: the command that the Bash tool was asked to run.
+
+    Returns:
+        True if the pattern matches the command.
+    """
+    if pattern.endswith(":*"):
+        prefix = pattern[: -len(":*")]
+        if "*" in prefix:
+            return False
+        return command == prefix or command.startswith(prefix + " ")
+    if fnmatch.fnmatchcase(command, pattern):
+        return True
+    return pattern.endswith(" *") and fnmatch.fnmatchcase(command, pattern[: -len(" *")])
+
+
+def bash_deny_patterns(settings: dict) -> list[str]:
+    """Find the `Bash` patterns of the `deny` permission list.
+
+    Args:
+        settings: the parsed contents of `.claude/settings.json`.
+
+    Returns:
+        The text between `Bash(` and `)` of each `deny` pattern for the Bash tool.
+    """
+    return [
+        pattern[len("Bash(") : -len(")")]
+        for pattern in settings.get("permissions", {}).get("deny", [])
+        if pattern.startswith("Bash(") and pattern.endswith(")")
+    ]
 
 
 def main() -> int:
@@ -242,6 +311,22 @@ def main() -> int:
     if not os.access(GUARD, os.X_OK):
         print(f"FAILED: {GUARD} is not executable")
         failures += 1
+
+    # `deny` wins over `allow`, so no `deny` pattern may reject a command that this
+    # hook permits.  Only the hook can distinguish those commands.
+    deny_patterns = bash_deny_patterns(settings)
+    for command in PERMITTED:
+        for pattern in deny_patterns:
+            if deny_pattern_matches(pattern, command):
+                print(f"FAILED: deny pattern Bash({pattern}) rejects: {command}")
+                failures += 1
+
+    # A pattern with both an interior `*` and a trailing `:*` matches nothing, so
+    # writing one silently states no policy at all.
+    for pattern in deny_patterns:
+        if pattern.endswith(":*") and "*" in pattern[: -len(":*")]:
+            print(f"FAILED: deny pattern Bash({pattern}) matches nothing")
+            failures += 1
 
     return 1 if failures else 0
 

@@ -16,11 +16,11 @@ hook parses the command instead, and denies:
   * `git branch` in any form other than listing, including the positional forms
     `git branch NEWBRANCH` and `git branch -- NEWBRANCH`.
 
-The hook inspects the literal `git` invocations of a command: those of a command list,
-of a shell's `-c` argument, and of a here-document that feeds a shell.  It does not
-follow `eval`, command substitution, or a command such as `xargs` or `find -exec` that
-receives `git` as data.  A command that the hook cannot analyze is denied if it mentions
-a restricted subcommand.
+The hook inspects the `git` invocations of a command: those of a command list, of a
+shell's `-c` argument, of a here-document that feeds a shell, of `eval`, of `xargs`, of
+`find -exec`, and of `ssh`.  It does not follow command substitution, nor a command that
+is built at run time, such as `echo "git $operation main" | sh`.  A command that cannot
+be split into words is denied if it mentions a restricted subcommand.
 
 The hook only ever denies.  A permitted command produces no decision, so the `allow` and
 `deny` lists of `.claude/settings.json` still govern it.
@@ -50,8 +50,15 @@ PROGRAM = "git-guard-one-branch-per-directory.py"
 # Shells whose `-c` argument is itself parsed as a command.
 SHELLS = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
 
+# Programs that run a command on another host, as `ssh HOST git checkout main` does.
+REMOTE_SHELLS = frozenset({"rsh", "ssh"})
+
+# Programs that receive a command as data and then run it.  `eval` and a remote shell
+# run shell text; `xargs` and `find -exec` run an argument list.
+INDIRECT_PROGRAMS = frozenset({"eval", "find", "xargs"}) | REMOTE_SHELLS
+
 # Programs whose arguments this hook parses.
-PARSED_PROGRAMS = frozenset({"git"}) | SHELLS
+PARSED_PROGRAMS = frozenset({"git"}) | SHELLS | INDIRECT_PROGRAMS
 
 # Commands that run another command given as their trailing arguments.
 WRAPPERS = frozenset(
@@ -87,34 +94,64 @@ KEYWORDS = frozenset(
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*=.*", re.DOTALL)
 
 # A git subcommand that this hook restricts, in a command it could not parse.
-FORBIDDEN_MENTION = re.compile(
-    r"\bgit\s+((-{1,2}\S+|\S+=\S+)\s+)*(branch|checkout|stash|switch)\b"
-)
+FORBIDDEN_MENTION = re.compile(r"\bgit\s+((-{1,2}\S+|\S+=\S+)\s+)*(branch|checkout|stash|switch)\b")
 
-# A here-document: the redirection operator, the delimiter word, the body, and the
-# line that holds the delimiter alone.  A `<<-` here-document permits leading tabs
-# on that line.
+# A here-document: the redirection operator, the delimiter word, the rest of the line
+# that holds them, the body, and the line that holds the delimiter alone.  A `<<-`
+# here-document permits leading tabs on that line.  The body starts at the next line,
+# not just after the delimiter word, because what follows the delimiter word on its own
+# line is shell syntax rather than data, as in `cat <<EOF && git checkout main`.
 HEREDOC = re.compile(
     r"<<-?[ \t]*(?P<quote>['\"]?)(?P<delimiter>\w+)(?P=quote)"
-    r"(?P<body>.*?)^[\t]*(?P=delimiter)[ \t]*$",
+    r"(?P<rest>[^\n]*)\n(?P<body>.*?)^[\t]*(?P=delimiter)[ \t]*$",
     re.DOTALL | re.MULTILINE,
 )
 
 # Git options that precede the subcommand and take a separate value, as in
-# `git -C DIR branch`.  The `--option=value` form is handled separately.
+# `git -C DIR branch`.  The `--option=value` form is handled separately, and so is an
+# option such as `--exec-path`, whose value is optional and therefore must be written
+# with `=`; treating it as taking a separate value would skip the subcommand.
 GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
     {
         "--attr-source",
         "--config-env",
-        "--exec-path",
         "--git-dir",
         "--namespace",
-        "--super-prefix",
         "--work-tree",
         "-C",
         "-c",
     }
 )
+
+# `xargs` options that take a separate value.
+XARGS_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "--arg-file",
+        "--delimiter",
+        "--eof",
+        "--max-args",
+        "--max-chars",
+        "--max-lines",
+        "--max-procs",
+        "--process-slot-var",
+        "--replace",
+        "-E",
+        "-I",
+        "-L",
+        "-P",
+        "-a",
+        "-d",
+        "-n",
+        "-s",
+    }
+)
+
+# `find` primaries that run a command, and the arguments that end that command.
+FIND_COMMAND_PRIMARIES = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+FIND_COMMAND_TERMINATORS = frozenset({"+", ";"})
+
+# Single-letter `ssh` options that take a separate value.  `ssh` has no long options.
+SSH_OPTION_LETTERS_WITH_VALUE = frozenset("BbcDEeFIiJLlmOopQRSWw")
 
 # Read-only `git branch` options that take no value.
 BRANCH_READ_ONLY_FLAGS = frozenset(
@@ -252,7 +289,8 @@ def _remove_heredoc_bodies(command: str) -> tuple[str, list[str]]:
     """Take the here-document bodies out of a shell command.
 
     A here-document body is data, not shell syntax, so parsing it as a command would
-    misread the text that a command such as `cat > file <<EOF` merely writes.
+    misread the text that a command such as `cat > file <<EOF` merely writes.  The rest
+    of the line that introduces the here-document is shell syntax, so it is kept.
 
     Args:
         command: a shell command.
@@ -264,7 +302,8 @@ def _remove_heredoc_bodies(command: str) -> tuple[str, list[str]]:
 
     def take(match: re.Match[str]) -> str:
         bodies.append(match.group("body"))
-        return "<<"
+        # Keeps what follows the delimiter word on its own line, which is shell syntax.
+        return "<<" + match.group("rest")
 
     return HEREDOC.sub(take, command), bodies
 
@@ -279,6 +318,72 @@ def _is_shell_command_option(token: str) -> bool:
         True if the shell runs the following argument as a command.
     """
     return token.startswith("-") and not token.startswith("--") and "c" in token[1:]
+
+
+def _xargs_command(argv: list[str]) -> list[str]:
+    """Find the command that an `xargs` invocation runs.
+
+    Args:
+        argv: the argument list of an `xargs` invocation.
+
+    Returns:
+        The words of the command, or an empty list if there is none.  The words that
+        `xargs` appends from its own input are not known here, so they are absent.
+    """
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "-" or not token.startswith("-"):
+            return argv[index:]
+        if "=" not in token and token in XARGS_OPTIONS_WITH_VALUE:
+            index += 2
+        else:
+            index += 1
+    return []
+
+
+def _find_commands(argv: list[str]) -> Iterator[list[str]]:
+    """Find the commands that a `find` invocation runs, as in `find . -exec CMD ;`.
+
+    Args:
+        argv: the argument list of a `find` invocation.
+
+    Yields:
+        The words of each command.
+    """
+    index = 1
+    while index < len(argv):
+        if argv[index] not in FIND_COMMAND_PRIMARIES:
+            index += 1
+            continue
+        index += 1
+        words: list[str] = []
+        while index < len(argv) and argv[index] not in FIND_COMMAND_TERMINATORS:
+            words.append(argv[index])
+            index += 1
+        yield words
+
+
+def _remote_shell_command(argv: list[str]) -> list[str]:
+    """Find the command that an `ssh` invocation runs on another host.
+
+    Args:
+        argv: the argument list of an `ssh` or `rsh` invocation.
+
+    Returns:
+        The words of the command, or an empty list if there is none.
+    """
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "-" or not token.startswith("-"):
+            # This operand is the destination host, and the rest is the command.
+            return argv[index + 1 :]
+        if len(token) == 2 and token[1] in SSH_OPTION_LETTERS_WITH_VALUE:
+            index += 2
+        else:
+            index += 1
+    return []
 
 
 def _git_invocations(command: str) -> Iterator[list[str]]:
@@ -296,20 +401,63 @@ def _git_invocations(command: str) -> Iterator[list[str]]:
         argv = _strip_prefixes(words)
         if not argv:
             continue
-        program = PurePath(argv[0]).name
-        programs.add(program)
-        if program == "git":
-            yield argv
-        elif program in SHELLS:
-            # Parses the argument of `-c`, as in `sh -c 'git checkout main'`.
-            for index in range(1, len(argv) - 1):
-                if _is_shell_command_option(argv[index]):
-                    yield from _git_invocations(argv[index + 1])
-                    break
+        programs.add(PurePath(argv[0]).name)
+        yield from _invocations_of(argv)
     if programs & SHELLS:
         # A here-document that feeds a shell is a script, as in `sh <<'EOF'`.
         for body in bodies:
             yield from _git_invocations(body)
+
+
+def _invocations_of(argv: list[str]) -> Iterator[list[str]]:
+    """Find the git invocations that a single command runs.
+
+    A command that receives another command as data runs git without being git, so
+    this function looks inside it.
+
+    Args:
+        argv: the nonempty words of a single command, its prefixes already removed.
+
+    Yields:
+        The argument list of each `git` invocation.
+    """
+    program = PurePath(argv[0]).name
+    if program == "git":
+        yield argv
+    elif program in SHELLS:
+        # Parses the argument of `-c`, as in `sh -c 'git checkout main'`.
+        for index in range(1, len(argv) - 1):
+            if _is_shell_command_option(argv[index]):
+                yield from _git_invocations(argv[index + 1])
+                break
+    elif program == "eval":
+        # `eval` joins its arguments and runs the result as a shell command.
+        yield from _git_invocations(" ".join(argv[1:]))
+    elif program in REMOTE_SHELLS:
+        # `ssh` also joins its arguments, and a shell on the host runs the result.
+        yield from _git_invocations(" ".join(_remote_shell_command(argv)))
+    elif program == "xargs":
+        yield from _indirect_invocations(_xargs_command(argv))
+    elif program == "find":
+        for words in _find_commands(argv):
+            yield from _indirect_invocations(words)
+
+
+def _indirect_invocations(argv: list[str]) -> Iterator[list[str]]:
+    """Find the git invocations of a command that another command runs.
+
+    The words are already split, as `xargs` and `find -exec` receive them, so they
+    are not shell syntax to be parsed again.
+
+    Args:
+        argv: the words of the command, or an empty list if there is none.
+
+    Yields:
+        The argument list of each `git` invocation.
+    """
+    words = _strip_prefixes(argv)
+    if words:
+        yield from _invocations_of(words)
 
 
 def _subcommand(argv: list[str]) -> tuple[str | None, list[str]]:

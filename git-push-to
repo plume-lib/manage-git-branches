@@ -7,8 +7,9 @@
 # Usage:
 #   git-push-to [--nocompile] FROM_DIR TO_DIR ...
 #
-# The arguments are directory names for working copies (that is, clones).
-# They may be absolute directory names or relative to the current directory.
+# The arguments are the top-level directories of working copies (that is, clones);
+# a subdirectory of a working copy is not accepted.  They may be absolute directory
+# names or relative to the current directory.
 # The first argument may be "--nocompile" to skip the compilation step.
 #
 # This script does the following:
@@ -119,28 +120,53 @@ check_branch_exists() {
   return 0
 }
 
+## Prints the absolute pathname of the given pathname.  Prints nothing and returns
+## nonzero if the pathname cannot be canonicalized.
+## `realpath` would treat a pathname that starts with `-` as an option, so give it
+## one that does not.  Prefixing `./` is more portable than passing `--`, which not
+## every version of `realpath` accepts.
+absolute_path() {
+  operand="$1"
+  case "${operand}" in
+    -*) operand="./${operand}" ;;
+  esac
+  realpath "${operand}"
+}
+
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
   from="$1"
-  from_absolute="$(realpath "$from")"
   to="$2"
-  to_absolute="$(realpath "$to")"
+
+  # A failure here is not yet an error, and it leaves the variable empty: on a
+  # system whose `realpath` requires the pathname to exist, a nonexistent directory
+  # fails here, and the tests just below diagnose that better.
+  from_absolute="$(absolute_path "${from}")"
+  to_absolute="$(absolute_path "${to}")"
 
   if [ ! -d "${from}" ]; then
-    if [ "${from}" = "${from_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: $from" >&2
-    else
+    if [ -n "${from_absolute}" ] && [ "${from}" != "${from_absolute}" ]; then
       echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}" >&2
+    else
+      echo "${SCRIPT_NAME}: no such directory: ${from}" >&2
     fi
     return 1
   fi
-  if [ ! -d "$to" ]; then
-    if [ "${to}" = "${to_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: $to" >&2
-    else
+  if [ ! -d "${to}" ]; then
+    if [ -n "${to_absolute}" ] && [ "${to}" != "${to_absolute}" ]; then
       echo "${SCRIPT_NAME}: no such directory: ${to} = ${to_absolute}" >&2
+    else
+      echo "${SCRIPT_NAME}: no such directory: ${to}" >&2
     fi
+    return 1
+  fi
+  if [ -z "${from_absolute}" ]; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: ${from}" >&2
+    return 1
+  fi
+  if [ -z "${to_absolute}" ]; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: ${to}" >&2
     return 1
   fi
 
