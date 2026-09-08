@@ -1,0 +1,115 @@
+#!/bin/sh
+
+# Tests the `git-orphaned-branches` script.
+#
+# These test cases exercise the detection of a directory that contains nothing
+# but a `.project` file.  They do not exercise the deleted-branch detection,
+# which would require a remote repository.
+
+TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+TOPLEVEL="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)"
+GIT_ORPHANED_BRANCHES="${TOPLEVEL}/git-orphaned-branches"
+
+status=0
+
+if ! work="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${work}" ]; then
+  echo "$0: cannot create a temporary directory" >&2
+  exit 1
+fi
+
+# Restores the permissions of the deliberately unlistable directory created
+# below, so that `rm -rf` can remove it.
+# shellcheck disable=SC2329 # Is called from traps.
+cleanup() {
+  chmod 755 "${work}/p-branch-unlistable" 2> /dev/null
+  rm -rf "${work}"
+}
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
+trap 'cleanup' EXIT
+trap 'cleanup; trap - INT; kill -s INT "$$"' INT
+trap 'cleanup; trap - TERM; kill -s TERM "$$"' TERM
+
+if ! work="$(CDPATH='' cd -- "${work}" && pwd -P)" || [ -z "${work}" ]; then
+  echo "$0: cannot resolve the temporary directory" >&2
+  exit 1
+fi
+
+# Contains nothing but a `.project` file.
+mkdir -p "${work}/p-branch-only-project"
+touch "${work}/p-branch-only-project/.project"
+
+# Contains a `.project` file and a regular file.
+mkdir -p "${work}/p-branch-plus-file"
+touch "${work}/p-branch-plus-file/.project" "${work}/p-branch-plus-file/other"
+
+# Contains a `.project` file and a hidden file.
+mkdir -p "${work}/p-branch-plus-hidden"
+touch "${work}/p-branch-plus-hidden/.project" "${work}/p-branch-plus-hidden/.other"
+
+# Contains a `.project` file and a subdirectory.
+mkdir -p "${work}/p-branch-plus-subdir/sub"
+touch "${work}/p-branch-plus-subdir/.project"
+
+# Contains a `.project` file and a symbolic link with no target.
+mkdir -p "${work}/p-branch-plus-dangling-symlink"
+touch "${work}/p-branch-plus-dangling-symlink/.project"
+ln -s no-such-file "${work}/p-branch-plus-dangling-symlink/dangling"
+
+# Contains nothing.
+mkdir -p "${work}/p-branch-empty"
+
+# Contains no `.project` file.
+mkdir -p "${work}/p-branch-no-project"
+touch "${work}/p-branch-no-project/other"
+
+# Contains nothing but a `.project` file, but is not named `*-branch-*`.
+mkdir -p "${work}/p-plain-project"
+touch "${work}/p-plain-project/.project"
+
+# Contains a `.project` file and a regular file, but cannot be listed:  it can
+# be searched but not read.  Every glob in such a directory expands to nothing,
+# which must not be mistaken for "contains nothing but a `.project` file".
+# The superuser can read any directory, so skip this case when running as root.
+unlistable=0
+if [ "$(id -u)" -ne 0 ]; then
+  unlistable=1
+  mkdir -p "${work}/p-branch-unlistable"
+  touch "${work}/p-branch-unlistable/.project" "${work}/p-branch-unlistable/other"
+  chmod 111 "${work}/p-branch-unlistable"
+fi
+
+# `find` warns that it cannot list `p-branch-unlistable`, so discard stderr.
+if ! output="$(cd "${work}" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
+  echo "FAIL: git-orphaned-branches exited with a failure status"
+  exit 1
+fi
+
+# Checks whether `git-orphaned-branches` listed a directory.
+# Arguments: DIRECTORY-NAME  "listed" or "unlisted"
+check() {
+  if printf '%s\n' "${output}" | grep -q -x -F -- "${work}/$1"; then
+    actual="listed"
+  else
+    actual="unlisted"
+  fi
+  if [ "${actual}" != "$2" ]; then
+    echo "FAIL: git-orphaned-branches left $1 ${actual} rather than $2"
+    status=1
+  fi
+}
+
+check "p-branch-only-project" "listed"
+check "p-branch-plus-file" "unlisted"
+check "p-branch-plus-hidden" "unlisted"
+check "p-branch-plus-subdir" "unlisted"
+check "p-branch-plus-dangling-symlink" "unlisted"
+check "p-branch-empty" "unlisted"
+check "p-branch-no-project" "unlisted"
+check "p-plain-project" "unlisted"
+if [ "${unlistable}" -eq 1 ]; then
+  check "p-branch-unlistable" "unlisted"
+fi
+
+exit "${status}"
