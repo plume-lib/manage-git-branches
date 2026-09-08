@@ -205,6 +205,11 @@ git_push_to() {
     return 1
   fi
 
+  if [ "${from_absolute}" = "${to_absolute}" ]; then
+    echo "${SCRIPT_NAME}: FROM_DIR and TO_DIR are the same directory: ${from_absolute}" >&2
+    return 1
+  fi
+
   if ! check_branch_exists "${from_absolute}"; then
     return 1
   fi
