@@ -35,9 +35,10 @@ The commands are:
   directory is a sibling of the working copy.  If the repository has a remote
   named `origin`, the new branch is pushed to `origin`, which gives the new
   branch an upstream branch so that `git-push-to` and `git-pull-from` can use
-  the new working copy; if the repository has no remote named `origin`, then
-  the new branch is not pushed and has no upstream branch.  Below is a
-  definition for an alias `gnb`.
+  the new working copy; if the repository has no remote named `origin`, or if
+  the push fails (for example, because the remote is read-only), then the new
+  branch has no upstream branch, but the new working copy is still created.
+  Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to) `[--nocompile] FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.
