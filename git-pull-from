@@ -8,8 +8,10 @@
 # Usage:
 #   git-pull-from [--nocompile] OTHER-REPO-DIR
 #
-# Run this command from within a repository.  OTHER-REPO-DIR may be an absolute
-# or relative pathname.
+# Run this command from the top level of a repository; a subdirectory of the
+# working tree is not itself a clone, and this command is rejected there.
+# OTHER-REPO-DIR may be an absolute or relative pathname, and it too must be
+# the top level of a clone.
 
 # This script does the following:
 #  * pull another directory from its remote,

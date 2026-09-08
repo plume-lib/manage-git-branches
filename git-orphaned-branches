@@ -14,13 +14,35 @@
 
 # DEBUG=1
 
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other scripts even when this script
+# is invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
 if [ "$#" -ne 0 ]; then
   echo "Usage: ${SCRIPT_NAME}" >&2
   exit 1
 fi
+
+status=0
 
 dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
 trap 'rm -f "${dirs_file}"' EXIT INT TERM
@@ -33,9 +55,21 @@ while IFS= read -r dir; do
     # There is a .git subdirectory.
 
     # If the branch was deleted in the remote, print the directory name.
-    if "${SCRIPT_DIR}"/is-deleted-branch "$dir"; then
-      realpath "$dir"
-    fi
+    # Only status 0 from `is-deleted-branch` means "the branch was deleted".
+    # Statuses 1, 2, and 3 are answers of "no" or "cannot tell", each of which
+    # `is-deleted-branch` has already explained if it is worth explaining.  Any
+    # other status means that `is-deleted-branch` could not run, which must not
+    # be silently reported as "there is nothing to delete".
+    "${SCRIPT_DIR}"/is-deleted-branch "$dir"
+    is_deleted_status=$?
+    case "${is_deleted_status}" in
+      0) realpath "$dir" ;;
+      1 | 2 | 3) ;;
+      *)
+        echo "${SCRIPT_NAME}: ${SCRIPT_DIR}/is-deleted-branch failed with status ${is_deleted_status} on: $dir" >&2
+        status=1
+        ;;
+    esac
     # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
     # git -C "$dir" remote prune origin 2>&1 > /dev/null
   else
@@ -48,3 +82,5 @@ while IFS= read -r dir; do
     fi
   fi
 done < "${dirs_file}"
+
+exit "${status}"

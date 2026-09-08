@@ -7,7 +7,7 @@
 # Usage:
 #   git-push-to [--nocompile] FROM_DIR TO_DIR ...
 #
-# The arguments are directory names for working copies (that is, clones).
+# Each argument names the top level of a working copy (that is, of a clone).
 # They may be absolute directory names or relative to the current directory.
 # The first argument may be "--nocompile" to skip the compilation step.
 #

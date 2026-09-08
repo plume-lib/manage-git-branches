@@ -11,7 +11,8 @@
 #  * 2 (false) if the directory is not the top level of a clone, so the
 #    question does not apply,
 #  * 3 (false) if the question cannot be answered: HEAD is detached, the
-#    branch has no upstream, or the remote could not be contacted,
+#    branch has no upstream, the remote could not be contacted, or this
+#    script could not resolve the location of its own helper scripts,
 #  * 64 if this command was invoked incorrectly.
 #
 # A caller must not treat every nonzero status as "the branch still exists";
@@ -20,15 +21,21 @@
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other scripts even when this script
 # is invoked through a symbolic link from elsewhere, such as ~/bin.
+# Exit with status 3 on failure, not 1:  status 1 means "the branch still
+# exists in its remote", and a caller that saw it would proceed as if this
+# script had answered the question.
 script_path="$0"
 script_links=0
 while [ -L "${script_path}" ]; do
   script_links=$((script_links + 1))
   if [ "${script_links}" -gt 40 ]; then
     echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
-    exit 1
+    exit 3
   fi
-  script_link="$(readlink -- "${script_path}")"
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 3
+  fi
   case "${script_link}" in
     /*) script_path="${script_link}" ;;
     *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
