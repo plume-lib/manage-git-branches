@@ -1,10 +1,11 @@
 #!/bin/sh
 
 # Tests that `git-pull-from` accepts the `--nocompile` argument, just as
-# `git-push-to` does.
+# `git-push-to` does, and that the merge commit it creates names the other
+# repository by a relative pathname.
 #
 # Usage:
-#   tests/test-git-pull-from.sh
+#   tests/test-git-pull-from
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -50,6 +51,13 @@ git -C "${workdir}/from" push -q -u origin main
 
 make_clone "${workdir}/to"
 
+# A commit that only "to" has, so that pulling "from" into it creates a merge
+# commit.  Git generates that commit's message from the pathname that was
+# pulled, so the message shows which pathname `git-push-to` passed to `git`.
+date > "${workdir}/to/to-change.txt"
+git -C "${workdir}/to" add to-change.txt
+git -C "${workdir}/to" commit -q -m "a change in the destination"
+
 date > "${workdir}/from/change.txt"
 git -C "${workdir}/from" add change.txt
 git -C "${workdir}/from" commit -q -m "a change"
@@ -67,4 +75,16 @@ if [ "$(git -C "${remote}" rev-parse main)" != "$(git -C "${workdir}/to" rev-par
   fail "git-pull-from --nocompile did not push"
 fi
 
-echo "${SCRIPT_NAME}: OK"
+# The merge commit must name the other repository relative to this one, not by
+# an absolute pathname:  an absolute pathname would record this machine's
+# directory layout in history that is shared with everyone else.
+subject="$(git -C "${workdir}/to" log -1 --format=%s)"
+case "${subject}" in
+  *"${workdir}"*) fail "merge commit message contains an absolute pathname: ${subject}" ;;
+esac
+case "${subject}" in
+  *../from*) ;;
+  *) fail "merge commit message does not name ../from: ${subject}" ;;
+esac
+
+echo "${SCRIPT_NAME}: PASS"
