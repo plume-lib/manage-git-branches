@@ -5,7 +5,7 @@
 # user-visible interface, so the README must describe it.
 #
 # Usage:
-#   tests/test-env-vars-documented
+#   tests/test-env-vars-documented.sh
 #
 # The exit status is 0 if every such variable is documented, and 1 otherwise.
 
@@ -58,7 +58,7 @@ for script in ${SCRIPTS}; do
 done
 
 if [ "${status}" -eq 0 ]; then
-  echo "${SCRIPT_NAME}: all environment variables are documented"
+  echo "${SCRIPT_NAME}: OK"
 fi
 
 exit "${status}"

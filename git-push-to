@@ -104,6 +104,41 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+## Returns 0 if the given directory is the top level of a clone whose branch
+## still exists in its remote.  Otherwise, prints a diagnostic and returns 1.
+## Only status 1 from `is-deleted-branch` means "the branch still exists"; any
+## other status is a reason not to proceed, because treating it as success
+## would silently disable this check.
+check_branch_exists() {
+  "${SCRIPT_DIR}"/is-deleted-branch "$1"
+  is_deleted_status=$?
+  case "${is_deleted_status}" in
+    0)
+      echo "${SCRIPT_NAME}: is a deleted branch: $1" >&2
+      return 1
+      ;;
+    1) ;;
+    2)
+      echo "${SCRIPT_NAME}: not a git clone: $1" >&2
+      return 1
+      ;;
+    3)
+      # HEAD is detached, the branch has no upstream, or the remote could not
+      # be contacted.  Whether the branch still exists is unknown.
+      echo "${SCRIPT_NAME}: cannot tell whether the branch still exists in its remote: $1" >&2
+      return 1
+      ;;
+    *)
+      # `is-deleted-branch` documents only statuses 0, 1, 2, 3, and 64.  Any
+      # other status means it could not run (for example, status 127 because
+      # ${SCRIPT_DIR} does not contain it).
+      echo "${SCRIPT_NAME}: ${SCRIPT_DIR}/is-deleted-branch failed with status ${is_deleted_status} on: $1" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
@@ -129,8 +164,7 @@ git_push_to() {
     return 1
   fi
 
-  if "${SCRIPT_DIR}"/is-deleted-branch "${from_absolute}"; then
-    echo "${SCRIPT_NAME}: is a deleted branch: ${from_absolute}" >&2
+  if ! check_branch_exists "${from_absolute}"; then
     return 1
   fi
 
@@ -146,8 +180,7 @@ git_push_to() {
     return 1
   fi
 
-  if "${SCRIPT_DIR}"/is-deleted-branch "${to_absolute}"; then
-    echo "${SCRIPT_NAME}: is a deleted branch: ${to_absolute}" >&2
+  if ! check_branch_exists "${to_absolute}"; then
     return 1
   fi
 

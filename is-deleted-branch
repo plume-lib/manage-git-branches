@@ -5,9 +5,17 @@
 # Usage:
 #   is-deleted-branch DIRECTORY
 #
-# The status code is 0 (true) if the directory is on a deleted branch,
-# and 1 (false) otherwise, including any branch that has never been
-# pushed and any directory that is not a clone.
+# The status code is:
+#  * 0 (true) if the directory is on a branch that was deleted in its remote,
+#  * 1 (false) if the directory is on a branch that still exists in its remote,
+#  * 2 (false) if the directory is not the top level of a clone, so the
+#    question does not apply,
+#  * 3 (false) if the question cannot be answered: HEAD is detached, the
+#    branch has no upstream, or the remote could not be contacted,
+#  * 64 if this command was invoked incorrectly.
+#
+# A caller must not treat every nonzero status as "the branch still exists";
+# only status 1 means that.
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other scripts even when this script
@@ -31,23 +39,25 @@ SCRIPT_NAME="$(basename -- "$0")"
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} DIRECTORY" >&2
-  exit 1
+  exit 64
 fi
 
 dir="$1"
 
-# `rev-parse` succeeds in every subdirectory of a clone, so also require that
-# the directory is the clone's top level.  `--show-toplevel` prints nothing in
-# a bare repository, which has no branch checked out.
-if ! toplevel="$(git -C "${dir}" rev-parse --show-toplevel 2> /dev/null)" \
-  || [ -z "${toplevel}" ]; then
-  # Not a clone, so not a deleted branch.
-  exit 1
+# `git -C DIR rev-parse` succeeds for every directory within a clone's working
+# tree, so also require that DIRECTORY is that working tree's top level.  A
+# subdirectory is not itself a clone, and answering for the enclosing clone
+# would answer a question that the caller did not ask.
+toplevel="$(git -C "${dir}" rev-parse --show-toplevel 2> /dev/null)" || exit 2
+if [ -z "${toplevel}" ]; then
+  # A bare repository has no working tree, so it is not on any branch.
+  exit 2
 fi
-if [ "$(CDPATH='' cd -- "${dir}" && pwd -P)" \
-  != "$(CDPATH='' cd -- "${toplevel}" && pwd -P)" ]; then
-  # A subdirectory of a clone, rather than the clone itself.
-  exit 1
+dir_real="$(realpath -- "${dir}" 2> /dev/null)" || exit 2
+toplevel_real="$(realpath -- "${toplevel}" 2> /dev/null)" || exit 2
+if [ "${dir_real}" != "${toplevel_real}" ]; then
+  # Not a clone, so it is not on any branch, deleted or otherwise.
+  exit 2
 fi
 
 # A detached HEAD is not on a branch, so it is not on a deleted branch.

@@ -17,7 +17,9 @@ jobs:
           persist-credentials: false
       - uses: luizm/action-sh-checker@v0.10.0
         with:
-          # No "sh_checker_only_diff: true" because the workflow also runs on `push`.
+          # No "sh_checker_only_diff: true" because the workflow also runs on
+          # `push` and because without environment variable `GITHUB_TOKEN`, it
+          # silently finds no files and thus does nothing.
           sh_checker_checkbashisms_enable: true
           # shfmt and shellcheck are run by `prek`.
           sh_checker_shfmt_disable: true
