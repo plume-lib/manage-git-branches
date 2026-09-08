@@ -94,8 +94,17 @@ check_branch_exists() {
       echo "${SCRIPT_NAME}: is a deleted branch: $1" >&2
       return 1
       ;;
+    1) ;;
     2)
       echo "${SCRIPT_NAME}: not a git clone: $1" >&2
+      return 1
+      ;;
+    *)
+      # `is-deleted-branch` documents only statuses 0, 1, and 2.  Any other
+      # status means it could not run (for example, status 127 because
+      # ${SCRIPT_DIR} does not contain it).  Do not treat that as success,
+      # which would silently disable this check.
+      echo "${SCRIPT_NAME}: ${SCRIPT_DIR}/is-deleted-branch failed with status ${is_deleted_status} on: $1" >&2
       return 1
       ;;
   esac

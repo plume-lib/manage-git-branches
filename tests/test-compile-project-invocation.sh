@@ -33,6 +33,14 @@ for path_element in ${PATH}; do
 done
 IFS="${saved_ifs}"
 
+# An empty PATH would vacuously hide `compile-project`, but it would also hide
+# `git` and every other command that the scripts under test need, so the tests
+# below would fail for an unrelated reason.
+if [ -z "${PATH_WITHOUT_COMPILE_PROJECT}" ]; then
+  echo "${SCRIPT_NAME}: cannot construct a nonempty PATH without compile-project" >&2
+  exit 1
+fi
+
 # Use a subshell, because a variable assignment that prefixes a regular builtin
 # such as `command` does not necessarily persist in the current shell.
 if (PATH="${PATH_WITHOUT_COMPILE_PROJECT}" && export PATH && command -v compile-project > /dev/null); then
