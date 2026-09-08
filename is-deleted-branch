@@ -20,13 +20,20 @@
 # A caller must not treat every nonzero status as "the branch still exists";
 # only status 1 means that.
 #
+# Status 0 says that the branch was deleted in its remote, not that the
+# working copy holds nothing of value:  the branch can hold commits that were
+# never pushed, and deleting the directory would lose them.
+#
 # A branch that has no upstream configuration is reported as deleted only if
-# this clone still holds a remote-tracking ref that shows that the branch was
-# pushed.  Pruning (`git fetch --prune`, `git remote prune`, or the
-# `fetch.prune` and `remote.NAME.prune` configuration variables) deletes that
-# ref, and its reflog, along with the remote branch, and Git keeps no other
-# record of the push.  In a clone that prunes, such a branch is therefore
-# always "cannot tell" (status 3) rather than "deleted".
+# this clone still holds a record that the branch was pushed:  a
+# remote-tracking ref for it, or a reflog entry for such a ref.  Either record
+# can disappear.  Pruning (`git fetch --prune`, `git remote prune`, or the
+# `fetch.prune` and `remote.NAME.prune` configuration variables) deletes the
+# ref, and its reflog, along with the remote branch.  Reflog expiry deletes
+# reflog entries that are older than `gc.reflogExpire` (90 days by default)
+# even when the ref survives, because Git runs `git gc --auto` from commands
+# such as `git commit` and `git fetch`.  Git then keeps no record of the push,
+# so such a branch is "cannot tell" (status 3) rather than "deleted".
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other scripts even when this script
@@ -117,15 +124,21 @@ branch_remote="$(git -C "${dir}" config --get "branch.${branch}.remote")"
 merge_refs="$(git -C "${dir}" config --get-all "branch.${branch}.merge")"
 
 # A branch exists in a remote because someone pushed it there, so ask the
-# remote that `git push` uses.  Git chooses that remote as
-# `branch.BRANCH.pushRemote`, then `remote.pushDefault`, then
-# `branch.BRANCH.remote`, then "origin".
+# remote that `git push` uses:  `branch.BRANCH.pushRemote`, then
+# `remote.pushDefault`, then `branch.BRANCH.remote`, then "origin".
+# Consult `branch.BRANCH.remote` before `remote.pushDefault`, unlike
+# `git push`.  Both `branch.BRANCH.pushRemote` and `branch.BRANCH.remote` say
+# something about this branch, whereas `remote.pushDefault` is a default for
+# every branch of every clone, commonly set once in ~/.gitconfig to name a
+# fork.  Letting that default outrank this branch's own upstream would
+# discard what this clone records about the branch, and would answer "cannot
+# tell" for every branch that was never pushed to the fork.
 remote="$(git -C "${dir}" config --get "branch.${branch}.pushRemote")"
 if [ -z "${remote}" ]; then
-  remote="$(git -C "${dir}" config --get remote.pushDefault)"
+  remote="${branch_remote}"
 fi
 if [ -z "${remote}" ]; then
-  remote="${branch_remote}"
+  remote="$(git -C "${dir}" config --get remote.pushDefault)"
 fi
 if [ -z "${remote}" ]; then
   # Git uses the remote named "origin" when no configuration names a remote.
@@ -222,6 +235,13 @@ branch_was_pushed() {
 '
   set -f
   for candidate_ref in ${candidate_refs}; do
+    if [ "${candidate_ref}" = "${branch_ref}" ]; then
+      # A fetch refspec can map the branch to itself, as the "+refs/*:refs/*"
+      # that `git remote add --mirror=fetch` sets does.  The branch is
+      # trivially at its own commit and its reflog is not a record of a push,
+      # so such a ref is no sign that the branch was pushed.
+      continue
+    fi
     candidate_commit="$(git -C "${dir}" rev-parse --verify --quiet \
       "${candidate_ref}")" || continue
     if [ "${candidate_commit}" = "${branch_commit}" ] \

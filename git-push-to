@@ -140,8 +140,8 @@ check_branch_exists() {
       ;;
     3)
       # HEAD is detached, no remote can be determined for the branch, the
-      # branch is not in the remote and has no upstream configuration (so it
-      # may never have been pushed), or the remote could not be contacted.
+      # branch has no upstream configuration and nothing shows that it was
+      # ever pushed, or the remote could not be contacted.
       # Whether the branch still exists is unknown.
       echo "${SCRIPT_NAME}: cannot tell whether the branch still exists in its remote: $1" >&2
       return 1

@@ -145,9 +145,8 @@ git -C "${testdir}/myrepo-branch-otherremote" config --unset-all branch.live.mer
 ## sign that this branch was pushed.
 staleref="${testdir}/myrepo-branch-staleref"
 git clone -q "${remote}" "${staleref}"
+## `git checkout -b` sets no upstream configuration, so there is none to unset.
 git -C "${staleref}" checkout -q -b dead
-git -C "${staleref}" config --unset branch.dead.remote
-git -C "${staleref}" config --unset-all branch.dead.merge
 echo 'unpushed' > "${staleref}/unpushed.txt"
 git -C "${staleref}" add unpushed.txt
 git -C "${staleref}" commit -q -m 'Unpushed commit on a never-pushed branch'
@@ -202,6 +201,26 @@ git -C "${pushremote}" commit -q -m 'Commit made after pushing'
 ## Delete the branch in the remote itself rather than with
 ## `git push --delete`, which would also delete the remote-tracking ref.
 git -C "${testdir}/myrepo-pushremote.git" update-ref -d refs/heads/live
+
+## A working copy whose branch was never pushed, and whose remote's fetch
+## refspec maps every ref to itself, as `git remote add --mirror=fetch` sets
+## it.  That refspec maps the branch to the branch, and the branch is
+## trivially at its own commit, which is no sign that it was pushed.
+mirrorrefspec="${testdir}/myrepo-branch-mirrorrefspec"
+git clone -q "${remote}" "${mirrorrefspec}"
+git -C "${mirrorrefspec}" checkout -q -b mirrorrefspec
+git -C "${mirrorrefspec}" config remote.origin.fetch '+refs/*:refs/*'
+echo 'unpushed' > "${mirrorrefspec}/unpushed.txt"
+git -C "${mirrorrefspec}" add unpushed.txt
+git -C "${mirrorrefspec}" commit -q -m 'Unpushed commit on a never-pushed branch'
+
+## A working copy with upstream configuration whose `remote.pushDefault` names
+## a remote that this clone does not have, as a `~/.gitconfig` that names a
+## fork does in every clone of a repository that the user has not forked.
+## The branch's own upstream configuration answers the question.
+pushdefaultabsent="${testdir}/myrepo-branch-pushdefaultabsent"
+git clone -q -b dead "${remote}" "${pushdefaultabsent}"
+git -C "${pushdefaultabsent}" config remote.pushDefault absent-fork
 
 ## Make the remote's "live" branch have a commit that the working copy lacks.
 ## A `git pull` in the working copy would fetch this commit.
@@ -321,6 +340,10 @@ expect_status 1 "${mergeonly}" \
   'branch whose branch.BRANCH.merge is set but whose branch.BRANCH.remote is not'
 expect_status 0 "${pushremote}" \
   'branch that was deleted in the remote that branch.BRANCH.pushRemote names'
+expect_status 3 "${mirrorrefspec}" \
+  'never-pushed branch whose fetch refspec maps the branch to itself'
+expect_status 0 "${pushdefaultabsent}" \
+  'branch whose remote.pushDefault names a remote that the clone lacks'
 expect_status 3 "${testdir}/myrepo-branch-detached" 'working copy with a detached HEAD'
 expect_status 3 "${testdir}/myrepo-branch-unborn" 'working copy whose branch has no commit'
 expect_status 1 "${testdir}/myrepo-branch-tag-upstream" \
@@ -509,7 +532,7 @@ git -C "${testdir}/myrepo-branch-unreachable" config ssh.variant plink
 # modify any of the directories that it inspects.
 scanned_clones='live dead brandnew detached unreachable notracking-live
 notracking-dead otherremote staleref pruned customrefspec mergeonly pushremote
-neverpushed unborn'
+mirrorrefspec pushdefaultabsent neverpushed unborn'
 for branch in ${scanned_clones}; do
   repo_state "${testdir}/myrepo-branch-${branch}" > "${testdir}/before-${branch}"
 done
@@ -535,7 +558,8 @@ fi
 sorted_orphans="$(printf '%s\n' "${orphans}" | sort)"
 expected_orphans="$(
   for orphan in myrepo-branch-dead myrepo-branch-notracking-dead \
-    myrepo-branch-customrefspec myrepo-branch-pushremote; do
+    myrepo-branch-customrefspec myrepo-branch-pushremote \
+    myrepo-branch-pushdefaultabsent; do
     # `cd` prints its own diagnostic on failure.
     (CDPATH='' cd -- "${testdir}/${orphan}" && pwd -P)
   done | sort
