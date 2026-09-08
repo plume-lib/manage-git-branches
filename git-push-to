@@ -7,8 +7,8 @@
 # Usage:
 #   git-push-to [--nocompile] FROM_DIR TO_DIR ...
 #
-# The arguments are directory names for working copies (that is, clones).
-# They may be absolute directory names or relative to the current directory.
+# Each argument names the top level of a working copy (that is, of a clone).
+# Each may be absolute directory names or relative to the current directory.
 # The first argument may be "--nocompile" to skip the compilation step.
 #
 # This script does the following:
@@ -81,31 +81,127 @@
 
 nocompile=0
 
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other scripts even when this script
+# is invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
+
+## Returns 0 if the given directory is the top level of a clone whose branch
+## still exists in its remote.  Otherwise, prints a diagnostic and returns 1.
+## Only status 1 from `is-deleted-branch` means "the branch still exists"; any
+## other status is a reason not to proceed, because treating it as success
+## would silently disable this check.
+check_branch_exists() {
+  "${SCRIPT_DIR}"/is-deleted-branch "$1"
+  is_deleted_status=$?
+  case "${is_deleted_status}" in
+    0)
+      echo "${SCRIPT_NAME}: is a deleted branch: $1" >&2
+      return 1
+      ;;
+    1) ;;
+    2)
+      echo "${SCRIPT_NAME}: not a git clone: $1" >&2
+      return 1
+      ;;
+    3)
+      # HEAD is detached, the branch has no upstream, or the remote could not
+      # be contacted.  Whether the branch still exists is unknown.
+      echo "${SCRIPT_NAME}: cannot tell whether the branch still exists in its remote: $1" >&2
+      return 1
+      ;;
+    *)
+      # `is-deleted-branch` documents only statuses 0, 1, 2, 3, and 64.  Any
+      # other status means it could not run (for example, status 127 because
+      # ${SCRIPT_DIR} does not contain it).
+      echo "${SCRIPT_NAME}: ${SCRIPT_DIR}/is-deleted-branch failed with status ${is_deleted_status} on: $1" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+## Prints the absolute pathname of the given pathname.  Prints nothing and returns
+## nonzero if the pathname cannot be canonicalized.
+## `realpath` would treat a pathname that starts with `-` as an option, so give it
+## one that does not.  Prefixing `./` is more portable than passing `--`, which not
+## every version of `realpath` accepts.
+absolute_path() {
+  operand="$1"
+  case "${operand}" in
+    -*) operand="./${operand}" ;;
+  esac
+  realpath "${operand}"
+}
 
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
   from="$1"
-  from_absolute="$(realpath "$from")"
   to="$2"
-  to_absolute="$(realpath "$to")"
+
+  # A failure here is not yet an error, and it leaves the variable empty: on a
+  # system whose `realpath` requires the pathname to exist, a nonexistent directory
+  # fails here, and the tests just below diagnose that better.
+  from_absolute="$(absolute_path "${from}")"
+  to_absolute="$(absolute_path "${to}")"
 
   if [ ! -d "${from}" ]; then
-    if [ "${from}" = "${from_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: $from" >&2
-    else
+    if [ -n "${from_absolute}" ] && [ "${from}" != "${from_absolute}" ]; then
       echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}" >&2
+    else
+      echo "${SCRIPT_NAME}: no such directory: ${from}" >&2
     fi
     return 1
   fi
-  if [ ! -d "$to" ]; then
-    if [ "${to}" = "${to_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: $to" >&2
-    else
+  if [ ! -d "${to}" ]; then
+    if [ -n "${to_absolute}" ] && [ "${to}" != "${to_absolute}" ]; then
       echo "${SCRIPT_NAME}: no such directory: ${to} = ${to_absolute}" >&2
+    else
+      echo "${SCRIPT_NAME}: no such directory: ${to}" >&2
     fi
+    return 1
+  fi
+  if [ -z "${from_absolute}" ]; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: ${from}" >&2
+    return 1
+  fi
+  if [ -z "${to_absolute}" ]; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: ${to}" >&2
     return 1
   fi
 
@@ -114,8 +210,7 @@ git_push_to() {
     return 1
   fi
 
-  if "${SCRIPT_DIR}"/is-deleted-branch "${from_absolute}"; then
-    echo "${SCRIPT_NAME}: is a deleted branch: ${from_absolute}" >&2
+  if ! check_branch_exists "${from_absolute}"; then
     return 1
   fi
 
@@ -131,8 +226,7 @@ git_push_to() {
     return 1
   fi
 
-  if "${SCRIPT_DIR}"/is-deleted-branch "${to_absolute}"; then
-    echo "${SCRIPT_NAME}: is a deleted branch: ${to_absolute}" >&2
+  if ! check_branch_exists "${to_absolute}"; then
     return 1
   fi
 
@@ -141,7 +235,23 @@ git_push_to() {
     return 1
   fi
 
-  if ! git pull -q "${from_absolute}"; then
+  # Pull from a relative pathname, so that the merge commit message that git
+  # generates does not embed this machine's directory layout in shared history.
+  # `relative-path` is a portable version of `realpath --relative-to`, whose
+  # `--relative-to` option the BSD and macOS versions of `realpath` lack.
+  # Note: pwd=to_absolute
+  if ! from_relative="$("${SCRIPT_DIR}"/relative-path "${to_absolute}" "${from_absolute}")"; then
+    echo "${SCRIPT_NAME}: cannot express ${from_absolute} relative to ${to_absolute}" >&2
+    return 1
+  fi
+  # `git pull` passes the repository to `git fetch`, which parses options again
+  # and interprets a colon in a bare pathname as an scp-style URL.
+  case "${from_relative}" in
+    ./* | ../* | .) ;;
+    *) from_relative="./${from_relative}" ;;
+  esac
+
+  if ! git pull -q -- "${from_relative}"; then
     # Note: pwd=to_absolute
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
     return 1
