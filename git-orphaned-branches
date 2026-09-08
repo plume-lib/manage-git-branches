@@ -18,7 +18,43 @@
 
 # DEBUG=1
 
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other scripts even when this script
+# is invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
 # If non-empty, separate the output directories by NUL rather than by newline.
@@ -27,6 +63,8 @@ if [ "$#" -ge 1 ] && { [ "$1" = "--print0" ] || [ "$1" = "-0" ]; }; then
   print0="$1"
   shift
 fi
+
+status=0
 
 if [ "$#" -ne 0 ]; then
   echo "Usage: ${SCRIPT_NAME} [--print0]" >&2
@@ -43,6 +81,36 @@ print_dir() {
   fi
 }
 
+# Prints the absolute path of directory $1, with symbolic links resolved.
+# `realpath` would be simpler, but POSIX added it only in 2024 and some systems
+# still lack it, whereas `cd` and `pwd -P` are portable.
+absolute_path() {
+  (CDPATH='' cd -- "$1" && pwd -P)
+}
+
+# Returns 0 (true) if directory $1 contains no entry other than `.project`.
+# `find "$1" -mindepth 1 -maxdepth 1` would be simpler, but the `-mindepth` and
+# `-maxdepth` options are GNU extensions that POSIX `find` does not support.
+only_dot_project() {
+  # In a directory that cannot be listed (but can be searched, such as one with
+  # mode 711), every glob below expands to nothing, which is indistinguishable
+  # from an empty directory.  Do not claim that such a directory is empty.
+  if [ ! -r "$1" ]; then
+    return 1
+  fi
+  for entry in "$1"/* "$1"/.*; do
+    case "${entry##*/}" in
+      '.' | '..' | '.project') continue ;;
+    esac
+    # When a pattern matches nothing, the shell leaves it unexpanded.
+    if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+      continue
+    fi
+    return 1
+  done
+  return 0
+}
+
 dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
 trap 'rm -f "${dirs_file}"' EXIT INT TERM
 find . -name '*-branch-*' -type d > "${dirs_file}"
@@ -52,30 +120,44 @@ while IFS= read -r dir; do
   if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
   if [ -d "$dir/.git" ]; then
     # There is a .git subdirectory.
-    if ! git -C "$dir" ls-remote -h "$(git -C "$dir" config --get remote.origin.url)" > /dev/null 2>&1; then
-      if [ -n "$DEBUG" ]; then
-        echo "Did not find remote repository for $dir; this command failed: git -C \"$dir\" config --get remote.origin.url"
-      fi
-    else
-      # The remote repository exists.
-      if [ -n "$DEBUG" ]; then echo "remote repository exists: $dir"; fi
-      # Don't match on "There is no tracking information for the current branch.", which is output
-      # for both a new branch and a deleted branch where the repository has been pruned.
 
-      # If the branch was deleted in the remote, print the directory name.
-      if "${SCRIPT_DIR}"/is-deleted-branch "$dir"; then
-        print_dir "$(realpath "$dir")"
-      fi
-      # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
-      # git -C "$dir" remote prune origin 2>&1 > /dev/null
-    fi
+    # If the branch was deleted in the remote, print the directory name.
+    # Only status 0 from `is-deleted-branch` means "the branch was deleted".
+    # Statuses 1, 2, and 3 are answers of "no" or "cannot tell", each of which
+    # `is-deleted-branch` has already explained if it is worth explaining.  Any
+    # other status means that `is-deleted-branch` could not run, which must not
+    # be silently reported as "there is nothing to delete".
+    "${SCRIPT_DIR}"/is-deleted-branch "$dir"
+    is_deleted_status=$?
+    case "${is_deleted_status}" in
+      # `cd` prints its own diagnostic on failure.
+      0)
+        if dir_absolute="$(absolute_path "$dir")"; then
+          print_dir "${dir_absolute}"
+        else
+          status=1
+        fi
+        ;;
+      1 | 2 | 3) ;;
+      *)
+        echo "${SCRIPT_NAME}: ${SCRIPT_DIR}/is-deleted-branch failed with status ${is_deleted_status} on: $dir" >&2
+        status=1
+        ;;
+    esac
+    # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
+    # git -C "$dir" remote prune origin 2>&1 > /dev/null
   else
     # There is no .git subdirectory.
-    if [ -f "$dir/.project" ]; then
-      if [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
-        # It has only the `.project` file and no other content.
-        print_dir "$(realpath "$dir")"
+    if [ -f "$dir/.project" ] && only_dot_project "$dir"; then
+      # It has only the `.project` file and no other content.
+      # `cd` prints its own diagnostic on failure.
+      if dir_absolute="$(absolute_path "$dir")"; then
+        print_dir "${dir_absolute}"
+      else
+        status=1
       fi
     fi
   fi
 done < "${dirs_file}"
+
+exit "${status}"
