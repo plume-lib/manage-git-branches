@@ -53,6 +53,20 @@ expect_failure_message() {
   fi
 }
 
+# Usage: expect_batch_option DESCRIPTION
+# Checks that the SSH invocations recorded since the argument file was last
+# emptied used Plink's and Putty's `-batch` rather than OpenSSH's
+# `-o BatchMode=yes`.
+expect_batch_option() {
+  if [ ! -s "${ssh_arguments}" ]; then
+    fail "$1: the SSH command was not invoked"
+  elif grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
+    fail "$1: invocation included \"-o BatchMode=yes\""
+  elif ! grep -q -- '-batch' "${ssh_arguments}"; then
+    fail "$1: invocation did not include \"-batch\", got [$(cat "${ssh_arguments}")]"
+  fi
+}
+
 # Usage: repo_state DIRECTORY
 # Prints a summary of everything that `is-deleted-branch` must not change:
 # the commits that are reachable from any ref, and the working tree status.
@@ -311,6 +325,45 @@ elif grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
 elif ! grep -q -- '-batch' "${ssh_arguments}"; then
   fail 'Putty-style GIT_SSH invocation did not include "-batch"'
 fi
+
+# With no configured variant, Plink and Putty are recognized by command name,
+# in an SSH command and in an executable path alike.
+git -C "${testdir}/myrepo-branch-unreachable" config --unset core.sshCommand
+git -C "${testdir}/myrepo-branch-unreachable" config --unset ssh.variant
+mkdir -p "${testdir}/plink-bin" "${testdir}/putty-bin"
+cp "${fake_ssh}" "${testdir}/plink-bin/plink"
+cp "${fake_ssh}" "${testdir}/putty-bin/putty"
+for variant in plink putty; do
+  program="${testdir}/${variant}-bin/${variant}"
+
+  : > "${ssh_arguments}"
+  git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${program}"
+  expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+    "is-deleted-branch with an automatically detected ${variant} core.sshCommand"
+  git -C "${testdir}/myrepo-branch-unreachable" config --unset core.sshCommand
+  expect_batch_option "automatically detected ${variant} core.sshCommand"
+
+  : > "${ssh_arguments}"
+  GIT_SSH_COMMAND="${program}"
+  export GIT_SSH_COMMAND
+  expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+    "is-deleted-branch with an automatically detected ${variant} GIT_SSH_COMMAND"
+  unset GIT_SSH_COMMAND
+  expect_batch_option "automatically detected ${variant} GIT_SSH_COMMAND"
+
+  # GIT_SSH is an executable path, so the wrapper adds the option and announces
+  # the variant that Git would otherwise have to guess.
+  : > "${ssh_arguments}"
+  GIT_SSH="${program}"
+  export GIT_SSH
+  expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
+    "is-deleted-branch with an automatically detected ${variant} GIT_SSH"
+  unset GIT_SSH
+  expect_batch_option "automatically detected ${variant} GIT_SSH"
+done
+# Restore the configuration that the remaining tests inherit.
+git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${fake_ssh}"
+git -C "${testdir}/myrepo-branch-unreachable" config ssh.variant plink
 
 # `git-orphaned-branches` must list exactly the deleted branch, and must not
 # modify any of the directories that it inspects.
