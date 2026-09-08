@@ -54,18 +54,17 @@ The commands are:
   Typical usage is `rm -rf $(git-orphaned-branches)` or `rmgob` (see alias
   below).
 * [`relative-path`](relative-path) `BASE TARGET`:
-  Prints the pathname of TARGET, relative to BASE.  This is a portable version
-  of `realpath -e --relative-to=BASE TARGET`; the `--relative-to` option is a
+  Prints the pathname of TARGET, relative to BASE.  Both must name existing
+  files or directories.  This is a portable version of
+  `realpath -e --relative-to=BASE TARGET`; the `--relative-to` option is a
   GNU extension that the BSD and macOS versions of `realpath` do not support.
-* [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
+* [`compile-project`](compile-project) `[--clean] [--no-discover] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
+  With `--no-discover`, compiles in the given directory itself rather than in
+  the top level of the git clone that contains it.
   The command-line arguments for the compilation can be customized, using the
   environment variables described below.
-* [`relative-path`](relative-path) `BASE TARGET`:
-  Prints the pathname of TARGET, relative to BASE.  Both must name existing
-  files or directories.  This is a portable replacement for GNU
-  `realpath --relative-to=BASE TARGET`.
 
 More documentation of each script appears at the top of the script.
 Click the command names above to see that documentation.

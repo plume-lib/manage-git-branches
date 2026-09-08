@@ -10,9 +10,12 @@
 # exit status is failure.
 #
 # Usage:
-#   compile-project [--clean] [<directory>]
+#   compile-project [--clean] [--no-discover] [<directory>]
 #
 # If --clean is passed, then the project is cleaned before being compiled.
+# If --no-discover is passed, then the current directory (or <directory>) is
+# used as the top level of the project, without discovering the top level of
+# the git clone that contains it.
 # If variable GRADLE_ASSEMBLE_FLAGS is defined, it is passed to `gradlew assemble` or `gradle assemble`.
 # If variable MVN_COMPILE_FLAGS is defined, it is passed to `mvnw compile` or `mvn compile`.
 # If variable MAKE_FLAGS is defined, it is passed to `make`.
@@ -20,33 +23,75 @@
 #
 # This command does not need to be run in, or be given, the top-level directory
 # of the project; it discovers the top-level directory on its own (from the
-# current directory, or from <directory> if one is given) and runs the command there.
+# current directory, or from <directory> if one is given) and runs the command
+# there.  Pass --no-discover to compile in the given directory itself.
 
 # TODO: Handle other build systems too, such as Ant.
 # TODO: Have a list of per-directory or per-repository commands, to override the default.
 
-CLEAN=""
-if [ "$#" -ge 1 ]; then
-  if [ "$1" = "--clean" ]; then
-    CLEAN="$1"
-    shift
-  fi
-fi
-
 # SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-if [ "$#" -eq 0 ]; then
-  startdir="$(pwd)"
-elif [ "$#" -eq 1 ]; then
-  startdir="$1"
-else
-  echo "Usage: ${SCRIPT_NAME} [--clean] [<directory>]" >&2
+usage() {
+  echo "Usage: ${SCRIPT_NAME} [--clean] [--no-discover] [<directory>]" >&2
   exit 1
+}
+
+CLEAN=""
+DISCOVER=1
+while [ "$#" -ge 1 ]; do
+  case "$1" in
+    --clean)
+      CLEAN="$1"
+      shift
+      ;;
+    --no-discover)
+      DISCOVER=0
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      usage
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+# $startdir is a physical absolute path, without a trailing "/" character, so
+# that it can be compared to the output of `git rev-parse --show-toplevel`,
+# which is also a physical absolute path.
+if [ "$#" -eq 0 ]; then
+  if ! startdir="$(pwd -P)" || [ -z "$startdir" ]; then
+    echo "${SCRIPT_NAME}: cannot determine the current directory" >&2
+    exit 1
+  fi
+elif [ "$#" -eq 1 ]; then
+  if [ -z "$1" ]; then
+    echo "${SCRIPT_NAME}: the <directory> argument is empty" >&2
+    exit 1
+  fi
+  if [ ! -d "$1" ]; then
+    echo "${SCRIPT_NAME}: not a directory: $1" >&2
+    exit 1
+  fi
+  if ! startdir="$(CDPATH='' cd -- "$1" && pwd -P)" || [ -z "$startdir" ]; then
+    echo "${SCRIPT_NAME}: cannot change to directory: $1" >&2
+    exit 1
+  fi
+else
+  usage
 fi
 
 # $toplevel does not have a trailing "/" character
-if toplevel="$(git -C "$startdir" rev-parse --show-toplevel 2> /dev/null)" && [ -n "$toplevel" ]; then
+if [ "$DISCOVER" = 0 ]; then
+  toplevel="$startdir"
+  echo "Running ${SCRIPT_NAME} in $toplevel"
+elif toplevel="$(git -C "$startdir" rev-parse --show-toplevel 2> /dev/null)" && [ -n "$toplevel" ]; then
   if [ "$toplevel" = "$startdir" ]; then
     echo "Running ${SCRIPT_NAME} in $toplevel"
   else
@@ -123,7 +168,7 @@ else
     fi
   done
   if [ "$buildfile_found" = 0 ] && [ -n "$ERR_IF_NO_BUILDFILE" ]; then
-    echo "${SCRIPT_NAME} did nothing in $(pwd)" >&2
+    echo "${SCRIPT_NAME} did nothing in ${toplevel}" >&2
     exit 1
   fi
 fi
