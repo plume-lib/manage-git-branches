@@ -39,7 +39,12 @@ check_branch_directory() {
 }
 
 workdir="$(mktemp -d)"
-trap 'rm -rf "${workdir}"' EXIT INT TERM
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
+trap 'rm -rf "${workdir}"' EXIT
+trap 'rm -rf "${workdir}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${workdir}"; trap - TERM; kill -s TERM "$$"' TERM
 workdir="$(CDPATH='' cd -- "${workdir}" && pwd -P)"
 
 GIT_AUTHOR_NAME='manage-git-branches test'

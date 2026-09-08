@@ -8,8 +8,10 @@
 # Usage:
 #   git-pull-from [--nocompile] OTHER-REPO-DIR
 #
-# Run this command from within a repository.  OTHER-REPO-DIR may be an absolute
-# or relative pathname.
+# Run this command from the top level of a repository; a subdirectory of the
+# working tree is not itself a clone, and this command is rejected there.
+# OTHER-REPO-DIR may be an absolute or relative pathname, and it too must be
+# the top level of a clone.
 
 # This script does the following:
 #  * pull another directory from its remote,
@@ -22,7 +24,43 @@
 #
 # Calling `git-push-to` is often more readable, because it makes both directory names explicit.
 
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other scripts even when this script
+# is invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
 nocompile=0

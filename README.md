@@ -37,14 +37,15 @@ The commands are:
 * [`git-push-to`](git-push-to) `[--nocompile] FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.
-  The two directories should be working copies (that is, git clones).
+  Each directory must be the top level of a working copy (that is, of a git
+  clone).
   You may also pass a list of directories: each is pushed into the subsequent one.
 * [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
   succeeds.
-  OTHER-REPO-DIR and the current directory should both be working copies (that
-  is, git clones).
+  OTHER-REPO-DIR and the current directory must both be the top level of a
+  working copy (that is, of a git clone).
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
 * [`git-orphaned-branches`](git-orphaned-branches):
@@ -57,6 +58,10 @@ The commands are:
   the given directory, which defaults to the current directory.
   The command-line arguments for the compilation can be customized, using the
   environment variables described below.
+* [`relative-path`](relative-path) `BASE TARGET`:
+  Prints the pathname of TARGET, relative to BASE.  Both must name existing
+  files or directories.  This is a portable replacement for GNU
+  `realpath --relative-to=BASE TARGET`.
 
 More documentation of each script appears at the top of the script.
 Click the command names above to see that documentation.
@@ -78,6 +83,10 @@ takes effect when it is set to a non-empty value.
   succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
+* `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch` uses these standard Git
+  variables to select the SSH command when it queries a remote repository.
+* `GIT_SSH_VARIANT`: `is-deleted-branch` uses this standard Git variable to
+  determine whether the selected SSH command accepts OpenSSH options.
 
 ## Installation
 
