@@ -257,6 +257,9 @@ UNAPPROVED = (
     "git log --oneline\nmake",
     "echo 'git branch newbranch'",
     "git-new-branch newbranch",
+    # A path-qualified program that merely has git's file name is not git.
+    "./git status",
+    "/tmp/git log --oneline",
     # A wrapper or an indirection: git must be the command itself.
     "sudo git log",
     "timeout 300 git log",

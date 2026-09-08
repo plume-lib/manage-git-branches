@@ -861,9 +861,10 @@ def _approves(command: str) -> bool:
         if _is_separator(token) and not frozenset(token) <= APPROVED_OPERATOR_CHARS:
             return False
     commands = list(_simple_commands(tokens))
-    return bool(commands) and all(
-        PurePath(argv[0]).name == "git" and _reads_only(argv) for argv in commands
-    )
+    # The program must be written as the bare word `git`, which the shell looks up on
+    # `PATH`.  A path-qualified form such as `./git` or `/tmp/git` names some other
+    # program that merely has git's file name, so it is left to the permission system.
+    return bool(commands) and all(argv[0] == "git" and _reads_only(argv) for argv in commands)
 
 
 def approval(command: str) -> str | None:
