@@ -11,14 +11,53 @@
 #  * 2 (false) if the directory is not the top level of a clone, so the
 #    question does not apply,
 #  * 3 (false) if the question cannot be answered: HEAD is detached, the
-#    branch has no upstream, or the remote could not be contacted,
+#    branch has no upstream, the remote could not be contacted, or this
+#    script could not resolve the location of its own helper scripts,
 #  * 64 if this command was invoked incorrectly.
 #
 # A caller must not treat every nonzero status as "the branch still exists";
 # only status 1 means that.
-#
-# This command does not modify the directory.
 
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other scripts even when this script
+# is invoked through a symbolic link from elsewhere, such as ~/bin.
+# Exit with status 3 on failure, not 1:  status 1 means "the branch still
+# exists in its remote", and a caller that saw it would proceed as if this
+# script had answered the question.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 3
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 3
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 3
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
 if [ "$#" -ne 1 ]; then
@@ -40,27 +79,145 @@ fi
 dir_real="$(realpath -- "${dir}" 2> /dev/null)" || exit 2
 toplevel_real="$(realpath -- "${toplevel}" 2> /dev/null)" || exit 2
 if [ "${dir_real}" != "${toplevel_real}" ]; then
-  # Not a clone, so it is not on any branch, deleted or otherwise.  Report
-  # this distinctly, so that a caller can give an accurate diagnostic.
+  # Not a clone, so it is not on any branch, deleted or otherwise.
   exit 2
 fi
 
-# The branch, remote, and remote branch that `git pull` in the directory
-# would use.  If any is absent (say, because HEAD is detached or the branch
-# has no upstream), then there is no remote branch to ask about, so whether
-# the branch was deleted cannot be determined.
-branch="$(git -C "${dir}" symbolic-ref --quiet --short HEAD)" || exit 3
-remote="$(git -C "${dir}" config --get "branch.${branch}.remote")" || exit 3
-remote_ref="$(git -C "${dir}" config --get "branch.${branch}.merge")" || exit 3
+# A detached HEAD is not on a branch, so there is no remote branch to ask
+# about, and whether a branch was deleted cannot be determined.
+# Strip the known prefix ourselves, because `symbolic-ref --short` can return
+# "heads/BRANCH" when a tag and the branch have the same name.
+if ! branch_ref="$(git -C "${dir}" symbolic-ref --quiet HEAD 2> /dev/null)"; then
+  exit 3
+fi
+branch="${branch_ref#refs/heads/}"
 
-# `git ls-remote --exit-code` exits with status 2 if the remote has no
-# matching ref, and with some other nonzero status if it cannot be contacted.
-git -C "${dir}" ls-remote --quiet --exit-code "${remote}" "${remote_ref}" > /dev/null 2>&1
-ls_remote_status=$?
-case "${ls_remote_status}" in
-  0) exit 1 ;;
-  2) exit 0 ;;
-  # The remote could not be contacted (say, the network is down), so it is
-  # unknown whether the branch still exists there.
-  *) exit 3 ;;
+# The branch's upstream, as a remote name and one or more refs such as
+# "refs/heads/BRANCH".
+remote="$(git -C "${dir}" config --get "branch.${branch}.remote")"
+upstream_refs="$(git -C "${dir}" config --get-all "branch.${branch}.merge")"
+if [ -z "${remote}" ] || [ -z "${upstream_refs}" ]; then
+  # The branch has no upstream, so there is no remote branch to ask about,
+  # and whether a branch was deleted cannot be determined.
+  exit 3
+fi
+
+# A ref name cannot contain a newline.  Preserve each configured merge value as
+# one argument so that ls-remote succeeds if any configured upstream ref exists.
+saved_ifs="${IFS}"
+IFS='
+'
+set -f
+# shellcheck disable=SC2086
+set -- ${upstream_refs}
+set +f
+IFS="${saved_ifs}"
+
+if [ -z "${GIT_SSH_COMMAND:-}" ]; then
+  unset GIT_SSH_COMMAND
+fi
+ssh_command="${GIT_SSH_COMMAND:-$(git -C "${dir}" config --get core.sshCommand)}"
+ssh_variant="${GIT_SSH_VARIANT:-$(git -C "${dir}" config --get ssh.variant)}"
+
+# `ssh_batch_option` is the option that disables interactive prompts for the
+# selected SSH implementation.  Git accepts several SSH implementations, but
+# only OpenSSH accepts `-o`; Plink and Putty accept `-batch`.
+# When no variant is specified, recognize the standard command names and
+# otherwise leave Git's own variant detection in charge.
+# `ssh_resolved_variant` is the variant that `ssh_batch_option` belongs to.
+
+# Usage: ssh_variant_of PROGRAM
+# Prints the SSH variant that the command name PROGRAM denotes, or nothing if
+# PROGRAM is not a command name that this script recognizes.
+ssh_variant_of() {
+  case "$(basename -- "$1")" in
+    ssh | ssh.exe) echo 'ssh' ;;
+    plink | plink.exe) echo 'plink' ;;
+    putty | putty.exe) echo 'putty' ;;
+  esac
+}
+
+ssh_resolved_variant=''
+case "${ssh_variant}" in
+  ssh | plink | putty)
+    ssh_resolved_variant="${ssh_variant}"
+    ;;
+  '' | auto)
+    if [ -z "${ssh_command}" ]; then
+      if [ -z "${GIT_SSH:-}" ]; then
+        # Git runs "ssh" when neither variable nor configuration names a
+        # command.
+        ssh_resolved_variant='ssh'
+      else
+        # GIT_SSH is an executable path rather than a shell command.
+        ssh_resolved_variant="$(ssh_variant_of "${GIT_SSH}")"
+      fi
+    else
+      # An SSH command is a shell command line, whose first word names the
+      # program to run.
+      ssh_resolved_variant="$(ssh_variant_of "${ssh_command%% *}")"
+    fi
+    ;;
+esac
+
+ssh_batch_option=''
+case "${ssh_resolved_variant}" in
+  ssh)
+    ssh_batch_option='-o BatchMode=yes'
+    ;;
+  plink | putty)
+    ssh_batch_option='-batch'
+    ;;
+esac
+
+# `git ls-remote --exit-code` exits with status 2 if no matching ref exists.
+# GIT_TERMINAL_PROMPT=0 makes an authentication failure an error rather than
+# an interactive prompt.  OpenSSH's `-o BatchMode=yes` does the same for SSH
+# authentication and host-key prompts.  Plink's and Putty's `-batch` option
+# rejects any prompt that would require user input.
+
+if [ -n "${ssh_batch_option}" ]; then
+  if [ -n "${ssh_command}" ]; then
+    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${ssh_command} ${ssh_batch_option}" \
+      git -C "${dir}" ls-remote --exit-code "${remote}" "$@" > /dev/null 2>&1
+    status="$?"
+  elif [ -n "${GIT_SSH:-}" ]; then
+    # GIT_SSH is an executable path rather than a shell command.  A wrapper
+    # adds the option without changing the way the path is parsed.
+    # Git guesses the variant from the basename of GIT_SSH, and the wrapper's
+    # basename is not one that Git recognizes.  Without GIT_SSH_VARIANT, Git
+    # would guess the "simple" variant, which cannot pass a port or an address
+    # family to SSH.
+    IS_DELETED_BRANCH_GIT_SSH="${GIT_SSH}"
+    IS_DELETED_BRANCH_SSH_BATCH_OPTION="${ssh_batch_option}"
+    export IS_DELETED_BRANCH_GIT_SSH IS_DELETED_BRANCH_SSH_BATCH_OPTION
+    GIT_TERMINAL_PROMPT=0 GIT_SSH="${SCRIPT_DIR}/is-deleted-branch-ssh-wrapper" \
+      GIT_SSH_VARIANT="${ssh_resolved_variant}" \
+      git -C "${dir}" ls-remote --exit-code "${remote}" "$@" > /dev/null 2>&1
+    status="$?"
+  else
+    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh ${ssh_batch_option}" \
+      git -C "${dir}" ls-remote --exit-code "${remote}" "$@" > /dev/null 2>&1
+    status="$?"
+  fi
+else
+  GIT_TERMINAL_PROMPT=0 \
+    git -C "${dir}" ls-remote --exit-code "${remote}" "$@" > /dev/null 2>&1
+  status="$?"
+fi
+case "${status}" in
+  0)
+    # The branch still exists in the remote.
+    exit 1
+    ;;
+  2)
+    # The branch was deleted in the remote.
+    exit 0
+    ;;
+  *)
+    # The remote could not be contacted (say, the network is down), so it is
+    # unknown whether the branch still exists there.
+    echo "${SCRIPT_NAME}: cannot list branches of remote ${remote} for ${dir}" >&2
+    exit 3
+    ;;
 esac

@@ -48,7 +48,7 @@ fi
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
-# Canonicalize the parent directory. ${BRANCHDIR} does not exist yet.
+# Canonicalize the parent directory, because ${BRANCHDIR} does not exist yet.
 if ! PARENTDIR="$(realpath ..)" || [ -z "${PARENTDIR}" ]; then
   echo "${SCRIPT_NAME}: Cannot canonicalize the parent directory of $(pwd)" >&2
   exit 1
