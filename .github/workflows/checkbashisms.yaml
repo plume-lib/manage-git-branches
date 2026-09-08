@@ -15,16 +15,11 @@ jobs:
           fetch-depth: 1
           show-progress: false
           persist-credentials: false
-      # This step runs only `checkbashisms`.  `prek` (see prek.yaml) already
-      # runs `shellcheck` and `shfmt`, with this repository's own options,
-      # which differ from the ones that this action would use.
-      #
-      # Do not set `sh_checker_only_diff`, which requires a `GITHUB_TOKEN` in
-      # the environment.  Without one, the action silently finds no files to
-      # check and the job passes without running any checker at all.
       - uses: luizm/action-sh-checker@v0.10.0
         with:
-          # No "sh_checker_only_diff: true" because the workflow also runs on `push`.
+          # No "sh_checker_only_diff: true" because the workflow also runs on
+          # `push` and because without environment variable `GITHUB_TOKEN`, it
+          # silently finds no files and thus does nothing.
           sh_checker_checkbashisms_enable: true
           # shfmt and shellcheck are run by `prek`.
           sh_checker_shfmt_disable: true
