@@ -139,6 +139,70 @@ git -C "${testdir}/myrepo-branch-otherremote" remote rename origin upstream
 git -C "${testdir}/myrepo-branch-otherremote" config --unset branch.live.remote
 git -C "${testdir}/myrepo-branch-otherremote" config --unset-all branch.live.merge
 
+## A working copy whose branch was never pushed, but which has a stale
+## remote-tracking ref for a branch of the same name that someone else pushed
+## and deleted, and that this working copy never pruned.  Such a ref is no
+## sign that this branch was pushed.
+staleref="${testdir}/myrepo-branch-staleref"
+git clone -q "${remote}" "${staleref}"
+git -C "${staleref}" checkout -q -b dead
+git -C "${staleref}" config --unset branch.dead.remote
+git -C "${staleref}" config --unset-all branch.dead.merge
+echo 'unpushed' > "${staleref}/unpushed.txt"
+git -C "${staleref}" add unpushed.txt
+git -C "${staleref}" commit -q -m 'Unpushed commit on a never-pushed branch'
+
+## A working copy with no upstream configuration whose remote-tracking refs are
+## pruned.  Pruning deletes the only sign that the branch was pushed.
+pruned="${testdir}/myrepo-branch-pruned"
+git clone -q -b dead "${remote}" "${pruned}"
+git -C "${pruned}" config --unset branch.dead.remote
+git -C "${pruned}" config --unset-all branch.dead.merge
+
+## A working copy with no upstream configuration whose remote-tracking refs are
+## in a location of their own, because the remote has a fetch refspec other
+## than the default one.
+customrefspec="${testdir}/myrepo-branch-customrefspec"
+git clone -q -b dead "${remote}" "${customrefspec}"
+git -C "${customrefspec}" config --unset branch.dead.remote
+git -C "${customrefspec}" config --unset-all branch.dead.merge
+git -C "${customrefspec}" config remote.origin.fetch \
+  '+refs/heads/*:refs/custom/origin/*'
+git -C "${customrefspec}" update-ref refs/custom/origin/dead \
+  refs/remotes/origin/dead
+git -C "${customrefspec}" update-ref -d refs/remotes/origin/dead
+
+## A working copy whose `branch.BRANCH.merge` names a ref that no longer
+## exists in the remote, but whose `branch.BRANCH.remote` is unset.  Git
+## ignores `branch.BRANCH.merge` in that case, so this branch's upstream is
+## the branch of the same name.
+mergeonly="${testdir}/myrepo-branch-mergeonly"
+git clone -q -b live "${remote}" "${mergeonly}"
+git -C "${mergeonly}" config --unset branch.live.remote
+git -C "${mergeonly}" config branch.live.merge refs/heads/dead
+
+## A working copy in which `branch.BRANCH.pushRemote`, `remote.pushDefault`,
+## and `branch.BRANCH.remote` all name different remotes.  The branch exists
+## in the latter two and was deleted in the first, which is the one that
+## `git push` uses.  The working copy has a commit that it never pushed, so
+## the push that its reflog records is the only sign that it pushed at all.
+pushremote="${testdir}/myrepo-branch-pushremote"
+git init -q --bare -b main "${testdir}/myrepo-pushremote.git"
+git init -q --bare -b main "${testdir}/myrepo-pushdefault.git"
+git clone -q -b live "${remote}" "${pushremote}"
+git -C "${pushremote}" remote add pushremote "${testdir}/myrepo-pushremote.git"
+git -C "${pushremote}" remote add pushdefault "${testdir}/myrepo-pushdefault.git"
+git -C "${pushremote}" push -q pushremote live
+git -C "${pushremote}" push -q pushdefault live
+git -C "${pushremote}" config branch.live.pushRemote pushremote
+git -C "${pushremote}" config remote.pushDefault pushdefault
+echo 'unpushed' > "${pushremote}/unpushed.txt"
+git -C "${pushremote}" add unpushed.txt
+git -C "${pushremote}" commit -q -m 'Commit made after pushing'
+## Delete the branch in the remote itself rather than with
+## `git push --delete`, which would also delete the remote-tracking ref.
+git -C "${testdir}/myrepo-pushremote.git" update-ref -d refs/heads/live
+
 ## Make the remote's "live" branch have a commit that the working copy lacks.
 ## A `git pull` in the working copy would fetch this commit.
 (
@@ -151,6 +215,10 @@ git -C "${testdir}/myrepo-branch-otherremote" config --unset-all branch.live.mer
 
 ## Delete the "dead" branch in the remote.
 git -C "${testdir}/setup" push -q origin --delete dead
+
+## Pruning the working copy above deletes its remote-tracking ref for the
+## deleted branch, and the ref's reflog along with it.
+git -C "${pruned}" fetch -q --prune origin
 
 ## A working copy whose branch was never pushed.
 git clone -q "${remote}" "${testdir}/myrepo-branch-brandnew"
@@ -193,6 +261,22 @@ git -C "${testdir}/myrepo-branch-unreachable" config ssh.variant ssh
 git -C "${testdir}/myrepo-branch-unreachable" remote set-url origin \
   'ssh://example.invalid/no-such-repo.git'
 
+## A working copy whose branch was never pushed and whose remote cannot be
+## reached.  Answering must not require the network.
+neverpushed="${testdir}/myrepo-branch-neverpushed"
+git clone -q "${remote}" "${neverpushed}"
+git -C "${neverpushed}" checkout -q -b neverpushed
+git -C "${neverpushed}" config core.sshCommand "${fake_ssh}"
+git -C "${neverpushed}" config ssh.variant ssh
+git -C "${neverpushed}" remote set-url origin \
+  'ssh://example.invalid/no-such-repo.git'
+
+## A working copy of an empty repository.  Its branch has no commit, and yet
+## `git clone` gives that branch upstream configuration.
+git init -q --bare -b main "${testdir}/myrepo-empty.git"
+git clone -q "${testdir}/myrepo-empty.git" "${testdir}/myrepo-branch-unborn" \
+  2> /dev/null
+
 ## A directory that is not a clone.
 mkdir "${testdir}/myrepo-branch-notaclone"
 
@@ -227,7 +311,18 @@ expect_status 0 "${testdir}/myrepo-branch-notracking-dead" \
   'branch with no upstream configuration that was deleted in the remote'
 expect_status 1 "${testdir}/myrepo-branch-otherremote" \
   'branch with no upstream configuration whose remote is not named "origin"'
+expect_status 3 "${staleref}" \
+  'never-pushed branch with a stale remote-tracking ref of the same name'
+expect_status 3 "${pruned}" \
+  'branch with no upstream configuration whose remote-tracking refs are pruned'
+expect_status 0 "${customrefspec}" \
+  'branch with no upstream configuration and a non-default fetch refspec'
+expect_status 1 "${mergeonly}" \
+  'branch whose branch.BRANCH.merge is set but whose branch.BRANCH.remote is not'
+expect_status 0 "${pushremote}" \
+  'branch that was deleted in the remote that branch.BRANCH.pushRemote names'
 expect_status 3 "${testdir}/myrepo-branch-detached" 'working copy with a detached HEAD'
+expect_status 3 "${testdir}/myrepo-branch-unborn" 'working copy whose branch has no commit'
 expect_status 1 "${testdir}/myrepo-branch-tag-upstream" \
   'branch whose upstream is an existing non-head ref'
 expect_status 1 "${testdir}/myrepo-branch-multiple-upstreams" \
@@ -239,6 +334,22 @@ expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreacha
   'is-deleted-branch on a working copy whose remote cannot be reached'
 if ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
   fail 'SSH invocation did not include "-o BatchMode=yes"'
+fi
+
+# A branch that was never pushed is answered for without contacting the
+# remote, and so without an error message about an unreachable remote.
+: > "${ssh_arguments}"
+neverpushed_stderr="${testdir}/neverpushed-stderr"
+"${IS_DELETED_BRANCH}" "${neverpushed}" > /dev/null 2> "${neverpushed_stderr}"
+neverpushed_status="$?"
+if [ "${neverpushed_status}" -ne 3 ]; then
+  fail "never-pushed branch with an unreachable remote: expected status 3, got ${neverpushed_status}"
+fi
+if [ -s "${ssh_arguments}" ]; then
+  fail "never-pushed branch with an unreachable remote: contacted the remote, with [$(cat "${ssh_arguments}")]"
+fi
+if [ -s "${neverpushed_stderr}" ]; then
+  fail "never-pushed branch with an unreachable remote: printed [$(cat "${neverpushed_stderr}")] on standard error"
 fi
 
 # GIT_SSH is an executable path, so a path containing spaces must remain a
@@ -396,7 +507,9 @@ git -C "${testdir}/myrepo-branch-unreachable" config ssh.variant plink
 
 # `git-orphaned-branches` must list exactly the deleted branch, and must not
 # modify any of the directories that it inspects.
-scanned_clones='live dead brandnew detached unreachable notracking-live notracking-dead otherremote'
+scanned_clones='live dead brandnew detached unreachable notracking-live
+notracking-dead otherremote staleref pruned customrefspec mergeonly pushremote
+neverpushed unborn'
 for branch in ${scanned_clones}; do
   repo_state "${testdir}/myrepo-branch-${branch}" > "${testdir}/before-${branch}"
 done
@@ -416,10 +529,17 @@ if ! grep -q 'cannot list branches of remote' "${orphans_stderr}"; then
   fail "git-orphaned-branches: expected \"cannot list branches of remote\" on standard error, got [$(cat "${orphans_stderr}")]"
 fi
 # `find` does not specify the order in which it visits directories, so compare
-# the sorted lists.
+# the sorted lists.  `git-orphaned-branches` prints each directory as `cd` and
+# `pwd -P` resolve it, because POSIX added `realpath` only in 2024 and some
+# systems still lack it.
 sorted_orphans="$(printf '%s\n' "${orphans}" | sort)"
-expected_orphans="$(cd "${testdir}" \
-  && realpath myrepo-branch-dead myrepo-branch-notracking-dead | sort)"
+expected_orphans="$(
+  for orphan in myrepo-branch-dead myrepo-branch-notracking-dead \
+    myrepo-branch-customrefspec myrepo-branch-pushremote; do
+    # `cd` prints its own diagnostic on failure.
+    (CDPATH='' cd -- "${testdir}/${orphan}" && pwd -P)
+  done | sort
+)"
 if [ "${sorted_orphans}" != "${expected_orphans}" ]; then
   fail "git-orphaned-branches printed [${orphans}], expected [${expected_orphans}]"
 fi
