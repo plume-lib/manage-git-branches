@@ -76,7 +76,12 @@ repo_state() {
 }
 
 testdir="$(mktemp -d)"
-trap 'rm -rf "${testdir}"' EXIT INT TERM
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
+trap 'rm -rf "${testdir}"' EXIT
+trap 'rm -rf "${testdir}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${testdir}"; trap - TERM; kill -s TERM "$$"' TERM
 
 # Make the tests independent of the user's git configuration.
 GIT_CONFIG_GLOBAL="${testdir}/gitconfig"
