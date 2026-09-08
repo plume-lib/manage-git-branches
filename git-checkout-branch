@@ -48,9 +48,6 @@ fi
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
-# As with ${TOPLEVEL} above, test for an empty result: otherwise a failure
-# here would silently yield a ${BRANCHDIR} directly under the file system
-# root, which this script would then copy into and its traps would remove.
 if ! PARENTDIR=$(CDPATH='' cd .. && pwd -P) || [ -z "${PARENTDIR}" ]; then
   echo "${SCRIPT_NAME}: Cannot determine parent directory of $(pwd)" >&2
   exit 1
