@@ -33,7 +33,10 @@ while [ -L "${script_path}" ]; do
     echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
     exit 1
   fi
-  script_link="$(readlink -- "${script_path}")"
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
   case "${script_link}" in
     /*) script_path="${script_link}" ;;
     *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
