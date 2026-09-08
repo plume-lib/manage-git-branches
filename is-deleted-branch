@@ -60,11 +60,12 @@ if [ "${dir_real}" != "${toplevel_real}" ]; then
   exit 2
 fi
 
-# A detached HEAD is not on a branch, so it is not on a deleted branch.
+# A detached HEAD is not on a branch, so there is no remote branch to ask
+# about, and whether a branch was deleted cannot be determined.
 # Strip the known prefix ourselves, because `symbolic-ref --short` can return
 # "heads/BRANCH" when a tag and the branch have the same name.
 if ! branch_ref="$(git -C "${dir}" symbolic-ref --quiet HEAD 2> /dev/null)"; then
-  exit 1
+  exit 3
 fi
 branch="${branch_ref#refs/heads/}"
 
@@ -73,9 +74,9 @@ branch="${branch_ref#refs/heads/}"
 remote="$(git -C "${dir}" config --get "branch.${branch}.remote")"
 upstream_refs="$(git -C "${dir}" config --get-all "branch.${branch}.merge")"
 if [ -z "${remote}" ] || [ -z "${upstream_refs}" ]; then
-  # The branch has no upstream, so it was never pushed:  it is a new branch
-  # rather than a deleted one.
-  exit 1
+  # The branch has no upstream, so there is no remote branch to ask about,
+  # and whether a branch was deleted cannot be determined.
+  exit 3
 fi
 
 # A ref name cannot contain a newline.  Preserve each configured merge value as
@@ -191,7 +192,9 @@ case "${status}" in
     exit 0
     ;;
   *)
+    # The remote could not be contacted (say, the network is down), so it is
+    # unknown whether the branch still exists there.
     echo "${SCRIPT_NAME}: cannot list branches of remote ${remote} for ${dir}" >&2
-    exit 1
+    exit 3
     ;;
 esac

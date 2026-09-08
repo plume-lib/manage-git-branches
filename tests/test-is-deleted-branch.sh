@@ -36,8 +36,9 @@ expect_status() {
 }
 
 # Usage: expect_failure_message COMMAND DIRECTORY DESCRIPTION
-# Runs `COMMAND DIRECTORY`, and checks that it exits with status 1 and
-# complains on standard error that it cannot list the remote's branches.
+# Runs `COMMAND DIRECTORY`, and checks that it exits with status 3, meaning
+# that the question could not be answered, and complains on standard error
+# that it cannot list the remote's branches.
 expect_failure_message() {
   cmd="$1"
   dir="$2"
@@ -45,8 +46,8 @@ expect_failure_message() {
   stderr_file="${testdir}/stderr"
   "${cmd}" "${dir}" > /dev/null 2> "${stderr_file}"
   actual="$?"
-  if [ "${actual}" -ne 1 ]; then
-    fail "${description}: expected status 1, got ${actual}"
+  if [ "${actual}" -ne 3 ]; then
+    fail "${description}: expected status 3, got ${actual}"
   fi
   if ! grep -q 'cannot list branches of remote' "${stderr_file}"; then
     fail "${description}: expected \"cannot list branches of remote\" on standard error, got [$(cat "${stderr_file}")]"
@@ -202,14 +203,14 @@ done
 
 expect_status 1 "${testdir}/myrepo-branch-live" 'branch that exists in the remote'
 expect_status 0 "${testdir}/myrepo-branch-dead" 'branch that was deleted in the remote'
-expect_status 1 "${testdir}/myrepo-branch-brandnew" 'branch that was never pushed'
-expect_status 1 "${testdir}/myrepo-branch-detached" 'working copy with a detached HEAD'
+expect_status 3 "${testdir}/myrepo-branch-brandnew" 'branch that was never pushed'
+expect_status 3 "${testdir}/myrepo-branch-detached" 'working copy with a detached HEAD'
 expect_status 1 "${testdir}/myrepo-branch-tag-upstream" \
   'branch whose upstream is an existing non-head ref'
 expect_status 1 "${testdir}/myrepo-branch-multiple-upstreams" \
   'branch with deleted and existing configured upstream refs'
-expect_status 1 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
-expect_status 1 "${testdir}/myrepo-branch-dead/subdirectory" \
+expect_status 2 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
+expect_status 2 "${testdir}/myrepo-branch-dead/subdirectory" \
   'subdirectory of a clone whose branch was deleted'
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
   'is-deleted-branch on a working copy whose remote cannot be reached'
