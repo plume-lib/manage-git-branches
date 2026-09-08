@@ -8,3 +8,9 @@ dependencies = []
 
 [dependency-groups]
 dev = ["pymarkdownlnt>=0.9.33", "ty>=0.0.1a32"]
+
+[tool.ruff.lint]
+# Preview mode enables the `# ruff: ignore[rule-name]` suppression syntax.
+# Setting it here (rather than relying on a user-level ~/.ruff.toml) keeps CI
+# and local runs in agreement.
+preview = true
