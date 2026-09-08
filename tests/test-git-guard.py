@@ -13,6 +13,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -91,7 +92,28 @@ FORBIDDEN = (
     "find . -name x -exec git branch newbranch +",
     "ssh host git checkout main",
     "ssh -p 22 host git branch newbranch",
+    "ssh -p22 host git switch main",
+    "ssh -vp 22 host git checkout main",
     "env xargs git switch main",
+    # `env -S` gives the whole command as one argument, and appends what follows it.
+    "env -S 'git checkout main'",
+    "env -S 'git checkout' main",
+    "env -S git branch newbranch",
+    "/usr/bin/env -S 'git stash'",
+    "env --split-string='git switch main'",
+    "env --split-string 'git branch newbranch'",
+    "env --split='git checkout main'",
+    "env -i -S 'git checkout main'",
+    "env -iS 'git checkout main'",
+    "env -uFOO -S 'git checkout main'",
+    "env -C /some/dir -S 'git stash pop'",
+    "env -S \"sh -c 'git checkout main'\"",
+    # An `ssh` option can name a command that runs on the local host.
+    "ssh -o ProxyCommand='git checkout main' host true",
+    "ssh -oProxyCommand='git checkout main' host true",
+    "ssh -o 'ProxyCommand git stash' host true",
+    "ssh -o proxycommand='git switch main' host true",
+    "ssh -o LocalCommand='git branch newbranch' host true",
     # Unparsable, but it mentions a forbidden operation.
     "git checkout 'main",
 )
@@ -158,6 +180,12 @@ PERMITTED = (
     "echo '*.md' | xargs grep 'git stash'",
     "eval git status",
     "ssh host git branch --show-current",
+    "ssh -o ProxyCommand='nc %h %p' host true",
+    "ssh -o ProxyCommand='git branch --show-current' host true",
+    "ssh -o StrictHostKeyChecking=no host git status",
+    "env -S 'git branch --show-current'",
+    "env -S 'echo git checkout main'",
+    "env -uS git status",
     "find . -name '*.py' -type f",
     # Unparsable, and mentioning nothing forbidden.
     "echo 'unterminated",
@@ -308,6 +336,19 @@ def main() -> int:
     if not any(GUARD.name in command for command in commands):
         print(f"FAILED: no PreToolUse hook in {SETTINGS} runs {GUARD}")
         failures += 1
+
+    # A shell runs the hook command, so `${CLAUDE_PROJECT_DIR}` must be quoted:  a
+    # project directory whose path contains a space must remain one word.
+    directory = "/parent directory/project"
+    for command in commands:
+        if GUARD.name not in command:
+            continue
+        expanded = command.replace("${CLAUDE_PROJECT_DIR}", directory)
+        expanded = expanded.replace("$CLAUDE_PROJECT_DIR", directory)
+        words = shlex.split(expanded)
+        if words[:1] != [f"{directory}/.claude/hooks/{GUARD.name}"]:
+            print(f"FAILED: hook command splits into {words} for project directory {directory}")
+            failures += 1
     if not os.access(GUARD, os.X_OK):
         print(f"FAILED: {GUARD} is not executable")
         failures += 1

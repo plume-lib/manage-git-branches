@@ -31,7 +31,7 @@ trap 'cleanup' EXIT
 trap 'cleanup; trap - INT; kill -s INT "$$"' INT
 trap 'cleanup; trap - TERM; kill -s TERM "$$"' TERM
 
-if ! work="$(realpath "${work}")" || [ -z "${work}" ]; then
+if ! work="$(CDPATH='' cd -- "${work}" && pwd -P)" || [ -z "${work}" ]; then
   echo "$0: cannot resolve the temporary directory" >&2
   exit 1
 fi

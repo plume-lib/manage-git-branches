@@ -17,10 +17,12 @@ hook parses the command instead, and denies:
     `git branch NEWBRANCH` and `git branch -- NEWBRANCH`.
 
 The hook inspects the `git` invocations of a command: those of a command list, of a
-shell's `-c` argument, of a here-document that feeds a shell, of `eval`, of `xargs`, of
-`find -exec`, and of `ssh`.  It does not follow command substitution, nor a command that
-is built at run time, such as `echo "git $operation main" | sh`.  A command that cannot
-be split into words is denied if it mentions a restricted subcommand.
+shell's `-c` argument, of a here-document that feeds a shell, of `eval`, of `env -S`, of
+`xargs`, of `find -exec`, of `ssh`, and of an `ssh` option such as `-o ProxyCommand=...`
+that names a command that runs on the local host.  It does not follow command
+substitution, nor a command that is built at run time, such as
+`echo "git $operation main" | sh`.  A command that cannot be split into words is denied
+if it mentions a restricted subcommand.
 
 The hook only ever denies.  A permitted command produces no decision, so the `allow` and
 `deny` lists of `.claude/settings.json` still govern it.
@@ -64,6 +66,18 @@ PARSED_PROGRAMS = frozenset({"git"}) | SHELLS | INDIRECT_PROGRAMS
 WRAPPERS = frozenset(
     {"command", "env", "exec", "nice", "nohup", "stdbuf", "sudo", "time", "timeout"}
 )
+
+# The `env` option that gives the whole command as one argument, which `env` splits
+# into words itself, as in `env -S 'git checkout main'`.  A long option may be
+# abbreviated, so `--split-string` is recognized by any unambiguous prefix of it.
+ENV_SPLIT_STRING_OPTION = "--split-string"
+ENV_SPLIT_STRING_LETTER = "S"
+
+# Other `env` options that take a value, which may be attached, as in `-uNAME`, or a
+# separate argument.  An option whose value is optional, such as `--block-signal`, must
+# be written with `=`, so it never takes a separate argument.
+ENV_OPTION_LETTERS_WITH_VALUE = frozenset("Cu")
+ENV_LONG_OPTIONS_WITH_VALUE = frozenset({"--chdir", "--unset"})
 
 # Characters that make up a shell operator token, such as `;` or `&&`.  A newline
 # separates one command from the next, so it is an operator rather than whitespace.
@@ -150,8 +164,18 @@ XARGS_OPTIONS_WITH_VALUE = frozenset(
 FIND_COMMAND_PRIMARIES = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 FIND_COMMAND_TERMINATORS = frozenset({"+", ";"})
 
-# Single-letter `ssh` options that take a separate value.  `ssh` has no long options.
+# Single-letter `ssh` options that take a value, either attached to the letter or as
+# the following argument.  `ssh` has no long options.
 SSH_OPTION_LETTERS_WITH_VALUE = frozenset("BbcDEeFIiJLlmOopQRSWw")
+
+# `ssh` configuration settings, given by `-o`, whose value is a command that runs on
+# the local host rather than on the remote one.  A setting name is case-insensitive,
+# as in an `ssh_config` file.
+SSH_LOCAL_COMMAND_SETTINGS = frozenset({"localcommand", "proxycommand"})
+
+# The value of an `ssh` `-o` option: a setting name, then `=` or whitespace, then the
+# value, as in `-o ProxyCommand=CMD` and `-o "ProxyCommand CMD"`.
+SSH_SETTING = re.compile(r"\s*(?P<name>\w+)\s*=?\s*(?P<value>.*)", re.DOTALL)
 
 # Read-only `git branch` options that take no value.
 BRANCH_READ_ONLY_FLAGS = frozenset(
@@ -258,6 +282,98 @@ def _simple_commands(tokens: list[str]) -> Iterator[list[str]]:
         yield words
 
 
+def _is_long_option(token: str, option: str) -> bool:
+    """Tell whether a token is a long option, possibly abbreviated.
+
+    A long option may be written as any unambiguous prefix of its name, so `--split`
+    is `--split-string`.
+
+    Args:
+        token: an argument, without any `=value` suffix.
+        option: the full name of a long option.
+
+    Returns:
+        True if the token names the option.
+    """
+    return len(token) > 2 and option.startswith(token)
+
+
+def _env_split_string(argv: list[str]) -> list[str] | None:
+    """Find the command that `env -S` runs, which `env` itself splits into words.
+
+    `env -S 'git checkout main'` gives the whole command as one argument, so skipping
+    `env` and its arguments would skip the git invocation along with them.
+
+    A command string that cannot be split into words raises UnparsableCommandError, so
+    that the caller denies the command rather than letting it through unexamined.
+
+    Args:
+        argv: the arguments of an `env` invocation, without the `env` itself.
+
+    Returns:
+        The words of the command, or None if there is no split-string option.
+    """
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if token == "--" or not token.startswith("-") or token == "-":
+            # `env` stops parsing its own options at its first operand.
+            return None
+        name, separator, value = token.partition("=")
+        if name.startswith("--"):
+            if _is_long_option(name, ENV_SPLIT_STRING_OPTION):
+                return _env_command(value if separator else None, argv, index)
+            if not separator and any(
+                _is_long_option(name, option) for option in ENV_LONG_OPTIONS_WITH_VALUE
+            ):
+                index += 1
+            continue
+        # A cluster of single-letter options, as in `env -iS 'git checkout main'`.
+        for position, letter in enumerate(token[1:], start=2):
+            if letter == ENV_SPLIT_STRING_LETTER:
+                return _env_command(token[position:] or None, argv, index)
+            if letter in ENV_OPTION_LETTERS_WITH_VALUE:
+                # The value is the rest of this argument, or the next argument.
+                if not token[position:]:
+                    index += 1
+                break
+    return None
+
+
+def _env_command(value: str | None, argv: list[str], index: int) -> list[str]:
+    """Assemble the command of `env -S` from its command string and what follows it.
+
+    `env` splits the command string into words and appends its own remaining
+    arguments, so `env -S git branch newbranch` runs `git branch newbranch`.
+
+    Args:
+        value: the command string, if it is attached to the option, else None.
+        argv: the arguments of the `env` invocation, without the `env` itself.
+        index: the index of the argument that follows the split-string option.
+
+    Returns:
+        The words of the command.
+    """
+    if value is None:
+        value = _argument(argv, index)
+        index += 1
+    return _tokenize(value) + argv[index:]
+
+
+def _argument(argv: list[str], index: int) -> str:
+    """Return the argument at an index, or the empty string if there is none.
+
+    Args:
+        argv: an argument list.
+        index: the index of the wanted argument.
+
+    Returns:
+        The argument, or the empty string.
+    """
+    return argv[index] if index < len(argv) else ""
+
+
 def _strip_prefixes(words: list[str]) -> list[str]:
     """Remove leading variable assignments and command wrappers.
 
@@ -275,9 +391,16 @@ def _strip_prefixes(words: list[str]) -> list[str]:
         if ASSIGNMENT.fullmatch(argv[0]):
             del argv[0]
             continue
-        if PurePath(argv[0]).name in WRAPPERS:
+        program = PurePath(argv[0]).name
+        if program in WRAPPERS:
             # Skips the wrapper and its own arguments, such as `-u nobody`.
             del argv[0]
+            if program == "env":
+                # `env -S 'git checkout main'` hides the command in one argument.
+                split = _env_split_string(argv)
+                if split is not None:
+                    argv = split
+                    continue
             while argv and PurePath(argv[0]).name not in PARSED_PROGRAMS:
                 del argv[0]
             continue
@@ -364,6 +487,37 @@ def _find_commands(argv: list[str]) -> Iterator[list[str]]:
         yield words
 
 
+def _ssh_arguments(argv: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """Split an `ssh` argument list into its options and its operands.
+
+    Args:
+        argv: the argument list of an `ssh` or `rsh` invocation.
+
+    Returns:
+        Each option letter with its value, which is empty if the option takes none;
+        and the operands, which are the destination host and the remote command.
+    """
+    options: list[tuple[str, str]] = []
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if token == "-" or not token.startswith("-"):
+            return options, [token, *argv[index:]]
+        # A cluster of single-letter options, as in `ssh -vp 22 host`.
+        for position, letter in enumerate(token[1:], start=2):
+            if letter not in SSH_OPTION_LETTERS_WITH_VALUE:
+                options.append((letter, ""))
+                continue
+            value = token[position:]
+            if not value:
+                value = _argument(argv, index)
+                index += 1
+            options.append((letter, value))
+            break
+    return options, []
+
+
 def _remote_shell_command(argv: list[str]) -> list[str]:
     """Find the command that an `ssh` invocation runs on another host.
 
@@ -373,17 +527,28 @@ def _remote_shell_command(argv: list[str]) -> list[str]:
     Returns:
         The words of the command, or an empty list if there is none.
     """
-    index = 1
-    while index < len(argv):
-        token = argv[index]
-        if token == "-" or not token.startswith("-"):
-            # This operand is the destination host, and the rest is the command.
-            return argv[index + 1 :]
-        if len(token) == 2 and token[1] in SSH_OPTION_LETTERS_WITH_VALUE:
-            index += 2
-        else:
-            index += 1
-    return []
+    # The first operand is the destination host, and the rest is the command.
+    return _ssh_arguments(argv)[1][1:]
+
+
+def _local_shell_commands(argv: list[str]) -> Iterator[str]:
+    """Find the commands that an `ssh` invocation runs on the local host.
+
+    `ssh -o ProxyCommand=CMD` runs CMD in a shell on the local host, so a `git` in it
+    acts on this working copy rather than on one elsewhere.
+
+    Args:
+        argv: the argument list of an `ssh` or `rsh` invocation.
+
+    Yields:
+        Each local command, as shell text.
+    """
+    for letter, value in _ssh_arguments(argv)[0]:
+        if letter != "o":
+            continue
+        setting = SSH_SETTING.fullmatch(value)
+        if setting is not None and setting.group("name").lower() in SSH_LOCAL_COMMAND_SETTINGS:
+            yield setting.group("value")
 
 
 def _git_invocations(command: str) -> Iterator[list[str]]:
@@ -434,6 +599,9 @@ def _invocations_of(argv: list[str]) -> Iterator[list[str]]:
         # `eval` joins its arguments and runs the result as a shell command.
         yield from _git_invocations(" ".join(argv[1:]))
     elif program in REMOTE_SHELLS:
+        # An option such as `-o ProxyCommand=CMD` runs CMD on the local host.
+        for local in _local_shell_commands(argv):
+            yield from _git_invocations(local)
         # `ssh` also joins its arguments, and a shell on the host runs the result.
         yield from _git_invocations(" ".join(_remote_shell_command(argv)))
     elif program == "xargs":

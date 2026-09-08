@@ -53,10 +53,19 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+status=0
+
 if [ "$#" -ne 0 ]; then
   echo "Usage: ${SCRIPT_NAME}" >&2
   exit 1
 fi
+
+# Prints the absolute path of directory $1, with symbolic links resolved.
+# `realpath` would be simpler, but POSIX added it only in 2024 and some systems
+# still lack it, whereas `cd` and `pwd -P` are portable.
+absolute_path() {
+  (CDPATH='' cd -- "$1" && pwd -P)
+}
 
 # Returns 0 (true) if directory $1 contains no entry other than `.project`.
 # `find "$1" -mindepth 1 -maxdepth 1` would be simpler, but the `-mindepth` and
@@ -100,8 +109,8 @@ while IFS= read -r dir; do
     "${SCRIPT_DIR}"/is-deleted-branch "$dir"
     is_deleted_status=$?
     case "${is_deleted_status}" in
-      # `realpath` prints its own diagnostic on failure.
-      0) realpath "$dir" || status=1 ;;
+      # `cd` prints its own diagnostic on failure.
+      0) absolute_path "$dir" || status=1 ;;
       1 | 2 | 3) ;;
       *)
         echo "${SCRIPT_NAME}: ${SCRIPT_DIR}/is-deleted-branch failed with status ${is_deleted_status} on: $dir" >&2
@@ -114,7 +123,7 @@ while IFS= read -r dir; do
     # There is no .git subdirectory.
     if [ -f "$dir/.project" ] && only_dot_project "$dir"; then
       # It has only the `.project` file and no other content.
-      realpath "$dir"
+      absolute_path "$dir"
     fi
   fi
 done < "${dirs_file}"
