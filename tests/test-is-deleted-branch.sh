@@ -122,6 +122,23 @@ for branch in live dead; do
   git -C "${testdir}/myrepo-branch-${branch}" tag "${branch}"
 done
 
+## Create a working copy for each branch that has no upstream configuration.
+## Neither `git checkout -b BRANCH` (which `git-new-branch` runs) nor
+## `git push REMOTE BRANCH` sets one, so such a working copy is common.
+for branch in live dead; do
+  dir="${testdir}/myrepo-branch-notracking-${branch}"
+  git clone -q -b "${branch}" "${remote}" "${dir}"
+  git -C "${dir}" config --unset "branch.${branch}.remote"
+  git -C "${dir}" config --unset-all "branch.${branch}.merge"
+done
+
+## A working copy with no upstream configuration whose only remote is not
+## named "origin".
+git clone -q -b live "${remote}" "${testdir}/myrepo-branch-otherremote"
+git -C "${testdir}/myrepo-branch-otherremote" remote rename origin upstream
+git -C "${testdir}/myrepo-branch-otherremote" config --unset branch.live.remote
+git -C "${testdir}/myrepo-branch-otherremote" config --unset-all branch.live.merge
+
 ## Make the remote's "live" branch have a commit that the working copy lacks.
 ## A `git pull` in the working copy would fetch this commit.
 (
@@ -204,6 +221,12 @@ done
 expect_status 1 "${testdir}/myrepo-branch-live" 'branch that exists in the remote'
 expect_status 0 "${testdir}/myrepo-branch-dead" 'branch that was deleted in the remote'
 expect_status 3 "${testdir}/myrepo-branch-brandnew" 'branch that was never pushed'
+expect_status 1 "${testdir}/myrepo-branch-notracking-live" \
+  'branch with no upstream configuration that exists in the remote'
+expect_status 0 "${testdir}/myrepo-branch-notracking-dead" \
+  'branch with no upstream configuration that was deleted in the remote'
+expect_status 1 "${testdir}/myrepo-branch-otherremote" \
+  'branch with no upstream configuration whose remote is not named "origin"'
 expect_status 3 "${testdir}/myrepo-branch-detached" 'working copy with a detached HEAD'
 expect_status 1 "${testdir}/myrepo-branch-tag-upstream" \
   'branch whose upstream is an existing non-head ref'
@@ -373,7 +396,7 @@ git -C "${testdir}/myrepo-branch-unreachable" config ssh.variant plink
 
 # `git-orphaned-branches` must list exactly the deleted branch, and must not
 # modify any of the directories that it inspects.
-scanned_clones='live dead brandnew detached unreachable'
+scanned_clones='live dead brandnew detached unreachable notracking-live notracking-dead otherremote'
 for branch in ${scanned_clones}; do
   repo_state "${testdir}/myrepo-branch-${branch}" > "${testdir}/before-${branch}"
 done
@@ -392,8 +415,12 @@ done
 if ! grep -q 'cannot list branches of remote' "${orphans_stderr}"; then
   fail "git-orphaned-branches: expected \"cannot list branches of remote\" on standard error, got [$(cat "${orphans_stderr}")]"
 fi
-expected_orphans="$(cd "${testdir}" && realpath myrepo-branch-dead)"
-if [ "${orphans}" != "${expected_orphans}" ]; then
+# `find` does not specify the order in which it visits directories, so compare
+# the sorted lists.
+sorted_orphans="$(printf '%s\n' "${orphans}" | sort)"
+expected_orphans="$(cd "${testdir}" \
+  && realpath myrepo-branch-dead myrepo-branch-notracking-dead | sort)"
+if [ "${sorted_orphans}" != "${expected_orphans}" ]; then
   fail "git-orphaned-branches printed [${orphans}], expected [${expected_orphans}]"
 fi
 

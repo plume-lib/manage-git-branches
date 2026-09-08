@@ -10,9 +10,11 @@
 #  * 1 (false) if the directory is on a branch that still exists in its remote,
 #  * 2 (false) if the directory is not the top level of a clone, so the
 #    question does not apply,
-#  * 3 (false) if the question cannot be answered: HEAD is detached, the
-#    branch has no upstream, the remote could not be contacted, or this
-#    script could not resolve the location of its own helper scripts,
+#  * 3 (false) if the question cannot be answered: HEAD is detached, no
+#    remote can be determined for the branch, the branch has no upstream
+#    configuration and does not exist in the remote (so it may never have
+#    been pushed), the remote could not be contacted, or this script could
+#    not resolve the location of its own helper scripts,
 #  * 64 if this command was invoked incorrectly.
 #
 # A caller must not treat every nonzero status as "the branch still exists";
@@ -96,10 +98,38 @@ branch="${branch_ref#refs/heads/}"
 # "refs/heads/BRANCH".
 remote="$(git -C "${dir}" config --get "branch.${branch}.remote")"
 upstream_refs="$(git -C "${dir}" config --get-all "branch.${branch}.merge")"
+
+# A branch has no upstream configuration until some command sets it, and
+# neither `git checkout -b BRANCH` (which `git-new-branch` runs) nor
+# `git push REMOTE BRANCH` sets it.  Such a branch can still exist in a
+# remote, so when configuration does not name the upstream, fall back to the
+# remote and the ref that Git itself would use.
+configured_upstream=1
 if [ -z "${remote}" ] || [ -z "${upstream_refs}" ]; then
-  # The branch has no upstream, so there is no remote branch to ask about,
-  # and whether a branch was deleted cannot be determined.
-  exit 3
+  configured_upstream=0
+fi
+
+if [ -z "${remote}" ]; then
+  remote="$(git -C "${dir}" config --get remote.pushDefault)"
+fi
+if [ -z "${remote}" ]; then
+  # Git uses the remote named "origin" when no configuration names a remote.
+  # If there is no remote named "origin", but there is exactly one other
+  # remote, then that is the only remote the branch could exist in.
+  remotes="$(git -C "${dir}" remote)"
+  if printf '%s\n' "${remotes}" | grep -q -x 'origin'; then
+    remote='origin'
+  elif [ "$(printf '%s\n' "${remotes}" | grep -c '.')" -eq 1 ]; then
+    remote="${remotes}"
+  else
+    # The clone has no remote, or it has several and none is named "origin",
+    # so there is no remote branch to ask about.
+    exit 3
+  fi
+fi
+if [ -z "${upstream_refs}" ]; then
+  # `git push` creates or updates a branch of the same name in the remote.
+  upstream_refs="refs/heads/${branch}"
 fi
 
 # A ref name cannot contain a newline.  Preserve each configured merge value as
@@ -211,6 +241,15 @@ case "${status}" in
     exit 1
     ;;
   2)
+    if [ "${configured_upstream}" -eq 0 ] \
+      && ! git -C "${dir}" rev-parse --verify --quiet \
+        "refs/remotes/${remote}/${branch}" > /dev/null 2>&1; then
+      # The branch has no upstream configuration and no remote-tracking ref,
+      # so it was probably never pushed.  A branch that was never pushed was
+      # not deleted.  A branch that was deleted and whose remote-tracking ref
+      # was then pruned looks the same, so the question cannot be answered.
+      exit 3
+    fi
     # The branch was deleted in the remote.
     exit 0
     ;;
