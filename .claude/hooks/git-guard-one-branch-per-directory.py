@@ -84,6 +84,10 @@ ENV_LONG_OPTIONS_WITH_VALUE = frozenset({"--chdir", "--unset"})
 OPERATOR_CHARACTERS = "();<>|&\n"
 OPERATOR_CHARS = frozenset(OPERATOR_CHARACTERS)
 
+# Characters that separate one word from the next without being an operator.  A newline
+# is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
+WHITESPACE_CHARACTERS = " \t\r"
+
 # Shell keywords that separate one command from another.
 KEYWORDS = frozenset(
     {
@@ -229,6 +233,60 @@ class UnparsableCommandError(Exception):
     """A command that could not be split into words."""
 
 
+def _strip_comments(command: str) -> str:
+    r"""Remove the shell comments from a command, keeping the newlines that end them.
+
+    `shlex` would remove a comment itself, but it consumes the newline that ends the
+    comment along with it.  A newline is the operator that separates one command from
+    the next, so losing it would join a commented line to the line that follows and
+    hide that line's command, as in `cd /some/dir # go there\ngit checkout main`.
+
+    A `#` begins a comment only where a word begins: at the start of the command, after
+    whitespace, or after an operator.  It is an ordinary character elsewhere, as in
+    `git log --grep a#b`, inside quotes, and when it is escaped.
+
+    Args:
+        command: a shell command.
+
+    Returns:
+        The command with each comment removed and each newline kept.
+    """
+    kept: list[str] = []
+    quote = ""
+    at_word_start = True
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if quote != "":
+            kept.append(character)
+            if character == "\\" and quote == '"' and index + 1 < len(command):
+                index += 1
+                kept.append(command[index])
+            elif character == quote:
+                quote = ""
+        elif character == "\\":
+            kept.append(character)
+            if index + 1 < len(command):
+                index += 1
+                kept.append(command[index])
+            at_word_start = False
+        elif character in "'\"":
+            quote = character
+            kept.append(character)
+            at_word_start = False
+        elif character == "#" and at_word_start:
+            # The comment runs to the end of the line.  Leave the newline itself, which
+            # is the operator that separates this command from the next.
+            while index < len(command) and command[index] != "\n":
+                index += 1
+            continue
+        else:
+            kept.append(character)
+            at_word_start = character in WHITESPACE_CHARACTERS or character in OPERATOR_CHARS
+        index += 1
+    return "".join(kept)
+
+
 def _tokenize(command: str) -> list[str]:
     """Split a shell command into words and operator tokens.
 
@@ -238,9 +296,11 @@ def _tokenize(command: str) -> list[str]:
     Returns:
         The tokens of the command.
     """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATOR_CHARACTERS)
+    lexer = shlex.shlex(_strip_comments(command), posix=True, punctuation_chars=OPERATOR_CHARACTERS)
+    # Comments are already gone, and `shlex` would eat the newline that ends one.
+    lexer.commenters = ""
     # A newline is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
-    lexer.whitespace = " \t\r"
+    lexer.whitespace = WHITESPACE_CHARACTERS
     lexer.whitespace_split = True
     try:
         return list(lexer)

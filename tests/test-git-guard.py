@@ -73,6 +73,13 @@ FORBIDDEN = (
     "git status\ngit branch newbranch",
     "git log --oneline\n\ngit stash",
     "cd /some/dir\ngit switch main\nmake",
+    # A comment ends at the newline, which still separates the commands.
+    "cd /some/dir # go there\ngit checkout main",
+    "ls  #\ngit switch main",
+    "make test # build the project\ngit branch newbranch",
+    "echo a#b\ngit stash",
+    "git status # check\ngit checkout main",
+    "sh <<'EOF'\n# Switch to main.\ngit checkout main\nEOF",
     # A here-document that feeds a shell is a script.
     "sh <<'EOF'\ngit checkout main\nEOF",
     "bash <<EOF\ngit stash\nEOF",
@@ -187,6 +194,12 @@ PERMITTED = (
     "env -S 'echo git checkout main'",
     "env -uS git status",
     "find . -name '*.py' -type f",
+    # A comment is not a command, even when it names a forbidden operation, and even
+    # when an apostrophe in it would not parse as shell words.
+    "git status # do not checkout main",
+    "ls # don't run git checkout here",
+    "git status # about stash\ngit log --oneline",
+    "git log --grep a#b",
     # Unparsable, and mentioning nothing forbidden.
     "echo 'unterminated",
 )
