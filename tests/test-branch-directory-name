@@ -5,7 +5,7 @@
 # as an option or as backslash escapes.
 #
 # Usage:
-#   tests/test-branch-directory-name.sh
+#   tests/test-branch-directory-name
 
 set -e
 
@@ -38,14 +38,26 @@ check_branch_directory() {
   rmdir -- "${expected}"
 }
 
-workdir="$(mktemp -d)"
+# The handlers are installed before the temporary directory is created, so
+# that a signal cannot leave it behind.
+# shellcheck disable=SC2329 # Is called from traps.
+cleanup() {
+  if [ -n "${workdir}" ]; then
+    rm -rf "${workdir}"
+  fi
+}
+workdir=''
 # The signal handlers re-raise the signal with the handler removed, so that
 # the script dies of the signal rather than resuming where it was
 # interrupted, and so that the caller sees that it was killed by a signal.
-trap 'rm -rf "${workdir}"' EXIT
-trap 'rm -rf "${workdir}"; trap - INT; kill -s INT "$$"' INT
-trap 'rm -rf "${workdir}"; trap - TERM; kill -s TERM "$$"' TERM
-workdir="$(CDPATH='' cd -- "${workdir}" && pwd -P)"
+trap 'cleanup' EXIT
+trap 'cleanup; trap - INT; kill -s INT "$$"' INT
+trap 'cleanup; trap - TERM; kill -s TERM "$$"' TERM
+workdir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
+if ! resolved="$(CDPATH='' cd -- "${workdir}" && pwd -P)" || [ -z "${resolved}" ]; then
+  fail "cannot resolve the temporary directory: ${workdir}"
+fi
+workdir="${resolved}"
 
 GIT_AUTHOR_NAME='manage-git-branches test'
 GIT_AUTHOR_EMAIL='test@example.com'
@@ -73,4 +85,4 @@ for shellname in sh dash bash ksh; do
   check_branch_directory 'feature/one' 'feature-one'
 done
 
-echo "${SCRIPT_NAME}: OK"
+echo "${SCRIPT_NAME}: PASS"

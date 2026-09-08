@@ -19,9 +19,6 @@ SCRIPT_NAME="$(basename -- "$0")"
 
 README="${TOPLEVEL}/README.md"
 
-# Every executable file at the top level, rather than a hardcoded list, so
-# that adding a script does not silently exempt it from this check.  Emacs
-# backup files, whose names end in "~", are not part of the package.
 SCRIPTS="$(find "${TOPLEVEL}" -maxdepth 1 -type f -perm -u+x ! -name '*~' \
   -exec basename -- {} ';' | sort)"
 if [ -z "${SCRIPTS}" ]; then

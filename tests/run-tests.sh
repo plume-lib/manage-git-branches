@@ -1,6 +1,7 @@
 #!/bin/sh
 
-# Runs every test in this directory.  Exits with status 0 if all tests pass.
+# Runs every test in this directory.  A test is an executable file whose name
+# starts with `test-`; it passes if it exits with status 0.
 #
 # Usage:
 #   tests/run-tests.sh
@@ -8,10 +9,19 @@
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 
 status=0
-for test_script in "${TESTS_DIR}"/test-*.sh; do
-  if ! "${test_script}"; then
-    echo "FAILURE: ${test_script}" >&2
+
+for test_script_absolute in "${TESTS_DIR}"/test-*; do
+  # Skips an executable directory, and the pattern itself when the pattern
+  # matches nothing and the shell leaves it unexpanded.
+  if [ ! -f "${test_script_absolute}" ] || [ ! -x "${test_script_absolute}" ]; then continue; fi
+  test_script="$(basename -- "${test_script_absolute}")"
+  # Skips editor backup files, such as `test-foo~` and `test-foo.~1~`.
+  case "${test_script}" in *'~'*) continue ;; esac
+  echo "Running ${test_script}"
+  if ! "${test_script_absolute}"; then
+    echo "FAILED: ${test_script}"
     status=1
   fi
 done
+
 exit "${status}"

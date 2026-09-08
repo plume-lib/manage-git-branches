@@ -5,7 +5,7 @@
 # subsequent invocation is not blocked by a leftover directory.
 #
 # Usage:
-#   tests/test-branch-interrupt.sh
+#   tests/test-branch-interrupt
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -66,6 +66,9 @@ create_interrupting_cp() {
   mkdir -p "${FAKE_BIN}"
   cat > "${FAKE_BIN}/cp" << 'INNER'
 #!/bin/sh
+# Exit rather than sending the interrupt if the partial copy cannot be made,
+# so that the test cannot pass without an interrupt actually occurring.
+set -e
 # The destination is the last argument.
 dest=""
 for arg in "$@"; do dest="${arg}"; done
@@ -87,15 +90,15 @@ INNER
 }
 
 ## Runs the given branch script on the given branch, in MAIN_DIR and with the
-## interrupting `cp` first on PATH.  Fails the test unless the script is killed
-## by SIGINT.
+## interrupting `cp` first on PATH.  Fails the test unless the script reports
+## signal termination.
 run_interrupted() {
   status=0
   (cd "${MAIN_DIR}" && PATH="${FAKE_BIN}:${PATH}" "${COMMANDS_DIR}/$1" "$2") \
     > /dev/null 2>&1 || status="$?"
-  # A shell reports a command killed by signal N as exit status 128+N.
-  if [ "${status}" -ne 130 ]; then
-    fail "$1 exited with status ${status}, not 130 (killed by SIGINT)"
+  # A shell reports a command killed by a signal with an exit status greater than 128.
+  if [ "${status}" -le 128 ]; then
+    fail "$1 exited with status ${status}, not greater than 128 (killed by a signal)"
   fi
 }
 

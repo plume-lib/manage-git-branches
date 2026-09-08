@@ -8,7 +8,7 @@
 #   git-push-to [--nocompile] FROM_DIR TO_DIR ...
 #
 # Each argument names the top level of a working copy (that is, of a clone).
-# They may be absolute directory names or relative to the current directory.
+# Each may be absolute directory names or relative to the current directory.
 # The first argument may be "--nocompile" to skip the compilation step.
 #
 # This script does the following:
@@ -155,28 +155,53 @@ check_branch_exists() {
   return 0
 }
 
+## Prints the absolute pathname of the given pathname.  Prints nothing and returns
+## nonzero if the pathname cannot be canonicalized.
+## `realpath` would treat a pathname that starts with `-` as an option, so give it
+## one that does not.  Prefixing `./` is more portable than passing `--`, which not
+## every version of `realpath` accepts.
+absolute_path() {
+  operand="$1"
+  case "${operand}" in
+    -*) operand="./${operand}" ;;
+  esac
+  realpath "${operand}"
+}
+
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
   from="$1"
-  from_absolute="$(realpath "$from")"
   to="$2"
-  to_absolute="$(realpath "$to")"
+
+  # A failure here is not yet an error, and it leaves the variable empty: on a
+  # system whose `realpath` requires the pathname to exist, a nonexistent directory
+  # fails here, and the tests just below diagnose that better.
+  from_absolute="$(absolute_path "${from}")"
+  to_absolute="$(absolute_path "${to}")"
 
   if [ ! -d "${from}" ]; then
-    if [ "${from}" = "${from_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: $from" >&2
-    else
+    if [ -n "${from_absolute}" ] && [ "${from}" != "${from_absolute}" ]; then
       echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}" >&2
+    else
+      echo "${SCRIPT_NAME}: no such directory: ${from}" >&2
     fi
     return 1
   fi
-  if [ ! -d "$to" ]; then
-    if [ "${to}" = "${to_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: $to" >&2
-    else
+  if [ ! -d "${to}" ]; then
+    if [ -n "${to_absolute}" ] && [ "${to}" != "${to_absolute}" ]; then
       echo "${SCRIPT_NAME}: no such directory: ${to} = ${to_absolute}" >&2
+    else
+      echo "${SCRIPT_NAME}: no such directory: ${to}" >&2
     fi
+    return 1
+  fi
+  if [ -z "${from_absolute}" ]; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: ${from}" >&2
+    return 1
+  fi
+  if [ -z "${to_absolute}" ]; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: ${to}" >&2
     return 1
   fi
 
@@ -205,7 +230,23 @@ git_push_to() {
     return 1
   fi
 
-  if ! git pull -q "${from_absolute}"; then
+  # Pull from a relative pathname, so that the merge commit message that git
+  # generates does not embed this machine's directory layout in shared history.
+  # `relative-path` is a portable version of `realpath --relative-to`, whose
+  # `--relative-to` option the BSD and macOS versions of `realpath` lack.
+  # Note: pwd=to_absolute
+  if ! from_relative="$("${SCRIPT_DIR}"/relative-path "${to_absolute}" "${from_absolute}")"; then
+    echo "${SCRIPT_NAME}: cannot express ${from_absolute} relative to ${to_absolute}" >&2
+    return 1
+  fi
+  # `git pull` passes the repository to `git fetch`, which parses options again
+  # and interprets a colon in a bare pathname as an scp-style URL.
+  case "${from_relative}" in
+    ./* | ../* | .) ;;
+    *) from_relative="./${from_relative}" ;;
+  esac
+
+  if ! git pull -q -- "${from_relative}"; then
     # Note: pwd=to_absolute
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
     return 1

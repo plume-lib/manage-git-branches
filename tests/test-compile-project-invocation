@@ -1,11 +1,14 @@
 #!/bin/sh
 
-# Tests that `git-push-to` and `git-pull-from` run `compile-project`
-# even when `compile-project` is not on the PATH.  Also tests invoking
-# the scripts by an absolute pathname.
+# Tests that:
+# * `git-push-to` accepts relative source pathnames that resemble Git options
+#   or transport URLs.
+# * `git-push-to` and `git-pull-from` run `compile-project` even when
+#   even when `compile-project` is not on the PATH.
+# * invoking the scripts by an absolute pathname.
 #
 # Usage:
-#   tests/test-compile-project-invocation.sh
+#   tests/test-compile-project-invocation
 
 set -e
 
@@ -69,7 +72,7 @@ if (PATH="${PATH_WITHOUT_COMPILE_PROJECT}" && export PATH && command -v compile-
   exit 1
 fi
 
-work_dir="$(mktemp -d)"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
 # The signal handlers re-raise the signal with the handler removed, so that
 # the script dies of the signal rather than resuming where it was
 # interrupted, and so that the caller sees that it was killed by a signal.
@@ -154,6 +157,38 @@ if ! (cd "${work_dir}/main" \
 fi
 if [ ! -f "${work_dir}/main/compiled-marker" ]; then
   fail 'git-pull-from did not run compile-project'
+fi
+
+# Test a source whose pathname relative to the destination looks like a Git
+# option.  The source must still be pulled rather than being parsed as an
+# option to `git pull`.
+make_clone "${work_dir}/to-option-source"
+make_clone "${work_dir}/to-option-source/--no-tags"
+date > "${work_dir}/to-option-source/--no-tags/option-like-pathname-change.txt"
+git -C "${work_dir}/to-option-source/--no-tags" add option-like-pathname-change.txt
+git -C "${work_dir}/to-option-source/--no-tags" commit -q -m "option-like pathname change"
+
+if ! "${REPO_DIR}/git-push-to" --nocompile "${work_dir}/to-option-source/--no-tags" "${work_dir}/to-option-source"; then
+  fail "git-push-to failed for an option-like relative pathname"
+fi
+if [ ! -f "${work_dir}/to-option-source/option-like-pathname-change.txt" ]; then
+  fail "git-push-to did not pull from the option-like relative pathname"
+fi
+
+# Test a source whose pathname relative to the destination looks like an
+# scp-style Git transport URL.  The source must still be pulled as a local
+# repository.
+make_clone "${work_dir}/to-colon-source"
+make_clone "${work_dir}/to-colon-source/src:repo"
+date > "${work_dir}/to-colon-source/src:repo/colon-pathname-change.txt"
+git -C "${work_dir}/to-colon-source/src:repo" add colon-pathname-change.txt
+git -C "${work_dir}/to-colon-source/src:repo" commit -q -m "colon pathname change"
+
+if ! "${REPO_DIR}/git-push-to" --nocompile "${work_dir}/to-colon-source/src:repo" "${work_dir}/to-colon-source"; then
+  fail "git-push-to failed for a transport-URL-like relative pathname"
+fi
+if [ ! -f "${work_dir}/to-colon-source/colon-pathname-change.txt" ]; then
+  fail "git-push-to did not pull from the transport-URL-like relative pathname"
 fi
 
 echo "${SCRIPT_NAME}: OK"

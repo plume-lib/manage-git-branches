@@ -45,7 +45,7 @@ The commands are:
   directory, then pushes the current directory to its remote if compilation
   succeeds.
   OTHER-REPO-DIR and the current directory must both be the top level of a
-  working copy (that is, of a git clone).
+  working copy (that is, a git clone).
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
 * [`git-orphaned-branches`](git-orphaned-branches):
@@ -53,6 +53,10 @@ The commands are:
   working copies for branches that were deleted in the remote repository.
   Typical usage is `rm -rf $(git-orphaned-branches)` or `rmgob` (see alias
   below).
+* [`relative-path`](relative-path) `BASE TARGET`:
+  Prints the pathname of TARGET, relative to BASE.  This is a portable version
+  of `realpath -e --relative-to=BASE TARGET`; the `--relative-to` option is a
+  GNU extension that the BSD and macOS versions of `realpath` do not support.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
