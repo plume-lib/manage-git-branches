@@ -18,6 +18,16 @@ fail() {
   exit 1
 }
 
+# Do not let the invoking environment change what the scripts under test do.
+# MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT would skip the very step that these
+# tests check for, and the flag variables could keep `compile-project` from
+# creating the marker file that the tests look for.
+unset MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT
+unset MAKE_FLAGS
+unset GRADLE_ASSEMBLE_FLAGS
+unset MVN_COMPILE_FLAGS
+unset ERR_IF_NO_BUILDFILE
+
 # Build a PATH from which `compile-project` cannot be found, so that the scripts
 # under test can run it only by resolving it relative to their own location.
 # The user may have an installation of manage-git-branches on the PATH, so drop
@@ -25,12 +35,21 @@ fail() {
 PATH_WITHOUT_COMPILE_PROJECT=''
 saved_ifs="${IFS}"
 IFS=':'
+# The unquoted expansion of ${PATH} below undergoes pathname expansion as well
+# as field splitting, so disable pathname expansion:  otherwise a PATH element
+# containing `*`, `?`, or `[...]` would be replaced by the files it matches.
+set -f
 for path_element in ${PATH}; do
+  # An empty PATH element means the current directory.
+  if [ -z "${path_element}" ]; then
+    path_element='.'
+  fi
   if [ -x "${path_element}/compile-project" ]; then
     continue
   fi
   PATH_WITHOUT_COMPILE_PROJECT="${PATH_WITHOUT_COMPILE_PROJECT}${PATH_WITHOUT_COMPILE_PROJECT:+:}${path_element}"
 done
+set +f
 IFS="${saved_ifs}"
 
 # An empty PATH would vacuously hide `compile-project`, but it would also hide

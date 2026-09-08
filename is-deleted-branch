@@ -8,7 +8,14 @@
 # The status code is:
 #  * 0 (true) if the directory is on a branch that was deleted in its remote,
 #  * 1 (false) if the directory is on a branch that still exists in its remote,
-#  * 2 (false) if the directory is not a clone, so the question does not apply.
+#  * 2 (false) if the directory is not the top level of a clone, so the
+#    question does not apply,
+#  * 3 (false) if the question cannot be answered: HEAD is detached, the
+#    branch has no upstream, or the remote could not be contacted,
+#  * 64 if this command was invoked incorrectly.
+#
+# A caller must not treat every nonzero status as "the branch still exists";
+# only status 1 means that.
 #
 # This command does not modify the directory.
 
@@ -16,12 +23,23 @@ SCRIPT_NAME="$(basename -- "$0")"
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} DIRECTORY" >&2
-  exit 1
+  exit 64
 fi
 
 dir="$1"
 
-if ! git -C "${dir}" rev-parse --git-dir > /dev/null 2>&1; then
+# `git -C DIR rev-parse` succeeds for every directory within a clone's working
+# tree, so also require that DIRECTORY is that working tree's top level.  A
+# subdirectory is not itself a clone, and answering for the enclosing clone
+# would answer a question that the caller did not ask.
+toplevel="$(git -C "${dir}" rev-parse --show-toplevel 2> /dev/null)" || exit 2
+if [ -z "${toplevel}" ]; then
+  # A bare repository has no working tree, so it is not on any branch.
+  exit 2
+fi
+dir_real="$(realpath -- "${dir}" 2> /dev/null)" || exit 2
+toplevel_real="$(realpath -- "${toplevel}" 2> /dev/null)" || exit 2
+if [ "${dir_real}" != "${toplevel_real}" ]; then
   # Not a clone, so it is not on any branch, deleted or otherwise.  Report
   # this distinctly, so that a caller can give an accurate diagnostic.
   exit 2
@@ -29,17 +47,20 @@ fi
 
 # The branch, remote, and remote branch that `git pull` in the directory
 # would use.  If any is absent (say, because HEAD is detached or the branch
-# has no upstream), then `git pull` fails for a reason other than a deleted
-# branch, so the branch is not a deleted one.
-branch="$(git -C "${dir}" symbolic-ref --quiet --short HEAD)" || exit 1
-remote="$(git -C "${dir}" config --get "branch.${branch}.remote")" || exit 1
-remote_ref="$(git -C "${dir}" config --get "branch.${branch}.merge")" || exit 1
+# has no upstream), then there is no remote branch to ask about, so whether
+# the branch was deleted cannot be determined.
+branch="$(git -C "${dir}" symbolic-ref --quiet --short HEAD)" || exit 3
+remote="$(git -C "${dir}" config --get "branch.${branch}.remote")" || exit 3
+remote_ref="$(git -C "${dir}" config --get "branch.${branch}.merge")" || exit 3
 
 # `git ls-remote --exit-code` exits with status 2 if the remote has no
 # matching ref, and with some other nonzero status if it cannot be contacted.
 git -C "${dir}" ls-remote --quiet --exit-code "${remote}" "${remote_ref}" > /dev/null 2>&1
 ls_remote_status=$?
-if [ "${ls_remote_status}" -eq 2 ]; then
-  exit 0
-fi
-exit 1
+case "${ls_remote_status}" in
+  0) exit 1 ;;
+  2) exit 0 ;;
+  # The remote could not be contacted (say, the network is down), so it is
+  # unknown whether the branch still exists there.
+  *) exit 3 ;;
+esac
