@@ -46,7 +46,7 @@ The commands are:
   OTHER-REPO-DIR and the current directory should both be working copies (that
   is, git clones).
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
-  Tests whether the given directory is on a deleted branch.
+  Tests whether the given directory is the top level of a deleted branch.
 * [`git-orphaned-branches`](git-orphaned-branches):
   Lists directories named `*-branch-*`, below the current directory, that are
   working copies for branches that were deleted in the remote repository.
