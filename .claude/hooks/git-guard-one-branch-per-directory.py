@@ -215,6 +215,30 @@ BRANCH_READ_ONLY_OPTIONS_WITH_VALUE = frozenset(
 # --remotes, --verbose.  Clusters such as `-av` are permitted.
 BRANCH_READ_ONLY_LETTERS = frozenset("ahilrv")
 
+# `git branch` options that put it in list mode, so that an operand is a pattern to
+# match rather than the name of a branch to create.  Each filter below selects which
+# branches to list, and `git branch` refuses `--all` and `--remotes` with an operand
+# unless `--list` is also given, so none of these can create a branch.
+# `--format`, `--sort`, and `--verbose` are deliberately absent:  each of
+# `git branch --format=%(refname) BRANCH`, `git branch --sort=refname BRANCH`, and
+# `git branch -v BRANCH` creates a branch.
+BRANCH_LIST_FLAGS = frozenset({"--all", "--list", "--remotes"})
+
+# List-mode `git branch` options that take a value, either as `--option=value` or as
+# a following argument.
+BRANCH_LIST_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "--contains",
+        "--merged",
+        "--no-contains",
+        "--no-merged",
+        "--points-at",
+    }
+)
+
+# Single-letter list-mode `git branch` options: --all, --list, --remotes.
+BRANCH_LIST_LETTERS = frozenset("alr")
+
 # `git stash` arguments that neither push a stash entry nor change the working copy.
 STASH_READ_ONLY_ARGUMENTS = frozenset({"--help", "-h", "list", "show"})
 
@@ -242,6 +266,12 @@ def _tokenize(command: str) -> list[str]:
     # A newline is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
+    # Do not let `#` start a comment.  `shlex` discards the rest of the line
+    # *including its newline*, which would append the next line's words to the
+    # current command and hide the `git` that starts that next command.  Treating `#`
+    # as an ordinary character only ever adds words to a command already being
+    # examined, so it cannot hide a forbidden command.
+    lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError as exception:
@@ -674,9 +704,10 @@ def _branch_denial(args: list[str]) -> str | None:
             continue
         name, _, value = token.partition("=")
         if name in BRANCH_READ_ONLY_FLAGS:
-            listing = listing or name == "--list"
+            listing = listing or name in BRANCH_LIST_FLAGS
             continue
         if name in BRANCH_READ_ONLY_OPTIONS_WITH_VALUE:
+            listing = listing or name in BRANCH_LIST_OPTIONS_WITH_VALUE
             if not value and index < len(args) and not args[index].startswith("-"):
                 index += 1
             continue
@@ -685,7 +716,7 @@ def _branch_denial(args: list[str]) -> str | None:
         for letter in name[1:]:
             if letter not in BRANCH_READ_ONLY_LETTERS:
                 return f"`git branch -{letter}` modifies branches."
-            listing = listing or letter == "l"
+            listing = listing or letter in BRANCH_LIST_LETTERS
     if operands and not listing:
         return (
             f"`git branch {operands[0]}` creates a branch."

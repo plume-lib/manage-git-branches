@@ -124,8 +124,15 @@ SCRIPT_NAME="$(basename -- "$0")"
 ## branch, which `git pull` and `git push` require.  If it does not, prints an
 ## explanation and returns 1.
 check_upstream() {
-  # If the directory is not a working copy, let a subsequent command diagnose that.
-  branch="$(git -C "$1" rev-parse --abbrev-ref HEAD 2> /dev/null)" || return 0
+  # If the directory is not a working copy, or HEAD is detached, let a subsequent
+  # command diagnose that:  `check_branch_exists` does so accurately, whereas
+  # `git rev-parse --abbrev-ref HEAD` prints "HEAD" for a detached HEAD, which would
+  # make this function recommend `git push --set-upstream origin HEAD` and thereby
+  # create a branch named "HEAD".
+  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
+  # "heads/BRANCH" when a tag and the branch have the same name.
+  branch_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
+  branch="${branch_ref#refs/heads/}"
   if git -C "$1" rev-parse --symbolic-full-name "@{upstream}" > /dev/null 2>&1; then
     return 0
   fi
