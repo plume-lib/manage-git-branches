@@ -85,6 +85,22 @@ nocompile=0
 # directory that contains this package's other scripts even when this script
 # is invoked through a symbolic link from elsewhere, such as ~/bin.
 script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
 script_links=0
 while [ -L "${script_path}" ]; do
   script_links=$((script_links + 1))
