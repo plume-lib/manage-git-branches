@@ -82,6 +82,16 @@ if [ "$#" -ne 1 ]; then
   exit 64
 fi
 
+# A path that does not exist -- or that exists but is not a directory -- is
+# certainly not a clone.  Reject it here rather than leaving it to `git -C`,
+# for which the empty string is a documented no-op:  `git -C '' rev-parse`
+# would answer about the current directory rather than about the argument.
+# The `realpath` call below also rejects the empty string, but only as a side
+# effect of `realpath ''` failing; this test states the requirement directly.
+if [ ! -d "$1" ]; then
+  exit 2
+fi
+
 dir="$1"
 
 # Prints the absolute path of directory $1, with symbolic links resolved.

@@ -263,8 +263,10 @@ done
 echo built >> "${dir}/log"
 EOF
 chmod +x "${sentinel}/gradlew"
-if "${COMPILE_PROJECT}" --clean "${sentinel}" > /dev/null 2>&1; then
-  fail "zero exit status despite a clean that exited 222 in ${sentinel}"
+"${COMPILE_PROJECT}" --clean "${sentinel}" > /dev/null 2>&1
+sentinel_status=$?
+if [ "${sentinel_status}" != 222 ]; then
+  fail "expected exit status 222 from a clean that exited 222 in ${sentinel}, but got ${sentinel_status}"
 fi
 if [ "$(cat "${sentinel}/log")" != "cleaned" ]; then
   fail "with a clean that exited 222, expected only \"cleaned\" but got: $(cat "${sentinel}/log")"
