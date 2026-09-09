@@ -96,7 +96,19 @@ only_dot_project() {
 }
 
 dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
-trap 'rm -f "${dirs_file}"' EXIT INT TERM
+# shellcheck disable=SC2329 # Is called from traps.
+cleanup() {
+  rm -f "${dirs_file}"
+}
+# A POSIX shell such as dash does not run an EXIT trap when the shell is killed
+# by a signal, so trap the signals too.  Each signal handler re-raises the
+# signal with the handler removed, so that this script dies of the signal
+# rather than resuming the loop below with the temporary file already removed,
+# and so that the caller sees that it was killed by a signal.
+trap cleanup EXIT
+trap 'cleanup; trap - HUP EXIT; kill -s HUP "$$"' HUP
+trap 'cleanup; trap - INT EXIT; kill -s INT "$$"' INT
+trap 'cleanup; trap - TERM EXIT; kill -s TERM "$$"' TERM
 find . -name '*-branch-*' -type d > "${dirs_file}"
 
 while IFS= read -r dir; do
@@ -111,7 +123,11 @@ while IFS= read -r dir; do
     # `is-deleted-branch` has already explained if it is worth explaining.  Any
     # other status means that `is-deleted-branch` could not run, which must not
     # be silently reported as "there is nothing to delete".
-    "${SCRIPT_DIR}"/is-deleted-branch "$dir"
+    # Redirect stdin from /dev/null.  This loop's stdin is the list of
+    # directories, and `is-deleted-branch` runs `git`, which runs `ssh`; if any
+    # descendant read stdin, it would consume directory names out of the list
+    # and those directories would silently never be examined.
+    "${SCRIPT_DIR}"/is-deleted-branch "$dir" < /dev/null
     is_deleted_status=$?
     case "${is_deleted_status}" in
       # `cd` prints its own diagnostic on failure.

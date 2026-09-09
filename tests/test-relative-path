@@ -2,6 +2,7 @@
 
 # Tests the `relative-path` script.
 
+SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 TOPLEVEL="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)"
 RELATIVE_PATH="${TOPLEVEL}/relative-path"
@@ -9,7 +10,7 @@ RELATIVE_PATH="${TOPLEVEL}/relative-path"
 status=0
 
 if ! work="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${work}" ]; then
-  echo "$0: cannot create a temporary directory" >&2
+  echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
   exit 1
 fi
 # The signal handlers re-raise the signal with the handler removed, so that
@@ -18,18 +19,19 @@ fi
 trap 'rm -rf "${work}"' EXIT
 trap 'rm -rf "${work}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${work}"; trap - TERM; kill -s TERM "$$"' TERM
-if ! resolved="$(realpath "${work}")" || [ -z "${resolved}" ]; then
-  echo "$0: cannot resolve '${work}'" >&2
+# `realpath` would be simpler, but the script under test deliberately avoids it.
+if ! resolved="$(CDPATH='' cd -- "${work}" && pwd -P)" || [ -z "${resolved}" ]; then
+  echo "${SCRIPT_NAME}: cannot resolve '${work}'" >&2
   exit 1
 fi
 work="${resolved}"
 
 if ! mkdir -p "${work}/a/b/c" "${work}/a/x" "${work}/d e/f" "${work}/-base" "${work}/-target"; then
-  echo "$0: cannot create directories under '${work}'" >&2
+  echo "${SCRIPT_NAME}: cannot create directories under '${work}'" >&2
   exit 1
 fi
 if ! ln -s "${work}/a/x" "${work}/link-to-x"; then
-  echo "$0: cannot create symbolic link '${work}/link-to-x'" >&2
+  echo "${SCRIPT_NAME}: cannot create symbolic link '${work}/link-to-x'" >&2
   exit 1
 fi
 
@@ -119,4 +121,7 @@ if "${RELATIVE_PATH}" "${work}/no-such-file" "${work}" > /dev/null 2>&1; then
   status=1
 fi
 
+if [ "${status}" = 0 ]; then
+  echo "${SCRIPT_NAME}: OK"
+fi
 exit "${status}"

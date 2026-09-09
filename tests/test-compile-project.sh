@@ -7,6 +7,7 @@
 #
 # The exit status is 0 if all tests pass, 1 otherwise.
 
+SCRIPT_NAME="$(basename -- "$0")"
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMPILE_PROJECT="${SCRIPT_DIR}/../compile-project"
 
@@ -28,7 +29,7 @@ unset MVN_COMPILE_FLAGS
 unset ERR_IF_NO_BUILDFILE
 
 if ! tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${tmpdir}" ]; then
-  echo "$0: cannot create a temporary directory" >&2
+  echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
   exit 1
 fi
 # The signal handlers re-raise the signal with the handler removed, so that
@@ -80,6 +81,6 @@ if [ "$(cat "${inherited}/log")" != "built" ]; then
 fi
 
 if [ "${status}" = 0 ]; then
-  echo "test-compile-project.sh: all tests passed"
+  echo "${SCRIPT_NAME}: OK"
 fi
 exit "${status}"

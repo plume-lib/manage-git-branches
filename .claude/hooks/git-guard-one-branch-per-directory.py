@@ -314,18 +314,16 @@ def _tokenize(command: str) -> list[str]:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATOR_CHARACTERS)
     # A newline is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
     lexer.whitespace = " \t\r"
-    # A `#` begins a comment only at the start of a word, but shlex would end the line
-    # at one anywhere, which would hide the commands after it:  a shell runs the `rm`
-    # of `git log a#; rm FILE`.  Treating `#` as an ordinary character instead only
-    # ever reports more commands than a shell runs, as it does for a real comment.
+    # A `#` begins a comment only at the start of a word, but shlex would begin a
+    # comment at one anywhere and would discard the rest of the line *including its
+    # newline*.  That would hide the commands after it on the same line -- a shell
+    # runs the `rm` of `git log a#; rm FILE` -- and would append the next line's
+    # words to the current command, hiding the `git` that starts that next command.
+    # Treating `#` as an ordinary character instead only ever reports more commands
+    # than a shell runs, as it does for a real comment, so it cannot hide a
+    # forbidden command.
     lexer.commenters = ""
     lexer.whitespace_split = True
-    # Do not let `#` start a comment.  `shlex` discards the rest of the line
-    # *including its newline*, which would append the next line's words to the
-    # current command and hide the `git` that starts that next command.  Treating `#`
-    # as an ordinary character only ever adds words to a command already being
-    # examined, so it cannot hide a forbidden command.
-    lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError as exception:

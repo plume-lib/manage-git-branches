@@ -178,17 +178,15 @@ check_branch_exists() {
   return 0
 }
 
-## Prints the absolute pathname of the given pathname.  Prints nothing and returns
-## nonzero if the pathname cannot be canonicalized.
-## `realpath` would treat a pathname that starts with `-` as an option, so give it
-## one that does not.  Prefixing `./` is more portable than passing `--`, which not
-## every version of `realpath` accepts.
+## Prints the absolute pathname of the given directory, with symbolic links
+## resolved.  Prints nothing and returns nonzero if the directory cannot be
+## canonicalized, which the callers below diagnose.
+## `realpath` would be simpler, but POSIX added it only in 2024 and some systems
+## still lack it, whereas `cd` and `pwd -P` are portable.  `cd` writes its own
+## diagnostic when it fails; discard it, because the callers below write a
+## better one.
 absolute_path() {
-  operand="$1"
-  case "${operand}" in
-    -*) operand="./${operand}" ;;
-  esac
-  realpath "${operand}"
+  (CDPATH='' cd -- "$1" && pwd -P) 2> /dev/null
 }
 
 ## A helper function that works on exactly two repositories.
@@ -197,9 +195,9 @@ git_push_to() {
   from="$1"
   to="$2"
 
-  # A failure here is not yet an error, and it leaves the variable empty: on a
-  # system whose `realpath` requires the pathname to exist, a nonexistent directory
-  # fails here, and the tests just below diagnose that better.
+  # A failure here is not yet an error, and it leaves the variable empty:  a
+  # nonexistent directory fails here, and the tests just below diagnose that
+  # better.
   from_absolute="$(absolute_path "${from}")"
   to_absolute="$(absolute_path "${to}")"
 
