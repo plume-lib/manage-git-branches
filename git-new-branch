@@ -139,8 +139,10 @@ BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
 REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 
 # These tests precede the copy of the working copy, so that a name collision
-# does not cost the user a full copy of the repository.  The tests that need no
-# network access come first.
+# does not cost the user a full copy of the repository.  Every test that needs
+# no network access comes first, including the tests for the directories, so
+# that a purely local failure is reported without waiting for a remote -- which
+# may take as long as a connection attempt takes to time out.
 
 # A local branch has to be detected here rather than left to the
 # `git checkout -b` below, which fails on one even when no remote has a branch
@@ -167,6 +169,15 @@ if [ -n "${REMOTE}" ] && [ "${BRANCHNAME}" != 'HEAD' ] \
   exit 1
 fi
 
+if [ -e "${BRANCHDIR}" ]; then
+  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
+  exit 1
+fi
+if [ -e "${BRANCH_TMPDIR}" ]; then
+  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
+  exit 1
+fi
+
 # This clone shows no such branch, so ask the remote itself:  the clone may
 # never have fetched the branch, or may not fetch it at all.
 #
@@ -184,18 +195,10 @@ if [ -n "${REMOTE}" ] \
   exit 1
 fi
 
-if [ -e "${BRANCHDIR}" ]; then
-  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
-  exit 1
-fi
-if [ -e "${BRANCH_TMPDIR}" ]; then
-  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
-  exit 1
-fi
-
-# We just checked that ${BRANCH_TMPDIR} does not exist, so whatever the copy
-# leaves at that location was created by this script and the traps may remove
-# it, even if the copy is interrupted before it finishes.
+# The test above showed that ${BRANCH_TMPDIR} does not exist, and nothing
+# between there and here creates it, so whatever the copy leaves at that
+# location was created by this script and the traps may remove it, even if the
+# copy is interrupted before it finishes.
 TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
 if ! \cp -Rp -- . "${BRANCH_TMPDIR}"; then
   echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2

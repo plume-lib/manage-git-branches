@@ -31,11 +31,15 @@ remote_is_usable() {
   # Not a remote of this clone.  Git accepts a URL or a pathname wherever it
   # accepts a remote name, and permits one as the value of
   # `branch.BRANCH.remote` or `remote.pushDefault`, so recognize those:  git
-  # rejects a string that contains ":" or that starts with "/", "./", "../", or
-  # "~" as the name of a remote, so such a string is a URL or a pathname rather
-  # than the name of a remote that is missing.
+  # rejects a string that contains "/", or that is "." or "..", as the name of
+  # a remote, and it reads a string that contains ":" as an scp-style or
+  # scheme-style URL, so such a string is a URL or a pathname rather than the
+  # name of a remote that is missing.  "~" starts a pathname in the shell
+  # syntax that git accepts for a local repository.
+  # "." and ".." are quoted so that `checkbashisms` does not read `. | ..` as
+  # the `.` command with an argument.
   case "$2" in
-    *:* | /* | ./* | ../* | '~'*) return 0 ;;
+    */* | '.' | '..' | *:* | '~'*) return 0 ;;
   esac
   return 1
 }
