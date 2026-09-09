@@ -64,9 +64,8 @@ The commands are:
   The command-line arguments for the compilation can be customized, using the
   environment variables described below.
 * [`relative-path`](relative-path) `BASE TARGET`:
-  Prints the pathname of TARGET, relative to BASE.  Both must name existing
-  files or directories.  This is a portable replacement for GNU
-  `realpath --relative-to=BASE TARGET`.
+  Prints the pathname of TARGET, relative to BASE.  This is a portable
+  replacement for GNU `realpath --relative-to=BASE TARGET`.
 
 More documentation of each script appears at the top of the script.
 Click the command names above to see that documentation.
