@@ -79,15 +79,39 @@ if [ "${local_head}" != "${remote_head}" ]; then
   fail "git-push-to did not push feature1 to the remote: ${local_head} != ${remote_head}"
 fi
 
+# A configured upstream is valid even when its cached remote-tracking ref is
+# absent.  `git pull` restores the ref from the remote.
+git -C "${MAIN_DIR}" update-ref -d refs/remotes/origin/main
+if ! "${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}"; then
+  fail "git-push-to rejected a configured upstream whose cached ref was absent"
+fi
+if ! git -C "${MAIN_DIR}" show-ref --verify --quiet refs/remotes/origin/main; then
+  fail "git pull did not restore the missing remote-tracking ref"
+fi
+
+# A configured upstream may name a tag rather than a cached remote-tracking branch.
+git -C "${MAIN_DIR}" tag upstream-tag
+git -C "${MAIN_DIR}" push -q origin refs/tags/upstream-tag
+git -C "${MAIN_DIR}" config branch.main.merge refs/tags/upstream-tag
+if ! "${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}"; then
+  fail "git-push-to rejected a configured tag upstream"
+fi
+git -C "${MAIN_DIR}" config branch.main.merge refs/heads/main
+
 # A working copy with no upstream branch gets an explanation, not git's
 # "There is no tracking information for the current branch".
 git -C "${FEATURE_DIR}" branch --unset-upstream
+git -C "${FEATURE_DIR}" remote rename origin github
 if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
   fail "git-push-to succeeded on a working copy with no upstream branch"
 fi
 case "${output}" in
   *"has no upstream branch"*) ;;
   *) fail "git-push-to did not explain the missing upstream branch: ${output}" ;;
+esac
+case "${output}" in
+  *"git push --set-upstream 'github' 'feature1'"*) ;;
+  *) fail "git-push-to did not recommend the configured remote: ${output}" ;;
 esac
 
 echo "${SCRIPT_NAME}: PASS"

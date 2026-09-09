@@ -253,6 +253,58 @@ class UnparsableCommandError(Exception):
     """A command that could not be split into words."""
 
 
+def _remove_shell_comments(command: str) -> str:
+    """Remove shell comments without removing their terminating newlines.
+
+    A comment starts at an unquoted ``#`` at the beginning of a word.  Keeping the
+    newline is important because the newline still separates the commands before and
+    after the comment.  Backslash-newline inside a comment has no special meaning.
+
+    Args:
+        command: a shell command.
+
+    Returns:
+        The command with comment text removed.
+    """
+    result: list[str] = []
+    quote = ""
+    at_word_start = True
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if quote:
+            result.append(character)
+            index += 1
+            if character == quote:
+                quote = ""
+            elif character == "\\" and quote == '"' and index < len(command):
+                result.append(command[index])
+                index += 1
+            continue
+        if character == "#" and at_word_start:
+            newline = command.find("\n", index)
+            if newline == -1:
+                break
+            result.append("\n")
+            index = newline + 1
+            at_word_start = True
+        elif character in "'\"":
+            result.append(character)
+            quote = character
+            at_word_start = False
+            index += 1
+        elif character == "\\" and index + 1 < len(command):
+            result.extend(command[index : index + 2])
+            if command[index + 1] != "\n":
+                at_word_start = False
+            index += 2
+        else:
+            result.append(character)
+            at_word_start = character in " \t\r\n" or character in OPERATOR_CHARS
+            index += 1
+    return "".join(result)
+
+
 def _tokenize(command: str) -> list[str]:
     """Split a shell command into words and operator tokens.
 
@@ -262,15 +314,14 @@ def _tokenize(command: str) -> list[str]:
     Returns:
         The tokens of the command.
     """
+    command = _remove_shell_comments(command)
     lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATOR_CHARACTERS)
     # A newline is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    # Do not let `#` start a comment.  `shlex` discards the rest of the line
-    # *including its newline*, which would append the next line's words to the
-    # current command and hide the `git` that starts that next command.  Treating `#`
-    # as an ordinary character only ever adds words to a command already being
-    # examined, so it cannot hide a forbidden command.
+    # Comments have already been removed without removing their newlines.  Using
+    # `shlex` comment handling would also incorrectly treat the `#` in `a#b` as the
+    # start of a comment.
     lexer.commenters = ""
     try:
         return list(lexer)
@@ -590,7 +641,9 @@ def _git_invocations(command: str) -> Iterator[list[str]]:
     Yields:
         The argument list of each `git` invocation.
     """
-    without_bodies, bodies = _remove_heredoc_bodies(command)
+    # Remove comments first, so a here-document-looking string in a comment does not
+    # hide commands on later lines.
+    without_bodies, bodies = _remove_heredoc_bodies(_remove_shell_comments(command))
     programs = set()
     for words in _simple_commands(_tokenize(without_bodies)):
         argv = _strip_prefixes(words)
