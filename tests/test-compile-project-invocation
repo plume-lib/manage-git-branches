@@ -1,0 +1,194 @@
+#!/bin/sh
+
+# Tests that:
+# * `git-push-to` accepts relative source pathnames that resemble Git options
+#   or transport URLs.
+# * `git-push-to` and `git-pull-from` run `compile-project` even when
+#   even when `compile-project` is not on the PATH.
+# * invoking the scripts by an absolute pathname.
+#
+# Usage:
+#   tests/test-compile-project-invocation
+
+set -e
+
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+REPO_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+SYSTEM_REALPATH="$(command -v realpath)"
+export SYSTEM_REALPATH
+
+fail() {
+  echo "${SCRIPT_NAME}: FAILED: $1" >&2
+  exit 1
+}
+
+# Do not let the invoking environment change what the scripts under test do.
+# MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT would skip the very step that these
+# tests check for, and the flag variables could keep `compile-project` from
+# creating the marker file that the tests look for.
+unset MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT
+unset MAKE_FLAGS
+unset GRADLE_ASSEMBLE_FLAGS
+unset MVN_COMPILE_FLAGS
+unset ERR_IF_NO_BUILDFILE
+
+# Build a PATH from which `compile-project` cannot be found, so that the scripts
+# under test can run it only by resolving it relative to their own location.
+# The user may have an installation of manage-git-branches on the PATH, so drop
+# every PATH element that supplies `compile-project`, not just ${REPO_DIR}.
+PATH_WITHOUT_COMPILE_PROJECT=''
+saved_ifs="${IFS}"
+IFS=':'
+# The unquoted expansion of ${PATH} below undergoes pathname expansion as well
+# as field splitting, so disable pathname expansion:  otherwise a PATH element
+# containing `*`, `?`, or `[...]` would be replaced by the files it matches.
+set -f
+for path_element in ${PATH}; do
+  # An empty PATH element means the current directory.
+  if [ -z "${path_element}" ]; then
+    path_element='.'
+  fi
+  if [ -x "${path_element}/compile-project" ]; then
+    continue
+  fi
+  PATH_WITHOUT_COMPILE_PROJECT="${PATH_WITHOUT_COMPILE_PROJECT}${PATH_WITHOUT_COMPILE_PROJECT:+:}${path_element}"
+done
+set +f
+IFS="${saved_ifs}"
+
+# An empty PATH would vacuously hide `compile-project`, but it would also hide
+# `git` and every other command that the scripts under test need, so the tests
+# below would fail for an unrelated reason.
+if [ -z "${PATH_WITHOUT_COMPILE_PROJECT}" ]; then
+  echo "${SCRIPT_NAME}: cannot construct a nonempty PATH without compile-project" >&2
+  exit 1
+fi
+
+# Use a subshell, because a variable assignment that prefixes a regular builtin
+# such as `command` does not necessarily persist in the current shell.
+if (PATH="${PATH_WITHOUT_COMPILE_PROJECT}" && export PATH && command -v compile-project > /dev/null); then
+  echo "${SCRIPT_NAME}: cannot construct a PATH without compile-project" >&2
+  exit 1
+fi
+
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
+trap 'rm -rf "${work_dir}"' EXIT
+trap 'rm -rf "${work_dir}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${work_dir}"; trap - TERM; kill -s TERM "$$"' TERM
+
+# Put a BSD-compatible realpath stand-in on PATH.  This makes the Linux test
+# reject GNU-only options in the same way that macOS does.
+fakebin="${work_dir}/fakebin"
+mkdir "${fakebin}"
+cat > "${fakebin}/realpath" << 'INNER'
+#!/bin/sh
+case "${1-}" in
+  --relative-to | --relative-to=*) exit 64 ;;
+esac
+exec "${SYSTEM_REALPATH}" "$@"
+INNER
+chmod +x "${fakebin}/realpath"
+TEST_PATH="${fakebin}:${PATH_WITHOUT_COMPILE_PROJECT}"
+
+# Do not depend on the invoking user's git identity.
+GIT_AUTHOR_NAME='manage-git-branches test'
+GIT_AUTHOR_EMAIL='test@example.com'
+GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
+GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
+export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+
+# Creates a clone of the test origin repository at $1 and configures it so that
+# `git pull` merges, whatever the invoking user's global git configuration says.
+make_clone() {
+  git clone -q "${work_dir}/origin.git" "$1"
+  git -C "$1" config pull.rebase false
+}
+
+# Makes a commit in the clone at $1, on the current branch.  The commit adds a
+# file named $2; each call must use a name that no prior call has used, so that
+# merging any two of these commits succeeds.
+commit_in() {
+  echo "$2" > "$1/$2"
+  git -C "$1" add "$2"
+  git -C "$1" commit -q -m "Add $2"
+}
+
+## Set up an origin repository whose build system is a Makefile that creates a
+## file named "compiled-marker".  The marker shows that `compile-project` ran.
+
+git -c init.defaultBranch=main init -q --bare "${work_dir}/origin.git"
+make_clone "${work_dir}/main"
+printf 'all:\n\ttouch compiled-marker\n' > "${work_dir}/main/Makefile"
+git -C "${work_dir}/main" add Makefile
+git -C "${work_dir}/main" commit -q -m 'Add Makefile'
+git -C "${work_dir}/main" push -q -u origin main
+
+make_clone "${work_dir}/feature"
+git -C "${work_dir}/feature" checkout -q -b feature
+commit_in "${work_dir}/feature" feature-1
+git -C "${work_dir}/feature" push -q -u origin feature
+
+## Test `git-push-to`.
+
+# Give the main branch a commit of its own, so that the merge is a real merge.
+commit_in "${work_dir}/main" main-1
+
+if ! PATH="${TEST_PATH}" "${REPO_DIR}/git-push-to" \
+  "${work_dir}/feature" "${work_dir}/main"; then
+  fail "git-push-to did not succeed when compile-project is not on the PATH"
+fi
+if [ ! -f "${work_dir}/main/compiled-marker" ]; then
+  fail 'git-push-to did not run compile-project'
+fi
+
+## Test `git-pull-from`.
+
+rm -f "${work_dir}/main/compiled-marker"
+commit_in "${work_dir}/feature" feature-2
+git -C "${work_dir}/feature" push -q
+
+if ! (cd "${work_dir}/main" \
+  && PATH="${TEST_PATH}" "${REPO_DIR}/git-pull-from" "${work_dir}/feature"); then
+  fail "git-pull-from did not succeed when compile-project is not on the PATH"
+fi
+if [ ! -f "${work_dir}/main/compiled-marker" ]; then
+  fail 'git-pull-from did not run compile-project'
+fi
+
+# Test a source whose pathname relative to the destination looks like a Git
+# option.  The source must still be pulled rather than being parsed as an
+# option to `git pull`.
+make_clone "${work_dir}/to-option-source"
+make_clone "${work_dir}/to-option-source/--no-tags"
+date > "${work_dir}/to-option-source/--no-tags/option-like-pathname-change.txt"
+git -C "${work_dir}/to-option-source/--no-tags" add option-like-pathname-change.txt
+git -C "${work_dir}/to-option-source/--no-tags" commit -q -m "option-like pathname change"
+
+if ! "${REPO_DIR}/git-push-to" --nocompile "${work_dir}/to-option-source/--no-tags" "${work_dir}/to-option-source"; then
+  fail "git-push-to failed for an option-like relative pathname"
+fi
+if [ ! -f "${work_dir}/to-option-source/option-like-pathname-change.txt" ]; then
+  fail "git-push-to did not pull from the option-like relative pathname"
+fi
+
+# Test a source whose pathname relative to the destination looks like an
+# scp-style Git transport URL.  The source must still be pulled as a local
+# repository.
+make_clone "${work_dir}/to-colon-source"
+make_clone "${work_dir}/to-colon-source/src:repo"
+date > "${work_dir}/to-colon-source/src:repo/colon-pathname-change.txt"
+git -C "${work_dir}/to-colon-source/src:repo" add colon-pathname-change.txt
+git -C "${work_dir}/to-colon-source/src:repo" commit -q -m "colon pathname change"
+
+if ! "${REPO_DIR}/git-push-to" --nocompile "${work_dir}/to-colon-source/src:repo" "${work_dir}/to-colon-source"; then
+  fail "git-push-to failed for a transport-URL-like relative pathname"
+fi
+if [ ! -f "${work_dir}/to-colon-source/colon-pathname-change.txt" ]; then
+  fail "git-push-to did not pull from the transport-URL-like relative pathname"
+fi
+
+echo "${SCRIPT_NAME}: OK"
