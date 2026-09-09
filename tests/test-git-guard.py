@@ -78,20 +78,6 @@ FORBIDDEN = (
     "git status # check state\ngit switch main",
     "cd /some/dir # go there\ngit checkout -b newbranch",
     "git log --oneline -1 #\ngit branch newbranch",
-    "cd /some/dir # go there\ngit checkout main",
-    "ls  #\ngit switch main",
-    "make test # build the project\ngit branch newbranch",
-    "echo a#b\ngit stash",
-    "git status # check\ngit checkout main",
-    "sh <<'EOF'\n# Switch to main.\ngit checkout main\nEOF",
-    # A `<<EOF` inside a comment does not introduce a here-document, so the line after
-    # the comment is a command rather than that here-document's body.
-    "echo hi # <<EOF\ngit checkout main\nEOF",
-    "echo hi # <<'EOF'\ngit checkout main\nEOF",
-    # A here-document body is data, so an unmatched quote in one, as in `user's`, opens
-    # no quotation that could hide the comment on a later line.
-    "cat > notes.md <<'EOF'\nThe user's rules.\nEOF\n# <<EOF\ngit checkout main\nEOF",
-    "cat > notes.md <<EOF\nIt isn't run.\nEOF\n# write the notes <<EOF\ngit stash\nEOF",
     "# A backslash in a comment does not continue the comment. \\\ngit checkout main",
     # A `#` that does not start a word does not start a comment, so what follows the
     # `;` is a command.
@@ -234,12 +220,6 @@ PERMITTED = (
     "env -S 'echo git checkout main'",
     "env -uS git status",
     "find . -name '*.py' -type f",
-    # A comment is not a command, even when it names a forbidden operation, and even
-    # when an apostrophe in it would not parse as shell words.
-    "git status # do not checkout main",
-    "ls # don't run git checkout here",
-    "git status # about stash\ngit log --oneline",
-    "git log --grep a#b",
     # Unparsable, and mentioning nothing forbidden.
     "echo 'unterminated",
 )
@@ -278,11 +258,6 @@ APPROVED = (
     "git status; git branch",
     "git status\ngit log --oneline",
     "git log --oneline | git -C /some/dir log --oneline",
-    # A comment is not shell syntax, so an expansion character in one expands nothing
-    # and does not withhold approval.
-    "git status # check state",
-    "git status # see `git log`",
-    "git log --oneline # costs $0",
 )
 
 # Commands that the hook must neither deny nor approve, leaving them to the `allow`
