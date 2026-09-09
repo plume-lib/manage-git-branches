@@ -88,6 +88,19 @@ $(cat "${STDERR_FILE}")"
   fi
 }
 
+## Usage: check_abort_advised SCRIPT COMMAND
+## Fails the test unless STDERR_FILE advises COMMAND.  A merge and a rebase
+## each reject the other's `--abort` -- `git merge --abort` during a rebase
+## fails with "There is no merge to abort (MERGE_HEAD missing)" -- so advice
+## that names the wrong one leaves the user with the conflicts and no way out
+## that the script mentioned.
+check_abort_advised() {
+  if ! grep -q -F -- "$2" "${STDERR_FILE}"; then
+    fail "$1 did not advise \`$2\`; its stderr was:
+$(cat "${STDERR_FILE}")"
+  fi
+}
+
 create_repositories
 
 # A pull that fails because the current branch has no upstream.  The script
@@ -125,6 +138,7 @@ if [ "${status}" -eq 0 ]; then
 fi
 check_pull_reported git-new-branch
 check_conflict_reported git-new-branch
+check_abort_advised git-new-branch 'git merge --abort'
 if [ -e "${WORK_DIR}/myrepo-branch-conflicted" ]; then
   fail "git-new-branch created ${WORK_DIR}/myrepo-branch-conflicted after a conflicted pull"
 fi
@@ -137,6 +151,41 @@ if [ "${status}" -eq 0 ]; then
 fi
 check_pull_reported git-checkout-branch
 check_conflict_reported git-checkout-branch
+check_abort_advised git-checkout-branch 'git merge --abort'
+if [ -e "${WORK_DIR}/myrepo-branch-feature2" ]; then
+  fail "git-checkout-branch created ${WORK_DIR}/myrepo-branch-feature2 after a conflicted pull"
+fi
+
+# A pull that rebases rather than merges, and fails with a conflict.  The
+# advice has to name `git rebase --abort` there:  the conflicts are the same,
+# but the operation that left them is not.
+git -C "${MAIN_DIR}" merge --abort
+git -C "${MAIN_DIR}" config pull.rebase true
+
+run_script git-new-branch rebased
+if [ "${status}" -eq 0 ]; then
+  fail "git-new-branch succeeded despite a conflicted rebasing pull"
+fi
+check_pull_reported git-new-branch
+check_conflict_reported git-new-branch
+check_abort_advised git-new-branch 'git rebase --abort'
+if grep -q -F -- 'git merge --abort' "${STDERR_FILE}"; then
+  fail "git-new-branch advised \`git merge --abort\` during a rebase; its stderr was:
+$(cat "${STDERR_FILE}")"
+fi
+if [ -e "${WORK_DIR}/myrepo-branch-rebased" ]; then
+  fail "git-new-branch created ${WORK_DIR}/myrepo-branch-rebased after a conflicted pull"
+fi
+
+git -C "${MAIN_DIR}" rebase --abort
+
+run_script git-checkout-branch feature2
+if [ "${status}" -eq 0 ]; then
+  fail "git-checkout-branch succeeded despite a conflicted rebasing pull"
+fi
+check_pull_reported git-checkout-branch
+check_conflict_reported git-checkout-branch
+check_abort_advised git-checkout-branch 'git rebase --abort'
 if [ -e "${WORK_DIR}/myrepo-branch-feature2" ]; then
   fail "git-checkout-branch created ${WORK_DIR}/myrepo-branch-feature2 after a conflicted pull"
 fi

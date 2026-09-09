@@ -92,6 +92,12 @@ ENV_LONG_OPTIONS_WITH_VALUE = frozenset({"--chdir", "--unset"})
 OPERATOR_CHARACTERS = "();<>|&\n"
 OPERATOR_CHARS = frozenset(OPERATOR_CHARACTERS)
 
+# The characters that make a following "(" open a substitution rather than a subshell:
+# a command substitution `$(...)`, or a process substitution `<(...)` or `>(...)`.  The
+# ")" that closes a substitution stands inside a word, whereas the ")" that closes a
+# subshell or a `case` pattern separates one word from the next.
+SUBSTITUTION_PREFIXES = frozenset("$<>")
+
 # Characters that separate one word from the next without being an operator.  A newline
 # is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
 WHITESPACE_CHARACTERS = " \t\r"
@@ -311,8 +317,10 @@ def _strip_comments(command: str) -> str:
     hide that line's command, as in `cd /some/dir # go there\ngit checkout main`.
 
     A `#` begins a comment only where a word begins: at the start of the command, after
-    whitespace, or after an operator.  It is an ordinary character elsewhere, as in
-    `git log --grep a#b`, inside quotes, and when it is escaped.
+    whitespace, or after an operator other than the `)` that closes a substitution.  It
+    is an ordinary character elsewhere, as in `git log --grep a#b` and
+    `echo $(echo x)#y`, inside quotes, and when it is escaped.  A line continuation is
+    no word boundary, because the shell joins the lines it separates.
 
     Args:
         command: a shell command.
@@ -323,6 +331,9 @@ def _strip_comments(command: str) -> str:
     kept: list[str] = []
     quote = ""
     at_word_start = True
+    # What opened each "(" that is still open, innermost last:  the "$", "<", or ">" of
+    # a substitution, and "" or another character for a subshell.
+    open_parens: list[str] = []
     index = 0
     while index < len(command):
         character = command[index]
@@ -335,10 +346,17 @@ def _strip_comments(command: str) -> str:
                 quote = ""
         elif character == "\\":
             kept.append(character)
-            if index + 1 < len(command):
+            escaped = command[index + 1] if index + 1 < len(command) else ""
+            if escaped != "":
                 index += 1
-                kept.append(command[index])
-            at_word_start = False
+                kept.append(escaped)
+            # A backslash-newline is a line continuation:  the shell removes both
+            # characters and joins the lines, so it leaves the word state as it was.  A
+            # `#` on the line after `echo hi \` still follows the space that precedes
+            # the backslash, so it still begins a comment, and a `<<EOF` in that comment
+            # still introduces no here-document.  Any other escape is part of a word.
+            if escaped != "\n":
+                at_word_start = False
         elif character in "'\"":
             quote = character
             kept.append(character)
@@ -349,6 +367,20 @@ def _strip_comments(command: str) -> str:
             while index < len(command) and command[index] != "\n":
                 index += 1
             continue
+        elif character == "(":
+            kept.append(character)
+            # Remember what opened this "(", for the ")" that closes it.
+            open_parens.append(command[index - 1] if index > 0 else "")
+            at_word_start = True
+        elif character == ")":
+            kept.append(character)
+            # A ")" that closes a substitution ends a word that the characters after it
+            # continue, so a "#" after it is an ordinary character:  `echo $(echo x)#y`
+            # prints "x#y".  A ")" that closes a subshell or a `case` pattern separates
+            # one word from the next, so a "#" after it begins a comment:  `(echo x)#y`
+            # runs `echo x` and comments out the rest of the line.  An unbalanced ")" is
+            # a syntax error, whose word state does not matter; call it a separator.
+            at_word_start = not open_parens or open_parens.pop() not in SUBSTITUTION_PREFIXES
         else:
             kept.append(character)
             at_word_start = character in WHITESPACE_CHARACTERS or character in OPERATOR_CHARS
@@ -594,6 +626,9 @@ def _remove_heredoc_bodies(command: str) -> tuple[str, list[str]]:
     pending: list[str] = []
     quote = ""
     at_word_start = True
+    # What opened each "(" that is still open, innermost last:  the "$", "<", or ">" of
+    # a substitution, and "" or another character for a subshell.
+    open_parens: list[str] = []
     index = 0
     while index < len(command):
         character = command[index]
@@ -606,10 +641,17 @@ def _remove_heredoc_bodies(command: str) -> tuple[str, list[str]]:
                 quote = ""
         elif character == "\\":
             kept.append(character)
-            if index + 1 < len(command):
+            escaped = command[index + 1] if index + 1 < len(command) else ""
+            if escaped != "":
                 index += 1
-                kept.append(command[index])
-            at_word_start = False
+                kept.append(escaped)
+            # A backslash-newline is a line continuation:  the shell removes both
+            # characters and joins the lines, so it leaves the word state as it was.  A
+            # `#` on the line after `echo hi \` still follows the space that precedes
+            # the backslash, so it still begins a comment, and a `<<EOF` in that comment
+            # still introduces no here-document.  Any other escape is part of a word.
+            if escaped != "\n":
+                at_word_start = False
         elif character in "'\"":
             quote = character
             kept.append(character)
@@ -643,6 +685,20 @@ def _remove_heredoc_bodies(command: str) -> tuple[str, list[str]]:
             index = operator.end()
             at_word_start = False
             continue
+        elif character == "(":
+            kept.append(character)
+            # Remember what opened this "(", for the ")" that closes it.
+            open_parens.append(command[index - 1] if index > 0 else "")
+            at_word_start = True
+        elif character == ")":
+            kept.append(character)
+            # A ")" that closes a substitution ends a word that the characters after it
+            # continue, so a "#" after it is an ordinary character:  `echo $(echo x)#y`
+            # prints "x#y".  A ")" that closes a subshell or a `case` pattern separates
+            # one word from the next, so a "#" after it begins a comment:  `(echo x)#y`
+            # runs `echo x` and comments out the rest of the line.  An unbalanced ")" is
+            # a syntax error, whose word state does not matter; call it a separator.
+            at_word_start = not open_parens or open_parens.pop() not in SUBSTITUTION_PREFIXES
         else:
             kept.append(character)
             at_word_start = character in WHITESPACE_CHARACTERS or character in OPERATOR_CHARS

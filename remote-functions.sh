@@ -7,11 +7,15 @@
 # A script that sources this file must set ${SCRIPT_DIR} to the directory that
 # contains this package's files, because `git_batch_ssh` runs a wrapper script
 # from that directory.
+#
+# Most of these functions are about remotes, which is what the file is named
+# for.  `conflict_abort_command` is not, but it is shared by the same commands,
+# and this is the file that they all source.
 
-## Usage: remote_is_usable REMOTES NAME
-## Tests whether NAME names a remote that a git command can contact.  REMOTES
-## is the output of `git remote` in the clone in question:  the names of its
-## remotes, one per line.
+## Usage: remote_is_usable DIRECTORY REMOTES NAME
+## Tests whether NAME names a remote that a git command run in DIRECTORY can
+## contact.  REMOTES is the output of `git remote` in the clone in question:
+## the names of its remotes, one per line.
 ##
 ## Configuration can name a remote that a clone does not have.
 ## `remote.pushDefault` in particular is a default for every branch of every
@@ -21,36 +25,57 @@
 ## that names it in advice to the user fails with "does not appear to be a git
 ## repository", which hides the actual problem.  So `push_remote` skips such a
 ## name and considers the next possibility.
+##
+## Git accepts a URL or a pathname wherever it accepts a remote's name, and
+## permits one as the value of `branch.BRANCH.remote` or `remote.pushDefault`
+## -- `git push --set-upstream ../other.git BRANCH` writes one there -- so
+## those count as usable as well.  A string that contains ":" is an scp-style
+## or a scheme-style URL, and "~" begins a pathname in the shell syntax that
+## git accepts for a local repository.  Any other string is a pathname only if
+## it exists:  git does accept "/" in the name of a remote (`git remote add
+## team/fork URL` succeeds), so a slash does not distinguish a pathname from
+## the name of a remote that this clone lacks, and only the file system does.
+## A relative pathname is resolved in DIRECTORY, where git resolves the ones it
+## is given.
 remote_is_usable() {
-  if [ -z "$2" ]; then
+  if [ -z "$3" ]; then
     return 1
   fi
-  if printf '%s\n' "$1" | grep -q -x -F -- "$2"; then
+  if printf '%s\n' "$2" | grep -q -x -F -- "$3"; then
     return 0
   fi
-  # Not a remote of this clone.  Git accepts a URL or a pathname wherever it
-  # accepts a remote name, and permits one as the value of
-  # `branch.BRANCH.remote` or `remote.pushDefault`, so recognize those:  git
-  # rejects a string that contains "/", or that is "." or "..", as the name of
-  # a remote, and it reads a string that contains ":" as an scp-style or
-  # scheme-style URL, so such a string is a URL or a pathname rather than the
-  # name of a remote that is missing.  "~" starts a pathname in the shell
-  # syntax that git accepts for a local repository.
-  # "." and ".." are quoted so that `checkbashisms` does not read `. | ..` as
-  # the `.` command with an argument.
-  case "$2" in
-    */* | '.' | '..' | *:* | '~'*) return 0 ;;
+  case "$3" in
+    *:* | '~'*) return 0 ;;
+    /*) remote_is_usable_path="$3" ;;
+    *) remote_is_usable_path="$1/$3" ;;
   esac
+  if [ -e "${remote_is_usable_path}" ]; then
+    return 0
+  fi
   return 1
+}
+
+## Usage: is_remote_name DIRECTORY NAME
+## Tests whether NAME is the name of a remote of the clone in DIRECTORY, as
+## opposed to the URL or the pathname of a repository, which git accepts
+## wherever it accepts a remote's name and which `push_remote` therefore
+## reports when that is what the configuration says.
+##
+## A command that requires the name of a remote, such as
+## `git remote set-branches`, fails on a URL or a pathname ("No such remote"),
+## and `git fetch URL` records no remote-tracking branch, so advice that names
+## one must be worded differently.
+is_remote_name() {
+  git -C "$1" remote | grep -q -x -F -- "$2"
 }
 
 ## Usage: push_remote_consider NAME
 ## A helper for `push_remote`:  sets ${push_remote_result} to NAME if
-## ${push_remote_result} is not set yet and NAME is a remote that the clone can
-## contact.
+## ${push_remote_result} is not set yet and NAME is a remote that the clone in
+## ${push_remote_dir} can contact.
 push_remote_consider() {
   if [ -z "${push_remote_result}" ] \
-    && remote_is_usable "${push_remote_remotes}" "$1"; then
+    && remote_is_usable "${push_remote_dir}" "${push_remote_remotes}" "$1"; then
     push_remote_result="$1"
   fi
 }
@@ -193,5 +218,29 @@ git_batch_ssh() {
     GIT_TERMINAL_PROMPT=0 \
       GIT_SSH_COMMAND="ssh ${git_batch_ssh_option}" \
       git -C "${git_batch_ssh_dir}" "$@"
+  fi
+}
+
+## Usage: conflict_abort_command DIRECTORY
+## Prints the git command that abandons the operation that left conflicts in
+## DIRECTORY:  `git rebase --abort` or `git merge --abort`.
+##
+## `git pull` merges or rebases, depending on `pull.rebase` and
+## `branch.BRANCH.rebase`, and each state has its own way out:  advising
+## `git merge --abort` during a rebase gives the user a command that fails with
+## "There is no merge to abort (MERGE_HEAD missing)", which leaves the conflicts
+## in place and says nothing about what would clear them.  A rebase records its
+## state in the `rebase-merge` directory of the repository, or in
+## `rebase-apply` when it applies patches; a merge leaves no such directory.
+conflict_abort_command() {
+  if ! conflict_abort_command_gitdir="$(git -C "$1" rev-parse --absolute-git-dir 2> /dev/null)"; then
+    conflict_abort_command_gitdir=''
+  fi
+  if [ -n "${conflict_abort_command_gitdir}" ] \
+    && { [ -d "${conflict_abort_command_gitdir}/rebase-merge" ] \
+      || [ -d "${conflict_abort_command_gitdir}/rebase-apply" ]; }; then
+    echo 'git rebase --abort'
+  else
+    echo 'git merge --abort'
   fi
 }

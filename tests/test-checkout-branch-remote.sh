@@ -167,6 +167,50 @@ if [ "${upstream}" != "origin/feature1" ]; then
   fail "${WORK_DIR}/unfetched-branch-feature1 tracks [${upstream}], not origin/feature1"
 fi
 
+# The branch's configured remote can be a pathname rather than the name of a
+# remote, which is what `git push --set-upstream ../other.git BRANCH` records.
+# `git remote set-branches` fails on such a value ("No such remote"), and
+# `git fetch PATHNAME` records no remote-tracking branch, so the advice has to
+# name the commands that do work on one.
+git clone -q --bare "${REMOTE}" "${WORK_DIR}/mainonly.git"
+git -C "${WORK_DIR}/mainonly.git" update-ref -d refs/heads/feature1
+PATHREMOTE_DIR="${WORK_DIR}/pathremote"
+git clone -q "${WORK_DIR}/mainonly.git" "${PATHREMOTE_DIR}"
+# The pathname is relative to the clone, which is where git resolves it.
+git -C "${PATHREMOTE_DIR}" config branch.main.remote '../myrepo.git'
+if output="$(cd "${PATHREMOTE_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
+  fail "git-checkout-branch checked out a branch that this clone has not fetched: ${output}"
+fi
+case "${output}" in
+  *"exists on remote ../myrepo.git, but this clone has not fetched it"*) ;;
+  *) fail "git-checkout-branch did not say that the branch was never fetched: ${output}" ;;
+esac
+case "${output}" in
+  *"is not one of this clone's remotes"*) ;;
+  *) fail "git-checkout-branch did not say that the branch's remote is a pathname: ${output}" ;;
+esac
+case "${output}" in
+  *"git remote add NAME ../myrepo.git"*) ;;
+  *) fail "git-checkout-branch did not say how to fetch from the pathname: ${output}" ;;
+esac
+# Advice that requires the name of a remote would fail on a pathname, so it
+# must not be given for one.
+case "${output}" in
+  *"git remote set-branches"*)
+    fail "git-checkout-branch advised a command that fails on a pathname: ${output}"
+    ;;
+esac
+# Following the advice works:  the branch can then be checked out.
+git -C "${PATHREMOTE_DIR}" remote add other '../myrepo.git'
+git -C "${PATHREMOTE_DIR}" fetch -q other
+if ! output="$(cd "${PATHREMOTE_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
+  fail "git-checkout-branch failed after the commands that it advised: ${output}"
+fi
+branch="$(git -C "${WORK_DIR}/pathremote-branch-feature1" rev-parse --abbrev-ref HEAD)"
+if [ "${branch}" != "feature1" ]; then
+  fail "${WORK_DIR}/pathremote-branch-feature1 is on branch ${branch}, not feature1"
+fi
+
 # A clone can hold a remote-tracking branch that its refspecs do not cover, if
 # someone fetched the branch once with an explicit refspec.  `git checkout
 # feature1` does not find such a ref -- it searches the remotes' refspecs, not
