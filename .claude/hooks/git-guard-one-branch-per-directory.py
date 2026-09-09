@@ -323,7 +323,7 @@ def _remove_shell_comments(command: str) -> str:
         character = command[index]
         if quote:
             result.append(character)
-                index += 1
+            index += 1
             if character == quote:
                 quote = ""
             elif character == "\\" and quote == '"' and index < len(command):
@@ -341,7 +341,7 @@ def _remove_shell_comments(command: str) -> str:
             result.append(character)
             quote = character
             at_word_start = False
-                index += 1
+            index += 1
         elif character == "\\" and index + 1 < len(command):
             result.extend(command[index : index + 2])
             if command[index + 1] != "\n":
@@ -350,7 +350,7 @@ def _remove_shell_comments(command: str) -> str:
         else:
             result.append(character)
             at_word_start = character in " \t\r\n" or character in OPERATOR_CHARS
-        index += 1
+            index += 1
     return "".join(result)
 
 
