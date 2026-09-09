@@ -121,10 +121,40 @@ if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
   echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
 fi
 
-# Determine which remote to ask whether the branch already exists:  the remote
-# that `git push` would use for the current branch, as `push_remote` in
-# remote-functions.sh determines it, which is also the remote that
-# `is-deleted-branch` and `git-push-to` use.  The new branch has no
+# Usage: branch_in_clone BRANCH
+# Tests whether this clone already holds BRANCH:  a local branch of that name,
+# or a remote-tracking branch of that name in some remote.  Either one shows
+# that the branch exists, and neither test needs network access.  A local
+# branch has to be detected here rather than left to the `git checkout -b`
+# below, which fails on one even when no remote has a branch of that name.
+branch_in_clone() {
+  if git rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
+    return 0
+  fi
+  # Ask about each remote separately, rather than matching a pattern against
+  # every remote-tracking ref:  both a remote's name and a branch's name may
+  # contain "/", so the name of such a ref does not by itself say where the
+  # remote's name ends and the branch's name begins.  A remote's name contains
+  # no whitespace, so the shell's word splitting separates the names here.
+  for remote_name in $(git remote); do
+    if git rev-parse --verify --quiet "refs/remotes/${remote_name}/$1" > /dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# These tests precede the copy of the working copy, so that a name collision
+# does not cost the user a full copy of the repository.
+if branch_in_clone "${BRANCHNAME}"; then
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists." >&2
+  exit 1
+fi
+
+# This clone does not hold the branch, so ask the remote.  Determine which
+# remote to ask:  the remote that `git push` would use for the current branch,
+# as `push_remote` in remote-functions.sh determines it, which is also the
+# remote that `is-deleted-branch` and `git-push-to` use.  The new branch has no
 # configuration of its own yet -- `git checkout -b` creates none -- and the new
 # working copy is a copy of this one, so this branch's configuration is what
 # says where the new branch will be pushed.
@@ -148,7 +178,7 @@ REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 if [ -n "${REMOTE}" ] \
   && git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
     "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists." >&2
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${REMOTE}." >&2
   exit 1
 fi
 

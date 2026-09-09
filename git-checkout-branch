@@ -122,9 +122,16 @@ fi
 # Tests whether this clone holds BRANCH:  a local branch of that name, or a
 # remote-tracking branch of that name in some remote.  The `git checkout`
 # below checks out the former, and creates a local branch from the latter.
+#
+# "HEAD" is excluded from the remote-tracking test:  a clone has a symbolic ref
+# `refs/remotes/REMOTE/HEAD` that names the remote's default branch, so that
+# ref resolves, but "HEAD" is not the name of a branch.
 branch_in_clone() {
   if git rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
     return 0
+  fi
+  if [ "$1" = 'HEAD' ]; then
+    return 1
   fi
   # Ask about each remote separately, rather than matching a pattern against
   # every remote-tracking ref:  both a remote's name and a branch's name may
@@ -170,9 +177,9 @@ if [ "${REMOTE_HAS_BRANCH}" != 'yes' ] && ! branch_in_clone "${BRANCHNAME}"; the
   if [ "${REMOTE_HAS_BRANCH}" = 'no' ]; then
     echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist." >&2
   elif [ -z "${REMOTE}" ]; then
-    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} is not in this clone, which determines no remote to ask about it." >&2
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, which determines no remote to ask about it." >&2
   else
-    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} is not in this clone, and remote ${REMOTE} could not be asked about it." >&2
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, and remote ${REMOTE} could not be asked about it." >&2
   fi
   exit 1
 fi
