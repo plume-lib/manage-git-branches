@@ -109,7 +109,9 @@ else
 fi
 
 # Sets $buildfile_found_here to 1 if a buildfile was found in directory $1, or to 0
-# if none was.  Returns the status of the build, or 0 if no buildfile was found.
+# if none was.  Returns the status of the build; or, if --clean was given and the
+# clean failed, the status of the clean, without building; or 0 if no buildfile
+# was found.
 # The "was a buildfile found?" answer is a variable rather than a reserved exit
 # status, because every exit status is one that a build command itself might return.
 compile_in_directory() {
