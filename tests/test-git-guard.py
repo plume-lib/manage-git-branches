@@ -88,6 +88,10 @@ FORBIDDEN = (
     # the comment is a command rather than that here-document's body.
     "echo hi # <<EOF\ngit checkout main\nEOF",
     "echo hi # <<'EOF'\ngit checkout main\nEOF",
+    # A here-document body is data, so an unmatched quote in one, as in `user's`, opens
+    # no quotation that could hide the comment on a later line.
+    "cat > notes.md <<'EOF'\nThe user's rules.\nEOF\n# <<EOF\ngit checkout main\nEOF",
+    "cat > notes.md <<EOF\nIt isn't run.\nEOF\n# write the notes <<EOF\ngit stash\nEOF",
     "# A backslash in a comment does not continue the comment. \\\ngit checkout main",
     # A `#` that does not start a word does not start a comment, so what follows the
     # `;` is a command.

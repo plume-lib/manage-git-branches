@@ -122,16 +122,12 @@ ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*=.*", re.DOTALL)
 # A git subcommand that this hook restricts, in a command it could not parse.
 FORBIDDEN_MENTION = re.compile(r"\bgit\s+((-{1,2}\S+|\S+=\S+)\s+)*(branch|checkout|stash|switch)\b")
 
-# A here-document: the redirection operator, the delimiter word, the rest of the line
-# that holds them, the body, and the line that holds the delimiter alone.  A `<<-`
-# here-document permits leading tabs on that line.  The body starts at the next line,
-# not just after the delimiter word, because what follows the delimiter word on its own
-# line is shell syntax rather than data, as in `cat <<EOF && git checkout main`.
-HEREDOC = re.compile(
-    r"<<-?[ \t]*(?P<quote>['\"]?)(?P<delimiter>\w+)(?P=quote)"
-    r"(?P<rest>[^\n]*)\n(?P<body>.*?)^[\t]*(?P=delimiter)[ \t]*$",
-    re.DOTALL | re.MULTILINE,
-)
+# The operator that introduces a here-document, together with its delimiter word, which
+# may be quoted, as in `<<'EOF'`.  A `<<<` here-string is not a here-document, and does
+# not match because `<` is not a word character.  The body starts at the next line, not
+# just after the delimiter word, because what follows the delimiter word on its own line
+# is shell syntax rather than data, as in `cat <<EOF && git checkout main`.
+HEREDOC_OPERATOR = re.compile(r"<<-?[ \t]*(?P<quote>['\"]?)(?P<delimiter>\w+)(?P=quote)")
 
 # Git options that precede the subcommand and take a separate value, as in
 # `git -C DIR branch`.  The `--option=value` form is handled separately, and so is an
@@ -543,27 +539,115 @@ def _strip_prefixes(words: list[str]) -> list[str]:
     return argv
 
 
+def _heredoc_body(command: str, index: int, delimiter: str) -> tuple[str, int] | None:
+    r"""Find the body of a here-document, which ends at the line that holds its delimiter.
+
+    A `<<-` here-document permits leading tabs on that line, and this function permits
+    them for every here-document, which at worst ends a body early and so leaves data
+    to be parsed as commands.
+
+    Args:
+        command: a shell command.
+        index: the index of the first character of the body, which begins a line.
+        delimiter: the here-document's delimiter word.
+
+    Returns:
+        The body and the index just past the line that holds the delimiter, or None if
+        no line holds it, which leaves the text where it is rather than removing it.
+    """
+    position = index
+    while position < len(command):
+        newline = command.find("\n", position)
+        end = len(command) if newline < 0 else newline
+        if command[position:end].lstrip("\t").rstrip(" \t") == delimiter:
+            return command[index:position], min(end + 1, len(command))
+        position = end + 1
+    return None
+
+
 def _remove_heredoc_bodies(command: str) -> tuple[str, list[str]]:
-    """Take the here-document bodies out of a shell command.
+    r"""Take the here-document bodies out of a shell command.
 
     A here-document body is data, not shell syntax, so parsing it as a command would
     misread the text that a command such as `cat > file <<EOF` merely writes.  The rest
     of the line that introduces the here-document is shell syntax, so it is kept.
 
+    The bodies come out before `_strip_comments` runs, so this function tracks quotes
+    and comments itself:  it skips each body without reading it as shell text, and a
+    `<<` in a quotation or in a comment introduces no here-document.  Stripping the
+    comments first would instead read each body as shell text, where an unmatched quote
+    in one, as in `don't`, opens a quotation that hides the comment on a later line; a
+    `<<EOF` left in that comment would then take the commands after it to be a body of
+    its own and hide them, as in
+    `cat <<'EOF'\nThe user's rules.\nEOF\n# <<EOF\ngit checkout main\nEOF`.
+
     Args:
         command: a shell command.
 
     Returns:
-        The command without its here-document bodies, and those bodies.
+        The command without its here-document bodies, and those bodies.  The comments
+        remain, for `_strip_comments` to remove.
     """
     bodies: list[str] = []
-
-    def take(match: re.Match[str]) -> str:
-        bodies.append(match.group("body"))
-        # Keeps what follows the delimiter word on its own line, which is shell syntax.
-        return "<<" + match.group("rest")
-
-    return HEREDOC.sub(take, command), bodies
+    kept: list[str] = []
+    # The delimiters of the here-documents whose bodies start at the next line.
+    pending: list[str] = []
+    quote = ""
+    at_word_start = True
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if quote != "":
+            kept.append(character)
+            if character == "\\" and quote == '"' and index + 1 < len(command):
+                index += 1
+                kept.append(command[index])
+            elif character == quote:
+                quote = ""
+        elif character == "\\":
+            kept.append(character)
+            if index + 1 < len(command):
+                index += 1
+                kept.append(command[index])
+            at_word_start = False
+        elif character in "'\"":
+            quote = character
+            kept.append(character)
+            at_word_start = False
+        elif character == "#" and at_word_start:
+            # A comment is not shell syntax, so a `<<EOF` in one introduces no
+            # here-document.  The comment itself is kept, for `_strip_comments`.
+            while index < len(command) and command[index] != "\n":
+                kept.append(command[index])
+                index += 1
+            continue
+        elif character == "\n":
+            kept.append(character)
+            index += 1
+            at_word_start = True
+            while pending:
+                found = _heredoc_body(command, index, pending[0])
+                if found is None:
+                    # No line holds the delimiter, so this is more likely a `<<` that
+                    # is not a here-document than a body; leave the text to be parsed.
+                    break
+                body, index = found
+                bodies.append(body)
+                del pending[0]
+            continue
+        elif character == "<" and (operator := HEREDOC_OPERATOR.match(command, index)):
+            pending.append(operator.group("delimiter"))
+            # Keeps the operator, which separates one word from the next, and drops the
+            # delimiter word, whose body this function removes.
+            kept.append("<<")
+            index = operator.end()
+            at_word_start = False
+            continue
+        else:
+            kept.append(character)
+            at_word_start = character in WHITESPACE_CHARACTERS or character in OPERATOR_CHARS
+        index += 1
+    return "".join(kept), bodies
 
 
 def _is_shell_command_option(token: str) -> bool:
@@ -695,9 +779,11 @@ def _git_invocations(command: str) -> Iterator[list[str]]:
     Yields:
         The argument list of each `git` invocation.
     """
-    # Strip the comments first:  a `<<EOF` written in a comment does not introduce a
-    # here-document, and treating it as one would take real commands to be its body.
-    without_bodies, bodies = _remove_heredoc_bodies(_strip_comments(command))
+    # Take the here-document bodies out first, because a body is data rather than shell
+    # text:  a quote or a `#` in one is not shell syntax, so scanning it for comments
+    # would misread the shell text that follows the body.  `_remove_heredoc_bodies`
+    # tracks quotes and comments itself, and `_tokenize` strips the comments.
+    without_bodies, bodies = _remove_heredoc_bodies(command)
     programs = set()
     for words in _simple_commands(_tokenize(without_bodies)):
         argv = _strip_prefixes(words)
