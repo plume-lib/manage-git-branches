@@ -104,13 +104,38 @@ case "${output}" in
   *) fail "git-checkout-branch claimed to know that the branch does not exist: ${output}" ;;
 esac
 
-# `git-checkout-branch` asks the remote without ever prompting.  A prompt would
-# block forever:  this script discards the query's output, and it may run from
-# another script or from a CI job.  `GIT_TERMINAL_PROMPT=0` does not suppress
-# the prompts that SSH itself issues, such as the one for an unknown host key,
-# so the SSH command must also be given the option that disables those.  A
-# branch whose remote cannot be reached is still checked out, from the
-# remote-tracking branch that this clone holds.
+# A branch that the remote has but that this clone never fetched cannot be
+# checked out:  `git checkout` consults only the refs that the clone holds.
+# Refusing before the copy, with advice to fetch, beats copying the whole
+# repository and then failing with git's "pathspec did not match" message.
+UNFETCHED_DIR="${WORK_DIR}/unfetched"
+git clone -q "${REMOTE}" "${UNFETCHED_DIR}"
+# Restrict the fetch refspec before deleting the remote-tracking branch, so
+# that the `git pull` in `git-checkout-branch` does not recreate it.
+git -C "${UNFETCHED_DIR}" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+git -C "${UNFETCHED_DIR}" update-ref -d refs/remotes/origin/feature1
+if output="$(cd "${UNFETCHED_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
+  fail "git-checkout-branch checked out a branch that this clone has not fetched: ${output}"
+fi
+case "${output}" in
+  *"exists on remote origin, but this clone has not fetched it"*) ;;
+  *) fail "git-checkout-branch did not say that the branch was never fetched: ${output}" ;;
+esac
+case "${output}" in
+  *"git fetch origin"*) ;;
+  *) fail "git-checkout-branch did not say to fetch the branch: ${output}" ;;
+esac
+for leftover in "${WORK_DIR}/unfetched-branch-feature1" "${WORK_DIR}/unfetched-branch-feature1-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "git-checkout-branch copied the working copy before refusing: ${leftover}"
+  fi
+done
+
+# The tests that need no network access come first, so a branch that this clone
+# holds is checked out without asking any remote about it.  A fake `ssh` counts
+# the connections:  the `git pull` above makes one, and a query about the
+# branch would make another.  A branch whose remote cannot be reached is still
+# checked out, from the remote-tracking branch that this clone holds.
 SSH_DIR="${WORK_DIR}/sshclone"
 git clone -q "${REMOTE}" "${SSH_DIR}"
 SSH_ARGUMENTS="${WORK_DIR}/ssh-arguments"
@@ -123,6 +148,26 @@ branch="$(git -C "${WORK_DIR}/sshclone-branch-feature1" rev-parse --abbrev-ref H
 if [ "${branch}" != "feature1" ]; then
   fail "${WORK_DIR}/sshclone-branch-feature1 is on branch ${branch}, not feature1"
 fi
+connections="$(grep -c '.' "${SSH_ARGUMENTS}" || true)"
+if [ "${connections}" -ne 1 ]; then
+  fail "git-checkout-branch made ${connections} SSH connections for a branch that this clone holds: [$(cat "${SSH_ARGUMENTS}")]"
+fi
+
+# `git-checkout-branch` asks the remote -- about a branch that this clone does
+# not hold, which is the case that needs an answer -- without ever prompting.
+# A prompt would block forever:  this script discards the query's output, and
+# it may run from another script or from a CI job.  `GIT_TERMINAL_PROMPT=0`
+# does not suppress the prompts that SSH itself issues, such as the one for an
+# unknown host key, so the SSH command must also be given the option that
+# disables those.
+: > "${SSH_ARGUMENTS}"
+if output="$(cd "${SSH_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" nosuchbranch 2>&1)"; then
+  fail "git-checkout-branch checked out a branch that does not exist: ${output}"
+fi
+case "${output}" in
+  *"could not be asked about it"*) ;;
+  *) fail "git-checkout-branch claimed to know that the branch does not exist: ${output}" ;;
+esac
 if [ ! -s "${SSH_ARGUMENTS}" ]; then
   fail 'git-checkout-branch did not contact the remote over SSH'
 elif ! grep -q -- '-o BatchMode=yes' "${SSH_ARGUMENTS}"; then

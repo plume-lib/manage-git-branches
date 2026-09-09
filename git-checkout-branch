@@ -123,6 +123,11 @@ fi
 # remote-tracking branch of that name in some remote.  The `git checkout`
 # below checks out the former, and creates a local branch from the latter.
 #
+# `git checkout` consults only the refs that this clone holds, so this test is
+# what says whether the branch can be checked out at all:  a branch that some
+# remote has but that was never fetched into this clone is not one that
+# `git checkout` can find.  The test needs no network access.
+#
 # "HEAD" is excluded from the remote-tracking test:  a clone has a symbolic ref
 # `refs/remotes/REMOTE/HEAD` that names the remote's default branch, so that
 # ref resolves, but "HEAD" is not the name of a branch.
@@ -146,36 +151,46 @@ branch_in_clone() {
   return 1
 }
 
-# Determine which remote to ask whether the branch exists:  the remote that
-# `git push` would use for the current branch, as `push_remote` in
-# remote-functions.sh determines it, which is also the remote that this
-# package's other commands use.  Asking only the remote named "origin", as
-# this script once did, asked no remote at all in a clone whose sole remote
-# has some other name, and then reported that the branch does not exist.
-BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
-REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
+# This test precedes the copy of the working copy, so that a branch that cannot
+# be checked out does not cost the user a full copy of the repository.
+if ! branch_in_clone "${BRANCHNAME}"; then
+  # The branch cannot be checked out.  Saying why takes asking a remote, which
+  # the test above did not need:  a branch that this clone does not hold may
+  # exist on the remote anyway, unfetched, and then the user's next step is to
+  # fetch it rather than to create it.
+  #
+  # Determine which remote to ask:  the remote that `git push` would use for
+  # the current branch, as `push_remote` in remote-functions.sh determines it,
+  # which is also the remote that this package's other commands use.  Asking
+  # only the remote named "origin", as this script once did, asked no remote at
+  # all in a clone whose sole remote has some other name, and then reported
+  # that the branch does not exist.
+  BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
+  REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 
-# `git ls-remote --exit-code` exits with status 2 if the remote has no such
-# branch, and with some other nonzero status if the remote could not be asked
-# at all, which is not the same thing.  `git_batch_ssh` disables the
-# interactive prompts that would otherwise block this query forever when this
-# script is run from another script or a CI job.
-REMOTE_HAS_BRANCH='unknown'
-if [ -n "${REMOTE}" ]; then
-  git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/${BRANCHNAME}" \
-    > /dev/null 2>&1
-  case "$?" in
-    0) REMOTE_HAS_BRANCH='yes' ;;
-    2) REMOTE_HAS_BRANCH='no' ;;
-  esac
-fi
+  # `git ls-remote --exit-code` exits with status 2 if the remote has no such
+  # branch, and with some other nonzero status if the remote could not be asked
+  # at all, which is not the same thing.  `git_batch_ssh` disables the
+  # interactive prompts that would otherwise block this query forever when this
+  # script is run from another script or a CI job.
+  REMOTE_HAS_BRANCH='unknown'
+  if [ -n "${REMOTE}" ]; then
+    git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/${BRANCHNAME}" \
+      > /dev/null 2>&1
+    case "$?" in
+      0) REMOTE_HAS_BRANCH='yes' ;;
+      2) REMOTE_HAS_BRANCH='no' ;;
+    esac
+  fi
 
-# A branch that this clone already holds can be checked out even if no remote
-# has it or no remote could be asked, so refuse only when nothing shows that
-# the branch exists.
-if [ "${REMOTE_HAS_BRANCH}" != 'yes' ] && ! branch_in_clone "${BRANCHNAME}"; then
-  if [ "${REMOTE_HAS_BRANCH}" = 'no' ]; then
-    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist." >&2
+  if [ "${REMOTE_HAS_BRANCH}" = 'yes' ]; then
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} exists on remote ${REMOTE}, but this clone has not fetched it." >&2
+    echo "${SCRIPT_NAME}: Run \`git fetch ${REMOTE}\` in ${TOPLEVEL}, then re-run ${SCRIPT_NAME}." >&2
+  elif [ "${REMOTE_HAS_BRANCH}" = 'no' ]; then
+    # Name the remote that was asked.  A clone can have other remotes, whose
+    # branches this script did not ask about and whose refs it did not find
+    # above, so a bare "does not exist" would claim more than was checked.
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone or on remote ${REMOTE}." >&2
   elif [ -z "${REMOTE}" ]; then
     echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, which determines no remote to ask about it." >&2
   else
