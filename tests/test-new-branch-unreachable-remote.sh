@@ -102,4 +102,23 @@ elif ! grep -q -- '-o BatchMode=yes' "${SSH_ARGUMENTS}"; then
   fail "SSH invocation did not include \"-o BatchMode=yes\": [$(cat "${SSH_ARGUMENTS}")]"
 fi
 
+# Every test that needs no network access comes first, so a collision with an
+# existing directory is reported without asking any remote about the branch.
+# Waiting for a query -- possibly for as long as a connection attempt takes to
+# time out -- before reporting a purely local failure would be pure delay.  The
+# fake `ssh` counts the connections:  the `git pull` above makes one, and a
+# query about the branch would make another.
+: > "${SSH_ARGUMENTS}"
+if output="$(cd "${SSH_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature2 2>&1)"; then
+  fail "git-new-branch created a branch whose directory exists: ${output}"
+fi
+case "${output}" in
+  *"directory exists: ${WORK_DIR}/myrepo-branch-feature2"*) ;;
+  *) fail "git-new-branch did not say that the directory exists: ${output}" ;;
+esac
+connections="$(grep -c '.' "${SSH_ARGUMENTS}" || true)"
+if [ "${connections}" -ne 1 ]; then
+  fail "git-new-branch made ${connections} SSH connections before reporting that the directory exists: [$(cat "${SSH_ARGUMENTS}")]"
+fi
+
 echo "${SCRIPT_NAME}: OK"

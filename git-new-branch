@@ -123,15 +123,33 @@ git pull -q > /dev/null 2>&1 || true
 BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
 REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 
-# Ask the remote whether the branch already exists.
+# These tests precede the copy of the working copy, so that a name collision
+# does not cost the user a full copy of the repository.  Every test that needs
+# no network access comes first, including the tests for the directories, so
+# that a purely local failure is reported without waiting for a remote -- which
+# may take as long as a connection attempt takes to time out.
+
+# A local branch has to be detected here rather than left to the
+# `git checkout -b` below, which fails on one even when no remote has a branch
+# of that name.
+if git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists in this clone." >&2
+  exit 1
+fi
+
+# A remote-tracking branch for ${REMOTE} shows that the remote has the branch,
+# without asking the remote.  Only ${REMOTE}'s refs are consulted:  a branch of
+# the same name in another remote -- "upstream" in a fork workflow, say -- is a
+# branch that neither `git checkout -b` nor a later push to ${REMOTE} would
+# collide with, so refusing on account of one would refuse a name that the user
+# can in fact use.
 #
-# `git_batch_ssh` disables the interactive prompts that would otherwise block
-# this query forever when this script is run from another script or a CI job,
-# as `is-deleted-branch` does for its own queries.
-# A remote that this script cannot ask is not an error; the branch is created.
-if [ -n "${REMOTE}" ] \
-  && git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
-    "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
+# "HEAD" is excluded:  a clone has a symbolic ref `refs/remotes/REMOTE/HEAD`
+# that names the remote's default branch, so that ref resolves, but "HEAD" is
+# not the name of a branch.
+if [ -n "${REMOTE}" ] && [ "${BRANCHNAME}" != 'HEAD' ] \
+  && git rev-parse --verify --quiet "refs/remotes/${REMOTE}/${BRANCHNAME}" \
+    > /dev/null; then
   echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${REMOTE}." >&2
   exit 1
 fi
@@ -145,9 +163,27 @@ if [ -e "${BRANCH_TMPDIR}" ]; then
   exit 1
 fi
 
-# We just checked that ${BRANCH_TMPDIR} does not exist, so whatever the copy
-# leaves at that location was created by this script and the traps may remove
-# it, even if the copy is interrupted before it finishes.
+# This clone shows no such branch, so ask the remote itself:  the clone may
+# never have fetched the branch, or may not fetch it at all.
+#
+# Asking the remote does not change it.  This script creates nothing outside
+# the new directory:  in particular, it does not push the new branch.
+#
+# `git_batch_ssh` disables the interactive prompts that would otherwise block
+# this query forever when this script is run from another script or a CI job,
+# as `is-deleted-branch` does for its own queries.
+# A remote that this script cannot ask is not an error; the branch is created.
+if [ -n "${REMOTE}" ] \
+  && git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
+    "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${REMOTE}." >&2
+  exit 1
+fi
+
+# The test above showed that ${BRANCH_TMPDIR} does not exist, and nothing
+# between there and here creates it, so whatever the copy leaves at that
+# location was created by this script and the traps may remove it, even if the
+# copy is interrupted before it finishes.
 TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
 if ! \cp -Rp -- . "${BRANCH_TMPDIR}"; then
   echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2

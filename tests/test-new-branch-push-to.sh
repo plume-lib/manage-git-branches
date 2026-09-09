@@ -233,6 +233,32 @@ if [ -e "${WORK_DIR}/multipleremotes-branch-feature1" ]; then
   fail "git-new-branch created a directory for a branch that already exists"
 fi
 
+# Only the remote that the branch would be pushed to matters.  In a fork
+# workflow, the clone also tracks "upstream", whose branches the user cannot
+# push to and whose names are therefore not in use for the new branch:
+# refusing on account of one of those would refuse a name that
+# `git checkout -b` accepts and that no push would collide with.
+FORK_REMOTE="${WORK_DIR}/myfork.git"
+git init -q --bare -b main "${FORK_REMOTE}"
+FORK_DIR="${WORK_DIR}/fork"
+git clone -q "${REMOTE}" "${FORK_DIR}"
+# `git remote rename` moves `branch.main.remote` along with the remote, so the
+# clone tracks the upstream repository and pushes to the fork.
+git -C "${FORK_DIR}" remote rename origin upstream
+git -C "${FORK_DIR}" remote add origin "${FORK_REMOTE}"
+git -C "${FORK_DIR}" config branch.main.pushRemote origin
+git -C "${FORK_DIR}" push -q origin main
+if ! git -C "${FORK_DIR}" rev-parse --verify --quiet refs/remotes/upstream/feature1 > /dev/null; then
+  fail "the test's fork clone does not track upstream/feature1"
+fi
+if ! output="$(cd "${FORK_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature1 2>&1)"; then
+  fail "git-new-branch refused a name that only the upstream remote uses: ${output}"
+fi
+branch="$(git -C "${WORK_DIR}/fork-branch-feature1" rev-parse --abbrev-ref HEAD)"
+if [ "${branch}" != "feature1" ]; then
+  fail "${WORK_DIR}/fork-branch-feature1 is on branch ${branch}, not feature1"
+fi
+
 # `git-push-to` recommends a remote that the clone has, for the same reason.
 ADVICE_DIR="${WORK_DIR}/advice"
 git clone -q "${REMOTE}" "${ADVICE_DIR}"
