@@ -79,6 +79,19 @@ else
   fi
 fi
 
+# `HEAD` is not a branch name, even though a clone has a symbolic ref
+# `refs/remotes/origin/HEAD`.
+if out="$(cd "${clone}" && "${GIT_CHECKOUT_BRANCH}" HEAD 2>&1)"; then
+  fail "zero exit status for HEAD"
+fi
+case "${out}" in
+  *"does not exist"*) ;;
+  *) fail "unexpected message for HEAD: ${out}" ;;
+esac
+if [ -e "${tmpdir}/myclone-branch-HEAD" ]; then
+  fail "directory was created for HEAD"
+fi
+
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_CHECKOUT_BRANCH}" > /dev/null 2>&1); then
   fail "zero exit status when given no argument"
