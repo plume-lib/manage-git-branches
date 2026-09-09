@@ -87,4 +87,4 @@ case "${subject}" in
   *) fail "merge commit message does not name ../from: ${subject}" ;;
 esac
 
-echo "${SCRIPT_NAME}: PASS"
+echo "${SCRIPT_NAME}: OK"
