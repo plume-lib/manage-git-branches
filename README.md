@@ -32,8 +32,13 @@ The commands are:
 * [`git-new-branch`](git-new-branch) `BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   copy directory.  Run this command from within a working copy; the new
-  directory is a sibling of the working copy.  Below is a definition for an
-  alias `gnb`.
+  directory is a sibling of the working copy.  If the repository has a remote
+  named `origin`, the new branch is pushed to `origin`, which gives the new
+  branch an upstream branch so that `git-push-to` and `git-pull-from` can use
+  the new working copy; if the repository has no remote named `origin`, or if
+  the push fails (for example, because the remote is read-only), then the new
+  branch has no upstream branch, but the new working copy is still created.
+  Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to) `[--nocompile] FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.
@@ -53,19 +58,14 @@ The commands are:
   working copies for branches that were deleted in the remote repository.
   Typical usage is `git-orphaned-branches --print0 | xargs -0 rm -rf` or
   `rmgob` (see alias below).
-* [`relative-path`](relative-path) `BASE TARGET`:
-  Prints the pathname of TARGET, relative to BASE.  This is a portable version
-  of `realpath -e --relative-to=BASE TARGET`; the `--relative-to` option is a
-  GNU extension that the BSD and macOS versions of `realpath` do not support.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
   The command-line arguments for the compilation can be customized, using the
   environment variables described below.
 * [`relative-path`](relative-path) `BASE TARGET`:
-  Prints the pathname of TARGET, relative to BASE.  Both must name existing
-  files or directories.  This is a portable replacement for GNU
-  `realpath --relative-to=BASE TARGET`.
+  Prints the pathname of TARGET, relative to BASE.  This is a portable
+  replacement for GNU `realpath --relative-to=BASE TARGET`.
 
 More documentation of each script appears at the top of the script.
 Click the command names above to see that documentation.
@@ -109,6 +109,11 @@ alias gcb=git-checkout-branch
 alias gnb=git-new-branch
 alias rmgob='git-orphaned-branches --print0 | xargs -0 rm -rf'
 ```
+
+## Testing
+
+To run the tests, run `tests/run-tests.sh`.  Each test creates its
+repositories under a temporary directory and removes them afterward.
 
 ## One branch per directory
 

@@ -10,6 +10,7 @@
 # The test creates its own scratch git repositories under a temporary
 # directory; it does not touch any repository outside that directory.
 
+SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 TOPLEVEL="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)"
 GIT_ORPHANED_BRANCHES="${TOPLEVEL}/git-orphaned-branches"
@@ -23,7 +24,7 @@ fi
 status=0
 
 if ! work="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${work}" ]; then
-  echo "$0: cannot create a temporary directory" >&2
+  echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
   exit 1
 fi
 
@@ -42,7 +43,7 @@ trap 'cleanup; trap - INT; kill -s INT "$$"' INT
 trap 'cleanup; trap - TERM; kill -s TERM "$$"' TERM
 
 if ! work="$(CDPATH='' cd -- "${work}" && pwd -P)" || [ -z "${work}" ]; then
-  echo "$0: cannot resolve the temporary directory" >&2
+  echo "${SCRIPT_NAME}: cannot resolve the temporary directory" >&2
   exit 1
 fi
 
@@ -191,4 +192,7 @@ cmp -s "${work}/print-newline.goal" "${work}/print-newline.actual" \
 [ -d "${work}/scan/my" ] || fail "cleanup deleted ${work}/scan/my"
 [ -d "${work}/scan/my dir" ] || fail "cleanup deleted ${work}/scan/my dir"
 
+if [ "${status}" = 0 ]; then
+  echo "${SCRIPT_NAME}: OK"
+fi
 exit "${status}"
