@@ -85,4 +85,4 @@ for shellname in sh dash bash ksh; do
   check_branch_directory 'feature/one' 'feature-one'
 done
 
-echo "${SCRIPT_NAME}: PASS"
+echo "${SCRIPT_NAME}: OK"
