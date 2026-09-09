@@ -59,11 +59,20 @@ if ! resolved="$(CDPATH='' cd -- "${workdir}" && pwd -P)" || [ -z "${resolved}" 
 fi
 workdir="${resolved}"
 
+# Make the test independent of the invoking user's git configuration.  A
+# global setting such as `commit.gpgsign`, `pull.rebase`, `merge.ff`,
+# `core.hooksPath`, or `commit.template` would otherwise change what the
+# commands below do, or make them fail.
+GIT_CONFIG_GLOBAL="${workdir}/gitconfig"
+GIT_CONFIG_SYSTEM=/dev/null
+# A committer identity, in case the user running the test has none.
 GIT_AUTHOR_NAME='manage-git-branches test'
 GIT_AUTHOR_EMAIL='test@example.com'
 GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
 GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
+export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+: > "${GIT_CONFIG_GLOBAL}"
 
 remote="${workdir}/remote.git"
 git init -q --bare -b main "${remote}"
