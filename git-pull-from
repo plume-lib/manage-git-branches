@@ -18,8 +18,12 @@
 #  * build this one using `compile-project` (see its documentation),
 #  * push this one to its remote if the build succeeds.
 #
-# All the work is done by `git-push-to OTHER-REPO-DIR .`, so the two commands
-# behave identically and diagnostics mention `git-push-to`.
+# After checking that this directory and OTHER-REPO-DIR are the top levels of
+# clones -- which this script diagnoses itself, so that a diagnostic names the
+# directory that the user gave rather than the "." that this script passes on
+# -- all the work is done by `git-push-to OTHER-REPO-DIR .`, so the two
+# commands behave identically.  Diagnostics from that step mention
+# `git-push-to`.
 #
 # Calling `git-push-to` is often more readable, because it makes both directory names explicit.
 
@@ -71,6 +75,60 @@ fi
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} [--nocompile] OTHER-REPO-DIR" >&2
+  exit 1
+fi
+
+# Like each argument of `git-push-to`, the current directory must be the top
+# level of a clone.  Diagnose that here rather than leaving it to `git-push-to`,
+# which would report it about ".":  that does not tell the user which directory
+# to run this command in, and `git-push-to` cannot know that "." came from this
+# command rather than from the user.
+# Capture the top level first: under a POSIX `sh` (e.g., dash), a command
+# substitution that produces no output is an empty argument rather than an
+# error, so testing the status of `git rev-parse` alone would not catch it.
+if ! TOPLEVEL="$(git rev-parse --show-toplevel 2> /dev/null)" || [ -z "${TOPLEVEL}" ]; then
+  # The current directory is not in a working copy at all:  it is outside any
+  # repository, or it is in a bare repository, which has no working copy.
+  echo "${SCRIPT_NAME}: not the top level of a git clone: $(pwd)" >&2
+  exit 1
+fi
+# Compare physical pathnames, because the current directory may be reached
+# through a symbolic link that `git rev-parse --show-toplevel` resolved.
+if ! TOPLEVEL_PHYSICAL="$(CDPATH='' cd -- "${TOPLEVEL}" && pwd -P)" \
+  || [ -z "${TOPLEVEL_PHYSICAL}" ]; then
+  echo "${SCRIPT_NAME}: cannot canonicalize the top level of this clone: ${TOPLEVEL}" >&2
+  exit 1
+fi
+if [ "$(pwd -P)" != "${TOPLEVEL_PHYSICAL}" ]; then
+  echo "${SCRIPT_NAME}: not the top level of a git clone: $(pwd)" >&2
+  echo "${SCRIPT_NAME}: its top level is: ${TOPLEVEL}" >&2
+  exit 1
+fi
+
+# OTHER-REPO-DIR must be the top level of a clone too.  `git-push-to` also
+# checks this, but check it here so that the diagnostic names this command's
+# argument rather than appearing to come from a command the user did not run.
+if [ ! -d "$1" ]; then
+  echo "${SCRIPT_NAME}: no such directory: $1" >&2
+  exit 1
+fi
+if ! OTHER_TOPLEVEL="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" \
+  || [ -z "${OTHER_TOPLEVEL}" ]; then
+  echo "${SCRIPT_NAME}: not the top level of a git clone: $1" >&2
+  exit 1
+fi
+if ! OTHER_TOPLEVEL_PHYSICAL="$(CDPATH='' cd -- "${OTHER_TOPLEVEL}" && pwd -P)" \
+  || [ -z "${OTHER_TOPLEVEL_PHYSICAL}" ]; then
+  echo "${SCRIPT_NAME}: cannot canonicalize the top level of that clone: ${OTHER_TOPLEVEL}" >&2
+  exit 1
+fi
+if ! OTHER_PHYSICAL="$(CDPATH='' cd -- "$1" && pwd -P)" || [ -z "${OTHER_PHYSICAL}" ]; then
+  echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
+  exit 1
+fi
+if [ "${OTHER_PHYSICAL}" != "${OTHER_TOPLEVEL_PHYSICAL}" ]; then
+  echo "${SCRIPT_NAME}: not the top level of a git clone: $1" >&2
+  echo "${SCRIPT_NAME}: its top level is: ${OTHER_TOPLEVEL}" >&2
   exit 1
 fi
 
