@@ -87,10 +87,12 @@ takes effect when it is set to a non-empty value.
   succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
-* `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch` uses these standard Git
-  variables to select the SSH command when it queries a remote repository.
-* `GIT_SSH_VARIANT`: `is-deleted-branch` uses this standard Git variable to
-  determine whether the selected SSH command accepts OpenSSH options.
+* `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`, `git-new-branch`, and
+  `git-checkout-branch` use these standard Git variables to select the SSH
+  command when they query a remote repository.
+* `GIT_SSH_VARIANT`: `is-deleted-branch`, `git-new-branch`, and
+  `git-checkout-branch` use this standard Git variable to determine whether the
+  selected SSH command accepts OpenSSH options.
 
 ## Installation
 
