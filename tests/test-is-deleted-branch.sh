@@ -353,6 +353,20 @@ expect_status 1 "${testdir}/myrepo-branch-multiple-upstreams" \
 expect_status 2 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
 expect_status 2 "${testdir}/myrepo-branch-dead/subdirectory" \
   'subdirectory of a clone whose branch was deleted'
+
+# The wrong number of arguments is a usage error, which is status 64 rather
+# than any of the statuses that answer the question.
+"${IS_DELETED_BRANCH}" > /dev/null 2>&1
+actual="$?"
+if [ "${actual}" -ne 64 ]; then
+  fail "no argument: expected status 64, got ${actual}"
+fi
+"${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-live" \
+  "${testdir}/myrepo-branch-dead" > /dev/null 2>&1
+actual="$?"
+if [ "${actual}" -ne 64 ]; then
+  fail "two arguments: expected status 64, got ${actual}"
+fi
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
   'is-deleted-branch on a working copy whose remote cannot be reached'
 if ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
