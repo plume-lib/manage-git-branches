@@ -25,20 +25,10 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 trap 'rm -rf "${WORK_DIR}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 
-# Make the test independent of the invoking user's git configuration.  A
-# global setting such as `commit.gpgsign`, `pull.rebase`, `merge.ff`,
-# `core.hooksPath`, or `commit.template` would otherwise change what the
-# commands below do, or make them fail.
-GIT_CONFIG_GLOBAL="${WORK_DIR}/gitconfig"
-GIT_CONFIG_SYSTEM=/dev/null
-# A committer identity, in case the user running the test has none.
-GIT_AUTHOR_NAME="Test User"
-GIT_AUTHOR_EMAIL="test@example.com"
-GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
-GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
-export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
-export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-: > "${GIT_CONFIG_GLOBAL}"
+# shellcheck source=common-functions.sh
+. "${TESTS_DIR}/common-functions.sh"
+
+isolate_git_configuration "${WORK_DIR}"
 
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $*" >&2
@@ -124,19 +114,7 @@ esac
 SSH_DIR="${WORK_DIR}/sshclone"
 git clone -q "${REMOTE}" "${SSH_DIR}"
 SSH_ARGUMENTS="${WORK_DIR}/ssh-arguments"
-FAKE_SSH="${WORK_DIR}/fake-ssh"
-cat > "${FAKE_SSH}" << 'FAKE_SSH_END'
-#!/bin/sh
-printf '%s\n' "$*" >> "${SSH_ARGUMENTS_FILE}"
-exit 1
-FAKE_SSH_END
-chmod +x "${FAKE_SSH}"
-SSH_ARGUMENTS_FILE="${SSH_ARGUMENTS}"
-export SSH_ARGUMENTS_FILE
-git -C "${SSH_DIR}" config core.sshCommand "${FAKE_SSH}"
-git -C "${SSH_DIR}" config ssh.variant ssh
-git -C "${SSH_DIR}" remote set-url origin 'ssh://example.invalid/no-such-repo.git'
-: > "${SSH_ARGUMENTS}"
+use_fake_ssh "${SSH_DIR}" "${SSH_ARGUMENTS}"
 
 if ! output="$(cd "${SSH_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
   fail "git-checkout-branch failed when the remote could not be reached over SSH: ${output}"

@@ -23,20 +23,10 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 trap 'rm -rf "${WORK_DIR}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 
-# Make the test independent of the invoking user's git configuration.  A
-# global setting such as `commit.gpgsign`, `pull.rebase`, `merge.ff`,
-# `core.hooksPath`, or `commit.template` would otherwise change what the
-# commands below do, or make them fail.
-GIT_CONFIG_GLOBAL="${WORK_DIR}/gitconfig"
-GIT_CONFIG_SYSTEM=/dev/null
-# A committer identity, in case the user running the test has none.
-GIT_AUTHOR_NAME="Test User"
-GIT_AUTHOR_EMAIL="test@example.com"
-GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
-GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
-export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
-export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-: > "${GIT_CONFIG_GLOBAL}"
+# shellcheck source=common-functions.sh
+. "${TESTS_DIR}/common-functions.sh"
+
+isolate_git_configuration "${WORK_DIR}"
 
 # The test repository contains no build file, so skip compilation.
 MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1
