@@ -5,9 +5,10 @@
 # Supports Gradle, Maven, and Make projects.  If no buildfile is found
 # at the top level, searches at (only) the next level down.
 #
-# The exit status is failure if any build fails.  If no buildfile is
-# found and ERR_IF_NO_BUILDFILE is set to a non-empty value, then the
-# exit status is failure.
+# The exit status is failure if any build fails, if <directory> is given
+# but is not a directory, or if the top-level directory cannot be
+# determined.  If no buildfile is found and ERR_IF_NO_BUILDFILE is set to
+# a non-empty value, then the exit status is failure.
 #
 # Usage:
 #   compile-project [--clean] [<directory>]
@@ -20,9 +21,22 @@
 #
 # This command does not need to be run in the top-level directory of the project;
 # it will discover the top-level directory on its own and run the command there.
+# The top level is that of the git repository containing the current or given
+# directory, or the directory itself if it is not within a git repository.
 
 # TODO: Handle other build systems too, such as Ant.
 # TODO: Have a list of per-directory or per-repository commands, to override the default.
+
+# Git exports $GIT_DIR and $GIT_WORK_TREE to hooks and to the commands run by
+# `git rebase --exec`, `git bisect run`, and `git submodule foreach`.  They take
+# precedence over the `-C` argument of `git`, so leaving them set would make
+# this script compile whatever repository the caller happened to be working in,
+# rather than the current or given directory.
+unset GIT_DIR
+unset GIT_WORK_TREE
+# `cd` consults $CDPATH, so leaving it set would make `cd "$dir"` compile some
+# other directory named "$dir" (and print the directory it chose to stdout).
+CDPATH=''
 
 CLEAN=""
 if [ "$#" -ge 1 ]; then
@@ -32,22 +46,64 @@ if [ "$#" -ge 1 ]; then
   fi
 fi
 
-# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-# $toplevel does not have a trailing "/" character
-if [ "$#" -eq 0 ]; then
-  if toplevel="$(git rev-parse --show-toplevel 2> /dev/null)"; then
-    echo "Running ${SCRIPT_NAME} in $toplevel, called from $(pwd)"
-  else
-    toplevel=$(pwd)
-    echo "Running ${SCRIPT_NAME} in $toplevel"
+# Prints the top level of the git repository that contains directory $1.
+# The exit status is 0 on success, 222 if $1 is not within a git repository, and
+# 1 if git could not answer the question -- for example, because the repository
+# is owned by another user, or has an unsupported format, or git is not
+# installed.  In that case, git's diagnostic has been copied to stderr; the
+# caller must not conclude that $1 is outside a repository.
+git_toplevel() {
+  # Run git twice, rather than capturing its standard output and standard error
+  # together, so that a warning on standard error cannot be mistaken for part of
+  # the directory name.  LC_ALL is set because the message is matched below.
+  if git_toplevel_stderr="$(LC_ALL=C git -C "$1" rev-parse --show-toplevel 2>&1 > /dev/null)"; then
+    git -C "$1" rev-parse --show-toplevel
+    return 0
   fi
+  case "${git_toplevel_stderr}" in
+    *'not a git repository'*) return 222 ;;
+  esac
+  if [ -n "${git_toplevel_stderr}" ]; then
+    printf '%s\n' "${git_toplevel_stderr}" >&2
+  fi
+  return 1
+}
+
+# $toplevel has no trailing "/" character, unless it is the root directory "/".
+if [ "$#" -eq 0 ]; then
+  toplevel="$(git_toplevel .)"
+  case "$?" in
+    0) printf '%s\n' "Running ${SCRIPT_NAME} in $toplevel, called from $(pwd)" ;;
+    222)
+      toplevel="$(pwd)"
+      printf '%s\n' "Running ${SCRIPT_NAME} in $toplevel"
+      ;;
+    *) exit 1 ;;
+  esac
 elif [ "$#" -eq 1 ]; then
-  toplevel="$1"
-  echo "Running ${SCRIPT_NAME} in $toplevel"
+  if [ ! -d "$1" ]; then
+    printf '%s: not a directory: %s\n' "${SCRIPT_NAME}" "$1" >&2
+    exit 1
+  fi
+  toplevel="$(git_toplevel "$1")"
+  case "$?" in
+    0) printf '%s\n' "Running ${SCRIPT_NAME} in $toplevel, called for $1" ;;
+    222)
+      # The directory is its own top level.  Make it absolute, so that later
+      # messages and `cd` commands do not depend on the current directory.
+      # This also removes any trailing "/" characters.
+      if ! toplevel="$(cd -- "$1" && pwd)"; then
+        exit 1
+      fi
+      printf '%s\n' "Running ${SCRIPT_NAME} in $toplevel"
+      ;;
+    *) exit 1 ;;
+  esac
 else
-  echo "Usage: ${SCRIPT_NAME} [--clean] [<directory>]" >&2
+  printf '%s\n' "Usage: ${SCRIPT_NAME} [--clean] [<directory>]" >&2
   exit 1
 fi
 
@@ -117,7 +173,7 @@ else
     fi
   done
   if [ "$buildfile_found" = 0 ] && [ -n "$ERR_IF_NO_BUILDFILE" ]; then
-    echo "${SCRIPT_NAME} did nothing in $(pwd)" >&2
+    printf '%s\n' "${SCRIPT_NAME} did nothing in $toplevel or its subdirectories" >&2
     exit 1
   fi
 fi
