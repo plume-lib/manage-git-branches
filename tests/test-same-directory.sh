@@ -16,7 +16,12 @@ TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
-trap 'rm -rf "${WORK_DIR}"' EXIT INT TERM
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
+trap 'rm -rf "${WORK_DIR}"' EXIT
+trap 'rm -rf "${WORK_DIR}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 
 # A committer identity, in case the user running the test has none.
 GIT_AUTHOR_NAME="Test User"
