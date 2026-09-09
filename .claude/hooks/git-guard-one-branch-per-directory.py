@@ -24,7 +24,15 @@ substitution, nor a command that is built at run time, such as
 `echo "git $operation main" | sh`.  A command that cannot be split into words is denied
 if it mentions a restricted subcommand.
 
-The hook only ever denies.  A permitted command produces no decision, so the `allow` and
+The hook also approves a command that only reads a repository, which no `allow` pattern
+can safely do.  Such a pattern would need a wildcard before the subcommand, as in
+`git -C * log`, and because `*` spans words that also matches an inserted global option
+such as `-c core.pager=CMD`, which makes git run an arbitrary command; Claude Code warns
+at startup about an `allow` pattern of that shape.  This hook parses the options instead,
+and approves a command only when every command in it is a `git` invocation whose global
+options cannot run another program and whose subcommand only reads.
+
+A command that is neither denied nor approved produces no decision, so the `allow` and
 `deny` lists of `.claude/settings.json` still govern it.
 
 This file is shared across multiple repositories.  It must be copied along with the
@@ -215,8 +223,73 @@ BRANCH_READ_ONLY_OPTIONS_WITH_VALUE = frozenset(
 # --remotes, --verbose.  Clusters such as `-av` are permitted.
 BRANCH_READ_ONLY_LETTERS = frozenset("ahilrv")
 
+# `git branch` options that put it in list mode, so that an operand is a pattern to
+# match rather than the name of a branch to create.  Each filter below selects which
+# branches to list, and `git branch` refuses `--all` and `--remotes` with an operand
+# unless `--list` is also given, so none of these can create a branch.
+# `--format`, `--sort`, and `--verbose` are deliberately absent:  each of
+# `git branch --format=%(refname) BRANCH`, `git branch --sort=refname BRANCH`, and
+# `git branch -v BRANCH` creates a branch.
+BRANCH_LIST_FLAGS = frozenset({"--all", "--list", "--remotes"})
+
+# List-mode `git branch` options that take a value, either as `--option=value` or as
+# a following argument.
+BRANCH_LIST_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "--contains",
+        "--merged",
+        "--no-contains",
+        "--no-merged",
+        "--points-at",
+    }
+)
+
+# Single-letter list-mode `git branch` options: --all, --list, --remotes.
+BRANCH_LIST_LETTERS = frozenset("alr")
+
 # `git stash` arguments that neither push a stash entry nor change the working copy.
 STASH_READ_ONLY_ARGUMENTS = frozenset({"--help", "-h", "list", "show"})
+
+# Git global options that this hook approves, none of which names a program to run.
+# An option that is absent here, such as `-c`, `--config-env`, or `--exec-path`, can
+# make git run an arbitrary command, so a command that passes one is left to the
+# permission system.  `-C`, whose value is attached as in `-Cdir` or separate as in
+# `-C dir`, is approved by _reads_only rather than by this set.
+APPROVED_GLOBAL_OPTIONS = frozenset(
+    {
+        "--glob-pathspecs",
+        "--icase-pathspecs",
+        "--literal-pathspecs",
+        "--no-optional-locks",
+        "--no-pager",
+        "--noglob-pathspecs",
+        "--paginate",
+        "-P",
+    }
+)
+
+# Git subcommands that only read a repository, whatever their arguments.  These are
+# exactly the read-only subcommands that the `allow` list of `.claude/settings.json`
+# permits with any arguments, so approving one here adds only a global option and
+# `-C DIR` to what that list already permits.  `branch` and `stash` are absent
+# because only some of their forms read: see _branch_denial and _stash_denial.
+READ_ONLY_SUBCOMMANDS = frozenset({"diff", "log", "rev-parse", "show", "status"})
+
+# The shell operator characters that may appear in an approved command.  They run one
+# command after another, as `;`, `&&`, `||`, `|`, `&`, and a newline do.  An operator
+# that is absent here redirects a file or opens a subshell, as `<`, `>`, `(`, and `)`
+# do, and a shell keyword such as `if` is absent too, so a command that uses one is
+# left to the permission system.
+APPROVED_OPERATOR_CHARS = frozenset(";&|\n")
+
+# Shell syntax that this hook does not interpret, and that _tokenize does not report
+# as a command of its own: command substitution and parameter expansion.  Either can
+# run a command, as a backquoted command in an argument does, so a command that
+# contains one is left to the permission system.
+UNAPPROVABLE_CHARACTERS = "`$"
+
+# Why an approved command is approved, for the permission decision.
+APPROVAL = "This command only reads a git repository."
 
 ALTERNATIVE = (
     "Instead of changing the branch of this working copy, make a new working copy: run"
@@ -241,7 +314,18 @@ def _tokenize(command: str) -> list[str]:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATOR_CHARACTERS)
     # A newline is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
     lexer.whitespace = " \t\r"
+    # A `#` begins a comment only at the start of a word, but shlex would end the line
+    # at one anywhere, which would hide the commands after it:  a shell runs the `rm`
+    # of `git log a#; rm FILE`.  Treating `#` as an ordinary character instead only
+    # ever reports more commands than a shell runs, as it does for a real comment.
+    lexer.commenters = ""
     lexer.whitespace_split = True
+    # Do not let `#` start a comment.  `shlex` discards the rest of the line
+    # *including its newline*, which would append the next line's words to the
+    # current command and hide the `git` that starts that next command.  Treating `#`
+    # as an ordinary character only ever adds words to a command already being
+    # examined, so it cannot hide a forbidden command.
+    lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError as exception:
@@ -674,9 +758,10 @@ def _branch_denial(args: list[str]) -> str | None:
             continue
         name, _, value = token.partition("=")
         if name in BRANCH_READ_ONLY_FLAGS:
-            listing = listing or name == "--list"
+            listing = listing or name in BRANCH_LIST_FLAGS
             continue
         if name in BRANCH_READ_ONLY_OPTIONS_WITH_VALUE:
+            listing = listing or name in BRANCH_LIST_OPTIONS_WITH_VALUE
             if not value and index < len(args) and not args[index].startswith("-"):
                 index += 1
             continue
@@ -685,7 +770,7 @@ def _branch_denial(args: list[str]) -> str | None:
         for letter in name[1:]:
             if letter not in BRANCH_READ_ONLY_LETTERS:
                 return f"`git branch -{letter}` modifies branches."
-            listing = listing or letter == "l"
+            listing = listing or letter in BRANCH_LIST_LETTERS
     if operands and not listing:
         return (
             f"`git branch {operands[0]}` creates a branch."
@@ -752,6 +837,87 @@ def _denials(command: str) -> Iterator[str]:
             yield reason
 
 
+def _reads_only(argv: list[str]) -> bool:
+    """Tell whether a git invocation only reads a repository.
+
+    Args:
+        argv: the argument list of a `git` invocation.
+
+    Returns:
+        True if every global option is harmless and the subcommand only reads.
+    """
+    index = 1
+    while index < len(argv) and argv[index].startswith("-"):
+        token = argv[index]
+        if token == "-C":
+            # The directory is the next argument, which may be absent.
+            index += 2
+        elif token.startswith("-C"):
+            # The directory is attached, as in `git -Cdir log`.
+            index += 1
+        elif token in APPROVED_GLOBAL_OPTIONS:
+            index += 1
+        else:
+            return False
+    if index >= len(argv):
+        # No subcommand, as in `git`, `git -C`, and `git --no-pager`.
+        return False
+    name = argv[index]
+    args = argv[index + 1 :]
+    if name == "branch":
+        return _branch_denial(args) is None
+    if name == "stash":
+        return _stash_denial(args) is None
+    return name in READ_ONLY_SUBCOMMANDS
+
+
+def _approves(command: str) -> bool:
+    """Tell whether every command of a shell command only reads a repository.
+
+    An approval covers the whole command, so one command in it that is not a read-only
+    git invocation withholds approval from all of them.  A program that runs a command
+    given to it as data, such as `xargs`, and a wrapper such as `sudo` are not
+    approved either: `git` must be the command itself.
+
+    Args:
+        command: the command that the Bash tool was asked to run.
+
+    Returns:
+        True if the command may run without a permission prompt.
+    """
+    if any(character in command for character in UNAPPROVABLE_CHARACTERS):
+        return False
+    tokens = _tokenize(command)
+    for token in tokens:
+        if _is_separator(token) and not frozenset(token) <= APPROVED_OPERATOR_CHARS:
+            return False
+    commands = list(_simple_commands(tokens))
+    # The program must be written as the bare word `git`, which the shell looks up on
+    # `PATH`.  A path-qualified form such as `./git` or `/tmp/git` names some other
+    # program that merely has git's file name, so it is left to the permission system.
+    return bool(commands) and all(argv[0] == "git" and _reads_only(argv) for argv in commands)
+
+
+def approval(command: str) -> str | None:
+    """Decide whether a shell command may run without a permission prompt.
+
+    Args:
+        command: the command that the Bash tool was asked to run.
+
+    Returns:
+        Why the command is approved, or None if this hook does not approve it.
+    """
+    try:
+        return APPROVAL if _approves(command) else None
+    except UnparsableCommandError:
+        return None
+    except Exception as exception:  # ruff: ignore[blind-except]
+        # The catch is deliberately blind: a defect in this hook must report itself
+        # rather than approve a command that it did not analyze.
+        print(f"{PROGRAM}: cannot analyze {command!r}: {exception!r}", file=sys.stderr)
+        return None
+
+
 def denial(command: str) -> str | None:
     """Decide whether a shell command changes the branch of a working copy.
 
@@ -770,6 +936,25 @@ def denial(command: str) -> str | None:
         # rather than permit a command that changes the branch of this working copy.
         print(f"{PROGRAM}: cannot analyze {command!r}: {exception!r}", file=sys.stderr)
         return _unanalyzable_denial(command)
+
+
+def _decide(decision: str, reason: str) -> None:
+    """Write a permission decision to standard output.
+
+    Args:
+        decision: the permission decision, `allow` or `deny`.
+        reason: why the hook made that decision.
+    """
+    json.dump(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": decision,
+                "permissionDecisionReason": reason,
+            }
+        },
+        sys.stdout,
+    )
 
 
 def main() -> int:
@@ -793,18 +978,12 @@ def main() -> int:
     if not isinstance(command, str):
         return 0
     reason = denial(command)
-    if reason is None:
+    if reason is not None:
+        _decide("deny", f"{reason}  {ALTERNATIVE}")
         return 0
-    json.dump(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": f"{reason}  {ALTERNATIVE}",
-            }
-        },
-        sys.stdout,
-    )
+    reason = approval(command)
+    if reason is not None:
+        _decide("allow", reason)
     return 0
 
 
