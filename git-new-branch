@@ -134,20 +134,40 @@ fi
 # silently passed there.
 #
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
-# asked, and this script creates the branch.
+# asked, and only the local tests in `branch_exists` apply.
 BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
 REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 
-# Ask the remote whether the branch already exists.
+# Succeeds if the given branch exists:  locally, as a remote-tracking branch of
+# ${REMOTE}, or on ${REMOTE} itself.  The local tests come first because they
+# need no network access, and because `git checkout -b` fails on a local branch
+# even when the remote has no branch of that name.
 #
 # `git_batch_ssh` disables the interactive prompts that would otherwise block
-# this query forever when this script is run from another script or a CI job,
-# as `is-deleted-branch` does for its own queries.
+# the query to the remote forever when this script is run from another script
+# or a CI job, as `is-deleted-branch` does for its own queries.
 # A remote that this script cannot ask is not an error; the branch is created.
-if [ -n "${REMOTE}" ] \
-  && git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
-    "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${REMOTE}." >&2
+branch_exists() {
+  if git rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
+    return 0
+  fi
+  if [ -z "${REMOTE}" ]; then
+    return 1
+  fi
+  if git rev-parse --verify --quiet "refs/remotes/${REMOTE}/$1" > /dev/null; then
+    return 0
+  fi
+  git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/$1" > /dev/null 2>&1
+}
+
+# This test precedes the copy of the working copy, so that a name collision
+# does not cost the user a full copy of the repository.
+if branch_exists "${BRANCHNAME}"; then
+  if [ -n "${REMOTE}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists, locally or on remote ${REMOTE}." >&2
+  else
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists locally." >&2
+  fi
   exit 1
 fi
 
