@@ -38,6 +38,17 @@ trap 'rm -rf "${tmpdir}"' EXIT
 trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
 
+# On macOS, $TMPDIR ends with "/", so the template above contains "//" and
+# macOS `mktemp` echoes the duplicated "/" back.  `cd` collapses it, so a path
+# built from ${tmpdir} would not match the paths that `compile-project` prints.
+# Normalize the path the same way that `compile-project` does: with `pwd`, not
+# `pwd -P`, so that symbolic links (such as /tmp or /var on macOS) are left
+# alone here just as they are there.
+if ! tmpdir="$(CDPATH='' cd -- "${tmpdir}" && pwd)" || [ -z "${tmpdir}" ]; then
+  echo "$0: cannot determine the absolute temporary directory" >&2
+  exit 1
+fi
+
 # Do not let a repository above ${tmpdir} (say, if TMPDIR is within a working
 # copy) affect the top-level directory that `compile-project` discovers.
 GIT_CEILING_DIRECTORIES="${tmpdir}"
