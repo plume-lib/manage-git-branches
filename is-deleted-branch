@@ -67,6 +67,15 @@ fi
 
 dir="$1"
 
+# Prints the absolute pathname of directory $1, with symbolic links resolved.
+# `realpath` would be simpler, but POSIX added it only in 2024 and some systems
+# still lack it; of those that have it, not every one accepts `--` to end the
+# options, which a pathname that starts with `-` needs.  `cd` and `pwd -P` are
+# portable.
+print_absolute_path() {
+  (CDPATH='' cd -- "$1" && pwd -P)
+}
+
 # `git -C DIR rev-parse` succeeds for every directory within a clone's working
 # tree, so also require that DIRECTORY is that working tree's top level.  A
 # subdirectory is not itself a clone, and answering for the enclosing clone
@@ -76,8 +85,17 @@ if [ -z "${toplevel}" ]; then
   # A bare repository has no working tree, so it is not on any branch.
   exit 2
 fi
-dir_real="$(realpath -- "${dir}" 2> /dev/null)" || exit 2
-toplevel_real="$(realpath -- "${toplevel}" 2> /dev/null)" || exit 2
+# A pathname that cannot be canonicalized means that whether DIRECTORY is the
+# top level of a clone cannot be determined.
+# (status 2 would assert that DIRECTORY is not the top level of a clone.)
+if ! dir_real="$(print_absolute_path "${dir}")"; then
+  echo "${SCRIPT_NAME}: cannot canonicalize: ${dir}" >&2
+  exit 3
+fi
+if ! toplevel_real="$(print_absolute_path "${toplevel}")"; then
+  echo "${SCRIPT_NAME}: cannot canonicalize: ${toplevel}" >&2
+  exit 3
+fi
 if [ "${dir_real}" != "${toplevel_real}" ]; then
   # Not a clone, so it is not on any branch, deleted or otherwise.
   exit 2

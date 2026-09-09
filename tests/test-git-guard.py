@@ -74,6 +74,13 @@ FORBIDDEN = (
     "git status\ngit branch newbranch",
     "git log --oneline\n\ngit stash",
     "cd /some/dir\ngit switch main\nmake",
+    # A `#` comment ends at the newline, so the next line is still a command.
+    "git status # check state\ngit switch main",
+    "cd /some/dir # go there\ngit checkout -b newbranch",
+    "git log --oneline -1 #\ngit branch newbranch",
+    # A `#` that does not start a word does not start a comment, so what follows the
+    # `;` is a command.
+    "echo a#b; git checkout main",
     # A here-document that feeds a shell is a script.
     "sh <<'EOF'\ngit checkout main\nEOF",
     "bash <<EOF\ngit stash\nEOF",
@@ -144,6 +151,19 @@ PERMITTED = (
     "git branch --sort=-committerdate -r",
     "git branch --format=%(refname:short)",
     "git branch --color=never --column",
+    # Listing forms in which an operand is a pattern, not a branch to create.
+    # `git branch` itself refuses `-a` and `-r` with an operand unless `--list` is
+    # also given, so neither form can create a branch.
+    "git branch -r 'origin/wpi-*'",
+    "git branch -a 'wpi-*'",
+    "git branch --all 'wpi-*'",
+    "git branch --remotes 'origin/wpi-*'",
+    "git branch -a --list 'wpi-*'",
+    "git branch --contains HEAD 'wpi-*'",
+    "git branch --no-contains HEAD 'wpi-*'",
+    "git branch --merged main 'wpi-*'",
+    "git branch --no-merged=main 'wpi-*'",
+    "git branch --points-at HEAD 'wpi-*'",
     "git -C /some/dir branch",
     "git -C /some/dir branch --show-current",
     "git --no-pager branch -a",
@@ -169,6 +189,11 @@ PERMITTED = (
     # A shell option that is not a command option.
     "bash -s < script.sh",
     "sh -n script.sh",
+    # A `#` comment mentions a forbidden operation without running it, whether it
+    # occupies the whole line or trails a command.
+    "# git checkout main",
+    "git status # git checkout main",
+    "echo hi # git branch newbranch",
     # Commands that merely mention a forbidden operation.
     "echo 'git branch newbranch'",
     "grep -n 'git checkout' README.md",

@@ -120,6 +120,27 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+## Tests whether the working copy in the given directory has an upstream
+## branch, which `git pull` and `git push` require.  If it does not, prints an
+## explanation and returns 1.
+check_upstream() {
+  # If the directory is not a working copy, or HEAD is detached, let a subsequent
+  # command diagnose that:  `check_branch_exists` does so accurately, whereas
+  # `git rev-parse --abbrev-ref HEAD` prints "HEAD" for a detached HEAD, which would
+  # make this function recommend `git push --set-upstream origin HEAD` and thereby
+  # create a branch named "HEAD".
+  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
+  # "heads/BRANCH" when a tag and the branch have the same name.
+  branch_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
+  branch="${branch_ref#refs/heads/}"
+  if git -C "$1" rev-parse --symbolic-full-name "@{upstream}" > /dev/null 2>&1; then
+    return 0
+  fi
+  echo "${SCRIPT_NAME}: branch ${branch} in $1 has no upstream branch, so it cannot be pulled or pushed" >&2
+  echo "${SCRIPT_NAME}: to give it one, cd to that directory and run: git push --set-upstream origin '${branch}'" >&2
+  return 1
+}
+
 ## Returns 0 if the given directory is the top level of a clone whose branch
 ## still exists in its remote.  Otherwise, prints a diagnostic and returns 1.
 ## Only status 1 from `is-deleted-branch` means "the branch still exists"; any
@@ -210,6 +231,13 @@ git_push_to() {
     return 1
   fi
 
+  # Check the upstream before asking whether the branch was deleted:
+  # `is-deleted-branch` cannot tell, and exits with status 3, when the branch
+  # has no upstream, and its diagnostic is less specific than this one.
+  if ! check_upstream "${from_absolute}"; then
+    return 1
+  fi
+
   if ! check_branch_exists "${from_absolute}"; then
     return 1
   fi
@@ -223,6 +251,10 @@ git_push_to() {
 
   if ! cd "$to_absolute"; then
     echo "${SCRIPT_NAME}: cannot cd to ${to_absolute}" >&2
+    return 1
+  fi
+
+  if ! check_upstream "${to_absolute}"; then
     return 1
   fi
 
