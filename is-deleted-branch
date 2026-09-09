@@ -94,12 +94,12 @@ fi
 
 dir="$1"
 
-# Prints the absolute pathname of directory $1, with symbolic links resolved.
+# Prints the absolute path of directory $1, with symbolic links resolved.
 # `realpath` would be simpler, but POSIX added it only in 2024 and some systems
 # still lack it; of those that have it, not every one accepts `--` to end the
 # options, which a pathname that starts with `-` needs.  `cd` and `pwd -P` are
 # portable.
-print_absolute_path() {
+absolute_path() {
   (CDPATH='' cd -- "$1" && pwd -P)
 }
 
@@ -115,11 +115,11 @@ fi
 # A pathname that cannot be canonicalized means that whether DIRECTORY is the
 # top level of a clone cannot be determined.
 # (status 2 would assert that DIRECTORY is not the top level of a clone.)
-if ! dir_real="$(print_absolute_path "${dir}")"; then
+if ! dir_real="$(absolute_path "${dir}")"; then
   echo "${SCRIPT_NAME}: cannot canonicalize: ${dir}" >&2
   exit 3
 fi
-if ! toplevel_real="$(print_absolute_path "${toplevel}")"; then
+if ! toplevel_real="$(absolute_path "${toplevel}")"; then
   echo "${SCRIPT_NAME}: cannot canonicalize: ${toplevel}" >&2
   exit 3
 fi
