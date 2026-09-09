@@ -7,28 +7,29 @@
 #
 # The exit status is 0 if all tests pass, 1 otherwise.
 
+SCRIPT_NAME="$(basename -- "$0")"
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMPILE_PROJECT="${SCRIPT_DIR}/../compile-project"
 
 status=0
 
 fail() {
-  # Use printf, not echo, so that backslashes in the message are not expanded.
   printf 'FAIL: %s\n' "$*" >&2
   status=1
 }
 
 # Do not let the invoking environment change what the script under test does.
-# The flag variables could keep `compile-project` from creating the marker file
-# that the tests look for, and ERR_IF_NO_BUILDFILE would make it fail in the
-# directory that has no buildfile.
+# These flag variables are passed to the build tool, so they could keep
+# `compile-project` from writing the log lines that the tests look for.
+# `CLEAN` is deliberately not unset:  the last test below checks that
+# `compile-project` ignores it.
 unset MAKE_FLAGS
 unset GRADLE_ASSEMBLE_FLAGS
 unset MVN_COMPILE_FLAGS
 unset ERR_IF_NO_BUILDFILE
 
 if ! tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${tmpdir}" ]; then
-  echo "$0: cannot create a temporary directory" >&2
+  echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
   exit 1
 fi
 # The signal handlers re-raise the signal with the handler removed, so that
@@ -64,6 +65,37 @@ make_project() {
     printf 'clean:\n\t@echo cleaned >> log\n\t@exit %s\n' "$2"
   } > "$1/Makefile"
 }
+
+# Without --clean, the project is compiled but not cleaned.
+noclean="${tmpdir}/noclean"
+make_project "${noclean}"
+if ! "${COMPILE_PROJECT}" "${noclean}" > /dev/null; then
+  fail "nonzero exit status in ${noclean}"
+fi
+if [ "$(cat "${noclean}/log")" != "built" ]; then
+  fail "without --clean, expected only \"built\" but got: $(cat "${noclean}/log")"
+fi
+
+# With --clean, the project is cleaned and then compiled.
+withclean="${tmpdir}/withclean"
+make_project "${withclean}"
+if ! "${COMPILE_PROJECT}" --clean "${withclean}" > /dev/null; then
+  fail "nonzero exit status in ${withclean}"
+fi
+if [ "$(cat "${withclean}/log")" != "cleaned
+built" ]; then
+  fail "with --clean, expected \"cleaned\" then \"built\" but got: $(cat "${withclean}/log")"
+fi
+
+# CLEAN in the environment does not clean the project.
+inherited="${tmpdir}/inherited"
+make_project "${inherited}"
+if ! CLEAN=anything "${COMPILE_PROJECT}" "${inherited}" > /dev/null; then
+  fail "nonzero exit status in ${inherited}"
+fi
+if [ "$(cat "${inherited}/log")" != "built" ]; then
+  fail "with CLEAN in the environment, expected only \"built\" but got: $(cat "${inherited}/log")"
+fi
 
 # Checks that `compile-project <directory>` exits with status 1 and complains
 # on stderr that <directory> is not a directory.
@@ -239,6 +271,6 @@ if [ "$(cat "${sentinel}/log")" != "cleaned" ]; then
 fi
 
 if [ "${status}" = 0 ]; then
-  echo "test-compile-project.sh: all tests passed"
+  echo "${SCRIPT_NAME}: OK"
 fi
 exit "${status}"

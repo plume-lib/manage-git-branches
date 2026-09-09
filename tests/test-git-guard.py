@@ -518,7 +518,10 @@ def main() -> int:
             print(f"FAILED: deny pattern Bash({pattern}) matches nothing")
             failures += 1
 
-    return 1 if failures else 0
+    if failures:
+        return 1
+    print(f"{Path(__file__).name}: OK")
+    return 0
 
 
 if __name__ == "__main__":

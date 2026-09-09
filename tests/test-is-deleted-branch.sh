@@ -573,4 +573,4 @@ if [ "${failures}" -ne 0 ]; then
   exit 1
 fi
 
-echo "${SCRIPT_NAME}: all tests passed"
+echo "${SCRIPT_NAME}: OK"
