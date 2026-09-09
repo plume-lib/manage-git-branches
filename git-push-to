@@ -133,11 +133,24 @@ check_upstream() {
   # "heads/BRANCH" when a tag and the branch have the same name.
   branch_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
   branch="${branch_ref#refs/heads/}"
-  if git -C "$1" rev-parse --symbolic-full-name "@{upstream}" > /dev/null 2>&1; then
+  remote="$(git -C "$1" config --get "branch.${branch}.remote")"
+  merge_refs="$(git -C "$1" config --get-all "branch.${branch}.merge")"
+  if [ -n "${remote}" ] && [ -n "${merge_refs}" ]; then
     return 0
   fi
+  push_remote="$(git -C "$1" config --get "branch.${branch}.pushRemote")"
+  if [ -z "${push_remote}" ]; then
+    push_remote="$(git -C "$1" config --get remote.pushDefault)"
+  fi
+  if [ -z "${push_remote}" ]; then
+    push_remote="${remote:-REMOTE}"
+  fi
+  if [ "${push_remote}" = REMOTE ]; then
+    configured_remote="$(git -C "$1" remote | awk 'NR == 1 { remote = $0 } END { if (NR == 1) print remote }')"
+    push_remote="${configured_remote:-REMOTE}"
+  fi
   echo "${SCRIPT_NAME}: branch ${branch} in $1 has no upstream branch, so it cannot be pulled or pushed" >&2
-  echo "${SCRIPT_NAME}: to give it one, cd to that directory and run: git push --set-upstream origin '${branch}'" >&2
+  echo "${SCRIPT_NAME}: to give it one, cd to that directory and run: git push --set-upstream '${push_remote}' '${branch}'" >&2
   return 1
 }
 

@@ -88,9 +88,11 @@ FORBIDDEN = (
     # the comment is a command rather than that here-document's body.
     "echo hi # <<EOF\ngit checkout main\nEOF",
     "echo hi # <<'EOF'\ngit checkout main\nEOF",
+    "# A backslash in a comment does not continue the comment. \\\ngit checkout main",
     # A `#` that does not start a word does not start a comment, so what follows the
     # `;` is a command.
     "echo a#b; git checkout main",
+    "echo \\ # ignored; git checkout main",
     # A here-document that feeds a shell is a script.
     "sh <<'EOF'\ngit checkout main\nEOF",
     "bash <<EOF\ngit stash\nEOF",
@@ -204,6 +206,8 @@ PERMITTED = (
     "# git checkout main",
     "git status # git checkout main",
     "echo hi # git branch newbranch",
+    "# ; git checkout main",
+    "git status # && git checkout main",
     # Commands that merely mention a forbidden operation.
     "echo 'git branch newbranch'",
     "grep -n 'git checkout' README.md",
