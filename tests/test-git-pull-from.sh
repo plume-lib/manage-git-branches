@@ -32,11 +32,20 @@ trap 'rm -rf "${workdir}"' EXIT
 trap 'rm -rf "${workdir}"; exit 130' INT
 trap 'rm -rf "${workdir}"; exit 143' TERM
 
+# Make the test independent of the invoking user's git configuration.  A
+# global setting such as `commit.gpgsign`, `pull.rebase`, `merge.ff`,
+# `core.hooksPath`, or `commit.template` would otherwise change what the
+# commands below do, or make them fail.
+GIT_CONFIG_GLOBAL="${workdir}/gitconfig"
+GIT_CONFIG_SYSTEM=/dev/null
+# A committer identity, in case the user running the test has none.
 GIT_AUTHOR_NAME='manage-git-branches test'
 GIT_AUTHOR_EMAIL='test@example.com'
 GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
 GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
+export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+: > "${GIT_CONFIG_GLOBAL}"
 
 remote="${workdir}/remote.git"
 git init -q --bare -b main "${remote}"
@@ -85,6 +94,56 @@ esac
 case "${subject}" in
   *../from*) ;;
   *) fail "merge commit message does not name ../from: ${subject}" ;;
+esac
+
+# `git-pull-from` requires the current directory to be the top level of a
+# clone.  A subdirectory of a working copy is in a git repository, so the
+# diagnostic must not say merely that this is not a clone.
+mkdir -p "${workdir}/to/subdir"
+if output="$(cd "${workdir}/to/subdir" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from" 2>&1)"; then
+  fail "git-pull-from succeeded in a subdirectory of a working copy"
+fi
+case "${output}" in
+  *"not the top level of a git clone"*) ;;
+  *) fail "git-pull-from did not say that the directory is not a top level: ${output}" ;;
+esac
+case "${output}" in
+  *"its top level is: "*) ;;
+  *) fail "git-pull-from did not name the top level to run in: ${output}" ;;
+esac
+
+# The same requirement holds outside a working copy altogether.
+if output="$(cd "${workdir}" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from" 2>&1)"; then
+  fail "git-pull-from succeeded outside a working copy"
+fi
+case "${output}" in
+  *"not the top level of a git clone"*) ;;
+  *) fail "git-pull-from did not reject a directory outside a working copy: ${output}" ;;
+esac
+
+# OTHER-REPO-DIR must be the top level of a clone too.
+mkdir -p "${workdir}/from/subdir"
+if output="$(cd "${workdir}/to" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from/subdir" 2>&1)"; then
+  fail "git-pull-from accepted a subdirectory as OTHER-REPO-DIR"
+fi
+case "${output}" in
+  *"git-pull-from: not the top level of a git clone: "*"/from/subdir"*) ;;
+  *) fail "git-pull-from did not reject OTHER-REPO-DIR: ${output}" ;;
+esac
+# The diagnostic is about this command's argument, so it names this command.
+case "${output}" in
+  *git-push-to*) fail "git-pull-from left the diagnostic to git-push-to: ${output}" ;;
+esac
+if output="$(cd "${workdir}/to" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/no-such-directory" 2>&1)"; then
+  fail "git-pull-from accepted a nonexistent OTHER-REPO-DIR"
+fi
+case "${output}" in
+  *"no such directory"*) ;;
+  *) fail "git-pull-from did not reject a nonexistent OTHER-REPO-DIR: ${output}" ;;
 esac
 
 echo "${SCRIPT_NAME}: OK"
