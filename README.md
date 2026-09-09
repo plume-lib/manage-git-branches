@@ -52,11 +52,11 @@ The commands are:
   working copy (that is, a git clone).
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
-* [`git-orphaned-branches`](git-orphaned-branches):
+* [`git-orphaned-branches`](git-orphaned-branches) `[--print0]`:
   Lists directories named `*-branch-*`, below the current directory, that are
   working copies for branches that were deleted in the remote repository.
-  Typical usage is `rm -rf $(git-orphaned-branches)` or `rmgob` (see alias
-  below).
+  Typical usage is `git-orphaned-branches --print0 | xargs -0 rm -rf` or
+  `rmgob` (see alias below).
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
@@ -108,7 +108,7 @@ such as `~/.profile`.
 export PATH="/path/to/manage-git-branches:${PATH}"
 alias gcb=git-checkout-branch
 alias gnb=git-new-branch
-alias rmgob='rm -rf $(git-orphaned-branches)'
+alias rmgob='git-orphaned-branches --print0 | xargs -0 rm -rf'
 ```
 
 ## Testing
