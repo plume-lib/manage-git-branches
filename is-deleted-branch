@@ -372,10 +372,10 @@ if [ -n "${ssh_batch_option}" ]; then
     # basename is not one that Git recognizes.  Without GIT_SSH_VARIANT, Git
     # would guess the "simple" variant, which cannot pass a port or an address
     # family to SSH.
-    IS_DELETED_BRANCH_GIT_SSH="${GIT_SSH}"
-    IS_DELETED_BRANCH_SSH_BATCH_OPTION="${ssh_batch_option}"
-    export IS_DELETED_BRANCH_GIT_SSH IS_DELETED_BRANCH_SSH_BATCH_OPTION
-    GIT_TERMINAL_PROMPT=0 GIT_SSH="${SCRIPT_DIR}/is-deleted-branch-ssh-wrapper" \
+    MANAGE_GIT_BRANCHES_GIT_SSH="${GIT_SSH}"
+    MANAGE_GIT_BRANCHES_SSH_BATCH_OPTION="${ssh_batch_option}"
+    export MANAGE_GIT_BRANCHES_GIT_SSH MANAGE_GIT_BRANCHES_SSH_BATCH_OPTION
+    GIT_TERMINAL_PROMPT=0 GIT_SSH="${SCRIPT_DIR}/git-ssh-batch-wrapper" \
       GIT_SSH_VARIANT="${ssh_resolved_variant}" \
       git -C "${dir}" ls-remote --exit-code "${remote}" "$@" > /dev/null 2>&1
     status="$?"
