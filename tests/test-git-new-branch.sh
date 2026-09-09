@@ -92,9 +92,14 @@ if [ -e "${newdir}-TMP" ]; then
   fail "temporary directory was left behind: ${newdir}-TMP"
 fi
 
-# A branch name that is in use on the remote is an error.
+# A branch name that is in use on the remote is an error, even when the clone
+# has no remote-tracking branch for it and so must ask the remote itself.
 clone="${tmpdir}/myclone-branch-main"
 git clone -q "${repo}" "${clone}"
+# Restrict the fetch refspec before deleting the remote-tracking branch, so
+# that the `git pull` in `git-new-branch` does not recreate it.
+git -C "${clone}" config remote.origin.fetch "+refs/heads/main:refs/remotes/origin/main"
+git -C "${clone}" update-ref -d refs/remotes/origin/localonly
 if out="$(cd "${clone}" && "${GIT_NEW_BRANCH}" localonly 2>&1)"; then
   fail "zero exit status for the branch localonly that exists on the remote"
 fi
