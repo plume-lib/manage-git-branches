@@ -6,11 +6,8 @@
 # Usage:
 #   git-new-branch NEWBRANCHNAME
 #
-# If the repository has a remote named "origin", the new branch is pushed to
-# it, with the remote branch as the new branch's upstream.  The upstream is
-# what lets `git-push-to` and `git-pull-from` pull and push the new branch.
-# If the push fails -- for example, because the remote is read-only -- this
-# script warns but still creates the branch directory, without an upstream.
+# The new branch is in a new directory that has the same directory
+# contents as the current repository.
 
 # SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
@@ -64,7 +61,35 @@ BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
 git pull -q > /dev/null 2>&1 || true
 
-if git ls-remote --exit-code origin "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
+# Determine which remote to ask whether the branch already exists, the same
+# way that `is-deleted-branch` and `git-push-to` determine a branch's remote:
+# `remote.pushDefault`, then "origin", then the only remote if the clone has
+# exactly one.  (No `branch.BRANCH.pushRemote` configuration can exist yet,
+# because the branch does not exist yet.)  Asking only the remote named
+# "origin", as this script once did, asked no remote at all in a clone whose
+# sole remote has some other name, so the check silently passed there.
+# ${REMOTE} is empty if no remote can be determined; then no remote can be
+# asked, and this script creates the branch.
+REMOTE="$(git config --get remote.pushDefault)"
+if [ -z "${REMOTE}" ]; then
+  REMOTES="$(git remote)"
+  if printf '%s\n' "${REMOTES}" | grep -q -x 'origin'; then
+    REMOTE='origin'
+  elif [ "$(printf '%s\n' "${REMOTES}" | grep -c '.')" -eq 1 ]; then
+    REMOTE="${REMOTES}"
+  fi
+fi
+
+# Asking the remote does not change it.  This script creates nothing outside
+# the new directory:  in particular, it does not push the new branch.
+#
+# `GIT_TERMINAL_PROMPT=0` makes an authentication failure an error rather than
+# a prompt, as `is-deleted-branch` does for its own queries:  without it, this
+# query blocks forever when this script is run from another script or a CI job.
+# A remote that this script cannot ask is not an error; the branch is created.
+if [ -n "${REMOTE}" ] \
+  && GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "${REMOTE}" \
+    "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists." >&2
   exit 1
 fi
@@ -96,25 +121,5 @@ if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
   exit 1
 fi
 TMPDIR_TO_CLEAN=""
-
-# Give the new branch an upstream.  Without one, `git pull` and `git push` in
-# the new directory fail with "There is no tracking information for the
-# current branch", so `git-push-to` and `git-pull-from` cannot use it.
-#
-# Push only after the move succeeded, because the cleanup traps cannot undo a
-# push: if the script failed or was interrupted between the push and the move,
-# the traps would remove the working copy but leave the branch in the remote,
-# and re-running this script would abort because the branch already exists.
-#
-# `git config --get`, not `git remote get-url`, which requires git 2.7 or later.
-if [ -n "$(git config --get remote.origin.url)" ]; then
-  if ! (cd -- "${BRANCHDIR}" && git push -q --set-upstream origin "${BRANCHNAME}"); then
-    # This is not an error: the new working copy is usable without an upstream,
-    # and the push can fail for reasons that are not this script's business,
-    # such as a read-only clone, a protected branch, or a rejecting hook.
-    echo "${SCRIPT_NAME}: WARNING: cannot push ${BRANCHNAME} to origin, so it has no upstream branch" >&2
-    echo "${SCRIPT_NAME}: WARNING: \`git-push-to\` and \`git-pull-from\` need one; to give it one, cd to ${BRANCHDIR} and run: git push --set-upstream origin '${BRANCHNAME}'" >&2
-  fi
-fi
 
 echo "Success: created ${BRANCHDIR}"

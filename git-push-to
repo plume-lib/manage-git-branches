@@ -138,19 +138,39 @@ check_upstream() {
   if [ -n "${remote}" ] && [ -n "${merge_refs}" ]; then
     return 0
   fi
+  # Determine the remote that `git push` would use, the same way that
+  # `is-deleted-branch` does:  `branch.BRANCH.pushRemote`, then
+  # `remote.pushDefault`, then `branch.BRANCH.remote`, then "origin", then the
+  # only remote if the clone has exactly one.  ${push_remote} is empty if no
+  # remote can be determined.
   push_remote="$(git -C "$1" config --get "branch.${branch}.pushRemote")"
   if [ -z "${push_remote}" ]; then
     push_remote="$(git -C "$1" config --get remote.pushDefault)"
   fi
   if [ -z "${push_remote}" ]; then
-    push_remote="${remote:-REMOTE}"
+    push_remote="${remote}"
   fi
-  if [ "${push_remote}" = REMOTE ]; then
-    configured_remote="$(git -C "$1" remote | awk 'NR == 1 { remote = $0 } END { if (NR == 1) print remote }')"
-    push_remote="${configured_remote:-REMOTE}"
+  remotes="$(git -C "$1" remote)"
+  if [ -z "${push_remote}" ]; then
+    if printf '%s\n' "${remotes}" | grep -q -x 'origin'; then
+      push_remote='origin'
+    elif [ "$(printf '%s\n' "${remotes}" | grep -c '.')" -eq 1 ]; then
+      push_remote="${remotes}"
+    fi
   fi
   echo "${SCRIPT_NAME}: branch ${branch} in $1 has no upstream branch, so it cannot be pulled or pushed" >&2
-  echo "${SCRIPT_NAME}: to give it one, cd to that directory and run: git push --set-upstream '${push_remote}' '${branch}'" >&2
+  # Do not name a placeholder such as "REMOTE" within a command that the user
+  # might copy:  a command that fails with "'REMOTE' does not appear to be a
+  # git repository" hides the actual problem, which is that this clone does
+  # not determine which remote to push the branch to.
+  if [ -n "${push_remote}" ]; then
+    echo "${SCRIPT_NAME}: to give it one, cd to that directory and run: git push --set-upstream '${push_remote}' '${branch}'" >&2
+  elif [ -z "${remotes}" ]; then
+    echo "${SCRIPT_NAME}: that clone has no remote, so first add one (\`git remote add ...\`), then cd to that directory and run: git push --set-upstream REMOTE '${branch}'" >&2
+  else
+    echo "${SCRIPT_NAME}: that clone has several remotes and none is named origin, so cd to that directory and run: git push --set-upstream REMOTE '${branch}', where REMOTE is one of:" >&2
+    printf '%s\n' "${remotes}" | sed "s/^/${SCRIPT_NAME}:   /" >&2
+  fi
   return 1
 }
 
@@ -169,7 +189,10 @@ check_branch_exists() {
       ;;
     1) ;;
     2)
-      echo "${SCRIPT_NAME}: not a git clone: $1" >&2
+      # Status 2 also means a bare repository or a subdirectory of a working
+      # copy, so do not say merely "not a git clone", which would send a user
+      # who is in such a directory looking for the wrong problem.
+      echo "${SCRIPT_NAME}: not the top level of a git clone: $1" >&2
       return 1
       ;;
     3)

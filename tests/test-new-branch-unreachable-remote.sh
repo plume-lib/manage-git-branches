@@ -1,11 +1,12 @@
 #!/bin/sh
 
-# Tests that `git-new-branch` still creates the branch directory when the new
-# branch cannot be pushed to "origin" -- for example, because the remote is
-# read-only or unreachable.  Such a push failure is a warning, not an error.
+# Tests that `git-new-branch` still creates the branch directory when the
+# remote is unreachable -- for example, because it is offline or has been
+# moved.  `git-new-branch` contacts the remote only to ask whether the branch
+# already exists, and being unable to ask is not an error.
 #
 # Usage:
-#   tests/test-new-branch-unpushable-remote.sh
+#   tests/test-new-branch-unreachable-remote.sh
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -24,12 +25,20 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 trap 'rm -rf "${WORK_DIR}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 
+# Make the test independent of the invoking user's git configuration.  A
+# global setting such as `commit.gpgsign`, `pull.rebase`, `merge.ff`,
+# `core.hooksPath`, or `commit.template` would otherwise change what the
+# commands below do, or make them fail.
+GIT_CONFIG_GLOBAL="${WORK_DIR}/gitconfig"
+GIT_CONFIG_SYSTEM=/dev/null
 # A committer identity, in case the user running the test has none.
 GIT_AUTHOR_NAME="Test User"
 GIT_AUTHOR_EMAIL="test@example.com"
 GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
 GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
+export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+: > "${GIT_CONFIG_GLOBAL}"
 
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $*" >&2
@@ -55,13 +64,13 @@ create_repositories() {
 
 create_repositories
 
-# Make "origin" unpushable.  A nonexistent repository is the most portable way
+# Make "origin" unreachable.  A nonexistent repository is the most portable way
 # to do that: making the remote read-only would depend on file permissions, and
-# rejecting the push with a hook would not work under `core.hooksPath`.
+# rejecting a connection with a hook would not work under `core.hooksPath`.
 git -C "${MAIN_DIR}" remote set-url origin "${WORK_DIR}/no-such-repository.git"
 
 if ! output="$(cd "${MAIN_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature1 2>&1)"; then
-  fail "git-new-branch failed when the branch could not be pushed: ${output}"
+  fail "git-new-branch failed when the remote could not be contacted: ${output}"
 fi
 if [ ! -d "${FEATURE_DIR}" ]; then
   fail "git-new-branch did not create ${FEATURE_DIR}: ${output}"
@@ -70,23 +79,22 @@ if [ -e "${FEATURE_DIR}-TMP" ]; then
   fail "git-new-branch left behind ${FEATURE_DIR}-TMP"
 fi
 
-# The user is told that the branch has no upstream, and how to give it one.
+# An unreachable remote is not the user's problem to solve here, so the command
+# says nothing about it.
 case "${output}" in
-  *"WARNING"*"no upstream branch"*) ;;
-  *) fail "git-new-branch did not warn about the failed push: ${output}" ;;
-esac
-case "${output}" in
-  *"git push --set-upstream origin 'feature1'"*) ;;
-  *) fail "git-new-branch did not say how to set the upstream: ${output}" ;;
+  *"no-such-repository"* | *WARNING* | *ERROR*)
+    fail "git-new-branch complained about the unreachable remote: ${output}"
+    ;;
 esac
 
-# The new working copy is on the new branch, even though it has no upstream.
+# The new working copy is on the new branch, and has no upstream, because
+# `git-new-branch` does not push.
 branch="$(git -C "${FEATURE_DIR}" rev-parse --abbrev-ref HEAD)"
 if [ "${branch}" != "feature1" ]; then
   fail "${FEATURE_DIR} is on branch ${branch}, not feature1"
 fi
 if git -C "${FEATURE_DIR}" rev-parse --symbolic-full-name '@{upstream}' > /dev/null 2>&1; then
-  fail "${FEATURE_DIR} has an upstream, but the push should have failed"
+  fail "${FEATURE_DIR} has an upstream, but git-new-branch does not push"
 fi
 
 echo "${SCRIPT_NAME}: OK"
