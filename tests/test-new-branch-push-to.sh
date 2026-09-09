@@ -63,6 +63,18 @@ if [ ! -d "${FEATURE_DIR}" ]; then
   fail "git-new-branch did not create ${FEATURE_DIR}"
 fi
 
+# `git-new-branch` does not change any remote repository.
+if git -C "${REMOTE}" rev-parse --verify --quiet refs/heads/feature1 > /dev/null; then
+  fail "git-new-branch pushed feature1 to the remote"
+fi
+if git -C "${FEATURE_DIR}" rev-parse --symbolic-full-name '@{upstream}' > /dev/null 2>&1; then
+  fail "git-new-branch gave feature1 an upstream, but it does not push"
+fi
+
+# `git-push-to` needs an upstream, so create one, as `git-new-branch` tells the
+# user to do.
+git -C "${FEATURE_DIR}" push -q --set-upstream origin feature1
+
 # Commit a change in the main branch, to be propagated to the new branch.
 echo "second line" >> "${MAIN_DIR}/file.txt"
 git -C "${MAIN_DIR}" commit -q -a -m "Add a second line"
