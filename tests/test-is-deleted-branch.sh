@@ -35,6 +35,35 @@ expect_status() {
   fi
 }
 
+# Usage: expect_status_from CWD EXPECTED DIRECTORY DESCRIPTION
+# Runs `is-deleted-branch DIRECTORY` with CWD as the current directory, and
+# checks its status code.  The current directory matters when DIRECTORY is the
+# empty string, because `git -C ''` operates on the current directory.
+expect_status_from() {
+  cwd="$1"
+  expected="$2"
+  dir="$3"
+  description="$4"
+  (CDPATH='' cd -- "${cwd}" && "${IS_DELETED_BRANCH}" "${dir}") > /dev/null 2>&1
+  actual="$?"
+  if [ "${actual}" -ne "${expected}" ]; then
+    fail "${description}: expected status ${expected}, got ${actual}"
+  fi
+}
+
+# Usage: expect_usage_error DESCRIPTION ARGUMENT...
+# Runs `is-deleted-branch` with the given arguments and checks that it reports
+# a usage error rather than answering the question.
+expect_usage_error() {
+  description="$1"
+  shift
+  "${IS_DELETED_BRANCH}" "$@" > /dev/null 2>&1
+  actual="$?"
+  if [ "${actual}" -ne 64 ]; then
+    fail "${description}: expected status 64, got ${actual}"
+  fi
+}
+
 # Usage: expect_failure_message COMMAND DIRECTORY DESCRIPTION
 # Runs `COMMAND DIRECTORY`, and checks that it exits with status 3, meaning
 # that the question could not be answered, and complains on standard error
@@ -267,7 +296,7 @@ git -C "${testdir}/myrepo-branch-multiple-upstreams" config --add branch.live.me
 git clone -q -b live "${remote}" "${testdir}/myrepo-branch-unreachable"
 ssh_arguments="${testdir}/ssh-arguments"
 fake_ssh="${testdir}/fake-ssh"
-cat > "${fake_ssh}" <<'EOF'
+cat > "${fake_ssh}" << 'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "${SSH_ARGUMENTS_FILE}"
 exit 1
@@ -298,6 +327,13 @@ git clone -q "${testdir}/myrepo-empty.git" "${testdir}/myrepo-branch-unborn" \
 
 ## A directory that is not a clone.
 mkdir "${testdir}/myrepo-branch-notaclone"
+
+## A path that does not exist, and a path that exists but is not a directory.
+## Neither name contains "-branch-", so `git-orphaned-branches` does not scan
+## them.
+nonexistent="${testdir}/nonexistent"
+plainfile="${testdir}/plainfile"
+: > "${plainfile}"
 
 ## A subdirectory of a clone whose branch was deleted.  It is not itself a
 ## clone, even though git commands run in it operate on the clone.
@@ -351,6 +387,15 @@ expect_status 1 "${testdir}/myrepo-branch-tag-upstream" \
 expect_status 1 "${testdir}/myrepo-branch-multiple-upstreams" \
   'branch with deleted and existing configured upstream refs'
 expect_status 2 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
+expect_status 2 "${nonexistent}" 'path that does not exist'
+expect_status 2 "${plainfile}" 'path that is not a directory'
+# Run from within a clone, so that a script that passed the empty string to
+# `git -C` would answer about that clone instead of rejecting the argument.
+expect_status_from "${testdir}/myrepo-branch-dead" 2 '' \
+  'empty DIRECTORY argument, from within a clone whose branch was deleted'
+expect_usage_error 'no argument'
+expect_usage_error 'two arguments' "${testdir}/myrepo-branch-live" \
+  "${testdir}/myrepo-branch-dead"
 expect_status 2 "${testdir}/myrepo-branch-dead/subdirectory" \
   'subdirectory of a clone whose branch was deleted'
 
