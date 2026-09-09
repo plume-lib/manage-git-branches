@@ -6,6 +6,7 @@
 # but a `.project` file.  They do not exercise the deleted-branch detection,
 # which would require a remote repository.
 
+SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 TOPLEVEL="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)"
 GIT_ORPHANED_BRANCHES="${TOPLEVEL}/git-orphaned-branches"
@@ -13,7 +14,7 @@ GIT_ORPHANED_BRANCHES="${TOPLEVEL}/git-orphaned-branches"
 status=0
 
 if ! work="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${work}" ]; then
-  echo "$0: cannot create a temporary directory" >&2
+  echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
   exit 1
 fi
 
@@ -32,7 +33,7 @@ trap 'cleanup; trap - INT; kill -s INT "$$"' INT
 trap 'cleanup; trap - TERM; kill -s TERM "$$"' TERM
 
 if ! work="$(CDPATH='' cd -- "${work}" && pwd -P)" || [ -z "${work}" ]; then
-  echo "$0: cannot resolve the temporary directory" >&2
+  echo "${SCRIPT_NAME}: cannot resolve the temporary directory" >&2
   exit 1
 fi
 
@@ -112,4 +113,7 @@ if [ "${unlistable}" -eq 1 ]; then
   check "p-branch-unlistable" "unlisted"
 fi
 
+if [ "${status}" = 0 ]; then
+  echo "${SCRIPT_NAME}: OK"
+fi
 exit "${status}"

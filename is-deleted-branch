@@ -10,13 +10,30 @@
 #  * 1 (false) if the directory is on a branch that still exists in its remote,
 #  * 2 (false) if the directory is not the top level of a clone, so the
 #    question does not apply,
-#  * 3 (false) if the question cannot be answered: HEAD is detached, the
-#    branch has no upstream, the remote could not be contacted, or this
-#    script could not resolve the location of its own helper scripts,
+#  * 3 (false) if the question cannot be answered: HEAD is detached, no
+#    remote can be determined for the branch, the branch has no upstream
+#    configuration and nothing shows that it was ever pushed, the remote
+#    could not be contacted, or this script could not resolve the location of
+#    its own helper scripts,
 #  * 64 if this command was invoked incorrectly.
 #
 # A caller must not treat every nonzero status as "the branch still exists";
 # only status 1 means that.
+#
+# Status 0 says that the branch was deleted in its remote, not that the
+# working copy holds nothing of value:  the branch can hold commits that were
+# never pushed, and deleting the directory would lose them.
+#
+# A branch that has no upstream configuration is reported as deleted only if
+# this clone still holds a record that the branch was pushed:  a
+# remote-tracking ref for it, or a reflog entry for such a ref.  Either record
+# can disappear.  Pruning (`git fetch --prune`, `git remote prune`, or the
+# `fetch.prune` and `remote.NAME.prune` configuration variables) deletes the
+# ref, and its reflog, along with the remote branch.  Reflog expiry deletes
+# reflog entries that are older than `gc.reflogExpire` (90 days by default)
+# even when the ref survives, because Git runs `git gc --auto` from commands
+# such as `git commit` and `git fetch`.  Git then keeps no record of the push,
+# so such a branch is "cannot tell" (status 3) rather than "deleted".
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other scripts even when this script
@@ -67,6 +84,15 @@ fi
 
 dir="$1"
 
+# Prints the absolute pathname of directory $1, with symbolic links resolved.
+# `realpath` would be simpler, but POSIX added it only in 2024 and some systems
+# still lack it; of those that have it, not every one accepts `--` to end the
+# options, which a pathname that starts with `-` needs.  `cd` and `pwd -P` are
+# portable.
+print_absolute_path() {
+  (CDPATH='' cd -- "$1" && pwd -P)
+}
+
 # `git -C DIR rev-parse` succeeds for every directory within a clone's working
 # tree, so also require that DIRECTORY is that working tree's top level.  A
 # subdirectory is not itself a clone, and answering for the enclosing clone
@@ -76,8 +102,17 @@ if [ -z "${toplevel}" ]; then
   # A bare repository has no working tree, so it is not on any branch.
   exit 2
 fi
-dir_real="$(realpath -- "${dir}" 2> /dev/null)" || exit 2
-toplevel_real="$(realpath -- "${toplevel}" 2> /dev/null)" || exit 2
+# A pathname that cannot be canonicalized means that whether DIRECTORY is the
+# top level of a clone cannot be determined.
+# (status 2 would assert that DIRECTORY is not the top level of a clone.)
+if ! dir_real="$(print_absolute_path "${dir}")"; then
+  echo "${SCRIPT_NAME}: cannot canonicalize: ${dir}" >&2
+  exit 3
+fi
+if ! toplevel_real="$(print_absolute_path "${toplevel}")"; then
+  echo "${SCRIPT_NAME}: cannot canonicalize: ${toplevel}" >&2
+  exit 3
+fi
 if [ "${dir_real}" != "${toplevel_real}" ]; then
   # Not a clone, so it is not on any branch, deleted or otherwise.
   exit 2
@@ -92,13 +127,162 @@ if ! branch_ref="$(git -C "${dir}" symbolic-ref --quiet HEAD 2> /dev/null)"; the
 fi
 branch="${branch_ref#refs/heads/}"
 
-# The branch's upstream, as a remote name and one or more refs such as
-# "refs/heads/BRANCH".
-remote="$(git -C "${dir}" config --get "branch.${branch}.remote")"
-upstream_refs="$(git -C "${dir}" config --get-all "branch.${branch}.merge")"
-if [ -z "${remote}" ] || [ -z "${upstream_refs}" ]; then
-  # The branch has no upstream, so there is no remote branch to ask about,
-  # and whether a branch was deleted cannot be determined.
+# A branch with no commit does not yet exist even locally, so it was never
+# pushed and it was not deleted.  `git clone` of an empty repository leaves
+# HEAD on such a branch, and gives it upstream configuration that no push
+# ever justified.
+branch_commit="$(git -C "${dir}" rev-parse --verify --quiet "${branch_ref}")"
+if [ -z "${branch_commit}" ]; then
+  exit 3
+fi
+
+# The branch's upstream configuration:  a remote name and one or more refs
+# such as "refs/heads/BRANCH".
+branch_remote="$(git -C "${dir}" config --get "branch.${branch}.remote")"
+merge_refs="$(git -C "${dir}" config --get-all "branch.${branch}.merge")"
+
+# A branch exists in a remote because someone pushed it there, so ask the
+# remote that `git push` uses:  `branch.BRANCH.pushRemote`, then
+# `remote.pushDefault`, then `branch.BRANCH.remote`, then "origin".
+# Consult `branch.BRANCH.remote` before `remote.pushDefault`, unlike
+# `git push`.  Both `branch.BRANCH.pushRemote` and `branch.BRANCH.remote` say
+# something about this branch, whereas `remote.pushDefault` is a default for
+# every branch of every clone, commonly set once in ~/.gitconfig to name a
+# fork.  Letting that default outrank this branch's own upstream would
+# discard what this clone records about the branch, and would answer "cannot
+# tell" for every branch that was never pushed to the fork.
+remote="$(git -C "${dir}" config --get "branch.${branch}.pushRemote")"
+if [ -z "${remote}" ]; then
+  remote="${branch_remote}"
+fi
+if [ -z "${remote}" ]; then
+  remote="$(git -C "${dir}" config --get remote.pushDefault)"
+fi
+if [ -z "${remote}" ]; then
+  # Git uses the remote named "origin" when no configuration names a remote.
+  # If there is no remote named "origin", but there is exactly one other
+  # remote, then that is the only remote the branch could exist in.
+  remotes="$(git -C "${dir}" remote)"
+  if printf '%s\n' "${remotes}" | grep -q -x 'origin'; then
+    remote='origin'
+  elif [ "$(printf '%s\n' "${remotes}" | grep -c '.')" -eq 1 ]; then
+    remote="${remotes}"
+  else
+    # The clone has no remote, or it has several and none is named "origin",
+    # so there is no remote branch to ask about.
+    exit 3
+  fi
+fi
+
+# A branch has no upstream configuration until some command sets it, and
+# neither `git checkout -b BRANCH` (which `git-new-branch` runs) nor
+# `git push REMOTE BRANCH` sets it.  Such a branch can still exist in a
+# remote, under the name that `git push` gives it:  a branch of the same name.
+# `branch.BRANCH.merge` names refs in `branch.BRANCH.remote`, so it describes
+# no other remote, and Git ignores it when `branch.BRANCH.remote` is unset
+# (`git pull` then reports "no tracking information").
+configured_upstream=0
+upstream_refs="refs/heads/${branch}"
+if [ -n "${merge_refs}" ] && [ "${remote}" = "${branch_remote}" ]; then
+  configured_upstream=1
+  upstream_refs="${merge_refs}"
+fi
+
+# Usage: tracking_refs REF
+# Prints the remote-tracking refs that ${remote}'s fetch refspecs map REF to,
+# one per line.  Prints nothing if no refspec maps REF, which is also what
+# happens when ${remote} is a URL rather than the name of a configured remote:
+# fetching from a URL creates no remote-tracking ref.
+tracking_refs() {
+  git -C "${dir}" config --get-all "remote.${remote}.fetch" \
+    | while IFS= read -r refspec; do
+      # A fetch refspec is [+]SOURCE:DESTINATION.  A "*" in SOURCE matches any
+      # substring, and DESTINATION's "*" stands for what SOURCE's matched.
+      # A refspec without a DESTINATION, such as the negative refspec
+      # "^refs/heads/BRANCH", creates no remote-tracking ref.
+      case "${refspec}" in
+        *:*) ;;
+        *) continue ;;
+      esac
+      refspec="${refspec#+}"
+      source_pattern="${refspec%%:*}"
+      destination="${refspec#*:}"
+      case "${source_pattern}" in
+        *'*'*)
+          # A ref name cannot contain "*", "?", or "[", so the only pattern
+          # character in SOURCE is the "*" that this case matched.
+          source_prefix="${source_pattern%%'*'*}"
+          source_suffix="${source_pattern#*'*'}"
+          case "$1" in
+            "${source_prefix}"*"${source_suffix}") ;;
+            *) continue ;;
+          esac
+          matched="${1#"${source_prefix}"}"
+          matched="${matched%"${source_suffix}"}"
+          case "${destination}" in
+            *'*'*)
+              printf '%s%s%s\n' "${destination%%'*'*}" "${matched}" \
+                "${destination#*'*'}"
+              ;;
+            *) printf '%s\n' "${destination}" ;;
+          esac
+          ;;
+        *)
+          if [ "$1" = "${source_pattern}" ]; then
+            printf '%s\n' "${destination}"
+          fi
+          ;;
+      esac
+    done
+}
+
+# Usage: branch_was_pushed
+# Returns 0 (true) if this clone shows that the branch was pushed to
+# ${remote}.  The existence of a remote-tracking ref for the branch is not
+# itself such a sign:  the ref may be a leftover from a different branch of
+# the same name, which someone else pushed and deleted and which this clone
+# never pruned.  A sign is a reflog entry that records a push.  So is a
+# remote-tracking ref that is at the same commit as the branch:  even if that
+# ref is a leftover, the branch holds no work that the remote lacks.
+branch_was_pushed() {
+  candidate_refs="$(tracking_refs "refs/heads/${branch}")"
+  pushed=1
+  # A ref name cannot contain a newline.
+  pushed_saved_ifs="${IFS}"
+  IFS='
+'
+  set -f
+  for candidate_ref in ${candidate_refs}; do
+    if [ "${candidate_ref}" = "${branch_ref}" ]; then
+      # A fetch refspec can map the branch to itself, as the "+refs/*:refs/*"
+      # that `git remote add --mirror=fetch` sets does.  The branch is
+      # trivially at its own commit and its reflog is not a record of a push,
+      # so such a ref is no sign that the branch was pushed.
+      continue
+    fi
+    candidate_commit="$(git -C "${dir}" rev-parse --verify --quiet \
+      "${candidate_ref}")" || continue
+    if [ "${candidate_commit}" = "${branch_commit}" ] \
+      || git -C "${dir}" reflog show "${candidate_ref}" 2> /dev/null \
+      | grep -q ': update by push$'; then
+      pushed=0
+      break
+    fi
+  done
+  set +f
+  IFS="${pushed_saved_ifs}"
+  return "${pushed}"
+}
+
+if [ "${configured_upstream}" -eq 0 ] && ! branch_was_pushed; then
+  # The branch has no upstream configuration and no sign of having been
+  # pushed, so it was probably never pushed, and a branch that was never
+  # pushed was not deleted.  Contacting the remote could not settle the
+  # question:  a branch of this name in the remote might be someone else's,
+  # and the absence of one is what a never-pushed branch and a deleted branch
+  # both look like.  Answering without the network also keeps a scan of many
+  # never-pushed branches, such as `git-orphaned-branches` performs, from
+  # making one network request per branch.
   exit 3
 fi
 
