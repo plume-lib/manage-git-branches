@@ -2,7 +2,8 @@
 
 """Test `.claude/hooks/git-guard-one-branch-per-directory.py`.
 
-That hook forbids changing the branch of a working copy.
+That hook forbids changing the branch of a working copy, and approves a command that
+only reads a repository.
 
 Usage:
   tests/test-git-guard.py
@@ -73,6 +74,15 @@ FORBIDDEN = (
     "git status\ngit branch newbranch",
     "git log --oneline\n\ngit stash",
     "cd /some/dir\ngit switch main\nmake",
+    # A `#` comment ends at the newline, so the next line is still a command.
+    "git status # check state\ngit switch main",
+    "cd /some/dir # go there\ngit checkout -b newbranch",
+    "git log --oneline -1 #\ngit branch newbranch",
+    "# A backslash in a comment does not continue the comment. \\\ngit checkout main",
+    # A `#` that does not start a word does not start a comment, so what follows the
+    # `;` is a command.
+    "echo a#b; git checkout main",
+    "echo \\ # ignored; git checkout main",
     # A here-document that feeds a shell is a script.
     "sh <<'EOF'\ngit checkout main\nEOF",
     "bash <<EOF\ngit stash\nEOF",
@@ -114,6 +124,9 @@ FORBIDDEN = (
     "ssh -o 'ProxyCommand git stash' host true",
     "ssh -o proxycommand='git switch main' host true",
     "ssh -o LocalCommand='git branch newbranch' host true",
+    # A `#` that does not begin a word is not a comment, so what follows it runs.
+    "git status a#; git checkout main",
+    "git log --grep=x#; git stash",
     # Unparsable, but it mentions a forbidden operation.
     "git checkout 'main",
 )
@@ -140,6 +153,19 @@ PERMITTED = (
     "git branch --sort=-committerdate -r",
     "git branch --format=%(refname:short)",
     "git branch --color=never --column",
+    # Listing forms in which an operand is a pattern, not a branch to create.
+    # `git branch` itself refuses `-a` and `-r` with an operand unless `--list` is
+    # also given, so neither form can create a branch.
+    "git branch -r 'origin/wpi-*'",
+    "git branch -a 'wpi-*'",
+    "git branch --all 'wpi-*'",
+    "git branch --remotes 'origin/wpi-*'",
+    "git branch -a --list 'wpi-*'",
+    "git branch --contains HEAD 'wpi-*'",
+    "git branch --no-contains HEAD 'wpi-*'",
+    "git branch --merged main 'wpi-*'",
+    "git branch --no-merged=main 'wpi-*'",
+    "git branch --points-at HEAD 'wpi-*'",
     "git -C /some/dir branch",
     "git -C /some/dir branch --show-current",
     "git --no-pager branch -a",
@@ -165,6 +191,13 @@ PERMITTED = (
     # A shell option that is not a command option.
     "bash -s < script.sh",
     "sh -n script.sh",
+    # A `#` comment mentions a forbidden operation without running it, whether it
+    # occupies the whole line or trails a command.
+    "# git checkout main",
+    "git status # git checkout main",
+    "echo hi # git branch newbranch",
+    "# ; git checkout main",
+    "git status # && git checkout main",
     # Commands that merely mention a forbidden operation.
     "echo 'git branch newbranch'",
     "grep -n 'git checkout' README.md",
@@ -187,6 +220,90 @@ PERMITTED = (
     "env -S 'echo git checkout main'",
     "env -uS git status",
     "find . -name '*.py' -type f",
+    # Unparsable, and mentioning nothing forbidden.
+    "echo 'unterminated",
+)
+
+# Commands that the hook must approve, so that they run without a permission prompt.
+# No `allow` pattern can express these, because a pattern that admits a global option
+# or `-C DIR` before the subcommand also admits `-c core.pager=CMD`.
+APPROVED = (
+    # Subcommands that only read, with no global option at all.
+    "git status",
+    "git log --oneline",
+    "git log --grep checkout HEAD",
+    "git diff --stat",
+    "git show HEAD",
+    "git rev-parse --abbrev-ref HEAD",
+    "git branch",
+    "git branch -av",
+    "git branch --list 'wpi-*'",
+    "git branch --sort=-committerdate -r",
+    "git stash list",
+    "git stash show -p",
+    # The same, in another working copy.
+    "git -C /some/dir branch",
+    "git -C /some/dir branch --show-current",
+    "git -C /some/dir log --oneline",
+    "git -C /some/dir diff",
+    "git -C /some/dir stash list",
+    # `-C` takes its value attached as well as separately.
+    "git -Cdir log",
+    # Global options that cannot run another program.
+    "git --no-pager branch -a",
+    "git --no-pager -C /some/dir log",
+    "git --no-optional-locks status",
+    # One read-only command after another.
+    "git status && git -C /some/dir log",
+    "git status; git branch",
+    "git status\ngit log --oneline",
+    "git log --oneline | git -C /some/dir log --oneline",
+)
+
+# Commands that the hook must neither deny nor approve, leaving them to the `allow`
+# and `deny` lists of `.claude/settings.json` and to a permission prompt.
+UNAPPROVED = (
+    # A global option that names a program to run, or that this hook does not know.
+    "git -c core.pager=cat log",
+    "git -c color.ui=always -C /some/dir log",
+    "git --exec-path=/some/dir log",
+    "git --git-dir=/some/dir/.git log",
+    "git --config-env=core.pager=PAGER log",
+    # A subcommand that writes, even though nothing about it is forbidden.
+    "git add .",
+    "git commit -m message",
+    "git tag v1.0",
+    "git -C /some/dir tag v1.0",
+    "git remote -v",
+    # No subcommand at all.
+    "git",
+    "git -C /some/dir",
+    "git --no-pager",
+    # A command that is not git, running before or after one that is.
+    "git log && rm -rf /some/dir",
+    "git status && make",
+    "git log | head",
+    "git log --oneline\nmake",
+    "echo 'git branch newbranch'",
+    "git-new-branch newbranch",
+    # A path-qualified program that merely has git's file name is not git.
+    "./git status",
+    "/tmp/git log --oneline",
+    # A wrapper or an indirection: git must be the command itself.
+    "sudo git log",
+    "timeout 300 git log",
+    "GIT_PAGER=cat git log",
+    "xargs git log",
+    "ssh host git branch --show-current",
+    # A `#` that does not begin a word is not a comment, so what follows it runs.
+    "git log a#; rm /some/file",
+    # Shell syntax that this hook does not interpret.
+    "git log `rm -rf /some/dir`",
+    "git log $(echo HEAD)",
+    "git log ${SOMEREF}",
+    "git log > out.txt",
+    "(git log)",
+    "if true; then git log; fi",
     # Unparsable, and mentioning nothing forbidden.
     "echo 'unterminated",
 )
@@ -291,6 +408,17 @@ def main() -> int:
             failures += 1
 
     for command in PERMITTED:
+        if decision(command) == "deny":
+            print(f"FAILED: denied: {command}")
+            failures += 1
+
+    for command in APPROVED:
+        result = decision(command)
+        if result != "allow":
+            print(f"FAILED: {result} instead of allow: {command}")
+            failures += 1
+
+    for command in UNAPPROVED:
         result = decision(command)
         if result is not None:
             print(f"FAILED: {result} instead of no decision: {command}")
@@ -354,9 +482,9 @@ def main() -> int:
         failures += 1
 
     # `deny` wins over `allow`, so no `deny` pattern may reject a command that this
-    # hook permits.  Only the hook can distinguish those commands.
+    # hook permits or approves.  Only the hook can distinguish those commands.
     deny_patterns = bash_deny_patterns(settings)
-    for command in PERMITTED:
+    for command in PERMITTED + APPROVED:
         for pattern in deny_patterns:
             if deny_pattern_matches(pattern, command):
                 print(f"FAILED: deny pattern Bash({pattern}) rejects: {command}")
@@ -369,7 +497,10 @@ def main() -> int:
             print(f"FAILED: deny pattern Bash({pattern}) matches nothing")
             failures += 1
 
-    return 1 if failures else 0
+    if failures:
+        return 1
+    print(f"{Path(__file__).name}: OK")
+    return 0
 
 
 if __name__ == "__main__":

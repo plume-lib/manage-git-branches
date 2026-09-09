@@ -26,21 +26,53 @@ if [ "$#" -ne 2 ]; then
   exit 1
 fi
 
+# Prints the absolute pathname of $1, with symbolic links resolved.
+# `realpath` would be simpler, but POSIX added it only in 2024 and some systems
+# still lack it -- which is the same reason this script exists -- whereas `cd`,
+# `pwd -P`, and `readlink` are what the rest of this package already relies on.
+canonicalize() {
+  # `cd` below resolves every symbolic link in the pathname, but only if the
+  # final component names a directory, so resolve a final symbolic link here.
+  canonical="$1"
+  canonical_links=0
+  while [ -L "${canonical}" ]; do
+    canonical_links=$((canonical_links + 1))
+    if [ "${canonical_links}" -gt 40 ]; then
+      return 1
+    fi
+    if ! canonical_link="$(readlink -- "${canonical}")"; then
+      return 1
+    fi
+    case "${canonical_link}" in
+      /*) canonical="${canonical_link}" ;;
+      *) canonical="$(dirname -- "${canonical}")/${canonical_link}" ;;
+    esac
+  done
+  if [ -d "${canonical}" ]; then
+    # `cd` writes its own diagnostic when it fails; discard it, because the
+    # caller writes a better one.
+    (CDPATH='' cd -- "${canonical}" && pwd -P) 2> /dev/null
+    return
+  fi
+  if ! canonical_dir="$( (CDPATH='' cd -- "$(dirname -- "${canonical}")" && pwd -P) 2> /dev/null )"; then
+    return 1
+  fi
+  # `pwd -P` prints "/" for the root directory, where appending "/" too would
+  # produce "//name" rather than "/name".
+  case "${canonical_dir}" in
+    */) printf '%s%s\n' "${canonical_dir}" "$(basename -- "${canonical}")" ;;
+    *) printf '%s/%s\n' "${canonical_dir}" "$(basename -- "${canonical}")" ;;
+  esac
+}
+
 # The `[ -e ... ]` tests reject a pathname whose final component does not
-# exist.  `realpath -e` would do so, but `-e` is a GNU extension.
-base_operand="$1"
-case "${base_operand}" in
-  -*) base_operand="./${base_operand}" ;;
-esac
-if ! [ -e "$1" ] || ! base="$(realpath "${base_operand}")"; then
+# exist, including a symbolic link whose target does not exist.  `realpath -e`
+# would do so, but `-e` is a GNU extension.
+if ! [ -e "$1" ] || ! base="$(canonicalize "$1")" || [ -z "${base}" ]; then
   echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
   exit 1
 fi
-target_operand="$2"
-case "${target_operand}" in
-  -*) target_operand="./${target_operand}" ;;
-esac
-if ! [ -e "$2" ] || ! target="$(realpath "${target_operand}")"; then
+if ! [ -e "$2" ] || ! target="$(canonicalize "$2")" || [ -z "${target}" ]; then
   echo "${SCRIPT_NAME}: cannot canonicalize: $2" >&2
   exit 1
 fi
