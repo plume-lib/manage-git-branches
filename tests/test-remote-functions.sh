@@ -142,4 +142,23 @@ if [ "${remote}" != 'origin' ]; then
   fail "push_remote reported [${remote}] for a branch whose remote is a name containing a slash"
 fi
 
+# `conflict_abort_command` names the command that ends the operation in
+# progress:  a rebase and a merge each reject the other's `--abort`.
+abort_command="$(conflict_abort_command "${WORK_DIR}/clone")"
+if [ "${abort_command}" != 'git merge --abort' ]; then
+  fail "conflict_abort_command reported [${abort_command}] with no rebase in progress"
+fi
+mkdir -p "${WORK_DIR}/clone/.git/rebase-merge"
+abort_command="$(conflict_abort_command "${WORK_DIR}/clone")"
+if [ "${abort_command}" != 'git rebase --abort' ]; then
+  fail "conflict_abort_command reported [${abort_command}] during a rebase"
+fi
+rmdir "${WORK_DIR}/clone/.git/rebase-merge"
+mkdir -p "${WORK_DIR}/clone/.git/rebase-apply"
+abort_command="$(conflict_abort_command "${WORK_DIR}/clone")"
+if [ "${abort_command}" != 'git rebase --abort' ]; then
+  fail "conflict_abort_command reported [${abort_command}] during a patch-applying rebase"
+fi
+rmdir "${WORK_DIR}/clone/.git/rebase-apply"
+
 echo "${SCRIPT_NAME}: OK"

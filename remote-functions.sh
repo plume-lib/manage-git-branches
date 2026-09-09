@@ -7,6 +7,10 @@
 # A script that sources this file must set ${SCRIPT_DIR} to the directory that
 # contains this package's files, because `git_batch_ssh` runs a wrapper script
 # from that directory.
+#
+# Most of these functions are about remotes, which is what the file is named
+# for.  `conflict_abort_command` is not, but it is shared by the same commands,
+# and this is the file that they all source.
 
 ## Usage: remote_is_usable DIRECTORY REMOTES NAME
 ## Tests whether NAME names a remote that a git command run in DIRECTORY can
@@ -200,5 +204,29 @@ git_batch_ssh() {
     GIT_TERMINAL_PROMPT=0 \
       GIT_SSH_COMMAND="ssh ${git_batch_ssh_option}" \
       git -C "${git_batch_ssh_dir}" "$@"
+  fi
+}
+
+## Usage: conflict_abort_command DIRECTORY
+## Prints the git command that abandons the operation that left conflicts in
+## DIRECTORY:  `git rebase --abort` or `git merge --abort`.
+##
+## `git pull` merges or rebases, depending on `pull.rebase` and
+## `branch.BRANCH.rebase`, and each state has its own way out:  advising
+## `git merge --abort` during a rebase gives the user a command that fails with
+## "There is no merge to abort (MERGE_HEAD missing)", which leaves the conflicts
+## in place and says nothing about what would clear them.  A rebase records its
+## state in the `rebase-merge` directory of the repository, or in
+## `rebase-apply` when it applies patches; a merge leaves no such directory.
+conflict_abort_command() {
+  if ! conflict_abort_command_gitdir="$(git -C "$1" rev-parse --absolute-git-dir 2> /dev/null)"; then
+    conflict_abort_command_gitdir=''
+  fi
+  if [ -n "${conflict_abort_command_gitdir}" ] \
+    && { [ -d "${conflict_abort_command_gitdir}/rebase-merge" ] \
+      || [ -d "${conflict_abort_command_gitdir}/rebase-apply" ]; }; then
+    echo 'git rebase --abort'
+  else
+    echo 'git merge --abort'
   fi
 }

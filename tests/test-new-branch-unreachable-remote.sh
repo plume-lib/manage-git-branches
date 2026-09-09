@@ -2,8 +2,9 @@
 
 # Tests that `git-new-branch` still creates the branch directory when the
 # remote is unreachable -- for example, because it is offline or has been
-# moved.  `git-new-branch` contacts the remote only to ask whether the branch
-# already exists, and being unable to ask is not an error.
+# moved.  `git-new-branch` contacts the remote to bring the working copy up to
+# date and to ask whether the branch already exists; it reports being unable to
+# do the former, but neither failure is an error.
 #
 # Usage:
 #   tests/test-new-branch-unreachable-remote.sh
@@ -68,6 +69,23 @@ fi
 if [ -e "${FEATURE_DIR}-TMP" ]; then
   fail "git-new-branch left behind ${FEATURE_DIR}-TMP"
 fi
+
+# The `git pull` that brings this working copy up to date fails when the remote
+# is unreachable, and that failure is reported, because the new branch is based
+# on a possibly stale commit; see `tests/test-branch-pull-failure.sh`.
+case "${output}" in
+  *"\`git pull\` failed"*) ;;
+  *) fail "git-new-branch did not report the failed pull: ${output}" ;;
+esac
+# Being unable to reach the remote is not the user's problem to solve here, so
+# the command continues rather than treating it as an error.
+case "${output}" in
+  *ERROR*) fail "git-new-branch treated the unreachable remote as an error: ${output}" ;;
+esac
+case "${output}" in
+  *"continuing, using the current commit"*) ;;
+  *) fail "git-new-branch did not say that it continued anyway: ${output}" ;;
+esac
 
 # The new working copy is on the new branch, and has no upstream, because
 # `git-new-branch` does not push.
