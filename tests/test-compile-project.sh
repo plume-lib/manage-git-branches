@@ -62,7 +62,11 @@ expect_not_a_directory "${tmpdir}/does-not-exist"
 
 # A file that is not a directory is an error.
 notadirectory="${tmpdir}/regular-file"
-touch "${notadirectory}"
+# Without this check, a failure to create the file would leave the test
+# indistinguishable from the preceding one, which uses a nonexistent path.
+if ! touch "${notadirectory}" || [ ! -f "${notadirectory}" ]; then
+  fail "could not create the regular file ${notadirectory}"
+fi
 expect_not_a_directory "${notadirectory}"
 
 # The error message reports the path as given, without expanding backslash
@@ -97,6 +101,73 @@ nobuildfile="${tmpdir}/no-buildfile"
 mkdir -p "${nobuildfile}"
 if ! "${COMPILE_PROJECT}" "${nobuildfile}" > /dev/null; then
   fail "nonzero exit status for directory without a buildfile ${nobuildfile}"
+fi
+
+# When no buildfile is found, the reported directory is absolute, even if the
+# argument was relative.
+nobuildfile_stderr="$(cd -- "${tmpdir}" && ERR_IF_NO_BUILDFILE=1 "${COMPILE_PROJECT}" no-buildfile 2>&1 > /dev/null)"
+case "${nobuildfile_stderr}" in
+  *"did nothing in ${nobuildfile}"*) ;;
+  *) fail "expected \"did nothing in ${nobuildfile}\" on stderr, got: ${nobuildfile_stderr}" ;;
+esac
+
+# $GIT_DIR and $GIT_WORK_TREE in the environment (as when running under a git
+# hook, `git rebase --exec`, `git bisect run`, or `git submodule foreach`) do
+# not redirect the build to the caller's repository.
+gitdirrepo="${tmpdir}/gitdir-repo"
+gitdirtarget="${tmpdir}/gitdir-target"
+mkdir -p "${gitdirrepo}" "${gitdirtarget}"
+printf 'all:\n\t@touch wrong.txt\n' > "${gitdirrepo}/Makefile"
+printf 'all:\n\t@touch built.txt\n' > "${gitdirtarget}/Makefile"
+git -c init.defaultBranch=main init -q "${gitdirrepo}"
+if ! GIT_DIR="${gitdirrepo}/.git" GIT_WORK_TREE="${gitdirrepo}" \
+  "${COMPILE_PROJECT}" "${gitdirtarget}" > /dev/null; then
+  fail "nonzero exit status for directory ${gitdirtarget} with GIT_DIR set"
+fi
+if [ ! -f "${gitdirtarget}/built.txt" ]; then
+  fail "did not build ${gitdirtarget} when GIT_DIR was set"
+fi
+if [ -f "${gitdirrepo}/wrong.txt" ]; then
+  fail "built the repository named by GIT_DIR, not the given directory"
+fi
+
+# $CDPATH in the environment does not redirect the build to a same-named
+# directory elsewhere.
+cdpathdecoy="${tmpdir}/cdpath-decoy"
+cdpathhere="${tmpdir}/cdpath-here"
+mkdir -p "${cdpathdecoy}/proj" "${cdpathhere}/proj"
+printf 'all:\n\t@touch wrong.txt\n' > "${cdpathdecoy}/proj/Makefile"
+printf 'all:\n\t@touch built.txt\n' > "${cdpathhere}/proj/Makefile"
+if ! (cd -- "${cdpathhere}" && CDPATH="${cdpathdecoy}" "${COMPILE_PROJECT}" proj > /dev/null); then
+  fail "nonzero exit status for directory proj with CDPATH set"
+fi
+if [ ! -f "${cdpathhere}/proj/built.txt" ]; then
+  fail "did not build ${cdpathhere}/proj when CDPATH was set"
+fi
+if [ -f "${cdpathdecoy}/proj/wrong.txt" ]; then
+  fail "built the directory found through CDPATH, not the given directory"
+fi
+
+# A git failure other than "not a git repository" is an error; the directory is
+# not treated as its own top level, which would build the wrong project.
+badrepo="${tmpdir}/bad-repo"
+mkdir -p "${badrepo}/sub"
+printf 'all:\n\t@touch built.txt\n' > "${badrepo}/sub/Makefile"
+git -c init.defaultBranch=main init -q "${badrepo}"
+# Edit the file directly; `git config` would itself reject the repository.
+if ! sed -i.bak 's/repositoryformatversion = 0/repositoryformatversion = 99/' "${badrepo}/.git/config"; then
+  fail "could not make ${badrepo} unreadable"
+fi
+badrepo_stderr="$("${COMPILE_PROJECT}" "${badrepo}/sub" 2>&1 > /dev/null)"
+badrepo_status=$?
+if [ "${badrepo_status}" = 0 ]; then
+  fail "zero exit status for the unreadable repository ${badrepo}"
+fi
+if [ -z "${badrepo_stderr}" ]; then
+  fail "no diagnostic for the unreadable repository ${badrepo}"
+fi
+if [ -f "${badrepo}/sub/built.txt" ]; then
+  fail "built ${badrepo}/sub although the top level could not be determined"
 fi
 
 if [ "${status}" = 0 ]; then
