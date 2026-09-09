@@ -76,8 +76,9 @@ set_variables_in() {
     }
     function is_assignment(t) { return t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ }
     # The redirection operator that introduces a here-document, whose lines
-    # are data rather than code.
-    function is_heredoc(t) { return t ~ /^[0-9]*<<-?/ }
+    # are data rather than code.  A here-string, "<<<", supplies its data on
+    # the same line, so it is not one.
+    function is_heredoc(t) { return t ~ /^[0-9]*<<-?/ && t !~ /^[0-9]*<<</ }
     # Prints the variables that the current logical line assigns.
     function report_line(  i, j, k, name, at_command) {
       for (i = 1; i <= nwords; i++) {
@@ -128,7 +129,8 @@ set_variables_in() {
           i++
           continue
         }
-        if (c == "\\") {
+        # A backslash (octal 134) quotes the character that follows it.
+        if (c == "\134") {
           if (i == len) { continued = 1; i++; continue }
           add_word(c substr(line, i + 1, 1))
           i += 2
@@ -148,6 +150,7 @@ set_variables_in() {
           # Quoting starts afresh within a command substitution, even within
           # double quotation marks.
           push_context("subst")
+          subst_parens[depth] = 1
           add_word("$(")
           i += 2
           continue
@@ -166,10 +169,12 @@ set_variables_in() {
           if (c == ")") {
             if (arith_parens[depth] > 1) { arith_parens[depth]--; add_word(c); i++; continue }
             if (substr(line, i + 1, 1) == ")") { pop_context(); add_word("))"); i += 2; continue }
-            # Not the "))" that ends an arithmetic expansion, so this line is
-            # not a shell line at all.  Leave the context, so that the rest of
-            # the line is split as usual.
-            pop_context()
+            # Not the "))" that ends an arithmetic expansion, so the "$((" was
+            # a command substitution that begins with a subshell, as in
+            # "$((cd dir; pwd) | cat)".  This ")" ends the subshell, and the
+            # command substitution is still open.
+            stack[depth] = "subst"
+            subst_parens[depth] = 1
             add_word(c)
             i++
             continue
@@ -186,8 +191,17 @@ set_variables_in() {
         }
         if (c == "\047") { push_context("single"); add_word(c); i++; continue }
         if (c == "\"") { push_context("double"); add_word(c); i++; continue }
-        if (c == ")" && context() == "subst") { pop_context(); add_word(c); i++; continue }
-        if (context() == "subst" || context() == "backtick") { add_word(c); i++; continue }
+        if (context() == "subst") {
+          # Parentheses nest within a command substitution, as in
+          # "$( (cd dir && pwd) )", so count them:  only the one that closes
+          # the "$(" ends it.
+          if (c == "(") { subst_parens[depth]++; add_word(c); i++; continue }
+          if (c == ")" && --subst_parens[depth] == 0) { pop_context(); add_word(c); i++; continue }
+          add_word(c)
+          i++
+          continue
+        }
+        if (context() == "backtick") { add_word(c); i++; continue }
         # Outside quotation marks and command substitutions.
         if (c == "#" && !have_word) { break }
         if (c == " " || c == "\t") { end_word(); i++; continue }
@@ -246,18 +260,24 @@ SUBSTITUTED="$(echo one; echo two)"
 BACKTICKED=`echo one; echo two`
 ARITHMETIC=$((PLAIN * 2))
 NESTED_ARITHMETIC=$(((PLAIN + 1) * 2))
+SUBSHELL="$( (echo one; echo two) )"
+PIPED_SUBSHELL=$((echo one; echo two) | cat)
 if [ "${PLAIN}" -eq 1 ]; then CONDITIONAL=3; fi
 # COMMENTED=1
 PREFIX_ONE=1 PREFIX_TWO=2 some-command
 ARITHMETIC_PREFIX=$((PLAIN * 2)) some-command
+SUBSHELL_PREFIX=$( (echo one; echo two) ) some-command
+PIPED_SUBSHELL_PREFIX=$((echo one; echo two) | cat) some-command
 FIXTURE_END
 EXPECTED='ARITHMETIC
 BACKTICKED
 CONDITIONAL
 EXPORTED
 NESTED_ARITHMETIC
+PIPED_SUBSHELL
 PLAIN
 QUOTED
+SUBSHELL
 SUBSTITUTED'
 ACTUAL="$(set_variables_in "${FIXTURE}")"
 if [ "${ACTUAL}" != "${EXPECTED}" ]; then
@@ -271,6 +291,13 @@ fi
 printf '%s\n' 'cat << END_OF_TEXT' 'SOMETHING=1' 'END_OF_TEXT' > "${FIXTURE}"
 if (set_variables_in "${FIXTURE}") > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: set_variables_in read a here-document as code" >&2
+  exit 2
+fi
+
+# A here-string is not a here-document:  its data is on the same line.
+printf '%s\n' 'cat <<<"one two"' 'HERE_STRING=1' > "${FIXTURE}"
+if [ "$(set_variables_in "${FIXTURE}")" != "HERE_STRING" ]; then
+  echo "${SCRIPT_NAME}: set_variables_in mistook a here-string for a here-document" >&2
   exit 2
 fi
 
