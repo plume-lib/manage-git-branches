@@ -18,8 +18,12 @@
 #  * build this one using `compile-project` (see its documentation),
 #  * push this one to its remote if the build succeeds.
 #
-# All the work is done by `git-push-to OTHER-REPO-DIR .`, so the two commands
-# behave identically and diagnostics mention `git-push-to`.
+# After checking that this directory and OTHER-REPO-DIR are the top levels of
+# clones -- which this script diagnoses itself, so that a diagnostic names the
+# directory that the user gave rather than the "." that this script passes on
+# -- all the work is done by `git-push-to OTHER-REPO-DIR .`, so the two
+# commands behave identically.  Diagnostics from that step mention
+# `git-push-to`.
 #
 # Calling `git-push-to` is often more readable, because it makes both directory names explicit.
 

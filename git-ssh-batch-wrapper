@@ -1,0 +1,19 @@
+#!/bin/sh
+
+# `git_batch_ssh`, in remote-functions.sh, runs this script as GIT_SSH when the
+# user's GIT_SSH names an SSH program that accepts an option that disables
+# interactive prompts.  GIT_SSH is an executable path rather than a shell
+# command, so it cannot carry the option; this wrapper adds it.
+
+case "${MANAGE_GIT_BRANCHES_SSH_BATCH_OPTION}" in
+  '-o BatchMode=yes')
+    exec "${MANAGE_GIT_BRANCHES_GIT_SSH}" -o BatchMode=yes "$@"
+    ;;
+  -batch)
+    exec "${MANAGE_GIT_BRANCHES_GIT_SSH}" -batch "$@"
+    ;;
+  *)
+    echo "$(basename -- "$0"): invalid batch option" >&2
+    exit 1
+    ;;
+esac

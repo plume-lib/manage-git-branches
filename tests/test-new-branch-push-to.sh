@@ -205,6 +205,73 @@ if [ -e "${WORK_DIR}/othername-branch-feature1" ]; then
   fail "git-new-branch created a directory for a branch that already exists"
 fi
 
+# `remote.pushDefault` is a default for every clone, commonly set once in
+# ~/.gitconfig to name a fork, so it can name a remote that this clone does not
+# have.  Using that name would make the query fail, which would silently
+# disable this check.
+PUSHDEFAULT_DIR="${WORK_DIR}/pushdefault"
+git clone -q "${REMOTE}" "${PUSHDEFAULT_DIR}"
+git -C "${PUSHDEFAULT_DIR}" branch --unset-upstream
+git -C "${PUSHDEFAULT_DIR}" config remote.pushDefault fork
+if output="$(cd "${PUSHDEFAULT_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature1 2>&1)"; then
+  fail "git-new-branch created a branch that already exists in the remote: ${output}"
+fi
+case "${output}" in
+  *"branch feature1 already exists"*) ;;
+  *) fail "git-new-branch did not ask a remote that the clone has: ${output}" ;;
+esac
+if [ -e "${WORK_DIR}/pushdefault-branch-feature1" ]; then
+  fail "git-new-branch created a directory for a branch that already exists"
+fi
+
+# The branch's own remote says where the branch would be pushed, even in a
+# clone that has several remotes and none named "origin".  Consulting only
+# clone-wide configuration asked no remote at all in such a clone, so the check
+# silently passed.
+MULTIPLE_DIR="${WORK_DIR}/multipleremotes"
+git clone -q "${REMOTE}" "${MULTIPLE_DIR}"
+git -C "${MULTIPLE_DIR}" remote rename origin upstream
+git -C "${MULTIPLE_DIR}" remote add elsewhere "${REMOTE}"
+if output="$(cd "${MULTIPLE_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature1 2>&1)"; then
+  fail "git-new-branch created a branch that already exists in the remote: ${output}"
+fi
+case "${output}" in
+  *"branch feature1 already exists"*) ;;
+  *) fail "git-new-branch did not ask the branch's own remote: ${output}" ;;
+esac
+if [ -e "${WORK_DIR}/multipleremotes-branch-feature1" ]; then
+  fail "git-new-branch created a directory for a branch that already exists"
+fi
+
+# `git-push-to` recommends a remote that the clone has, for the same reason.
+ADVICE_DIR="${WORK_DIR}/advice"
+git clone -q "${REMOTE}" "${ADVICE_DIR}"
+git -C "${ADVICE_DIR}" branch --unset-upstream
+git -C "${ADVICE_DIR}" config remote.pushDefault fork
+if output="$("${COMMANDS_DIR}/git-push-to" "${ADVICE_DIR}" "${MAIN_DIR}" 2>&1)"; then
+  fail "git-push-to succeeded on a working copy with no upstream branch"
+fi
+case "${output}" in
+  *fork*) fail "git-push-to recommended a remote that the clone does not have: ${output}" ;;
+esac
+case "${output}" in
+  *"git push --set-upstream 'origin' 'main'"*) ;;
+  *) fail "git-push-to did not recommend a remote that the clone has: ${output}" ;;
+esac
+
+# `git-push-to` and `is-deleted-branch` must agree about which remote a branch
+# would be pushed to, so `git-push-to` also prefers the branch's own remote to
+# the clone-wide `remote.pushDefault`.
+git -C "${ADVICE_DIR}" remote add fork "${REMOTE}"
+git -C "${ADVICE_DIR}" config branch.main.remote origin
+if output="$("${COMMANDS_DIR}/git-push-to" "${ADVICE_DIR}" "${MAIN_DIR}" 2>&1)"; then
+  fail "git-push-to succeeded on a working copy with no upstream branch"
+fi
+case "${output}" in
+  *"git push --set-upstream 'origin' 'main'"*) ;;
+  *) fail "git-push-to did not prefer the branch's own remote to remote.pushDefault: ${output}" ;;
+esac
+
 # A clone with no remote has no remote to ask, so the branch is created.
 NO_REMOTE_DIR="${WORK_DIR}/noremote"
 git clone -q "${REMOTE}" "${NO_REMOTE_DIR}"

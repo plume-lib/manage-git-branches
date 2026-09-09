@@ -77,6 +77,13 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+  exit 3
+fi
+# shellcheck source=remote-functions.sh
+. "${SCRIPT_DIR}/remote-functions.sh"
+
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} DIRECTORY" >&2
   exit 64
@@ -142,36 +149,15 @@ branch_remote="$(git -C "${dir}" config --get "branch.${branch}.remote")"
 merge_refs="$(git -C "${dir}" config --get-all "branch.${branch}.merge")"
 
 # A branch exists in a remote because someone pushed it there, so ask the
-# remote that `git push` uses:  `branch.BRANCH.pushRemote`, then
-# `remote.pushDefault`, then `branch.BRANCH.remote`, then "origin".
-# Consult `branch.BRANCH.remote` before `remote.pushDefault`, unlike
-# `git push`.  Both `branch.BRANCH.pushRemote` and `branch.BRANCH.remote` say
-# something about this branch, whereas `remote.pushDefault` is a default for
-# every branch of every clone, commonly set once in ~/.gitconfig to name a
-# fork.  Letting that default outrank this branch's own upstream would
-# discard what this clone records about the branch, and would answer "cannot
-# tell" for every branch that was never pushed to the fork.
-remote="$(git -C "${dir}" config --get "branch.${branch}.pushRemote")"
+# remote that `git push` uses.  `push_remote`, in remote-functions.sh,
+# determines it; answering "cannot tell" for a branch that was never pushed to
+# the remote that `remote.pushDefault` names is one reason for the order that
+# it documents.
+remote="$(push_remote "${dir}" "${branch}")"
 if [ -z "${remote}" ]; then
-  remote="${branch_remote}"
-fi
-if [ -z "${remote}" ]; then
-  remote="$(git -C "${dir}" config --get remote.pushDefault)"
-fi
-if [ -z "${remote}" ]; then
-  # Git uses the remote named "origin" when no configuration names a remote.
-  # If there is no remote named "origin", but there is exactly one other
-  # remote, then that is the only remote the branch could exist in.
-  remotes="$(git -C "${dir}" remote)"
-  if printf '%s\n' "${remotes}" | grep -q -x 'origin'; then
-    remote='origin'
-  elif [ "$(printf '%s\n' "${remotes}" | grep -c '.')" -eq 1 ]; then
-    remote="${remotes}"
-  else
-    # The clone has no remote, or it has several and none is named "origin",
-    # so there is no remote branch to ask about.
-    exit 3
-  fi
+  # The clone has no remote, or it has several and none is named "origin", so
+  # there is no remote branch to ask about.
+  exit 3
 fi
 
 # A branch has no upstream configuration until some command sets it, and
@@ -297,98 +283,11 @@ set -- ${upstream_refs}
 set +f
 IFS="${saved_ifs}"
 
-if [ -z "${GIT_SSH_COMMAND:-}" ]; then
-  unset GIT_SSH_COMMAND
-fi
-ssh_command="${GIT_SSH_COMMAND:-$(git -C "${dir}" config --get core.sshCommand)}"
-ssh_variant="${GIT_SSH_VARIANT:-$(git -C "${dir}" config --get ssh.variant)}"
-
-# `ssh_batch_option` is the option that disables interactive prompts for the
-# selected SSH implementation.  Git accepts several SSH implementations, but
-# only OpenSSH accepts `-o`; Plink and Putty accept `-batch`.
-# When no variant is specified, recognize the standard command names and
-# otherwise leave Git's own variant detection in charge.
-# `ssh_resolved_variant` is the variant that `ssh_batch_option` belongs to.
-
-# Usage: ssh_variant_of PROGRAM
-# Prints the SSH variant that the command name PROGRAM denotes, or nothing if
-# PROGRAM is not a command name that this script recognizes.
-ssh_variant_of() {
-  case "$(basename -- "$1")" in
-    ssh | ssh.exe) echo 'ssh' ;;
-    plink | plink.exe) echo 'plink' ;;
-    putty | putty.exe) echo 'putty' ;;
-  esac
-}
-
-ssh_resolved_variant=''
-case "${ssh_variant}" in
-  ssh | plink | putty)
-    ssh_resolved_variant="${ssh_variant}"
-    ;;
-  '' | auto)
-    if [ -z "${ssh_command}" ]; then
-      if [ -z "${GIT_SSH:-}" ]; then
-        # Git runs "ssh" when neither variable nor configuration names a
-        # command.
-        ssh_resolved_variant='ssh'
-      else
-        # GIT_SSH is an executable path rather than a shell command.
-        ssh_resolved_variant="$(ssh_variant_of "${GIT_SSH}")"
-      fi
-    else
-      # An SSH command is a shell command line, whose first word names the
-      # program to run.
-      ssh_resolved_variant="$(ssh_variant_of "${ssh_command%% *}")"
-    fi
-    ;;
-esac
-
-ssh_batch_option=''
-case "${ssh_resolved_variant}" in
-  ssh)
-    ssh_batch_option='-o BatchMode=yes'
-    ;;
-  plink | putty)
-    ssh_batch_option='-batch'
-    ;;
-esac
-
 # `git ls-remote --exit-code` exits with status 2 if no matching ref exists.
-# GIT_TERMINAL_PROMPT=0 makes an authentication failure an error rather than
-# an interactive prompt.  OpenSSH's `-o BatchMode=yes` does the same for SSH
-# authentication and host-key prompts.  Plink's and Putty's `-batch` option
-# rejects any prompt that would require user input.
-
-if [ -n "${ssh_batch_option}" ]; then
-  if [ -n "${ssh_command}" ]; then
-    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${ssh_command} ${ssh_batch_option}" \
-      git -C "${dir}" ls-remote --exit-code "${remote}" "$@" > /dev/null 2>&1
-    status="$?"
-  elif [ -n "${GIT_SSH:-}" ]; then
-    # GIT_SSH is an executable path rather than a shell command.  A wrapper
-    # adds the option without changing the way the path is parsed.
-    # Git guesses the variant from the basename of GIT_SSH, and the wrapper's
-    # basename is not one that Git recognizes.  Without GIT_SSH_VARIANT, Git
-    # would guess the "simple" variant, which cannot pass a port or an address
-    # family to SSH.
-    IS_DELETED_BRANCH_GIT_SSH="${GIT_SSH}"
-    IS_DELETED_BRANCH_SSH_BATCH_OPTION="${ssh_batch_option}"
-    export IS_DELETED_BRANCH_GIT_SSH IS_DELETED_BRANCH_SSH_BATCH_OPTION
-    GIT_TERMINAL_PROMPT=0 GIT_SSH="${SCRIPT_DIR}/is-deleted-branch-ssh-wrapper" \
-      GIT_SSH_VARIANT="${ssh_resolved_variant}" \
-      git -C "${dir}" ls-remote --exit-code "${remote}" "$@" > /dev/null 2>&1
-    status="$?"
-  else
-    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh ${ssh_batch_option}" \
-      git -C "${dir}" ls-remote --exit-code "${remote}" "$@" > /dev/null 2>&1
-    status="$?"
-  fi
-else
-  GIT_TERMINAL_PROMPT=0 \
-    git -C "${dir}" ls-remote --exit-code "${remote}" "$@" > /dev/null 2>&1
-  status="$?"
-fi
+# `git_batch_ssh`, in remote-functions.sh, disables the interactive prompts
+# that would otherwise block this query forever.
+git_batch_ssh "${dir}" ls-remote --exit-code "${remote}" "$@" > /dev/null 2>&1
+status="$?"
 case "${status}" in
   0)
     # The branch still exists in the remote.

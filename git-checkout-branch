@@ -6,8 +6,53 @@
 # Usage:
 #   git-checkout-branch BRANCHNAME
 
-# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.  Do this
+# before the `cd` below, because a relative pathname in $0 is relative to the
+# directory that the caller ran this script from.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
+
+if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=remote-functions.sh
+. "${SCRIPT_DIR}/remote-functions.sh"
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} BRANCHNAME" >&2
@@ -56,10 +101,69 @@ fi
 BRANCHDIR="${PARENTDIR%/}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
-git pull -q > /dev/null 2>&1 || true
+# A failed pull is not an error:  the branch is checked out from what this
+# working copy holds, whether or not the remote can be reached.  Use
+# `git_batch_ssh` for the same reason as for the query below:  this command's
+# output is discarded, so a prompt would block forever with nothing to show
+# for it.
+git_batch_ssh . pull -q > /dev/null 2>&1 || true
 
-if ! git ls-remote --exit-code origin "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist." >&2
+# Usage: branch_in_clone BRANCH
+# Tests whether this clone holds BRANCH:  a local branch of that name, or a
+# remote-tracking branch of that name in some remote.  The `git checkout`
+# below checks out the former, and creates a local branch from the latter.
+branch_in_clone() {
+  if git rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
+    return 0
+  fi
+  # Ask about each remote separately, rather than matching a pattern against
+  # every remote-tracking ref:  both a remote's name and a branch's name may
+  # contain "/", so the name of such a ref does not by itself say where the
+  # remote's name ends and the branch's name begins.  A remote's name contains
+  # no whitespace, so the shell's word splitting separates the names here.
+  for remote_name in $(git remote); do
+    if git rev-parse --verify --quiet "refs/remotes/${remote_name}/$1" > /dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Determine which remote to ask whether the branch exists:  the remote that
+# `git push` would use for the current branch, as `push_remote` in
+# remote-functions.sh determines it, which is also the remote that this
+# package's other commands use.  Asking only the remote named "origin", as
+# this script once did, asked no remote at all in a clone whose sole remote
+# has some other name, and then reported that the branch does not exist.
+BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
+REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
+
+# `git ls-remote --exit-code` exits with status 2 if the remote has no such
+# branch, and with some other nonzero status if the remote could not be asked
+# at all, which is not the same thing.  `git_batch_ssh` disables the
+# interactive prompts that would otherwise block this query forever when this
+# script is run from another script or a CI job.
+REMOTE_HAS_BRANCH='unknown'
+if [ -n "${REMOTE}" ]; then
+  git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/${BRANCHNAME}" \
+    > /dev/null 2>&1
+  case "$?" in
+    0) REMOTE_HAS_BRANCH='yes' ;;
+    2) REMOTE_HAS_BRANCH='no' ;;
+  esac
+fi
+
+# A branch that this clone already holds can be checked out even if no remote
+# has it or no remote could be asked, so refuse only when nothing shows that
+# the branch exists.
+if [ "${REMOTE_HAS_BRANCH}" != 'yes' ] && ! branch_in_clone "${BRANCHNAME}"; then
+  if [ "${REMOTE_HAS_BRANCH}" = 'no' ]; then
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist." >&2
+  elif [ -z "${REMOTE}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} is not in this clone, which determines no remote to ask about it." >&2
+  else
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} is not in this clone, and remote ${REMOTE} could not be asked about it." >&2
+  fi
   exit 1
 fi
 

@@ -9,8 +9,53 @@
 # The new branch is in a new directory that has the same directory
 # contents as the current repository.
 
-# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.  Do this
+# before the `cd` below, because a relative pathname in $0 is relative to the
+# directory that the caller ran this script from.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
+
+if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=remote-functions.sh
+. "${SCRIPT_DIR}/remote-functions.sh"
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} NEWBRANCHNAME" >&2
@@ -59,36 +104,38 @@ fi
 BRANCHDIR="${PARENTDIR%/}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
-git pull -q > /dev/null 2>&1 || true
+# A failed pull is not an error:  the new branch starts from what this working
+# copy holds, whether or not the remote can be reached.  Use `git_batch_ssh`
+# for the same reason as for the query below:  this command's output is
+# discarded, so a prompt would block forever with nothing to show for it.
+git_batch_ssh . pull -q > /dev/null 2>&1 || true
 
-# Determine which remote to ask whether the branch already exists, the same
-# way that `is-deleted-branch` and `git-push-to` determine a branch's remote:
-# `remote.pushDefault`, then "origin", then the only remote if the clone has
-# exactly one.  (No `branch.BRANCH.pushRemote` configuration can exist yet,
-# because the branch does not exist yet.)  Asking only the remote named
-# "origin", as this script once did, asked no remote at all in a clone whose
-# sole remote has some other name, so the check silently passed there.
+# Determine which remote to ask whether the branch already exists:  the remote
+# that `git push` would use for the current branch, as `push_remote` in
+# remote-functions.sh determines it, which is also the remote that
+# `is-deleted-branch` and `git-push-to` use.  The new branch has no
+# configuration of its own yet -- `git checkout -b` creates none -- and the new
+# working copy is a copy of this one, so this branch's configuration is what
+# says where the new branch will be pushed.
+#
+# Asking only the remote named "origin", as this script once did, asked no
+# remote at all in a clone whose sole remote has some other name, so the check
+# silently passed there.
+#
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
 # asked, and this script creates the branch.
-REMOTE="$(git config --get remote.pushDefault)"
-if [ -z "${REMOTE}" ]; then
-  REMOTES="$(git remote)"
-  if printf '%s\n' "${REMOTES}" | grep -q -x 'origin'; then
-    REMOTE='origin'
-  elif [ "$(printf '%s\n' "${REMOTES}" | grep -c '.')" -eq 1 ]; then
-    REMOTE="${REMOTES}"
-  fi
-fi
+BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
+REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 
 # Asking the remote does not change it.  This script creates nothing outside
 # the new directory:  in particular, it does not push the new branch.
 #
-# `GIT_TERMINAL_PROMPT=0` makes an authentication failure an error rather than
-# a prompt, as `is-deleted-branch` does for its own queries:  without it, this
-# query blocks forever when this script is run from another script or a CI job.
+# `git_batch_ssh` disables the interactive prompts that would otherwise block
+# this query forever when this script is run from another script or a CI job,
+# as `is-deleted-branch` does for its own queries.
 # A remote that this script cannot ask is not an error; the branch is created.
 if [ -n "${REMOTE}" ] \
-  && GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "${REMOTE}" \
+  && git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
     "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists." >&2
   exit 1

@@ -19,8 +19,11 @@ SCRIPT_NAME="$(basename -- "$0")"
 
 README="${TOPLEVEL}/README.md"
 
-SCRIPTS="$(find "${TOPLEVEL}" -maxdepth 1 -type f -perm -u+x ! -name '*~' \
-  -exec basename -- {} ';' | sort)"
+# The commands, which are executable, and the files that they source, which
+# are not executable but whose names end in ".sh".  A variable that a sourced
+# file reads is part of the interface of the commands that source it.
+SCRIPTS="$(find "${TOPLEVEL}" -maxdepth 1 -type f ! -name '*~' \
+  \( -perm -u+x -o -name '*.sh' \) -exec basename -- {} ';' | sort)"
 if [ -z "${SCRIPTS}" ]; then
   echo "${SCRIPT_NAME}: found no scripts in ${TOPLEVEL}" >&2
   exit 2
@@ -55,8 +58,11 @@ script_code() {
 # the run of assignments that begins there:  the run is an assignment
 # statement if nothing but a command terminator follows it, and is an
 # environment prefix otherwise.
+#
+# It does not handle here-documents, whose lines are data rather than code.
+# It fails, rather than reading them as code, if a script contains one.
 set_variables_in() {
-  awk '
+  assigned="$(awk '
     function push_context(c) { stack[++depth] = c }
     function pop_context() { if (depth > 0) depth-- }
     function context() { return (depth > 0) ? stack[depth] : "" }
@@ -72,8 +78,23 @@ set_variables_in() {
         || t ~ /^(!|if|then|elif|else|do|while|until|export|readonly|local|time)$/
     }
     function is_assignment(t) { return t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ }
+    # The redirection operator that introduces a here-document, whose lines
+    # are data rather than code.
+    function is_heredoc(t) { return t ~ /^[0-9]*<<-?/ }
     # Prints the variables that the current logical line assigns.
     function report_line(  i, j, k, name, at_command) {
+      for (i = 1; i <= nwords; i++) {
+        if (is_heredoc(words[i])) {
+          # This awk program does not skip the lines of a here-document, so it
+          # would read them as code.  No script in this package uses one; the
+          # caller turns this marker into an error rather than reporting the
+          # variables that a here-document happens to mention.
+          if (!heredoc_seen) { print "<here-document>" }
+          heredoc_seen = 1
+          nwords = 0
+          return
+        }
+      }
       at_command = 1
       i = 1
       while (i <= nwords) {
@@ -116,12 +137,48 @@ set_variables_in() {
           i += 2
           continue
         }
+        if (c == "$" && substr(line, i + 1, 2) == "((") {
+          # An arithmetic expansion.  Its contents are not a command, and the
+          # "))" that ends it is not two operators.  Parentheses nest within
+          # it, so count them.
+          push_context("arith")
+          arith_parens[depth] = 1
+          add_word("$((")
+          i += 3
+          continue
+        }
         if (c == "$" && substr(line, i + 1, 1) == "(") {
           # Quoting starts afresh within a command substitution, even within
           # double quotation marks.
           push_context("subst")
           add_word("$(")
           i += 2
+          continue
+        }
+        if (c == "`") {
+          # A command substitution in the older form.  Quoting starts afresh
+          # within it, even within double quotation marks, and one backtick
+          # ends what another began.
+          if (context() == "backtick") pop_context(); else push_context("backtick")
+          add_word(c)
+          i++
+          continue
+        }
+        if (context() == "arith") {
+          if (c == "(") { arith_parens[depth]++; add_word(c); i++; continue }
+          if (c == ")") {
+            if (arith_parens[depth] > 1) { arith_parens[depth]--; add_word(c); i++; continue }
+            if (substr(line, i + 1, 1) == ")") { pop_context(); add_word("))"); i += 2; continue }
+            # Not the "))" that ends an arithmetic expansion, so this line is
+            # not a shell line at all.  Leave the context, so that the rest of
+            # the line is split as usual.
+            pop_context()
+            add_word(c)
+            i++
+            continue
+          }
+          add_word(c)
+          i++
           continue
         }
         if (context() == "double") {
@@ -133,7 +190,7 @@ set_variables_in() {
         if (c == "\047") { push_context("single"); add_word(c); i++; continue }
         if (c == "\"") { push_context("double"); add_word(c); i++; continue }
         if (c == ")" && context() == "subst") { pop_context(); add_word(c); i++; continue }
-        if (context() == "subst") { add_word(c); i++; continue }
+        if (context() == "subst" || context() == "backtick") { add_word(c); i++; continue }
         # Outside quotation marks and command substitutions.
         if (c == "#" && !have_word) { break }
         if (c == " " || c == "\t") { end_word(); i++; continue }
@@ -158,8 +215,13 @@ set_variables_in() {
       report_line()
     }
     END { if (depth == 0) { end_word(); report_line() } }
-  ' "$1" \
-    | grep -xE '[A-Z][A-Z0-9_]*' | sort -u
+  ' "$1")"
+  if printf '%s\n' "${assigned}" | grep -qxF '<here-document>'; then
+    echo "${SCRIPT_NAME}: $1 contains a here-document, which set_variables_in does not parse" >&2
+    echo "${SCRIPT_NAME}: extend set_variables_in to skip the lines of a here-document" >&2
+    exit 2
+  fi
+  printf '%s\n' "${assigned}" | grep -xE '[A-Z][A-Z0-9_]*' | sort -u
 }
 
 for script in ${SCRIPTS}; do
@@ -169,6 +231,51 @@ for script in ${SCRIPTS}; do
     exit 2
   fi
 done
+
+# Check `set_variables_in` itself on a script that contains each construct
+# that it must get right.  The distinction that it makes -- an assignment
+# statement, whose variable is internal to this package, versus an environment
+# prefix of a command, whose variable is not -- is easy to break, and breaking
+# it would make this test quietly stop requiring a variable to be documented.
+FIXTURE="$(mktemp "${TMPDIR:-/tmp}/manage-git-branches-fixture.XXXXXX")"
+trap 'rm -f "${FIXTURE}"' EXIT
+trap 'rm -f "${FIXTURE}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -f "${FIXTURE}"; trap - TERM; kill -s TERM "$$"' TERM
+cat > "${FIXTURE}" << 'FIXTURE_END'
+PLAIN=1
+export EXPORTED=2
+QUOTED="a b; c=d" # A value that contains a terminator and an assignment.
+SUBSTITUTED="$(echo one; echo two)"
+BACKTICKED=`echo one; echo two`
+ARITHMETIC=$((PLAIN * 2))
+NESTED_ARITHMETIC=$(((PLAIN + 1) * 2))
+if [ "${PLAIN}" -eq 1 ]; then CONDITIONAL=3; fi
+# COMMENTED=1
+PREFIX_ONE=1 PREFIX_TWO=2 some-command
+ARITHMETIC_PREFIX=$((PLAIN * 2)) some-command
+FIXTURE_END
+EXPECTED='ARITHMETIC
+BACKTICKED
+CONDITIONAL
+EXPORTED
+NESTED_ARITHMETIC
+PLAIN
+QUOTED
+SUBSTITUTED'
+ACTUAL="$(set_variables_in "${FIXTURE}")"
+if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+  echo "${SCRIPT_NAME}: set_variables_in is broken" >&2
+  echo "${SCRIPT_NAME}: expected [${EXPECTED}]" >&2
+  echo "${SCRIPT_NAME}: got      [${ACTUAL}]" >&2
+  exit 2
+fi
+
+# A here-document is an error rather than a wrong answer.
+printf '%s\n' 'cat << END_OF_TEXT' 'SOMETHING=1' 'END_OF_TEXT' > "${FIXTURE}"
+if (set_variables_in "${FIXTURE}") > /dev/null 2>&1; then
+  echo "${SCRIPT_NAME}: set_variables_in read a here-document as code" >&2
+  exit 2
+fi
 
 # The variables that some script in this package assigns.  One script sets
 # such a variable before invoking another that reads it, so it is internal to

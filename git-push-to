@@ -120,6 +120,13 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=remote-functions.sh
+. "${SCRIPT_DIR}/remote-functions.sh"
+
 ## Tests whether the working copy in the given directory has an upstream
 ## branch, which `git pull` and `git push` require.  If it does not, prints an
 ## explanation and returns 1.
@@ -139,32 +146,19 @@ check_upstream() {
     return 0
   fi
   # Determine the remote that `git push` would use, the same way that
-  # `is-deleted-branch` does:  `branch.BRANCH.pushRemote`, then
-  # `remote.pushDefault`, then `branch.BRANCH.remote`, then "origin", then the
-  # only remote if the clone has exactly one.  ${push_remote} is empty if no
-  # remote can be determined.
-  push_remote="$(git -C "$1" config --get "branch.${branch}.pushRemote")"
-  if [ -z "${push_remote}" ]; then
-    push_remote="$(git -C "$1" config --get remote.pushDefault)"
-  fi
-  if [ -z "${push_remote}" ]; then
-    push_remote="${remote}"
-  fi
+  # `is-deleted-branch` does:  with `push_remote`, in remote-functions.sh,
+  # which documents the order that it consults the configuration in.
+  # ${push_remote_name} is empty if no remote can be determined.
+  push_remote_name="$(push_remote "$1" "${branch}")"
   remotes="$(git -C "$1" remote)"
-  if [ -z "${push_remote}" ]; then
-    if printf '%s\n' "${remotes}" | grep -q -x 'origin'; then
-      push_remote='origin'
-    elif [ "$(printf '%s\n' "${remotes}" | grep -c '.')" -eq 1 ]; then
-      push_remote="${remotes}"
-    fi
-  fi
   echo "${SCRIPT_NAME}: branch ${branch} in $1 has no upstream branch, so it cannot be pulled or pushed" >&2
   # Do not name a placeholder such as "REMOTE" within a command that the user
   # might copy:  a command that fails with "'REMOTE' does not appear to be a
   # git repository" hides the actual problem, which is that this clone does
-  # not determine which remote to push the branch to.
-  if [ -n "${push_remote}" ]; then
-    echo "${SCRIPT_NAME}: to give it one, cd to that directory and run: git push --set-upstream '${push_remote}' '${branch}'" >&2
+  # not determine which remote to push the branch to.  For the same reason,
+  # `push_remote` never returns a remote that this clone cannot contact.
+  if [ -n "${push_remote_name}" ]; then
+    echo "${SCRIPT_NAME}: to give it one, cd to that directory and run: git push --set-upstream '${push_remote_name}' '${branch}'" >&2
   elif [ -z "${remotes}" ]; then
     echo "${SCRIPT_NAME}: that clone has no remote, so first add one (\`git remote add ...\`), then cd to that directory and run: git push --set-upstream REMOTE '${branch}'" >&2
   else

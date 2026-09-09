@@ -97,4 +97,39 @@ if git -C "${FEATURE_DIR}" rev-parse --symbolic-full-name '@{upstream}' > /dev/n
   fail "${FEATURE_DIR} has an upstream, but git-new-branch does not push"
 fi
 
+# `git-new-branch` asks the remote without ever prompting.  A prompt would
+# block forever:  this script discards the query's standard error, and it may
+# run from another script or from a CI job.  `GIT_TERMINAL_PROMPT=0` does not
+# suppress the prompts that SSH itself issues, such as the one for an unknown
+# host key, so the SSH command must also be given the option that disables
+# those.
+SSH_DIR="${WORK_DIR}/myrepo-branch-ssh"
+git clone -q "${REMOTE}" "${SSH_DIR}"
+SSH_ARGUMENTS="${WORK_DIR}/ssh-arguments"
+FAKE_SSH="${WORK_DIR}/fake-ssh"
+cat > "${FAKE_SSH}" << 'FAKE_SSH_END'
+#!/bin/sh
+printf '%s\n' "$*" >> "${SSH_ARGUMENTS_FILE}"
+exit 1
+FAKE_SSH_END
+chmod +x "${FAKE_SSH}"
+SSH_ARGUMENTS_FILE="${SSH_ARGUMENTS}"
+export SSH_ARGUMENTS_FILE
+git -C "${SSH_DIR}" config core.sshCommand "${FAKE_SSH}"
+git -C "${SSH_DIR}" config ssh.variant ssh
+git -C "${SSH_DIR}" remote set-url origin 'ssh://example.invalid/no-such-repo.git'
+: > "${SSH_ARGUMENTS}"
+
+if ! output="$(cd "${SSH_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature2 2>&1)"; then
+  fail "git-new-branch failed when the remote could not be reached over SSH: ${output}"
+fi
+if [ ! -d "${WORK_DIR}/myrepo-branch-feature2" ]; then
+  fail "git-new-branch did not create ${WORK_DIR}/myrepo-branch-feature2: ${output}"
+fi
+if [ ! -s "${SSH_ARGUMENTS}" ]; then
+  fail 'git-new-branch did not contact the remote over SSH'
+elif ! grep -q -- '-o BatchMode=yes' "${SSH_ARGUMENTS}"; then
+  fail "SSH invocation did not include \"-o BatchMode=yes\": [$(cat "${SSH_ARGUMENTS}")]"
+fi
+
 echo "${SCRIPT_NAME}: OK"
