@@ -2,14 +2,23 @@
 
 # Tests the `git-orphaned-branches` script.
 #
-# These test cases exercise the detection of a directory that contains nothing
-# but a `.project` file.  They do not exercise the deleted-branch detection,
-# which would require a remote repository.
+# Usage:
+#   tests/test-git-orphaned-branches
+#
+# The status code is 0 if all the tests pass, and nonzero otherwise.
+#
+# The test creates its own scratch git repositories under a temporary
+# directory; it does not touch any repository outside that directory.
 
 SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 TOPLEVEL="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)"
 GIT_ORPHANED_BRANCHES="${TOPLEVEL}/git-orphaned-branches"
+
+if [ "$#" -ne 0 ]; then
+  echo "Usage: ${SCRIPT_NAME}" >&2
+  exit 1
+fi
 
 status=0
 
@@ -22,7 +31,7 @@ fi
 # below, so that `rm -rf` can remove it.
 # shellcheck disable=SC2329 # Is called from traps.
 cleanup() {
-  chmod 755 "${work}/p-branch-unlistable" 2> /dev/null
+  chmod 755 "${work}/dot-project/p-branch-unlistable" 2> /dev/null
   rm -rf "${work}"
 }
 # The signal handlers re-raise the signal with the handler removed, so that
@@ -37,37 +46,67 @@ if ! work="$(CDPATH='' cd -- "${work}" && pwd -P)" || [ -z "${work}" ]; then
   exit 1
 fi
 
+fail() {
+  echo "${SCRIPT_NAME}: FAILED: $1" >&2
+  exit 1
+}
+
+# Prints the absolute path of directory $1, with symbolic links resolved.
+# `realpath` would be simpler, but POSIX added it only in 2024 and some
+# systems still lack it, whereas `cd` and `pwd -P` are portable.
+absolute_path() {
+  (CDPATH='' cd -- "$1" && pwd -P)
+}
+
+###########################################################################
+## Directories that contain nothing but a `.project` file.
+###########################################################################
+
+mkdir -p "${work}/dot-project"
+
 # Contains nothing but a `.project` file.
-mkdir -p "${work}/p-branch-only-project"
-touch "${work}/p-branch-only-project/.project"
+mkdir -p "${work}/dot-project/p-branch-only-project"
+touch "${work}/dot-project/p-branch-only-project/.project"
 
 # Contains a `.project` file and a regular file.
-mkdir -p "${work}/p-branch-plus-file"
-touch "${work}/p-branch-plus-file/.project" "${work}/p-branch-plus-file/other"
+mkdir -p "${work}/dot-project/p-branch-plus-file"
+touch "${work}/dot-project/p-branch-plus-file/.project" "${work}/dot-project/p-branch-plus-file/other"
 
 # Contains a `.project` file and a hidden file.
-mkdir -p "${work}/p-branch-plus-hidden"
-touch "${work}/p-branch-plus-hidden/.project" "${work}/p-branch-plus-hidden/.other"
+mkdir -p "${work}/dot-project/p-branch-plus-hidden"
+touch "${work}/dot-project/p-branch-plus-hidden/.project" "${work}/dot-project/p-branch-plus-hidden/.other"
 
 # Contains a `.project` file and a subdirectory.
-mkdir -p "${work}/p-branch-plus-subdir/sub"
-touch "${work}/p-branch-plus-subdir/.project"
+mkdir -p "${work}/dot-project/p-branch-plus-subdir/sub"
+touch "${work}/dot-project/p-branch-plus-subdir/.project"
 
 # Contains a `.project` file and a symbolic link with no target.
-mkdir -p "${work}/p-branch-plus-dangling-symlink"
-touch "${work}/p-branch-plus-dangling-symlink/.project"
-ln -s no-such-file "${work}/p-branch-plus-dangling-symlink/dangling"
+mkdir -p "${work}/dot-project/p-branch-plus-dangling-symlink"
+touch "${work}/dot-project/p-branch-plus-dangling-symlink/.project"
+ln -s no-such-file "${work}/dot-project/p-branch-plus-dangling-symlink/dangling"
 
 # Contains nothing.
-mkdir -p "${work}/p-branch-empty"
+mkdir -p "${work}/dot-project/p-branch-empty"
 
 # Contains no `.project` file.
-mkdir -p "${work}/p-branch-no-project"
-touch "${work}/p-branch-no-project/other"
+mkdir -p "${work}/dot-project/p-branch-no-project"
+touch "${work}/dot-project/p-branch-no-project/other"
 
 # Contains nothing but a `.project` file, but is not named `*-branch-*`.
-mkdir -p "${work}/p-plain-project"
-touch "${work}/p-plain-project/.project"
+mkdir -p "${work}/dot-project/p-plain-project"
+touch "${work}/dot-project/p-plain-project/.project"
+
+# A `*-branch-*` directory inside another one, which the walk has to descend
+# into:  a branch directory can hold a clone of another branch.
+mkdir -p "${work}/dot-project/p-branch-outer/q-branch-inner"
+touch "${work}/dot-project/p-branch-outer/q-branch-inner/.project"
+
+# A `*-branch-*` directory behind a symbolic link to a directory.  The walk
+# does not follow such a link, which is what keeps a link to an ancestor from
+# sending it around forever.
+mkdir -p "${work}/linktarget/p-branch-behind-link"
+touch "${work}/linktarget/p-branch-behind-link/.project"
+ln -s ../linktarget "${work}/dot-project/link"
 
 # Contains a `.project` file and a regular file, but cannot be listed:  it can
 # be searched but not read.  Every glob in such a directory expands to nothing,
@@ -76,21 +115,19 @@ touch "${work}/p-plain-project/.project"
 unlistable=0
 if [ "$(id -u)" -ne 0 ]; then
   unlistable=1
-  mkdir -p "${work}/p-branch-unlistable"
-  touch "${work}/p-branch-unlistable/.project" "${work}/p-branch-unlistable/other"
-  chmod 111 "${work}/p-branch-unlistable"
+  mkdir -p "${work}/dot-project/p-branch-unlistable"
+  touch "${work}/dot-project/p-branch-unlistable/.project" "${work}/dot-project/p-branch-unlistable/other"
+  chmod 111 "${work}/dot-project/p-branch-unlistable"
 fi
 
-# `find` warns that it cannot list `p-branch-unlistable`, so discard stderr.
-if ! output="$(cd "${work}" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
-  echo "FAIL: git-orphaned-branches exited with a failure status"
-  exit 1
+if ! output="$(cd "${work}/dot-project" && "${GIT_ORPHANED_BRANCHES}")"; then
+  fail "git-orphaned-branches exited with a failure status"
 fi
 
 # Checks whether `git-orphaned-branches` listed a directory.
 # Arguments: DIRECTORY-NAME  "listed" or "unlisted"
 check() {
-  if printf '%s\n' "${output}" | grep -q -x -F -- "${work}/$1"; then
+  if printf '%s\n' "${output}" | grep -q -x -F -- "${work}/dot-project/$1"; then
     actual="listed"
   else
     actual="unlisted"
@@ -109,9 +146,94 @@ check "p-branch-plus-dangling-symlink" "unlisted"
 check "p-branch-empty" "unlisted"
 check "p-branch-no-project" "unlisted"
 check "p-plain-project" "unlisted"
+check "p-branch-outer" "unlisted"
+check "p-branch-outer/q-branch-inner" "listed"
+if printf '%s\n' "${output}" | grep -q -F -- 'p-branch-behind-link'; then
+  echo "FAIL: git-orphaned-branches followed a symbolic link to a directory"
+  status=1
+fi
 if [ "${unlistable}" -eq 1 ]; then
   check "p-branch-unlistable" "unlisted"
 fi
+
+###########################################################################
+## A directory whose name contains a newline.
+###########################################################################
+
+# A newline cannot be held in a variable by `nl="$(printf '\n')"`, because
+# command substitution removes trailing newlines.
+nl="$(printf '\nx')"
+nl="${nl%x}"
+
+mkdir -p "${work}/newline"
+newline_dir="${work}/newline/p-branch-a${nl}b"
+mkdir -p "${newline_dir}"
+touch "${newline_dir}/.project"
+
+# Compare with --print0, because the newline in the directory name makes the
+# newline-separated output ambiguous.
+printf '%s\0' "$(absolute_path "${newline_dir}")" > "${work}/newline.goal"
+(cd "${work}/newline" && "${GIT_ORPHANED_BRANCHES}" --print0) > "${work}/newline.actual"
+if ! cmp -s "${work}/newline.goal" "${work}/newline.actual"; then
+  echo "FAIL: git-orphaned-branches output differs from ${work}/newline.goal"
+  status=1
+fi
+
+###########################################################################
+## Clones of branches that have been deleted in the remote repository.
+###########################################################################
+
+# Do not depend on the user's git identity or on any repository-local config.
+GIT_AUTHOR_NAME="Test"
+GIT_AUTHOR_EMAIL="test@example.com"
+GIT_COMMITTER_NAME="Test"
+GIT_COMMITTER_EMAIL="test@example.com"
+export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+
+# Create a remote repository with branches "main" and "feat2".
+git init -q --bare -b main "${work}/remote.git"
+# Redirect stderr to suppress the "you appear to have cloned an empty repository" warning.
+git clone -q "${work}/remote.git" "${work}/seed" 2> /dev/null
+echo "hello" > "${work}/seed/file.txt"
+git -C "${work}/seed" add file.txt
+git -C "${work}/seed" commit -q -m "Initial commit"
+git -C "${work}/seed" push -q origin main
+git -C "${work}/seed" push -q origin main:refs/heads/feat2
+
+# The orphan directory's name, and the name of its parent directory, contain a
+# space; the parent's first space-separated component names a sibling
+# directory that must not be deleted.
+mkdir -p "${work}/scan/my"
+mkdir -p "${work}/scan/my dir"
+orphan="${work}/scan/my dir/my repo-branch-feat2"
+git clone -q -b feat2 "${work}/remote.git" "${orphan}"
+
+# Delete branch "feat2" in the remote, orphaning the clone.
+git -C "${work}/seed" push -q origin --delete feat2
+
+orphan_absolute="$(absolute_path "${orphan}")"
+
+# Test 1: --print0 emits the directory names separated by NUL.
+printf '%s\0' "${orphan_absolute}" > "${work}/print0.goal"
+(cd "${work}/scan" && "${GIT_ORPHANED_BRANCHES}" --print0) > "${work}/print0.actual"
+cmp -s "${work}/print0.goal" "${work}/print0.actual" \
+  || fail "--print0 output differs from ${work}/print0.goal"
+# `-0` is an alias for `--print0`, so it emits the very same bytes.
+(cd "${work}/scan" && "${GIT_ORPHANED_BRANCHES}" -0) > "${work}/print0-alias.actual"
+cmp -s "${work}/print0.goal" "${work}/print0-alias.actual" \
+  || fail "-0 output differs from ${work}/print0.goal"
+
+# Test 2: without --print0, the directory names are separated by newlines.
+printf '%s\n' "${orphan_absolute}" > "${work}/print-newline.goal"
+(cd "${work}/scan" && "${GIT_ORPHANED_BRANCHES}") > "${work}/print-newline.actual"
+cmp -s "${work}/print-newline.goal" "${work}/print-newline.actual" \
+  || fail "default output differs from ${work}/print-newline.goal"
+
+# Test 3: the recommended cleanup command deletes the orphan and nothing else.
+(cd "${work}/scan" && "${GIT_ORPHANED_BRANCHES}" --print0) | xargs -0 rm -rf
+[ ! -e "${orphan}" ] || fail "cleanup did not delete ${orphan}"
+[ -d "${work}/scan/my" ] || fail "cleanup deleted ${work}/scan/my"
+[ -d "${work}/scan/my dir" ] || fail "cleanup deleted ${work}/scan/my dir"
 
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"

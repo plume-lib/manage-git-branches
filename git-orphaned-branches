@@ -7,15 +7,18 @@
 # because a pull request has been merged).
 # Also lists directories containing nothing but a `.project` file.
 #
-# This command is read-only:  it never modifies any of the directories
-# that it inspects.
+# Usage:
+#   git-orphaned-branches [--print0]
+#   git-orphaned-branches --print0 | xargs -0 rm -rf
 #
-# A listed directory is one whose branch was deleted in the remote, which is
-# not the same as one that holds nothing of value:  such a branch can hold
-# commits that were never pushed.  To see them before deleting anything, run
-# `git log --branches --not --remotes` in each listed directory.
+# With --print0 (or -0), the directories are separated by a NUL character
+# rather than by a newline, which is safe for directory names that contain
+# whitespace, a newline, or a glob metacharacter.  Without it, a directory
+# name that contains a newline is indistinguishable from two directory names.
 #
-# Typical usage is:  rm -rf $(git-orphaned-branches)
+# Usually, a remote branch disappears because its PR was merged.  It
+# is conceivable that the branch has local commits that were never
+# pushed, in which case deleting the branch could lose work.
 
 # DEBUG=1
 
@@ -58,12 +61,29 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+# If non-empty, separate the output directories by NUL rather than by newline.
+print0=""
+if [ "$#" -ge 1 ] && { [ "$1" = "--print0" ] || [ "$1" = "-0" ]; }; then
+  print0="$1"
+  shift
+fi
+
 status=0
 
 if [ "$#" -ne 0 ]; then
-  echo "Usage: ${SCRIPT_NAME}" >&2
+  echo "Usage: ${SCRIPT_NAME} [--print0]" >&2
   exit 1
 fi
+
+# Prints its argument, followed by a NUL character if --print0 was given and by
+# a newline otherwise.
+print_dir() {
+  if [ -n "$print0" ]; then
+    printf '%s\0' "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
 
 # Prints the absolute path of directory $1, with symbolic links resolved.
 # `realpath` would be simpler, but POSIX added it only in 2024 and some systems
@@ -95,24 +115,10 @@ only_dot_project() {
   return 0
 }
 
-dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
-# shellcheck disable=SC2329 # Is called from traps.
-cleanup() {
-  rm -f "${dirs_file}"
-}
-# A POSIX shell such as dash does not run an EXIT trap when the shell is killed
-# by a signal, so trap the signals too.  Each signal handler re-raises the
-# signal with the handler removed, so that this script dies of the signal
-# rather than resuming the loop below with the temporary file already removed,
-# and so that the caller sees that it was killed by a signal.
-trap cleanup EXIT
-trap 'cleanup; trap - HUP EXIT; kill -s HUP "$$"' HUP
-trap 'cleanup; trap - INT EXIT; kill -s INT "$$"' INT
-trap 'cleanup; trap - TERM EXIT; kill -s TERM "$$"' TERM
-find . -name '*-branch-*' -type d > "${dirs_file}"
-
-while IFS= read -r dir; do
-  if [ ! -d "$dir" ]; then continue; fi
+# Reports directory $1, whose name matches `*-branch-*`, if its branch was
+# deleted in the remote or if it holds nothing but a `.project` file.
+check_directory() {
+  dir="$1"
   if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
   if [ -d "$dir/.git" ]; then
     # There is a .git subdirectory.
@@ -123,15 +129,19 @@ while IFS= read -r dir; do
     # `is-deleted-branch` has already explained if it is worth explaining.  Any
     # other status means that `is-deleted-branch` could not run, which must not
     # be silently reported as "there is nothing to delete".
-    # Redirect stdin from /dev/null.  This loop's stdin is the list of
-    # directories, and `is-deleted-branch` runs `git`, which runs `ssh`; if any
-    # descendant read stdin, it would consume directory names out of the list
-    # and those directories would silently never be examined.
+    # Redirect stdin from /dev/null, because `is-deleted-branch` runs `git`,
+    # which runs `ssh`, and this script must not stop to await input.
     "${SCRIPT_DIR}"/is-deleted-branch "$dir" < /dev/null
     is_deleted_status=$?
     case "${is_deleted_status}" in
       # `cd` prints its own diagnostic on failure.
-      0) absolute_path "$dir" || status=1 ;;
+      0)
+        if dir_absolute="$(absolute_path "$dir")"; then
+          print_dir "${dir_absolute}"
+        else
+          status=1
+        fi
+        ;;
       1 | 2 | 3) ;;
       *)
         echo "${SCRIPT_NAME}: ${SCRIPT_DIR}/is-deleted-branch failed with status ${is_deleted_status} on: $dir" >&2
@@ -144,9 +154,58 @@ while IFS= read -r dir; do
     # There is no .git subdirectory.
     if [ -f "$dir/.project" ] && only_dot_project "$dir"; then
       # It has only the `.project` file and no other content.
-      absolute_path "$dir"
+      # `cd` prints its own diagnostic on failure.
+      if dir_absolute="$(absolute_path "$dir")"; then
+        print_dir "${dir_absolute}"
+      else
+        status=1
+      fi
     fi
   fi
-done < "${dirs_file}"
+}
+
+# Examines directory $1 and every directory below it.
+#
+# The entries that remain to be examined are held in the positional
+# parameters, which a shell makes local to a function call:  the recursive call
+# below gets positional parameters of its own, and this call's are intact when
+# it returns, so the recursion needs no variable that it could clobber.  `find`
+# would be simpler, but `find` communicates through newline-separated text,
+# which cannot represent a file name that contains a newline, whereas the
+# positional parameters can hold any file name.
+#
+# A single worklist in the positional parameters of the main shell, in place of
+# this recursion, would cost more:  pushing a directory's entries onto the
+# worklist rewrites the whole worklist, which costs O(n) for each of the n
+# entries of one directory and so is quadratic in a large one -- seconds rather
+# than milliseconds for a directory of a few thousand entries, such as a
+# `node_modules` or a package cache anywhere below the current directory.
+examine_directory() {
+  set -- "$1"/* "$1"/.*
+  while [ "$#" -gt 0 ]; do
+    case "${1##*/}" in
+      '.' | '..')
+        shift
+        continue
+        ;;
+    esac
+    # A pattern that matched nothing, which the shell leaves unexpanded, names
+    # no directory, so this test skips it as well.  A symbolic link is not
+    # followed, which is what `find` does by default and which prevents an
+    # endless descent through a link to an ancestor.
+    if [ -d "$1" ] && [ ! -L "$1" ]; then
+      case "${1##*/}" in
+        *-branch-*) check_directory "$1" ;;
+      esac
+      # Examine every directory's entries, even those of a directory that is
+      # itself named `*-branch-*`, because such a directory may contain
+      # another.
+      examine_directory "$1"
+    fi
+    shift
+  done
+}
+
+examine_directory .
 
 exit "${status}"
