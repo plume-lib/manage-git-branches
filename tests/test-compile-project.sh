@@ -53,6 +53,31 @@ if [ "$(cat "${cleanfails}/log")" != "cleaned" ]; then
   fail "with a failing clean, expected only \"cleaned\" but got: $(cat "${cleanfails}/log")"
 fi
 
+# With --clean and a clean whose exit status is 222, the project is not compiled and
+# the exit status is failure.  222 was once the internal signal for "no buildfile
+# found", so a clean that exited with it was taken for a project with nothing to build
+# and the script exited successfully without compiling.
+sentinel="${tmpdir}/sentinel"
+mkdir -p "${sentinel}"
+cat > "${sentinel}/gradlew" << 'EOF'
+#!/bin/sh
+dir="$(dirname -- "$0")"
+for argument in "$@"; do
+  if [ "${argument}" = clean ]; then
+    echo cleaned >> "${dir}/log"
+    exit 222
+  fi
+done
+echo built >> "${dir}/log"
+EOF
+chmod +x "${sentinel}/gradlew"
+if "${COMPILE_PROJECT}" --clean "${sentinel}" > /dev/null 2>&1; then
+  fail "zero exit status despite a clean that exited 222 in ${sentinel}"
+fi
+if [ "$(cat "${sentinel}/log")" != "cleaned" ]; then
+  fail "with a clean that exited 222, expected only \"cleaned\" but got: $(cat "${sentinel}/log")"
+fi
+
 if [ "${status}" = 0 ]; then
   echo "test-compile-project.sh: all tests passed"
 fi

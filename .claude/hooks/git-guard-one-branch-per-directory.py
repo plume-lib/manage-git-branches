@@ -370,22 +370,13 @@ def _tokenize(command: str) -> list[str]:
         The tokens of the command.
     """
     lexer = shlex.shlex(_strip_comments(command), posix=True, punctuation_chars=OPERATOR_CHARACTERS)
-    # Comments are already gone, and `shlex` would eat the newline that ends one.
+    # `_strip_comments` has already removed the comments, and `shlex` would discard the
+    # rest of the line *including its newline*, which would append the next line's words
+    # to the current command and hide the `git` that starts that next command.
     lexer.commenters = ""
     # A newline is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
     lexer.whitespace = WHITESPACE_CHARACTERS
-    # A `#` begins a comment only at the start of a word, but shlex would end the line
-    # at one anywhere, which would hide the commands after it:  a shell runs the `rm`
-    # of `git log a#; rm FILE`.  Treating `#` as an ordinary character instead only
-    # ever reports more commands than a shell runs, as it does for a real comment.
-    lexer.commenters = ""
     lexer.whitespace_split = True
-    # Do not let `#` start a comment.  `shlex` discards the rest of the line
-    # *including its newline*, which would append the next line's words to the
-    # current command and hide the `git` that starts that next command.  Treating `#`
-    # as an ordinary character only ever adds words to a command already being
-    # examined, so it cannot hide a forbidden command.
-    lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError as exception:
@@ -704,7 +695,9 @@ def _git_invocations(command: str) -> Iterator[list[str]]:
     Yields:
         The argument list of each `git` invocation.
     """
-    without_bodies, bodies = _remove_heredoc_bodies(command)
+    # Strip the comments first:  a `<<EOF` written in a comment does not introduce a
+    # here-document, and treating it as one would take real commands to be its body.
+    without_bodies, bodies = _remove_heredoc_bodies(_strip_comments(command))
     programs = set()
     for words in _simple_commands(_tokenize(without_bodies)):
         argv = _strip_prefixes(words)
@@ -945,9 +938,12 @@ def _approves(command: str) -> bool:
     Returns:
         True if the command may run without a permission prompt.
     """
-    if any(character in command for character in UNAPPROVABLE_CHARACTERS):
+    # A comment is not shell syntax, so a `$` or a backquote in one expands nothing
+    # and must not withhold approval.
+    stripped = _strip_comments(command)
+    if any(character in stripped for character in UNAPPROVABLE_CHARACTERS):
         return False
-    tokens = _tokenize(command)
+    tokens = _tokenize(stripped)
     for token in tokens:
         if _is_separator(token) and not frozenset(token) <= APPROVED_OPERATOR_CHARS:
             return False

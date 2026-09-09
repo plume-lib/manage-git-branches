@@ -84,6 +84,10 @@ FORBIDDEN = (
     "echo a#b\ngit stash",
     "git status # check\ngit checkout main",
     "sh <<'EOF'\n# Switch to main.\ngit checkout main\nEOF",
+    # A `<<EOF` inside a comment does not introduce a here-document, so the line after
+    # the comment is a command rather than that here-document's body.
+    "echo hi # <<EOF\ngit checkout main\nEOF",
+    "echo hi # <<'EOF'\ngit checkout main\nEOF",
     # A `#` that does not start a word does not start a comment, so what follows the
     # `;` is a command.
     "echo a#b; git checkout main",
@@ -266,6 +270,11 @@ APPROVED = (
     "git status; git branch",
     "git status\ngit log --oneline",
     "git log --oneline | git -C /some/dir log --oneline",
+    # A comment is not shell syntax, so an expansion character in one expands nothing
+    # and does not withhold approval.
+    "git status # check state",
+    "git status # see `git log`",
+    "git log --oneline # costs $0",
 )
 
 # Commands that the hook must neither deny nor approve, leaving them to the `allow`
