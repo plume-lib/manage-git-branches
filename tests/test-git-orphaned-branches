@@ -109,8 +109,7 @@ if [ "$(id -u)" -ne 0 ]; then
   chmod 111 "${work}/dot-project/p-branch-unlistable"
 fi
 
-# `find` warns that it cannot list `p-branch-unlistable`, so discard stderr.
-if ! output="$(cd "${work}/dot-project" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
+if ! output="$(cd "${work}/dot-project" && "${GIT_ORPHANED_BRANCHES}")"; then
   fail "git-orphaned-branches exited with a failure status"
 fi
 
@@ -138,6 +137,29 @@ check "p-branch-no-project" "unlisted"
 check "p-plain-project" "unlisted"
 if [ "${unlistable}" -eq 1 ]; then
   check "p-branch-unlistable" "unlisted"
+fi
+
+###########################################################################
+## A directory whose name contains a newline.
+###########################################################################
+
+# A newline cannot be held in a variable by `nl="$(printf '\n')"`, because
+# command substitution removes trailing newlines.
+nl="$(printf '\nx')"
+nl="${nl%x}"
+
+mkdir -p "${work}/newline"
+newline_dir="${work}/newline/p-branch-a${nl}b"
+mkdir -p "${newline_dir}"
+touch "${newline_dir}/.project"
+
+# Compare with --print0, because the newline in the directory name makes the
+# newline-separated output ambiguous.
+printf '%s\0' "$(absolute_path "${newline_dir}")" > "${work}/newline.goal"
+(cd "${work}/newline" && "${GIT_ORPHANED_BRANCHES}" --print0) > "${work}/newline.actual"
+if ! cmp -s "${work}/newline.goal" "${work}/newline.actual"; then
+  echo "FAIL: git-orphaned-branches output differs from ${work}/newline.goal"
+  status=1
 fi
 
 ###########################################################################
@@ -179,6 +201,10 @@ printf '%s\0' "${orphan_absolute}" > "${work}/print0.goal"
 (cd "${work}/scan" && "${GIT_ORPHANED_BRANCHES}" --print0) > "${work}/print0.actual"
 cmp -s "${work}/print0.goal" "${work}/print0.actual" \
   || fail "--print0 output differs from ${work}/print0.goal"
+# `-0` is an alias for `--print0`, so it emits the very same bytes.
+(cd "${work}/scan" && "${GIT_ORPHANED_BRANCHES}" -0) > "${work}/print0-alias.actual"
+cmp -s "${work}/print0.goal" "${work}/print0-alias.actual" \
+  || fail "-0 output differs from ${work}/print0.goal"
 
 # Test 2: without --print0, the directory names are separated by newlines.
 printf '%s\n' "${orphan_absolute}" > "${work}/print-newline.goal"

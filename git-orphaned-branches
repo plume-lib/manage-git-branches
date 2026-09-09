@@ -13,7 +13,8 @@
 #
 # With --print0 (or -0), the directories are separated by a NUL character
 # rather than by a newline, which is safe for directory names that contain
-# whitespace or a glob metacharacter.
+# whitespace, a newline, or a glob metacharacter.  Without it, a directory
+# name that contains a newline is indistinguishable from two directory names.
 #
 # Usually, a remote branch disappears because its PR was merged.  It
 # is conceivable that the branch has local commits that were never
@@ -114,24 +115,42 @@ only_dot_project() {
   return 0
 }
 
-dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
-# shellcheck disable=SC2329 # Is called from traps.
-cleanup() {
-  rm -f "${dirs_file}"
-}
-# A POSIX shell such as dash does not run an EXIT trap when the shell is killed
-# by a signal, so trap the signals too.  Each signal handler re-raises the
-# signal with the handler removed, so that this script dies of the signal
-# rather than resuming the loop below with the temporary file already removed,
-# and so that the caller sees that it was killed by a signal.
-trap cleanup EXIT
-trap 'cleanup; trap - HUP EXIT; kill -s HUP "$$"' HUP
-trap 'cleanup; trap - INT EXIT; kill -s INT "$$"' INT
-trap 'cleanup; trap - TERM EXIT; kill -s TERM "$$"' TERM
-find . -name '*-branch-*' -type d > "${dirs_file}"
+# The worklist of file names that remain to be examined, held in the
+# positional parameters.  `find` would be simpler, but `find` communicates
+# through newline-separated text, which cannot represent a file name that
+# contains a newline, whereas the positional parameters can hold any file
+# name.  (A recursive shell function would be simpler than a worklist, but a
+# POSIX shell has no local variables, so a recursive call would clobber its
+# caller's loop variable.)
+#
+# The worklist is a stack rather than a queue (each directory's entries are
+# pushed on the front), so that it holds only the unexamined siblings along
+# one path from the current directory.  A queue would instead hold an entire
+# level of the tree, and rewriting the whole worklist to push one entry onto a
+# queue of length n costs O(n), which is quadratic overall and is minutes
+# rather than seconds on a large tree.
+set -- ./* ./.*
 
-while IFS= read -r dir; do
-  if [ ! -d "$dir" ]; then continue; fi
+while [ "$#" -gt 0 ]; do
+  child="$1"
+  shift
+  case "${child##*/}" in
+    '.' | '..') continue ;;
+  esac
+  # This also skips a pattern that matched nothing, which the shell leaves
+  # unexpanded and which therefore names no directory.
+  if [ ! -d "${child}" ]; then continue; fi
+  # Do not follow symbolic links, which is what `find` does by default and
+  # which prevents an endless descent through a link to an ancestor.
+  if [ -L "${child}" ]; then continue; fi
+  # Examine every directory's entries, even those of a directory that is
+  # itself named `*-branch-*`, because such a directory may contain another.
+  set -- "${child}"/* "${child}"/.* "$@"
+  case "${child##*/}" in
+    *-branch-*) ;;
+    *) continue ;;
+  esac
+  dir="${child}"
   if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
   if [ -d "$dir/.git" ]; then
     # There is a .git subdirectory.
@@ -142,10 +161,8 @@ while IFS= read -r dir; do
     # `is-deleted-branch` has already explained if it is worth explaining.  Any
     # other status means that `is-deleted-branch` could not run, which must not
     # be silently reported as "there is nothing to delete".
-    # Redirect stdin from /dev/null.  This loop's stdin is the list of
-    # directories, and `is-deleted-branch` runs `git`, which runs `ssh`; if any
-    # descendant read stdin, it would consume directory names out of the list
-    # and those directories would silently never be examined.
+    # Redirect stdin from /dev/null, because `is-deleted-branch` runs `git`,
+    # which runs `ssh`, and this script must not stop to await input.
     "${SCRIPT_DIR}"/is-deleted-branch "$dir" < /dev/null
     is_deleted_status=$?
     case "${is_deleted_status}" in
@@ -177,6 +194,6 @@ while IFS= read -r dir; do
       fi
     fi
   fi
-done < "${dirs_file}"
+done
 
 exit "${status}"
