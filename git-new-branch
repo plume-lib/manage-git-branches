@@ -5,6 +5,12 @@
 #
 # Usage:
 #   git-new-branch NEWBRANCHNAME
+#
+# If the repository has a remote named "origin", the new branch is pushed to
+# it, with the remote branch as the new branch's upstream.  The upstream is
+# what lets `git-push-to` and `git-pull-from` pull and push the new branch.
+# If the push fails -- for example, because the remote is read-only -- this
+# script warns but still creates the branch directory, without an upstream.
 
 # SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
@@ -105,5 +111,25 @@ if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
   exit 1
 fi
 TMPDIR_TO_CLEAN=""
+
+# Give the new branch an upstream.  Without one, `git pull` and `git push` in
+# the new directory fail with "There is no tracking information for the
+# current branch", so `git-push-to` and `git-pull-from` cannot use it.
+#
+# Push only after the move succeeded, because the cleanup traps cannot undo a
+# push: if the script failed or was interrupted between the push and the move,
+# the traps would remove the working copy but leave the branch in the remote,
+# and re-running this script would abort because the branch already exists.
+#
+# `git config --get`, not `git remote get-url`, which requires git 2.7 or later.
+if [ -n "$(git config --get remote.origin.url)" ]; then
+  if ! (cd -- "${BRANCHDIR}" && git push -q --set-upstream origin "${BRANCHNAME}"); then
+    # This is not an error: the new working copy is usable without an upstream,
+    # and the push can fail for reasons that are not this script's business,
+    # such as a read-only clone, a protected branch, or a rejecting hook.
+    echo "${SCRIPT_NAME}: WARNING: cannot push ${BRANCHNAME} to origin, so it has no upstream branch" >&2
+    echo "${SCRIPT_NAME}: WARNING: \`git-push-to\` and \`git-pull-from\` need one; to give it one, cd to ${BRANCHDIR} and run: git push --set-upstream origin '${BRANCHNAME}'" >&2
+  fi
+fi
 
 echo "Success: created ${BRANCHDIR}"
