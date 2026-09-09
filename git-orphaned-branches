@@ -15,10 +15,9 @@
 # rather than by a newline, which is safe for directory names that contain
 # whitespace or a glob metacharacter.
 #
-# A listed directory is one whose branch was deleted in the remote, which is
-# not the same as one that holds nothing of value:  such a branch can hold
-# commits that were never pushed.  To see them before deleting anything, run
-# `git log --branches --not --remotes` in each listed directory.
+# Usually, a remote branch disappears because its PR was merged.  It
+# is conceivable that the branch has local commits that were never
+# pushed, in which case deleting the branch could lose work.
 
 # DEBUG=1
 
