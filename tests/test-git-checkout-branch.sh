@@ -81,6 +81,36 @@ else
   fi
 fi
 
+# A clone whose sole remote is not named "origin" is asked about the branch.
+# Asking only a remote named "origin", as this script once did, asked no
+# remote at all in such a clone, so a branch that plainly exists there was
+# reported as nonexistent and no directory was created.
+othername="${tmpdir}/othername-branch-main"
+git clone -q "${repo}" "${othername}"
+git -C "${othername}" remote rename origin elsewhere
+if ! out="$(cd "${othername}" && "${GIT_CHECKOUT_BRANCH}" localonly 2>&1)"; then
+  fail "nonzero exit status for a branch of a remote not named origin: ${out}"
+fi
+otherdir="${tmpdir}/othername-branch-localonly"
+if [ ! -d "${otherdir}" ]; then
+  fail "directory was not created: ${otherdir}"
+else
+  checkedout="$(git -C "${otherdir}" rev-parse --abbrev-ref HEAD)"
+  if [ "${checkedout}" != "localonly" ]; then
+    fail "checked out ${checkedout} rather than localonly in ${otherdir}"
+  fi
+fi
+
+# The diagnostic for a nonexistent branch names the remote that was asked,
+# rather than "origin", which such a clone does not have.
+if out="$(cd "${othername}" && "${GIT_CHECKOUT_BRANCH}" nosuchbranch 2>&1)"; then
+  fail "zero exit status for the nonexistent branch nosuchbranch"
+fi
+case "${out}" in
+  *"does not exist, locally or on remote elsewhere"*) ;;
+  *) fail "the message does not name the remote that was asked: ${out}" ;;
+esac
+
 # `HEAD` is not a branch name, even though a clone has a symbolic ref
 # `refs/remotes/origin/HEAD`.
 if out="$(cd "${clone}" && "${GIT_CHECKOUT_BRANCH}" HEAD 2>&1)"; then
