@@ -1,8 +1,10 @@
 #!/bin/sh
 
 # Tests that `git-pull-from` accepts the `--nocompile` argument, just as
-# `git-push-to` does, and that the merge commit it creates names the other
-# repository by a relative pathname.
+# `git-push-to` does, that the merge commit it creates names the other
+# repository by a relative pathname, and that it diagnoses the current
+# directory and OTHER-REPO-DIR itself when either is not the top level of a
+# clone.
 #
 # Usage:
 #   tests/test-git-pull-from
@@ -84,5 +86,90 @@ case "${subject}" in
   *../from*) ;;
   *) fail "merge commit message does not name ../from: ${subject}" ;;
 esac
+
+# `git-pull-from` requires the current directory to be the top level of a
+# clone.  A subdirectory of a working copy is in a git repository, so the
+# diagnostic must not say merely that this is not a clone.
+mkdir -p "${workdir}/to/subdir"
+if output="$(cd "${workdir}/to/subdir" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from" 2>&1)"; then
+  fail "git-pull-from succeeded in a subdirectory of a working copy"
+fi
+case "${output}" in
+  *"not the top level of a git clone"*) ;;
+  *) fail "git-pull-from did not say that the directory is not a top level: ${output}" ;;
+esac
+case "${output}" in
+  *"its top level is: "*) ;;
+  *) fail "git-pull-from did not name the top level to run in: ${output}" ;;
+esac
+
+# The same requirement holds outside a working copy altogether.
+if output="$(cd "${workdir}" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from" 2>&1)"; then
+  fail "git-pull-from succeeded outside a working copy"
+fi
+case "${output}" in
+  *"not the top level of a git clone"*) ;;
+  *) fail "git-pull-from did not reject a directory outside a working copy: ${output}" ;;
+esac
+
+# OTHER-REPO-DIR must be the top level of a clone too.
+mkdir -p "${workdir}/from/subdir"
+if output="$(cd "${workdir}/to" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from/subdir" 2>&1)"; then
+  fail "git-pull-from accepted a subdirectory as OTHER-REPO-DIR"
+fi
+case "${output}" in
+  *"git-pull-from: not the top level of a git clone: "*"/from/subdir"*) ;;
+  *) fail "git-pull-from did not reject OTHER-REPO-DIR: ${output}" ;;
+esac
+# The diagnostic is about this command's argument, so it names this command.
+case "${output}" in
+  *git-push-to*) fail "git-pull-from left the diagnostic to git-push-to: ${output}" ;;
+esac
+if output="$(cd "${workdir}/to" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/no-such-directory" 2>&1)"; then
+  fail "git-pull-from accepted a nonexistent OTHER-REPO-DIR"
+fi
+case "${output}" in
+  *"no such directory"*) ;;
+  *) fail "git-pull-from did not reject a nonexistent OTHER-REPO-DIR: ${output}" ;;
+esac
+
+# `git-pull-from` compares physical pathnames, so it accepts a clone that is
+# reached through a symbolic link, both as the current directory and as
+# OTHER-REPO-DIR.  (`git rev-parse --show-toplevel` resolves symbolic links,
+# so comparing the pathnames as given would reject these.)
+ln -s "${workdir}/to" "${workdir}/to-link"
+ln -s "${workdir}/from" "${workdir}/from-link"
+date > "${workdir}/from/another-change.txt"
+git -C "${workdir}/from" add another-change.txt
+git -C "${workdir}/from" commit -q -m "another change"
+if ! output="$(cd "${workdir}/to-link" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from-link" 2>&1)"; then
+  fail "git-pull-from failed when the clones were named through symbolic links: ${output}"
+fi
+if [ ! -f "${workdir}/to/another-change.txt" ]; then
+  fail "git-pull-from did not merge the change when the clones were named through symbolic links"
+fi
+
+# A directory that cannot be entered might or might not be a clone, so say
+# that it cannot be canonicalized rather than that it is not a clone.
+# Only an unprivileged user is stopped by the permissions.
+if [ "$(id -u)" != 0 ]; then
+  # Leave the directory empty, so that the cleanup trap can remove it.
+  mkdir "${workdir}/unenterable"
+  chmod 000 "${workdir}/unenterable"
+  if output="$(cd "${workdir}/to" \
+    && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/unenterable" 2>&1)"; then
+    fail "git-pull-from accepted a directory that cannot be entered"
+  fi
+  chmod 700 "${workdir}/unenterable"
+  case "${output}" in
+    *"cannot canonicalize"*) ;;
+    *) fail "git-pull-from did not report a directory that cannot be entered: ${output}" ;;
+  esac
+fi
 
 echo "${SCRIPT_NAME}: OK"
