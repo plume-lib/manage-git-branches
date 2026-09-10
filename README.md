@@ -35,26 +35,21 @@ The commands are:
 * [`git-new-branch`](git-new-branch) `BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   copy directory.  Run this command from within a working copy; the new
-  directory is a sibling of the working copy.  The effects of this command are
-  local:  it does not push the new branch, so the new branch has no upstream
-  branch.  `git-push-to` and `git-pull-from` need one; to create it, cd to the
-  new directory and run `git push --set-upstream REMOTE BRANCHNAME`.  Before
-  creating the branch, the command does ask the remote that `git push` would
-  use for the current branch whether a branch of that name already exists
-  there.
+  directory is a sibling of the working copy.  This command does not push the
+  new branch.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to) `[--nocompile] FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.
   Each directory must be the top level of a working copy (that is, of a git
-  clone).
+  clone) and must have an upstream branch.
   You may also pass a list of directories: each is pushed into the subsequent one.
 * [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
   succeeds.
   OTHER-REPO-DIR and the current directory must both be the top level of a
-  working copy (that is, a git clone).
+  working copy (that is, a git clone) and must each have an upstream branch.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
 * [`git-orphaned-branches`](git-orphaned-branches) `[--print0]`:

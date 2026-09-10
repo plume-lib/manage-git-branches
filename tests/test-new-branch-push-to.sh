@@ -62,6 +62,17 @@ if [ ! -d "${FEATURE_DIR}" ]; then
   fail "git-new-branch did not create ${FEATURE_DIR}"
 fi
 
+# `git-push-to` needs an upstream branch, and `git-new-branch` does not create
+# one, because it has only local effects.  Report its absence here, where the
+# cause is clear, rather than as a `git-push-to` failure below.
+if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
+  fail "git-push-to succeeded on a new branch that has no upstream branch"
+fi
+case "${output}" in
+  *"has no upstream branch"*) ;;
+  *) fail "git-push-to did not explain the missing upstream branch: ${output}" ;;
+esac
+
 # `git-new-branch` pushes nothing, so the new branch has no upstream branch
 # until the user creates one, as the README says to do.  `git-push-to` and
 # `git-pull-from` need one.
