@@ -1,0 +1,14 @@
+#!/bin/sh
+
+case "${MANAGE_GIT_BRANCHES_SSH_BATCH_OPTION}" in
+  '-o BatchMode=yes')
+    exec "${MANAGE_GIT_BRANCHES_GIT_SSH}" -o BatchMode=yes "$@"
+    ;;
+  -batch)
+    exec "${MANAGE_GIT_BRANCHES_GIT_SSH}" -batch "$@"
+    ;;
+  *)
+    echo "$(basename -- "$0"): invalid batch option" >&2
+    exit 1
+    ;;
+esac
