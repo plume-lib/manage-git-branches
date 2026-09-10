@@ -25,10 +25,12 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 trap 'rm -rf "${WORK_DIR}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 
+# shellcheck source=lib-git-test-env.sh
+. "${TESTS_DIR}/lib-git-test-env.sh"
 # shellcheck source=common-functions.sh
 . "${TESTS_DIR}/common-functions.sh"
 
-isolate_git_configuration "${WORK_DIR}"
+sanitize_git_env "${WORK_DIR}"
 
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $*" >&2
@@ -112,112 +114,73 @@ case "${output}" in
   *) fail "git-checkout-branch claimed to know that the branch does not exist: ${output}" ;;
 esac
 
-# A branch that the remote has but that this clone never fetched cannot be
-# checked out:  `git checkout` consults only the refs that the clone holds.
-# Refusing before the copy, with advice to fetch, beats copying the whole
-# repository and then failing with git's "pathspec did not match" message.
+# A branch that the remote has but that this clone never fetched has no ref
+# here, and `git checkout` consults only the refs that the clone holds.  The
+# branch is therefore fetched, rather than only queried:  a successful query
+# would leave the checkout to fail with git's "pathspec did not match".
 UNFETCHED_DIR="${WORK_DIR}/unfetched"
 git clone -q "${REMOTE}" "${UNFETCHED_DIR}"
 # Restrict the fetch refspec before deleting the remote-tracking branch, so
 # that the `git pull` in `git-checkout-branch` does not recreate it.
 git -C "${UNFETCHED_DIR}" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
 git -C "${UNFETCHED_DIR}" update-ref -d refs/remotes/origin/feature1
-if output="$(cd "${UNFETCHED_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
-  fail "git-checkout-branch checked out a branch that this clone has not fetched: ${output}"
-fi
-case "${output}" in
-  *"exists on remote origin, but this clone has not fetched it"*) ;;
-  *) fail "git-checkout-branch did not say that the branch was never fetched: ${output}" ;;
-esac
-case "${output}" in
-  *"git fetch origin"*) ;;
-  *) fail "git-checkout-branch did not say to fetch the branch: ${output}" ;;
-esac
-for leftover in "${WORK_DIR}/unfetched-branch-feature1" "${WORK_DIR}/unfetched-branch-feature1-TMP"; do
-  if [ -e "${leftover}" ]; then
-    fail "git-checkout-branch copied the working copy before refusing: ${leftover}"
-  fi
-done
-# This clone's fetch refspec covers only `main`, so plain `git fetch origin`
-# would not bring the branch in and the user would arrive right back here.  The
-# advice has to name a refspec that fetches the branch.
-case "${output}" in
-  *"does not cover feature1"*) ;;
-  *) fail "git-checkout-branch did not say that this clone does not fetch the branch: ${output}" ;;
-esac
-case "${output}" in
-  *"git remote set-branches --add origin feature1"*) ;;
-  *) fail "git-checkout-branch did not say how to make this clone fetch the branch: ${output}" ;;
-esac
-# Following the advice works:  the branch can then be checked out, and it
-# tracks the remote's branch.
-git -C "${UNFETCHED_DIR}" remote set-branches --add origin feature1
-git -C "${UNFETCHED_DIR}" fetch -q origin
 if ! output="$(cd "${UNFETCHED_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
-  fail "git-checkout-branch failed after the commands that it advised: ${output}"
+  fail "git-checkout-branch failed on a branch that this clone has not fetched: ${output}"
 fi
 branch="$(git -C "${WORK_DIR}/unfetched-branch-feature1" rev-parse --abbrev-ref HEAD)"
 if [ "${branch}" != "feature1" ]; then
   fail "${WORK_DIR}/unfetched-branch-feature1 is on branch ${branch}, not feature1"
 fi
-if ! upstream="$(git -C "${WORK_DIR}/unfetched-branch-feature1" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2> /dev/null)"; then
-  upstream=''
+expected_commit="$(git -C "${REMOTE}" rev-parse refs/heads/feature1)"
+actual_commit="$(git -C "${WORK_DIR}/unfetched-branch-feature1" rev-parse HEAD)"
+if [ "${actual_commit}" != "${expected_commit}" ]; then
+  fail "${WORK_DIR}/unfetched-branch-feature1 is at ${actual_commit}, not at the remote's feature1 (${expected_commit})"
 fi
-if [ "${upstream}" != "origin/feature1" ]; then
-  fail "${WORK_DIR}/unfetched-branch-feature1 tracks [${upstream}], not origin/feature1"
+# The new working copy gets an upstream even though this clone's fetch refspec
+# does not cover the branch, so git set none up:  `git-push-to` and
+# `git-pull-from` require one.
+upstream_remote="$(git -C "${WORK_DIR}/unfetched-branch-feature1" config --get branch.feature1.remote)"
+upstream_merge="$(git -C "${WORK_DIR}/unfetched-branch-feature1" config --get branch.feature1.merge)"
+if [ "${upstream_remote}" != "origin" ] \
+  || [ "${upstream_merge}" != "refs/heads/feature1" ]; then
+  fail "${WORK_DIR}/unfetched-branch-feature1 has upstream [${upstream_remote}] [${upstream_merge}], not origin refs/heads/feature1"
 fi
 
 # The branch's configured remote can be a pathname rather than the name of a
 # remote, which is what `git push --set-upstream ../other.git BRANCH` records.
-# `git remote set-branches` fails on such a value ("No such remote"), and
-# `git fetch PATHNAME` records no remote-tracking branch, so the advice has to
-# name the commands that do work on one.
+# Such a remote has no remote-tracking namespace, so the fetch records the
+# branch only in FETCH_HEAD, and the branch is created from that.
 git clone -q --bare "${REMOTE}" "${WORK_DIR}/mainonly.git"
 git -C "${WORK_DIR}/mainonly.git" update-ref -d refs/heads/feature1
 PATHREMOTE_DIR="${WORK_DIR}/pathremote"
 git clone -q "${WORK_DIR}/mainonly.git" "${PATHREMOTE_DIR}"
 # The pathname is relative to the clone, which is where git resolves it.
 git -C "${PATHREMOTE_DIR}" config branch.main.remote '../myrepo.git'
-if output="$(cd "${PATHREMOTE_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
-  fail "git-checkout-branch checked out a branch that this clone has not fetched: ${output}"
-fi
-case "${output}" in
-  *"exists on remote ../myrepo.git, but this clone has not fetched it"*) ;;
-  *) fail "git-checkout-branch did not say that the branch was never fetched: ${output}" ;;
-esac
-case "${output}" in
-  *"is not one of this clone's remotes"*) ;;
-  *) fail "git-checkout-branch did not say that the branch's remote is a pathname: ${output}" ;;
-esac
-case "${output}" in
-  *"git remote add NAME ../myrepo.git"*) ;;
-  *) fail "git-checkout-branch did not say how to fetch from the pathname: ${output}" ;;
-esac
-# Advice that requires the name of a remote would fail on a pathname, so it
-# must not be given for one.
-case "${output}" in
-  *"git remote set-branches"*)
-    fail "git-checkout-branch advised a command that fails on a pathname: ${output}"
-    ;;
-esac
-# Following the advice works:  the branch can then be checked out.
-git -C "${PATHREMOTE_DIR}" remote add other '../myrepo.git'
-git -C "${PATHREMOTE_DIR}" fetch -q other
 if ! output="$(cd "${PATHREMOTE_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
-  fail "git-checkout-branch failed after the commands that it advised: ${output}"
+  fail "git-checkout-branch failed on a branch of a remote named by a pathname: ${output}"
 fi
 branch="$(git -C "${WORK_DIR}/pathremote-branch-feature1" rev-parse --abbrev-ref HEAD)"
 if [ "${branch}" != "feature1" ]; then
   fail "${WORK_DIR}/pathremote-branch-feature1 is on branch ${branch}, not feature1"
+fi
+expected_commit="$(git -C "${REMOTE}" rev-parse refs/heads/feature1)"
+actual_commit="$(git -C "${WORK_DIR}/pathremote-branch-feature1" rev-parse HEAD)"
+if [ "${actual_commit}" != "${expected_commit}" ]; then
+  fail "${WORK_DIR}/pathremote-branch-feature1 is at ${actual_commit}, not at the remote's feature1 (${expected_commit})"
+fi
+# The upstream is the pathname, which is what `git push --set-upstream` would
+# have recorded.  Git records none for a branch created from FETCH_HEAD.
+upstream_remote="$(git -C "${WORK_DIR}/pathremote-branch-feature1" config --get branch.feature1.remote)"
+if [ "${upstream_remote}" != "../myrepo.git" ]; then
+  fail "${WORK_DIR}/pathremote-branch-feature1 has upstream remote [${upstream_remote}], not ../myrepo.git"
 fi
 
 # A clone can hold a remote-tracking branch that its refspecs do not cover, if
 # someone fetched the branch once with an explicit refspec.  `git checkout
 # feature1` does not find such a ref -- it searches the remotes' refspecs, not
 # the refs -- so the branch has to be created from the ref by name.  Git
-# records an upstream only for a branch that the clone fetches, so the branch
-# gets none, and the command says so rather than leaving the user to discover
-# it at the next `git push`.
+# records an upstream only for a branch that the clone fetches, so it sets
+# none here, and `git-checkout-branch` configures one itself.
 ONEOFF_DIR="${WORK_DIR}/oneoff"
 git clone -q "${REMOTE}" "${ONEOFF_DIR}"
 git -C "${ONEOFF_DIR}" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
@@ -235,40 +198,36 @@ actual_commit="$(git -C "${WORK_DIR}/oneoff-branch-feature1" rev-parse HEAD)"
 if [ "${actual_commit}" != "${expected_commit}" ]; then
   fail "${WORK_DIR}/oneoff-branch-feature1 is at ${actual_commit}, not at origin/feature1 (${expected_commit})"
 fi
-case "${output}" in
-  *"has no upstream"*) ;;
-  *) fail "git-checkout-branch did not say that the branch has no upstream: ${output}" ;;
-esac
+upstream_remote="$(git -C "${WORK_DIR}/oneoff-branch-feature1" config --get branch.feature1.remote)"
+upstream_merge="$(git -C "${WORK_DIR}/oneoff-branch-feature1" config --get branch.feature1.merge)"
+if [ "${upstream_remote}" != "origin" ] \
+  || [ "${upstream_merge}" != "refs/heads/feature1" ]; then
+  fail "${WORK_DIR}/oneoff-branch-feature1 has upstream [${upstream_remote}] [${upstream_merge}], not origin refs/heads/feature1"
+fi
 
-# Several remotes with a branch of this name do not say which one to check out.
+# Several remotes have a branch of this name, and one of them is the remote
+# that this clone fetches the current branch from, so that one is chosen.
 # `git checkout feature1` fails on such a name -- "matched multiple remote
-# tracking branches" -- so refusing here, before the copy, both explains the
-# problem and saves the user a full copy of the repository.
+# tracking branches" -- so the choice is made here rather than left to it.
 MULTI_DIR="${WORK_DIR}/multiremote"
 SECOND_REMOTE="${WORK_DIR}/second.git"
 git clone -q --bare "${REMOTE}" "${SECOND_REMOTE}"
 git clone -q "${REMOTE}" "${MULTI_DIR}"
 git -C "${MULTI_DIR}" remote add second "${SECOND_REMOTE}"
 git -C "${MULTI_DIR}" fetch -q second
-if output="$(cd "${MULTI_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
-  fail "git-checkout-branch checked out a branch that several remotes have: ${output}"
+if ! output="$(cd "${MULTI_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
+  fail "git-checkout-branch failed when the fetch remote is one of several that have the branch: ${output}"
 fi
-case "${output}" in
-  *"2 remotes of this clone have a branch feature1"*) ;;
-  *) fail "git-checkout-branch did not say that several remotes have the branch: ${output}" ;;
-esac
-case "${output}" in
-  *"checkout.defaultRemote"*) ;;
-  *) fail "git-checkout-branch did not say how to choose a remote: ${output}" ;;
-esac
-for leftover in "${WORK_DIR}/multiremote-branch-feature1" "${WORK_DIR}/multiremote-branch-feature1-TMP"; do
-  if [ -e "${leftover}" ]; then
-    fail "git-checkout-branch copied the working copy before refusing: ${leftover}"
-  fi
-done
+if ! upstream="$(git -C "${WORK_DIR}/multiremote-branch-feature1" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2> /dev/null)"; then
+  upstream=''
+fi
+if [ "${upstream}" != "origin/feature1" ]; then
+  fail "${WORK_DIR}/multiremote-branch-feature1 tracks [${upstream}], not the origin/feature1 of the fetch remote"
+fi
+rm -rf "${WORK_DIR}/multiremote-branch-feature1"
 
-# `checkout.defaultRemote` chooses among them, as it does for `git checkout`
-# itself, and the branch is created from that remote's branch.
+# `checkout.defaultRemote` outranks the fetch remote, as it does for git's own
+# search, and the branch is created from that remote's branch.
 git -C "${MULTI_DIR}" config checkout.defaultRemote second
 if ! output="$(cd "${MULTI_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
   fail "git-checkout-branch failed when checkout.defaultRemote chose a remote: ${output}"
@@ -283,6 +242,39 @@ fi
 if [ "${upstream}" != "second/feature1" ]; then
   fail "${WORK_DIR}/multiremote-branch-feature1 tracks [${upstream}], not second/feature1"
 fi
+
+# When none of the remotes that have the branch is the fetch remote and
+# `checkout.defaultRemote` names none of them either, which one to check out
+# is ambiguous.  Saying so before the copy both explains the problem and saves
+# the user a full copy of the repository.
+AMBIGUOUS_DIR="${WORK_DIR}/ambiguous"
+THIRD_REMOTE="${WORK_DIR}/third.git"
+git clone -q --bare "${REMOTE}" "${THIRD_REMOTE}"
+git clone -q "${REMOTE}" "${AMBIGUOUS_DIR}"
+# Narrow the fetch refspec of the fetch remote and drop its remote-tracking
+# branch, so that only the two other remotes have one for feature1.
+git -C "${AMBIGUOUS_DIR}" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+git -C "${AMBIGUOUS_DIR}" update-ref -d refs/remotes/origin/feature1
+git -C "${AMBIGUOUS_DIR}" remote add second "${SECOND_REMOTE}"
+git -C "${AMBIGUOUS_DIR}" remote add third "${THIRD_REMOTE}"
+git -C "${AMBIGUOUS_DIR}" fetch -q second
+git -C "${AMBIGUOUS_DIR}" fetch -q third
+if output="$(cd "${AMBIGUOUS_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
+  fail "git-checkout-branch checked out a branch that several remotes have: ${output}"
+fi
+case "${output}" in
+  *"branch feature1 exists on several remotes of this clone"*) ;;
+  *) fail "git-checkout-branch did not say that several remotes have the branch: ${output}" ;;
+esac
+case "${output}" in
+  *"checkout.defaultRemote"*) ;;
+  *) fail "git-checkout-branch did not say how to choose a remote: ${output}" ;;
+esac
+for leftover in "${WORK_DIR}/ambiguous-branch-feature1" "${WORK_DIR}/ambiguous-branch-feature1-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "git-checkout-branch copied the working copy before refusing: ${leftover}"
+  fi
+done
 
 # The tests that need no network access come first, so a branch that this clone
 # holds is checked out without asking any remote about it.  A fake `ssh` counts

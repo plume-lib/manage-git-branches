@@ -118,18 +118,47 @@ if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
   echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
 fi
 
-# Usage: remotes_with_branch BRANCH
-# Prints the name of every remote for which this clone holds a remote-tracking
-# branch named BRANCH, one per line.
+# Determine which remote to ask about the branch:  the remote that `git fetch`
+# would use for the current branch, as `fetch_remote` in remote-functions.sh
+# determines it.  Checking out a branch reads from a remote, so this is not
+# the remote that `git-new-branch`, `is-deleted-branch`, and `git-push-to`
+# use, which is the one that `git push` would use; in the fork workflow the
+# two differ, and a branch of the project exists on this one.
 #
-# `git checkout` consults only the refs that this clone holds, so this test is
-# what says whether the branch can be checked out at all:  a branch that some
-# remote has but that was never fetched into this clone is not one that
-# `git checkout` can find.  The test needs no network access.
+# Asking only the remote named "origin", as this script once did, asked no
+# remote at all in a clone whose sole remote has some other name, and then
+# reported that the branch does not exist.
 #
-# "HEAD" is excluded:  a clone has a symbolic ref `refs/remotes/REMOTE/HEAD`
-# that names the remote's default branch, so that ref resolves, but "HEAD" is
-# not the name of a branch.
+# ${REMOTE} is empty if no remote can be determined; then no remote can be
+# asked, and only the local tests in `find_branch` apply.
+BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
+REMOTE="$(fetch_remote . "${BRANCH_REF#refs/heads/}")"
+
+# How the `git checkout` below creates the branch, set by `find_branch`:
+# ${CHECKOUT_START_POINT} is the ref or commit to create it from, or empty to
+# check out a local branch of that name that this clone already has, and
+# ${CHECKOUT_REMOTE} is the remote that the branch comes from, which becomes
+# the new branch's upstream.
+CHECKOUT_START_POINT=''
+CHECKOUT_REMOTE=''
+
+## Usage: contains_line LINES LINE
+## Succeeds if LINE is one of the lines of LINES.  A LINE that is empty is
+## never one of them, because it names nothing.
+contains_line() {
+  if [ -z "$2" ]; then
+    return 1
+  fi
+  printf '%s\n' "$1" | grep -q -x -F -- "$2"
+}
+
+## Usage: remotes_with_branch BRANCH
+## Prints the name of each remote of this clone that has the remote-tracking
+## branch REMOTE/BRANCH here, one per line.
+##
+## "HEAD" is excluded:  a clone has a symbolic ref `refs/remotes/REMOTE/HEAD`
+## that names the remote's default branch, so that ref resolves, but "HEAD" is
+## not the name of a branch.
 remotes_with_branch() {
   if [ "$1" = 'HEAD' ]; then
     return 0
@@ -142,168 +171,137 @@ remotes_with_branch() {
   # Pathname expansion is disabled around the loop, because a remote's name is
   # a name rather than a pattern.
   set -f
-  for remote_name in $(git remote); do
-    if git rev-parse --verify --quiet "refs/remotes/${remote_name}/$1" > /dev/null; then
-      printf '%s\n' "${remote_name}"
+  for remotes_with_branch_remote in $(git remote); do
+    if git rev-parse --verify --quiet \
+      "refs/remotes/${remotes_with_branch_remote}/$1" > /dev/null; then
+      printf '%s\n' "${remotes_with_branch_remote}"
     fi
   done
   set +f
 }
 
-# Usage: fetch_covers REMOTE BRANCH
-# Tests whether `git fetch REMOTE` would bring REMOTE's branch BRANCH into this
-# clone:  whether some configured fetch refspec of REMOTE maps it.
+# Usage: find_branch BRANCH
+# Looks for BRANCH: locally, as a remote-tracking branch of any remote, or on
+# ${REMOTE}.  On success it sets ${CHECKOUT_START_POINT} and
+# ${CHECKOUT_REMOTE} to say how the checkout below creates the branch.  The
+# local tests come first because they need no network access, and they succeed
+# in a repository that has no remote.
 #
-# REMOTE must be the name of one of this clone's remotes.  A URL or a pathname,
-# which git accepts wherever it accepts a remote's name, has no configured
-# refspecs at all, so this function would answer "not covered" for every branch
-# of one; the caller tests for that case with `is_remote_name` instead.
+# The exit status distinguishes the ways of not finding it, because the three
+# are different news for the user:  0 if the branch was found, 1 if no such
+# branch exists, 2 if ${REMOTE} could not be asked about it, and 3 if
+# ${REMOTE} has the branch but it could not be fetched.  Reporting an
+# unreachable remote as "no such branch" would assert something that was
+# never checked.
 #
-# A clone made by `git clone --single-branch`, or one whose refspecs were
-# narrowed by `git remote set-branches`, fetches only some of the remote's
-# branches.  There, no number of `git fetch REMOTE` runs brings in a branch
-# that the refspecs do not cover, so advice to run that command would send the
-# user around a loop that never terminates.
-fetch_covers() {
-  # The `while` loop below runs in a subshell, because it reads from a pipe, so
-  # it reports its answer as the subshell's exit status rather than by setting
-  # a variable.  The subshell is explicit:  a shell that runs the last stage of
-  # a pipeline in the current shell, as bash does with `lastpipe`, would
-  # otherwise let `exit` terminate this script.
-  git config --get-all "remote.$1.fetch" | (
-    fetch_covers_result=1
-    while IFS= read -r fetch_covers_refspec; do
-      # A refspec is [+]SOURCE:DESTINATION, or ^SOURCE for a negative refspec,
-      # which excludes what it matches.  Only the source matters here:  it is
-      # the pattern that the remote's refs are matched against.  In a refspec,
-      # "*" matches any substring, including one that contains "/", which is
-      # what an unquoted shell pattern does too.
-      case "${fetch_covers_refspec}" in
-        '^'*)
-          fetch_covers_negative='yes'
-          fetch_covers_source="${fetch_covers_refspec#^}"
-          ;;
-        *)
-          fetch_covers_negative='no'
-          fetch_covers_source="${fetch_covers_refspec#+}"
-          fetch_covers_source="${fetch_covers_source%%:*}"
-          ;;
-      esac
-      # shellcheck disable=SC2254  # The refspec's source is a pattern.
-      case "refs/heads/$2" in
-        ${fetch_covers_source})
-          if [ "${fetch_covers_negative}" = 'yes' ]; then
-            # An exclusion outranks any refspec that would have brought the
-            # branch in.
-            exit 1
-          fi
-          fetch_covers_result=0
-          ;;
-      esac
-    done
-    exit "${fetch_covers_result}"
-  )
-}
-
-# The remote whose remote-tracking branch the `git checkout` below will create
-# the branch from, or empty if this clone has a local branch of that name,
-# which `git checkout` checks out instead.
-CHECKOUT_REMOTE=''
-if ! git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
-  # These tests precede the copy of the working copy, so that a branch that
-  # cannot be checked out does not cost the user a full copy of the repository.
-  BRANCH_REMOTES="$(remotes_with_branch "${BRANCHNAME}")"
-  BRANCH_REMOTES_COUNT="$(printf '%s\n' "${BRANCH_REMOTES}" | grep -c '.')"
-  if [ "${BRANCH_REMOTES_COUNT}" -eq 1 ]; then
-    CHECKOUT_REMOTE="${BRANCH_REMOTES}"
-  elif [ "${BRANCH_REMOTES_COUNT}" -gt 1 ]; then
-    # Several remotes have a branch of this name, so the name alone does not
-    # say which one to check out.  `git checkout BRANCHNAME` fails on such a
-    # name -- "matched multiple remote tracking branches" -- and failing here
-    # rather than there both explains the problem and saves the copy.
-    #
-    # `checkout.defaultRemote` is git's own way to settle this, consulted by
-    # `git checkout` for exactly this purpose, so honor it.
-    CHECKOUT_DEFAULT_REMOTE="$(git config --get checkout.defaultRemote)"
-    if [ -n "${CHECKOUT_DEFAULT_REMOTE}" ] \
-      && printf '%s\n' "${BRANCH_REMOTES}" \
-      | grep -q -x -F -- "${CHECKOUT_DEFAULT_REMOTE}"; then
-      CHECKOUT_REMOTE="${CHECKOUT_DEFAULT_REMOTE}"
+# Every remote is consulted for a remote-tracking branch, not just ${REMOTE},
+# because `git checkout` creates the new local branch from a remote-tracking
+# branch of any remote.  Which remote's branch it is created from is decided
+# here rather than left to `git checkout BRANCHNAME`, whose own search fails
+# outright when several remotes have a remote-tracking branch of that name
+# ("matched multiple ... remote tracking branches").  Among several,
+# `checkout.defaultRemote` picks one, as it does for git's own search, and
+# otherwise ${REMOTE} does, being the remote that this clone fetches the
+# current branch from.  If neither picks one, the name is ambiguous, and
+# saying so is more use than either guessing or letting the checkout fail
+# after the copy.
+#
+# A branch that only ${REMOTE} has is fetched, not merely queried with
+# `ls-remote`.  A successful query does not make the checkout succeed:  the
+# checkout needs a ref in this clone, and there is none, or the
+# remote-tracking test above would have found it.  A clone made with
+# `--single-branch`, or with any other narrowed `remote.REMOTE.fetch`, is in
+# that state for every branch but the ones it fetches.
+#
+# `git_batch_ssh` disables the interactive prompts that would otherwise block
+# the query to the remote forever when this script is run from another script
+# or a CI job, as `git-new-branch` and `is-deleted-branch` do for their
+# queries.
+find_branch() {
+  if git rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
+    CHECKOUT_START_POINT=''
+    CHECKOUT_REMOTE=''
+    return 0
+  fi
+  find_branch_remotes="$(remotes_with_branch "$1")"
+  if [ -n "${find_branch_remotes}" ]; then
+    find_branch_chosen=''
+    find_branch_default="$(git config --get checkout.defaultRemote)"
+    if contains_line "${find_branch_remotes}" "${find_branch_default}"; then
+      find_branch_chosen="${find_branch_default}"
+    elif contains_line "${find_branch_remotes}" "${REMOTE}"; then
+      find_branch_chosen="${REMOTE}"
+    elif [ "$(printf '%s\n' "${find_branch_remotes}" | grep -c '.')" -eq 1 ]; then
+      find_branch_chosen="${find_branch_remotes}"
     else
-      BRANCH_REMOTES_LIST="$(printf '%s\n' "${BRANCH_REMOTES}" | tr '\n' ' ')"
-      echo "${SCRIPT_NAME}: ERROR: ${BRANCH_REMOTES_COUNT} remotes of this clone have a branch ${BRANCHNAME}: ${BRANCH_REMOTES_LIST% }" >&2
+      echo "${SCRIPT_NAME}: ERROR: branch $1 exists on several remotes of this clone, so which one to check out is ambiguous:" >&2
+      printf '%s\n' "${find_branch_remotes}" | sed "s/^/${SCRIPT_NAME}:   /" >&2
       echo "${SCRIPT_NAME}: Run \`git config checkout.defaultRemote REMOTE\` in ${TOPLEVEL} to choose one of them, then re-run ${SCRIPT_NAME}." >&2
       exit 1
     fi
-  else
-    # The branch cannot be checked out.  Saying why takes asking a remote,
-    # which the tests above did not need:  a branch that this clone does not
-    # hold may exist on the remote anyway, unfetched, and then the user's next
-    # step is to fetch it rather than to create it.
-    #
-    # Determine which remote to ask:  the remote that `git push` would use for
-    # the current branch, as `push_remote` in remote-functions.sh determines
-    # it, which is also the remote that this package's other commands use.
-    # Asking only the remote named "origin", as this script once did, asked no
-    # remote at all in a clone whose sole remote has some other name, and then
-    # reported that the branch does not exist.
-    BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
-    REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
-
-    # `git ls-remote --exit-code` exits with status 2 if the remote has no such
-    # branch, and with some other nonzero status if the remote could not be
-    # asked at all, which is not the same thing.  `git_batch_ssh` disables the
-    # interactive prompts that would otherwise block this query forever when
-    # this script is run from another script or a CI job.
-    REMOTE_HAS_BRANCH='unknown'
-    if [ -n "${REMOTE}" ]; then
-      git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/${BRANCHNAME}" \
-        > /dev/null 2>&1
-      case "$?" in
-        0) REMOTE_HAS_BRANCH='yes' ;;
-        2) REMOTE_HAS_BRANCH='no' ;;
-      esac
+    CHECKOUT_START_POINT="${find_branch_chosen}/$1"
+    CHECKOUT_REMOTE="${find_branch_chosen}"
+    return 0
+  fi
+  if [ -z "${REMOTE}" ]; then
+    return 1
+  fi
+  # `git ls-remote --exit-code` exits with status 2 if the remote has no such
+  # branch, and with some other nonzero status if the remote could not be
+  # asked at all, which is not the same thing.
+  git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/$1" > /dev/null 2>&1
+  case "$?" in
+    0) ;;
+    2) return 1 ;;
+    *) return 2 ;;
+  esac
+  if is_remote_name . "${REMOTE}"; then
+    # A named remote has a remote-tracking namespace, so fetch the branch into
+    # it, leaving this clone in the state that a clone which had already
+    # fetched the branch is in.
+    if ! git_batch_ssh . fetch -q "${REMOTE}" \
+      "refs/heads/$1:refs/remotes/${REMOTE}/$1"; then
+      return 3
     fi
+    CHECKOUT_START_POINT="${REMOTE}/$1"
+  else
+    # ${REMOTE} is a URL or a pathname, which `branch.BRANCH.remote` and
+    # `remote.pushDefault` also accept.  Such a remote has no remote-tracking
+    # namespace, so a fetch from it records the branch only in FETCH_HEAD.
+    if ! git_batch_ssh . fetch -q "${REMOTE}" "refs/heads/$1"; then
+      return 3
+    fi
+    CHECKOUT_START_POINT='FETCH_HEAD'
+  fi
+  CHECKOUT_REMOTE="${REMOTE}"
+  return 0
+}
 
-    if [ "${REMOTE_HAS_BRANCH}" = 'yes' ]; then
-      echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} exists on remote ${REMOTE}, but this clone has not fetched it." >&2
-      if ! is_remote_name . "${REMOTE}"; then
-        # ${REMOTE} is the URL or the pathname of a repository rather than one
-        # of this clone's remotes, which is what the configuration says about
-        # this branch; see `push_remote` in remote-functions.sh.  Neither
-        # command below applies to such a value:  `git remote set-branches`
-        # fails on it ("No such remote"), and `git fetch URL` leaves the fetched
-        # commits in FETCH_HEAD without creating the remote-tracking branch
-        # that `git checkout` needs.  Configuring a remote for the repository
-        # is what makes those commands work.
-        echo "${SCRIPT_NAME}: ${REMOTE} is not one of this clone's remotes, so \`git fetch\` records no remote-tracking branch for it." >&2
-        echo "${SCRIPT_NAME}: Run \`git remote add NAME ${REMOTE}\` and then \`git fetch NAME\` in ${TOPLEVEL}, then re-run ${SCRIPT_NAME}." >&2
-      elif fetch_covers "${REMOTE}" "${BRANCHNAME}"; then
-        echo "${SCRIPT_NAME}: Run \`git fetch ${REMOTE}\` in ${TOPLEVEL}, then re-run ${SCRIPT_NAME}." >&2
-      else
-        # This clone does not fetch that branch at all, so plain
-        # `git fetch REMOTE` would change nothing and the user would arrive
-        # right back here.  Advise widening the clone's refspec rather than a
-        # one-off `git fetch REMOTE BRANCH:refs/remotes/REMOTE/BRANCH`:  git
-        # records an upstream only for a branch that the clone fetches, so the
-        # one-off fetch yields a branch with no upstream, and this package's
-        # other commands then have no remote to work with.
-        echo "${SCRIPT_NAME}: This clone's fetch configuration for ${REMOTE} does not cover ${BRANCHNAME}, so \`git fetch ${REMOTE}\` alone would not bring it in." >&2
-        echo "${SCRIPT_NAME}: Run \`git remote set-branches --add ${REMOTE} ${BRANCHNAME}\` and then \`git fetch ${REMOTE}\` in ${TOPLEVEL}, then re-run ${SCRIPT_NAME}." >&2
-      fi
-    elif [ "${REMOTE_HAS_BRANCH}" = 'no' ]; then
+# This test precedes the copy of the working copy, so that a branch that
+# cannot be checked out does not cost the user a full copy of the repository.
+find_branch "${BRANCHNAME}"
+case "$?" in
+  0) ;;
+  2)
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, and remote ${REMOTE} could not be asked about it." >&2
+    exit 1
+    ;;
+  3)
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} exists on remote ${REMOTE}, but it could not be fetched into this clone." >&2
+    exit 1
+    ;;
+  *)
+    if [ -n "${REMOTE}" ]; then
       # Name the remote that was asked.  A clone can have other remotes, whose
-      # branches this script did not ask about and whose refs it did not find
-      # above, so a bare "does not exist" would claim more than was checked.
-      echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone or on remote ${REMOTE}." >&2
-    elif [ -z "${REMOTE}" ]; then
-      echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, which determines no remote to ask about it." >&2
+      # branches this script did not ask about, so a bare "does not exist"
+      # would claim more than was checked.
+      echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist, locally or on remote ${REMOTE}." >&2
     else
-      echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, and remote ${REMOTE} could not be asked about it." >&2
+      echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, which determines no remote to ask about it." >&2
     fi
     exit 1
-  fi
-fi
+    ;;
+esac
 
 if [ -e "${BRANCHDIR}" ]; then
   echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
@@ -322,35 +320,37 @@ if ! \cp -Rp -- . "${BRANCH_TMPDIR}"; then
   echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
   exit 1
 fi
-# Usage: run_checkout ARGUMENT...
-# Runs `git checkout ARGUMENT...` in ${BRANCH_TMPDIR}, and exits this script if
-# that fails, after reporting the command that failed.
-run_checkout() {
-  if ! (cd -- "${BRANCH_TMPDIR}" && git checkout "$@"); then
-    echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout $*)" >&2
+# Create the branch from the start point that `find_branch` chose, rather than
+# letting `git checkout BRANCHNAME` search for one:  git's search fails when
+# several remotes have a remote-tracking branch of that name, and it finds
+# nothing at all in a clone whose narrowed fetch refspec keeps the branch out
+# of the remote-tracking namespace.
+if [ -z "${CHECKOUT_START_POINT}" ]; then
+  set -- checkout -q "${BRANCHNAME}"
+else
+  set -- checkout -q -b "${BRANCHNAME}" "${CHECKOUT_START_POINT}"
+fi
+if ! (cd -- "${BRANCH_TMPDIR}" && git "$@"); then
+  echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git $*)" >&2
+  exit 1
+fi
+
+# Give the new branch an upstream, which `git-push-to` and `git-pull-from`
+# require, if the checkout did not.  Creating a branch from a remote-tracking
+# start point sets one up, honoring `branch.autoSetupMerge` and
+# `branch.autoSetupRebase` as git does elsewhere, but git can find no remote
+# for a start point that no fetch refspec maps -- FETCH_HEAD, or a
+# remote-tracking branch in a clone made with `--single-branch` -- and then it
+# says nothing and sets nothing.  These are the two settings that it would
+# have written; git accepts a URL or a pathname in the first of them, as
+# `git push --set-upstream ../other.git BRANCH` writes there.
+if [ -n "${CHECKOUT_REMOTE}" ] \
+  && [ -z "$(git -C "${BRANCH_TMPDIR}" config --get "branch.${BRANCHNAME}.remote")" ]; then
+  if ! git -C "${BRANCH_TMPDIR}" config "branch.${BRANCHNAME}.remote" "${CHECKOUT_REMOTE}" \
+    || ! git -C "${BRANCH_TMPDIR}" config "branch.${BRANCHNAME}.merge" "refs/heads/${BRANCHNAME}"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot configure ${CHECKOUT_REMOTE} as the upstream of ${BRANCHNAME} in ${BRANCH_TMPDIR}" >&2
     exit 1
   fi
-}
-
-if [ -z "${CHECKOUT_REMOTE}" ]; then
-  run_checkout "${BRANCHNAME}" -q
-elif fetch_covers "${CHECKOUT_REMOTE}" "${BRANCHNAME}"; then
-  # Name the remote-tracking branch to create the branch from, rather than
-  # letting `git checkout BRANCHNAME` search for one:  that search fails when
-  # more than one remote has a branch of this name, and the choice among them
-  # was already made above.
-  run_checkout -q -b "${BRANCHNAME}" --track "${CHECKOUT_REMOTE}/${BRANCHNAME}"
-else
-  # This clone holds the remote-tracking branch but does not fetch that branch,
-  # as happens when someone fetched the branch once into a clone whose refspecs
-  # do not cover it.  Git records an upstream only for a branch that the clone
-  # fetches, so `--track` fails here ("not a branch"), and plain
-  # `git checkout BRANCHNAME` does not find the ref at all.  Create the branch
-  # from the ref anyway -- it is the commit that the user asked for -- and say
-  # what the branch lacks and how to supply it.
-  run_checkout -q -b "${BRANCHNAME}" "${CHECKOUT_REMOTE}/${BRANCHNAME}"
-  echo "${SCRIPT_NAME}: warning: branch ${BRANCHNAME} has no upstream: this clone does not fetch ${BRANCHNAME} from ${CHECKOUT_REMOTE}." >&2
-  echo "${SCRIPT_NAME}: To set one, run \`git remote set-branches --add ${CHECKOUT_REMOTE} ${BRANCHNAME}\` and then \`git branch --set-upstream-to ${CHECKOUT_REMOTE}/${BRANCHNAME}\` in ${BRANCHDIR}." >&2
 fi
 
 if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then

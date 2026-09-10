@@ -8,6 +8,11 @@
 #
 # The new branch is in a new directory that has the same directory
 # contents as the current repository.
+#
+# Every effect of this script is local:  it never contacts a remote except to
+# read from it, and in particular it does not push the new branch.  Therefore,
+# the new branch has no upstream branch, which `git-push-to` and
+# `git-pull-from` require.
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
@@ -127,11 +132,7 @@ fi
 # `is-deleted-branch` and `git-push-to` use.  The new branch has no
 # configuration of its own yet -- `git checkout -b` creates none -- and the new
 # working copy is a copy of this one, so this branch's configuration is what
-# says where the new branch will be pushed.
-#
-# Asking only the remote named "origin", as this script once did, asked no
-# remote at all in a clone whose sole remote has some other name, so the check
-# silently passed there.
+# says which remote the new branch would eventually be pushed to.
 #
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
 # asked, and only the local tests in `branch_exists` apply.
@@ -139,9 +140,18 @@ BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
 REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 
 # Succeeds if the given branch exists:  locally, as a remote-tracking branch of
-# ${REMOTE}, or on ${REMOTE} itself.  The local tests come first because they
-# need no network access, and because `git checkout -b` fails on a local branch
-# even when the remote has no branch of that name.
+# a remote, or on ${REMOTE} itself.  The local branch is tested first because
+# the test needs no network access, and because `git checkout -b` fails on a
+# local branch even when the remote has no branch of that name.
+#
+# When no remote can be determined, every remote is consulted for a
+# remote-tracking branch of that name.  Any remote of this clone could be the
+# one that the new branch is eventually pushed to -- that is just what having
+# determined none means -- and a remote-tracking branch is evidence that a
+# remote already has a branch of this name, so it is the only evidence
+# available and it costs no network access.  Skipping it would abandon the
+# collision check in exactly the clone that this script itself creates, since
+# `git checkout -b` writes no `branch.BRANCH.remote` for the new branch.
 #
 # `git_batch_ssh` disables the interactive prompts that would otherwise block
 # the query to the remote forever when this script is run from another script
@@ -152,6 +162,12 @@ branch_exists() {
     return 0
   fi
   if [ -z "${REMOTE}" ]; then
+    for branch_exists_remote in $(git remote); do
+      if git rev-parse --verify --quiet \
+        "refs/remotes/${branch_exists_remote}/$1" > /dev/null; then
+        return 0
+      fi
+    done
     return 1
   fi
   if git rev-parse --verify --quiet "refs/remotes/${REMOTE}/$1" > /dev/null; then

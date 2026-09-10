@@ -160,9 +160,9 @@ check_upstream() {
   if [ -n "${push_remote_name}" ]; then
     echo "${SCRIPT_NAME}: to give it one, cd to that directory and run: git push --set-upstream '${push_remote_name}' '${branch}'" >&2
   elif [ -z "${remotes}" ]; then
-    echo "${SCRIPT_NAME}: that clone has no remote, so first add one (\`git remote add ...\`), then cd to that directory and run: git push --set-upstream REMOTE '${branch}'" >&2
+    echo "${SCRIPT_NAME}: that clone has no remote, so first add one (\`git remote add ...\`), then cd to that directory and push branch ${branch} to it with \`git push --set-upstream\`" >&2
   else
-    echo "${SCRIPT_NAME}: that clone has several remotes and none is named origin, so cd to that directory and run: git push --set-upstream REMOTE '${branch}', where REMOTE is one of:" >&2
+    echo "${SCRIPT_NAME}: that clone has several remotes and none is named origin, so cd to that directory and push branch ${branch} with \`git push --set-upstream\`, naming one of these remotes:" >&2
     printf '%s\n' "${remotes}" | sed "s/^/${SCRIPT_NAME}:   /" >&2
   fi
   return 1
