@@ -83,6 +83,20 @@ remote_is_usable() {
   return 1
 }
 
+## Usage: is_remote_name DIRECTORY NAME
+## Tests whether NAME is the name of a remote of the clone in DIRECTORY, as
+## opposed to the URL or the pathname of a repository, which git accepts
+## wherever it accepts a remote's name and which `push_remote` and
+## `fetch_remote` therefore report when that is what the configuration says.
+##
+## A command that requires the name of a remote, such as
+## `git remote set-branches`, fails on a URL or a pathname ("No such remote"),
+## and `git fetch URL` records no remote-tracking branch, so advice that names
+## one must be worded differently.
+is_remote_name() {
+  git -C "$1" remote | grep -q -x -F -- "$2"
+}
+
 ## Usage: remote_consider NAME
 ## A helper for `push_remote` and `fetch_remote`:  sets ${remote_result} to
 ## NAME if ${remote_result} is not set yet and NAME is a remote that the clone

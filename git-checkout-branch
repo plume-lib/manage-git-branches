@@ -147,6 +147,10 @@ REMOTE="$(fetch_remote . "${BRANCH_REF#refs/heads/}")"
 CHECKOUT_START_POINT=''
 CHECKOUT_REMOTE=''
 
+# What the remote said when `find_branch` could not ask it about the branch,
+# empty if it said nothing.
+REMOTE_QUERY_ERROR=''
+
 ## Usage: contains_line LINES LINE
 ## Succeeds if LINE is one of the lines of LINES.  A LINE that is empty is
 ## never one of them, because it names nothing.
@@ -161,26 +165,45 @@ contains_line() {
 ## Prints the name of each remote of this clone that has the remote-tracking
 ## branch REMOTE/BRANCH here, one per line.
 ##
-## `HEAD` is excluded because a clone has a symbolic ref
-## `refs/remotes/origin/HEAD` that names origin's default branch; it resolves,
-## but `HEAD` is not the name of a branch.
+## "HEAD" is excluded:  a clone has a symbolic ref `refs/remotes/REMOTE/HEAD`
+## that names the remote's default branch, so that ref resolves, but "HEAD" is
+## not the name of a branch.
 remotes_with_branch() {
-  if [ "$1" = "HEAD" ]; then
+  if [ "$1" = 'HEAD' ]; then
     return 0
   fi
+  # Ask about each remote separately, rather than matching a pattern against
+  # every remote-tracking ref:  both a remote's name and a branch's name may
+  # contain "/", so the name of such a ref does not by itself say where the
+  # remote's name ends and the branch's name begins.  A remote's name contains
+  # no whitespace, so the shell's word splitting separates the names here.
+  # Pathname expansion is disabled around the loop, because a remote's name is
+  # a name rather than a pattern.
+  set -f
   for remotes_with_branch_remote in $(git remote); do
     if git rev-parse --verify --quiet \
       "refs/remotes/${remotes_with_branch_remote}/$1" > /dev/null; then
       printf '%s\n' "${remotes_with_branch_remote}"
     fi
   done
+  set +f
 }
 
-# Succeeds if the given branch exists: locally, as a remote-tracking branch of
-# any remote, or on ${REMOTE}; then it sets ${CHECKOUT_START_POINT} and
+# Usage: find_branch BRANCH
+# Looks for BRANCH: locally, as a remote-tracking branch of any remote, or on
+# ${REMOTE}.  On success it sets ${CHECKOUT_START_POINT} and
 # ${CHECKOUT_REMOTE} to say how the checkout below creates the branch.  The
 # local tests come first because they need no network access, and they succeed
 # in a repository that has no remote.
+#
+# The exit status distinguishes the ways of not finding it, because the three
+# are different news for the user:  0 if the branch was found, 1 if no such
+# branch exists, 2 if ${REMOTE} could not be asked about it, and 3 if
+# ${REMOTE} has the branch but it could not be fetched.  Reporting an
+# unreachable remote as "no such branch" would assert something that was
+# never checked.  On status 2 it also sets ${REMOTE_QUERY_ERROR} to what the
+# remote said, so that the caller can report why the remote could not be
+# asked.
 #
 # Every remote is consulted for a remote-tracking branch, not just ${REMOTE},
 # because `git checkout` creates the new local branch from a remote-tracking
@@ -224,7 +247,7 @@ find_branch() {
     else
       echo "${SCRIPT_NAME}: ERROR: branch $1 exists on several remotes of this clone, so which one to check out is ambiguous:" >&2
       printf '%s\n' "${find_branch_remotes}" | sed "s/^/${SCRIPT_NAME}:   /" >&2
-      echo "${SCRIPT_NAME}: Set checkout.defaultRemote to the one you want, then re-run ${SCRIPT_NAME}." >&2
+      echo "${SCRIPT_NAME}: Run \`git config checkout.defaultRemote REMOTE\` in ${TOPLEVEL} to choose one of them, then re-run ${SCRIPT_NAME}." >&2
       exit 1
     fi
     CHECKOUT_START_POINT="${find_branch_chosen}/$1"
@@ -234,16 +257,31 @@ find_branch() {
   if [ -z "${REMOTE}" ]; then
     return 1
   fi
-  if ! git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/$1" > /dev/null 2>&1; then
-    return 1
-  fi
-  if contains_line "$(git remote)" "${REMOTE}"; then
+  # `git ls-remote --exit-code` exits with status 2 if the remote has no such
+  # branch, and with some other nonzero status if the remote could not be
+  # asked at all, which is not the same thing.
+  #
+  # Keep the query's standard error, which says why the remote could not be
+  # asked:  the diagnostic for that case reports only that it could not, and
+  # the reason is what the user acts on.  A key that needs a passphrase, for
+  # instance, works for the interactive `git pull` above and then fails this
+  # query with "Permission denied (publickey)", because the query disables the
+  # prompts.  The query's standard output is the matching refs, which the exit
+  # status already reports, so discard it.
+  REMOTE_QUERY_ERROR="$(git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
+    "refs/heads/$1" 2>&1 > /dev/null)"
+  case "$?" in
+    0) ;;
+    2) return 1 ;;
+    *) return 2 ;;
+  esac
+  if is_remote_name . "${REMOTE}"; then
     # A named remote has a remote-tracking namespace, so fetch the branch into
     # it, leaving this clone in the state that a clone which had already
     # fetched the branch is in.
     if ! git_batch_ssh . fetch -q "${REMOTE}" \
       "refs/heads/$1:refs/remotes/${REMOTE}/$1"; then
-      return 1
+      return 3
     fi
     CHECKOUT_START_POINT="${REMOTE}/$1"
   else
@@ -251,7 +289,7 @@ find_branch() {
     # `remote.pushDefault` also accept.  Such a remote has no remote-tracking
     # namespace, so a fetch from it records the branch only in FETCH_HEAD.
     if ! git_batch_ssh . fetch -q "${REMOTE}" "refs/heads/$1"; then
-      return 1
+      return 3
     fi
     CHECKOUT_START_POINT='FETCH_HEAD'
   fi
@@ -259,14 +297,34 @@ find_branch() {
   return 0
 }
 
-if ! find_branch "${BRANCHNAME}"; then
-  if [ -n "${REMOTE}" ]; then
-    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist, locally or on remote ${REMOTE}." >&2
-  else
-    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone." >&2
-  fi
-  exit 1
-fi
+# This test precedes the copy of the working copy, so that a branch that
+# cannot be checked out does not cost the user a full copy of the repository.
+find_branch "${BRANCHNAME}"
+case "$?" in
+  0) ;;
+  2)
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, and remote ${REMOTE} could not be asked about it." >&2
+    if [ -n "${REMOTE_QUERY_ERROR}" ]; then
+      echo "${REMOTE_QUERY_ERROR}" >&2
+    fi
+    exit 1
+    ;;
+  3)
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} exists on remote ${REMOTE}, but it could not be fetched into this clone." >&2
+    exit 1
+    ;;
+  *)
+    if [ -n "${REMOTE}" ]; then
+      # Name the remote that was asked.  A clone can have other remotes, whose
+      # branches this script did not ask about, so a bare "does not exist"
+      # would claim more than was checked.
+      echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist, locally or on remote ${REMOTE}." >&2
+    else
+      echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, which determines no remote to ask about it." >&2
+    fi
+    exit 1
+    ;;
+esac
 
 if [ -e "${BRANCHDIR}" ]; then
   echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2

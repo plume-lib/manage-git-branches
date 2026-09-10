@@ -1,14 +1,6 @@
 #!/bin/sh
 
-# Tests `remote_is_usable`, `push_remote`, and `fetch_remote` in
-# remote-functions.sh, which decide which remote this package's commands ask
-# about a branch.  A wrong answer is not visible in the commands' output:  it
-# makes them ask some other repository, which can report that a branch that
-# still exists was deleted.  Also tests `conflict_abort_command` and
-# `conflict_continue_command`, which the same file provides for the same
-# commands:  they name the commands that end or resume the operation that a
-# failed pull left in progress, and a wrong name is a command that the user
-# runs and that fails.
+# Tests the functions in remote-functions.sh.
 #
 # Usage:
 #   tests/test-remote-functions.sh
@@ -172,6 +164,19 @@ git -C "${WORK_DIR}/clone" config branch.main.remote 'team/fork'
 remote="$(push_remote "${WORK_DIR}/clone" main)"
 if [ "${remote}" != 'origin' ]; then
   fail "push_remote reported [${remote}] for a branch whose remote is a name containing a slash"
+fi
+
+# `is_remote_name` distinguishes the two kinds of value that `push_remote`
+# reports, so that advice which requires the name of a remote is given only
+# where such a command would work.
+if ! is_remote_name "${WORK_DIR}/clone" 'origin'; then
+  fail 'is_remote_name said that "origin" is not a remote of the clone'
+fi
+if is_remote_name "${WORK_DIR}/clone" '../mirrors/other.git'; then
+  fail 'is_remote_name said that a pathname is a remote of the clone'
+fi
+if is_remote_name "${WORK_DIR}/clone" 'fork'; then
+  fail 'is_remote_name said that a name the clone lacks is a remote of it'
 fi
 
 # A directory in the working tree does not make the name of a remote that the
