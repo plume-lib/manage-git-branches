@@ -136,8 +136,9 @@ case "${output}" in
   *) fail "git-push-to did not explain that it could not choose a remote: ${output}" ;;
 esac
 case "${output}" in
-  *"--set-upstream 'REMOTE'"*)
-    fail "git-push-to recommended a command that names a placeholder remote: ${output}" ;;
+  *"--set-upstream REMOTE"* | *"--set-upstream 'REMOTE'"*)
+    fail "git-push-to recommended a command that names a placeholder remote: ${output}"
+    ;;
 esac
 case "${output}" in
   *"  github"*) ;;
@@ -156,8 +157,13 @@ case "${output}" in
   *) fail "git-push-to did not explain that the clone has no remote: ${output}" ;;
 esac
 case "${output}" in
-  *"--set-upstream 'REMOTE'"*)
-    fail "git-push-to recommended a command that names a placeholder remote: ${output}" ;;
+  *"--set-upstream REMOTE"* | *"--set-upstream 'REMOTE'"*)
+    fail "git-push-to recommended a command that names a placeholder remote: ${output}"
+    ;;
+esac
+case "${output}" in
+  *"git remote add"*) ;;
+  *) fail "git-push-to did not say to add a remote first: ${output}" ;;
 esac
 
 # A subdirectory of a working copy is a git repository, so saying merely "not a

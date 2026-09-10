@@ -66,14 +66,28 @@ remote_is_usable() {
   return 1
 }
 
-## Usage: push_remote_consider NAME
-## A helper for `push_remote`:  sets ${push_remote_result} to NAME if
-## ${push_remote_result} is not set yet and NAME is a remote that the clone in
-## ${push_remote_dir} can contact.
-push_remote_consider() {
-  if [ -z "${push_remote_result}" ] \
-    && remote_is_usable "${push_remote_dir}" "${push_remote_remotes}" "$1"; then
-    push_remote_result="$1"
+## Usage: remote_consider NAME
+## A helper for `push_remote` and `fetch_remote`:  sets ${remote_result} to
+## NAME if ${remote_result} is not set yet and NAME is a remote that the clone
+## in ${remote_dir} can contact.
+remote_consider() {
+  if [ -z "${remote_result}" ] \
+    && remote_is_usable "${remote_dir}" "${remote_remotes}" "$1"; then
+    remote_result="$1"
+  fi
+}
+
+## Usage: remote_consider_sole
+## A helper for `push_remote` and `fetch_remote`:  sets ${remote_result} to
+## the sole remote of the clone in ${remote_dir}, if ${remote_result} is not
+## set yet and that clone has exactly one remote.  Such a clone has no remote
+## named "origin", because `remote_consider origin` would have accepted it,
+## but its one remote is the only remote that any branch of it could come
+## from or go to.
+remote_consider_sole() {
+  if [ -z "${remote_result}" ] \
+    && [ "$(printf '%s\n' "${remote_remotes}" | grep -c '.')" -eq 1 ]; then
+    remote_result="${remote_remotes}"
   fi
 }
 
@@ -95,26 +109,52 @@ push_remote_consider() {
 ## fork.  Letting that default outrank this branch's own upstream would discard
 ## what this clone records about the branch.
 push_remote() {
-  push_remote_dir="$1"
-  push_remote_branch="$2"
-  push_remote_remotes="$(git -C "${push_remote_dir}" remote)"
-  push_remote_result=''
-  if [ -n "${push_remote_branch}" ]; then
-    push_remote_consider \
-      "$(git -C "${push_remote_dir}" config --get "branch.${push_remote_branch}.pushRemote")"
-    push_remote_consider \
-      "$(git -C "${push_remote_dir}" config --get "branch.${push_remote_branch}.remote")"
+  remote_dir="$1"
+  remote_branch="$2"
+  remote_remotes="$(git -C "${remote_dir}" remote)"
+  remote_result=''
+  if [ -n "${remote_branch}" ]; then
+    remote_consider \
+      "$(git -C "${remote_dir}" config --get "branch.${remote_branch}.pushRemote")"
+    remote_consider \
+      "$(git -C "${remote_dir}" config --get "branch.${remote_branch}.remote")"
   fi
-  push_remote_consider "$(git -C "${push_remote_dir}" config --get remote.pushDefault)"
+  remote_consider "$(git -C "${remote_dir}" config --get remote.pushDefault)"
   # Git uses the remote named "origin" when no configuration names a remote.
-  push_remote_consider 'origin'
-  if [ -z "${push_remote_result}" ] \
-    && [ "$(printf '%s\n' "${push_remote_remotes}" | grep -c '.')" -eq 1 ]; then
-    # The clone has no remote named "origin", but it has exactly one other
-    # remote, which is therefore the only remote the branch could be pushed to.
-    push_remote_result="${push_remote_remotes}"
+  remote_consider 'origin'
+  remote_consider_sole
+  printf '%s\n' "${remote_result}"
+}
+
+## Usage: fetch_remote DIRECTORY BRANCH
+## Prints the name of the remote that `git fetch` in DIRECTORY would use for
+## BRANCH, or nothing if the clone in DIRECTORY determines no remote for it.
+## BRANCH may be empty, which means that no branch is checked out (HEAD is
+## detached), so only the clone's branch-independent configuration applies.
+##
+## The order is `branch.BRANCH.remote`, then "origin", then the clone's only
+## remote if it has exactly one.  A value that names a remote the clone cannot
+## contact does not count; see `remote_is_usable`.
+##
+## This is not `push_remote`, and a command that reads from a remote must not
+## use that one.  `branch.BRANCH.pushRemote` and `remote.pushDefault` say
+## where a branch is pushed and say nothing about where the clone's branches
+## come from; in the fork workflow they name the user's fork, while the
+## project's branches are fetched from a different remote.  Asking the fork
+## whether some branch of the project exists gets the wrong answer.
+fetch_remote() {
+  remote_dir="$1"
+  remote_branch="$2"
+  remote_remotes="$(git -C "${remote_dir}" remote)"
+  remote_result=''
+  if [ -n "${remote_branch}" ]; then
+    remote_consider \
+      "$(git -C "${remote_dir}" config --get "branch.${remote_branch}.remote")"
   fi
-  printf '%s\n' "${push_remote_result}"
+  # Git uses the remote named "origin" when no configuration names a remote.
+  remote_consider 'origin'
+  remote_consider_sole
+  printf '%s\n' "${remote_result}"
 }
 
 ## Usage: ssh_variant_of PROGRAM
@@ -151,8 +191,10 @@ git_batch_ssh() {
   if [ -z "${GIT_SSH_COMMAND:-}" ]; then
     unset GIT_SSH_COMMAND
   fi
-  git_batch_ssh_command="${GIT_SSH_COMMAND:-$(git -C "${git_batch_ssh_dir}" config --get core.sshCommand)}"
-  git_batch_ssh_variant="${GIT_SSH_VARIANT:-$(git -C "${git_batch_ssh_dir}" config --get ssh.variant)}"
+  # `git config --get` exits 1 when the key is not set, which is not a
+  # failure here but would abort a caller that runs under `set -e`.
+  git_batch_ssh_command="${GIT_SSH_COMMAND:-$(git -C "${git_batch_ssh_dir}" config --get core.sshCommand || true)}"
+  git_batch_ssh_variant="${GIT_SSH_VARIANT:-$(git -C "${git_batch_ssh_dir}" config --get ssh.variant || true)}"
 
   # The variant that ${git_batch_ssh_option} belongs to.
   git_batch_ssh_resolved_variant=''

@@ -27,8 +27,11 @@ The commands are:
 * [`git-checkout-branch`](git-checkout-branch) `BRANCHNAME`:
   Checks out the given branch of the repository in a new working copy
   directory.  Run this command from within a working copy; the new directory
-  is a sibling of the working copy.  Below is a definition for an alias
-  `gcb`.
+  is a sibling of the working copy.  The branch may exist locally, in any
+  remote that this working copy has fetched from, or in the remote that
+  `git fetch` would use for the current branch; the command asks that remote
+  when the working copy itself shows no such branch.  Below is a definition
+  for an alias `gcb`.
 * [`git-new-branch`](git-new-branch) `BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   copy directory.  Run this command from within a working copy; the new
