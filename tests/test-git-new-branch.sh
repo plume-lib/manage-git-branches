@@ -154,6 +154,50 @@ if [ ! -d "${tmpdir}/tworemotes-branch-onlyfork" ]; then
   fail "directory was not created: ${tmpdir}/tworemotes-branch-onlyfork"
 fi
 
+# `HEAD` is not the name of a branch, even though a clone has a symbolic ref
+# `refs/remotes/origin/HEAD` that resolves.  It is rejected before the working
+# copy is copied, and with a diagnosis rather than a raw `git checkout`
+# failure.
+if out="$(cd "${clone}" && "${GIT_NEW_BRANCH}" HEAD 2>&1)"; then
+  fail "zero exit status for HEAD"
+fi
+case "${out}" in
+  *"git-new-branch: ERROR: HEAD is not the name of a branch."*) ;;
+  *) fail "unexpected message for HEAD: ${out}" ;;
+esac
+for leftover in "${tmpdir}/myclone-branch-HEAD" "${tmpdir}/myclone-branch-HEAD-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "directory was created for HEAD: ${leftover}"
+  fi
+done
+
+# Every remote operation disables SSH's own interactive prompts, as the README
+# promises:  the `git pull` that brings the working copy up to date as well as
+# the query that asks the remote about the branch name.  Their output is
+# captured or discarded, so a prompt for an unknown host key or for the
+# passphrase of a key would be invisible and would block forever.  The fake
+# `ssh` records the arguments of each invocation and then fails, so both
+# operations fail; neither failure is fatal, and what this checks is the
+# options they passed.
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+sshclone="${tmpdir}/sshclone-branch-main"
+git clone -q "${repo}" "${sshclone}"
+use_fake_ssh "${sshclone}" "${tmpdir}/ssh-arguments"
+if ! out="$(cd "${sshclone}" && "${GIT_NEW_BRANCH}" sshnew 2>&1)"; then
+  fail "nonzero exit status when the remote is unreachable: ${out}"
+fi
+if [ ! -d "${tmpdir}/sshclone-branch-sshnew" ]; then
+  fail "directory was not created when the remote is unreachable"
+fi
+ssh_invocations="$(grep -c '.' "${tmpdir}/ssh-arguments" || true)"
+if [ "${ssh_invocations}" -lt 2 ]; then
+  fail "expected the pull and the query to invoke ssh, got ${ssh_invocations} invocation(s)"
+fi
+if grep -v -- '-o BatchMode=yes' "${tmpdir}/ssh-arguments" | grep -q '.'; then
+  fail "an ssh invocation did not disable SSH's prompts: $(cat "${tmpdir}/ssh-arguments")"
+fi
+
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then
   fail "zero exit status when given no argument"
