@@ -1,7 +1,8 @@
 #!/bin/sh
 
-# Tests that a working copy created by `git-new-branch` can be used by
-# `git-push-to`, which is the workflow that the README describes.
+# Tests that a working copy created by `git-new-branch`, once its branch has
+# been given an upstream, can be used by `git-push-to`, which is the workflow
+# that the README describes.
 #
 # Usage:
 #   tests/test-new-branch-push-to.sh
@@ -59,6 +60,13 @@ if ! (cd "${MAIN_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature1); then
 fi
 if [ ! -d "${FEATURE_DIR}" ]; then
   fail "git-new-branch did not create ${FEATURE_DIR}"
+fi
+
+# `git-new-branch` pushes nothing, so the new branch has no upstream branch
+# until the user creates one, as the README says to do.  `git-push-to` and
+# `git-pull-from` need one.
+if ! git -C "${FEATURE_DIR}" push -q --set-upstream origin feature1; then
+  fail "cannot give the new branch an upstream"
 fi
 
 # Commit a change in the main branch, to be propagated to the new branch.
@@ -248,50 +256,18 @@ case "${output}" in
   *) fail "git-push-to did not prefer the branch's own remote to remote.pushDefault: ${output}" ;;
 esac
 
-# `git-new-branch` pushes the new branch to the remote that it asked about the
-# branch, which is the remote that `git push` would use for the current
-# branch.  Pushing to "origin" instead, as this script once did, pushed to a
-# repository that the collision check had not asked about:  a branch that
-# exists there rejects the push after the whole working copy has been copied,
-# which is the cost that the check exists to avoid.
-FORK="${WORK_DIR}/fork.git"
-git init -q --bare -b main "${FORK}"
-PUSHREMOTE_DIR="${WORK_DIR}/pushremote"
-git clone -q "${REMOTE}" "${PUSHREMOTE_DIR}"
-git -C "${PUSHREMOTE_DIR}" remote add fork "${FORK}"
-git -C "${PUSHREMOTE_DIR}" config branch.main.pushRemote fork
-if ! output="$(cd "${PUSHREMOTE_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature4 2>&1)"; then
-  fail "git-new-branch failed in a clone whose push remote is not origin: ${output}"
-fi
-if ! git -C "${FORK}" rev-parse --verify --quiet refs/heads/feature4 > /dev/null; then
-  fail "git-new-branch did not push feature4 to the branch's push remote: ${output}"
-fi
-if git -C "${REMOTE}" rev-parse --verify --quiet refs/heads/feature4 > /dev/null; then
-  fail "git-new-branch pushed feature4 to origin rather than to the push remote"
-fi
-upstream="$(git -C "${WORK_DIR}/pushremote-branch-feature4" \
-  rev-parse --symbolic-full-name '@{upstream}' 2> /dev/null || true)"
-if [ "${upstream}" != 'refs/remotes/fork/feature4' ]; then
-  fail "the new working copy's upstream is [${upstream}], not refs/remotes/fork/feature4"
-fi
-
-# In a clone whose sole remote has some other name, the new branch is pushed
-# to that remote.  Pushing only to "origin" pushed nowhere at all in such a
-# clone, so the new working copy had no upstream and `git-push-to` and
-# `git-pull-from` could not use it.
+# In a clone whose sole remote has some other name, a branch name that no
+# remote has is created, just as it is in a clone whose remote is "origin".
+# (`tests/test-new-branch-no-push.sh` checks that no remote receives it.)
 ONLY_REMOTE_DIR="${WORK_DIR}/onlyremote"
 git clone -q "${REMOTE}" "${ONLY_REMOTE_DIR}"
 git -C "${ONLY_REMOTE_DIR}" remote rename origin elsewhere
 if ! output="$(cd "${ONLY_REMOTE_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature5 2>&1)"; then
   fail "git-new-branch failed in a clone whose only remote is not origin: ${output}"
 fi
-if ! git -C "${REMOTE}" rev-parse --verify --quiet refs/heads/feature5 > /dev/null; then
-  fail "git-new-branch did not push feature5 to the clone's only remote: ${output}"
-fi
-upstream="$(git -C "${WORK_DIR}/onlyremote-branch-feature5" \
-  rev-parse --symbolic-full-name '@{upstream}' 2> /dev/null || true)"
-if [ "${upstream}" != 'refs/remotes/elsewhere/feature5' ]; then
-  fail "the new working copy's upstream is [${upstream}], not refs/remotes/elsewhere/feature5"
+branch="$(git -C "${WORK_DIR}/onlyremote-branch-feature5" rev-parse --abbrev-ref HEAD)"
+if [ "${branch}" != "feature5" ]; then
+  fail "${WORK_DIR}/onlyremote-branch-feature5 is on branch ${branch}, not feature5"
 fi
 
 # A clone with no remote has no remote to ask, so the branch is created.

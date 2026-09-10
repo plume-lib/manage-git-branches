@@ -6,12 +6,14 @@
 # Usage:
 #   git-new-branch NEWBRANCHNAME
 #
-# If the repository determines a remote for the current branch, the new branch
-# is pushed to that remote, with the remote branch as the new branch's
-# upstream.  The upstream is what lets `git-push-to` and `git-pull-from` pull
-# and push the new branch.  If the push fails -- for example, because the
-# remote is read-only -- this script warns but still creates the branch
-# directory, without an upstream.
+# The effects of this script are local:  it pushes nothing, so the new branch
+# exists only in the new working copy.  A branch that was never pushed has no
+# upstream branch, which `git pull`, `git push`, `git-push-to`, and
+# `git-pull-from` need; to create one, cd to the new directory and run
+# `git push --set-upstream REMOTE BRANCHNAME`.
+#
+# The one thing this script asks a remote is whether a branch of the given
+# name already exists there, which would make the new branch collide with it.
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
@@ -131,7 +133,7 @@ fi
 # `is-deleted-branch` and `git-push-to` use.  The new branch has no
 # configuration of its own yet -- `git checkout -b` creates none -- and the new
 # working copy is a copy of this one, so this branch's configuration is what
-# says where the new branch will be pushed.
+# says which remote the new branch would eventually be pushed to.
 #
 # Asking only the remote named "origin", as this script once did, asked no
 # remote at all in a clone whose sole remote has some other name, so the check
@@ -202,34 +204,5 @@ if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
   exit 1
 fi
 TMPDIR_TO_CLEAN=""
-
-# Give the new branch an upstream.  Without one, `git pull` and `git push` in
-# the new directory fail with "There is no tracking information for the
-# current branch", so `git-push-to` and `git-pull-from` cannot use it.
-#
-# Push only after the move succeeded, because the cleanup traps cannot undo a
-# push: if the script failed or was interrupted between the push and the move,
-# the traps would remove the working copy but leave the branch in the remote,
-# and re-running this script would abort because the branch already exists.
-#
-# Push to ${REMOTE}, the remote that the collision check above asked about the
-# branch.  Pushing to "origin" instead, as this script once did, pushed to a
-# repository that the check had not asked about, so a branch that exists there
-# rejected the push after the whole working copy had been copied -- the very
-# cost that the check exists to avoid -- and pushed to no repository at all in
-# a clone whose sole remote has some other name.
-#
-# ${REMOTE} may be a relative pathname rather than the name of a remote; git
-# accepts one wherever it accepts a name.  It resolves in ${BRANCHDIR} as it
-# does in this working copy, because the two are siblings.
-if [ -n "${REMOTE}" ]; then
-  if ! (cd -- "${BRANCHDIR}" && git push -q --set-upstream "${REMOTE}" "${BRANCHNAME}"); then
-    # This is not an error: the new working copy is usable without an upstream,
-    # and the push can fail for reasons that are not this script's business,
-    # such as a read-only clone, a protected branch, or a rejecting hook.
-    echo "${SCRIPT_NAME}: WARNING: cannot push ${BRANCHNAME} to ${REMOTE}, so it has no upstream branch" >&2
-    echo "${SCRIPT_NAME}: WARNING: \`git-push-to\` and \`git-pull-from\` need one; to give it one, cd to ${BRANCHDIR} and run: git push --set-upstream '${REMOTE}' '${BRANCHNAME}'" >&2
-  fi
-fi
 
 echo "Success: created ${BRANCHDIR}"
