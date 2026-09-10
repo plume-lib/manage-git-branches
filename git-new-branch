@@ -169,7 +169,7 @@ if branch_exists "${BRANCHNAME}"; then
   if [ -n "${REMOTE}" ]; then
     echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists, locally or on remote ${REMOTE}." >&2
   else
-    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists locally." >&2
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists in this clone." >&2
   fi
   exit 1
 fi
