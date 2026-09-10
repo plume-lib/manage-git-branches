@@ -2,7 +2,9 @@
 
 # Tests that `git-new-branch` has only local effects: it does not push the new
 # branch, and it creates the branch directory even when the remote cannot be
-# contacted at all.
+# contacted at all.  `git-new-branch` contacts the remote to bring the working
+# copy up to date and to ask whether the branch already exists; it reports
+# being unable to do the former, but neither failure is an error.
 #
 # Usage:
 #   tests/test-new-branch-no-push.sh
@@ -17,6 +19,8 @@ TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
 
 . "${TESTS_DIR}/lib-git-test-env.sh"
+# shellcheck source=common-functions.sh
+. "${TESTS_DIR}/common-functions.sh"
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
 # The signal handlers re-raise the signal with the handler removed, so that
@@ -150,6 +154,46 @@ fi
 branch="$(git -C "${OFFLINE_DIR}" rev-parse --abbrev-ref HEAD)"
 if [ "${branch}" != "feature2" ]; then
   fail "${OFFLINE_DIR} is on branch ${branch}, not feature2"
+fi
+
+# The `git pull` that brings this working copy up to date fails when the remote
+# is unreachable, and that failure is reported, because the new branch is based
+# on a possibly stale commit; see `tests/test-branch-pull-failure.sh`.
+case "${output}" in
+  *"\`git pull\` failed"*) ;;
+  *) fail "git-new-branch did not report the failed pull: ${output}" ;;
+esac
+# Being unable to reach the remote is not the user's problem to solve here, so
+# the command continues rather than treating it as an error.
+case "${output}" in
+  *ERROR*) fail "git-new-branch treated the unreachable remote as an error: ${output}" ;;
+esac
+case "${output}" in
+  *"continuing, using the current commit"*) ;;
+  *) fail "git-new-branch did not say that it continued anyway: ${output}" ;;
+esac
+
+# `git-new-branch` asks the remote without ever prompting.  A prompt would
+# block forever:  this script discards the query's standard error, and it may
+# run from another script or from a CI job.  `GIT_TERMINAL_PROMPT=0` does not
+# suppress the prompts that SSH itself issues, such as the one for an unknown
+# host key, so the SSH command must also be given the option that disables
+# those.
+SSH_DIR="${WORK_DIR}/myrepo-branch-ssh"
+git clone -q "${REMOTE}" "${SSH_DIR}"
+SSH_ARGUMENTS="${WORK_DIR}/ssh-arguments"
+use_fake_ssh "${SSH_DIR}" "${SSH_ARGUMENTS}"
+
+if ! output="$(cd "${SSH_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature3 2>&1)"; then
+  fail "git-new-branch failed when the remote could not be reached over SSH: ${output}"
+fi
+if [ ! -d "${WORK_DIR}/myrepo-branch-feature3" ]; then
+  fail "git-new-branch did not create ${WORK_DIR}/myrepo-branch-feature3: ${output}"
+fi
+if [ ! -s "${SSH_ARGUMENTS}" ]; then
+  fail 'git-new-branch did not contact the remote over SSH'
+elif ! grep -q -- '-o BatchMode=yes' "${SSH_ARGUMENTS}"; then
+  fail "SSH invocation did not include \"-o BatchMode=yes\": [$(cat "${SSH_ARGUMENTS}")]"
 fi
 
 echo "${SCRIPT_NAME}: OK"

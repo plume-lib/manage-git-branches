@@ -112,7 +112,16 @@ if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
   fi
   if [ -n "$(git ls-files --unmerged)" ]; then
     echo "${SCRIPT_NAME}: ERROR: the failed pull left conflicts in ${TOPLEVEL}." >&2
-    echo "${SCRIPT_NAME}: Resolve them, or run \`git merge --abort\`, then re-run ${SCRIPT_NAME}." >&2
+    # Resolving the conflicts is only half of the way out of a rebase or a
+    # cherry-pick:  until its `--continue` runs, HEAD is the operation's
+    # intermediate commit, and re-running this script from there would branch
+    # from a commit that lacks the commits that the operation has not replayed.
+    CONTINUE_COMMAND="$(conflict_continue_command .)"
+    if [ -n "${CONTINUE_COMMAND}" ]; then
+      echo "${SCRIPT_NAME}: Resolve them and run \`${CONTINUE_COMMAND}\`, or run \`$(conflict_abort_command .)\` to abandon the pull; then re-run ${SCRIPT_NAME}." >&2
+    else
+      echo "${SCRIPT_NAME}: Resolve them, or run \`$(conflict_abort_command .)\`, then re-run ${SCRIPT_NAME}." >&2
+    fi
     exit 1
   fi
   echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
