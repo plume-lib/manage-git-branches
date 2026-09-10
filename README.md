@@ -32,11 +32,7 @@ The commands are:
 * [`git-new-branch`](git-new-branch) `BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   copy directory.  Run this command from within a working copy; the new
-  directory is a sibling of the working copy.  This command does not change
-  any remote repository:  it does not push the new branch, so the branch has
-  no upstream branch.  `git-push-to` and `git-pull-from` need one; to create
-  it, cd to the new directory and run
-  `git push --set-upstream REMOTE BRANCHNAME`.
+  directory is a sibling of the working copy.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to) `[--nocompile] FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to

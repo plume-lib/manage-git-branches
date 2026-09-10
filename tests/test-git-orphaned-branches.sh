@@ -14,7 +14,8 @@ SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 TOPLEVEL="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)"
 GIT_ORPHANED_BRANCHES="${TOPLEVEL}/git-orphaned-branches"
-SCRIPT_NAME="$(basename -- "$0")"
+
+. "${TESTS_DIR}/lib-git-test-env.sh"
 
 if [ "$#" -ne 0 ]; then
   echo "Usage: ${SCRIPT_NAME}" >&2
@@ -46,6 +47,8 @@ if ! work="$(CDPATH='' cd -- "${work}" && pwd -P)" || [ -z "${work}" ]; then
   echo "${SCRIPT_NAME}: cannot resolve the temporary directory" >&2
   exit 1
 fi
+
+sanitize_git_env "${work}"
 
 fail() {
   echo "${SCRIPT_NAME}: FAILED: $1" >&2
@@ -97,6 +100,18 @@ touch "${work}/dot-project/p-branch-no-project/other"
 mkdir -p "${work}/dot-project/p-plain-project"
 touch "${work}/dot-project/p-plain-project/.project"
 
+# A `*-branch-*` directory inside another one, which the walk has to descend
+# into:  a branch directory can hold a clone of another branch.
+mkdir -p "${work}/dot-project/p-branch-outer/q-branch-inner"
+touch "${work}/dot-project/p-branch-outer/q-branch-inner/.project"
+
+# A `*-branch-*` directory behind a symbolic link to a directory.  The walk
+# does not follow such a link, which is what keeps a link to an ancestor from
+# sending it around forever.
+mkdir -p "${work}/linktarget/p-branch-behind-link"
+touch "${work}/linktarget/p-branch-behind-link/.project"
+ln -s ../linktarget "${work}/dot-project/link"
+
 # Contains a `.project` file and a regular file, but cannot be listed:  it can
 # be searched but not read.  Every glob in such a directory expands to nothing,
 # which must not be mistaken for "contains nothing but a `.project` file".
@@ -135,6 +150,12 @@ check "p-branch-plus-dangling-symlink" "unlisted"
 check "p-branch-empty" "unlisted"
 check "p-branch-no-project" "unlisted"
 check "p-plain-project" "unlisted"
+check "p-branch-outer" "unlisted"
+check "p-branch-outer/q-branch-inner" "listed"
+if printf '%s\n' "${output}" | grep -q -F -- 'p-branch-behind-link'; then
+  echo "FAIL: git-orphaned-branches followed a symbolic link to a directory"
+  status=1
+fi
 if [ "${unlistable}" -eq 1 ]; then
   check "p-branch-unlistable" "unlisted"
 fi
@@ -165,13 +186,6 @@ fi
 ###########################################################################
 ## Clones of branches that have been deleted in the remote repository.
 ###########################################################################
-
-# Do not depend on the user's git identity or on any repository-local config.
-GIT_AUTHOR_NAME="Test"
-GIT_AUTHOR_EMAIL="test@example.com"
-GIT_COMMITTER_NAME="Test"
-GIT_COMMITTER_EMAIL="test@example.com"
-export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 
 # Create a remote repository with branches "main" and "feat2".
 git init -q --bare -b main "${work}/remote.git"

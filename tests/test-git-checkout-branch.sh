@@ -12,6 +12,8 @@
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 GIT_CHECKOUT_BRANCH="${SCRIPT_DIR}/../git-checkout-branch"
 
+. "${SCRIPT_DIR}/lib-git-test-env.sh"
+
 status=0
 
 fail() {
@@ -22,6 +24,8 @@ fail() {
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "${tmpdir}"' EXIT INT TERM
 
+sanitize_git_env "${tmpdir}"
+
 # Create a repository that has no remote, with a branch "localonly" in
 # addition to the initial branch.
 repo="${tmpdir}/myrepo-branch-main"
@@ -29,8 +33,6 @@ mkdir -p "${repo}"
 (
   cd "${repo}" || exit 1
   git init -q -b main .
-  git config user.email "test@example.com"
-  git config user.name "Test User"
   echo "hello" > file.txt
   git add file.txt
   git commit -q -m "Initial commit"
@@ -90,6 +92,30 @@ case "${out}" in
 esac
 if [ -e "${tmpdir}/myclone-branch-HEAD" ]; then
   fail "directory was created for HEAD"
+fi
+
+# The query to `origin` disables SSH's own interactive prompts, as the README
+# promises.  Without that, a prompt for an unknown host key or for the
+# passphrase of a key blocks forever when this script runs from another script
+# or from a CI job, where nobody sees the prompt and nobody can answer it.
+# The fake `ssh` records the arguments of each invocation and then fails, so
+# the query fails and the branch is reported as nonexistent; what this checks
+# is the option that the query passed.  `sanitize_git_env` has already unset
+# the variables that would otherwise select some other SSH command.
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+sshclone="${tmpdir}/sshclone-branch-main"
+git clone -q "${repo}" "${sshclone}"
+use_fake_ssh "${sshclone}" "${tmpdir}/ssh-arguments"
+# A name that no local test can answer, so that the remote is asked:  the
+# clone has no branch and no remote-tracking branch of that name.
+if (cd "${sshclone}" && "${GIT_CHECKOUT_BRANCH}" onlyremote > /dev/null 2>&1); then
+  fail "zero exit status for a branch that only an unreachable remote could have"
+fi
+if [ ! -s "${tmpdir}/ssh-arguments" ]; then
+  fail "git-checkout-branch did not ask origin about the branch"
+elif ! grep -q -- '-o BatchMode=yes' "${tmpdir}/ssh-arguments"; then
+  fail "the query to origin did not disable SSH's prompts: $(cat "${tmpdir}/ssh-arguments")"
 fi
 
 # The wrong number of arguments is an error.
