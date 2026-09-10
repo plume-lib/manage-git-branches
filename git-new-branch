@@ -135,10 +135,6 @@ fi
 # working copy is a copy of this one, so this branch's configuration is what
 # says which remote the new branch would eventually be pushed to.
 #
-# Asking only the remote named "origin", as this script once did, asked no
-# remote at all in a clone whose sole remote has some other name, so the check
-# silently passed there.
-#
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
 # asked, and only the local tests in `branch_exists` apply.
 BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''

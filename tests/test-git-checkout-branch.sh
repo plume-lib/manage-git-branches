@@ -82,9 +82,6 @@ else
 fi
 
 # A clone whose sole remote is not named "origin" is asked about the branch.
-# Asking only a remote named "origin", as this script once did, asked no
-# remote at all in such a clone, so a branch that plainly exists there was
-# reported as nonexistent and no directory was created.
 othername="${tmpdir}/othername-branch-main"
 git clone -q "${repo}" "${othername}"
 git -C "${othername}" remote rename origin elsewhere

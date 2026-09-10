@@ -123,10 +123,6 @@ fi
 # determines it, which is also the remote that `git-new-branch`,
 # `is-deleted-branch`, and `git-push-to` use.
 #
-# Asking only the remote named "origin", as this script once did, asked no
-# remote at all in a clone whose sole remote has some other name, so a branch
-# that exists only in that remote was reported as nonexistent.
-#
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
 # asked, and only the local test in `branch_exists` applies.
 BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
