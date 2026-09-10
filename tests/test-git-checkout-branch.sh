@@ -158,6 +158,135 @@ else
   fi
 fi
 
+# When several remotes have a branch of that name and the fetch remote is not
+# one of them, which one to check out is ambiguous.  Saying so costs the user
+# nothing, whereas letting the checkout choose fails only after the working
+# copy has been copied:  `git checkout BRANCH` reports "matched multiple
+# remote tracking branches" and nothing is checked out.
+ambiguous="${tmpdir}/ambiguous-branch-main"
+git clone -q "${repo}" "${ambiguous}"
+git init -q --bare -b main "${tmpdir}/fork1.git"
+git init -q --bare -b main "${tmpdir}/fork2.git"
+git -C "${ambiguous}" remote add fork1 "${tmpdir}/fork1.git"
+git -C "${ambiguous}" remote add fork2 "${tmpdir}/fork2.git"
+git -C "${ambiguous}" push -q fork1 "refs/remotes/origin/localonly:refs/heads/shared"
+git -C "${ambiguous}" push -q fork2 "refs/remotes/origin/localonly:refs/heads/shared"
+git -C "${ambiguous}" fetch -q fork1
+git -C "${ambiguous}" fetch -q fork2
+if out="$(cd "${ambiguous}" && "${GIT_CHECKOUT_BRANCH}" shared 2>&1)"; then
+  fail "zero exit status for a branch that several remotes have"
+fi
+case "${out}" in
+  *"ERROR: branch shared exists on several remotes"*) ;;
+  *) fail "git-checkout-branch did not report the ambiguity: ${out}" ;;
+esac
+case "${out}" in
+  *fork1*fork2* | *fork2*fork1*) ;;
+  *) fail "git-checkout-branch did not list the remotes that have the branch: ${out}" ;;
+esac
+for leftover in "${tmpdir}/ambiguous-branch-shared" "${tmpdir}/ambiguous-branch-shared-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "directory was created for the ambiguous branch shared: ${leftover}"
+  fi
+done
+
+# `checkout.defaultRemote` resolves the ambiguity, as it does for git's own
+# search for a remote-tracking branch.
+git -C "${ambiguous}" config checkout.defaultRemote fork2
+if ! out="$(cd "${ambiguous}" && "${GIT_CHECKOUT_BRANCH}" shared 2>&1)"; then
+  fail "nonzero exit status for a branch that checkout.defaultRemote chooses: ${out}"
+fi
+ambiguousdir="${tmpdir}/ambiguous-branch-shared"
+if [ ! -d "${ambiguousdir}" ]; then
+  fail "directory was not created: ${ambiguousdir}"
+else
+  upstream="$(git -C "${ambiguousdir}" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2> /dev/null)"
+  if [ "${upstream}" != "fork2/shared" ]; then
+    fail "the upstream is ${upstream} rather than the fork2/shared that checkout.defaultRemote chose"
+  fi
+fi
+
+# The fetch remote is used when it is one of the remotes that have the branch,
+# without any configuration:  it is the remote that this clone's branches come
+# from, and the branch of any other remote is a different branch.
+git init -q --bare -b main "${tmpdir}/origin2.git"
+git -C "${ambiguous}" push -q "${tmpdir}/origin2.git" "refs/remotes/origin/main:refs/heads/main"
+git -C "${ambiguous}" push -q "${tmpdir}/origin2.git" "refs/remotes/origin/localonly:refs/heads/shared"
+preferred="${tmpdir}/preferred-branch-main"
+git clone -q "${tmpdir}/origin2.git" "${preferred}"
+git -C "${preferred}" remote add fork1 "${tmpdir}/fork1.git"
+git -C "${preferred}" fetch -q fork1
+if ! out="$(cd "${preferred}" && "${GIT_CHECKOUT_BRANCH}" shared 2>&1)"; then
+  fail "nonzero exit status for a branch that the fetch remote also has: ${out}"
+fi
+preferreddir="${tmpdir}/preferred-branch-shared"
+if [ ! -d "${preferreddir}" ]; then
+  fail "directory was not created: ${preferreddir}"
+else
+  upstream="$(git -C "${preferreddir}" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2> /dev/null)"
+  if [ "${upstream}" != "origin/shared" ]; then
+    fail "the upstream is ${upstream} rather than the origin/shared of the fetch remote"
+  fi
+fi
+
+# A clone whose fetch refspec does not cover the branch has no ref for it, so
+# the branch is fetched rather than only queried.  A successful query does not
+# make the checkout succeed:  `git checkout BRANCH` needs a ref in the clone,
+# and reports "pathspec 'BRANCH' did not match" without one.  The new working
+# copy still gets an upstream, which `git-push-to` and `git-pull-from` require.
+narrow="${tmpdir}/narrow-branch-main"
+git clone -q --single-branch -b main "${repo}" "${narrow}"
+if ! out="$(cd "${narrow}" && "${GIT_CHECKOUT_BRANCH}" localonly 2>&1)"; then
+  fail "nonzero exit status for a branch outside this clone's fetch refspec: ${out}"
+fi
+narrowdir="${tmpdir}/narrow-branch-localonly"
+if [ ! -d "${narrowdir}" ]; then
+  fail "directory was not created: ${narrowdir}"
+else
+  checkedout="$(git -C "${narrowdir}" rev-parse --abbrev-ref HEAD)"
+  if [ "${checkedout}" != "localonly" ]; then
+    fail "checked out ${checkedout} rather than localonly in ${narrowdir}"
+  fi
+  if [ "$(git -C "${narrowdir}" rev-parse HEAD)" \
+    != "$(git -C "${repo}" rev-parse refs/heads/localonly)" ]; then
+    fail "the branch in ${narrowdir} is not the localonly of the remote"
+  fi
+  upstream_remote="$(git -C "${narrowdir}" config --get branch.localonly.remote)"
+  upstream_merge="$(git -C "${narrowdir}" config --get branch.localonly.merge)"
+  if [ "${upstream_remote}" != "origin" ] \
+    || [ "${upstream_merge}" != "refs/heads/localonly" ]; then
+    fail "the upstream in ${narrowdir} is [${upstream_remote}] [${upstream_merge}]"
+  fi
+fi
+
+# A pathname, which git accepts wherever it accepts a remote's name, has no
+# remote-tracking namespace, so the fetch records the branch only in
+# FETCH_HEAD.  The new branch's upstream is then that pathname, which is what
+# `git push --set-upstream ../other.git BRANCH` would record.
+pathname="${tmpdir}/pathname-branch-main"
+git clone -q "${repo}" "${pathname}"
+# Removing the remote deletes its remote-tracking branches, leaving the
+# pathname in `branch.main.remote` as the only remote there is.
+git -C "${pathname}" remote remove origin
+git -C "${pathname}" config branch.main.remote "${repo}"
+git -C "${pathname}" config branch.main.merge refs/heads/main
+if ! out="$(cd "${pathname}" && "${GIT_CHECKOUT_BRANCH}" localonly 2>&1)"; then
+  fail "nonzero exit status for a branch of a remote named by a pathname: ${out}"
+fi
+pathnamedir="${tmpdir}/pathname-branch-localonly"
+if [ ! -d "${pathnamedir}" ]; then
+  fail "directory was not created: ${pathnamedir}"
+else
+  if [ "$(git -C "${pathnamedir}" rev-parse HEAD)" \
+    != "$(git -C "${repo}" rev-parse refs/heads/localonly)" ]; then
+    fail "the branch in ${pathnamedir} is not the localonly of the remote"
+  fi
+  upstream_remote="$(git -C "${pathnamedir}" config --get branch.localonly.remote)"
+  if [ "${upstream_remote}" != "${repo}" ]; then
+    fail "the upstream remote in ${pathnamedir} is [${upstream_remote}], not ${repo}"
+  fi
+fi
+
 # `HEAD` is not a branch name, even though a clone has a symbolic ref
 # `refs/remotes/origin/HEAD`.
 if out="$(cd "${clone}" && "${GIT_CHECKOUT_BRANCH}" HEAD 2>&1)"; then

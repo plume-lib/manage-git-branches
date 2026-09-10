@@ -113,6 +113,47 @@ if [ -e "${tmpdir}/myclone-branch-localonly" ]; then
   fail "directory was created for the branch localonly that exists on the remote"
 fi
 
+# A name that a remote-tracking branch already uses is a collision even when no
+# remote can be determined for the current branch.  A clone with several
+# remotes, none named "origin", determines none for a branch that has no
+# `branch.BRANCH.remote` -- which is the state that `git-new-branch` itself
+# leaves a new branch in, because `git checkout -b` writes no such setting --
+# and the remote-tracking branches that the clone does have are then the only
+# evidence of a collision.
+tworemotes="${tmpdir}/tworemotes-branch-main"
+git clone -q -o upstream "${repo}" "${tworemotes}"
+git init -q --bare -b main "${tmpdir}/newfork.git"
+git -C "${tworemotes}" remote add fork "${tmpdir}/newfork.git"
+git -C "${tworemotes}" config --unset branch.main.remote
+git -C "${tworemotes}" config --unset branch.main.merge
+if out="$(cd "${tworemotes}" && "${GIT_NEW_BRANCH}" localonly 2>&1)"; then
+  fail "zero exit status for the branch localonly that a remote-tracking branch uses"
+fi
+case "${out}" in
+  *"already exists"*) ;;
+  *) fail "unexpected message for the branch localonly of a remote-tracking branch: ${out}" ;;
+esac
+for leftover in "${tmpdir}/tworemotes-branch-localonly" "${tmpdir}/tworemotes-branch-localonly-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "directory was created for the branch localonly of a remote-tracking branch: ${leftover}"
+  fi
+done
+
+# When a remote can be determined, only that remote's branches collide:  a
+# branch of some other remote is not where this branch would be pushed, so it
+# is not a collision.  This clone pushes to "upstream", and only "fork" has a
+# branch named "onlyfork".
+git -C "${tworemotes}" config branch.main.remote upstream
+git -C "${tworemotes}" config branch.main.merge refs/heads/main
+git -C "${tworemotes}" push -q fork "refs/remotes/upstream/localonly:refs/heads/onlyfork"
+git -C "${tworemotes}" fetch -q fork
+if ! out="$(cd "${tworemotes}" && "${GIT_NEW_BRANCH}" onlyfork 2>&1)"; then
+  fail "nonzero exit status for a name that only another remote uses: ${out}"
+fi
+if [ ! -d "${tmpdir}/tworemotes-branch-onlyfork" ]; then
+  fail "directory was not created: ${tmpdir}/tworemotes-branch-onlyfork"
+fi
+
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then
   fail "zero exit status when given no argument"
