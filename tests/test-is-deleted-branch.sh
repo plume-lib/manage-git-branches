@@ -14,6 +14,8 @@ SCRIPT_NAME="$(basename -- "$0")"
 IS_DELETED_BRANCH="$(dirname -- "${SCRIPT_DIR}")/is-deleted-branch"
 GIT_ORPHANED_BRANCHES="$(dirname -- "${SCRIPT_DIR}")/git-orphaned-branches"
 
+. "${SCRIPT_DIR}/lib-git-test-env.sh"
+
 failures=0
 
 # Prints a message and records a test failure.
@@ -114,17 +116,7 @@ trap 'rm -rf "${testdir}"' EXIT
 trap 'rm -rf "${testdir}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${testdir}"; trap - TERM; kill -s TERM "$$"' TERM
 
-# Make the tests independent of the user's git configuration.
-GIT_CONFIG_GLOBAL="${testdir}/gitconfig"
-GIT_CONFIG_SYSTEM=/dev/null
-GIT_AUTHOR_NAME='Test Person'
-GIT_AUTHOR_EMAIL='test@example.com'
-GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
-GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
-export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
-export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-unset DEBUG GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT
-: > "${GIT_CONFIG_GLOBAL}"
+sanitize_git_env "${testdir}"
 
 ## Create a remote repository with branches "main", "live", and "dead".
 remote="${testdir}/myrepo-remote.git"
