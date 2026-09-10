@@ -1,7 +1,9 @@
 #!/bin/sh
 
 # Tests that a working copy created by `git-new-branch` can be used by
-# `git-push-to`, which is the workflow that the README describes.
+# `git-push-to`, which is the workflow that the README describes.  Because
+# `git-new-branch` does not push the new branch, that workflow starts by
+# giving the new branch an upstream branch, as the README says to do.
 #
 # Usage:
 #   tests/test-new-branch-push-to.sh
@@ -60,6 +62,21 @@ fi
 if [ ! -d "${FEATURE_DIR}" ]; then
   fail "git-new-branch did not create ${FEATURE_DIR}"
 fi
+
+# `git-push-to` needs an upstream branch, and `git-new-branch` does not create
+# one, because it has only local effects.  Report its absence here, where the
+# cause is clear, rather than as a `git-push-to` failure below.
+if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
+  fail "git-push-to succeeded on a new branch that has no upstream branch"
+fi
+case "${output}" in
+  *"has no upstream branch"*) ;;
+  *) fail "git-push-to did not explain the missing upstream branch: ${output}" ;;
+esac
+
+# Give the new branch an upstream branch, which is what the README tells the
+# user to do after running `git-new-branch`.
+git -C "${FEATURE_DIR}" push -q --set-upstream origin feature1
 
 # Commit a change in the main branch, to be propagated to the new branch.
 echo "second line" >> "${MAIN_DIR}/file.txt"

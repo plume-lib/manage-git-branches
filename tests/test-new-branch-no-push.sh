@@ -1,11 +1,11 @@
 #!/bin/sh
 
-# Tests that `git-new-branch` still creates the branch directory when the new
-# branch cannot be pushed to "origin" -- for example, because the remote is
-# read-only or unreachable.  Such a push failure is a warning, not an error.
+# Tests that `git-new-branch` has only local effects: it does not push the new
+# branch, and it creates the branch directory even when the remote cannot be
+# contacted at all.
 #
 # Usage:
-#   tests/test-new-branch-unpushable-remote.sh
+#   tests/test-new-branch-no-push.sh
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -36,6 +36,7 @@ fail() {
 REMOTE="${WORK_DIR}/myrepo.git"
 MAIN_DIR="${WORK_DIR}/myrepo-branch-main"
 FEATURE_DIR="${WORK_DIR}/myrepo-branch-feature1"
+OFFLINE_DIR="${WORK_DIR}/myrepo-branch-feature2"
 
 ## Creates a remote repository with one commit, and a clone of it in MAIN_DIR.
 create_repositories() {
@@ -52,13 +53,11 @@ create_repositories() {
 
 create_repositories
 
-# Make "origin" unpushable.  A nonexistent repository is the most portable way
-# to do that: making the remote read-only would depend on file permissions, and
-# rejecting the push with a hook would not work under `core.hooksPath`.
-git -C "${MAIN_DIR}" remote set-url origin "${WORK_DIR}/no-such-repository.git"
+# The remote's refs before the command, to compare to its refs afterward.
+refs_before="$(git -C "${REMOTE}" for-each-ref)"
 
 if ! output="$(cd "${MAIN_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature1 2>&1)"; then
-  fail "git-new-branch failed when the branch could not be pushed: ${output}"
+  fail "git-new-branch failed: ${output}"
 fi
 if [ ! -d "${FEATURE_DIR}" ]; then
   fail "git-new-branch did not create ${FEATURE_DIR}: ${output}"
@@ -67,23 +66,42 @@ if [ -e "${FEATURE_DIR}-TMP" ]; then
   fail "git-new-branch left behind ${FEATURE_DIR}-TMP"
 fi
 
-# The user is told that the branch has no upstream, and how to give it one.
-case "${output}" in
-  *"WARNING"*"no upstream branch"*) ;;
-  *) fail "git-new-branch did not warn about the failed push: ${output}" ;;
-esac
-case "${output}" in
-  *"git push --set-upstream origin 'feature1'"*) ;;
-  *) fail "git-new-branch did not say how to set the upstream: ${output}" ;;
-esac
+# The new branch was not pushed:  the remote is exactly as it was, and the new
+# working copy has no upstream branch and no remote-tracking branch.
+if [ "$(git -C "${REMOTE}" for-each-ref)" != "${refs_before}" ]; then
+  fail "git-new-branch changed the refs of ${REMOTE}:
+$(git -C "${REMOTE}" for-each-ref)"
+fi
+if git -C "${FEATURE_DIR}" rev-parse --symbolic-full-name '@{upstream}' > /dev/null 2>&1; then
+  fail "git-new-branch gave feature1 an upstream branch"
+fi
+if git -C "${FEATURE_DIR}" show-ref --verify --quiet refs/remotes/origin/feature1; then
+  fail "git-new-branch created a remote-tracking branch for feature1"
+fi
 
 # The new working copy is on the new branch, even though it has no upstream.
 branch="$(git -C "${FEATURE_DIR}" rev-parse --abbrev-ref HEAD)"
 if [ "${branch}" != "feature1" ]; then
   fail "${FEATURE_DIR} is on branch ${branch}, not feature1"
 fi
-if git -C "${FEATURE_DIR}" rev-parse --symbolic-full-name '@{upstream}' > /dev/null 2>&1; then
-  fail "${FEATURE_DIR} has an upstream, but the push should have failed"
+
+# A remote that cannot be contacted at all is not an error either, because
+# nothing that `git-new-branch` must do requires the remote.  A nonexistent
+# repository is the most portable way to make the remote unusable: making it
+# read-only would depend on file permissions.
+git -C "${MAIN_DIR}" remote set-url origin "${WORK_DIR}/no-such-repository.git"
+if ! output="$(cd "${MAIN_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature2 2>&1)"; then
+  fail "git-new-branch failed when the remote could not be contacted: ${output}"
+fi
+if [ ! -d "${OFFLINE_DIR}" ]; then
+  fail "git-new-branch did not create ${OFFLINE_DIR}: ${output}"
+fi
+if [ -e "${OFFLINE_DIR}-TMP" ]; then
+  fail "git-new-branch left behind ${OFFLINE_DIR}-TMP"
+fi
+branch="$(git -C "${OFFLINE_DIR}" rev-parse --abbrev-ref HEAD)"
+if [ "${branch}" != "feature2" ]; then
+  fail "${OFFLINE_DIR} is on branch ${branch}, not feature2"
 fi
 
 echo "${SCRIPT_NAME}: OK"
