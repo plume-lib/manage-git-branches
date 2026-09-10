@@ -53,8 +53,8 @@ script_code() {
 # contains whitespace, quotation marks, or a command substitution does not
 # affect the result.  Then, at each point where a command may start, it reads
 # the run of assignments that begins there:  the run is an assignment
-# statement if nothing but a command terminator follows it, and is an
-# environment prefix otherwise.
+# statement if nothing but a redirection or a command terminator follows it,
+# and is an environment prefix otherwise.
 #
 # It does not handle here-documents, whose lines are data rather than code.
 # It fails, rather than reading them as code, if a script contains one.
@@ -79,8 +79,17 @@ set_variables_in() {
     # are data rather than code.  A here-string, "<<<", supplies its data on
     # the same line, so it is not one.
     function is_heredoc(t) { return t ~ /^[0-9]*<<-?/ && t !~ /^[0-9]*<<</ }
+    # A redirection, which may follow the assignments of an assignment
+    # statement, as in "VAR=value > file", without making them an environment
+    # prefix of a command.
+    function is_redirection(t) { return t ~ /^[0-9]*(<|>)/ }
+    # A redirection whose target is the word that follows it, rather than being
+    # attached to the operator as in ">file".  A form that contains "&" or "|",
+    # such as "2>&1", is not one:  the tokenizer above splits those characters
+    # into a token of their own.
+    function is_bare_redirection(t) { return t ~ /^[0-9]*(<|>|>>|<>|<<<)$/ }
     # Prints the variables that the current logical line assigns.
-    function report_line(  i, j, k, name, at_command) {
+    function report_line(  i, j, k, r, name, at_command) {
       for (i = 1; i <= nwords; i++) {
         if (is_heredoc(words[i])) {
           # This awk program does not skip the lines of a here-document, so it
@@ -98,7 +107,15 @@ set_variables_in() {
       while (i <= nwords) {
         if (at_command && is_assignment(words[i])) {
           for (j = i; j <= nwords && is_assignment(words[j]); j++) { }
-          if (j > nwords || is_terminator(words[j])) {
+          # A redirection may come between the assignments and the terminator,
+          # so skip it before deciding.  The assignments end at "j"; "r" is
+          # only for looking past them.
+          r = j
+          while (r <= nwords && is_redirection(words[r])) {
+            if (is_bare_redirection(words[r])) { r++ }
+            r++
+          }
+          if (r > nwords || is_terminator(words[r])) {
             for (k = i; k < j; k++) {
               name = words[k]
               sub(/=.*/, "", name)
@@ -264,19 +281,33 @@ SUBSHELL="$( (echo one; echo two) )"
 PIPED_SUBSHELL=$((echo one; echo two) | cat)
 if [ "${PLAIN}" -eq 1 ]; then CONDITIONAL=3; fi
 # COMMENTED=1
+ESCAPED="a \" b; c=d" # An escaped quotation mark does not end the value.
+MULTILINE="one
+two"
+REDIRECTED=1 > REDIRECTION_TARGET # The target is not an assignment.
+CONTINUED=1 \
+  some-command
+STATEMENT_AFTER_CONTINUATION=1
 PREFIX_ONE=1 PREFIX_TWO=2 some-command
 ARITHMETIC_PREFIX=$((PLAIN * 2)) some-command
 SUBSHELL_PREFIX=$( (echo one; echo two) ) some-command
 PIPED_SUBSHELL_PREFIX=$((echo one; echo two) | cat) some-command
+REDIRECTED_PREFIX=1 >/dev/null some-command # The target is attached.
+MULTILINE_PREFIX="one
+two" some-command
 FIXTURE_END
 EXPECTED='ARITHMETIC
 BACKTICKED
 CONDITIONAL
+ESCAPED
 EXPORTED
+MULTILINE
 NESTED_ARITHMETIC
 PIPED_SUBSHELL
 PLAIN
 QUOTED
+REDIRECTED
+STATEMENT_AFTER_CONTINUATION
 SUBSHELL
 SUBSTITUTED'
 ACTUAL="$(set_variables_in "${FIXTURE}")"
@@ -291,6 +322,14 @@ fi
 printf '%s\n' 'cat << END_OF_TEXT' 'SOMETHING=1' 'END_OF_TEXT' > "${FIXTURE}"
 if (set_variables_in "${FIXTURE}") > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: set_variables_in read a here-document as code" >&2
+  exit 2
+fi
+
+# A here-document whose operator is "<<-" is an error as well.  That operator
+# strips leading tabs from its lines, so the fixture contains tabs.
+printf 'cat <<- END_OF_TEXT\n\tSOMETHING=1\n\tEND_OF_TEXT\n' > "${FIXTURE}"
+if (set_variables_in "${FIXTURE}") > /dev/null 2>&1; then
+  echo "${SCRIPT_NAME}: set_variables_in read a <<- here-document as code" >&2
   exit 2
 fi
 
