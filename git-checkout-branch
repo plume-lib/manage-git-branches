@@ -124,11 +124,15 @@ fi
 # `HEAD` is excluded from the remote-tracking test because a clone has a
 # symbolic ref `refs/remotes/origin/HEAD` that names origin's default branch;
 # it resolves, but `HEAD` is not the name of a branch.
+#
+# `git_batch_ssh` disables the interactive prompts that would otherwise block
+# the query to `origin` forever when this script is run from another script or
+# a CI job, as `git-new-branch` and `is-deleted-branch` do for their queries.
 branch_exists() {
   git rev-parse --verify --quiet "refs/heads/$1" > /dev/null \
     || { [ "$1" != "HEAD" ] \
          && git rev-parse --verify --quiet "refs/remotes/origin/$1" > /dev/null; } \
-    || git ls-remote --exit-code origin "refs/heads/$1" > /dev/null 2>&1
+    || git_batch_ssh . ls-remote --exit-code origin "refs/heads/$1" > /dev/null 2>&1
 }
 
 if ! branch_exists "${BRANCHNAME}"; then

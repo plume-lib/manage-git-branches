@@ -18,8 +18,12 @@
 #  * build this one using `compile-project` (see its documentation),
 #  * push this one to its remote if the build succeeds.
 #
-# All the work is done by `git-push-to OTHER-REPO-DIR .`, so the two commands
-# behave identically and diagnostics mention `git-push-to`.
+# All the work is done by `git-push-to OTHER-REPO-DIR .`; diagnostics from that
+# step mention `git-push-to`.  Before running it, this script checks that the
+# current directory is the top level of a clone, because `git-push-to` would
+# report that about the "." that this script passes on, which does not tell the
+# user which directory to run this command in.  It checks OTHER-REPO-DIR too,
+# so that a diagnostic about it appears to come from the command the user ran.
 #
 # Calling `git-push-to` is often more readable, because it makes both directory names explicit.
 
@@ -71,6 +75,68 @@ fi
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} [--nocompile] OTHER-REPO-DIR" >&2
+  exit 1
+fi
+
+# Prints the absolute pathname of the given directory, with symbolic links
+# resolved.  Prints nothing and returns nonzero if the directory cannot be
+# canonicalized, which the callers below diagnose.
+# `realpath` would be simpler, but POSIX added it only in 2024 and some systems
+# still lack it, whereas `cd` and `pwd -P` are portable.  `cd` writes its own
+# diagnostic when it fails; discard it, because the callers below write a
+# better one.
+absolute_path() {
+  (CDPATH='' cd -- "$1" && pwd -P) 2> /dev/null
+}
+
+# Like each argument of `git-push-to`, the current directory must be the top
+# level of a clone.  Diagnose that here rather than leaving it to `git-push-to`,
+# which would report it about ".":  that does not tell the user which directory
+# to run this command in, and `git-push-to` cannot know that "." came from this
+# command rather than from the user.
+# Test the output as well as the status:  in a bare repository, which has no
+# working tree, git before version 2.25 printed nothing and exited with status
+# 0 rather than failing.
+if ! toplevel="$(git rev-parse --show-toplevel 2> /dev/null)" || [ -z "${toplevel}" ]; then
+  # The current directory is not in a working copy at all:  it is outside any
+  # repository, or it is in a bare repository, which has no working copy.
+  echo "${SCRIPT_NAME}: not the top level of a git clone: $(pwd)" >&2
+  exit 1
+fi
+# Compare physical pathnames, because the current directory may be reached
+# through a symbolic link that `git rev-parse --show-toplevel` resolved.
+# Canonicalize what git printed as well, rather than depending on git to have
+# done so; git documents the pathname as absolute but not as physical.
+if [ "$(pwd -P)" != "$(absolute_path "${toplevel}")" ]; then
+  echo "${SCRIPT_NAME}: not the top level of a git clone: $(pwd)" >&2
+  echo "${SCRIPT_NAME}: its top level is: ${toplevel}" >&2
+  exit 1
+fi
+
+# OTHER-REPO-DIR must be the top level of a clone too.  `git-push-to` also
+# checks this, but check it here so that the diagnostic names this command's
+# argument rather than appearing to come from a command the user did not run.
+# Canonicalize the argument before running `git` in it:  `git -C` fails on a
+# directory that cannot be entered, so without this test such a directory would
+# be reported as not being a clone, which is not what is known about it.
+other_physical="$(absolute_path "$1")"
+if [ ! -d "$1" ]; then
+  echo "${SCRIPT_NAME}: no such directory: $1" >&2
+  exit 1
+fi
+if [ -z "${other_physical}" ]; then
+  echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
+  exit 1
+fi
+if ! other_toplevel="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" \
+  || [ -z "${other_toplevel}" ]; then
+  echo "${SCRIPT_NAME}: not the top level of a git clone: $1" >&2
+  exit 1
+fi
+# As above, compare physical pathnames, canonicalizing both.
+if [ "${other_physical}" != "$(absolute_path "${other_toplevel}")" ]; then
+  echo "${SCRIPT_NAME}: not the top level of a git clone: $1" >&2
+  echo "${SCRIPT_NAME}: its top level is: ${other_toplevel}" >&2
   exit 1
 fi
 
