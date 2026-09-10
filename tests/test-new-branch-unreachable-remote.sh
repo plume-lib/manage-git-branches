@@ -17,6 +17,8 @@ SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
 
+. "${TESTS_DIR}/lib-git-test-env.sh"
+
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
 # The signal handlers re-raise the signal with the handler removed, so that
 # the script dies of the signal rather than resuming where it was
@@ -29,6 +31,8 @@ trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 . "${TESTS_DIR}/common-functions.sh"
 
 isolate_git_configuration "${WORK_DIR}"
+
+sanitize_git_env "${WORK_DIR}"
 
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $*" >&2
