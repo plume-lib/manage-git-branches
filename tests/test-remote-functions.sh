@@ -1,9 +1,13 @@
 #!/bin/sh
 
-# Tests `remote_is_usable` and `push_remote` in remote-functions.sh, which
-# decide which remote this package's commands ask about a branch.  A wrong
-# answer is not visible in the commands' output:  it makes them ask some other
-# repository, which can report that a branch that still exists was deleted.
+# Tests `remote_is_usable`, `push_remote`, and `fetch_remote` in
+# remote-functions.sh, which decide which remote this package's commands ask
+# about a branch.  A wrong answer is not visible in the commands' output:  it
+# makes them ask some other repository, which can report that a branch that
+# still exists was deleted.  Also tests `conflict_abort_command`, which the
+# same file provides for the same commands:  it names the command that ends
+# the operation that a failed pull left in progress, and the wrong name is a
+# command that the user runs and that fails.
 #
 # Usage:
 #   tests/test-remote-functions.sh
@@ -25,10 +29,10 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 trap 'rm -rf "${WORK_DIR}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 
-# shellcheck source=common-functions.sh
-. "${TESTS_DIR}/common-functions.sh"
+# shellcheck source=lib-git-test-env.sh
+. "${TESTS_DIR}/lib-git-test-env.sh"
 
-isolate_git_configuration "${WORK_DIR}"
+sanitize_git_env "${WORK_DIR}"
 
 # `remote-functions.sh` expects ${SCRIPT_DIR} to be the directory that holds
 # this package's files.  The functions that this test calls do not use it, but
@@ -180,6 +184,73 @@ git -C "${WORK_DIR}/clone" config remote.pushDefault 'fork/repository.git'
 remote="$(push_remote "${WORK_DIR}/clone" main)"
 if [ "${remote}" != 'fork/repository.git' ]; then
   fail "push_remote reported [${remote}] for a branch pushed to fork/repository.git"
+fi
+
+# `branch.BRANCH.pushRemote` outranks `branch.BRANCH.remote`, as `git push`
+# itself does:  a branch that is fetched from one remote and pushed to another
+# is pushed to the one that the pushRemote names.
+git -C "${WORK_DIR}/clone" config branch.main.pushRemote '../mirrors/other.git'
+git -C "${WORK_DIR}/clone" config branch.main.remote 'origin'
+remote="$(push_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != '../mirrors/other.git' ]; then
+  fail "push_remote reported [${remote}] for a branch whose pushRemote is ../mirrors/other.git"
+fi
+
+# An empty branch, which means that HEAD is detached, uses only the
+# configuration that is not about a particular branch:  the branch settings
+# above are the ones of some other branch, which say nothing about this push.
+remote="$(push_remote "${WORK_DIR}/clone" '')"
+if [ "${remote}" != 'fork/repository.git' ]; then
+  fail "push_remote reported [${remote}] for an empty branch"
+fi
+git -C "${WORK_DIR}/clone" config --unset branch.main.pushRemote
+git -C "${WORK_DIR}/clone" config --unset branch.main.remote
+
+# `fetch_remote` reports the remote that the branch is fetched from, which is
+# not always the one that `push_remote` reports.  In the fork workflow the
+# clone pushes to a fork -- `remote.pushDefault` or `branch.BRANCH.pushRemote`
+# names it -- and fetches the project's branches from another remote, so a
+# question about what the project has must go to the latter.  Asking the fork
+# would report that a branch of the project does not exist.
+git init -q --bare -b main "${WORK_DIR}/fork.git"
+git -C "${WORK_DIR}/clone" remote add fork "${WORK_DIR}/fork.git"
+git -C "${WORK_DIR}/clone" config remote.pushDefault 'fork'
+remote="$(fetch_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'origin' ]; then
+  fail "fetch_remote reported [${remote}] for a clone whose remote.pushDefault is fork"
+fi
+remote="$(push_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'fork' ]; then
+  fail "push_remote reported [${remote}] for a clone whose remote.pushDefault is fork"
+fi
+git -C "${WORK_DIR}/clone" config --unset remote.pushDefault
+git -C "${WORK_DIR}/clone" config branch.main.pushRemote 'fork'
+remote="$(fetch_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'origin' ]; then
+  fail "fetch_remote reported [${remote}] for a branch whose pushRemote is fork"
+fi
+
+# `branch.BRANCH.remote` does say where the branch is fetched from, so
+# `fetch_remote` reports it even though a pushRemote outranks it for a push.
+git -C "${WORK_DIR}/clone" config branch.main.remote 'fork'
+remote="$(fetch_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'fork' ]; then
+  fail "fetch_remote reported [${remote}] for a branch whose remote is fork"
+fi
+git -C "${WORK_DIR}/clone" config --unset branch.main.remote
+git -C "${WORK_DIR}/clone" config --unset branch.main.pushRemote
+
+# A clone whose sole remote is not named "origin" fetches from that one.
+git -C "${WORK_DIR}/clone" remote remove fork
+git -C "${WORK_DIR}/clone" remote rename origin elsewhere
+remote="$(fetch_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'elsewhere' ]; then
+  fail "fetch_remote reported [${remote}] for a clone whose sole remote is elsewhere"
+fi
+# The same clone pushes to that remote, because it is the only one it has.
+remote="$(push_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'elsewhere' ]; then
+  fail "push_remote reported [${remote}] for a clone whose sole remote is elsewhere"
 fi
 
 # `conflict_abort_command` names the command that ends the operation in

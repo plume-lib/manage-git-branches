@@ -81,6 +81,83 @@ else
   fi
 fi
 
+# A clone whose sole remote is not named "origin" is asked about the branch.
+othername="${tmpdir}/othername-branch-main"
+git clone -q "${repo}" "${othername}"
+git -C "${othername}" remote rename origin elsewhere
+if ! out="$(cd "${othername}" && "${GIT_CHECKOUT_BRANCH}" localonly 2>&1)"; then
+  fail "nonzero exit status for a branch of a remote not named origin: ${out}"
+fi
+otherdir="${tmpdir}/othername-branch-localonly"
+if [ ! -d "${otherdir}" ]; then
+  fail "directory was not created: ${otherdir}"
+else
+  checkedout="$(git -C "${otherdir}" rev-parse --abbrev-ref HEAD)"
+  if [ "${checkedout}" != "localonly" ]; then
+    fail "checked out ${checkedout} rather than localonly in ${otherdir}"
+  fi
+fi
+
+# The diagnostic for a nonexistent branch names the remote that was asked,
+# rather than "origin", which such a clone does not have.
+if out="$(cd "${othername}" && "${GIT_CHECKOUT_BRANCH}" nosuchbranch 2>&1)"; then
+  fail "zero exit status for the nonexistent branch nosuchbranch"
+fi
+case "${out}" in
+  *"does not exist, locally or on remote elsewhere"*) ;;
+  *) fail "the message does not name the remote that was asked: ${out}" ;;
+esac
+
+# A clone that pushes to a fork checks out a branch of the remote that it
+# fetches from.  The push remote is the wrong one to ask about a branch:  a
+# fork does not have the project's branches, so asking it would report that a
+# branch that plainly exists does not exist.
+forkclone="${tmpdir}/forkclone-branch-main"
+git clone -q "${repo}" "${forkclone}"
+git init -q --bare -b main "${tmpdir}/fork.git"
+git -C "${forkclone}" remote add fork "${tmpdir}/fork.git"
+git -C "${forkclone}" config branch.main.pushRemote fork
+if ! out="$(cd "${forkclone}" && "${GIT_CHECKOUT_BRANCH}" localonly 2>&1)"; then
+  fail "nonzero exit status for a branch of the fetch remote: ${out}"
+fi
+forkdir="${tmpdir}/forkclone-branch-localonly"
+if [ ! -d "${forkdir}" ]; then
+  fail "directory was not created: ${forkdir}"
+else
+  checkedout="$(git -C "${forkdir}" rev-parse --abbrev-ref HEAD)"
+  if [ "${checkedout}" != "localonly" ]; then
+    fail "checked out ${checkedout} rather than localonly in ${forkdir}"
+  fi
+fi
+
+# The diagnostic for a nonexistent branch names the remote that was asked,
+# which is the one the clone fetches from rather than the one it pushes to.
+if out="$(cd "${forkclone}" && "${GIT_CHECKOUT_BRANCH}" nosuchbranch 2>&1)"; then
+  fail "zero exit status for the nonexistent branch nosuchbranch"
+fi
+case "${out}" in
+  *"does not exist, locally or on remote origin"*) ;;
+  *) fail "the message does not name the remote that was asked: ${out}" ;;
+esac
+
+# A branch that only a remote other than the fetch remote has can be checked
+# out, because `git checkout` creates the local branch from the
+# remote-tracking branch of any remote.
+git -C "${forkclone}" push -q fork "refs/remotes/origin/localonly:refs/heads/onlyfork"
+git -C "${forkclone}" fetch -q fork
+if ! out="$(cd "${forkclone}" && "${GIT_CHECKOUT_BRANCH}" onlyfork 2>&1)"; then
+  fail "nonzero exit status for a branch of a remote other than the fetch remote: ${out}"
+fi
+onlyforkdir="${tmpdir}/forkclone-branch-onlyfork"
+if [ ! -d "${onlyforkdir}" ]; then
+  fail "directory was not created: ${onlyforkdir}"
+else
+  checkedout="$(git -C "${onlyforkdir}" rev-parse --abbrev-ref HEAD)"
+  if [ "${checkedout}" != "onlyfork" ]; then
+    fail "checked out ${checkedout} rather than onlyfork in ${onlyforkdir}"
+  fi
+fi
+
 # `HEAD` is not a branch name, even though a clone has a symbolic ref
 # `refs/remotes/origin/HEAD`.
 if out="$(cd "${clone}" && "${GIT_CHECKOUT_BRANCH}" HEAD 2>&1)"; then

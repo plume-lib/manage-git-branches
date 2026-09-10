@@ -1,7 +1,8 @@
 #!/bin/sh
 
-# Tests that a working copy created by `git-new-branch` can be used by
-# `git-push-to`, which is the workflow that the README describes.
+# Tests that a working copy created by `git-new-branch`, once its branch has
+# been given an upstream, can be used by `git-push-to`, which is the workflow
+# that the README describes.
 #
 # Usage:
 #   tests/test-new-branch-push-to.sh
@@ -69,9 +70,23 @@ if git -C "${FEATURE_DIR}" rev-parse --symbolic-full-name '@{upstream}' > /dev/n
   fail "git-new-branch gave feature1 an upstream, but it does not push"
 fi
 
-# `git-push-to` needs an upstream, so create one, as `git-new-branch` tells the
-# user to do.
-git -C "${FEATURE_DIR}" push -q --set-upstream origin feature1
+# `git-push-to` needs an upstream branch, and `git-new-branch` does not create
+# one, because it has only local effects.  Report its absence here, where the
+# cause is clear, rather than as a `git-push-to` failure below.
+if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
+  fail "git-push-to succeeded on a new branch that has no upstream branch"
+fi
+case "${output}" in
+  *"has no upstream branch"*) ;;
+  *) fail "git-push-to did not explain the missing upstream branch: ${output}" ;;
+esac
+
+# `git-new-branch` pushes nothing, so the new branch has no upstream branch
+# until the user creates one, as the README says to do.  `git-push-to` and
+# `git-pull-from` need one.
+if ! git -C "${FEATURE_DIR}" push -q --set-upstream origin feature1; then
+  fail "cannot give the new branch an upstream"
+fi
 
 # Commit a change in the main branch, to be propagated to the new branch.
 echo "second line" >> "${MAIN_DIR}/file.txt"
@@ -140,8 +155,9 @@ case "${output}" in
   *) fail "git-push-to did not explain that it could not choose a remote: ${output}" ;;
 esac
 case "${output}" in
-  *"--set-upstream 'REMOTE'"*)
-    fail "git-push-to recommended a command that names a placeholder remote: ${output}" ;;
+  *"--set-upstream REMOTE"* | *"--set-upstream 'REMOTE'"*)
+    fail "git-push-to recommended a command that names a placeholder remote: ${output}"
+    ;;
 esac
 case "${output}" in
   *"  github"*) ;;
@@ -160,8 +176,13 @@ case "${output}" in
   *) fail "git-push-to did not explain that the clone has no remote: ${output}" ;;
 esac
 case "${output}" in
-  *"--set-upstream 'REMOTE'"*)
-    fail "git-push-to recommended a command that names a placeholder remote: ${output}" ;;
+  *"--set-upstream REMOTE"* | *"--set-upstream 'REMOTE'"*)
+    fail "git-push-to recommended a command that names a placeholder remote: ${output}"
+    ;;
+esac
+case "${output}" in
+  *"git remote add"*) ;;
+  *) fail "git-push-to did not say to add a remote first: ${output}" ;;
 esac
 
 # A subdirectory of a working copy is a git repository, so saying merely "not a
@@ -259,6 +280,20 @@ case "${output}" in
   *"git push --set-upstream 'origin' 'main'"*) ;;
   *) fail "git-push-to did not prefer the branch's own remote to remote.pushDefault: ${output}" ;;
 esac
+
+# In a clone whose sole remote has some other name, a branch name that no
+# remote has is created, just as it is in a clone whose remote is "origin".
+# (`tests/test-new-branch-no-push.sh` checks that no remote receives it.)
+ONLY_REMOTE_DIR="${WORK_DIR}/onlyremote"
+git clone -q "${REMOTE}" "${ONLY_REMOTE_DIR}"
+git -C "${ONLY_REMOTE_DIR}" remote rename origin elsewhere
+if ! output="$(cd "${ONLY_REMOTE_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature5 2>&1)"; then
+  fail "git-new-branch failed in a clone whose only remote is not origin: ${output}"
+fi
+branch="$(git -C "${WORK_DIR}/onlyremote-branch-feature5" rev-parse --abbrev-ref HEAD)"
+if [ "${branch}" != "feature5" ]; then
+  fail "${WORK_DIR}/onlyremote-branch-feature5 is on branch ${branch}, not feature5"
+fi
 
 # A clone with no remote has no remote to ask, so the branch is created.
 NO_REMOTE_DIR="${WORK_DIR}/noremote"
