@@ -7,10 +7,6 @@
 # A script that sources this file must set ${SCRIPT_DIR} to the directory that
 # contains this package's files, because `git_batch_ssh` runs a wrapper script
 # from that directory.
-#
-# Most of these functions are about remotes, which is what the file is named
-# for.  The `conflict_` functions are not, but they are shared by the same
-# commands, and this is the file that they all source.
 
 ## Usage: remote_is_usable DIRECTORY REMOTES NAME
 ## Tests whether NAME names a remote that a git command run in DIRECTORY can
@@ -21,10 +17,9 @@
 ## `remote.pushDefault` in particular is a default for every branch of every
 ## clone, commonly set once in ~/.gitconfig to name a fork; in a clone that has
 ## no such remote, it names a remote that only some other clone has.  A query
-## about such a name fails, which would silently disable a check, and a command
-## that names it in advice to the user fails with "does not appear to be a git
-## repository", which hides the actual problem.  So `push_remote` skips such a
-## name and considers the next possibility.
+## about such a name fails, which would silently disable a check, and a
+## diagnostic that names it hides the actual problem.  So `push_remote` skips
+## such a name and considers the next possibility.
 ##
 ## Git accepts a URL or a pathname wherever it accepts a remote's name, and
 ## permits one as the value of `branch.BRANCH.remote` or `remote.pushDefault`
@@ -89,10 +84,9 @@ remote_is_usable() {
 ## wherever it accepts a remote's name and which `push_remote` and
 ## `fetch_remote` therefore report when that is what the configuration says.
 ##
-## A command that requires the name of a remote, such as
-## `git remote set-branches`, fails on a URL or a pathname ("No such remote"),
-## and `git fetch URL` records no remote-tracking branch, so advice that names
-## one must be worded differently.
+## Only a named remote has a remote-tracking namespace:  `git fetch URL`
+## records no remote-tracking branch, so a caller that fetches into that
+## namespace has to know which kind of value it has.
 is_remote_name() {
   git -C "$1" remote | grep -q -x -F -- "$2"
 }
@@ -288,81 +282,5 @@ git_batch_ssh() {
     GIT_TERMINAL_PROMPT=0 \
       GIT_SSH_COMMAND="ssh ${git_batch_ssh_option}" \
       git -C "${git_batch_ssh_dir}" "$@"
-  fi
-}
-
-## Usage: conflict_operation DIRECTORY
-## Prints the name of the git operation that left conflicts in DIRECTORY --
-## `rebase`, `am`, `cherry-pick`, `revert`, or `merge` -- or nothing if no
-## operation is in progress.
-##
-## Each operation rejects every other one's way out:  `git merge --abort`
-## during a rebase fails with "There is no merge to abort (MERGE_HEAD
-## missing)", and `git rebase --abort` during a `git am` fails with "It looks
-## like 'git am' is in progress.  Cannot rebase."  Advice that names the wrong
-## operation leaves the user with the conflicts and no command that clears
-## them, so it has to name the one that is actually in progress.
-##
-## Git records the operation in the repository directory.  A rebase leaves
-## `rebase-merge`, or `rebase-apply` when it applies patches; `git am` leaves
-## `rebase-apply` too, and only it creates the `applying` file there, which is
-## how git itself tells the two apart.  The other operations leave the
-## pseudo-ref that they are named for.  The rebase directories are tested
-## first, because a rebase that stops at a conflict can leave
-## `CHERRY_PICK_HEAD` as well.
-conflict_operation() {
-  if ! conflict_operation_gitdir="$(git -C "$1" rev-parse --absolute-git-dir 2> /dev/null)"; then
-    return
-  fi
-  if [ -d "${conflict_operation_gitdir}/rebase-merge" ]; then
-    echo 'rebase'
-  elif [ -d "${conflict_operation_gitdir}/rebase-apply" ]; then
-    if [ -f "${conflict_operation_gitdir}/rebase-apply/applying" ]; then
-      echo 'am'
-    else
-      echo 'rebase'
-    fi
-  elif [ -f "${conflict_operation_gitdir}/CHERRY_PICK_HEAD" ]; then
-    echo 'cherry-pick'
-  elif [ -f "${conflict_operation_gitdir}/REVERT_HEAD" ]; then
-    echo 'revert'
-  elif [ -f "${conflict_operation_gitdir}/MERGE_HEAD" ]; then
-    echo 'merge'
-  fi
-}
-
-## Usage: conflict_abort_command DIRECTORY
-## Prints the git command that abandons the operation that left conflicts in
-## DIRECTORY:  `git rebase --abort`, `git merge --abort`, or whichever other
-## operation `conflict_operation` reports.
-##
-## Conflicts can outlive the operation that made them, as when `git checkout
-## -m` or `git stash apply` leaves them:  then there is nothing to abort, and
-## every `--abort` fails.  `git merge --abort` is documented as equivalent to
-## `git reset --merge`, and that command needs no operation in progress, so it
-## is what clears the conflicts in that case.
-conflict_abort_command() {
-  conflict_abort_command_operation="$(conflict_operation "$1")"
-  if [ -z "${conflict_abort_command_operation}" ]; then
-    echo 'git reset --merge'
-  else
-    echo "git ${conflict_abort_command_operation} --abort"
-  fi
-}
-
-## Usage: conflict_continue_command DIRECTORY
-## Prints the git command that resumes the operation that left conflicts in
-## DIRECTORY, such as `git rebase --continue`, or nothing if no operation is in
-## progress and resolving the conflicts therefore finishes nothing.
-##
-## Resolving a rebase's conflicts does not end the rebase.  Until `git rebase
-## --continue` runs, HEAD is still the rebase's intermediate commit and the
-## commits that the rebase has not replayed yet are not on it, so a caller that
-## tells the user only to resolve the conflicts sends them on with a working
-## copy that is missing their own work.
-conflict_continue_command() {
-  conflict_continue_command_operation="$(conflict_operation "$1")"
-  if [ -n "${conflict_continue_command_operation}" ]; then
-    echo "git ${conflict_continue_command_operation} --continue"
   fi
 }

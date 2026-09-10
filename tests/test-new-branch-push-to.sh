@@ -134,59 +134,12 @@ git -C "${MAIN_DIR}" config branch.main.merge refs/heads/main
 # A working copy with no upstream branch gets an explanation, not git's
 # "There is no tracking information for the current branch".
 git -C "${FEATURE_DIR}" branch --unset-upstream
-git -C "${FEATURE_DIR}" remote rename origin github
 if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
   fail "git-push-to succeeded on a working copy with no upstream branch"
 fi
 case "${output}" in
   *"has no upstream branch"*) ;;
   *) fail "git-push-to did not explain the missing upstream branch: ${output}" ;;
-esac
-case "${output}" in
-  *"git push --set-upstream 'github' 'feature1'"*) ;;
-  *) fail "git-push-to did not recommend the configured remote: ${output}" ;;
-esac
-
-# When several remotes exist and none is named origin, no remote can be chosen
-# for the user, so the advice names the remotes instead of a placeholder that
-# would fail if the user pasted it.
-git -C "${FEATURE_DIR}" remote add elsewhere "${REMOTE}"
-if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
-  fail "git-push-to succeeded on a working copy with no upstream branch"
-fi
-case "${output}" in
-  *"several remotes and none is named origin"*) ;;
-  *) fail "git-push-to did not explain that it could not choose a remote: ${output}" ;;
-esac
-case "${output}" in
-  *"--set-upstream REMOTE"* | *"--set-upstream 'REMOTE'"*)
-    fail "git-push-to recommended a command that names a placeholder remote: ${output}"
-    ;;
-esac
-case "${output}" in
-  *"  github"*) ;;
-  *) fail "git-push-to did not list the remotes to choose from: ${output}" ;;
-esac
-
-# A working copy with no remote at all cannot be given an upstream by `git
-# push` alone, so the advice says to add a remote first.
-git -C "${FEATURE_DIR}" remote remove elsewhere
-git -C "${FEATURE_DIR}" remote remove github
-if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
-  fail "git-push-to succeeded on a working copy with no remote"
-fi
-case "${output}" in
-  *"has no remote"*) ;;
-  *) fail "git-push-to did not explain that the clone has no remote: ${output}" ;;
-esac
-case "${output}" in
-  *"--set-upstream REMOTE"* | *"--set-upstream 'REMOTE'"*)
-    fail "git-push-to recommended a command that names a placeholder remote: ${output}"
-    ;;
-esac
-case "${output}" in
-  *"git remote add"*) ;;
-  *) fail "git-push-to did not say to add a remote first: ${output}" ;;
 esac
 
 # A subdirectory of a working copy is a git repository, so saying merely "not a
@@ -281,35 +234,6 @@ branch="$(git -C "${WORK_DIR}/fork-branch-feature1" rev-parse --abbrev-ref HEAD)
 if [ "${branch}" != "feature1" ]; then
   fail "${WORK_DIR}/fork-branch-feature1 is on branch ${branch}, not feature1"
 fi
-
-# `git-push-to` recommends a remote that the clone has, for the same reason.
-ADVICE_DIR="${WORK_DIR}/advice"
-git clone -q "${REMOTE}" "${ADVICE_DIR}"
-git -C "${ADVICE_DIR}" branch --unset-upstream
-git -C "${ADVICE_DIR}" config remote.pushDefault fork
-if output="$("${COMMANDS_DIR}/git-push-to" "${ADVICE_DIR}" "${MAIN_DIR}" 2>&1)"; then
-  fail "git-push-to succeeded on a working copy with no upstream branch"
-fi
-case "${output}" in
-  *fork*) fail "git-push-to recommended a remote that the clone does not have: ${output}" ;;
-esac
-case "${output}" in
-  *"git push --set-upstream 'origin' 'main'"*) ;;
-  *) fail "git-push-to did not recommend a remote that the clone has: ${output}" ;;
-esac
-
-# `git-push-to` and `is-deleted-branch` must agree about which remote a branch
-# would be pushed to, so `git-push-to` also prefers the branch's own remote to
-# the clone-wide `remote.pushDefault`.
-git -C "${ADVICE_DIR}" remote add fork "${REMOTE}"
-git -C "${ADVICE_DIR}" config branch.main.remote origin
-if output="$("${COMMANDS_DIR}/git-push-to" "${ADVICE_DIR}" "${MAIN_DIR}" 2>&1)"; then
-  fail "git-push-to succeeded on a working copy with no upstream branch"
-fi
-case "${output}" in
-  *"git push --set-upstream 'origin' 'main'"*) ;;
-  *) fail "git-push-to did not prefer the branch's own remote to remote.pushDefault: ${output}" ;;
-esac
 
 # In a clone whose sole remote has some other name, a branch name that no
 # remote has is created, just as it is in a clone whose remote is "origin".
