@@ -16,6 +16,8 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 REPO_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 
+. "${SCRIPT_DIR}/lib-git-test-env.sh"
+
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $1" >&2
   exit 1
@@ -32,11 +34,7 @@ trap 'rm -rf "${workdir}"' EXIT
 trap 'rm -rf "${workdir}"; exit 130' INT
 trap 'rm -rf "${workdir}"; exit 143' TERM
 
-GIT_AUTHOR_NAME='manage-git-branches test'
-GIT_AUTHOR_EMAIL='test@example.com'
-GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
-GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
-export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+sanitize_git_env "${workdir}"
 
 remote="${workdir}/remote.git"
 git init -q --bare -b main "${remote}"

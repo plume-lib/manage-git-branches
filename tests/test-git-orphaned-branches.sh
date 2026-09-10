@@ -15,6 +15,8 @@ TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 TOPLEVEL="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)"
 GIT_ORPHANED_BRANCHES="${TOPLEVEL}/git-orphaned-branches"
 
+. "${TESTS_DIR}/lib-git-test-env.sh"
+
 if [ "$#" -ne 0 ]; then
   echo "Usage: ${SCRIPT_NAME}" >&2
   exit 1
@@ -45,6 +47,8 @@ if ! work="$(CDPATH='' cd -- "${work}" && pwd -P)" || [ -z "${work}" ]; then
   echo "${SCRIPT_NAME}: cannot resolve the temporary directory" >&2
   exit 1
 fi
+
+sanitize_git_env "${work}"
 
 fail() {
   echo "${SCRIPT_NAME}: FAILED: $1" >&2
@@ -182,13 +186,6 @@ fi
 ###########################################################################
 ## Clones of branches that have been deleted in the remote repository.
 ###########################################################################
-
-# Do not depend on the user's git identity or on any repository-local config.
-GIT_AUTHOR_NAME="Test"
-GIT_AUTHOR_EMAIL="test@example.com"
-GIT_COMMITTER_NAME="Test"
-GIT_COMMITTER_EMAIL="test@example.com"
-export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 
 # Create a remote repository with branches "main" and "feat2".
 git init -q --bare -b main "${work}/remote.git"
