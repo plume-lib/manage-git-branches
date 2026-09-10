@@ -66,7 +66,11 @@ fi
 if git -C "${REMOTE}" rev-parse --verify --quiet refs/heads/feature1 > /dev/null; then
   fail "git-new-branch pushed feature1 to the remote"
 fi
-if git -C "${FEATURE_DIR}" rev-parse --symbolic-full-name '@{upstream}' > /dev/null 2>&1; then
+# Test the configuration that defines an upstream, as `git-push-to` does, not
+# `@{upstream}`, which also fails when only the cached remote-tracking ref is
+# absent -- which it always is here, since `git-new-branch` pushes nothing.
+if [ -n "$(git -C "${FEATURE_DIR}" config --get branch.feature1.remote)" ] \
+  && [ -n "$(git -C "${FEATURE_DIR}" config --get-all branch.feature1.merge)" ]; then
   fail "git-new-branch gave feature1 an upstream, but it does not push"
 fi
 
