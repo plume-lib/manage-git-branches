@@ -27,25 +27,29 @@ The commands are:
 * [`git-checkout-branch`](git-checkout-branch) `BRANCHNAME`:
   Checks out the given branch of the repository in a new working copy
   directory.  Run this command from within a working copy; the new directory
-  is a sibling of the working copy.  Below is a definition for an alias
-  `gcb`.
+  is a sibling of the working copy.  The branch may exist locally, in any
+  remote that this working copy has fetched from, or in the remote that
+  `git fetch` would use for the current branch; the command asks that remote
+  when the working copy itself shows no such branch.  Below is a definition
+  for an alias `gcb`.
 * [`git-new-branch`](git-new-branch) `BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   copy directory.  Run this command from within a working copy; the new
-  directory is a sibling of the working copy.
+  directory is a sibling of the working copy.  This command does not push the
+  new branch.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to) `[--nocompile] FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.
   Each directory must be the top level of a working copy (that is, of a git
-  clone).
+  clone) and must have an upstream branch.
   You may also pass a list of directories: each is pushed into the subsequent one.
 * [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
   succeeds.
   OTHER-REPO-DIR and the current directory must both be the top level of a
-  working copy (that is, a git clone).
+  working copy (that is, a git clone) and must each have an upstream branch.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
 * [`git-orphaned-branches`](git-orphaned-branches) `[--print0]`:
