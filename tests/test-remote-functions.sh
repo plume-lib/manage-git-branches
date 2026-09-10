@@ -86,15 +86,25 @@ check_usable "${REMOTES}" "${TILDE}other" 'yes'
 # A pathname, which git also accepts wherever it accepts a remote's name.
 # `git push --set-upstream ../other.git BRANCH` writes such a value into
 # `branch.BRANCH.remote`.  Only a pathname that names a repository is usable:
-# git accepts "/" in the name of a remote, so a slash does not tell a pathname
-# from the name of a remote that this clone lacks.  A pathname may name a bare
-# repository or a working tree.
+# git accepts "/" in the name of a remote, so a slash does not by itself tell a
+# pathname from the name of a remote that this clone lacks.  A pathname may
+# name a bare repository or a working tree.
 git init -q --bare -b main "${WORK_DIR}/mirrors/other.git"
 git init -q -b main "${WORK_DIR}/working-tree"
 check_usable "${REMOTES}" 'mirrors/other.git' 'yes'
-check_usable "${REMOTES}" 'working-tree' 'yes'
+check_usable "${REMOTES}" './working-tree' 'yes'
 check_usable "${REMOTES}" 'mirrors/nosuch.git' 'no'
 check_usable "${REMOTES}" '/srv/git/nosuch-49b1c0.git' 'no'
+
+# A name with no "/" in it is the name of a remote, so a repository of that
+# name within the working tree does not make it usable, even though git would
+# resolve the name as a relative pathname in a clone that has no such remote.
+# A nested repository is commonplace -- a submodule, or a vendored clone -- and
+# it is not the fork that `remote.pushDefault = working-tree` names, so pushing
+# a branch into it is the failure that this function exists to prevent.  A
+# value that is meant as a pathname says so with a "/", as "./working-tree"
+# above does.
+check_usable "${REMOTES}" 'working-tree' 'no'
 
 # A file or a directory that is not a repository does not make a name usable.
 # A working tree commonly contains a directory whose name is also a common
@@ -174,8 +184,20 @@ if [ "${remote}" != 'origin' ]; then
   fail "push_remote reported [${remote}] for a name that only a working-tree directory matches"
 fi
 
+# A repository nested in the working tree does not make such a name usable
+# either.  A submodule, or a vendored clone, in a directory named "upstream" is
+# commonplace, and `remote.pushDefault = upstream` in ~/.gitconfig names the
+# fork that some other clone has:  pushing the branch into the nested
+# repository is the same failure as pushing to a name that no repository has.
+git init -q --bare -b main "${WORK_DIR}/clone/upstream"
+git -C "${WORK_DIR}/clone" config remote.pushDefault 'upstream'
+remote="$(push_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'origin' ]; then
+  fail "push_remote reported [${remote}] for a name that only a nested repository matches"
+fi
+
 # A pathname that does name a repository is still reported, even when it lies
-# within the working tree, where the directory in the check above lies.
+# within the working tree, where the directories in the checks above lie.
 git init -q --bare -b main "${WORK_DIR}/clone/fork/repository.git"
 git -C "${WORK_DIR}/clone" config remote.pushDefault 'fork/repository.git'
 remote="$(push_remote "${WORK_DIR}/clone" main)"

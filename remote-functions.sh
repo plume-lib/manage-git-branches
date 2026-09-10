@@ -27,12 +27,12 @@
 ## -- `git push --set-upstream ../other.git BRANCH` writes one there -- so
 ## those count as usable as well.  A string that contains ":" is an scp-style
 ## or a scheme-style URL, and "~" begins a pathname in the shell syntax that
-## git accepts for a local repository.  Any other string is a pathname only if
-## it names a repository:  git does accept "/" in the name of a remote
-## (`git remote add team/fork URL` succeeds), so a slash does not distinguish a
-## pathname from the name of a remote that this clone lacks, and only the file
-## system does.  A relative pathname is resolved in DIRECTORY, where git
-## resolves the ones it is given.
+## git accepts for a local repository.  A string that contains "/" is a
+## pathname only if it names a repository:  git does accept "/" in the name of
+## a remote (`git remote add team/fork URL` succeeds), so a slash does not by
+## itself distinguish a pathname from the name of a remote that this clone
+## lacks, and only the file system does.  A relative pathname is resolved in
+## DIRECTORY, where git resolves the ones it is given.
 ##
 ## Merely existing is not enough.  A file or a directory of that name is
 ## commonplace -- a working tree that contains a directory named "upstream"
@@ -41,6 +41,17 @@
 ## the way that this function exists to prevent.  A bundle file does not count
 ## either:  git can fetch from one, but this package's callers push to the
 ## remote they choose, or advise the user to.
+##
+## A string that contains no "/" is not a pathname at all here, even when a
+## repository of that name lies in DIRECTORY.  Git would resolve such a name
+## as a relative pathname, having no remote of that name, but a repository
+## nested in a working tree is commonplace -- a submodule, or a vendored
+## clone, in a directory named "upstream" or "fork" -- and it is not the fork
+## that `remote.pushDefault` names.  Pushing a branch into the submodule is
+## the same class of failure as pushing to a name that no repository has, so
+## such a name is skipped like any other name that this clone lacks.  A value
+## that is meant as a relative pathname says so with a "/", as "./upstream"
+## and "../other.git" do.
 remote_is_usable() {
   if [ -z "$3" ]; then
     return 1
@@ -51,7 +62,9 @@ remote_is_usable() {
   case "$3" in
     *:* | '~'*) return 0 ;;
     /*) remote_is_usable_path="$3" ;;
-    *) remote_is_usable_path="$1/$3" ;;
+    */*) remote_is_usable_path="$1/$3" ;;
+    # A name with no "/" in it is the name of a remote, not a pathname.
+    *) return 1 ;;
   esac
   # `git rev-parse --resolve-git-dir` tests the one directory it is given,
   # rather than searching the parent directories as most git commands do, so a
