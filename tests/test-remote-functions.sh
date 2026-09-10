@@ -1,14 +1,6 @@
 #!/bin/sh
 
-# Tests the functions in remote-functions.sh:  `remote_is_usable`,
-# `push_remote`, and `fetch_remote`, which decide which remote this package's
-# commands ask about a branch, `is_remote_name`, which says whether that answer
-# is the name of a remote, and `conflict_abort_command`.  A wrong answer from
-# the first three is not visible in the commands' output:  it makes them ask
-# some other repository, which can report that a branch that still exists was
-# deleted.  `conflict_abort_command` names the command that ends the operation
-# that a failed pull left in progress, and the wrong name is a command that the
-# user runs and that fails.
+# Tests the functions in remote-functions.sh.
 #
 # Usage:
 #   tests/test-remote-functions.sh
@@ -290,22 +282,55 @@ if [ "${remote}" != 'elsewhere' ]; then
 fi
 
 # `conflict_abort_command` names the command that ends the operation in
-# progress:  a rebase and a merge each reject the other's `--abort`.
-abort_command="$(conflict_abort_command "${WORK_DIR}/clone")"
-if [ "${abort_command}" != 'git merge --abort' ]; then
-  fail "conflict_abort_command reported [${abort_command}] with no rebase in progress"
-fi
+# progress, and `conflict_continue_command` the command that resumes it:  each
+# operation rejects every other one's `--abort` and `--continue`.
+
+## Usage: check_conflict_commands SITUATION ABORT CONTINUE
+## Fails the test unless the two functions report ABORT and CONTINUE for the
+## state that the clone is currently in, which SITUATION names.
+check_conflict_commands() {
+  check_conflict_commands_abort="$(conflict_abort_command "${WORK_DIR}/clone")"
+  if [ "${check_conflict_commands_abort}" != "$2" ]; then
+    fail "conflict_abort_command reported [${check_conflict_commands_abort}] rather than [$2] $1"
+  fi
+  check_conflict_commands_continue="$(conflict_continue_command "${WORK_DIR}/clone")"
+  if [ "${check_conflict_commands_continue}" != "$3" ]; then
+    fail "conflict_continue_command reported [${check_conflict_commands_continue}] rather than [$3] $1"
+  fi
+}
+
+# With no operation in progress, every `--abort` fails, and resolving the
+# conflicts finishes nothing, so there is no `--continue` to advise.
+check_conflict_commands 'with no operation in progress' 'git reset --merge' ''
 mkdir -p "${WORK_DIR}/clone/.git/rebase-merge"
-abort_command="$(conflict_abort_command "${WORK_DIR}/clone")"
-if [ "${abort_command}" != 'git rebase --abort' ]; then
-  fail "conflict_abort_command reported [${abort_command}] during a rebase"
-fi
+check_conflict_commands 'during a rebase' 'git rebase --abort' 'git rebase --continue'
 rmdir "${WORK_DIR}/clone/.git/rebase-merge"
 mkdir -p "${WORK_DIR}/clone/.git/rebase-apply"
-abort_command="$(conflict_abort_command "${WORK_DIR}/clone")"
-if [ "${abort_command}" != 'git rebase --abort' ]; then
-  fail "conflict_abort_command reported [${abort_command}] during a patch-applying rebase"
-fi
-rmdir "${WORK_DIR}/clone/.git/rebase-apply"
+check_conflict_commands 'during a patch-applying rebase' \
+  'git rebase --abort' 'git rebase --continue'
+# `git am` uses the same directory as a patch-applying rebase, and only it
+# creates `applying` there.  Advising `git rebase --abort` during a `git am`
+# gives the user a command that exits 128 with "It looks like 'git am' is in
+# progress.  Cannot rebase."
+touch "${WORK_DIR}/clone/.git/rebase-apply/applying"
+check_conflict_commands 'during a git am' 'git am --abort' 'git am --continue'
+rm -rf "${WORK_DIR}/clone/.git/rebase-apply"
+touch "${WORK_DIR}/clone/.git/MERGE_HEAD"
+check_conflict_commands 'during a merge' 'git merge --abort' 'git merge --continue'
+rm -f "${WORK_DIR}/clone/.git/MERGE_HEAD"
+touch "${WORK_DIR}/clone/.git/CHERRY_PICK_HEAD"
+check_conflict_commands 'during a cherry-pick' \
+  'git cherry-pick --abort' 'git cherry-pick --continue'
+# A rebase that stops at a conflict can leave `CHERRY_PICK_HEAD` as well, and
+# `git cherry-pick --abort` is not what leaves that state, so the rebase
+# directory outranks the pseudo-ref.
+mkdir -p "${WORK_DIR}/clone/.git/rebase-merge"
+check_conflict_commands 'during a rebase that left CHERRY_PICK_HEAD' \
+  'git rebase --abort' 'git rebase --continue'
+rmdir "${WORK_DIR}/clone/.git/rebase-merge"
+rm -f "${WORK_DIR}/clone/.git/CHERRY_PICK_HEAD"
+touch "${WORK_DIR}/clone/.git/REVERT_HEAD"
+check_conflict_commands 'during a revert' 'git revert --abort' 'git revert --continue'
+rm -f "${WORK_DIR}/clone/.git/REVERT_HEAD"
 
 echo "${SCRIPT_NAME}: OK"
