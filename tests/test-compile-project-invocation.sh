@@ -18,6 +18,8 @@ REPO_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 SYSTEM_REALPATH="$(command -v realpath)"
 export SYSTEM_REALPATH
 
+. "${SCRIPT_DIR}/lib-git-test-env.sh"
+
 fail() {
   echo "${SCRIPT_NAME}: FAILED: $1" >&2
   exit 1
@@ -94,20 +96,7 @@ INNER
 chmod +x "${fakebin}/realpath"
 TEST_PATH="${fakebin}:${PATH_WITHOUT_COMPILE_PROJECT}"
 
-# Make the test independent of the invoking user's git configuration.  A
-# global setting such as `commit.gpgsign`, `pull.rebase`, `merge.ff`,
-# `core.hooksPath`, or `commit.template` would otherwise change what the
-# commands below do, or make them fail.
-GIT_CONFIG_GLOBAL="${work_dir}/gitconfig"
-GIT_CONFIG_SYSTEM=/dev/null
-# A committer identity, in case the user running the test has none.
-GIT_AUTHOR_NAME='manage-git-branches test'
-GIT_AUTHOR_EMAIL='test@example.com'
-GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
-GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
-export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
-export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-: > "${GIT_CONFIG_GLOBAL}"
+sanitize_git_env "${work_dir}"
 
 # Creates a clone of the test origin repository at $1 and configures it so that
 # `git pull` merges, whatever the invoking user's global git configuration says.

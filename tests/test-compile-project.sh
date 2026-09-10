@@ -11,6 +11,8 @@ SCRIPT_NAME="$(basename -- "$0")"
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMPILE_PROJECT="${SCRIPT_DIR}/../compile-project"
 
+. "${SCRIPT_DIR}/lib-git-test-env.sh"
+
 status=0
 
 fail() {
@@ -38,6 +40,8 @@ fi
 trap 'rm -rf "${tmpdir}"' EXIT
 trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
+
+sanitize_git_env "${tmpdir}"
 
 # On macOS, $TMPDIR ends with "/", so the template above contains "//" and
 # macOS `mktemp` echoes the duplicated "/" back.  `cd` collapses it, so a path
