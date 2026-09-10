@@ -47,6 +47,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import string
 import sys
 from pathlib import PurePath
 from typing import TYPE_CHECKING
@@ -96,6 +97,16 @@ OPERATOR_CHARS = frozenset(OPERATOR_CHARACTERS)
 # redirection does not separate one command from the next, and its target is not a word
 # of the command it belongs to.
 REDIRECTION_CHARACTERS = "<>"
+
+# Redirection operators that end in some other character, and that stripping
+# REDIRECTION_CHARACTERS from the end of an operator token therefore does not find:
+# `>&` and `<&` duplicate a file descriptor, as in `2>&1`, and `>|` truncates a file
+# even under `set -o noclobber`.
+REDIRECTION_OPERATOR_SUFFIXES = (">&", "<&", ">|")
+
+# The characters of the file descriptor that may precede a redirection operator, as the
+# `2` of `2>/dev/null` does.
+DIGIT_CHARACTERS = frozenset(string.digits)
 
 # The characters that make a following "(" open a substitution rather than a subshell:
 # a command substitution `$(...)`, or a process substitution `<(...)` or `>(...)`.  The
@@ -347,10 +358,12 @@ def _simple_commands(tokens: list[str]) -> Iterator[list[str]]:
 
     A redirection is not one of those operators.  It does not separate one command from
     the next, and it may even stand before the command it belongs to, as in
-    `> out.txt git switch main`.  Its target is not a word of that command, and neither
-    is a file descriptor written before it; a leading number is a file descriptor only
-    when it is the whole of the command so far, because `git branch 2 > out.txt` names
-    a branch instead.
+    `> out.txt git switch main`.  Its target is not a word of that command; a file
+    descriptor written against the operator, as in `2>/dev/null`, is not a word of it
+    either, and `_shell_text` has already removed that.  A number that whitespace
+    separates from the operator is a word, because `git branch 2 > out.txt` names a
+    branch; only a number that is the whole of the command so far is dropped, as the
+    `2` of `2 > out.txt git switch main` is.
 
     Args:
         tokens: the tokens of a shell command.
@@ -374,6 +387,16 @@ def _simple_commands(tokens: list[str]) -> Iterator[list[str]]:
         # of the one token that `\n<<EOF` begins with does.
         separator = token.rstrip(REDIRECTION_CHARACTERS)
         target = separator != token
+        if not target:
+            # A redirection operator that ends in some other character, as `>&` and
+            # `>|` do.  Without this, the `1` of `2>&1 git checkout main` would be a
+            # word rather than the redirection's target, and would hide the `git` that
+            # follows it by standing where the command's name belongs.
+            for suffix in REDIRECTION_OPERATOR_SUFFIXES:
+                if token.endswith(suffix):
+                    separator = token[: -len(suffix)]
+                    target = True
+                    break
         if separator == "":
             if len(words) == 1 and words[0].isdigit():
                 del words[0]
@@ -624,6 +647,29 @@ def _heredoc_operator(command: str, index: int) -> tuple[str, int] | None:
     return _redirection_word(command, position)
 
 
+def _file_descriptor_end(command: str, index: int) -> int | None:
+    """Find the end of a file descriptor that a redirection operator follows directly.
+
+    A run of digits is a file descriptor only where a word begins and only when the
+    operator adjoins it, as in `2>/dev/null`.  Whitespace between them makes the digits
+    an ordinary word, as the `2` of `git branch 2 > out.txt` is, and a digit that a
+    word continues is part of that word, as the `2` of `git log HEAD~2>out.txt` is.
+
+    Args:
+        command: a shell command.
+        index: the index of a digit at which a word begins.
+
+    Returns:
+        The index of the redirection operator, or None if the digits are a word.
+    """
+    position = index
+    while position < len(command) and command[position] in DIGIT_CHARACTERS:
+        position += 1
+    if position < len(command) and command[position] in REDIRECTION_CHARACTERS:
+        return position
+    return None
+
+
 def _shell_text(command: str) -> tuple[str, list[str]]:
     r"""Take the comments and the standard-input data out of a shell command.
 
@@ -640,6 +686,11 @@ def _shell_text(command: str) -> tuple[str, list[str]]:
     leave the `#` of `<<EOF#x` where a word begins, so that it would comment out the
     rest of that line.
 
+    It also removes the file descriptor of a redirection, as the `2` of `2>/dev/null`
+    is.  Only this scan can tell that descriptor from a word, because it is one just
+    when the operator adjoins it; `shlex` splits `2>/dev/null` and `2 > /dev/null`
+    into the same three tokens.
+
     A `#` begins a comment only where a word begins:  at the start of the command,
     after whitespace, or after an operator other than the `)` that closes a
     substitution.  It is an ordinary character elsewhere, as in `git log --grep a#b`
@@ -655,9 +706,10 @@ def _shell_text(command: str) -> tuple[str, list[str]]:
         command: a shell command.
 
     Returns:
-        The shell text of the command, without its comments and without the data that
-        it feeds to a command's standard input, and that data: each here-document body,
-        and the word of each here-string.
+        The shell text of the command, without its comments, without the file
+        descriptor of a redirection, and without the data that it feeds to a command's
+        standard input, and that data: each here-document body, and the word of each
+        here-string.
     """
     bodies: list[str] = []
     kept: list[str] = []
@@ -727,6 +779,20 @@ def _shell_text(command: str) -> tuple[str, list[str]]:
                 bodies.append(body)
                 del pending[0]
             continue
+        elif character in DIGIT_CHARACTERS and at_word_start:
+            operator = _file_descriptor_end(command, index)
+            if operator is not None:
+                # A file descriptor that a redirection operator follows directly, as in
+                # `git branch --show-current 2>/dev/null`.  It belongs to the
+                # redirection rather than to the command, so removing it keeps
+                # `_simple_commands` from reading the `2` as an operand, which would be
+                # a branch name here.  The operator itself stays, and a word still
+                # begins at it.
+                index = operator
+                continue
+            # An ordinary word that begins with a digit.
+            kept.append(character)
+            at_word_start = False
         elif character == "<":
             run = index
             while run < len(command) and command[run] == "<":

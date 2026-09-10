@@ -139,6 +139,10 @@ FORBIDDEN = (
     "2> out.txt git switch main",
     "< /dev/null git stash",
     "git status\n> out.txt git branch newbranch",
+    # A redirection operator that ends in some other character than `<` or `>`:  the
+    # word after it is the redirection's target, not the command's name.
+    "2>&1 git checkout main",
+    ">| out.txt git checkout main",
     # A command that receives `git` as data and then runs it.
     "eval git checkout main",
     'eval "git checkout main"',
@@ -236,6 +240,10 @@ PERMITTED = (
     # Every line of a multi-line command, and only the commands.
     "git status\ngit log --oneline",
     "git commit -m 'first line\nsecond line'",
+    # A file descriptor that a redirection operator follows directly belongs to the
+    # redirection, not to the command, so it is no operand of `git branch`.
+    "git branch --show-current 2>/dev/null",
+    "git -C /some/dir branch --list 'wpi-*' 2>/dev/null",
     # A shell option that is not a command option.
     "bash -s < script.sh",
     "sh -n script.sh",
