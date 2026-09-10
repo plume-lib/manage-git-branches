@@ -12,6 +12,8 @@
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 GIT_NEW_BRANCH="${SCRIPT_DIR}/../git-new-branch"
 
+. "${SCRIPT_DIR}/lib-git-test-env.sh"
+
 status=0
 
 fail() {
@@ -22,6 +24,8 @@ fail() {
 tmpdir="$(mktemp -d)"
 trap 'chmod -R u+rwx "${tmpdir}" 2> /dev/null; rm -rf "${tmpdir}"' EXIT INT TERM
 
+sanitize_git_env "${tmpdir}"
+
 # Creates, in "$1", a repository that has no remote, with a branch "localonly"
 # in addition to the initial branch.
 make_repo() {
@@ -29,8 +33,6 @@ make_repo() {
   (
     cd "$1" || exit 1
     git init -q -b main .
-    git config user.email "test@example.com"
-    git config user.name "Test User"
     echo "hello" > file.txt
     git add file.txt
     git commit -q -m "Initial commit"

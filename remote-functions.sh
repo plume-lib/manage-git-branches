@@ -32,11 +32,19 @@
 ## those count as usable as well.  A string that contains ":" is an scp-style
 ## or a scheme-style URL, and "~" begins a pathname in the shell syntax that
 ## git accepts for a local repository.  Any other string is a pathname only if
-## it exists:  git does accept "/" in the name of a remote (`git remote add
-## team/fork URL` succeeds), so a slash does not distinguish a pathname from
-## the name of a remote that this clone lacks, and only the file system does.
-## A relative pathname is resolved in DIRECTORY, where git resolves the ones it
-## is given.
+## it names a repository:  git does accept "/" in the name of a remote
+## (`git remote add team/fork URL` succeeds), so a slash does not distinguish a
+## pathname from the name of a remote that this clone lacks, and only the file
+## system does.  A relative pathname is resolved in DIRECTORY, where git
+## resolves the ones it is given.
+##
+## Merely existing is not enough.  A file or a directory of that name is
+## commonplace -- a working tree that contains a directory named "upstream"
+## would make `remote.pushDefault = upstream` look usable in a clone whose
+## only remote is "origin" -- and a query to such a "remote" fails in exactly
+## the way that this function exists to prevent.  A bundle file does not count
+## either:  git can fetch from one, but this package's callers push to the
+## remote they choose, or advise the user to.
 remote_is_usable() {
   if [ -z "$3" ]; then
     return 1
@@ -49,7 +57,14 @@ remote_is_usable() {
     /*) remote_is_usable_path="$3" ;;
     *) remote_is_usable_path="$1/$3" ;;
   esac
-  if [ -e "${remote_is_usable_path}" ]; then
+  # `git rev-parse --resolve-git-dir` tests the one directory it is given,
+  # rather than searching the parent directories as most git commands do, so a
+  # plain directory within a working tree does not pass as the repository that
+  # contains it.  A pathname may name a working tree, whose repository is its
+  # ".git" (a directory, or a file that names one elsewhere), or a bare
+  # repository, which is itself the repository.
+  if git rev-parse --resolve-git-dir "${remote_is_usable_path}/.git" > /dev/null 2>&1 \
+    || git rev-parse --resolve-git-dir "${remote_is_usable_path}" > /dev/null 2>&1; then
     return 0
   fi
   return 1

@@ -115,42 +115,10 @@ only_dot_project() {
   return 0
 }
 
-# The worklist of file names that remain to be examined, held in the
-# positional parameters.  `find` would be simpler, but `find` communicates
-# through newline-separated text, which cannot represent a file name that
-# contains a newline, whereas the positional parameters can hold any file
-# name.  (A recursive shell function would be simpler than a worklist, but a
-# POSIX shell has no local variables, so a recursive call would clobber its
-# caller's loop variable.)
-#
-# The worklist is a stack rather than a queue (each directory's entries are
-# pushed on the front), so that it holds only the unexamined siblings along
-# one path from the current directory.  A queue would instead hold an entire
-# level of the tree, and rewriting the whole worklist to push one entry onto a
-# queue of length n costs O(n), which is quadratic overall and is minutes
-# rather than seconds on a large tree.
-set -- ./* ./.*
-
-while [ "$#" -gt 0 ]; do
-  child="$1"
-  shift
-  case "${child##*/}" in
-    '.' | '..') continue ;;
-  esac
-  # This also skips a pattern that matched nothing, which the shell leaves
-  # unexpanded and which therefore names no directory.
-  if [ ! -d "${child}" ]; then continue; fi
-  # Do not follow symbolic links, which is what `find` does by default and
-  # which prevents an endless descent through a link to an ancestor.
-  if [ -L "${child}" ]; then continue; fi
-  # Examine every directory's entries, even those of a directory that is
-  # itself named `*-branch-*`, because such a directory may contain another.
-  set -- "${child}"/* "${child}"/.* "$@"
-  case "${child##*/}" in
-    *-branch-*) ;;
-    *) continue ;;
-  esac
-  dir="${child}"
+# Reports directory $1, whose name matches `*-branch-*`, if its branch was
+# deleted in the remote or if it holds nothing but a `.project` file.
+check_directory() {
+  dir="$1"
   if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
   if [ -d "$dir/.git" ]; then
     # There is a .git subdirectory.
@@ -194,6 +162,50 @@ while [ "$#" -gt 0 ]; do
       fi
     fi
   fi
-done
+}
+
+# Examines directory $1 and every directory below it.
+#
+# The entries that remain to be examined are held in the positional
+# parameters, which a shell makes local to a function call:  the recursive call
+# below gets positional parameters of its own, and this call's are intact when
+# it returns, so the recursion needs no variable that it could clobber.  `find`
+# would be simpler, but `find` communicates through newline-separated text,
+# which cannot represent a file name that contains a newline, whereas the
+# positional parameters can hold any file name.
+#
+# A single worklist in the positional parameters of the main shell, in place of
+# this recursion, would cost more:  pushing a directory's entries onto the
+# worklist rewrites the whole worklist, which costs O(n) for each of the n
+# entries of one directory and so is quadratic in a large one -- seconds rather
+# than milliseconds for a directory of a few thousand entries, such as a
+# `node_modules` or a package cache anywhere below the current directory.
+examine_directory() {
+  set -- "$1"/* "$1"/.*
+  while [ "$#" -gt 0 ]; do
+    case "${1##*/}" in
+      '.' | '..')
+        shift
+        continue
+        ;;
+    esac
+    # A pattern that matched nothing, which the shell leaves unexpanded, names
+    # no directory, so this test skips it as well.  A symbolic link is not
+    # followed, which is what `find` does by default and which prevents an
+    # endless descent through a link to an ancestor.
+    if [ -d "$1" ] && [ ! -L "$1" ]; then
+      case "${1##*/}" in
+        *-branch-*) check_directory "$1" ;;
+      esac
+      # Examine every directory's entries, even those of a directory that is
+      # itself named `*-branch-*`, because such a directory may contain
+      # another.
+      examine_directory "$1"
+    fi
+    shift
+  done
+}
+
+examine_directory .
 
 exit "${status}"

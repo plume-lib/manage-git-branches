@@ -15,15 +15,12 @@ SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
 
+. "${TESTS_DIR}/lib-git-test-env.sh"
+
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
 trap 'rm -rf "${WORK_DIR}"' EXIT INT TERM
 
-# A committer identity, in case the user running the test has none.
-GIT_AUTHOR_NAME="Test User"
-GIT_AUTHOR_EMAIL="test@example.com"
-GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
-GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
-export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+sanitize_git_env "${WORK_DIR}"
 
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $*" >&2
