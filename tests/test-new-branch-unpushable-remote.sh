@@ -72,8 +72,10 @@ case "${output}" in
   *"WARNING"*"no upstream branch"*) ;;
   *) fail "git-new-branch did not warn about the failed push: ${output}" ;;
 esac
+# The advice names the remote that the script tried to push to, quoted the way
+# `git-push-to` quotes it, so that the user can paste the command as it stands.
 case "${output}" in
-  *"git push --set-upstream origin 'feature1'"*) ;;
+  *"git push --set-upstream 'origin' 'feature1'"*) ;;
   *) fail "git-new-branch did not say how to set the upstream: ${output}" ;;
 esac
 

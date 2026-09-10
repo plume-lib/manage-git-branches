@@ -6,11 +6,12 @@
 # Usage:
 #   git-new-branch NEWBRANCHNAME
 #
-# If the repository has a remote named "origin", the new branch is pushed to
-# it, with the remote branch as the new branch's upstream.  The upstream is
-# what lets `git-push-to` and `git-pull-from` pull and push the new branch.
-# If the push fails -- for example, because the remote is read-only -- this
-# script warns but still creates the branch directory, without an upstream.
+# If the repository determines a remote for the current branch, the new branch
+# is pushed to that remote, with the remote branch as the new branch's
+# upstream.  The upstream is what lets `git-push-to` and `git-pull-from` pull
+# and push the new branch.  If the push fails -- for example, because the
+# remote is read-only -- this script warns but still creates the branch
+# directory, without an upstream.
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
@@ -211,14 +212,23 @@ TMPDIR_TO_CLEAN=""
 # the traps would remove the working copy but leave the branch in the remote,
 # and re-running this script would abort because the branch already exists.
 #
-# `git config --get`, not `git remote get-url`, which requires git 2.7 or later.
-if [ -n "$(git config --get remote.origin.url)" ]; then
-  if ! (cd -- "${BRANCHDIR}" && git push -q --set-upstream origin "${BRANCHNAME}"); then
+# Push to ${REMOTE}, the remote that the collision check above asked about the
+# branch.  Pushing to "origin" instead, as this script once did, pushed to a
+# repository that the check had not asked about, so a branch that exists there
+# rejected the push after the whole working copy had been copied -- the very
+# cost that the check exists to avoid -- and pushed to no repository at all in
+# a clone whose sole remote has some other name.
+#
+# ${REMOTE} may be a relative pathname rather than the name of a remote; git
+# accepts one wherever it accepts a name.  It resolves in ${BRANCHDIR} as it
+# does in this working copy, because the two are siblings.
+if [ -n "${REMOTE}" ]; then
+  if ! (cd -- "${BRANCHDIR}" && git push -q --set-upstream "${REMOTE}" "${BRANCHNAME}"); then
     # This is not an error: the new working copy is usable without an upstream,
     # and the push can fail for reasons that are not this script's business,
     # such as a read-only clone, a protected branch, or a rejecting hook.
-    echo "${SCRIPT_NAME}: WARNING: cannot push ${BRANCHNAME} to origin, so it has no upstream branch" >&2
-    echo "${SCRIPT_NAME}: WARNING: \`git-push-to\` and \`git-pull-from\` need one; to give it one, cd to ${BRANCHDIR} and run: git push --set-upstream origin '${BRANCHNAME}'" >&2
+    echo "${SCRIPT_NAME}: WARNING: cannot push ${BRANCHNAME} to ${REMOTE}, so it has no upstream branch" >&2
+    echo "${SCRIPT_NAME}: WARNING: \`git-push-to\` and \`git-pull-from\` need one; to give it one, cd to ${BRANCHDIR} and run: git push --set-upstream '${REMOTE}' '${BRANCHNAME}'" >&2
   fi
 fi
 
