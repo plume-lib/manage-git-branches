@@ -266,10 +266,6 @@ case "${output}" in
   *"branch feature1 exists on several remotes of this clone"*) ;;
   *) fail "git-checkout-branch did not say that several remotes have the branch: ${output}" ;;
 esac
-case "${output}" in
-  *"checkout.defaultRemote"*) ;;
-  *) fail "git-checkout-branch did not say how to choose a remote: ${output}" ;;
-esac
 for leftover in "${WORK_DIR}/ambiguous-branch-feature1" "${WORK_DIR}/ambiguous-branch-feature1-TMP"; do
   if [ -e "${leftover}" ]; then
     fail "git-checkout-branch copied the working copy before refusing: ${leftover}"

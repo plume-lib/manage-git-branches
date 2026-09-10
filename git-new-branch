@@ -158,16 +158,6 @@ if ! PULL_OUTPUT="$(git_batch_ssh . pull -q 2>&1)"; then
   fi
   if [ -n "$(git ls-files --unmerged)" ]; then
     echo "${SCRIPT_NAME}: ERROR: the failed pull left conflicts in ${TOPLEVEL}." >&2
-    # Resolving the conflicts is only half of the way out of a rebase or a
-    # cherry-pick:  until its `--continue` runs, HEAD is the operation's
-    # intermediate commit, and re-running this script from there would branch
-    # from a commit that lacks the commits that the operation has not replayed.
-    CONTINUE_COMMAND="$(conflict_continue_command .)"
-    if [ -n "${CONTINUE_COMMAND}" ]; then
-      echo "${SCRIPT_NAME}: Resolve them and run \`${CONTINUE_COMMAND}\`, or run \`$(conflict_abort_command .)\` to abandon the pull; then re-run ${SCRIPT_NAME}." >&2
-    else
-      echo "${SCRIPT_NAME}: Resolve them, or run \`$(conflict_abort_command .)\`, then re-run ${SCRIPT_NAME}." >&2
-    fi
     exit 1
   fi
   echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
@@ -202,9 +192,9 @@ REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 #
 # The evidence is not conclusive:  a remote-tracking branch outlives the branch
 # it tracks, because `git fetch` does not delete one unless it is asked to
-# prune.  So the message says what the evidence is and how to refresh it,
-# rather than asserting that the remote has the branch, and it differs from the
-# message for the query below, which asks the remote itself.
+# prune.  So the message says what the evidence is, rather than asserting that
+# the remote has the branch, and it differs from the message for the query
+# below, which asks the remote itself.
 #
 # "HEAD" needs no exclusion here, even though a clone has a symbolic ref
 # `refs/remotes/REMOTE/HEAD` that resolves:  the name was rejected above.
@@ -217,7 +207,6 @@ for tracking_remote in ${TRACKING_REMOTES}; do
   if git rev-parse --verify --quiet \
     "refs/remotes/${tracking_remote}/${BRANCHNAME}" > /dev/null; then
     echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${tracking_remote}, according to the remote-tracking branch ${tracking_remote}/${BRANCHNAME} in this clone." >&2
-    echo "${SCRIPT_NAME}: If ${tracking_remote} no longer has it, run \`git fetch --prune ${tracking_remote}\` and re-run ${SCRIPT_NAME}." >&2
     exit 1
   fi
 done
