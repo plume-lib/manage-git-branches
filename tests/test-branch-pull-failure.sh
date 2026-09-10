@@ -98,6 +98,19 @@ $(cat "${STDERR_FILE}")"
   fi
 }
 
+## Usage: check_continue_advised SCRIPT COMMAND
+## Fails the test unless STDERR_FILE advises COMMAND.  Resolving the conflicts
+## is only half of the way out of a rebase:  until `git rebase --continue`
+## runs, HEAD is the rebase's intermediate commit, and a user who follows
+## advice that stops at "resolve them" re-runs the script from a commit that
+## does not have their own commits on it.
+check_continue_advised() {
+  if ! grep -q -F -- "$2" "${STDERR_FILE}"; then
+    fail "$1 did not advise \`$2\`; its stderr was:
+$(cat "${STDERR_FILE}")"
+  fi
+}
+
 create_repositories
 
 # A pull that fails because the current branch has no upstream.  The script
@@ -136,6 +149,7 @@ fi
 check_pull_reported git-new-branch
 check_conflict_reported git-new-branch
 check_abort_advised git-new-branch 'git merge --abort'
+check_continue_advised git-new-branch 'git merge --continue'
 if [ -e "${WORK_DIR}/myrepo-branch-conflicted" ]; then
   fail "git-new-branch created ${WORK_DIR}/myrepo-branch-conflicted after a conflicted pull"
 fi
@@ -149,6 +163,7 @@ fi
 check_pull_reported git-checkout-branch
 check_conflict_reported git-checkout-branch
 check_abort_advised git-checkout-branch 'git merge --abort'
+check_continue_advised git-checkout-branch 'git merge --continue'
 if [ -e "${WORK_DIR}/myrepo-branch-feature2" ]; then
   fail "git-checkout-branch created ${WORK_DIR}/myrepo-branch-feature2 after a conflicted pull"
 fi
@@ -166,6 +181,7 @@ fi
 check_pull_reported git-new-branch
 check_conflict_reported git-new-branch
 check_abort_advised git-new-branch 'git rebase --abort'
+check_continue_advised git-new-branch 'git rebase --continue'
 if grep -q -F -- 'git merge --abort' "${STDERR_FILE}"; then
   fail "git-new-branch advised \`git merge --abort\` during a rebase; its stderr was:
 $(cat "${STDERR_FILE}")"
@@ -183,6 +199,7 @@ fi
 check_pull_reported git-checkout-branch
 check_conflict_reported git-checkout-branch
 check_abort_advised git-checkout-branch 'git rebase --abort'
+check_continue_advised git-checkout-branch 'git rebase --continue'
 if [ -e "${WORK_DIR}/myrepo-branch-feature2" ]; then
   fail "git-checkout-branch created ${WORK_DIR}/myrepo-branch-feature2 after a conflicted pull"
 fi
