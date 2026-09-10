@@ -12,6 +12,8 @@
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 GIT_CHECKOUT_BRANCH="${SCRIPT_DIR}/../git-checkout-branch"
 
+. "${SCRIPT_DIR}/lib-git-test-env.sh"
+
 status=0
 
 fail() {
@@ -22,6 +24,8 @@ fail() {
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "${tmpdir}"' EXIT INT TERM
 
+sanitize_git_env "${tmpdir}"
+
 # Create a repository that has no remote, with a branch "localonly" in
 # addition to the initial branch.
 repo="${tmpdir}/myrepo-branch-main"
@@ -29,8 +33,6 @@ mkdir -p "${repo}"
 (
   cd "${repo}" || exit 1
   git init -q -b main .
-  git config user.email "test@example.com"
-  git config user.name "Test User"
   echo "hello" > file.txt
   git add file.txt
   git commit -q -m "Initial commit"

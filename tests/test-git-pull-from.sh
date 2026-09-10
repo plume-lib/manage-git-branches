@@ -18,6 +18,8 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 REPO_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 
+. "${SCRIPT_DIR}/lib-git-test-env.sh"
+
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $1" >&2
   exit 1
@@ -34,20 +36,7 @@ trap 'rm -rf "${workdir}"' EXIT
 trap 'rm -rf "${workdir}"; exit 130' INT
 trap 'rm -rf "${workdir}"; exit 143' TERM
 
-# Make the test independent of the invoking user's git configuration.  A
-# global setting such as `commit.gpgsign`, `pull.rebase`, `merge.ff`,
-# `core.hooksPath`, or `commit.template` would otherwise change what the
-# commands below do, or make them fail.
-GIT_CONFIG_GLOBAL="${workdir}/gitconfig"
-GIT_CONFIG_SYSTEM=/dev/null
-# A committer identity, in case the user running the test has none.
-GIT_AUTHOR_NAME='manage-git-branches test'
-GIT_AUTHOR_EMAIL='test@example.com'
-GIT_COMMITTER_NAME="${GIT_AUTHOR_NAME}"
-GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
-export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
-export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-: > "${GIT_CONFIG_GLOBAL}"
+sanitize_git_env "${workdir}"
 
 remote="${workdir}/remote.git"
 git init -q --bare -b main "${remote}"
