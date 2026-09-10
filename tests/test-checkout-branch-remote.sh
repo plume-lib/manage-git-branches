@@ -276,6 +276,36 @@ for leftover in "${WORK_DIR}/ambiguous-branch-feature1" "${WORK_DIR}/ambiguous-b
   fi
 done
 
+# The remote has the branch, but the fetch of it into this clone fails, which
+# is not the same as the branch not existing:  the branch is there, and the
+# user's next step is to fix whatever stopped the fetch rather than to look
+# for another name.  Here a ref named "origin/feature1/blocker" occupies the
+# name that the fetch would write, and git refuses to have both a ref and a
+# directory of refs at one name.
+BLOCKED_DIR="${WORK_DIR}/blockedfetch"
+git clone -q "${REMOTE}" "${BLOCKED_DIR}"
+# Narrow the fetch refspec before deleting the remote-tracking branch, so that
+# neither the `git pull` in `git-checkout-branch` nor its fetch of the branch
+# recreates it, and the branch is looked for on the remote.
+git -C "${BLOCKED_DIR}" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+git -C "${BLOCKED_DIR}" update-ref -d refs/remotes/origin/feature1
+git -C "${BLOCKED_DIR}" update-ref refs/remotes/origin/feature1/blocker \
+  "$(git -C "${BLOCKED_DIR}" rev-parse refs/remotes/origin/main)"
+if output="$(cd "${BLOCKED_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 2>&1)"; then
+  fail "git-checkout-branch succeeded although the branch could not be fetched: ${output}"
+fi
+case "${output}" in
+  *"could not be fetched"*) ;;
+  *) fail "git-checkout-branch did not say that the branch could not be fetched: ${output}" ;;
+esac
+# The failed fetch is reported before the copy, so it costs the user no copy
+# of the repository.
+for leftover in "${WORK_DIR}/blockedfetch-branch-feature1" "${WORK_DIR}/blockedfetch-branch-feature1-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "git-checkout-branch copied the working copy although the fetch failed: ${leftover}"
+  fi
+done
+
 # The tests that need no network access come first, so a branch that this clone
 # holds is checked out without asking any remote about it.  A fake `ssh` counts
 # the connections:  the `git pull` above makes one, and a query about the
@@ -313,6 +343,13 @@ case "${output}" in
   *"could not be asked about it"*) ;;
   *) fail "git-checkout-branch claimed to know that the branch does not exist: ${output}" ;;
 esac
+# The query's own output follows that message, because "could not be asked"
+# alone does not say what went wrong, and the reason is what the user acts on.
+reason="$(printf '%s\n' "${output}" \
+  | sed -n '/ERROR: branch nosuchbranch/,$p' | sed '1d')"
+if [ -z "${reason}" ]; then
+  fail "git-checkout-branch did not report why the remote could not be asked: ${output}"
+fi
 if [ ! -s "${SSH_ARGUMENTS}" ]; then
   fail 'git-checkout-branch did not contact the remote over SSH'
 elif ! grep -q -- '-o BatchMode=yes' "${SSH_ARGUMENTS}"; then

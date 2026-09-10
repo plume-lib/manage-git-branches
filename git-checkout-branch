@@ -134,10 +134,6 @@ fi
 # use, which is the one that `git push` would use; in the fork workflow the
 # two differ, and a branch of the project exists on this one.
 #
-# Asking only the remote named "origin", as this script once did, asked no
-# remote at all in a clone whose sole remote has some other name, and then
-# reported that the branch does not exist.
-#
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
 # asked, and only the local tests in `find_branch` apply.
 BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
@@ -150,6 +146,10 @@ REMOTE="$(fetch_remote . "${BRANCH_REF#refs/heads/}")"
 # the new branch's upstream.
 CHECKOUT_START_POINT=''
 CHECKOUT_REMOTE=''
+
+# What the remote said when `find_branch` could not ask it about the branch,
+# empty if it said nothing.
+REMOTE_QUERY_ERROR=''
 
 ## Usage: contains_line LINES LINE
 ## Succeeds if LINE is one of the lines of LINES.  A LINE that is empty is
@@ -201,7 +201,9 @@ remotes_with_branch() {
 # branch exists, 2 if ${REMOTE} could not be asked about it, and 3 if
 # ${REMOTE} has the branch but it could not be fetched.  Reporting an
 # unreachable remote as "no such branch" would assert something that was
-# never checked.
+# never checked.  On status 2 it also sets ${REMOTE_QUERY_ERROR} to what the
+# remote said, so that the caller can report why the remote could not be
+# asked.
 #
 # Every remote is consulted for a remote-tracking branch, not just ${REMOTE},
 # because `git checkout` creates the new local branch from a remote-tracking
@@ -258,7 +260,16 @@ find_branch() {
   # `git ls-remote --exit-code` exits with status 2 if the remote has no such
   # branch, and with some other nonzero status if the remote could not be
   # asked at all, which is not the same thing.
-  git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/$1" > /dev/null 2>&1
+  #
+  # Keep the query's standard error, which says why the remote could not be
+  # asked:  the diagnostic for that case reports only that it could not, and
+  # the reason is what the user acts on.  A key that needs a passphrase, for
+  # instance, works for the interactive `git pull` above and then fails this
+  # query with "Permission denied (publickey)", because the query disables the
+  # prompts.  The query's standard output is the matching refs, which the exit
+  # status already reports, so discard it.
+  REMOTE_QUERY_ERROR="$(git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
+    "refs/heads/$1" 2>&1 > /dev/null)"
   case "$?" in
     0) ;;
     2) return 1 ;;
@@ -293,6 +304,9 @@ case "$?" in
   0) ;;
   2)
     echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, and remote ${REMOTE} could not be asked about it." >&2
+    if [ -n "${REMOTE_QUERY_ERROR}" ]; then
+      echo "${REMOTE_QUERY_ERROR}" >&2
+    fi
     exit 1
     ;;
   3)
