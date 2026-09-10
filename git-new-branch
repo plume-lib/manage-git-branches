@@ -109,11 +109,49 @@ fi
 BRANCHDIR="${PARENTDIR%/}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
+# The tests below precede the copy of the working copy, so that a name
+# collision does not cost the user a full copy of the repository.  Among them,
+# every test that needs no network access comes first -- including the test for
+# ${BRANCHDIR} and the `git pull` that follows them -- so that a purely local
+# failure is reported without waiting for a remote, which may take as long as a
+# connection attempt takes to time out.
+
+# "HEAD" is not the name of a branch, though it looks like one to a user and a
+# clone even has a symbolic ref `refs/remotes/REMOTE/HEAD` that resolves.
+# `git checkout -b` below rejects it, but only after the remote has been asked
+# and the working copy has been copied, and its message names this script's own
+# command line rather than the problem.  `git-checkout-branch` rejects the name
+# too.
+if [ "${BRANCHNAME}" = 'HEAD' ]; then
+  echo "${SCRIPT_NAME}: ERROR: HEAD is not the name of a branch." >&2
+  exit 1
+fi
+
+# A local branch has to be detected here rather than left to the
+# `git checkout -b` below, which fails on one even when no remote has a branch
+# of that name.
+if git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists in this clone." >&2
+  exit 1
+fi
+
+if [ -e "${BRANCHDIR}" ]; then
+  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
+  exit 1
+fi
+
 # Bring this working copy up to date, so that the branch is based on the most
-# recent commit.  A failed pull is not fatal, because the repository might have
-# no remote or the current branch might have no upstream, but it is reported:
-# the branch will be based on a possibly stale commit.
-if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
+# recent commit and the remote-tracking branches that the next test consults
+# are as current as this clone can make them.  A failed pull is not fatal,
+# because the repository might have no remote or the current branch might have
+# no upstream, but it is reported: the branch will be based on a possibly stale
+# commit.
+#
+# `git_batch_ssh` disables the interactive prompts that git and SSH would
+# otherwise issue, as it does for the query below.  This pull's output is
+# captured rather than shown, so a prompt would be invisible and would block
+# this script forever; a failure that says why is better than a silent hang.
+if ! PULL_OUTPUT="$(git_batch_ssh . pull -q 2>&1)"; then
   echo "${SCRIPT_NAME}: warning: \`git pull\` failed in ${TOPLEVEL}:" >&2
   if [ -n "${PULL_OUTPUT}" ]; then
     echo "${PULL_OUTPUT}" >&2
@@ -144,70 +182,73 @@ fi
 # says which remote the new branch would eventually be pushed to.
 #
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
-# asked, and only the local tests in `branch_exists` apply.
+# asked, and only the local tests apply.
 BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
 REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 
-# Succeeds if the given branch exists:  locally, as a remote-tracking branch of
-# a remote, or on ${REMOTE} itself.  The local branch is tested first because
-# the test needs no network access, and because `git checkout -b` fails on a
-# local branch even when the remote has no branch of that name.
+# A remote-tracking branch is evidence that a remote has the branch, and it
+# costs no network access.  When a remote can be determined, only ${REMOTE}'s
+# refs are consulted:  a branch of the same name in another remote --
+# "upstream" in a fork workflow, say -- is a branch that neither
+# `git checkout -b` nor a later push to ${REMOTE} would collide with, so
+# refusing on account of one would refuse a name that the user can in fact use.
 #
-# When no remote can be determined, every remote is consulted for a
-# remote-tracking branch of that name.  Any remote of this clone could be the
-# one that the new branch is eventually pushed to -- that is just what having
-# determined none means -- and a remote-tracking branch is evidence that a
-# remote already has a branch of this name, so it is the only evidence
-# available and it costs no network access.  Skipping it would abandon the
-# collision check in exactly the clone that this script itself creates, since
+# When no remote can be determined, every remote is consulted.  Any remote of
+# this clone could be the one that the new branch is eventually pushed to --
+# that is just what having determined none means -- so a remote-tracking branch
+# is the only evidence available.  Skipping it would abandon the collision
+# check in exactly the clone that this script itself creates, since
 # `git checkout -b` writes no `branch.BRANCH.remote` for the new branch.
 #
+# The evidence is not conclusive:  a remote-tracking branch outlives the branch
+# it tracks, because `git fetch` does not delete one unless it is asked to
+# prune.  So the message says what the evidence is and how to refresh it,
+# rather than asserting that the remote has the branch, and it differs from the
+# message for the query below, which asks the remote itself.
+#
+# "HEAD" needs no exclusion here, even though a clone has a symbolic ref
+# `refs/remotes/REMOTE/HEAD` that resolves:  the name was rejected above.
+if [ -n "${REMOTE}" ]; then
+  TRACKING_REMOTES="${REMOTE}"
+else
+  TRACKING_REMOTES="$(git remote)"
+fi
+for tracking_remote in ${TRACKING_REMOTES}; do
+  if git rev-parse --verify --quiet \
+    "refs/remotes/${tracking_remote}/${BRANCHNAME}" > /dev/null; then
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${tracking_remote}, according to the remote-tracking branch ${tracking_remote}/${BRANCHNAME} in this clone." >&2
+    echo "${SCRIPT_NAME}: If ${tracking_remote} no longer has it, run \`git fetch --prune ${tracking_remote}\` and re-run ${SCRIPT_NAME}." >&2
+    exit 1
+  fi
+done
+
+# This clone shows no such branch, so ask the remote itself:  the clone may
+# never have fetched the branch, or may not fetch it at all.
+#
+# Asking the remote does not change it.  This script creates nothing outside
+# the new directory:  in particular, it does not push the new branch.
+#
 # `git_batch_ssh` disables the interactive prompts that would otherwise block
-# the query to the remote forever when this script is run from another script
-# or a CI job, as `is-deleted-branch` does for its own queries.
+# this query forever when this script is run from another script or a CI job,
+# as `is-deleted-branch` does for its own queries.
 # A remote that this script cannot ask is not an error; the branch is created.
-branch_exists() {
-  if git rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
-    return 0
-  fi
-  if [ -z "${REMOTE}" ]; then
-    for branch_exists_remote in $(git remote); do
-      if git rev-parse --verify --quiet \
-        "refs/remotes/${branch_exists_remote}/$1" > /dev/null; then
-        return 0
-      fi
-    done
-    return 1
-  fi
-  if git rev-parse --verify --quiet "refs/remotes/${REMOTE}/$1" > /dev/null; then
-    return 0
-  fi
-  git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/$1" > /dev/null 2>&1
-}
-
-# This test precedes the copy of the working copy, so that a name collision
-# does not cost the user a full copy of the repository.
-if branch_exists "${BRANCHNAME}"; then
-  if [ -n "${REMOTE}" ]; then
-    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists, locally or on remote ${REMOTE}." >&2
-  else
-    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists in this clone." >&2
-  fi
+if [ -n "${REMOTE}" ] \
+  && git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
+    "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${REMOTE}, which was asked directly." >&2
   exit 1
 fi
 
-if [ -e "${BRANCHDIR}" ]; then
-  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
-  exit 1
-fi
+# Test for ${BRANCH_TMPDIR} here rather than with the test for ${BRANCHDIR}
+# above, so that nothing -- in particular no remote query, which can take as
+# long as a connection attempt takes to time out -- runs between the test and
+# the assignment below.  Whatever the copy then leaves at that location was
+# created by this script and the traps may remove it, even if the copy is
+# interrupted before it finishes.
 if [ -e "${BRANCH_TMPDIR}" ]; then
   echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
   exit 1
 fi
-
-# We just checked that ${BRANCH_TMPDIR} does not exist, so whatever the copy
-# leaves at that location was created by this script and the traps may remove
-# it, even if the copy is interrupted before it finishes.
 TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
 if ! \cp -Rp -- . "${BRANCH_TMPDIR}"; then
   echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
