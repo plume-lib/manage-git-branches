@@ -68,7 +68,7 @@ make_project() {
 
 # Without --clean, the project is compiled but not cleaned.
 noclean="${tmpdir}/noclean"
-make_project "${noclean}"
+make_project "${noclean}" 0
 if ! "${COMPILE_PROJECT}" "${noclean}" > /dev/null; then
   fail "nonzero exit status in ${noclean}"
 fi
@@ -78,7 +78,7 @@ fi
 
 # With --clean, the project is cleaned and then compiled.
 withclean="${tmpdir}/withclean"
-make_project "${withclean}"
+make_project "${withclean}" 0
 if ! "${COMPILE_PROJECT}" --clean "${withclean}" > /dev/null; then
   fail "nonzero exit status in ${withclean}"
 fi
@@ -89,7 +89,7 @@ fi
 
 # CLEAN in the environment does not clean the project.
 inherited="${tmpdir}/inherited"
-make_project "${inherited}"
+make_project "${inherited}" 0
 if ! CLEAN=anything "${COMPILE_PROJECT}" "${inherited}" > /dev/null; then
   fail "nonzero exit status in ${inherited}"
 fi
