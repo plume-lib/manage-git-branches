@@ -88,8 +88,7 @@ fi
 # A remote that cannot be contacted at all is not an error either, because
 # nothing that `git-new-branch` must do requires the remote.  A nonexistent
 # repository is the most portable way to make the remote unusable: making it
-# read-only would depend on file permissions, and rejecting a fetch with a hook
-# would not work under `core.hooksPath`.
+# read-only would depend on file permissions.
 git -C "${MAIN_DIR}" remote set-url origin "${WORK_DIR}/no-such-repository.git"
 if ! output="$(cd "${MAIN_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature2 2>&1)"; then
   fail "git-new-branch failed when the remote could not be contacted: ${output}"

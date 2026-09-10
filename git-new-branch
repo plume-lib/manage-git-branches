@@ -8,9 +8,8 @@
 #
 # Every effect of this script is local:  it never contacts a remote except to
 # read from it, and in particular it does not push the new branch.  Therefore,
-# the new branch has no upstream branch.  `git-push-to` and `git-pull-from`
-# need one; to give the new branch an upstream branch, cd to the new directory
-# and run: git push --set-upstream origin NEWBRANCHNAME
+# the new branch has no upstream branch, which `git-push-to` and
+# `git-pull-from` require.
 
 # SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
