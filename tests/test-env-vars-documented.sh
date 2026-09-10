@@ -19,8 +19,11 @@ SCRIPT_NAME="$(basename -- "$0")"
 
 README="${TOPLEVEL}/README.md"
 
-SCRIPTS="$(find "${TOPLEVEL}" -maxdepth 1 -type f -perm -u+x ! -name '*~' \
-  -exec basename -- {} ';' | sort)"
+# The commands, which are executable, and the files that they source, which
+# are not executable but whose names end in ".sh".  A variable that a sourced
+# file reads is part of the interface of the commands that source it.
+SCRIPTS="$(find "${TOPLEVEL}" -maxdepth 1 -type f ! -name '*~' \
+  \( -perm -u+x -o -name '*.sh' \) -exec basename -- {} ';' | sort)"
 if [ -z "${SCRIPTS}" ]; then
   echo "${SCRIPT_NAME}: found no scripts in ${TOPLEVEL}" >&2
   exit 2

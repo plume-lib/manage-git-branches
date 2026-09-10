@@ -11,8 +11,53 @@
 # the new branch has no upstream branch, which `git-push-to` and
 # `git-pull-from` require.
 
-# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.  Do this
+# before the `cd` below, because a relative pathname in $0 is relative to the
+# directory that the caller ran this script from.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
+
+if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=remote-functions.sh
+. "${SCRIPT_DIR}/remote-functions.sh"
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} NEWBRANCHNAME" >&2
@@ -78,20 +123,64 @@ if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
   echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
 fi
 
-# Succeeds if the given branch exists: locally, as a remote-tracking branch of
-# `origin`, or on `origin`.  The local tests come first because they need no
-# network access, and because `git checkout -b` fails on a local branch even
-# when `origin` has no branch of that name.
+# Determine which remote the new branch would collide with:  the remote that
+# `git push` would use for the current branch, as `push_remote` in
+# remote-functions.sh determines it, which is also the remote that
+# `is-deleted-branch` and `git-push-to` use.  The new branch has no
+# configuration of its own yet -- `git checkout -b` creates none -- and the new
+# working copy is a copy of this one, so this branch's configuration is what
+# says which remote the new branch would eventually be pushed to.
+#
+# ${REMOTE} is empty if no remote can be determined; then no remote can be
+# asked, and only the local tests in `branch_exists` apply.
+BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
+REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
+
+# Succeeds if the given branch exists:  locally, as a remote-tracking branch of
+# a remote, or on ${REMOTE} itself.  The local branch is tested first because
+# the test needs no network access, and because `git checkout -b` fails on a
+# local branch even when the remote has no branch of that name.
+#
+# When no remote can be determined, every remote is consulted for a
+# remote-tracking branch of that name.  Any remote of this clone could be the
+# one that the new branch is eventually pushed to -- that is just what having
+# determined none means -- and a remote-tracking branch is evidence that a
+# remote already has a branch of this name, so it is the only evidence
+# available and it costs no network access.  Skipping it would abandon the
+# collision check in exactly the clone that this script itself creates, since
+# `git checkout -b` writes no `branch.BRANCH.remote` for the new branch.
+#
+# `git_batch_ssh` disables the interactive prompts that would otherwise block
+# the query to the remote forever when this script is run from another script
+# or a CI job, as `is-deleted-branch` does for its own queries.
+# A remote that this script cannot ask is not an error; the branch is created.
 branch_exists() {
-  git rev-parse --verify --quiet "refs/heads/$1" > /dev/null \
-    || git rev-parse --verify --quiet "refs/remotes/origin/$1" > /dev/null \
-    || git ls-remote --exit-code origin "refs/heads/$1" > /dev/null 2>&1
+  if git rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
+    return 0
+  fi
+  if [ -z "${REMOTE}" ]; then
+    for branch_exists_remote in $(git remote); do
+      if git rev-parse --verify --quiet \
+        "refs/remotes/${branch_exists_remote}/$1" > /dev/null; then
+        return 0
+      fi
+    done
+    return 1
+  fi
+  if git rev-parse --verify --quiet "refs/remotes/${REMOTE}/$1" > /dev/null; then
+    return 0
+  fi
+  git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/$1" > /dev/null 2>&1
 }
 
 # This test precedes the copy of the working copy, so that a name collision
 # does not cost the user a full copy of the repository.
 if branch_exists "${BRANCHNAME}"; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists, locally or on origin." >&2
+  if [ -n "${REMOTE}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists, locally or on remote ${REMOTE}." >&2
+  else
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists in this clone." >&2
+  fi
   exit 1
 fi
 
