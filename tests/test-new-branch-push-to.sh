@@ -62,6 +62,18 @@ if [ ! -d "${FEATURE_DIR}" ]; then
   fail "git-new-branch did not create ${FEATURE_DIR}"
 fi
 
+# `git-new-branch` does not change any remote repository.
+if git -C "${REMOTE}" rev-parse --verify --quiet refs/heads/feature1 > /dev/null; then
+  fail "git-new-branch pushed feature1 to the remote"
+fi
+# Test the configuration that defines an upstream, as `git-push-to` does, not
+# `@{upstream}`, which also fails when only the cached remote-tracking ref is
+# absent -- which it always is here, since `git-new-branch` pushes nothing.
+if [ -n "$(git -C "${FEATURE_DIR}" config --get branch.feature1.remote)" ] \
+  && [ -n "$(git -C "${FEATURE_DIR}" config --get-all branch.feature1.merge)" ]; then
+  fail "git-new-branch gave feature1 an upstream, but it does not push"
+fi
+
 # `git-push-to` needs an upstream branch, and `git-new-branch` does not create
 # one, because it has only local effects.  Report its absence here, where the
 # cause is clear, rather than as a `git-push-to` failure below.

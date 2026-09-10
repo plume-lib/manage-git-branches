@@ -6,6 +6,9 @@
 # Usage:
 #   git-new-branch NEWBRANCHNAME
 #
+# The new branch is in a new directory that has the same directory
+# contents as the current repository.
+#
 # Every effect of this script is local:  it never contacts a remote except to
 # read from it, and in particular it does not push the new branch.  Therefore,
 # the new branch has no upstream branch, which `git-push-to` and
