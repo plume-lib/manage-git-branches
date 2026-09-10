@@ -8,6 +8,11 @@
 #
 # The new branch is in a new directory that has the same directory
 # contents as the current repository.
+#
+# Every effect of this script is local:  it never contacts a remote except to
+# read from it, and in particular it does not push the new branch.  Therefore,
+# the new branch has no upstream branch, which `git-push-to` and
+# `git-pull-from` require.
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
@@ -127,11 +132,7 @@ fi
 # `is-deleted-branch` and `git-push-to` use.  The new branch has no
 # configuration of its own yet -- `git checkout -b` creates none -- and the new
 # working copy is a copy of this one, so this branch's configuration is what
-# says where the new branch will be pushed.
-#
-# Asking only the remote named "origin", as this script once did, asked no
-# remote at all in a clone whose sole remote has some other name, so the check
-# silently passed there.
+# says which remote the new branch would eventually be pushed to.
 #
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
 # asked, and only the local tests below apply.

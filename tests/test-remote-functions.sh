@@ -1,9 +1,10 @@
 #!/bin/sh
 
-# Tests `remote_is_usable` and `push_remote` in remote-functions.sh, which
-# decide which remote this package's commands ask about a branch.  A wrong
-# answer is not visible in the commands' output:  it makes them ask some other
-# repository, which can report that a branch that still exists was deleted.
+# Tests `remote_is_usable`, `push_remote`, and `fetch_remote` in
+# remote-functions.sh, which decide which remote this package's commands ask
+# about a branch.  A wrong answer is not visible in the commands' output:  it
+# makes them ask some other repository, which can report that a branch that
+# still exists was deleted.
 #
 # Usage:
 #   tests/test-remote-functions.sh
@@ -25,10 +26,10 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 trap 'rm -rf "${WORK_DIR}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 
-# shellcheck source=common-functions.sh
-. "${TESTS_DIR}/common-functions.sh"
+# shellcheck source=lib-git-test-env.sh
+. "${TESTS_DIR}/lib-git-test-env.sh"
 
-isolate_git_configuration "${WORK_DIR}"
+sanitize_git_env "${WORK_DIR}"
 
 # `remote-functions.sh` expects ${SCRIPT_DIR} to be the directory that holds
 # this package's files.  The functions that this test calls do not use it, but
@@ -85,15 +86,25 @@ check_usable "${REMOTES}" "${TILDE}other" 'yes'
 # A pathname, which git also accepts wherever it accepts a remote's name.
 # `git push --set-upstream ../other.git BRANCH` writes such a value into
 # `branch.BRANCH.remote`.  Only a pathname that names a repository is usable:
-# git accepts "/" in the name of a remote, so a slash does not tell a pathname
-# from the name of a remote that this clone lacks.  A pathname may name a bare
-# repository or a working tree.
+# git accepts "/" in the name of a remote, so a slash does not by itself tell a
+# pathname from the name of a remote that this clone lacks.  A pathname may
+# name a bare repository or a working tree.
 git init -q --bare -b main "${WORK_DIR}/mirrors/other.git"
 git init -q -b main "${WORK_DIR}/working-tree"
 check_usable "${REMOTES}" 'mirrors/other.git' 'yes'
-check_usable "${REMOTES}" 'working-tree' 'yes'
+check_usable "${REMOTES}" './working-tree' 'yes'
 check_usable "${REMOTES}" 'mirrors/nosuch.git' 'no'
 check_usable "${REMOTES}" '/srv/git/nosuch-49b1c0.git' 'no'
+
+# A name with no "/" in it is the name of a remote, so a repository of that
+# name within the working tree does not make it usable, even though git would
+# resolve the name as a relative pathname in a clone that has no such remote.
+# A nested repository is commonplace -- a submodule, or a vendored clone -- and
+# it is not the fork that `remote.pushDefault = working-tree` names, so pushing
+# a branch into it is the failure that this function exists to prevent.  A
+# value that is meant as a pathname says so with a "/", as "./working-tree"
+# above does.
+check_usable "${REMOTES}" 'working-tree' 'no'
 
 # A file or a directory that is not a repository does not make a name usable.
 # A working tree commonly contains a directory whose name is also a common
@@ -173,13 +184,92 @@ if [ "${remote}" != 'origin' ]; then
   fail "push_remote reported [${remote}] for a name that only a working-tree directory matches"
 fi
 
+# A repository nested in the working tree does not make such a name usable
+# either.  A submodule, or a vendored clone, in a directory named "upstream" is
+# commonplace, and `remote.pushDefault = upstream` in ~/.gitconfig names the
+# fork that some other clone has:  pushing the branch into the nested
+# repository is the same failure as pushing to a name that no repository has.
+git init -q --bare -b main "${WORK_DIR}/clone/upstream"
+git -C "${WORK_DIR}/clone" config remote.pushDefault 'upstream'
+remote="$(push_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'origin' ]; then
+  fail "push_remote reported [${remote}] for a name that only a nested repository matches"
+fi
+
 # A pathname that does name a repository is still reported, even when it lies
-# within the working tree, where the directory in the check above lies.
+# within the working tree, where the directories in the checks above lie.
 git init -q --bare -b main "${WORK_DIR}/clone/fork/repository.git"
 git -C "${WORK_DIR}/clone" config remote.pushDefault 'fork/repository.git'
 remote="$(push_remote "${WORK_DIR}/clone" main)"
 if [ "${remote}" != 'fork/repository.git' ]; then
   fail "push_remote reported [${remote}] for a branch pushed to fork/repository.git"
+fi
+
+# `branch.BRANCH.pushRemote` outranks `branch.BRANCH.remote`, as `git push`
+# itself does:  a branch that is fetched from one remote and pushed to another
+# is pushed to the one that the pushRemote names.
+git -C "${WORK_DIR}/clone" config branch.main.pushRemote '../mirrors/other.git'
+git -C "${WORK_DIR}/clone" config branch.main.remote 'origin'
+remote="$(push_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != '../mirrors/other.git' ]; then
+  fail "push_remote reported [${remote}] for a branch whose pushRemote is ../mirrors/other.git"
+fi
+
+# An empty branch, which means that HEAD is detached, uses only the
+# configuration that is not about a particular branch:  the branch settings
+# above are the ones of some other branch, which say nothing about this push.
+remote="$(push_remote "${WORK_DIR}/clone" '')"
+if [ "${remote}" != 'fork/repository.git' ]; then
+  fail "push_remote reported [${remote}] for an empty branch"
+fi
+git -C "${WORK_DIR}/clone" config --unset branch.main.pushRemote
+git -C "${WORK_DIR}/clone" config --unset branch.main.remote
+
+# `fetch_remote` reports the remote that the branch is fetched from, which is
+# not always the one that `push_remote` reports.  In the fork workflow the
+# clone pushes to a fork -- `remote.pushDefault` or `branch.BRANCH.pushRemote`
+# names it -- and fetches the project's branches from another remote, so a
+# question about what the project has must go to the latter.  Asking the fork
+# would report that a branch of the project does not exist.
+git init -q --bare -b main "${WORK_DIR}/fork.git"
+git -C "${WORK_DIR}/clone" remote add fork "${WORK_DIR}/fork.git"
+git -C "${WORK_DIR}/clone" config remote.pushDefault 'fork'
+remote="$(fetch_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'origin' ]; then
+  fail "fetch_remote reported [${remote}] for a clone whose remote.pushDefault is fork"
+fi
+remote="$(push_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'fork' ]; then
+  fail "push_remote reported [${remote}] for a clone whose remote.pushDefault is fork"
+fi
+git -C "${WORK_DIR}/clone" config --unset remote.pushDefault
+git -C "${WORK_DIR}/clone" config branch.main.pushRemote 'fork'
+remote="$(fetch_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'origin' ]; then
+  fail "fetch_remote reported [${remote}] for a branch whose pushRemote is fork"
+fi
+
+# `branch.BRANCH.remote` does say where the branch is fetched from, so
+# `fetch_remote` reports it even though a pushRemote outranks it for a push.
+git -C "${WORK_DIR}/clone" config branch.main.remote 'fork'
+remote="$(fetch_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'fork' ]; then
+  fail "fetch_remote reported [${remote}] for a branch whose remote is fork"
+fi
+git -C "${WORK_DIR}/clone" config --unset branch.main.remote
+git -C "${WORK_DIR}/clone" config --unset branch.main.pushRemote
+
+# A clone whose sole remote is not named "origin" fetches from that one.
+git -C "${WORK_DIR}/clone" remote remove fork
+git -C "${WORK_DIR}/clone" remote rename origin elsewhere
+remote="$(fetch_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'elsewhere' ]; then
+  fail "fetch_remote reported [${remote}] for a clone whose sole remote is elsewhere"
+fi
+# The same clone pushes to that remote, because it is the only one it has.
+remote="$(push_remote "${WORK_DIR}/clone" main)"
+if [ "${remote}" != 'elsewhere' ]; then
+  fail "push_remote reported [${remote}] for a clone whose sole remote is elsewhere"
 fi
 
 echo "${SCRIPT_NAME}: OK"
