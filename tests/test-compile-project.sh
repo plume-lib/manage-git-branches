@@ -55,19 +55,20 @@ fi
 GIT_CEILING_DIRECTORIES="${tmpdir}"
 export GIT_CEILING_DIRECTORIES
 
-# Creates, in the given directory, a Makefile whose "all" target writes
-# "built" and whose "clean" target writes "cleaned", to a file named "log".
+# Creates, in the given directory, a Makefile whose "all" target appends
+# "built" to a file named "log" and whose "clean" target appends "cleaned"
+# to that file and then exits with the status given as the second argument.
 make_project() {
   mkdir -p "$1"
   {
     printf 'all:\n\t@echo built >> log\n'
-    printf 'clean:\n\t@echo cleaned >> log\n'
+    printf 'clean:\n\t@echo cleaned >> log\n\t@exit %s\n' "$2"
   } > "$1/Makefile"
 }
 
 # Without --clean, the project is compiled but not cleaned.
 noclean="${tmpdir}/noclean"
-make_project "${noclean}"
+make_project "${noclean}" 0
 if ! "${COMPILE_PROJECT}" "${noclean}" > /dev/null; then
   fail "nonzero exit status in ${noclean}"
 fi
@@ -77,7 +78,7 @@ fi
 
 # With --clean, the project is cleaned and then compiled.
 withclean="${tmpdir}/withclean"
-make_project "${withclean}"
+make_project "${withclean}" 0
 if ! "${COMPILE_PROJECT}" --clean "${withclean}" > /dev/null; then
   fail "nonzero exit status in ${withclean}"
 fi
@@ -88,7 +89,7 @@ fi
 
 # CLEAN in the environment does not clean the project.
 inherited="${tmpdir}/inherited"
-make_project "${inherited}"
+make_project "${inherited}" 0
 if ! CLEAN=anything "${COMPILE_PROJECT}" "${inherited}" > /dev/null; then
   fail "nonzero exit status in ${inherited}"
 fi
@@ -221,6 +222,54 @@ if [ -z "${badrepo_stderr}" ]; then
 fi
 if [ -f "${badrepo}/sub/built.txt" ]; then
   fail "built ${badrepo}/sub although the top level could not be determined"
+fi
+
+# With --clean and a clean that succeeds, the project is cleaned and then compiled.
+cleanok="${tmpdir}/clean-ok"
+make_project "${cleanok}" 0
+if ! "${COMPILE_PROJECT}" --clean "${cleanok}" > /dev/null; then
+  fail "nonzero exit status in ${cleanok}"
+fi
+if [ "$(cat "${cleanok}/log")" != "cleaned
+built" ]; then
+  fail "with a successful clean, expected \"cleaned\" then \"built\" but got: $(cat "${cleanok}/log")"
+fi
+
+# With --clean and a clean that fails, the project is not compiled and the
+# exit status is failure.
+cleanfails="${tmpdir}/clean-fails"
+make_project "${cleanfails}" 3
+if "${COMPILE_PROJECT}" --clean "${cleanfails}" > /dev/null 2>&1; then
+  fail "zero exit status despite a failing clean in ${cleanfails}"
+fi
+if [ "$(cat "${cleanfails}/log")" != "cleaned" ]; then
+  fail "with a failing clean, expected only \"cleaned\" but got: $(cat "${cleanfails}/log")"
+fi
+
+# With --clean and a clean whose exit status is 222, the project is not compiled and
+# the exit status is failure.  222 is the internal signal for "not a git repository",
+# so a clean that exited with it must not be mistaken for that.
+sentinel="${tmpdir}/sentinel"
+mkdir -p "${sentinel}"
+cat > "${sentinel}/gradlew" << 'EOF'
+#!/bin/sh
+dir="$(dirname -- "$0")"
+for argument in "$@"; do
+  if [ "${argument}" = clean ]; then
+    echo cleaned >> "${dir}/log"
+    exit 222
+  fi
+done
+echo built >> "${dir}/log"
+EOF
+chmod +x "${sentinel}/gradlew"
+"${COMPILE_PROJECT}" --clean "${sentinel}" > /dev/null 2>&1
+sentinel_status=$?
+if [ "${sentinel_status}" != 222 ]; then
+  fail "expected exit status 222 from a clean that exited 222 in ${sentinel}, but got ${sentinel_status}"
+fi
+if [ "$(cat "${sentinel}/log")" != "cleaned" ]; then
+  fail "with a clean that exited 222, expected only \"cleaned\" but got: $(cat "${sentinel}/log")"
 fi
 
 if [ "${status}" = 0 ]; then

@@ -78,6 +78,30 @@ FORBIDDEN = (
     "git status # check state\ngit switch main",
     "cd /some/dir # go there\ngit checkout -b newbranch",
     "git log --oneline -1 #\ngit branch newbranch",
+    "cd /some/dir # go there\ngit checkout main",
+    "ls  #\ngit switch main",
+    "make test # build the project\ngit branch newbranch",
+    "echo a#b\ngit stash",
+    "git status # check\ngit checkout main",
+    "sh <<'EOF'\n# Switch to main.\ngit checkout main\nEOF",
+    # A `<<EOF` inside a comment does not introduce a here-document, so the line after
+    # the comment is a command rather than that here-document's body.
+    "echo hi # <<EOF\ngit checkout main\nEOF",
+    "echo hi # <<'EOF'\ngit checkout main\nEOF",
+    # A here-document body is data, so an unmatched quote in one, as in `user's`, opens
+    # no quotation that could hide the comment on a later line.
+    "cat > notes.md <<'EOF'\nThe user's rules.\nEOF\n# <<EOF\ngit checkout main\nEOF",
+    "cat > notes.md <<EOF\nIt isn't run.\nEOF\n# write the notes <<EOF\ngit stash\nEOF",
+    # A line continuation is no word boundary:  the shell joins the lines, so a `#`
+    # that follows one still begins a comment, and a `<<EOF` in that comment introduces
+    # no here-document that could swallow the command on the line after it.
+    "echo hi \\\n# <<EOF\ngit checkout main\nEOF",
+    "echo hi \\\n# write the notes <<EOF\ngit stash\nEOF",
+    # A `)` that closes a command substitution stands inside a word, so a `#` after it
+    # is an ordinary character rather than the start of a comment.
+    "git log $(echo x)#; git checkout main",
+    "git log `echo x`#; git checkout main",
+    "cat <(echo x)#; git checkout main",
     "# A backslash in a comment does not continue the comment. \\\ngit checkout main",
     # A `#` that does not start a word does not start a comment, so what follows the
     # `;` is a command.
@@ -91,6 +115,34 @@ FORBIDDEN = (
     "cat > notes.md <<EOF && git checkout main\nnotes\nEOF",
     "cat > notes.md <<'EOF'; git switch main\nnotes\nEOF",
     "cat > notes.md <<-EOF | git stash\n\tnotes\n\tEOF",
+    # A here-document's delimiter word ends where any word ends, so the `#` of
+    # `<<EOF#x` stands inside the word rather than beginning a comment, and what
+    # follows the delimiter word on that line is shell syntax that still runs.
+    "cat <<EOF#x; git checkout main\nnotes\nEOF#x",
+    "cat <<E#F && git switch main\nnotes\nE#F",
+    "cat <<'EOF'#x; git stash\nnotes\nEOF#x",
+    # A `<<<` here-string is not a here-document:  its own word is the data, so the
+    # lines after it are commands rather than a body.
+    "cat <<<EOF\ngit checkout main\nEOF",
+    "grep -q yes <<<yes && git switch main",
+    # A here-string that feeds a shell is a script, just as a here-document is.
+    "sh <<<'git checkout main'",
+    # A line continuation joins the lines it separates, so the words after one continue
+    # the command, and a command after one on the next line still runs.
+    "git \\\n  checkout main",
+    "echo hi && \\\ngit checkout main",
+    "echo hi \\\n && git stash",
+    # A redirection does not separate one command from the next, and it may stand
+    # before the command it belongs to.  Its target is not that command's name, and
+    # neither is a file descriptor written before the operator.
+    "> out.txt git checkout main",
+    "2> out.txt git switch main",
+    "< /dev/null git stash",
+    "git status\n> out.txt git branch newbranch",
+    # A redirection operator that ends in some other character than `<` or `>`:  the
+    # word after it is the redirection's target, not the command's name.
+    "2>&1 git checkout main",
+    ">| out.txt git checkout main",
     # A command that receives `git` as data and then runs it.
     "eval git checkout main",
     'eval "git checkout main"',
@@ -188,6 +240,10 @@ PERMITTED = (
     # Every line of a multi-line command, and only the commands.
     "git status\ngit log --oneline",
     "git commit -m 'first line\nsecond line'",
+    # A file descriptor that a redirection operator follows directly belongs to the
+    # redirection, not to the command, so it is no operand of `git branch`.
+    "git branch --show-current 2>/dev/null",
+    "git -C /some/dir branch --list 'wpi-*' 2>/dev/null",
     # A shell option that is not a command option.
     "bash -s < script.sh",
     "sh -n script.sh",
@@ -198,6 +254,9 @@ PERMITTED = (
     "echo hi # git branch newbranch",
     "# ; git checkout main",
     "git status # && git checkout main",
+    # A `)` that closes a subshell separates one word from the next, so a `#` after it
+    # begins a comment, which hides the rest of the line from the shell as well.
+    "(echo x)#; git checkout main",
     # Commands that merely mention a forbidden operation.
     "echo 'git branch newbranch'",
     "grep -n 'git checkout' README.md",
@@ -208,6 +267,12 @@ PERMITTED = (
     "cat > notes.md <<'EOF'\nThe user's rules deny `git checkout`.\nEOF",
     "python3 - <<'EOF'\nprint('git stash')\nEOF",
     "cat > notes.md <<'EOF' && echo done\ngit checkout main\nEOF",
+    # A here-document body is data even when a `#` stands inside the delimiter word,
+    # and what follows the delimiter word on that line is a comment if it begins one.
+    "cat > notes.md <<EOF#x\ngit checkout main\nEOF#x",
+    "cat > notes.md <<'E#F'\ngit stash\nE#F",
+    "cat > notes.md <<\\EOF\ngit checkout main\nEOF",
+    "cat > notes.md <<EOF#x # git checkout main\nnotes\nEOF#x",
     # A command that receives a forbidden operation as data but does not run it.
     "find . -name '*.md' -exec grep 'git checkout' {} +",
     "echo '*.md' | xargs grep 'git stash'",
@@ -220,6 +285,12 @@ PERMITTED = (
     "env -S 'echo git checkout main'",
     "env -uS git status",
     "find . -name '*.py' -type f",
+    # A comment is not a command, even when it names a forbidden operation, and even
+    # when an apostrophe in it would not parse as shell words.
+    "git status # do not checkout main",
+    "ls # don't run git checkout here",
+    "git status # about stash\ngit log --oneline",
+    "git log --grep a#b",
     # Unparsable, and mentioning nothing forbidden.
     "echo 'unterminated",
 )
@@ -253,11 +324,18 @@ APPROVED = (
     "git --no-pager branch -a",
     "git --no-pager -C /some/dir log",
     "git --no-optional-locks status",
+    # A line continuation joins the lines of a single command.
+    "git log \\\n  --oneline",
     # One read-only command after another.
     "git status && git -C /some/dir log",
     "git status; git branch",
     "git status\ngit log --oneline",
     "git log --oneline | git -C /some/dir log --oneline",
+    # A comment is not shell syntax, so an expansion character in one expands nothing
+    # and does not withhold approval.
+    "git status # check state",
+    "git status # see `git log`",
+    "git log --oneline # costs $0",
 )
 
 # Commands that the hook must neither deny nor approve, leaving them to the `allow`
@@ -302,6 +380,8 @@ UNAPPROVED = (
     "git log $(echo HEAD)",
     "git log ${SOMEREF}",
     "git log > out.txt",
+    "> out.txt git status",
+    "git status <<EOF\nnotes\nEOF",
     "(git log)",
     "if true; then git log; fi",
     # Unparsable, and mentioning nothing forbidden.

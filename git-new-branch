@@ -107,7 +107,22 @@ fi
 BRANCHDIR="${PARENTDIR%/}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
-git pull -q > /dev/null 2>&1 || true
+# Bring this working copy up to date, so that the branch is based on the most
+# recent commit.  A failed pull is not fatal, because the repository might have
+# no remote or the current branch might have no upstream, but it is reported:
+# the branch will be based on a possibly stale commit.
+if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
+  echo "${SCRIPT_NAME}: warning: \`git pull\` failed in ${TOPLEVEL}:" >&2
+  if [ -n "${PULL_OUTPUT}" ]; then
+    echo "${PULL_OUTPUT}" >&2
+  fi
+  if [ -n "$(git ls-files --unmerged)" ]; then
+    echo "${SCRIPT_NAME}: ERROR: the failed pull left conflicts in ${TOPLEVEL}." >&2
+    echo "${SCRIPT_NAME}: Resolve them, or run \`git merge --abort\`, then re-run ${SCRIPT_NAME}." >&2
+    exit 1
+  fi
+  echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
+fi
 
 # Determine which remote the new branch would collide with:  the remote that
 # `git push` would use for the current branch, as `push_remote` in
@@ -126,16 +141,35 @@ git pull -q > /dev/null 2>&1 || true
 BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
 REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 
-# Ask the remote whether the branch already exists.
+# Succeeds if the given branch exists: locally, as a remote-tracking branch of
+# ${REMOTE}, or on ${REMOTE}.  The local tests come first because they need no
+# network access, and because `git checkout -b` fails on a local branch even
+# when the remote has no branch of that name.
 #
 # `git_batch_ssh` disables the interactive prompts that would otherwise block
-# this query forever when this script is run from another script or a CI job,
-# as `is-deleted-branch` does for its own queries.
-# A remote that this script cannot ask is not an error; the branch is created.
-if [ -n "${REMOTE}" ] \
-  && git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
-    "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${REMOTE}." >&2
+# the query forever when this script is run from another script or a CI job, as
+# `is-deleted-branch` does for its own queries.  A remote that this script
+# cannot ask is not an error; the branch is created.
+branch_exists() {
+  if git rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
+    return 0
+  fi
+  if [ -z "${REMOTE}" ]; then
+    return 1
+  fi
+  git rev-parse --verify --quiet "refs/remotes/${REMOTE}/$1" > /dev/null \
+    || git_batch_ssh . ls-remote --exit-code "${REMOTE}" "refs/heads/$1" \
+      > /dev/null 2>&1
+}
+
+# This test precedes the copy of the working copy, so that a name collision
+# does not cost the user a full copy of the repository.
+if branch_exists "${BRANCHNAME}"; then
+  if [ -n "${REMOTE}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists, locally or on remote ${REMOTE}." >&2
+  else
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists in this clone." >&2
+  fi
   exit 1
 fi
 

@@ -47,6 +47,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import string
 import sys
 from pathlib import PurePath
 from typing import TYPE_CHECKING
@@ -92,6 +93,31 @@ ENV_LONG_OPTIONS_WITH_VALUE = frozenset({"--chdir", "--unset"})
 OPERATOR_CHARACTERS = "();<>|&\n"
 OPERATOR_CHARS = frozenset(OPERATOR_CHARACTERS)
 
+# The characters that make up a redirection operator, such as `<`, `>>`, and `<<`.  A
+# redirection does not separate one command from the next, and its target is not a word
+# of the command it belongs to.
+REDIRECTION_CHARACTERS = "<>"
+
+# Redirection operators that end in some other character, and that stripping
+# REDIRECTION_CHARACTERS from the end of an operator token therefore does not find:
+# `>&` and `<&` duplicate a file descriptor, as in `2>&1`, and `>|` truncates a file
+# even under `set -o noclobber`.
+REDIRECTION_OPERATOR_SUFFIXES = (">&", "<&", ">|")
+
+# The characters of the file descriptor that may precede a redirection operator, as the
+# `2` of `2>/dev/null` does.
+DIGIT_CHARACTERS = frozenset(string.digits)
+
+# The characters that make a following "(" open a substitution rather than a subshell:
+# a command substitution `$(...)`, or a process substitution `<(...)` or `>(...)`.  The
+# ")" that closes a substitution stands inside a word, whereas the ")" that closes a
+# subshell or a `case` pattern separates one word from the next.
+SUBSTITUTION_PREFIXES = frozenset("$<>")
+
+# Characters that separate one word from the next without being an operator.  A newline
+# is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
+WHITESPACE_CHARACTERS = " \t\r"
+
 # Shell keywords that separate one command from another.
 KEYWORDS = frozenset(
     {
@@ -117,17 +143,6 @@ ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*=.*", re.DOTALL)
 
 # A git subcommand that this hook restricts, in a command it could not parse.
 FORBIDDEN_MENTION = re.compile(r"\bgit\s+((-{1,2}\S+|\S+=\S+)\s+)*(branch|checkout|stash|switch)\b")
-
-# A here-document: the redirection operator, the delimiter word, the rest of the line
-# that holds them, the body, and the line that holds the delimiter alone.  A `<<-`
-# here-document permits leading tabs on that line.  The body starts at the next line,
-# not just after the delimiter word, because what follows the delimiter word on its own
-# line is shell syntax rather than data, as in `cat <<EOF && git checkout main`.
-HEREDOC = re.compile(
-    r"<<-?[ \t]*(?P<quote>['\"]?)(?P<delimiter>\w+)(?P=quote)"
-    r"(?P<rest>[^\n]*)\n(?P<body>.*?)^[\t]*(?P=delimiter)[ \t]*$",
-    re.DOTALL | re.MULTILINE,
-)
 
 # Git options that precede the subcommand and take a separate value, as in
 # `git -C DIR branch`.  The `--option=value` form is handled separately, and so is an
@@ -302,80 +317,22 @@ class UnparsableCommandError(Exception):
     """A command that could not be split into words."""
 
 
-def _remove_shell_comments(command: str) -> str:
-    """Remove shell comments without removing their terminating newlines.
-
-    A comment starts at an unquoted ``#`` at the beginning of a word.  Keeping the
-    newline is important because the newline still separates the commands before and
-    after the comment.  Backslash-newline inside a comment has no special meaning.
+def _tokenize(text: str) -> list[str]:
+    """Split scanned shell text into words and operator tokens.
 
     Args:
-        command: a shell command.
+        text: the shell text of a command, as `_shell_text` returns it.
 
     Returns:
-        The command with comment text removed.
+        The tokens of the text.
     """
-    result: list[str] = []
-    quote = ""
-    at_word_start = True
-    index = 0
-    while index < len(command):
-        character = command[index]
-        if quote:
-            result.append(character)
-            index += 1
-            if character == quote:
-                quote = ""
-            elif character == "\\" and quote == '"' and index < len(command):
-                result.append(command[index])
-                index += 1
-            continue
-        if character == "#" and at_word_start:
-            newline = command.find("\n", index)
-            if newline == -1:
-                break
-            result.append("\n")
-            index = newline + 1
-            at_word_start = True
-        elif character in "'\"":
-            result.append(character)
-            quote = character
-            at_word_start = False
-            index += 1
-        elif character == "\\" and index + 1 < len(command):
-            result.extend(command[index : index + 2])
-            if command[index + 1] != "\n":
-                at_word_start = False
-            index += 2
-        else:
-            result.append(character)
-            at_word_start = character in " \t\r\n" or character in OPERATOR_CHARS
-            index += 1
-    return "".join(result)
-
-
-def _tokenize(command: str) -> list[str]:
-    """Split a shell command into words and operator tokens.
-
-    Args:
-        command: a shell command.
-
-    Returns:
-        The tokens of the command.
-    """
-    command = _remove_shell_comments(command)
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATOR_CHARACTERS)
-    # A newline is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
-    lexer.whitespace = " \t\r"
-    # A `#` begins a comment only at the start of a word, but shlex would begin a
-    # comment at one anywhere and would discard the rest of the line *including its
-    # newline*.  That would hide the commands after it on the same line -- a shell
-    # runs the `rm` of `git log a#; rm FILE` -- and would append the next line's
-    # words to the current command, hiding the `git` that starts that next command.
-    # Treating `#` as an ordinary character instead only ever reports more commands
-    # than a shell runs, as it does for a real comment, so it cannot hide a
-    # forbidden command.
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=OPERATOR_CHARACTERS)
+    # `_shell_text` has already removed the comments, and `shlex` would discard the
+    # rest of the line *including its newline*, which would append the next line's words
+    # to the current command and hide the `git` that starts that next command.
     lexer.commenters = ""
+    # A newline is an operator, per OPERATOR_CHARACTERS, so it is not also whitespace.
+    lexer.whitespace = WHITESPACE_CHARACTERS
     lexer.whitespace_split = True
     try:
         return list(lexer)
@@ -399,6 +356,15 @@ def _is_separator(token: str) -> bool:
 def _simple_commands(tokens: list[str]) -> Iterator[list[str]]:
     """Split a token list at operators and keywords.
 
+    A redirection is not one of those operators.  It does not separate one command from
+    the next, and it may even stand before the command it belongs to, as in
+    `> out.txt git switch main`.  Its target is not a word of that command; a file
+    descriptor written against the operator, as in `2>/dev/null`, is not a word of it
+    either, and `_shell_text` has already removed that.  A number that whitespace
+    separates from the operator is a word, because `git branch 2 > out.txt` names a
+    branch; only a number that is the whole of the command so far is dropped, as the
+    `2` of `2 > out.txt git switch main` is.
+
     Args:
         tokens: the tokens of a shell command.
 
@@ -406,13 +372,38 @@ def _simple_commands(tokens: list[str]) -> Iterator[list[str]]:
         The words of each command in the token list.
     """
     words: list[str] = []
+    # Whether this token is the target of a redirection rather than a word.
+    target = False
     for token in tokens:
-        if _is_separator(token):
-            if words:
-                yield words
-            words = []
-        else:
+        if target and not _is_separator(token):
+            target = False
+            continue
+        target = False
+        if not _is_separator(token):
             words.append(token)
+            continue
+        # `shlex` joins adjacent operator characters into one token, so a redirection
+        # may trail the operator that separates one command from the next, as the `<<`
+        # of the one token that `\n<<EOF` begins with does.
+        separator = token.rstrip(REDIRECTION_CHARACTERS)
+        target = separator != token
+        if not target:
+            # A redirection operator that ends in some other character, as `>&` and
+            # `>|` do.  Without this, the `1` of `2>&1 git checkout main` would be a
+            # word rather than the redirection's target, and would hide the `git` that
+            # follows it by standing where the command's name belongs.
+            for suffix in REDIRECTION_OPERATOR_SUFFIXES:
+                if token.endswith(suffix):
+                    separator = token[: -len(suffix)]
+                    target = True
+                    break
+        if separator == "":
+            if len(words) == 1 and words[0].isdigit():
+                del words[0]
+            continue
+        if words:
+            yield words
+        words = []
     if words:
         yield words
 
@@ -493,7 +484,8 @@ def _env_command(value: str | None, argv: list[str], index: int) -> list[str]:
     if value is None:
         value = _argument(argv, index)
         index += 1
-    return _tokenize(value) + argv[index:]
+    text, _ = _shell_text(value)
+    return _tokenize(text) + argv[index:]
 
 
 def _argument(argv: list[str], index: int) -> str:
@@ -543,27 +535,315 @@ def _strip_prefixes(words: list[str]) -> list[str]:
     return argv
 
 
-def _remove_heredoc_bodies(command: str) -> tuple[str, list[str]]:
-    """Take the here-document bodies out of a shell command.
+def _heredoc_body(command: str, index: int, delimiter: str) -> tuple[str, int] | None:
+    r"""Find the body of a here-document, which ends at the line that holds its delimiter.
 
-    A here-document body is data, not shell syntax, so parsing it as a command would
-    misread the text that a command such as `cat > file <<EOF` merely writes.  The rest
-    of the line that introduces the here-document is shell syntax, so it is kept.
+    A `<<-` here-document permits leading tabs on that line, and this function permits
+    them for every here-document, which at worst ends a body early and so leaves data
+    to be parsed as commands.
+
+    Args:
+        command: a shell command.
+        index: the index of the first character of the body, which begins a line.
+        delimiter: the here-document's delimiter word.
+
+    Returns:
+        The body and the index just past the line that holds the delimiter, or None if
+        no line holds it, which leaves the text where it is rather than removing it.
+    """
+    position = index
+    while position < len(command):
+        newline = command.find("\n", position)
+        end = len(command) if newline < 0 else newline
+        if command[position:end].lstrip("\t").rstrip(" \t") == delimiter:
+            return command[index:position], min(end + 1, len(command))
+        position = end + 1
+    return None
+
+
+def _word(command: str, index: int) -> tuple[str, int] | None:
+    r"""Read one shell word, the way a here-document delimiter or a here-string is one.
+
+    A word may be quoted or escaped, as in `'EOF'` and `\EOF`, and it ends at unquoted
+    whitespace or at an unquoted operator character.  A `#` does not end it, because a
+    `#` begins a comment only where a word begins, so the word of `<<EOF#x` is `EOF#x`.
+
+    Args:
+        command: a shell command.
+        index: the index of the first character of the word.
+
+    Returns:
+        The word, with its quoting removed, and the index just past it; or None if
+        there is no word there, or if a quotation in it is unterminated, which is a
+        syntax error.
+    """
+    letters: list[str] = []
+    position = index
+    while position < len(command):
+        character = command[position]
+        if character in "'\"":
+            position += 1
+            while position < len(command) and command[position] != character:
+                if character == '"' and command[position] == "\\" and position + 1 < len(command):
+                    position += 1
+                letters.append(command[position])
+                position += 1
+            if position >= len(command):
+                return None
+            position += 1
+        elif character == "\\":
+            if position + 1 >= len(command):
+                break
+            if command[position + 1] != "\n":
+                # A backslash-newline is a line continuation, which the shell removes.
+                letters.append(command[position + 1])
+            position += 2
+        elif character in WHITESPACE_CHARACTERS or character in OPERATOR_CHARS:
+            break
+        else:
+            letters.append(character)
+            position += 1
+    if position == index:
+        return None
+    return "".join(letters), position
+
+
+def _redirection_word(command: str, index: int) -> tuple[str, int] | None:
+    """Read the word that follows a redirection operator, which blanks may precede.
+
+    Args:
+        command: a shell command.
+        index: the index just past the redirection operator.
+
+    Returns:
+        What `_word` returns for the word that follows.
+    """
+    position = index
+    while position < len(command) and command[position] in " \t":
+        position += 1
+    return _word(command, position)
+
+
+def _heredoc_operator(command: str, index: int) -> tuple[str, int] | None:
+    """Read a here-document operator and the delimiter word that follows it.
+
+    The body starts at the next line, not just after the delimiter word, because what
+    follows the delimiter word on its own line is shell syntax rather than data, as in
+    `cat <<EOF && git checkout main`.
+
+    Args:
+        command: a shell command.
+        index: the index of a `<<` that no other `<` adjoins.
+
+    Returns:
+        The delimiter word, with its quoting removed, and the index just past it; or
+        None if no delimiter word follows, which is a syntax error rather than a
+        here-document.
+    """
+    position = index + len("<<")
+    if position < len(command) and command[position] == "-":
+        # `<<-` permits leading tabs on the body and on the delimiter's line.
+        position += 1
+    return _redirection_word(command, position)
+
+
+def _file_descriptor_end(command: str, index: int) -> int | None:
+    """Find the end of a file descriptor that a redirection operator follows directly.
+
+    A run of digits is a file descriptor only where a word begins and only when the
+    operator adjoins it, as in `2>/dev/null`.  Whitespace between them makes the digits
+    an ordinary word, as the `2` of `git branch 2 > out.txt` is, and a digit that a
+    word continues is part of that word, as the `2` of `git log HEAD~2>out.txt` is.
+
+    Args:
+        command: a shell command.
+        index: the index of a digit at which a word begins.
+
+    Returns:
+        The index of the redirection operator, or None if the digits are a word.
+    """
+    position = index
+    while position < len(command) and command[position] in DIGIT_CHARACTERS:
+        position += 1
+    if position < len(command) and command[position] in REDIRECTION_CHARACTERS:
+        return position
+    return None
+
+
+def _shell_text(command: str) -> tuple[str, list[str]]:
+    r"""Take the comments and the standard-input data out of a shell command.
+
+    That data is a here-document body and the word of a here-string.  It is data rather
+    than shell syntax, so parsing it as a command would misread the text that a command
+    such as `cat > file <<EOF` merely writes.
+
+    One scan removes the comments and the data together, because each of them decides
+    what the other means, and two scans would each misread what the other left behind.
+    Reading a body as shell text lets an unmatched quote in one, as in `don't`, open a
+    quotation that hides the comment on a later line; a `<<EOF` left in that comment
+    would then take the commands after it to be a body of its own and hide them.
+    Removing a here-document's delimiter word before looking for comments would instead
+    leave the `#` of `<<EOF#x` where a word begins, so that it would comment out the
+    rest of that line.
+
+    It also removes the file descriptor of a redirection, as the `2` of `2>/dev/null`
+    is.  Only this scan can tell that descriptor from a word, because it is one just
+    when the operator adjoins it; `shlex` splits `2>/dev/null` and `2 > /dev/null`
+    into the same three tokens.
+
+    A `#` begins a comment only where a word begins:  at the start of the command,
+    after whitespace, or after an operator other than the `)` that closes a
+    substitution.  It is an ordinary character elsewhere, as in `git log --grep a#b`
+    and `echo $(echo x)#y`, inside quotes, and when it is escaped.  A line continuation
+    is no word boundary, because the shell joins the lines it separates.
+
+    `shlex` would remove a comment itself, but it consumes the newline that ends the
+    comment along with it.  A newline is the operator that separates one command from
+    the next, so losing it would join a commented line to the line that follows and
+    hide that line's command, as in `cd /some/dir # go there\ngit status`.
 
     Args:
         command: a shell command.
 
     Returns:
-        The command without its here-document bodies, and those bodies.
+        The shell text of the command, without its comments, without the file
+        descriptor of a redirection, and without the data that it feeds to a command's
+        standard input, and that data: each here-document body, and the word of each
+        here-string.
     """
     bodies: list[str] = []
-
-    def take(match: re.Match[str]) -> str:
-        bodies.append(match.group("body"))
-        # Keeps what follows the delimiter word on its own line, which is shell syntax.
-        return "<<" + match.group("rest")
-
-    return HEREDOC.sub(take, command), bodies
+    kept: list[str] = []
+    # The delimiters of the here-documents whose bodies start at the next line.
+    pending: list[str] = []
+    quote = ""
+    at_word_start = True
+    # What opened each "(" that is still open, innermost last:  the "$", "<", or ">" of
+    # a substitution, and "" or another character for a subshell.
+    open_parens: list[str] = []
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if quote != "":
+            if character == "\\" and quote == '"' and index + 1 < len(command):
+                if command[index + 1] == "\n":
+                    # A line continuation, which the shell removes even inside quotes.
+                    index += 2
+                    continue
+                kept.extend((character, command[index + 1]))
+                index += 2
+                continue
+            kept.append(character)
+            if character == quote:
+                quote = ""
+        elif character == "\\":
+            escaped = command[index + 1] if index + 1 < len(command) else ""
+            if escaped == "\n":
+                # A line continuation:  the shell removes both characters and joins the
+                # lines.  Removing them here leaves the word state as it was, so a `#`
+                # on the line after `echo hi \` still follows the space that precedes
+                # the backslash and still begins a comment, and a `<<EOF` in that
+                # comment still introduces no here-document.  It also keeps the newline
+                # out of the text, where `shlex`, which does not join the lines, would
+                # make it part of the next word and hide the command that the next line
+                # begins.
+                index += 2
+                continue
+            kept.append(character)
+            if escaped != "":
+                kept.append(escaped)
+                index += 1
+            # Any other escape is part of a word.
+            at_word_start = False
+        elif character in "'\"":
+            quote = character
+            kept.append(character)
+            at_word_start = False
+        elif character == "#" and at_word_start:
+            # The comment runs to the end of the line.  Leave the newline itself, which
+            # is the operator that separates this command from the next, and which
+            # begins the body of a here-document that an earlier word introduced.
+            while index < len(command) and command[index] != "\n":
+                index += 1
+            continue
+        elif character == "\n":
+            kept.append(character)
+            index += 1
+            at_word_start = True
+            while pending:
+                found = _heredoc_body(command, index, pending[0])
+                if found is None:
+                    # No line holds the delimiter, so this is more likely a `<<` that
+                    # is not a here-document than a body; leave the text to be parsed.
+                    break
+                body, index = found
+                bodies.append(body)
+                del pending[0]
+            continue
+        elif character in DIGIT_CHARACTERS and at_word_start:
+            operator = _file_descriptor_end(command, index)
+            if operator is not None:
+                # A file descriptor that a redirection operator follows directly, as in
+                # `git branch --show-current 2>/dev/null`.  It belongs to the
+                # redirection rather than to the command, so removing it keeps
+                # `_simple_commands` from reading the `2` as an operand, which would be
+                # a branch name here.  The operator itself stays, and a word still
+                # begins at it.
+                index = operator
+                continue
+            # An ordinary word that begins with a digit.
+            kept.append(character)
+            at_word_start = False
+        elif character == "<":
+            run = index
+            while run < len(command) and command[run] == "<":
+                run += 1
+            # A run of two `<` introduces a here-document, whose body is the lines that
+            # follow this one.  A run of three is a here-string, whose own word is the
+            # data, so the lines that follow it are commands rather than a body.  A
+            # longer run is a syntax error.
+            end = None
+            if run - index == 2:
+                operator = _heredoc_operator(command, index)
+                if operator is not None:
+                    pending.append(operator[0])
+                    end = operator[1]
+            elif run - index == 3:
+                here_string = _redirection_word(command, run)
+                if here_string is not None:
+                    bodies.append(here_string[0])
+                    end = here_string[1]
+            if end is None:
+                kept.append(command[index:run])
+                at_word_start = True
+                index = run
+                continue
+            # Keeps the operator and the word after it as they are written, so that a
+            # `#` in that word still stands inside a word rather than where a word
+            # begins.  `_simple_commands` drops the word's token, as the target of a
+            # redirection.
+            kept.append(command[index:end])
+            at_word_start = False
+            index = end
+            continue
+        elif character == "(":
+            kept.append(character)
+            # Remember what opened this "(", for the ")" that closes it.
+            open_parens.append(command[index - 1] if index > 0 else "")
+            at_word_start = True
+        elif character == ")":
+            kept.append(character)
+            # A ")" that closes a substitution ends a word that the characters after it
+            # continue, so a "#" after it is an ordinary character:  `echo $(echo x)#y`
+            # prints "x#y".  A ")" that closes a subshell or a `case` pattern separates
+            # one word from the next, so a "#" after it begins a comment:  `(echo x)#y`
+            # runs `echo x` and comments out the rest of the line.  An unbalanced ")" is
+            # a syntax error, whose word state does not matter; call it a separator.
+            at_word_start = not open_parens or open_parens.pop() not in SUBSTITUTION_PREFIXES
+        else:
+            kept.append(character)
+            at_word_start = character in WHITESPACE_CHARACTERS or character in OPERATOR_CHARS
+        index += 1
+    return "".join(kept), bodies
 
 
 def _is_shell_command_option(token: str) -> bool:
@@ -695,18 +975,19 @@ def _git_invocations(command: str) -> Iterator[list[str]]:
     Yields:
         The argument list of each `git` invocation.
     """
-    # Remove comments first, so a here-document-looking string in a comment does not
-    # hide commands on later lines.
-    without_bodies, bodies = _remove_heredoc_bodies(_remove_shell_comments(command))
+    # One scan takes out the comments and the here-document bodies together, because
+    # a body is data rather than shell text:  a quote or a `#` in one is not shell
+    # syntax, so scanning it for comments would misread the shell text that follows it.
+    text, bodies = _shell_text(command)
     programs = set()
-    for words in _simple_commands(_tokenize(without_bodies)):
+    for words in _simple_commands(_tokenize(text)):
         argv = _strip_prefixes(words)
         if not argv:
             continue
         programs.add(PurePath(argv[0]).name)
         yield from _invocations_of(argv)
     if programs & SHELLS:
-        # A here-document that feeds a shell is a script, as in `sh <<'EOF'`.
+        # Data that feeds a shell is a script, as in `sh <<'EOF'` and `sh <<<'CMD'`.
         for body in bodies:
             yield from _git_invocations(body)
 
@@ -938,9 +1219,12 @@ def _approves(command: str) -> bool:
     Returns:
         True if the command may run without a permission prompt.
     """
-    if any(character in command for character in UNAPPROVABLE_CHARACTERS):
+    # A comment is not shell syntax, so a `$` or a backquote in one expands nothing
+    # and must not withhold approval.
+    text, _ = _shell_text(command)
+    if any(character in text for character in UNAPPROVABLE_CHARACTERS):
         return False
-    tokens = _tokenize(command)
+    tokens = _tokenize(text)
     for token in tokens:
         if _is_separator(token) and not frozenset(token) <= APPROVED_OPERATOR_CHARS:
             return False
