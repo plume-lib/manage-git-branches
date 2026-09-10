@@ -86,8 +86,8 @@ fi
 # certainly not a clone.  Reject it here rather than leaving it to `git -C`,
 # for which the empty string is a documented no-op:  `git -C '' rev-parse`
 # would answer about the current directory rather than about the argument.
-# The `realpath` call below also rejects the empty string, but only as a side
-# effect of `realpath ''` failing; this test states the requirement directly.
+# The `absolute_path` call below also rejects the empty string, but only as a
+# side effect of `cd -- ''` failing; this test states the requirement directly.
 if [ ! -d "$1" ]; then
   exit 2
 fi
