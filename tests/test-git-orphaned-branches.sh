@@ -14,7 +14,6 @@ SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 TOPLEVEL="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)"
 GIT_ORPHANED_BRANCHES="${TOPLEVEL}/git-orphaned-branches"
-SCRIPT_NAME="$(basename -- "$0")"
 
 if [ "$#" -ne 0 ]; then
   echo "Usage: ${SCRIPT_NAME}" >&2
@@ -97,6 +96,18 @@ touch "${work}/dot-project/p-branch-no-project/other"
 mkdir -p "${work}/dot-project/p-plain-project"
 touch "${work}/dot-project/p-plain-project/.project"
 
+# A `*-branch-*` directory inside another one, which the walk has to descend
+# into:  a branch directory can hold a clone of another branch.
+mkdir -p "${work}/dot-project/p-branch-outer/q-branch-inner"
+touch "${work}/dot-project/p-branch-outer/q-branch-inner/.project"
+
+# A `*-branch-*` directory behind a symbolic link to a directory.  The walk
+# does not follow such a link, which is what keeps a link to an ancestor from
+# sending it around forever.
+mkdir -p "${work}/linktarget/p-branch-behind-link"
+touch "${work}/linktarget/p-branch-behind-link/.project"
+ln -s ../linktarget "${work}/dot-project/link"
+
 # Contains a `.project` file and a regular file, but cannot be listed:  it can
 # be searched but not read.  Every glob in such a directory expands to nothing,
 # which must not be mistaken for "contains nothing but a `.project` file".
@@ -135,6 +146,12 @@ check "p-branch-plus-dangling-symlink" "unlisted"
 check "p-branch-empty" "unlisted"
 check "p-branch-no-project" "unlisted"
 check "p-plain-project" "unlisted"
+check "p-branch-outer" "unlisted"
+check "p-branch-outer/q-branch-inner" "listed"
+if printf '%s\n' "${output}" | grep -q -F -- 'p-branch-behind-link'; then
+  echo "FAIL: git-orphaned-branches followed a symbolic link to a directory"
+  status=1
+fi
 if [ "${unlistable}" -eq 1 ]; then
   check "p-branch-unlistable" "unlisted"
 fi
