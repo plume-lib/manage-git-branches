@@ -226,7 +226,7 @@ printf '%s\n' "${orphan_absolute}" > "${work}/print-newline.goal"
 cmp -s "${work}/print-newline.goal" "${work}/print-newline.actual" \
   || fail "default output differs from ${work}/print-newline.goal"
 
-# Test 3: the recommended cleanup command deletes the orphan and nothing else.
+# Test 3: the `--print0` pipeline deletes the orphan and nothing else.
 (cd "${work}/scan" && "${GIT_ORPHANED_BRANCHES}" --print0) | xargs -0 rm -rf
 [ ! -e "${orphan}" ] || fail "cleanup did not delete ${orphan}"
 [ -d "${work}/scan/my" ] || fail "cleanup deleted ${work}/scan/my"
@@ -416,6 +416,92 @@ git -C "${work}/seed" push -q origin --delete q9
 scan_with_counted_queries "${work}/queries-ssh"
 check_scan 2 'two clones that configure SSH differently' \
   "${work}/queries-ssh/p-branch-q8" "${work}/queries-ssh/p-branch-q9"
+
+###########################################################################
+## --remove
+###########################################################################
+
+# `--remove` removes each directory that it would otherwise list, by running
+# `git-remove-branch-directory`, and prints the ones that it removed.  That
+# script refuses a directory that holds work, so `--remove` can leave one
+# behind; it says why, and the exit status says that not everything was
+# removed.
+git -C "${work}/seed" push -q origin main:refs/heads/r1
+git -C "${work}/seed" push -q origin main:refs/heads/r2
+git -C "${work}/seed" push -q origin main:refs/heads/r3
+mkdir -p "${work}/removal"
+git clone -q -b r1 "${work}/remote.git" "${work}/removal/c-branch-r1"
+git clone -q -b r2 "${work}/remote.git" "${work}/removal/c-branch-r2"
+git clone -q -b r3 "${work}/remote.git" "${work}/removal/c-branch-r3"
+mkdir -p "${work}/removal/c-branch-project"
+touch "${work}/removal/c-branch-project/.project"
+echo "an uncommitted change" >> "${work}/removal/c-branch-r2/file.txt"
+git -C "${work}/seed" push -q origin --delete r1
+git -C "${work}/seed" push -q origin --delete r2
+
+removal_r1="$(absolute_path "${work}/removal/c-branch-r1")"
+removal_project="$(absolute_path "${work}/removal/c-branch-project")"
+removal_stderr="${work}/removal-stderr"
+if output="$(cd "${work}/removal" && "${GIT_ORPHANED_BRANCHES}" --remove \
+  2> "${removal_stderr}")"; then
+  fail "--remove exited with status 0 although a removal was refused"
+fi
+removal_expected="$(printf '%s\n%s\n' "${removal_project}" "${removal_r1}" | sort)"
+removal_actual="$(printf '%s\n' "${output}" | grep '.' | sort)"
+if [ "${removal_actual}" != "${removal_expected}" ]; then
+  fail "--remove printed [${removal_actual}], expected [${removal_expected}]"
+fi
+if [ -e "${work}/removal/c-branch-r1" ]; then
+  fail "--remove did not remove ${work}/removal/c-branch-r1"
+fi
+if [ -e "${work}/removal/c-branch-project" ]; then
+  fail "--remove did not remove ${work}/removal/c-branch-project"
+fi
+if [ ! -d "${work}/removal/c-branch-r2" ]; then
+  fail "--remove removed a directory that holds uncommitted changes"
+fi
+if [ ! -d "${work}/removal/c-branch-r3" ]; then
+  fail "--remove removed a directory whose branch still exists"
+fi
+if ! grep -q -F -- 'uncommitted changes' "${removal_stderr}"; then
+  fail "--remove did not say why it left a directory behind: $(cat "${removal_stderr}")"
+fi
+
+# None of the force flags is passed through, so a second run refuses again.
+if (cd "${work}/removal" && "${GIT_ORPHANED_BRANCHES}" --remove > /dev/null 2>&1); then
+  fail "--remove exited with status 0 although a removal was refused again"
+fi
+if [ ! -d "${work}/removal/c-branch-r2" ]; then
+  fail "--remove removed a directory that holds uncommitted changes"
+fi
+
+# `--remove --print0` separates the names of the removed directories with NUL,
+# as `--print0` alone separates the names of the listed ones.
+git -C "${work}/seed" push -q origin main:refs/heads/r4
+mkdir -p "${work}/removal0"
+git clone -q -b r4 "${work}/remote.git" "${work}/removal0/c-branch-r4"
+removal_r4="$(absolute_path "${work}/removal0/c-branch-r4")"
+git -C "${work}/seed" push -q origin --delete r4
+printf '%s\0' "${removal_r4}" > "${work}/removal0.goal"
+(cd "${work}/removal0" && "${GIT_ORPHANED_BRANCHES}" --remove --print0) \
+  > "${work}/removal0.actual"
+cmp -s "${work}/removal0.goal" "${work}/removal0.actual" \
+  || fail "--remove --print0 output differs from ${work}/removal0.goal"
+if [ -e "${work}/removal0/c-branch-r4" ]; then
+  fail "--remove --print0 did not remove ${work}/removal0/c-branch-r4"
+fi
+
+# A scan that finds nothing removes nothing and exits with status 0.
+mkdir -p "${work}/removal-empty/not-a-branch-directory"
+if ! output="$(cd "${work}/removal-empty" && "${GIT_ORPHANED_BRANCHES}" --remove)"; then
+  fail "--remove exited with a failure status although it found nothing"
+fi
+if [ -n "${output}" ]; then
+  fail "--remove printed [${output}] although it found nothing"
+fi
+if [ ! -d "${work}/removal-empty/not-a-branch-directory" ]; then
+  fail "--remove removed a directory that it does not list"
+fi
 
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"

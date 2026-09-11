@@ -13,13 +13,23 @@
 # instead.
 #
 # Usage:
-#   git-orphaned-branches [--print0]
-#   git-orphaned-branches --print0 | xargs -0 rm -rf
+#   git-orphaned-branches [--print0] [--remove]
 #
 # With --print0 (or -0), the directories are separated by a NUL character
 # rather than by a newline, which is safe for directory names that contain
 # whitespace, a newline, or a glob metacharacter.  Without it, a directory
 # name that contains a newline is indistinguishable from two directory names.
+#
+# With --remove, each directory that this command would list is removed, by
+# running `git-remove-branch-directory` on it, and the directories that were
+# removed are printed in the same format as without --remove.  That script
+# refuses to remove a directory that holds uncommitted changes or commits
+# that no remote-tracking ref holds, so --remove can leave a directory
+# behind; it says why, on standard error, and the exit status is then 1.
+# None of that script's `--force` flags is passed through:  a waiver that
+# applied to every directory of a recursive scan would be a foot-gun, so the
+# way to override one refusal is to run `git-remove-branch-directory` on that
+# directory with the flag that the refusal names.
 #
 # Usually, a remote branch disappears because its PR was merged.  It
 # is conceivable that the branch has local commits that were never
@@ -75,16 +85,44 @@ fi
 
 # If non-empty, separate the output directories by NUL rather than by newline.
 print0=""
-if [ "$#" -ge 1 ] && { [ "$1" = "--print0" ] || [ "$1" = "-0" ]; }; then
-  print0="$1"
+# If non-empty, remove each directory that this command would list.
+remove=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --print0 | -0) print0="$1" ;;
+    --remove) remove="$1" ;;
+    *) break ;;
+  esac
   shift
-fi
+done
 
 status=0
 
 if [ "$#" -ne 0 ]; then
-  echo "Usage: ${SCRIPT_NAME} [--print0]" >&2
+  echo "Usage: ${SCRIPT_NAME} [--print0] [--remove]" >&2
   exit 1
+fi
+
+# Where the directories to remove are collected, one per file, named by
+# position.  The removal happens after the scan rather than during it, so
+# that the walk does not descend into a directory that was just deleted, and
+# so that the whole list is known before anything is destroyed.  A shell list
+# cannot hold a pathname that contains a newline -- which is why --print0
+# exists -- so each pathname gets a file of its own.
+collect_dir=""
+collected=0
+if [ -n "${remove}" ]; then
+  if ! collect_dir="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" \
+    || [ -z "${collect_dir}" ]; then
+    echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
+    exit 1
+  fi
+  # The signal handlers re-raise the signal with the handler removed, so that
+  # this script dies of the signal rather than resuming where it was
+  # interrupted, and so that the caller sees that it was killed by a signal.
+  trap 'rm -rf -- "${collect_dir}"' EXIT
+  trap 'rm -rf -- "${collect_dir}"; trap - INT; kill -s INT "$$"' INT
+  trap 'rm -rf -- "${collect_dir}"; trap - TERM; kill -s TERM "$$"' TERM
 fi
 
 # Prints its argument, followed by a NUL character if --print0 was given and by
@@ -95,6 +133,19 @@ print_dir() {
   else
     printf '%s\n' "$1"
   fi
+}
+
+# Reports directory $1:  prints it, or, with --remove, records it for the
+# removal phase that follows the scan.
+report_dir() {
+  if [ -z "${remove}" ]; then
+    print_dir "$1"
+    return 0
+  fi
+  collected=$((collected + 1))
+  # Write the pathname with no terminator, so that the reader gets back
+  # exactly these bytes even for a name that ends in a newline.
+  printf '%s' "$1" > "${collect_dir}/${collected}"
 }
 
 # Prints the absolute path of directory $1, with symbolic links resolved.
@@ -233,7 +284,7 @@ check_directory() {
             # directory for deletion.
             echo "${SCRIPT_NAME}: not listing ${dir_absolute}, which hosts the worktree ${dependent_worktree}" >&2
           else
-            print_dir "${dir_absolute}"
+            report_dir "${dir_absolute}"
           fi
         fi
         ;;
@@ -251,7 +302,7 @@ check_directory() {
       # It has only the `.project` file and no other content.
       # `cd` prints its own diagnostic on failure.
       if dir_absolute="$(absolute_path "$dir")"; then
-        print_dir "${dir_absolute}"
+        report_dir "${dir_absolute}"
       else
         status=1
       fi
@@ -302,5 +353,31 @@ examine_directory() {
 }
 
 examine_directory .
+
+# The removal phase.  Each directory goes through
+# `git-remove-branch-directory`, which refuses to remove one that holds
+# uncommitted changes or commits that no remote-tracking ref holds, and says
+# why; only the directories that it removed are printed.
+if [ -n "${remove}" ]; then
+  removed_index=0
+  while [ "${removed_index}" -lt "${collected}" ]; do
+    removed_index=$((removed_index + 1))
+    # Append a character and strip it, so that a pathname that ends in a
+    # newline survives the command substitution.
+    removed_dir="$(
+      cat -- "${collect_dir}/${removed_index}"
+      printf 'x'
+    )"
+    removed_dir="${removed_dir%x}"
+    # Redirect stdin from /dev/null, because this script must not stop to
+    # await input.
+    if "${SCRIPT_DIR}"/git-remove-branch-directory -- "${removed_dir}" \
+      < /dev/null; then
+      print_dir "${removed_dir}"
+    else
+      status=1
+    fi
+  done
+fi
 
 exit "${status}"
