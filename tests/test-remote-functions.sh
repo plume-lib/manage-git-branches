@@ -281,4 +281,69 @@ if [ "${remote}" != 'elsewhere' ]; then
   fail "push_remote reported [${remote}] for a clone whose sole remote is elsewhere"
 fi
 
+## Usage: check_is_deleted_branch DIRECTORY EXPECTED DESCRIPTION
+## Checks that `is_deleted_branch DIRECTORY` returns status EXPECTED.
+check_is_deleted_branch() {
+  check_is_deleted_branch_status=0
+  is_deleted_branch "$1" || check_is_deleted_branch_status="$?"
+  if [ "${check_is_deleted_branch_status}" -ne "$2" ]; then
+    fail "is_deleted_branch on $3 returned ${check_is_deleted_branch_status}, not $2"
+  fi
+}
+
+# `is_deleted_branch` is the body of the `is-deleted-branch` command, which is
+# a wrapper around it.  tests/test-is-deleted-branch.sh exercises the answers
+# in depth through the command; what this checks is that the function answers
+# the same way when a script sources it and calls it directly, which is how
+# the other commands of this package use it.
+git init -q --bare -b main "${WORK_DIR}/idb-remote.git"
+# Redirect stderr to suppress the "you appear to have cloned an empty
+# repository" warning.
+git clone -q "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-seed" 2> /dev/null
+echo 'content' > "${WORK_DIR}/idb-seed/file.txt"
+git -C "${WORK_DIR}/idb-seed" add file.txt
+git -C "${WORK_DIR}/idb-seed" commit -q -m 'Initial commit'
+git -C "${WORK_DIR}/idb-seed" push -q -u origin main
+git -C "${WORK_DIR}/idb-seed" push -q origin main:refs/heads/doomed
+git clone -q -b doomed "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-dead"
+git clone -q -b main "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-live"
+git -C "${WORK_DIR}/idb-seed" push -q origin --delete doomed
+check_is_deleted_branch "${WORK_DIR}/idb-dead" 0 'a branch deleted in its remote'
+check_is_deleted_branch "${WORK_DIR}/idb-live" 1 'a branch that still exists'
+mkdir -p "${WORK_DIR}/idb-plain-directory"
+check_is_deleted_branch "${WORK_DIR}/idb-plain-directory" 2 'no working tree'
+
+# `check_is_deleted_branch` calls the function on the left of `||`, which
+# suppresses `set -e` for the whole of the function's body.  A caller that acts
+# on the answer instead -- the commands of this package run under `set -e` --
+# gets no such suppression, so check that the function survives one.  Do it in
+# a separate script, because a failure here kills the shell that runs it.
+#
+# The branch is pushed without `-u`, so it has no upstream configuration and
+# the `git config --get` queries fail, and it is then deleted in the remote, so
+# the `ls-remote` query fails too.  Both failures are answers rather than
+# errors, and the function must return 0 rather than let them abort the caller.
+git clone -q -b main "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-errexit"
+git -C "${WORK_DIR}/idb-errexit" checkout -q -b unconfigured
+git -C "${WORK_DIR}/idb-errexit" push -q origin unconfigured
+# Delete it from another clone, so that this one keeps the remote-tracking ref
+# that shows that the branch was pushed.
+git -C "${WORK_DIR}/idb-seed" push -q origin --delete unconfigured
+cat > "${WORK_DIR}/errexit-caller.sh" << 'EOF'
+#!/bin/sh
+set -e
+SCRIPT_NAME='errexit-caller.sh'
+SCRIPT_DIR="$2"
+# shellcheck source=/dev/null
+. "$2/remote-functions.sh"
+is_deleted_branch "$1"
+echo 'survived'
+EOF
+errexit_output="$(sh "${WORK_DIR}/errexit-caller.sh" "${WORK_DIR}/idb-errexit" \
+  "${COMMANDS_DIR}" 2>&1)" \
+  || fail "is_deleted_branch aborted a caller that runs under set -e: [${errexit_output}]"
+if [ "${errexit_output}" != 'survived' ]; then
+  fail "is_deleted_branch under set -e printed [${errexit_output}], not [survived]"
+fi
+
 echo "${SCRIPT_NAME}: OK"
