@@ -313,6 +313,119 @@ if ! printf '%s\n' "${output}" | grep -q -x -F -- "${submodule_absolute}"; then
   fail "git-orphaned-branches did not list the orphaned submodule working tree ${submodule_absolute}"
 fi
 
+###########################################################################
+## One remote query per remote URL, rather than one per directory.
+###########################################################################
+
+# Count the queries with a fake `git` on PATH that logs its arguments and then
+# runs the real git.  These tests' remotes are local pathnames that never
+# reach SSH, so counting SSH invocations would count nothing.
+real_git="$(command -v git)"
+mkdir -p "${work}/fake-bin"
+cat > "${work}/fake-bin/git" << FAKE_GIT_END
+#!/bin/sh
+printf '%s\n' "\$*" >> "\${GIT_COMMAND_LOG}"
+exec "${real_git}" "\$@"
+FAKE_GIT_END
+chmod +x "${work}/fake-bin/git"
+GIT_COMMAND_LOG="${work}/git-commands.log"
+export GIT_COMMAND_LOG
+
+# Usage: scan_with_counted_queries DIRECTORY
+# Runs `git-orphaned-branches` in DIRECTORY with the fake `git` on PATH.
+# Sets ${scan_output} to what it listed and ${scan_queries} to the number of
+# questions it asked a remote.  `ls-remote --get-url` only prints a URL from
+# the local configuration, so it asks nothing and does not count.
+scan_with_counted_queries() {
+  : > "${GIT_COMMAND_LOG}"
+  scan_output="$(PATH="${work}/fake-bin:${PATH}" \
+    sh -c 'cd "$1" && "$2"' sh "$1" "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"
+  scan_ls_remotes="$(grep -c 'ls-remote' "${GIT_COMMAND_LOG}" || true)"
+  scan_get_urls="$(grep -c 'ls-remote --get-url' "${GIT_COMMAND_LOG}" || true)"
+  scan_queries="$((scan_ls_remotes - scan_get_urls))"
+}
+
+# Usage: check_scan EXPECTED-QUERIES DESCRIPTION DIRECTORY...
+# Checks that the scan just run asked EXPECTED-QUERIES questions and listed
+# exactly the given directories.
+check_scan() {
+  check_scan_expected_queries="$1"
+  check_scan_description="$2"
+  shift 2
+  if [ "${scan_queries}" -ne "${check_scan_expected_queries}" ]; then
+    fail "${check_scan_description}: asked ${scan_queries} question(s), not ${check_scan_expected_queries}"
+  fi
+  check_scan_expected="$(for check_scan_dir in "$@"; do
+    absolute_path "${check_scan_dir}"
+  done | sort)"
+  check_scan_actual="$(printf '%s\n' "${scan_output}" | grep '.' | sort)"
+  if [ "${check_scan_actual}" != "${check_scan_expected}" ]; then
+    fail "${check_scan_description}: listed [${check_scan_actual}], expected [${check_scan_expected}]"
+  fi
+}
+
+# A second remote, so that clones of different upstreams can be told from
+# clones of one.
+git init -q --bare -b main "${work}/remote2.git"
+git -C "${work}/seed" remote add second "${work}/remote2.git"
+git -C "${work}/seed" push -q second main
+git -C "${work}/seed" tag live-tag
+git -C "${work}/seed" push -q origin refs/tags/live-tag
+for branch in q1 q2 q3 q5 q6 q7 q8 q9; do
+  git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
+done
+git -C "${work}/seed" push -q second main:refs/heads/q4
+
+# Three clones of one upstream: one query answers for all three.
+mkdir -p "${work}/queries-one"
+for branch in q1 q2 q3; do
+  git clone -q -b "${branch}" "${work}/remote.git" \
+    "${work}/queries-one/p-branch-${branch}"
+  git -C "${work}/seed" push -q origin --delete "${branch}"
+done
+scan_with_counted_queries "${work}/queries-one"
+check_scan 1 'three clones of one upstream' \
+  "${work}/queries-one/p-branch-q1" "${work}/queries-one/p-branch-q2" \
+  "${work}/queries-one/p-branch-q3"
+
+# Clones of different upstreams are asked separately, because a URL is what
+# says whether two directories are asking one repository.
+mkdir -p "${work}/queries-two"
+git clone -q -b q5 "${work}/remote.git" "${work}/queries-two/p-branch-q5"
+git clone -q -b q4 "${work}/remote2.git" "${work}/queries-two/p-branch-q4"
+git -C "${work}/seed" push -q origin --delete q5
+git -C "${work}/seed" push -q second --delete q4
+scan_with_counted_queries "${work}/queries-two"
+check_scan 2 'clones of two upstreams' \
+  "${work}/queries-two/p-branch-q4" "${work}/queries-two/p-branch-q5"
+
+# A directory whose configured upstream ref is not under refs/heads/ asks its
+# own question, because `ls-remote --heads` does not report such a ref.  It
+# still gets the right answer:  its upstream tag exists, so its branch is not
+# orphaned, while its neighbor's branch is.
+mkdir -p "${work}/queries-fallback"
+git clone -q -b q6 "${work}/remote.git" "${work}/queries-fallback/p-branch-q6"
+git clone -q -b q7 "${work}/remote.git" "${work}/queries-fallback/p-branch-q7"
+git -C "${work}/queries-fallback/p-branch-q7" config branch.q7.merge \
+  refs/tags/live-tag
+git -C "${work}/seed" push -q origin --delete q6
+git -C "${work}/seed" push -q origin --delete q7
+scan_with_counted_queries "${work}/queries-fallback"
+check_scan 2 'a clone whose upstream ref is outside refs/heads/' \
+  "${work}/queries-fallback/p-branch-q6"
+
+# Two clones of one upstream that reach it through different SSH commands are
+# asking different questions, and are asked separately.
+mkdir -p "${work}/queries-ssh"
+git clone -q -b q8 "${work}/remote.git" "${work}/queries-ssh/p-branch-q8"
+git clone -q -b q9 "${work}/remote.git" "${work}/queries-ssh/p-branch-q9"
+git -C "${work}/queries-ssh/p-branch-q9" config core.sshCommand 'ssh -v'
+git -C "${work}/seed" push -q origin --delete q8
+git -C "${work}/seed" push -q origin --delete q9
+scan_with_counted_queries "${work}/queries-ssh"
+check_scan 2 'two clones that configure SSH differently' \
+  "${work}/queries-ssh/p-branch-q8" "${work}/queries-ssh/p-branch-q9"
+
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
 fi

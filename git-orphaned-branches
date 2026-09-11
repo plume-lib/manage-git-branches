@@ -66,6 +66,13 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=remote-functions.sh
+. "${SCRIPT_DIR}/remote-functions.sh"
+
 # If non-empty, separate the output directories by NUL rather than by newline.
 print0=""
 if [ "$#" -ge 1 ] && { [ "$1" = "--print0" ] || [ "$1" = "-0" ]; }; then
@@ -195,14 +202,21 @@ check_directory() {
     # It is the top level of a working tree.
 
     # If the branch was deleted in the remote, print the directory name.
-    # Only status 0 from `is-deleted-branch` means "the branch was deleted".
+    # Only status 0 from `is_deleted_branch` means "the branch was deleted".
     # Statuses 1, 2, and 3 are answers of "no" or "cannot tell", each of which
-    # `is-deleted-branch` has already explained if it is worth explaining.  Any
-    # other status means that `is-deleted-branch` could not run, which must not
-    # be silently reported as "there is nothing to delete".
-    # Redirect stdin from /dev/null, because `is-deleted-branch` runs `git`,
-    # which runs `ssh`, and this script must not stop to await input.
-    "${SCRIPT_DIR}"/is-deleted-branch "$dir" < /dev/null
+    # it has already explained if it is worth explaining.  Any other status
+    # would mean that it could not answer at all, which must not be silently
+    # reported as "there is nothing to delete".
+    #
+    # Call the function of remote-functions.sh rather than running the
+    # `is-deleted-branch` command, which is a wrapper around it.  One process
+    # for the whole scan is what lets one `git ls-remote` answer for every
+    # directory that asks the same remote the same way:  what the function
+    # remembers, a subprocess per directory would throw away.
+    #
+    # Redirect stdin from /dev/null, because the function runs `git`, which
+    # runs `ssh`, and this script must not stop to await input.
+    is_deleted_branch "$dir" < /dev/null
     is_deleted_status=$?
     case "${is_deleted_status}" in
       # `cd` prints its own diagnostic on failure.
@@ -225,7 +239,7 @@ check_directory() {
         ;;
       1 | 2 | 3) ;;
       *)
-        echo "${SCRIPT_NAME}: ${SCRIPT_DIR}/is-deleted-branch failed with status ${is_deleted_status} on: $dir" >&2
+        echo "${SCRIPT_NAME}: is_deleted_branch returned status ${is_deleted_status} on: $dir" >&2
         status=1
         ;;
     esac
