@@ -299,9 +299,9 @@ git_push_to() {
   # Name the branch as well as the repository -- git's ordinary two-operand
   # form -- so that git's own machinery can say what it merged:
   #
-  #   Merge branch 'feature' of ./../myrepo-branch-feature
+  #   Merge branch 'feature' of ../myrepo-branch-feature
   #
-  # For a pathname with no refspec, `git fetch` writes "<sha>\t\t./../DIR"
+  # For a pathname with no refspec, `git fetch` writes "<sha>\t\t../DIR"
   # into FETCH_HEAD, which leaves `fmt-merge-msg` nothing to name, so the
   # message names the directory but not the branch.  Writing the message with
   # `-m` instead would fabricate it rather than letting git describe what it
@@ -313,10 +313,20 @@ git_push_to() {
   # FROM_DIR's HEAD moved in between, the one-operand form merges something
   # that this script never checked.
   #
-  # ${from_branch} is not empty here:  a detached HEAD is the only state in
-  # which `check_upstream` leaves it empty, and `check_branch_exists` above
-  # refuses that.
-  if ! git pull -q -- "${from_relative}" "${from_branch}"; then
+  # Spell the branch as `refs/heads/BRANCH` rather than as a bare name.
+  # `git fetch` resolves a bare name by trying `refs/BRANCH` and
+  # `refs/tags/BRANCH` before `refs/heads/BRANCH` -- the same collision that
+  # `check_upstream` contends with above, where a tag and the branch share a
+  # name.  Given a bare name, such a tag is merged in place of the branch:
+  # silently, and with exit status 0, because merging the tag is a perfectly
+  # good merge as far as git is concerned.  The full refname admits no such
+  # ambiguity, and `fmt-merge-msg` still writes "Merge branch 'BRANCH' of DIR"
+  # for it.
+  #
+  # ${from_branch} is not empty here:  `check_upstream` leaves it empty for a
+  # detached HEAD and for a directory that is not a working copy, and
+  # `check_branch_exists` above refuses both.
+  if ! git pull -q -- "${from_relative}" "refs/heads/${from_branch}"; then
     # Note: pwd=to_absolute
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
     return 1
