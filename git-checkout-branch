@@ -90,6 +90,17 @@ if ! cd "${TOPLEVEL}"; then
   exit 1
 fi
 
+# Refuse a working tree whose `.git` is a file rather than a directory -- a
+# submodule's working tree, or a linked worktree -- before anything expensive
+# happens:  before the `git pull`, before any query to a remote, and before
+# the copy.  Copying such a working tree produces a directory that shares this
+# one's git directory, and the checkout then moves this working tree's HEAD
+# and rewrites its index.  `check_git_dir_is_directory`, in
+# remote-functions.sh, explains the mechanism and prints the diagnostic.
+if ! check_git_dir_is_directory "${TOPLEVEL}"; then
+  exit 1
+fi
+
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
