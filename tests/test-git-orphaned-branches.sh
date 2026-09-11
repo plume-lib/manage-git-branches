@@ -431,6 +431,108 @@ scan_with_counted_queries "${work}/queries-ssh"
 check_scan 2 'two clones that configure SSH differently' \
   "${work}/queries-ssh/p-branch-q8" "${work}/queries-ssh/p-branch-q9"
 
+# Two clones of one upstream that run different programs at the far end are
+# asking different questions, and are asked separately.  Both queries succeed,
+# so the retry below cannot correct a shared answer:  the second clone's
+# `remote.origin.uploadpack` serves another repository entirely, where its
+# branch still exists, and reusing the first clone's answer would report a
+# live branch as orphaned.
+mkdir -p "${work}/queries-uploadpack"
+cat > "${work}/fake-upload-pack" << UPLOAD_PACK_END
+#!/bin/sh
+# Ignore the repository that git names, and serve the other one.
+exec git upload-pack "${work}/remote2.git"
+UPLOAD_PACK_END
+chmod +x "${work}/fake-upload-pack"
+for branch in qd qe; do
+  git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
+  git clone -q -b "${branch}" "${work}/remote.git" \
+    "${work}/queries-uploadpack/p-branch-${branch}"
+  git -C "${work}/seed" push -q origin --delete "${branch}"
+done
+# The branch that the other repository still has.
+git -C "${work}/seed" push -q second main:refs/heads/qe
+git -C "${work}/queries-uploadpack/p-branch-qe" config \
+  remote.origin.uploadpack "${work}/fake-upload-pack"
+scan_with_counted_queries "${work}/queries-uploadpack"
+check_scan 2 'two clones that configure upload-pack differently' \
+  "${work}/queries-uploadpack/p-branch-qd"
+
+# Two clones of one upstream that reach it through different transports are
+# asking different questions, and are asked separately.  Both queries succeed,
+# so nothing later can correct a shared answer:  the second clone's
+# `remote.origin.vcs` names a remote helper that answers in place of git's own
+# transport, and reusing the first clone's answer would report a live branch
+# as orphaned.
+mkdir -p "${work}/queries-vcs"
+cat > "${work}/fake-bin/git-remote-fakevcs" << HELPER_END
+#!/bin/sh
+# Ignore the URL that git names, and serve a fixed list of refs.  Reading the
+# list from a file, rather than asking a repository for it, keeps this
+# helper's own work out of the query count.
+while IFS= read -r fake_helper_command; do
+  case "\${fake_helper_command}" in
+    capabilities) printf 'fetch\n\n' ;;
+    list) cat "${work}/fake-helper-refs"; printf '\n' ;;
+    *) exit 0 ;;
+  esac
+done
+HELPER_END
+chmod +x "${work}/fake-bin/git-remote-fakevcs"
+for branch in qf qg; do
+  git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
+  git clone -q -b "${branch}" "${work}/remote.git" \
+    "${work}/queries-vcs/p-branch-${branch}"
+  git -C "${work}/seed" push -q origin --delete "${branch}"
+done
+# The branch that the remote helper still reports, in the format that a helper
+# answers `list` with:  "SHA<SPACE>refname".
+printf '%s refs/heads/qg\n' "$(git -C "${work}/seed" rev-parse HEAD)" \
+  > "${work}/fake-helper-refs"
+git -C "${work}/queries-vcs/p-branch-qg" config remote.origin.vcs fakevcs
+scan_with_counted_queries "${work}/queries-vcs"
+check_scan 2 'two clones that configure a remote helper differently' \
+  "${work}/queries-vcs/p-branch-qf"
+
+# A directory whose own configuration breaks its query does not answer for the
+# rest of its group.  A key names a URL, not a directory, so a failure that
+# belongs to one directory would otherwise be remembered for all of them, and
+# a scan that should have listed the healthy directories would list nothing.
+# `protocol.file.allow` forbids the query that this directory would make,
+# which fails it without changing what it would ask -- that is, without
+# changing the key -- and it is set on the directory that is scanned first,
+# which is the one that would poison the others.
+mkdir -p "${work}/queries-broken"
+for branch in qa qb qc; do
+  git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
+  git clone -q -b "${branch}" "${work}/remote.git" \
+    "${work}/queries-broken/p-branch-${branch}"
+  git -C "${work}/seed" push -q origin --delete "${branch}"
+done
+git -C "${work}/queries-broken/p-branch-qa" config protocol.file.allow never
+# One failed query, then one that succeeds and answers for the rest.
+scan_with_counted_queries "${work}/queries-broken"
+check_scan 2 'a directory whose own configuration breaks its query' \
+  "${work}/queries-broken/p-branch-qb" "${work}/queries-broken/p-branch-qc"
+
+# The same, with two broken directories:  a healthy directory is asked its own
+# question no matter how many of its siblings failed before it.  A budget of
+# retries, rather than a failure that is simply never remembered, would spend
+# itself on the second broken directory and report nothing at all.
+mkdir -p "${work}/queries-broken-two"
+for branch in qh qi qj; do
+  git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
+  git clone -q -b "${branch}" "${work}/remote.git" \
+    "${work}/queries-broken-two/p-branch-${branch}"
+  git -C "${work}/seed" push -q origin --delete "${branch}"
+done
+git -C "${work}/queries-broken-two/p-branch-qh" config protocol.file.allow never
+git -C "${work}/queries-broken-two/p-branch-qi" config protocol.file.allow never
+# Two failed queries, then one that succeeds.
+scan_with_counted_queries "${work}/queries-broken-two"
+check_scan 3 'two directories whose own configuration breaks their queries' \
+  "${work}/queries-broken-two/p-branch-qj"
+
 ###########################################################################
 ## --remove
 ###########################################################################
