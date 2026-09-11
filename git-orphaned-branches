@@ -215,6 +215,13 @@ live_dependent_worktree() {
 live_superproject() {
   live_superproject_top="$(git -C "$1" rev-parse --show-superproject-working-tree 2> /dev/null)" \
     || return 0
+  # Git before 2.13 does not know this option, and `rev-parse` echoes an
+  # option it does not recognize and exits 0.  Without this, every directory
+  # would look like a submodule of a working tree whose name is the option,
+  # and this command would list nothing at all.
+  case "${live_superproject_top}" in
+    --show-superproject-working-tree) live_superproject_top= ;;
+  esac
   if [ -n "${live_superproject_top}" ]; then
     printf '%s\n' "${live_superproject_top}"
   fi

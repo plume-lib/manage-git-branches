@@ -313,4 +313,37 @@ check_is_deleted_branch "${WORK_DIR}/idb-live" 1 'a branch that still exists'
 mkdir -p "${WORK_DIR}/idb-plain-directory"
 check_is_deleted_branch "${WORK_DIR}/idb-plain-directory" 2 'no working tree'
 
+# `check_is_deleted_branch` calls the function on the left of `||`, which
+# suppresses `set -e` for the whole of the function's body.  A caller that acts
+# on the answer instead -- the commands of this package run under `set -e` --
+# gets no such suppression, so check that the function survives one.  Do it in
+# a separate script, because a failure here kills the shell that runs it.
+#
+# The branch is pushed without `-u`, so it has no upstream configuration and
+# the `git config --get` queries fail, and it is then deleted in the remote, so
+# the `ls-remote` query fails too.  Both failures are answers rather than
+# errors, and the function must return 0 rather than let them abort the caller.
+git clone -q -b main "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-errexit"
+git -C "${WORK_DIR}/idb-errexit" checkout -q -b unconfigured
+git -C "${WORK_DIR}/idb-errexit" push -q origin unconfigured
+# Delete it from another clone, so that this one keeps the remote-tracking ref
+# that shows that the branch was pushed.
+git -C "${WORK_DIR}/idb-seed" push -q origin --delete unconfigured
+cat > "${WORK_DIR}/errexit-caller.sh" << 'EOF'
+#!/bin/sh
+set -e
+SCRIPT_NAME='errexit-caller.sh'
+SCRIPT_DIR="$2"
+# shellcheck source=/dev/null
+. "$2/remote-functions.sh"
+is_deleted_branch "$1"
+echo 'survived'
+EOF
+errexit_output="$(sh "${WORK_DIR}/errexit-caller.sh" "${WORK_DIR}/idb-errexit" \
+  "${COMMANDS_DIR}" 2>&1)" \
+  || fail "is_deleted_branch aborted a caller that runs under set -e: [${errexit_output}]"
+if [ "${errexit_output}" != 'survived' ]; then
+  fail "is_deleted_branch under set -e printed [${errexit_output}], not [survived]"
+fi
+
 echo "${SCRIPT_NAME}: OK"
