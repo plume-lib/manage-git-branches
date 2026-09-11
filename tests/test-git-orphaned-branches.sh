@@ -440,6 +440,26 @@ scan_with_counted_queries "${work}/queries-ssh"
 check_scan 2 'two clones that configure SSH differently' \
   "${work}/queries-ssh/p-branch-q8" "${work}/queries-ssh/p-branch-q9"
 
+# A directory whose own configuration breaks its query does not answer for the
+# rest of its group.  A key names a URL, not a directory, so a failure that
+# belongs to one directory would otherwise be remembered for all of them, and
+# a scan that should have listed the healthy directories would list nothing.
+# `remote.origin.uploadpack` is set on the directory that is scanned first,
+# which is the one that would poison the others.
+mkdir -p "${work}/queries-broken"
+for branch in qa qb qc; do
+  git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
+  git clone -q -b "${branch}" "${work}/remote.git" \
+    "${work}/queries-broken/p-branch-${branch}"
+  git -C "${work}/seed" push -q origin --delete "${branch}"
+done
+git -C "${work}/queries-broken/p-branch-qa" config remote.origin.uploadpack \
+  "${work}/no-such-upload-pack"
+# One failed query, then one retry that succeeds and answers for the rest.
+scan_with_counted_queries "${work}/queries-broken"
+check_scan 2 'a directory whose own configuration breaks its query' \
+  "${work}/queries-broken/p-branch-qb" "${work}/queries-broken/p-branch-qc"
+
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
 fi

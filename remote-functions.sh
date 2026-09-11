@@ -559,8 +559,9 @@ is_deleted_branch_was_pushed() {
 ##
 ## ${remote_heads_keys} holds one key per query, in the order the queries were
 ## made; a key's line number is the index of the variables that hold that
-## query's output and status.  A shell has no associative array, and the
-## output of a query holds newlines, so it cannot go in a list of its own.
+## query's output, status, and whether a failed query has been retried.  A
+## shell has no associative array, and the output of a query holds newlines,
+## so it cannot go in a list of its own.
 remote_heads_keys=''
 remote_heads_queries=0
 
@@ -611,8 +612,13 @@ remote_heads_key() {
       /*) remote_heads_key_path="${remote_heads_key_url}" ;;
       *) remote_heads_key_path="$1/${remote_heads_key_url}" ;;
     esac
-    remote_heads_key_location="$(physical_path "${remote_heads_key_path}")" \
-      || return 0
+    # Unlike the `physical_path` calls in `is_deleted_branch`, which explain
+    # the failure that they let through, this one is expected to fail:  a
+    # remote that names a pathname that no longer exists is an ordinary
+    # reason to have no key.  Discard `cd`'s diagnostic, which would name the
+    # pathname with no hint of what asked about it.
+    remote_heads_key_location="$(physical_path "${remote_heads_key_path}" \
+      2> /dev/null)" || return 0
   fi
   remote_heads_key_command="${GIT_SSH_COMMAND:-$(git -C "$1" config --get core.sshCommand || true)}"
   remote_heads_key_variant="${GIT_SSH_VARIANT:-$(git -C "$1" config --get ssh.variant || true)}"
@@ -634,9 +640,18 @@ remote_heads_key() {
 ## With a nonempty KEY, from `remote_heads_key`, the answer is remembered
 ## under that key and a later call with the same key returns it without asking
 ## again.  The result is one query per remote URL rather than one per
-## directory.  A failure is remembered too:  the directories of a group all
-## report an unreachable remote, but only the first of them waits for the
-## connection attempt to time out.
+## directory.
+##
+## A success is final, but a failure is retried once from the next directory
+## that asks.  A key names the URL and the SSH command, not the directory, yet
+## a query can fail for a reason that belongs to the directory it ran in --
+## `remote.<name>.uploadpack`, `http.proxy`, `credential.helper`,
+## `core.gitProxy`, or a clone that cannot be read.  Remembering such a
+## failure for the whole group would let one broken directory answer for its
+## healthy siblings, which is how this scan reports nothing at all.  One retry
+## lets a healthy directory correct the record, and still spares the rest of a
+## group the wait when the remote is genuinely unreachable:  a group waits for
+## two connection attempts to time out rather than for one per directory.
 ##
 ## The answer is returned in a variable rather than printed, because a caller
 ## that captured the output with `$(...)` would run this function in a
@@ -645,24 +660,44 @@ remote_heads_key() {
 ## `--heads`, rather than a pattern per branch:  one answer serves any number
 ## of questions, with no chunking and no command-line length limit.
 remote_heads() {
+  remote_heads_index=''
+  # Whether this call is the one retry that a remembered failure allows.  An
+  # answer from such a call is final, whether it succeeds or fails again.
+  remote_heads_retry=0
+  # Whether the remembered answer, if there is one, has already been retried.
+  # The `eval` below assigns it; this states its default, which a reader --
+  # and `shellcheck`, which cannot see through `eval` -- would otherwise have
+  # to infer.
+  remote_heads_retried=0
   if [ -n "$3" ]; then
     remote_heads_index="$(printf '%s\n' "${remote_heads_keys}" \
       | grep -n -x -F -- "$3" | head -n 1)"
     remote_heads_index="${remote_heads_index%%:*}"
     if [ -n "${remote_heads_index}" ]; then
-      eval "remote_heads_output=\${remote_heads_output_${remote_heads_index}}"
       eval "remote_heads_status=\${remote_heads_status_${remote_heads_index}}"
-      return "${remote_heads_status}"
+      eval "remote_heads_retried=\${remote_heads_retried_${remote_heads_index}}"
+      if [ "${remote_heads_status}" -eq 0 ] \
+        || [ "${remote_heads_retried}" -eq 1 ]; then
+        eval "remote_heads_output=\${remote_heads_output_${remote_heads_index}}"
+        return "${remote_heads_status}"
+      fi
+      # A remembered failure that no directory has retried.  Ask again here,
+      # and let this directory's answer replace it.
+      remote_heads_retry=1
     fi
   fi
   remote_heads_output="$(git_batch_ssh "$1" ls-remote --heads "$2" 2> /dev/null)"
   remote_heads_status="$?"
   if [ -n "$3" ]; then
-    remote_heads_queries=$((remote_heads_queries + 1))
-    remote_heads_keys="${remote_heads_keys}$3
+    if [ -z "${remote_heads_index}" ]; then
+      remote_heads_queries=$((remote_heads_queries + 1))
+      remote_heads_keys="${remote_heads_keys}$3
 "
-    eval "remote_heads_output_${remote_heads_queries}=\${remote_heads_output}"
-    eval "remote_heads_status_${remote_heads_queries}=\${remote_heads_status}"
+      remote_heads_index="${remote_heads_queries}"
+    fi
+    eval "remote_heads_output_${remote_heads_index}=\${remote_heads_output}"
+    eval "remote_heads_status_${remote_heads_index}=\${remote_heads_status}"
+    eval "remote_heads_retried_${remote_heads_index}=${remote_heads_retry}"
   fi
   return "${remote_heads_status}"
 }
