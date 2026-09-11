@@ -232,6 +232,87 @@ cmp -s "${work}/print-newline.goal" "${work}/print-newline.actual" \
 [ -d "${work}/scan/my" ] || fail "cleanup deleted ${work}/scan/my"
 [ -d "${work}/scan/my dir" ] || fail "cleanup deleted ${work}/scan/my dir"
 
+###########################################################################
+## Working trees whose `.git` is a file rather than a directory.
+###########################################################################
+
+# A linked worktree is a working tree, and `is-deleted-branch` answers about
+# it correctly, so an orphaned one must be listed.  Before this was fixed,
+# such a directory failed the `[ -d "$dir/.git" ]` test, was checked only for
+# a lone `.project` file, and was silently ignored.
+#
+# The main working tree that hosts it must not be listed, even when its own
+# branch was deleted as well:  removing it would remove the repository that
+# the worktree's `.git` file points into, breaking a working tree that the
+# user never named.
+git -C "${work}/seed" push -q origin main:refs/heads/host
+git -C "${work}/seed" push -q origin main:refs/heads/dependent
+mkdir -p "${work}/worktrees"
+host="${work}/worktrees/w-branch-host"
+dependent="${work}/worktrees/w-branch-dependent"
+git clone -q -b host "${work}/remote.git" "${host}"
+git -C "${host}" worktree add -q "${dependent}" dependent
+host_absolute="$(absolute_path "${host}")"
+dependent_absolute="$(absolute_path "${dependent}")"
+git -C "${work}/seed" push -q origin --delete host
+git -C "${work}/seed" push -q origin --delete dependent
+
+if ! output="$(cd "${work}/worktrees" && "${GIT_ORPHANED_BRANCHES}" \
+  2> "${work}/worktrees.stderr")"; then
+  fail "git-orphaned-branches exited with a failure status for a linked worktree"
+fi
+if ! printf '%s\n' "${output}" | grep -q -x -F -- "${dependent_absolute}"; then
+  fail "git-orphaned-branches did not list the orphaned worktree ${dependent}"
+fi
+if printf '%s\n' "${output}" | grep -q -x -F -- "${host_absolute}"; then
+  fail "git-orphaned-branches listed ${host}, which hosts a live worktree"
+fi
+if ! grep -q -F -- "${dependent_absolute}" "${work}/worktrees.stderr"; then
+  fail "git-orphaned-branches did not say which worktree ${host} hosts"
+fi
+
+# A registration whose directory is gone protects nothing:  removing the host
+# cannot break a working tree that does not exist.
+rm -rf "${dependent}"
+if ! output="$(cd "${work}/worktrees" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
+  fail "git-orphaned-branches exited with a failure status for a stale registration"
+fi
+if ! printf '%s\n' "${output}" | grep -q -x -F -- "${host_absolute}"; then
+  fail "git-orphaned-branches did not list ${host} once its worktree was gone"
+fi
+
+# A submodule's working tree is a working tree too, and its `.git` is a file
+# as well, so the same test decides it.
+git init -q --bare -b main "${work}/sub-origin.git"
+# Redirect stderr to suppress the "you appear to have cloned an empty
+# repository" warning.
+git clone -q "${work}/sub-origin.git" "${work}/sub-seed" 2> /dev/null
+echo "submodule content" > "${work}/sub-seed/sub.txt"
+git -C "${work}/sub-seed" add sub.txt
+git -C "${work}/sub-seed" commit -q -m "Initial commit"
+git -C "${work}/sub-seed" push -q origin main
+git -C "${work}/sub-seed" push -q origin main:refs/heads/subfeat
+mkdir -p "${work}/submodule"
+superproject="${work}/submodule/super-branch-main"
+git init -q -b main "${superproject}"
+echo "superproject content" > "${superproject}/super.txt"
+git -C "${superproject}" add super.txt
+git -C "${superproject}" commit -q -m "Initial commit"
+# git 2.38.1 and later refuse the "file" transport for a submodule unless
+# `protocol.file.allow` permits it.
+git -C "${superproject}" -c protocol.file.allow=always submodule add -q \
+  -b subfeat "${work}/sub-origin.git" sub-branch-subfeat
+git -C "${superproject}" commit -q -m "Add the submodule"
+submodule_absolute="$(absolute_path "${superproject}/sub-branch-subfeat")"
+git -C "${work}/sub-seed" push -q origin --delete subfeat
+
+if ! output="$(cd "${work}/submodule" && "${GIT_ORPHANED_BRANCHES}")"; then
+  fail "git-orphaned-branches exited with a failure status for a submodule"
+fi
+if ! printf '%s\n' "${output}" | grep -q -x -F -- "${submodule_absolute}"; then
+  fail "git-orphaned-branches did not list the orphaned submodule working tree ${submodule_absolute}"
+fi
+
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
 fi
