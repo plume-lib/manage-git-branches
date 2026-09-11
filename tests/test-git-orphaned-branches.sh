@@ -334,16 +334,9 @@ fi
 # Count the queries with a fake `git` on PATH that logs its arguments and then
 # runs the real git.  These tests' remotes are local pathnames that never
 # reach SSH, so counting SSH invocations would count nothing.
-real_git="$(command -v git)"
-mkdir -p "${work}/fake-bin"
-cat > "${work}/fake-bin/git" << FAKE_GIT_END
-#!/bin/sh
-printf '%s\n' "\$*" >> "\${GIT_COMMAND_LOG}"
-exec "${real_git}" "\$@"
-FAKE_GIT_END
-chmod +x "${work}/fake-bin/git"
-GIT_COMMAND_LOG="${work}/git-commands.log"
-export GIT_COMMAND_LOG
+# shellcheck source=common-functions.sh
+. "${TESTS_DIR}/common-functions.sh"
+make_counting_git "${work}/fake-bin" "${work}/git-commands.log"
 
 # Usage: scan_with_counted_queries DIRECTORY
 # Runs `git-orphaned-branches` in DIRECTORY with the fake `git` on PATH.
@@ -354,9 +347,7 @@ scan_with_counted_queries() {
   : > "${GIT_COMMAND_LOG}"
   scan_output="$(PATH="${work}/fake-bin:${PATH}" \
     sh -c 'cd "$1" && "$2"' sh "$1" "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"
-  scan_ls_remotes="$(grep -c 'ls-remote' "${GIT_COMMAND_LOG}" || true)"
-  scan_get_urls="$(grep -c 'ls-remote --get-url' "${GIT_COMMAND_LOG}" || true)"
-  scan_queries="$((scan_ls_remotes - scan_get_urls))"
+  scan_queries="$(count_remote_queries)"
 }
 
 # Usage: check_scan EXPECTED-QUERIES DESCRIPTION DIRECTORY...

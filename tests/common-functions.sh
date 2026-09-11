@@ -183,3 +183,46 @@ working_tree_state() {
   git "$@" rev-parse HEAD
   git "$@" ls-files --stage
 }
+
+## Usage: make_counting_git DIRECTORY LOG
+## Creates, in DIRECTORY, a `git` command that appends its arguments to LOG,
+## one invocation per line, and then runs the real git.  A test that puts
+## DIRECTORY first on PATH can then count the git commands that the command
+## under test ran, and in particular the questions it asked a remote.
+##
+## Counting git commands is cheaper than a fake SSH, and it counts the
+## queries that these tests actually make, whose remotes are local pathnames
+## that never reach SSH.
+##
+## Exports GIT_COMMAND_LOG, which the fake `git` appends to, and empties it,
+## so that it holds only the commands that the test is about to run.
+make_counting_git() {
+  mkdir -p "$1" || return 1
+  make_counting_git_real="$(command -v git)"
+  # If DIRECTORY is already on PATH, the fake `git` would exec itself forever.
+  if [ "${make_counting_git_real}" = "$1/git" ]; then
+    echo "make_counting_git: $1 is already on PATH" >&2
+    return 1
+  fi
+  GIT_COMMAND_LOG="$2"
+  export GIT_COMMAND_LOG
+  cat > "$1/git" << COUNTING_GIT_END
+#!/bin/sh
+printf '%s\n' "\$*" >> "\${GIT_COMMAND_LOG}"
+exec "${make_counting_git_real}" "\$@"
+COUNTING_GIT_END
+  chmod +x "$1/git" || return 1
+  : > "${GIT_COMMAND_LOG}"
+}
+
+## Usage: count_remote_queries
+## Prints the number of questions that the commands in ${GIT_COMMAND_LOG}
+## asked a remote:  the `git ls-remote` invocations, except the
+## `ls-remote --get-url` ones, which print a URL from the local configuration
+## and ask nothing.
+count_remote_queries() {
+  count_remote_queries_all="$(grep -c 'ls-remote' "${GIT_COMMAND_LOG}" || true)"
+  count_remote_queries_local="$(grep -c 'ls-remote --get-url' \
+    "${GIT_COMMAND_LOG}" || true)"
+  echo "$((count_remote_queries_all - count_remote_queries_local))"
+}
