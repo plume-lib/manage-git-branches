@@ -37,9 +37,9 @@ FAKE_SSH_END
 ##
 ## A submodule's working tree has a `.git` *file* that names a git directory
 ## in the superproject, which is one of the three states that the commands
-## that copy a working copy must refuse.  `protocol.file.allow` is needed because
-## git 2.38.1 and later refuse the "file" transport for a submodule by
-## default.
+## that copy a working copy must refuse.  `protocol.file.allow` is needed
+## because git 2.38.1 and later refuse the "file" transport for a submodule
+## by default.
 make_submodule_superproject() {
   (
     cd -- "$1" || exit 1
@@ -109,17 +109,79 @@ make_separate_git_dir_worktree() {
   )
 }
 
-## Usage: working_tree_state DIRECTORY
+## Usage: make_symlinked_git_dir_worktree DIRECTORY
+## Creates, in DIRECTORY, a repository whose working tree is
+## `symlink-branch-main` and whose git directory is `symlink-git-dir` beside
+## it, named by a *symbolic link* `symlink-branch-main/.git` rather than by a
+## `.git` file.  The repository has a branch "extra" that no directory has
+## checked out, so that a test can name a branch that no directory is using
+## yet.
+##
+## Such a `.git` answers `test -d`, because `-d` follows symbolic links, but
+## `cp -Rp` copies the link rather than what it names, and the relative target
+## `../symlink-git-dir` resolves to the same git directory from the sibling
+## copy.  So this is a fourth state that the commands that copy a working copy
+## must refuse.
+make_symlinked_git_dir_worktree() {
+  (
+    cd -- "$1" || exit 1
+    git init -q -b main symlink-branch-main || exit 1
+    cd symlink-branch-main || exit 1
+    echo 'content' > file.txt
+    git add file.txt
+    git commit -q -m 'Initial commit'
+    git branch extra
+    mv .git ../symlink-git-dir || exit 1
+    ln -s ../symlink-git-dir .git || exit 1
+  )
+}
+
+## Usage: make_env_git_dir_worktree DIRECTORY
+## Creates, in DIRECTORY, a working tree `env-branch-main` that holds no
+## `.git` at all and a git directory `env-git-dir` beside it.  A test reaches
+## the working tree by setting GIT_DIR to the git directory and GIT_WORK_TREE
+## to the working tree, which is how git finds a repository that no `.git`
+## names.  The repository has a branch "extra" that no directory has checked
+## out, so that a test can name a branch that no directory is using yet.
+##
+## A copy of such a working tree holds no repository, and the environment
+## still names the original's git directory, so the checkout moves the
+## original's HEAD.  It is the fifth state that the commands that copy a
+## working copy must refuse.
+make_env_git_dir_worktree() {
+  (
+    cd -- "$1" || exit 1
+    git init -q -b main env-branch-main || exit 1
+    cd env-branch-main || exit 1
+    echo 'content' > file.txt
+    git add file.txt
+    git commit -q -m 'Initial commit'
+    git branch extra
+    mv .git ../env-git-dir || exit 1
+  )
+}
+
+## Usage: working_tree_state DIRECTORY [GIT_DIRECTORY]
 ## Prints the state of the working tree DIRECTORY that a `git checkout` in it
 ## would change:  the ref that HEAD names, the commit that HEAD resolves to,
 ## and the contents of the index.  A test compares this before and after a
 ## command that must leave DIRECTORY alone.  The ref is the assertion that
 ## catches a copy which shares DIRECTORY's git directory, because the
 ## `git checkout` that such a copy runs moves this HEAD.
+##
+## Git finds the repository from DIRECTORY itself, which is what every working
+## tree but one permits.  A working tree that holds no `.git` at all is the
+## exception:  a test that makes one names its repository as GIT_DIRECTORY
+## here, as the environment names it for the command under test.
 working_tree_state() {
-  git -C "$1" symbolic-ref --quiet HEAD || echo '(detached HEAD)'
-  git -C "$1" rev-parse HEAD
-  git -C "$1" ls-files --stage
+  if [ -n "${2-}" ]; then
+    set -- --git-dir="$2" --work-tree="$1"
+  else
+    set -- -C "$1"
+  fi
+  git "$@" symbolic-ref --quiet HEAD || echo '(detached HEAD)'
+  git "$@" rev-parse HEAD
+  git "$@" ls-files --stage
 }
 
 ## Usage: make_counting_git DIRECTORY LOG
