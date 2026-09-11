@@ -98,13 +98,16 @@ if ! cd "${TOPLEVEL}"; then
   exit 1
 fi
 
-# Refuse a working tree whose `.git` is a file rather than a directory -- a
-# submodule's working tree, or a linked worktree -- before anything expensive
-# happens:  before the `git pull`, before any query to a remote, and before
-# the copy.  Copying such a working tree produces a directory that shares this
-# one's git directory, and the checkout then moves this working tree's HEAD
-# and rewrites its index.  `check_git_dir_is_directory`, in
-# remote-functions.sh, explains the mechanism and prints the diagnostic.
+# Refuse a working tree that does not hold its own `.git` directory -- one
+# whose `.git` is a file (a submodule's working tree, a linked worktree, or
+# the working tree of a repository made with `--separate-git-dir`), one whose
+# `.git` is a symbolic link, and one that has no `.git` at all -- before
+# anything expensive happens:  before the `git pull`, before any query to a
+# remote, and before the copy.  Copying such a working tree produces a
+# directory that shares this one's git directory, and the checkout then moves
+# this working tree's HEAD and rewrites its index.
+# `check_git_dir_is_directory`, in remote-functions.sh, explains the mechanism
+# and prints the diagnostic.
 if ! check_git_dir_is_directory "${TOPLEVEL}"; then
   exit 1
 fi
