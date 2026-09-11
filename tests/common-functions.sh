@@ -197,8 +197,13 @@ working_tree_state() {
 ## Exports GIT_COMMAND_LOG, which the fake `git` appends to, and empties it,
 ## so that it holds only the commands that the test is about to run.
 make_counting_git() {
-  make_counting_git_real="$(command -v git)"
   mkdir -p "$1" || return 1
+  make_counting_git_real="$(command -v git)"
+  # If DIRECTORY is already on PATH, the fake `git` would exec itself forever.
+  if [ "${make_counting_git_real}" = "$1/git" ]; then
+    echo "make_counting_git: $1 is already on PATH" >&2
+    return 1
+  fi
   GIT_COMMAND_LOG="$2"
   export GIT_COMMAND_LOG
   cat > "$1/git" << COUNTING_GIT_END

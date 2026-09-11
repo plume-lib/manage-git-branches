@@ -259,7 +259,7 @@ git_push_to() {
   fi
 
   # Check the upstream before asking whether the branch was deleted:
-  # `is-deleted-branch` cannot tell, and exits with status 3, when the branch
+  # `is_deleted_branch` cannot tell, and answers status 3, when the branch
   # has no upstream, and its diagnostic is less specific than this one.
   if ! check_upstream "${from_absolute}"; then
     return 1
