@@ -458,45 +458,48 @@ physical_path() {
 ## than the name of a configured remote:  fetching from a URL creates no
 ## remote-tracking ref.
 ##
-## The variables below are set in a pipeline, hence in a subshell, so they
-## cannot disturb the caller.
+## The variables below are prefixed with an abbreviation of this function's
+## name, as `check_git_dir_is_directory`'s are, so that they cannot collide
+## with a sourcing script's variables.  The pipeline that sets them also makes
+## them a subshell's, in every shell that this package supports, but the
+## prefix is what the guarantee rests on.
 is_deleted_branch_tracking_refs() {
   git -C "$1" config --get-all "remote.$2.fetch" \
-    | while IFS= read -r refspec; do
+    | while IFS= read -r tracking_refs_refspec; do
       # A fetch refspec is [+]SOURCE:DESTINATION.  A "*" in SOURCE matches any
       # substring, and DESTINATION's "*" stands for what SOURCE's matched.
       # A refspec without a DESTINATION, such as the negative refspec
       # "^refs/heads/BRANCH", creates no remote-tracking ref.
-      case "${refspec}" in
+      case "${tracking_refs_refspec}" in
         *:*) ;;
         *) continue ;;
       esac
-      refspec="${refspec#+}"
-      source_pattern="${refspec%%:*}"
-      destination="${refspec#*:}"
-      case "${source_pattern}" in
+      tracking_refs_refspec="${tracking_refs_refspec#+}"
+      tracking_refs_source_pattern="${tracking_refs_refspec%%:*}"
+      tracking_refs_destination="${tracking_refs_refspec#*:}"
+      case "${tracking_refs_source_pattern}" in
         *'*'*)
           # A ref name cannot contain "*", "?", or "[", so the only pattern
           # character in SOURCE is the "*" that this case matched.
-          source_prefix="${source_pattern%%'*'*}"
-          source_suffix="${source_pattern#*'*'}"
+          tracking_refs_source_prefix="${tracking_refs_source_pattern%%'*'*}"
+          tracking_refs_source_suffix="${tracking_refs_source_pattern#*'*'}"
           case "$3" in
-            "${source_prefix}"*"${source_suffix}") ;;
+            "${tracking_refs_source_prefix}"*"${tracking_refs_source_suffix}") ;;
             *) continue ;;
           esac
-          matched="${3#"${source_prefix}"}"
-          matched="${matched%"${source_suffix}"}"
-          case "${destination}" in
+          tracking_refs_matched="${3#"${tracking_refs_source_prefix}"}"
+          tracking_refs_matched="${tracking_refs_matched%"${tracking_refs_source_suffix}"}"
+          case "${tracking_refs_destination}" in
             *'*'*)
-              printf '%s%s%s\n' "${destination%%'*'*}" "${matched}" \
-                "${destination#*'*'}"
+              printf '%s%s%s\n' "${tracking_refs_destination%%'*'*}" \
+                "${tracking_refs_matched}" "${tracking_refs_destination#*'*'}"
               ;;
-            *) printf '%s\n' "${destination}" ;;
+            *) printf '%s\n' "${tracking_refs_destination}" ;;
           esac
           ;;
         *)
-          if [ "$3" = "${source_pattern}" ]; then
-            printf '%s\n' "${destination}"
+          if [ "$3" = "${tracking_refs_source_pattern}" ]; then
+            printf '%s\n' "${tracking_refs_destination}"
           fi
           ;;
       esac
@@ -611,18 +614,24 @@ is_deleted_branch() {
   # pushed and it was not deleted.  `git clone` of an empty repository leaves
   # HEAD on such a branch, and gives it upstream configuration that no push
   # ever justified.
+  # `rev-parse --verify --quiet` exits 1 when the ref does not exist, which is
+  # the case this tests for but would abort a caller that runs under `set -e`.
   is_deleted_branch_commit="$(git -C "${is_deleted_branch_dir}" rev-parse \
-    --verify --quiet "${is_deleted_branch_ref}")"
+    --verify --quiet "${is_deleted_branch_ref}" || true)"
   if [ -z "${is_deleted_branch_commit}" ]; then
     return 3
   fi
 
   # The branch's upstream configuration:  a remote name and one or more refs
   # such as "refs/heads/BRANCH".
+  # `git config --get` exits 1 when the key is not set, which a branch that has
+  # no upstream configuration -- the common case that the comment below
+  # describes -- is expected to be, but would abort a caller that runs under
+  # `set -e`.
   is_deleted_branch_branch_remote="$(git -C "${is_deleted_branch_dir}" config \
-    --get "branch.${is_deleted_branch_branch}.remote")"
+    --get "branch.${is_deleted_branch_branch}.remote" || true)"
   is_deleted_branch_merge_refs="$(git -C "${is_deleted_branch_dir}" config \
-    --get-all "branch.${is_deleted_branch_branch}.merge")"
+    --get-all "branch.${is_deleted_branch_branch}.merge" || true)"
 
   # A branch exists in a remote because someone pushed it there, so ask the
   # remote that `git push` uses.  `push_remote` determines it; answering
@@ -681,9 +690,17 @@ is_deleted_branch() {
   # `git ls-remote --exit-code` exits with status 2 if no matching ref exists.
   # `git_batch_ssh` disables the interactive prompts that would otherwise
   # block this query forever.
-  git_batch_ssh "${is_deleted_branch_dir}" ls-remote --exit-code \
-    "${is_deleted_branch_remote}" "$@" > /dev/null 2>&1
-  is_deleted_branch_status="$?"
+  #
+  # Ask in a condition rather than assigning `$?` after a standalone command,
+  # which would abort a caller that runs under `set -e` -- and would do so in
+  # the very case that this function exists to report, since a deleted branch
+  # is what makes the command exit nonzero.
+  if git_batch_ssh "${is_deleted_branch_dir}" ls-remote --exit-code \
+    "${is_deleted_branch_remote}" "$@" > /dev/null 2>&1; then
+    is_deleted_branch_status=0
+  else
+    is_deleted_branch_status="$?"
+  fi
   case "${is_deleted_branch_status}" in
     0)
       # The branch still exists in the remote.
