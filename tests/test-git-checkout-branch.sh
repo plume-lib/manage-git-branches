@@ -383,6 +383,34 @@ if [ "$(working_tree_state "${linked}")" != "${linked_before}" ]; then
   fail "the linked worktree's HEAD or index changed"
 fi
 
+# A working tree whose git directory lies outside it is a main working tree,
+# not a linked worktree:  the diagnostic must not send the user to another
+# working tree, nor name the git directory as one.
+separate_parent="${tmpdir}/separate"
+mkdir -p "${separate_parent}" || exit 1
+separate_parent="$(CDPATH='' cd -- "${separate_parent}" && pwd -P)" || exit 1
+make_separate_git_dir_worktree "${separate_parent}" || exit 1
+separate="${separate_parent}/separate-branch-main"
+separate_before="$(working_tree_state "${separate}")"
+if out="$(cd "${separate}" && "${GIT_CHECKOUT_BRANCH}" extra 2>&1)"; then
+  fail "zero exit status in a working tree whose git directory lies outside it"
+fi
+case "${out}" in
+  *"is a linked worktree"* | *"main working tree"*)
+    fail "a working tree whose git directory lies outside it was called a linked worktree: ${out}" ;;
+  *"git directory ${separate_parent}/separate-git-dir lies outside it"*) ;;
+  *) fail "unexpected message in a working tree whose git directory lies outside it: ${out}" ;;
+esac
+for leftover in "${separate_parent}/separate-branch-extra" \
+  "${separate_parent}/separate-branch-extra-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "directory was created in a working tree whose git directory lies outside it: ${leftover}"
+  fi
+done
+if [ "$(working_tree_state "${separate}")" != "${separate_before}" ]; then
+  fail "the HEAD or index changed in a working tree whose git directory lies outside it"
+fi
+
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_CHECKOUT_BRANCH}" > /dev/null 2>&1); then
   fail "zero exit status when given no argument"

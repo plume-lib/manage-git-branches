@@ -36,8 +36,8 @@ FAKE_SSH_END
 ## that no directory is using yet.
 ##
 ## A submodule's working tree has a `.git` *file* that names a git directory
-## in the superproject, which is one of the two states that the commands that
-## copy a working copy must refuse.  `protocol.file.allow` is needed because
+## in the superproject, which is one of the three states that the commands
+## that copy a working copy must refuse.  `protocol.file.allow` is needed because
 ## git 2.38.1 and later refuse the "file" transport for a submodule by
 ## default.
 make_submodule_superproject() {
@@ -68,8 +68,8 @@ make_submodule_superproject() {
 ## using yet.
 ##
 ## A linked worktree's `.git` is a file that names a git directory inside the
-## main working tree's repository, which is the other state that the commands
-## that copy a working copy must refuse.
+## main working tree's repository, which is another of the states that the
+## commands that copy a working copy must refuse.
 make_linked_worktree() {
   (
     cd -- "$1" || exit 1
@@ -80,6 +80,32 @@ make_linked_worktree() {
     git commit -q -m 'Initial commit'
     git branch extra
     git worktree add -q -b linked ../worktree-branch-linked
+  )
+}
+
+## Usage: make_separate_git_dir_worktree DIRECTORY
+## Creates, in DIRECTORY, a repository whose working tree is
+## `separate-branch-main` and whose git directory is `separate-git-dir`
+## beside it, made by hand with `git init --separate-git-dir`.  The
+## repository has a branch "extra" that no directory has checked out, so that
+## a test can name a branch that no directory is using yet.
+##
+## Such a working tree is a *main* working tree, but its `.git` is a file that
+## names the git directory beside it, which is the third state that the
+## commands that copy a working copy must refuse.  It is not a linked
+## worktree, and it has no other working tree to send the user to:  git takes
+## the main working tree to be the parent of the git directory, so
+## `git worktree list` names the git directory itself here.
+make_separate_git_dir_worktree() {
+  (
+    cd -- "$1" || exit 1
+    git init -q -b main --separate-git-dir separate-git-dir \
+      separate-branch-main || exit 1
+    cd separate-branch-main || exit 1
+    echo 'content' > file.txt
+    git add file.txt
+    git commit -q -m 'Initial commit'
+    git branch extra
   )
 }
 
