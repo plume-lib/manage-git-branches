@@ -547,6 +547,180 @@ is_deleted_branch_was_pushed() {
   return "${is_deleted_branch_was_pushed_result}"
 }
 
+## The answers that remotes have already given this file, so that one
+## `git ls-remote --heads` answers for every directory that asks the same
+## remote the same way.  In this package's workflow, every `REPO-branch-*`
+## directory of one project is a clone of one upstream repository, so a scan
+## of twenty of them asked twenty times what one query answers.
+##
+## The memory lasts as long as the process that sourced this file, which is
+## one run of one command.  A scan therefore sees one snapshot of each remote,
+## rather than a remote that may change under it as the scan proceeds.
+##
+## ${remote_heads_keys} holds one key per remembered answer, in the order the
+## answers arrived; a key's line number is the index of the variable that
+## holds that answer.  A shell has no associative array, and an answer holds
+## newlines, so it cannot go in a list of its own.
+remote_heads_keys=''
+remote_heads_answers=0
+
+## Usage: remote_heads_key DIRECTORY REMOTE
+## Prints a key that two directories share exactly when one `git ls-remote`
+## can answer for both of them.  Prints nothing if no such key applies, in
+## which case the caller must ask its own question.
+##
+## Four things decide it.  One is the URL that REMOTE resolves to, which is
+## what determines whether two queries ask the same repository -- not whether
+## the directories share a repository, and not what they call the remote.
+## `git ls-remote --get-url` resolves it, applying `url.*.insteadOf` rewriting
+## as the query itself would.
+##
+## Another is the SSH configuration, because `git_batch_ssh` takes
+## `core.sshCommand` and `ssh.variant` from the directory it is given:  two
+## directories that resolve one URL but reach it through different SSH
+## commands are asking different questions, and must not share an answer.
+##
+## Another is `remote.<name>.uploadpack`, which names the program that git
+## runs at the far end to list the refs.  Two directories that resolve one URL
+## but run different programs there can both succeed and yet be told different
+## branches -- the program is free to serve any repository at all -- so they
+## too are asking different questions.  Git applies this setting only to a
+## REMOTE that is the name of a remote, and a lookup for a REMOTE given as a
+## URL or a pathname finds nothing, which is the same answer.
+##
+## The last is every other setting that can put something other than the named
+## repository at the far end.  `remote.<name>.vcs` names a remote helper that
+## answers in place of git's own transport; a proxy (`remote.<name>.proxy`,
+## `http.proxy` and its per-URL forms, `core.gitProxy`) relays the query to
+## whatever it likes; a credential helper (`credential.helper` and its per-URL
+## forms) decides whose view of the refs comes back.  Each of these is
+## `uploadpack` again:  two directories that resolve one URL but differ here
+## can both succeed and be told different branches, so each belongs in the
+## key.  The per-URL forms have names that this function cannot predict, and
+## values that can repeat, so take the `http.*`, `credential.*` and
+## `core.gitProxy` configuration whole rather than by name.
+##
+## A remote given as a pathname is resolved in the directory that names it, so
+## two directories that both say "../upstream.git" do not name one repository.
+## Canonicalize such a pathname.  A pathname that cannot be canonicalized, or
+## a key that contains a newline (which the list of keys could not hold),
+## yields no key at all:  a query that is not shared is always correct, merely
+## slower.
+remote_heads_key() {
+  remote_heads_key_url="$(git -C "$1" ls-remote --get-url "$2" 2> /dev/null)" \
+    || return 0
+  if [ -z "${remote_heads_key_url}" ]; then
+    return 0
+  fi
+  # Git reads a string as a URL if it has a scheme, and as an scp-style URL if
+  # a colon precedes the first slash.  Anything else is a pathname, and "~"
+  # begins one that is not relative to DIRECTORY.  An empty location below
+  # means "a pathname", which the next block canonicalizes.
+  case "${remote_heads_key_url}" in
+    *://* | '~'*) remote_heads_key_location="${remote_heads_key_url}" ;;
+    *:*)
+      case "${remote_heads_key_url%%:*}" in
+        */*) remote_heads_key_location='' ;;
+        *) remote_heads_key_location="${remote_heads_key_url}" ;;
+      esac
+      ;;
+    *) remote_heads_key_location='' ;;
+  esac
+  if [ -z "${remote_heads_key_location}" ]; then
+    case "${remote_heads_key_url}" in
+      /*) remote_heads_key_path="${remote_heads_key_url}" ;;
+      *) remote_heads_key_path="$1/${remote_heads_key_url}" ;;
+    esac
+    # Unlike the `physical_path` calls in `is_deleted_branch`, which explain
+    # the failure that they let through, this one is expected to fail:  a
+    # remote that names a pathname that no longer exists is an ordinary
+    # reason to have no key.  Discard `cd`'s diagnostic, which would name the
+    # pathname with no hint of what asked about it.
+    remote_heads_key_location="$(physical_path "${remote_heads_key_path}" \
+      2> /dev/null)" || return 0
+  fi
+  remote_heads_key_command="${GIT_SSH_COMMAND:-$(git -C "$1" config --get core.sshCommand || true)}"
+  remote_heads_key_variant="${GIT_SSH_VARIANT:-$(git -C "$1" config --get ssh.variant || true)}"
+  # A REMOTE that is a pathname or a URL can make a name that `git config`
+  # rejects as malformed, which is no more than "this directory sets nothing
+  # of the sort for this remote"; discard the diagnostic that says so.
+  remote_heads_key_uploadpack="$(git -C "$1" config --get \
+    "remote.$2.uploadpack" 2> /dev/null || true)"
+  remote_heads_key_vcs="$(git -C "$1" config --get "remote.$2.vcs" \
+    2> /dev/null || true)"
+  remote_heads_key_proxy="$(git -C "$1" config --get "remote.$2.proxy" \
+    2> /dev/null || true)"
+  # The settings whose own names hold a URL, which no fixed list would find.
+  # `git config` prints one per line; fold the newlines into tabs, because a
+  # key is one line.  A directory that sets none of them prints nothing and
+  # exits nonzero, which is not an error here.
+  remote_heads_key_relays="$(git -C "$1" config --get-regexp \
+    '^(http\.|credential\.|core\.gitproxy$)' 2> /dev/null | tr '\n' '\t')" \
+    || remote_heads_key_relays=''
+  remote_heads_key_key="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "${remote_heads_key_location}" "${remote_heads_key_command}" \
+    "${remote_heads_key_variant}" "${remote_heads_key_uploadpack}" \
+    "${remote_heads_key_vcs}" "${remote_heads_key_proxy}" \
+    "${remote_heads_key_relays}")"
+  case "${remote_heads_key_key}" in
+    *'
+'*) return 0 ;;
+  esac
+  printf '%s\n' "${remote_heads_key_key}"
+}
+
+## Usage: remote_heads DIRECTORY REMOTE KEY
+## Asks REMOTE, in DIRECTORY, for its branches, and returns the status of
+## `git ls-remote --heads`:  0 if the remote answered, nonzero if it could not
+## be asked.  Sets ${remote_heads_output} to what the remote said, which is
+## one "SHA<TAB>refname" line per branch.
+##
+## With a nonempty KEY, from `remote_heads_key`, an answer is remembered under
+## that key and a later call with the same key returns it without asking
+## again.  The result is one query per remote URL rather than one per
+## directory.
+##
+## Only an answer is remembered; a failed query is made again by the next
+## directory that asks.  A key names the settings that decide what is asked,
+## not the directory, yet a query can still fail for a reason that belongs to
+## the directory it ran in -- a clone that cannot be read, or a setting such
+## as `protocol.*.allow` that forbids the query without changing what it would
+## ask.  Remembering such a failure for the whole group would let one broken
+## directory answer for its healthy siblings, which is how this scan reports
+## nothing at all; remembering it until some fixed number of retries is spent
+## only raises the number of broken directories that it takes to do so.  The
+## price is that a remote that nothing can reach is asked once per directory,
+## so such a group waits for one connection attempt per directory to time out
+## rather than for one.  A scan that is slow when the network is down is
+## better than a scan that is wrong when a directory is.
+##
+## The answer is returned in a variable rather than printed, because a caller
+## that captured the output with `$(...)` would run this function in a
+## subshell and lose what it remembered.
+##
+## `--heads`, rather than a pattern per branch:  one answer serves any number
+## of questions, with no chunking and no command-line length limit.
+remote_heads() {
+  if [ -n "$3" ]; then
+    remote_heads_index="$(printf '%s\n' "${remote_heads_keys}" \
+      | grep -n -x -F -- "$3" | head -n 1)"
+    remote_heads_index="${remote_heads_index%%:*}"
+    if [ -n "${remote_heads_index}" ]; then
+      eval "remote_heads_output=\${remote_heads_output_${remote_heads_index}}"
+      return 0
+    fi
+  fi
+  remote_heads_output="$(git_batch_ssh "$1" ls-remote --heads "$2" 2> /dev/null)"
+  remote_heads_status="$?"
+  if [ -n "$3" ] && [ "${remote_heads_status}" -eq 0 ]; then
+    remote_heads_answers=$((remote_heads_answers + 1))
+    remote_heads_keys="${remote_heads_keys}$3
+"
+    eval "remote_heads_output_${remote_heads_answers}=\${remote_heads_output}"
+  fi
+  return "${remote_heads_status}"
+}
+
 ## Usage: is_deleted_branch DIRECTORY
 ## Tests whether DIRECTORY is on a branch that was deleted in its remote, and
 ## returns the status that the `is-deleted-branch` command documents:  0 if
@@ -686,6 +860,45 @@ is_deleted_branch() {
   set -- ${is_deleted_branch_upstream_refs}
   set +f
   IFS="${is_deleted_branch_saved_ifs}"
+
+  # A `git ls-remote --heads` of the remote answers for every upstream ref
+  # under refs/heads/, and one such query answers for every directory that
+  # asks the same remote the same way -- which, in this package's workflow, is
+  # every branch directory of one project.  `branch.BRANCH.merge` may name any
+  # ref, and a ref outside refs/heads/ is not in that listing, so a directory
+  # that configures one asks its own question below.
+  is_deleted_branch_key=''
+  is_deleted_branch_shared=1
+  for is_deleted_branch_ref_arg in "$@"; do
+    case "${is_deleted_branch_ref_arg}" in
+      refs/heads/?*) ;;
+      *) is_deleted_branch_shared=0 ;;
+    esac
+  done
+  if [ "${is_deleted_branch_shared}" -eq 1 ]; then
+    is_deleted_branch_key="$(remote_heads_key "${is_deleted_branch_dir}" \
+      "${is_deleted_branch_remote}")"
+  fi
+  if [ -n "${is_deleted_branch_key}" ]; then
+    if ! remote_heads "${is_deleted_branch_dir}" "${is_deleted_branch_remote}" \
+      "${is_deleted_branch_key}"; then
+      # The remote could not be contacted (say, the network is down), so it is
+      # unknown whether the branch still exists there.
+      echo "${SCRIPT_NAME}: cannot list branches of remote ${is_deleted_branch_remote} for ${is_deleted_branch_dir}" >&2
+      return 3
+    fi
+    # Each line of the listing is "SHA<TAB>refname".
+    is_deleted_branch_listed="$(printf '%s\n' "${remote_heads_output}" | cut -f 2)"
+    for is_deleted_branch_ref_arg in "$@"; do
+      if printf '%s\n' "${is_deleted_branch_listed}" \
+        | grep -q -x -F -- "${is_deleted_branch_ref_arg}"; then
+        # The branch still exists in the remote.
+        return 1
+      fi
+    done
+    # The branch was deleted in the remote.
+    return 0
+  fi
 
   # `git ls-remote --exit-code` exits with status 2 if no matching ref exists.
   # `git_batch_ssh` disables the interactive prompts that would otherwise
