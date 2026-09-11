@@ -123,7 +123,13 @@ SCRIPT_NAME="$(basename -- "$0")"
 ## Tests whether the working copy in the given directory has an upstream
 ## branch, which `git pull` and `git push` require.  If it does not, prints an
 ## explanation and returns 1.
+##
+## Also sets ${check_upstream_branch} to the name of the branch that the
+## directory has checked out, or to the empty string if HEAD is detached.
+## The `git pull` below names the branch it merges, and this is where the name
+## is determined.
 check_upstream() {
+  check_upstream_branch=''
   # If the directory is not a working copy, or HEAD is detached, let a
   # subsequent command diagnose that:  `check_branch_exists` does so
   # accurately, whereas `git rev-parse --abbrev-ref HEAD` prints "HEAD" for a
@@ -132,6 +138,7 @@ check_upstream() {
   # "heads/BRANCH" when a tag and the branch have the same name.
   branch_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
   branch="${branch_ref#refs/heads/}"
+  check_upstream_branch="${branch}"
   remote="$(git -C "$1" config --get "branch.${branch}.remote")"
   merge_refs="$(git -C "$1" config --get-all "branch.${branch}.merge")"
   if [ -n "${remote}" ] && [ -n "${merge_refs}" ]; then
@@ -240,6 +247,9 @@ git_push_to() {
   if ! check_upstream "${from_absolute}"; then
     return 1
   fi
+  # The branch that the `git pull` below merges.  Read it now:  the call to
+  # `check_upstream` for ${to_absolute} overwrites it with TO_DIR's branch.
+  from_branch="${check_upstream_branch}"
 
   if ! check_branch_exists "${from_absolute}"; then
     return 1
@@ -286,7 +296,27 @@ git_push_to() {
     *) from_relative="./${from_relative}" ;;
   esac
 
-  if ! git pull -q -- "${from_relative}"; then
+  # Name the branch as well as the repository -- git's ordinary two-operand
+  # form -- so that git's own machinery can say what it merged:
+  #
+  #   Merge branch 'feature' of ./../myrepo-branch-feature
+  #
+  # For a pathname with no refspec, `git fetch` writes "<sha>\t\t./../DIR"
+  # into FETCH_HEAD, which leaves `fmt-merge-msg` nothing to name, so the
+  # message names the directory but not the branch.  Writing the message with
+  # `-m` instead would fabricate it rather than letting git describe what it
+  # merged, and would discard the commit summaries that `merge.log` turns on.
+  #
+  # This is also slightly more than cosmetic.  `git pull PATH` merges whatever
+  # FROM_DIR's HEAD points at, while `git pull PATH BRANCH` merges the branch
+  # that `check_upstream` determined and `check_branch_exists` validated.  If
+  # FROM_DIR's HEAD moved in between, the one-operand form merges something
+  # that this script never checked.
+  #
+  # ${from_branch} is not empty here:  a detached HEAD is the only state in
+  # which `check_upstream` leaves it empty, and `check_branch_exists` above
+  # refuses that.
+  if ! git pull -q -- "${from_relative}" "${from_branch}"; then
     # Note: pwd=to_absolute
     echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
     return 1
