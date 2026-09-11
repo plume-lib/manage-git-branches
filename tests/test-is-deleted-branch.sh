@@ -254,6 +254,29 @@ git -C "${pushdefaultabsent}" config remote.pushDefault absent-fork
   git push -q origin live
 ) || exit 1
 
+## A linked worktree, and a submodule's working tree.  Each is a working
+## tree whose `.git` is a file rather than a directory, and the question
+## applies to each of them:  status 2 says "not the top level of a working
+## tree", which neither of these is.
+##
+## Neither pathname contains "-branch-", so `git-orphaned-branches` does not
+## consider them in the scan at the end of this file.
+linkedworktree="${testdir}/myrepo-linked-worktree"
+git clone -q -b live "${remote}" "${testdir}/myrepo-worktree-host"
+git -C "${testdir}/myrepo-worktree-host" worktree add -q "${linkedworktree}" dead
+
+superproject="${testdir}/myrepo-superproject"
+git init -q -b main "${superproject}"
+echo 'superproject' > "${superproject}/super.txt"
+git -C "${superproject}" add super.txt
+git -C "${superproject}" commit -q -m 'Commit in the superproject'
+# git 2.38.1 and later refuse the "file" transport for a submodule unless
+# `protocol.file.allow` permits it.
+git -C "${superproject}" -c protocol.file.allow=always submodule add -q \
+  -b dead "${remote}" sub
+git -C "${superproject}" commit -q -m 'Add the submodule'
+submodule="${superproject}/sub"
+
 ## Delete the "dead" branch in the remote.
 git -C "${testdir}/setup" push -q origin --delete dead
 
@@ -391,6 +414,12 @@ expect_usage_error 'two arguments' "${testdir}/myrepo-branch-live" \
   "${testdir}/myrepo-branch-dead"
 expect_status 2 "${testdir}/myrepo-branch-dead/subdirectory" \
   'subdirectory of a clone whose branch was deleted'
+expect_status 0 "${linkedworktree}" \
+  'linked worktree whose branch was deleted in the remote'
+expect_status 0 "${submodule}" \
+  "submodule working tree whose branch was deleted in the submodule's remote"
+expect_status 1 "${testdir}/myrepo-worktree-host" \
+  'main working tree that hosts a linked worktree'
 
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
   'is-deleted-branch on a working copy whose remote cannot be reached'

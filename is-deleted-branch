@@ -8,8 +8,8 @@
 # The status code is:
 #  * 0 (true) if the directory is on a branch that was deleted in its remote,
 #  * 1 (false) if the directory is on a branch that still exists in its remote,
-#  * 2 (false) if the directory is not the top level of a clone, so the
-#    question does not apply,
+#  * 2 (false) if the directory is not the top level of a working tree, so
+#    the question does not apply,
 #  * 3 (false) if the question cannot be answered: HEAD is detached, no
 #    remote can be determined for the branch, the branch has no upstream
 #    configuration and nothing shows that it was ever pushed, the remote
@@ -19,6 +19,14 @@
 #
 # A caller must not treat every nonzero status as "the branch still exists";
 # only status 1 means that.
+#
+# Status 2 is about a working tree, not about a clone.  A submodule's working
+# tree and a linked worktree are working trees like any other -- what
+# distinguishes them is that their `.git` is a file that names a git directory
+# elsewhere -- and this command accepts them and answers about them.  What is
+# status 2 is a path that is not the top level of any working tree:  a
+# subdirectory of one, a bare repository, which has no working tree at all, or
+# a path that is no part of a repository.
 #
 # Status 0 says that the branch was deleted in its remote, not that the
 # working copy holds nothing of value:  the branch can hold commits that were
@@ -90,9 +98,10 @@ if [ "$#" -ne 1 ]; then
 fi
 
 # A path that does not exist -- or that exists but is not a directory -- is
-# certainly not a clone.  Reject it here rather than leaving it to `git -C`,
-# for which the empty string is a documented no-op:  `git -C '' rev-parse`
-# would answer about the current directory rather than about the argument.
+# certainly not a working tree.  Reject it here rather than leaving it to
+# `git -C`, for which the empty string is a documented no-op:
+# `git -C '' rev-parse` would answer about the current directory rather than
+# about the argument.
 # The `absolute_path` call below also rejects the empty string, but only as a
 # side effect of `cd -- ''` failing; this test states the requirement directly.
 if [ ! -d "$1" ]; then
@@ -110,18 +119,19 @@ absolute_path() {
   (CDPATH='' cd -- "$1" && pwd -P)
 }
 
-# `git -C DIR rev-parse` succeeds for every directory within a clone's working
-# tree, so also require that DIRECTORY is that working tree's top level.  A
-# subdirectory is not itself a clone, and answering for the enclosing clone
-# would answer a question that the caller did not ask.
+# `git -C DIR rev-parse` succeeds for every directory within a working tree,
+# so also require that DIRECTORY is that working tree's top level.  A
+# subdirectory is not itself a working tree, and answering for the enclosing
+# one would answer a question that the caller did not ask.
 toplevel="$(git -C "${dir}" rev-parse --show-toplevel 2> /dev/null)" || exit 2
 if [ -z "${toplevel}" ]; then
   # A bare repository has no working tree, so it is not on any branch.
   exit 2
 fi
 # A pathname that cannot be canonicalized means that whether DIRECTORY is the
-# top level of a clone cannot be determined.
-# (status 2 would assert that DIRECTORY is not the top level of a clone.)
+# top level of a working tree cannot be determined.
+# (status 2 would assert that DIRECTORY is not the top level of a working
+# tree.)
 if ! dir_real="$(absolute_path "${dir}")"; then
   echo "${SCRIPT_NAME}: cannot canonicalize: ${dir}" >&2
   exit 3
@@ -131,7 +141,8 @@ if ! toplevel_real="$(absolute_path "${toplevel}")"; then
   exit 3
 fi
 if [ "${dir_real}" != "${toplevel_real}" ]; then
-  # Not a clone, so it is not on any branch, deleted or otherwise.
+  # Not the top level of a working tree, so it is not on any branch, deleted
+  # or otherwise.
   exit 2
 fi
 
