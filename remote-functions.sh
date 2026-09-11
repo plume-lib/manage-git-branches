@@ -339,3 +339,271 @@ git_batch_ssh() {
       git -C "${git_batch_ssh_dir}" "$@"
   fi
 }
+
+## Usage: physical_path DIRECTORY
+## Prints the absolute pathname of DIRECTORY, with symbolic links resolved.
+## Prints nothing and returns nonzero if DIRECTORY cannot be entered.
+##
+## `realpath` would be simpler, but POSIX added it only in 2024 and some
+## systems still lack it; of those that have it, not every one accepts `--` to
+## end the options, which a pathname that starts with `-` needs.  `cd` and
+## `pwd -P` are portable.
+##
+## Several commands of this package define an `absolute_path` of their own.
+## This is the one that the functions in this file call, so that a command's
+## own definition -- `git-push-to`'s, which discards `cd`'s diagnostic --
+## cannot change what a shared function does.
+physical_path() {
+  (CDPATH='' cd -- "$1" && pwd -P)
+}
+
+## Usage: is_deleted_branch_tracking_refs DIRECTORY REMOTE REF
+## Prints the remote-tracking refs that REMOTE's fetch refspecs, as the clone
+## in DIRECTORY configures them, map REF to, one per line.  Prints nothing if
+## no refspec maps REF, which is also what happens when REMOTE is a URL rather
+## than the name of a configured remote:  fetching from a URL creates no
+## remote-tracking ref.
+##
+## The variables below are set in a pipeline, hence in a subshell, so they
+## cannot disturb the caller.
+is_deleted_branch_tracking_refs() {
+  git -C "$1" config --get-all "remote.$2.fetch" \
+    | while IFS= read -r refspec; do
+      # A fetch refspec is [+]SOURCE:DESTINATION.  A "*" in SOURCE matches any
+      # substring, and DESTINATION's "*" stands for what SOURCE's matched.
+      # A refspec without a DESTINATION, such as the negative refspec
+      # "^refs/heads/BRANCH", creates no remote-tracking ref.
+      case "${refspec}" in
+        *:*) ;;
+        *) continue ;;
+      esac
+      refspec="${refspec#+}"
+      source_pattern="${refspec%%:*}"
+      destination="${refspec#*:}"
+      case "${source_pattern}" in
+        *'*'*)
+          # A ref name cannot contain "*", "?", or "[", so the only pattern
+          # character in SOURCE is the "*" that this case matched.
+          source_prefix="${source_pattern%%'*'*}"
+          source_suffix="${source_pattern#*'*'}"
+          case "$3" in
+            "${source_prefix}"*"${source_suffix}") ;;
+            *) continue ;;
+          esac
+          matched="${3#"${source_prefix}"}"
+          matched="${matched%"${source_suffix}"}"
+          case "${destination}" in
+            *'*'*)
+              printf '%s%s%s\n' "${destination%%'*'*}" "${matched}" \
+                "${destination#*'*'}"
+              ;;
+            *) printf '%s\n' "${destination}" ;;
+          esac
+          ;;
+        *)
+          if [ "$3" = "${source_pattern}" ]; then
+            printf '%s\n' "${destination}"
+          fi
+          ;;
+      esac
+    done
+}
+
+## Usage: is_deleted_branch_was_pushed DIRECTORY REMOTE BRANCH BRANCH-REF COMMIT
+## Returns 0 (true) if the clone in DIRECTORY shows that BRANCH, whose ref is
+## BRANCH-REF and whose commit is COMMIT, was pushed to REMOTE.  The existence
+## of a remote-tracking ref for the branch is not itself such a sign:  the ref
+## may be a leftover from a different branch of the same name, which someone
+## else pushed and deleted and which this clone never pruned.  A sign is a
+## reflog entry that records a push.  So is a remote-tracking ref that is at
+## the same commit as the branch:  even if that ref is a leftover, the branch
+## holds no work that the remote lacks.
+is_deleted_branch_was_pushed() {
+  is_deleted_branch_was_pushed_candidates="$(
+    is_deleted_branch_tracking_refs "$1" "$2" "refs/heads/$3"
+  )"
+  is_deleted_branch_was_pushed_result=1
+  # A ref name cannot contain a newline.
+  is_deleted_branch_was_pushed_saved_ifs="${IFS}"
+  IFS='
+'
+  set -f
+  for is_deleted_branch_was_pushed_ref in ${is_deleted_branch_was_pushed_candidates}; do
+    if [ "${is_deleted_branch_was_pushed_ref}" = "$4" ]; then
+      # A fetch refspec can map the branch to itself, as the "+refs/*:refs/*"
+      # that `git remote add --mirror=fetch` sets does.  The branch is
+      # trivially at its own commit and its reflog is not a record of a push,
+      # so such a ref is no sign that the branch was pushed.
+      continue
+    fi
+    is_deleted_branch_was_pushed_commit="$(git -C "$1" rev-parse --verify \
+      --quiet "${is_deleted_branch_was_pushed_ref}")" || continue
+    if [ "${is_deleted_branch_was_pushed_commit}" = "$5" ] \
+      || git -C "$1" reflog show "${is_deleted_branch_was_pushed_ref}" 2> /dev/null \
+      | grep -q ': update by push$'; then
+      is_deleted_branch_was_pushed_result=0
+      break
+    fi
+  done
+  set +f
+  IFS="${is_deleted_branch_was_pushed_saved_ifs}"
+  return "${is_deleted_branch_was_pushed_result}"
+}
+
+## Usage: is_deleted_branch DIRECTORY
+## Tests whether DIRECTORY is on a branch that was deleted in its remote, and
+## returns the status that the `is-deleted-branch` command documents:  0 if
+## the branch was deleted in its remote, 1 if it still exists there, 2 if
+## DIRECTORY is not the top level of a working tree, and 3 if the question
+## cannot be answered.  That command is a wrapper around this function, and
+## its documentation is the documentation of this answer.
+##
+## The body lives here rather than in the command so that the other commands
+## of this package can ask the question directly.
+is_deleted_branch() {
+  is_deleted_branch_dir="$1"
+
+  # A path that does not exist -- or that exists but is not a directory -- is
+  # certainly not a working tree.  Reject it here rather than leaving it to
+  # `git -C`, for which the empty string is a documented no-op:
+  # `git -C '' rev-parse` would answer about the current directory rather than
+  # about the argument.
+  # The `physical_path` call below also rejects the empty string, but only as
+  # a side effect of `cd -- ''` failing; this test states the requirement
+  # directly.
+  if [ ! -d "${is_deleted_branch_dir}" ]; then
+    return 2
+  fi
+
+  # `git -C DIR rev-parse` succeeds for every directory within a working tree,
+  # so also require that DIRECTORY is that working tree's top level.  A
+  # subdirectory is not itself a working tree, and answering for the enclosing
+  # one would answer a question that the caller did not ask.
+  is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
+    --show-toplevel 2> /dev/null)" || return 2
+  if [ -z "${is_deleted_branch_toplevel}" ]; then
+    # A bare repository has no working tree, so it is not on any branch.
+    return 2
+  fi
+  # A pathname that cannot be canonicalized means that whether DIRECTORY is
+  # the top level of a working tree cannot be determined.
+  # (status 2 would assert that DIRECTORY is not the top level of a working
+  # tree.)
+  if ! is_deleted_branch_dir_real="$(physical_path "${is_deleted_branch_dir}")"; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: ${is_deleted_branch_dir}" >&2
+    return 3
+  fi
+  if ! is_deleted_branch_top_real="$(physical_path "${is_deleted_branch_toplevel}")"; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: ${is_deleted_branch_toplevel}" >&2
+    return 3
+  fi
+  if [ "${is_deleted_branch_dir_real}" != "${is_deleted_branch_top_real}" ]; then
+    # Not the top level of a working tree, so it is not on any branch, deleted
+    # or otherwise.
+    return 2
+  fi
+
+  # A detached HEAD is not on a branch, so there is no remote branch to ask
+  # about, and whether a branch was deleted cannot be determined.
+  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
+  # "heads/BRANCH" when a tag and the branch have the same name.
+  if ! is_deleted_branch_ref="$(git -C "${is_deleted_branch_dir}" symbolic-ref \
+    --quiet HEAD 2> /dev/null)"; then
+    return 3
+  fi
+  is_deleted_branch_branch="${is_deleted_branch_ref#refs/heads/}"
+
+  # A branch with no commit does not yet exist even locally, so it was never
+  # pushed and it was not deleted.  `git clone` of an empty repository leaves
+  # HEAD on such a branch, and gives it upstream configuration that no push
+  # ever justified.
+  is_deleted_branch_commit="$(git -C "${is_deleted_branch_dir}" rev-parse \
+    --verify --quiet "${is_deleted_branch_ref}")"
+  if [ -z "${is_deleted_branch_commit}" ]; then
+    return 3
+  fi
+
+  # The branch's upstream configuration:  a remote name and one or more refs
+  # such as "refs/heads/BRANCH".
+  is_deleted_branch_branch_remote="$(git -C "${is_deleted_branch_dir}" config \
+    --get "branch.${is_deleted_branch_branch}.remote")"
+  is_deleted_branch_merge_refs="$(git -C "${is_deleted_branch_dir}" config \
+    --get-all "branch.${is_deleted_branch_branch}.merge")"
+
+  # A branch exists in a remote because someone pushed it there, so ask the
+  # remote that `git push` uses.  `push_remote` determines it; answering
+  # "cannot tell" for a branch that was never pushed to the remote that
+  # `remote.pushDefault` names is one reason for the order that it documents.
+  is_deleted_branch_remote="$(push_remote "${is_deleted_branch_dir}" \
+    "${is_deleted_branch_branch}")"
+  if [ -z "${is_deleted_branch_remote}" ]; then
+    # The clone has no remote, or it has several and none is named "origin",
+    # so there is no remote branch to ask about.
+    return 3
+  fi
+
+  # A branch has no upstream configuration until some command sets it, and
+  # neither `git checkout -b BRANCH` (which `git-new-branch` runs) nor
+  # `git push REMOTE BRANCH` sets it.  Such a branch can still exist in a
+  # remote, under the name that `git push` gives it:  a branch of the same
+  # name.  `branch.BRANCH.merge` names refs in `branch.BRANCH.remote`, so it
+  # describes no other remote, and Git ignores it when `branch.BRANCH.remote`
+  # is unset (`git pull` then reports "no tracking information").
+  is_deleted_branch_configured=0
+  is_deleted_branch_upstream_refs="refs/heads/${is_deleted_branch_branch}"
+  if [ -n "${is_deleted_branch_merge_refs}" ] \
+    && [ "${is_deleted_branch_remote}" = "${is_deleted_branch_branch_remote}" ]; then
+    is_deleted_branch_configured=1
+    is_deleted_branch_upstream_refs="${is_deleted_branch_merge_refs}"
+  fi
+
+  if [ "${is_deleted_branch_configured}" -eq 0 ] \
+    && ! is_deleted_branch_was_pushed "${is_deleted_branch_dir}" \
+      "${is_deleted_branch_remote}" "${is_deleted_branch_branch}" \
+      "${is_deleted_branch_ref}" "${is_deleted_branch_commit}"; then
+    # The branch has no upstream configuration and no sign of having been
+    # pushed, so it was probably never pushed, and a branch that was never
+    # pushed was not deleted.  Contacting the remote could not settle the
+    # question:  a branch of this name in the remote might be someone else's,
+    # and the absence of one is what a never-pushed branch and a deleted
+    # branch both look like.  Answering without the network also keeps a scan
+    # of many never-pushed branches, such as `git-orphaned-branches` performs,
+    # from making one network request per branch.
+    return 3
+  fi
+
+  # A ref name cannot contain a newline.  Preserve each configured merge value
+  # as one argument so that ls-remote succeeds if any configured upstream ref
+  # exists.
+  is_deleted_branch_saved_ifs="${IFS}"
+  IFS='
+'
+  set -f
+  # shellcheck disable=SC2086
+  set -- ${is_deleted_branch_upstream_refs}
+  set +f
+  IFS="${is_deleted_branch_saved_ifs}"
+
+  # `git ls-remote --exit-code` exits with status 2 if no matching ref exists.
+  # `git_batch_ssh` disables the interactive prompts that would otherwise
+  # block this query forever.
+  git_batch_ssh "${is_deleted_branch_dir}" ls-remote --exit-code \
+    "${is_deleted_branch_remote}" "$@" > /dev/null 2>&1
+  is_deleted_branch_status="$?"
+  case "${is_deleted_branch_status}" in
+    0)
+      # The branch still exists in the remote.
+      return 1
+      ;;
+    2)
+      # The branch was deleted in the remote.
+      return 0
+      ;;
+    *)
+      # The remote could not be contacted (say, the network is down), so it is
+      # unknown whether the branch still exists there.
+      echo "${SCRIPT_NAME}: cannot list branches of remote ${is_deleted_branch_remote} for ${is_deleted_branch_dir}" >&2
+      return 3
+      ;;
+  esac
+}

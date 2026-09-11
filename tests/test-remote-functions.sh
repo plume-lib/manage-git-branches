@@ -281,4 +281,36 @@ if [ "${remote}" != 'elsewhere' ]; then
   fail "push_remote reported [${remote}] for a clone whose sole remote is elsewhere"
 fi
 
+## Usage: check_is_deleted_branch DIRECTORY EXPECTED DESCRIPTION
+## Checks that `is_deleted_branch DIRECTORY` returns status EXPECTED.
+check_is_deleted_branch() {
+  check_is_deleted_branch_status=0
+  is_deleted_branch "$1" || check_is_deleted_branch_status="$?"
+  if [ "${check_is_deleted_branch_status}" -ne "$2" ]; then
+    fail "is_deleted_branch on $3 returned ${check_is_deleted_branch_status}, not $2"
+  fi
+}
+
+# `is_deleted_branch` is the body of the `is-deleted-branch` command, which is
+# a wrapper around it.  tests/test-is-deleted-branch.sh exercises the answers
+# in depth through the command; what this checks is that the function answers
+# the same way when a script sources it and calls it directly, which is how
+# the other commands of this package use it.
+git init -q --bare -b main "${WORK_DIR}/idb-remote.git"
+# Redirect stderr to suppress the "you appear to have cloned an empty
+# repository" warning.
+git clone -q "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-seed" 2> /dev/null
+echo 'content' > "${WORK_DIR}/idb-seed/file.txt"
+git -C "${WORK_DIR}/idb-seed" add file.txt
+git -C "${WORK_DIR}/idb-seed" commit -q -m 'Initial commit'
+git -C "${WORK_DIR}/idb-seed" push -q -u origin main
+git -C "${WORK_DIR}/idb-seed" push -q origin main:refs/heads/doomed
+git clone -q -b doomed "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-dead"
+git clone -q -b main "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-live"
+git -C "${WORK_DIR}/idb-seed" push -q origin --delete doomed
+check_is_deleted_branch "${WORK_DIR}/idb-dead" 0 'a branch deleted in its remote'
+check_is_deleted_branch "${WORK_DIR}/idb-live" 1 'a branch that still exists'
+mkdir -p "${WORK_DIR}/idb-plain-directory"
+check_is_deleted_branch "${WORK_DIR}/idb-plain-directory" 2 'no working tree'
+
 echo "${SCRIPT_NAME}: OK"
