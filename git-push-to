@@ -120,6 +120,13 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=remote-functions.sh
+. "${SCRIPT_DIR}/remote-functions.sh"
+
 ## Tests whether the working copy in the given directory has an upstream
 ## branch, which `git pull` and `git push` require.  If it does not, prints an
 ## explanation and returns 1.
@@ -150,11 +157,19 @@ check_upstream() {
 
 ## Returns 0 if the given directory is the top level of a clone whose branch
 ## still exists in its remote.  Otherwise, prints a diagnostic and returns 1.
-## Only status 1 from `is-deleted-branch` means "the branch still exists"; any
+## Only status 1 from `is_deleted_branch` means "the branch still exists"; any
 ## other status is a reason not to proceed, because treating it as success
 ## would silently disable this check.
+##
+## Call the function of remote-functions.sh rather than running the
+## `is-deleted-branch` command, which is a wrapper around it.  One process for
+## the whole run is what keeps this check from asking a remote the same
+## question twice.  In a chain of directories, each middle directory is the
+## TO_DIR of one call and the FROM_DIR of the next, so it is checked twice;
+## and in this package's workflow every directory of the chain is a clone of
+## one upstream, so one `git ls-remote` answers for the whole chain.
 check_branch_exists() {
-  "${SCRIPT_DIR}"/is-deleted-branch "$1"
+  is_deleted_branch "$1"
   is_deleted_status=$?
   case "${is_deleted_status}" in
     0)
@@ -178,10 +193,10 @@ check_branch_exists() {
       return 1
       ;;
     *)
-      # `is-deleted-branch` documents only statuses 0, 1, 2, 3, and 64.  Any
-      # other status means it could not run (for example, status 127 because
-      # ${SCRIPT_DIR} does not contain it).
-      echo "${SCRIPT_NAME}: ${SCRIPT_DIR}/is-deleted-branch failed with status ${is_deleted_status} on: $1" >&2
+      # `is_deleted_branch` answers only 0, 1, 2, or 3.  Any other status
+      # means it could not answer at all, which must not be treated as "the
+      # branch still exists".
+      echo "${SCRIPT_NAME}: is_deleted_branch returned status ${is_deleted_status} on: $1" >&2
       return 1
       ;;
   esac
