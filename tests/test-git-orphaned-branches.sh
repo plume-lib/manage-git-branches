@@ -282,7 +282,10 @@ if ! printf '%s\n' "${output}" | grep -q -x -F -- "${host_absolute}"; then
 fi
 
 # A submodule's working tree is a working tree too, and its `.git` is a file
-# as well, so the same test decides it.
+# as well, so the same test decides it.  Its branch can be deleted in the
+# submodule's remote like any other, but the directory still must not be
+# listed:  it is part of the superproject's working tree, which the user never
+# named.
 git init -q --bare -b main "${work}/sub-origin.git"
 # Redirect stderr to suppress the "you appear to have cloned an empty
 # repository" warning.
@@ -306,11 +309,22 @@ git -C "${superproject}" commit -q -m "Add the submodule"
 submodule_absolute="$(absolute_path "${superproject}/sub-branch-subfeat")"
 git -C "${work}/sub-seed" push -q origin --delete subfeat
 
-if ! output="$(cd "${work}/submodule" && "${GIT_ORPHANED_BRANCHES}")"; then
+superproject_absolute="$(absolute_path "${superproject}")"
+
+if ! output="$(cd "${work}/submodule" && "${GIT_ORPHANED_BRANCHES}" \
+  2> "${work}/submodule.stderr")"; then
   fail "git-orphaned-branches exited with a failure status for a submodule"
 fi
-if ! printf '%s\n' "${output}" | grep -q -x -F -- "${submodule_absolute}"; then
-  fail "git-orphaned-branches did not list the orphaned submodule working tree ${submodule_absolute}"
+if printf '%s\n' "${output}" | grep -q -x -F -- "${submodule_absolute}"; then
+  fail "git-orphaned-branches listed ${submodule_absolute}, which is part of a live working tree"
+fi
+if ! grep -q -F -- "${superproject_absolute}" "${work}/submodule.stderr"; then
+  fail "git-orphaned-branches did not say which superproject ${submodule_absolute} belongs to"
+fi
+# The superproject itself is a clone of nothing, so `is-deleted-branch` cannot
+# call its branch deleted; the submodule is the only candidate here.
+if [ -n "${output}" ]; then
+  fail "git-orphaned-branches listed something under a superproject: ${output}"
 fi
 
 ###########################################################################

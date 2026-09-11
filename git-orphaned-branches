@@ -7,10 +7,11 @@
 # because a pull request has been merged).
 # Also lists directories containing nothing but a `.project` file.
 #
-# A directory that another live worktree depends on is never listed, even when
-# its own branch was deleted:  deleting it would take out a working tree that
-# the user never named.  Such a directory is reported on standard error
-# instead.
+# A directory that another live working tree depends on -- one that hosts a
+# linked worktree, or one that is a submodule of a superproject -- is never
+# listed, even when its own branch was deleted:  deleting it would damage a
+# working tree that the user never named.  Such a directory is reported on
+# standard error instead.
 #
 # Usage:
 #   git-orphaned-branches [--print0]
@@ -193,6 +194,32 @@ live_dependent_worktree() {
     )
 }
 
+# Prints the pathname of the superproject working tree that contains directory
+# $1 as a submodule, or nothing if $1 is not a submodule's working tree.
+#
+# A submodule's working tree is part of its superproject's working tree, so
+# removing it leaves the superproject with a deleted directory that the user
+# never asked to change and a `.gitmodules` that still names it.  As with a
+# linked worktree, this command's output is fed to `rm -rf`, so such a
+# directory must not appear in it however orphaned the submodule's own branch
+# is.
+#
+# `live_dependent_worktree` does not cover this case.  Run inside a submodule,
+# `git worktree list` names the submodule's own working tree as the main one,
+# so that function sees no linked worktree and reports nothing.
+#
+# This needs no liveness test of the kind that `live_dependent_worktree`
+# applies to a worktree registration, whose directory can be gone.  A
+# superproject working tree contains its submodule's working tree, so it is
+# present whenever $1 is.
+live_superproject() {
+  live_superproject_top="$(git -C "$1" rev-parse --show-superproject-working-tree 2> /dev/null)" \
+    || return 0
+  if [ -n "${live_superproject_top}" ]; then
+    printf '%s\n' "${live_superproject_top}"
+  fi
+}
+
 # Reports directory $1, whose name matches `*-branch-*`, if its branch was
 # deleted in the remote or if it holds nothing but a `.project` file.
 check_directory() {
@@ -225,13 +252,18 @@ check_directory() {
           status=1
         else
           dependent_worktree="$(live_dependent_worktree "$dir")"
+          dependent_superproject="$(live_superproject "$dir")"
+          # In each of these two cases, say why rather than saying nothing:
+          # the branch really was deleted, and the user is entitled to know
+          # why this command is not offering the directory for deletion.
           if [ -n "${dependent_worktree}" ]; then
             # Removing this directory would remove the repository that the
-            # other worktree's `.git` file points into.  Say so rather than
-            # saying nothing:  the branch really was deleted, and the user is
-            # entitled to know why this command is not offering the
-            # directory for deletion.
+            # other worktree's `.git` file points into.
             echo "${SCRIPT_NAME}: not listing ${dir_absolute}, which hosts the worktree ${dependent_worktree}" >&2
+          elif [ -n "${dependent_superproject}" ]; then
+            # Removing this directory would delete part of the superproject's
+            # working tree.
+            echo "${SCRIPT_NAME}: not listing ${dir_absolute}, which is a submodule of the working tree ${dependent_superproject}" >&2
           else
             print_dir "${dir_absolute}"
           fi
