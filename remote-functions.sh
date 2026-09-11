@@ -6,7 +6,106 @@
 #
 # A script that sources this file must set ${SCRIPT_DIR} to the directory that
 # contains this package's files, because `git_batch_ssh` runs a wrapper script
-# from that directory.
+# from that directory.  It must also set ${SCRIPT_NAME} to its own name, which
+# the diagnostics below use.
+
+## Usage: check_git_dir_is_directory DIRECTORY
+## Tests whether DIRECTORY, the top level of a working tree, holds its own
+## repository:  that is, whether DIRECTORY/.git is a directory.  Returns 0 if
+## it is.  Otherwise prints a diagnostic that says where to run the command
+## instead, and returns 1.
+##
+## `git-new-branch` and `git-checkout-branch` copy the top level with
+## `cp -Rp`, which copies `.git` along with everything else.  That is the
+## design when `.git` is a directory:  the copy is an independent clone.  When
+## `.git` is a *file* that names a git directory elsewhere, the copy names the
+## **same** git directory as the original -- a relative `gitdir:` resolves to
+## the same place from a sibling directory, and an absolute one names it
+## outright -- so the two working trees share one HEAD and one index, and the
+## `git checkout` that follows moves the *source's* HEAD and rewrites the
+## *source's* index.  That is data loss in a working tree that the user did
+## not name, so refuse before anything else happens.
+##
+## Three kinds of working tree have such a `.git`:  a submodule's; a linked
+## worktree made by `git worktree add`; and the working tree of a repository
+## made with `--separate-git-dir`, which is a main working tree whose git
+## directory merely lies outside it.  Their remedies differ, so the diagnostic
+## says which one this is.
+##
+## `git rev-parse --show-superproject-working-tree` recognizes a submodule:
+## it prints a path in a submodule's working tree and nothing in the other
+## two.  `--git-dir` and `--git-common-dir` then tell the other two apart:
+## they differ in a linked worktree, whose git directory is a subdirectory of
+## the repository that the main working tree holds, and they are equal when
+## the whole git directory is what lies elsewhere, because a git directory
+## that has no `commondir` file is its own common directory.  That equal case
+## prints one path twice, and the unequal case names two different
+## directories, so comparing the two as strings needs no
+## `--path-format=absolute`, which git gained only in version 2.31.
+##
+## `git rev-parse` prints an option that it does not recognize, rather than
+## failing, so a git too old for one of these options answers with the
+## option's own name.  Such an answer, and a query that fails outright, leave
+## the distinction unavailable; the diagnostic then says only that the git
+## directory lies elsewhere, which is the part that is certain.
+##
+## `git worktree list` names the main working tree, and is worth consulting
+## only for a linked worktree:  the other kinds have no other working tree to
+## send the user to.  Even then its first entry is not always a working tree.
+## Git takes the main working tree to be the parent of the git directory, so
+## for a repository made with `--separate-git-dir` it prints the git directory
+## itself, which is no place to run this command.  An entry counts only if it
+## has a `.git` of its own, and naming it is a convenience in any case; the
+## advice stands without it.
+##
+## The test is "`.git` is not a directory" rather than a comparison of git
+## directories.  `--git-dir` differs from `--git-common-dir` in a linked
+## worktree but not in a submodule, whose two are equal, so that comparison
+## would miss the submodule; and `-d` answers in every version of git.
+check_git_dir_is_directory() {
+  if [ ! -e "$1/.git" ] || [ -d "$1/.git" ]; then
+    return 0
+  fi
+  check_git_dir_superproject="$(git -C "$1" rev-parse \
+    --show-superproject-working-tree 2> /dev/null)"
+  case "${check_git_dir_superproject}" in
+    --show-superproject-working-tree) check_git_dir_superproject= ;;
+  esac
+  if [ -n "${check_git_dir_superproject}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: $1 is the working tree of a submodule, whose .git is a file rather than a directory." >&2
+    echo "${SCRIPT_NAME}: A copy of it would share this working tree's git directory, so the checkout would move this working tree's HEAD and rewrite its index." >&2
+    echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in the superproject ${check_git_dir_superproject} instead, whose branches are the ones worth branching." >&2
+    return 1
+  fi
+  check_git_dir_gitdir="$(git -C "$1" rev-parse --git-dir 2> /dev/null)"
+  check_git_dir_common="$(git -C "$1" rev-parse --git-common-dir 2> /dev/null)"
+  case "${check_git_dir_common}" in
+    --git-common-dir) check_git_dir_common= ;;
+  esac
+  if [ -z "${check_git_dir_gitdir}" ] || [ -z "${check_git_dir_common}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: $1 has a .git that is a file rather than a directory, so its git directory lies elsewhere." >&2
+    echo "${SCRIPT_NAME}: A copy of it would share this working tree's git directory, so the checkout would move this working tree's HEAD and rewrite its index." >&2
+    echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a working tree whose .git is a directory instead." >&2
+    return 1
+  fi
+  if [ "${check_git_dir_gitdir}" = "${check_git_dir_common}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: $1 is a working tree whose git directory ${check_git_dir_gitdir} lies outside it, so its .git is a file rather than a directory." >&2
+    echo "${SCRIPT_NAME}: A copy of it would share this working tree's git directory, so the checkout would move this working tree's HEAD and rewrite its index." >&2
+    echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a clone whose .git is a directory instead." >&2
+    return 1
+  fi
+  echo "${SCRIPT_NAME}: ERROR: $1 is a linked worktree, whose .git is a file rather than a directory." >&2
+  echo "${SCRIPT_NAME}: A copy of it would share this worktree's git directory, so the checkout would move this worktree's HEAD and rewrite its index." >&2
+  # The main working tree is the first entry that `git worktree list` prints.
+  check_git_dir_main="$(git -C "$1" worktree list --porcelain 2> /dev/null \
+    | sed -n '1s/^worktree //p')"
+  if [ -n "${check_git_dir_main}" ] && [ -e "${check_git_dir_main}/.git" ]; then
+    echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in the main working tree ${check_git_dir_main} instead." >&2
+  else
+    echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in the main working tree instead." >&2
+  fi
+  return 1
+}
 
 ## Usage: remote_is_usable DIRECTORY REMOTES NAME
 ## Tests whether NAME names a remote that a git command run in DIRECTORY can
