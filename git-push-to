@@ -124,12 +124,14 @@ SCRIPT_NAME="$(basename -- "$0")"
 ## branch, which `git pull` and `git push` require.  If it does not, prints an
 ## explanation and returns 1.
 ##
-## Also sets ${check_upstream_branch} to the name of the branch that the
-## directory has checked out, or to the empty string if HEAD is detached.
-## The `git pull` below names the branch it merges, and this is where the name
-## is determined.
+## Also sets ${checked_out_branch} to the name of the branch that the
+## directory has checked out, or to the empty string if HEAD is detached or
+## the directory is not a working copy.  It is the local branch, not the
+## upstream branch that this function is named for; the two can differ.  The
+## `git pull` below names the branch it merges, and this is where the name is
+## determined.
 check_upstream() {
-  check_upstream_branch=''
+  checked_out_branch=''
   # If the directory is not a working copy, or HEAD is detached, let a
   # subsequent command diagnose that:  `check_branch_exists` does so
   # accurately, whereas `git rev-parse --abbrev-ref HEAD` prints "HEAD" for a
@@ -138,7 +140,7 @@ check_upstream() {
   # "heads/BRANCH" when a tag and the branch have the same name.
   branch_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
   branch="${branch_ref#refs/heads/}"
-  check_upstream_branch="${branch}"
+  checked_out_branch="${branch}"
   remote="$(git -C "$1" config --get "branch.${branch}.remote")"
   merge_refs="$(git -C "$1" config --get-all "branch.${branch}.merge")"
   if [ -n "${remote}" ] && [ -n "${merge_refs}" ]; then
@@ -249,7 +251,7 @@ git_push_to() {
   fi
   # The branch that the `git pull` below merges.  Read it now:  the call to
   # `check_upstream` for ${to_absolute} overwrites it with TO_DIR's branch.
-  from_branch="${check_upstream_branch}"
+  from_branch="${checked_out_branch}"
 
   if ! check_branch_exists "${from_absolute}"; then
     return 1
