@@ -7,6 +7,8 @@
 #
 # The status code is:
 #  * 0 (true) if the directory is on a branch that was deleted in its remote,
+#    or if the directory is the leftover of such a branch's directory:  it
+#    holds nothing but Eclipse `.project` files (see below),
 #  * 1 (false) if the directory is on a branch that still exists in its remote,
 #  * 2 (false) if the directory is not the top level of a working tree, so
 #    the question does not apply,
@@ -19,6 +21,24 @@
 #
 # A caller must not treat every nonzero status as "the branch still exists";
 # only status 1 means that.
+#
+# A directory that holds nothing but Eclipse `.project` files is status 0,
+# even though it is no working tree and is on no branch at all.  What remains
+# after a branch directory's working tree is gone is Eclipse metadata:  a
+# `.project` file for each Eclipse project that the branch held, and the
+# directories that hold them, which are otherwise empty.  Nothing of the
+# branch survives in such a directory, so it is as removable as a working tree
+# whose branch was deleted in its remote, which is the question that callers
+# ask this command.
+#
+# The criterion applies to the whole tree below the directory:  every entry is
+# either a `.project` file or a directory that itself holds nothing but
+# `.project` files.  An empty directory counts as nothing, which is what lets
+# the empty `bin` that Eclipse leaves behind qualify.  Anything else -- a
+# regular file that is not named `.project`, a symbolic link, or a directory
+# that holds either -- is content, and the directory is then judged as a
+# working tree or not, like any other.  The directory itself must hold a
+# `.project` file:  an empty directory is not the leftover of anything.
 #
 # Status 2 is about a working tree, not about a clone.  A submodule's working
 # tree and a linked worktree are working trees like any other -- what

@@ -63,7 +63,7 @@ absolute_path() {
 }
 
 ###########################################################################
-## Directories that contain nothing but a `.project` file.
+## Directories that contain nothing but Eclipse `.project` files.
 ###########################################################################
 
 mkdir -p "${work}/dot-project"
@@ -80,9 +80,24 @@ touch "${work}/dot-project/p-branch-plus-file/.project" "${work}/dot-project/p-b
 mkdir -p "${work}/dot-project/p-branch-plus-hidden"
 touch "${work}/dot-project/p-branch-plus-hidden/.project" "${work}/dot-project/p-branch-plus-hidden/.other"
 
-# Contains a `.project` file and a subdirectory.
+# Contains a `.project` file and an empty subdirectory, such as the `bin` that
+# Eclipse makes for a project's build output.
 mkdir -p "${work}/dot-project/p-branch-plus-subdir/sub"
 touch "${work}/dot-project/p-branch-plus-subdir/.project"
+
+# The shape that Eclipse leaves when a branch directory's working tree is
+# gone:  a `.project` file at the top level, one in each project directory
+# below it, and an empty `bin` beside each of those.
+mkdir -p "${work}/dot-project/p-branch-leftover/covered-class/bin" \
+  "${work}/dot-project/p-branch-leftover/replacecall/bin"
+touch "${work}/dot-project/p-branch-leftover/.project" \
+  "${work}/dot-project/p-branch-leftover/covered-class/.project" \
+  "${work}/dot-project/p-branch-leftover/replacecall/.project"
+
+# Contains a `.project` file, and a file that is not one further down.
+mkdir -p "${work}/dot-project/p-branch-deep-file/sub"
+touch "${work}/dot-project/p-branch-deep-file/.project" \
+  "${work}/dot-project/p-branch-deep-file/sub/other"
 
 # Contains a `.project` file and a symbolic link with no target.
 mkdir -p "${work}/dot-project/p-branch-plus-dangling-symlink"
@@ -145,7 +160,9 @@ check() {
 check "p-branch-only-project" "listed"
 check "p-branch-plus-file" "unlisted"
 check "p-branch-plus-hidden" "unlisted"
-check "p-branch-plus-subdir" "unlisted"
+check "p-branch-plus-subdir" "listed"
+check "p-branch-leftover" "listed"
+check "p-branch-deep-file" "unlisted"
 check "p-branch-plus-dangling-symlink" "unlisted"
 check "p-branch-empty" "unlisted"
 check "p-branch-no-project" "unlisted"
