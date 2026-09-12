@@ -54,6 +54,16 @@
 # `git-orphaned-branches` and `is-deleted-branch` answer that question, and a
 # user who names a directory has already decided.
 
+# Git exports $GIT_DIR and $GIT_WORK_TREE to hooks and to the commands run by
+# `git rebase --exec`, `git bisect run`, and `git submodule foreach`.  They take
+# precedence over the `-C` argument of `git`, so leaving them set would make
+# every check below ask about whatever repository the caller happened to be
+# working in, rather than about the directory that `rm -rf` is about to take:
+# a directory with uncommitted changes and unpushed commits would be classified
+# and cleared by the answers of some other, clean repository.
+unset GIT_DIR
+unset GIT_WORK_TREE
+
 SCRIPT_NAME="$(basename -- "$0")"
 
 usage() {

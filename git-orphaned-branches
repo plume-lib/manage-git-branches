@@ -78,6 +78,17 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+# Git exports $GIT_DIR and $GIT_WORK_TREE to hooks and to the commands run by
+# `git rebase --exec`, `git bisect run`, and `git submodule foreach`.  They take
+# precedence over the `-C` argument of `git`, so leaving them set would make
+# every question below -- is this directory a working tree, does a linked
+# worktree depend on it, is it a submodule's -- answer for whatever repository
+# the caller happened to be working in, rather than for the directory being
+# examined.  Every directory scanned would then get one and the same answer.
+# `git-remove-branch-directory`, which `--remove` runs, unsets them as well.
+unset GIT_DIR
+unset GIT_WORK_TREE
+
 if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
   echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
   exit 1

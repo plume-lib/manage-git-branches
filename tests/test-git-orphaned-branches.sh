@@ -534,6 +534,33 @@ check_scan 3 'two directories whose own configuration breaks their queries' \
   "${work}/queries-broken-two/p-branch-qj"
 
 ###########################################################################
+## $GIT_DIR and $GIT_WORK_TREE in the environment.
+###########################################################################
+
+# Git exports them to hooks and to the commands run by `git rebase --exec`,
+# `git bisect run`, and `git submodule foreach`, and they take precedence over
+# `git -C`.  Left set, they made every directory of the scan answer for the
+# one repository that they name:  an orphaned clone was classified by that
+# repository instead of by itself, so the scan listed nothing and `--remove`
+# removed nothing.  The scan must give the same answer as it does with them
+# unset.
+git -C "${work}/seed" push -q origin main:refs/heads/envfeat
+mkdir -p "${work}/env-scan"
+envorphan="${work}/env-scan/myrepo-branch-envfeat"
+git clone -q -b envfeat "${work}/remote.git" "${envorphan}"
+git -C "${work}/seed" push -q origin --delete envfeat
+# An unrelated repository, on a branch that still exists in the remote, for
+# the environment to name.
+git clone -q "${work}/remote.git" "${work}/env-other"
+
+printf '%s\n' "$(absolute_path "${envorphan}")" > "${work}/env.goal"
+(cd "${work}/env-scan" \
+  && GIT_DIR="${work}/env-other/.git" GIT_WORK_TREE="${work}/env-other" \
+    "${GIT_ORPHANED_BRANCHES}") > "${work}/env.actual"
+cmp -s "${work}/env.goal" "${work}/env.actual" \
+  || fail "the scan with GIT_DIR set differs from ${work}/env.goal: [$(cat "${work}/env.actual")]"
+
+###########################################################################
 ## --remove
 ###########################################################################
 

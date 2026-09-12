@@ -87,7 +87,7 @@ git -C "${work}/seed" add file.txt
 git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
-  stashed detached corrupt stale; do
+  stashed detached corrupt stale envgitdir; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -323,6 +323,27 @@ run_command "a submodule's working tree" 1 --force \
 check_present "a submodule's working tree" \
   "${work}/submodule/super-branch-main/sub"
 check_message "a submodule's working tree" "its .git is a file"
+
+# $GIT_DIR and $GIT_WORK_TREE in the environment (as when running under a git
+# hook, or `git rebase --exec`) take precedence over `git -C`, so leaving them
+# set would make every check ask about the repository that they name rather
+# than about the directory that `rm -rf` is about to take.  A directory with
+# uncommitted changes and unpushed commits was removed with nothing asked,
+# because the clean repository named by the environment answered for it.
+envtarget="$(make_clone envgitdir)"
+add_unpushed_commit "${envtarget}"
+echo "a modification" >> "${envtarget}/file.txt"
+envother="${work}/env-other"
+git clone -q "${remote}" "${envother}"
+out="$(GIT_DIR="${envother}/.git" GIT_WORK_TREE="${envother}" \
+  "${COMMAND}" "${envtarget}" 2>&1)"
+envstatus="$?"
+if [ "${envstatus}" -ne 1 ]; then
+  fail "a target with GIT_DIR set: exit status ${envstatus}, expected 1: ${out}"
+fi
+check_present 'a target with GIT_DIR set' "${envtarget}"
+check_message 'a target with GIT_DIR set' "uncommitted changes"
+check_message 'a target with GIT_DIR set' "on no remote-tracking ref"
 
 ###########################################################################
 ## Arguments.
