@@ -87,9 +87,9 @@ fi
 # shellcheck source=remote-functions.sh
 . "${SCRIPT_DIR}/remote-functions.sh"
 
-# If non-empty, separate the output directories by NUL rather than by newline.
+# If variable `print0` is non-empty, separate the output directories by NUL rather than by newline.
 print0=""
-# If non-empty, remove each directory that this command would list.
+# If variable `remove` is non-empty, this script removes directories instead of listing them.
 remove=""
 while [ "$#" -gt 0 ]; do
   case "$1" in

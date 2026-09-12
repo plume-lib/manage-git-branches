@@ -52,9 +52,9 @@ The commands are:
 * [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
   Lists directories named `*-branch-*`, below the current directory, that are
   working copies for branches that were deleted in the remote repository.
-  With `--remove`, also removes each of them, by running
-  `git-remove-branch-directory`, and prints the ones that it removed.
-  Typical usage is `rmgob` (see alias below).
+  With `--remove`, also removes each of them.
+  Typical usage is `git-remove-branch-directory --remove` or `rmgob` (see
+  alias below).
 * [`git-remove-branch-directory`](git-remove-branch-directory)
   `[--force] [--force-uncommitted] [--force-unpushed] DIRECTORY...`:
   Removes a branch directory, unless the removal would lose work:  it refuses
@@ -116,12 +116,6 @@ alias gcb=git-checkout-branch
 alias gnb=git-new-branch
 alias rmgob='git-orphaned-branches --remove'
 ```
-
-`rmgob` removes each orphaned directory by running
-`git-remove-branch-directory`, which refuses a directory that holds
-uncommitted changes or commits that no remote-tracking ref holds.  So, unlike
-the `xargs -0 rm -rf` pipeline that `rmgob` used to be, it can leave a
-directory behind.  It says why, on standard error, and exits with status 1.
 
 ## Testing
 
