@@ -344,6 +344,56 @@ git clone -q "${testdir}/myrepo-empty.git" "${testdir}/myrepo-branch-unborn" \
 ## A directory that is not a clone.
 mkdir "${testdir}/myrepo-branch-notaclone"
 
+## Directories that hold nothing but Eclipse `.project` files, which is what a
+## branch directory leaves behind when its working tree is gone, and
+## directories that hold something else besides.  None of these names contains
+## "-branch-", so `git-orphaned-branches` does not consider them in the scan at
+## the end of this file; `tests/test-git-orphaned-branches.sh` tests the scan.
+
+## The shape that Eclipse leaves:  a `.project` file at the top level, one in
+## each project directory below it, and an empty `bin` beside each of those.
+leftover="${testdir}/dotproject-leftover"
+mkdir -p "${leftover}/covered-class/bin" "${leftover}/replacecall/bin"
+: > "${leftover}/.project"
+: > "${leftover}/covered-class/.project"
+: > "${leftover}/replacecall/.project"
+
+## Nothing but the `.project` file itself.
+mkdir "${testdir}/dotproject-only"
+: > "${testdir}/dotproject-only/.project"
+
+## A `.project` file beside a file that is not one.
+mkdir "${testdir}/dotproject-plus-file"
+: > "${testdir}/dotproject-plus-file/.project"
+: > "${testdir}/dotproject-plus-file/other"
+
+## A `.project` file, and a file that is not one further down.  The criterion
+## covers the whole tree, not just the top level.
+mkdir -p "${testdir}/dotproject-deep-file/sub/deeper"
+: > "${testdir}/dotproject-deep-file/.project"
+: > "${testdir}/dotproject-deep-file/sub/.project"
+: > "${testdir}/dotproject-deep-file/sub/deeper/other"
+
+## A `.project` file beside a symbolic link with no target.  A link is content
+## even when it names nothing.
+mkdir "${testdir}/dotproject-plus-symlink"
+: > "${testdir}/dotproject-plus-symlink/.project"
+ln -s no-such-file "${testdir}/dotproject-plus-symlink/dangling"
+
+## An empty directory, which holds no `.project` file and is the leftover of
+## nothing.
+mkdir "${testdir}/dotproject-empty"
+
+## A `.project` file below the directory but not in it.
+mkdir -p "${testdir}/dotproject-nested-only/sub"
+: > "${testdir}/dotproject-nested-only/sub/.project"
+
+## A working copy that holds a `.project` file, as an Eclipse project's clone
+## does.  Its branch still exists in the remote, and the `.git` directory
+## beside the `.project` file is what keeps the criterion above from applying.
+git clone -q -b live "${remote}" "${testdir}/myrepo-live-project"
+: > "${testdir}/myrepo-live-project/.project"
+
 ## A path that does not exist, and a path that exists but is not a directory.
 ## Neither name contains "-branch-", so `git-orphaned-branches` does not scan
 ## them.
@@ -403,6 +453,21 @@ expect_status 1 "${testdir}/myrepo-branch-tag-upstream" \
 expect_status 1 "${testdir}/myrepo-branch-multiple-upstreams" \
   'branch with deleted and existing configured upstream refs'
 expect_status 2 "${testdir}/myrepo-branch-notaclone" 'directory that is not a clone'
+expect_status 0 "${leftover}" \
+  'directory that holds nothing but .project files and the directories of them'
+expect_status 0 "${testdir}/dotproject-only" \
+  'directory that holds nothing but a .project file'
+expect_status 2 "${testdir}/dotproject-plus-file" \
+  'directory that holds a .project file and a file that is not one'
+expect_status 2 "${testdir}/dotproject-deep-file" \
+  'directory that holds a file that is not a .project file, below its top level'
+expect_status 2 "${testdir}/dotproject-plus-symlink" \
+  'directory that holds a .project file and a symbolic link'
+expect_status 2 "${testdir}/dotproject-empty" 'directory that holds nothing'
+expect_status 2 "${testdir}/dotproject-nested-only" \
+  'directory with no .project file of its own, below which there is one'
+expect_status 1 "${testdir}/myrepo-live-project" \
+  'working copy that holds a .project file and whose branch exists in the remote'
 expect_status 2 "${nonexistent}" 'path that does not exist'
 expect_status 2 "${plainfile}" 'path that is not a directory'
 # Run from within a clone, so that a script that passed the empty string to
