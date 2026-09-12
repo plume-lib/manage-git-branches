@@ -76,13 +76,17 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-# Git exports $GIT_DIR and $GIT_WORK_TREE to hooks and to the commands run
-# by `git rebase --exec`, `git bisect run`, and `git submodule foreach`.
-# They take precedence over the `-C` argument of `git`, so leaving them set
-# would make every question below answer for whatever repository the caller
-# happened to be working in, rather than for the directory being examined.
+# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to
+# the commands run by `git rebase --exec`, `git bisect run`, and
+# `git submodule foreach`.  They take precedence over the `-C` argument of
+# `git`, so leaving them set would make every question below answer for
+# whatever repository the caller happened to be working in, rather than for
+# the directory being examined.  `git-remove-branch-directory` unsets the
+# three itself, so `--remove` is covered twice over; unset them here as well,
+# because a scan asks its own questions before it removes anything.
 unset GIT_DIR
 unset GIT_WORK_TREE
+unset GIT_INDEX_FILE
 
 if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
   echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2

@@ -56,15 +56,25 @@
 # `git-orphaned-branches` and `is-deleted-branch` answer that question, and a
 # user who names a directory has already decided.
 
-# Git exports $GIT_DIR and $GIT_WORK_TREE to hooks and to the commands run by
-# `git rebase --exec`, `git bisect run`, and `git submodule foreach`.  They take
-# precedence over the `-C` argument of `git`, so leaving them set would make
-# every check below ask about whatever repository the caller happened to be
-# working in, rather than about the directory that `rm -rf` is about to take:
-# a directory with uncommitted changes and unpushed commits would be classified
-# and cleared by the answers of some other, clean repository.
+# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to the
+# commands run by `git rebase --exec`, `git bisect run`, and
+# `git submodule foreach`.  They take precedence over the `-C` argument of
+# `git`, so leaving them set would make every check below ask about whatever
+# repository the caller happened to be working in, rather than about the
+# directory that `rm -rf` is about to take:  a directory with uncommitted
+# changes and unpushed commits would be classified and cleared by the answers
+# of some other, clean repository.
+#
+# $GIT_INDEX_FILE names the index alone, and the uncommitted-changes check is
+# the one that reads an index.  A modified tracked file is still caught through
+# a foreign index, because it differs from whatever the index holds, but work
+# that exists *only* in the index is not:  a file that was created and staged
+# and never committed is absent from the foreign index, so it is untracked
+# there, and `--untracked-files=no` then says nothing about it.  Such a
+# directory was removed, silently and with exit status 0.
 unset GIT_DIR
 unset GIT_WORK_TREE
+unset GIT_INDEX_FILE
 
 SCRIPT_NAME="$(basename -- "$0")"
 

@@ -87,7 +87,7 @@ git -C "${work}/seed" add file.txt
 git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
-  stashed detached corrupt stale envgitdir; do
+  stashed detached corrupt stale envgitdir indexfile; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -344,6 +344,26 @@ fi
 check_present 'a target with GIT_DIR set' "${envtarget}"
 check_message 'a target with GIT_DIR set' "uncommitted changes"
 check_message 'a target with GIT_DIR set' "on no remote-tracking ref"
+
+# $GIT_INDEX_FILE names the index alone, and the uncommitted-changes check is
+# the one that reads an index.  A modified tracked file is caught through a
+# foreign index anyway, because it differs from whatever that index holds, but
+# work that exists only in the index is not:  a file created and staged and
+# never committed is absent from the foreign index, so it is untracked there,
+# and `--untracked-files=no` says nothing about it.  The directory was removed,
+# silently and with exit status 0.
+indextarget="$(make_clone indexfile)"
+echo "work that exists only in the index" > "${indextarget}/staged.txt"
+git -C "${indextarget}" add staged.txt
+indexother="${work}/index-other"
+git clone -q "${remote}" "${indexother}"
+out="$(GIT_INDEX_FILE="${indexother}/.git/index" "${COMMAND}" "${indextarget}" 2>&1)"
+indexstatus="$?"
+if [ "${indexstatus}" -ne 1 ]; then
+  fail "a target with GIT_INDEX_FILE set: exit status ${indexstatus}, expected 1: ${out}"
+fi
+check_present 'a target with GIT_INDEX_FILE set' "${indextarget}"
+check_message 'a target with GIT_INDEX_FILE set' "uncommitted changes"
 
 ###########################################################################
 ## Bare repositories.
