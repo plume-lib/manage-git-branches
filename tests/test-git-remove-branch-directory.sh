@@ -346,6 +346,44 @@ check_message 'a target with GIT_DIR set' "uncommitted changes"
 check_message 'a target with GIT_DIR set' "on no remote-tracking ref"
 
 ###########################################################################
+## Bare repositories.
+###########################################################################
+
+# A bare repository holds no working copy, so the uncommitted check has
+# nothing to ask about, but its objects are its own and `rm -rf` takes every
+# one of them.  It was classified with the directories that are no repository
+# at all, which are checked for nothing, so a bare repository that held the
+# only copy of its commits was removed and nothing was said.
+bareonly="${work}/myrepo-branch-bareonly.git"
+git clone -q --bare "${remote}" "${bareonly}"
+run_command 'a bare repository whose commits are nowhere else' 1 "${bareonly}"
+check_present 'a bare repository whose commits are nowhere else' "${bareonly}"
+check_message 'a bare repository whose commits are nowhere else' \
+  "on no remote-tracking ref"
+
+# The same refusal is waived by the same flag as a clone's.
+run_command 'a forced bare repository' 0 --force-unpushed "${bareonly}"
+check_gone 'a forced bare repository' "${bareonly}"
+check_message 'a forced bare repository' "--force-unpushed"
+
+# A bare repository whose every commit is on a remote-tracking ref has
+# nothing to lose, so it is removed.
+barepushed="${work}/myrepo-branch-barepushed.git"
+git init -q --bare -b main "${barepushed}"
+git -C "${barepushed}" remote add origin "${remote}"
+git -C "${barepushed}" fetch -q origin
+run_command 'a bare repository whose commits are on a remote' 0 "${barepushed}"
+check_gone 'a bare repository whose commits are on a remote' "${barepushed}"
+
+# A directory inside a bare repository is asked the same question:  removing
+# it loses those commits as surely as removing the repository directory does.
+bareinside="${work}/myrepo-branch-bareinside.git"
+git clone -q --bare "${remote}" "${bareinside}"
+run_command 'a directory inside a bare repository' 1 "${bareinside}/objects"
+check_present 'a directory inside a bare repository' "${bareinside}/objects"
+check_message 'a directory inside a bare repository' "on no remote-tracking ref"
+
+###########################################################################
 ## Arguments.
 ###########################################################################
 

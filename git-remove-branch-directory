@@ -23,7 +23,9 @@
 #    checked out, because `rm -rf` takes all of them with it:  a clone with an
 #    unpushed commit on a branch that nobody has looked at in a year is
 #    exactly what this check exists to catch, and so are a stash entry and a
-#    commit made on a detached HEAD, which no branch names at all.
+#    commit made on a detached HEAD, which no branch names at all.  A bare
+#    repository is asked the same question:  it holds no working copy, so the
+#    first check has nothing to ask about, but its objects are its own.
 #
 # `--force` waives both.  Each refusal names the check, says how much would be
 # lost, and quotes the flag that waives it; each waiver says on standard error
@@ -198,9 +200,29 @@ remove_branch_directory() {
   elif [ -n "${remove_toplevel}" ]; then
     remove_kind='within-working-tree'
   else
-    # Not a repository at all, or a bare repository, which holds no working
-    # copy of anything and whose refs are its own.
-    remove_kind='other'
+    # Not a repository at all, or a bare repository.  A bare repository holds
+    # no working copy, so the uncommitted check below has nothing to ask
+    # about, but its refs and objects are its own and `rm -rf` takes every one
+    # of them, so the unpushed check applies to it exactly as it does to a
+    # clone.  Classifying it as `other`, which is checked for nothing, removed
+    # a repository that held the only copy of its commits and said nothing.
+    #
+    # `--is-bare-repository` answers about the repository that contains
+    # ${remove_dir}, not only about ${remove_dir} itself, which is what this
+    # check wants:  removing a directory inside a bare repository, `objects`
+    # for instance, loses those commits as surely as removing the repository
+    # directory does.  `git rev-parse --absolute-git-dir` would tell the two
+    # apart, but it needs git 2.13, which `live_superproject` in
+    # `git-orphaned-branches` does not assume.  `--is-bare-repository` is as
+    # old as `rev-parse`, and the distinction it does not draw is one that
+    # this check does not need.
+    remove_bare="$(git -C "${remove_dir}" rev-parse --is-bare-repository \
+      2> /dev/null)"
+    if [ "${remove_bare}" = 'true' ]; then
+      remove_kind='bare-repository'
+    else
+      remove_kind='other'
+    fi
   fi
 
   if [ "${remove_kind}" = 'working-tree' ] && [ ! -d "${remove_dir}/.git" ]; then
@@ -261,7 +283,8 @@ remove_branch_directory() {
     fi
   fi
 
-  if [ "${remove_kind}" = 'working-tree' ]; then
+  if [ "${remove_kind}" = 'working-tree' ] \
+    || [ "${remove_kind}" = 'bare-repository' ]; then
     # Commits that no remote-tracking ref holds.  `rm -rf` destroys the whole
     # repository, so ask about every ref, not just the checked-out branch.
     # `--all` is what makes that so:  it covers HEAD, and so a commit made on
