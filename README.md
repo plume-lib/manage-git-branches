@@ -52,12 +52,16 @@ The commands are:
   It is also true of a directory that holds nothing but Eclipse `.project`
   files, which a branch directory may leave behind when its working tree
   is gone.
-* [`git-orphaned-branches`](git-orphaned-branches) `[--print0]`:
+* [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
   Lists directories named `*-branch-*`, below the current directory, that are
   working copies for branches that were deleted in the remote repository, or
   that hold nothing but Eclipse `.project` files.
-  Typical usage is `git-orphaned-branches --print0 | xargs -0 rm -rf` or
-  `rmgob` (see alias below).
+  With `--remove`, removes each of them instead of printing them.
+  Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
+  alias below).
+* [`git-remove-branch-directory`](git-remove-branch-directory)
+  `[--force] [--force-uncommitted] [--force-unpushed] DIRECTORY...`:
+  Removes a branch directory, unless the removal would lose work.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
@@ -111,7 +115,7 @@ such as `~/.profile`.
 export PATH="/path/to/manage-git-branches:${PATH}"
 alias gcb=git-checkout-branch
 alias gnb=git-new-branch
-alias rmgob='git-orphaned-branches --print0 | xargs -0 rm -rf'
+alias rmgob='git-orphaned-branches --remove'
 ```
 
 ## Testing

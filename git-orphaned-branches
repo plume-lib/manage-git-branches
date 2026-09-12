@@ -15,13 +15,21 @@
 # standard error instead.
 #
 # Usage:
-#   git-orphaned-branches [--print0]
-#   git-orphaned-branches --print0 | xargs -0 rm -rf
+#   git-orphaned-branches [--print0] [--remove]
 #
 # With --print0 (or -0), the directories are separated by a NUL character
 # rather than by a newline, which is safe for directory names that contain
 # whitespace, a newline, or a glob metacharacter.  Without it, a directory
 # name that contains a newline is indistinguishable from two directory names.
+# --print0 has no effect together with --remove, which prints no directory.
+#
+# With --remove, each directory that this command would list is removed, by
+# running `git-remove-branch-directory` on it, and nothing is printed on
+# standard output.  `git-remove-branch-directory` can leave a directory
+# behind; if so, this script says why, on standard error, and the exit
+# status is then 1.  None of that script's `--force` flags is passed
+# through.  A directory that contains another reported directory is removed
+# after the one it contains, and only if that one was removed.
 #
 # Usually, a remote branch disappears because its PR was merged.  It
 # is conceivable that the branch has local commits that were never
@@ -68,6 +76,18 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to
+# the commands run by `git rebase --exec`, `git bisect run`, and
+# `git submodule foreach`.  They take precedence over the `-C` argument of
+# `git`, so leaving them set would make every question below answer for
+# whatever repository the caller happened to be working in, rather than for
+# the directory being examined.  `git-remove-branch-directory` unsets the
+# three itself, so `--remove` is covered twice over; unset them here as well,
+# because a scan asks its own questions before it removes anything.
+unset GIT_DIR
+unset GIT_WORK_TREE
+unset GIT_INDEX_FILE
+
 if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
   echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
   exit 1
@@ -75,18 +95,46 @@ fi
 # shellcheck source=remote-functions.sh
 . "${SCRIPT_DIR}/remote-functions.sh"
 
-# If non-empty, separate the output directories by NUL rather than by newline.
+# If variable `print0` is non-empty, separate the output directories by NUL rather than by newline.
 print0=""
-if [ "$#" -ge 1 ] && { [ "$1" = "--print0" ] || [ "$1" = "-0" ]; }; then
-  print0="$1"
+# If variable `remove` is non-empty, this script removes directories instead of listing them.
+remove=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --print0 | -0) print0="$1" ;;
+    --remove) remove="$1" ;;
+    *) break ;;
+  esac
   shift
-fi
+done
 
 status=0
 
 if [ "$#" -ne 0 ]; then
-  echo "Usage: ${SCRIPT_NAME} [--print0]" >&2
+  echo "Usage: ${SCRIPT_NAME} [--print0] [--remove]" >&2
   exit 1
+fi
+
+# Where the directories to remove are collected, one per file, named by
+# position.  The removal happens after the scan rather than during it, so
+# that the walk does not descend into a directory that was just deleted, and
+# so that the whole list is known before anything is destroyed.  A shell list
+# cannot hold a pathname that contains a newline -- which is why --print0
+# exists -- so each pathname gets a file of its own.
+collect_dir=""
+collected=0
+if [ -n "${remove}" ]; then
+  if ! collect_dir="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" \
+    || [ -z "${collect_dir}" ]; then
+    echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
+    exit 1
+  fi
+  # The signal handlers re-raise the signal with the handler removed, so that
+  # this script dies of the signal rather than resuming where it was
+  # interrupted, and so that the caller sees that it was killed by a signal.
+  trap 'rm -rf -- "${collect_dir}"' EXIT
+  trap 'rm -rf -- "${collect_dir}"; trap - INT; kill -s INT "$$"' INT
+  trap 'rm -rf -- "${collect_dir}"; trap - TERM; kill -s TERM "$$"' TERM
 fi
 
 # Prints its argument, followed by a NUL character if --print0 was given and by
@@ -97,6 +145,19 @@ print_dir() {
   else
     printf '%s\n' "$1"
   fi
+}
+
+# Reports directory $1:  prints it, or, with --remove, records it for the
+# removal phase that follows the scan.
+report_dir() {
+  if [ -z "${remove}" ]; then
+    print_dir "$1"
+    return 0
+  fi
+  collected=$((collected + 1))
+  # Write the pathname with no terminator, so that the reader gets back
+  # exactly these bytes even for a name that ends in a newline.
+  printf '%s' "$1" > "${collect_dir}/${collected}"
 }
 
 # Prints the absolute path of directory $1, with symbolic links resolved.
@@ -232,7 +293,7 @@ check_directory() {
           # working tree.
           echo "${SCRIPT_NAME}: not listing ${dir_absolute}, which is a submodule of the working tree ${dependent_superproject}" >&2
         else
-          print_dir "${dir_absolute}"
+          report_dir "${dir_absolute}"
         fi
       fi
       ;;
@@ -289,5 +350,74 @@ examine_directory() {
 }
 
 examine_directory .
+
+# Prints the pathname collected as $1, followed by an `x`.  The caller strips
+# the `x`:  a command substitution removes trailing newlines, and this is what
+# lets a pathname that ends in one survive being read back.
+collected_dir() {
+  cat -- "${collect_dir}/$1"
+  printf 'x'
+}
+
+# Records that the directory $1 was not removed.
+kept=0
+keep_dir() {
+  kept=$((kept + 1))
+  printf '%s' "$1" > "${collect_dir}/kept.${kept}"
+}
+
+# Returns 0 (true) if a directory that was not removed is $1 or is below it.
+# Both pathnames come from `absolute_path`, so comparing them as text is
+# comparing the directories.  Each pattern is quoted, so a glob metacharacter
+# in a pathname matches itself.
+holds_kept_dir() {
+  holds_kept_index=0
+  while [ "${holds_kept_index}" -lt "${kept}" ]; do
+    holds_kept_index=$((holds_kept_index + 1))
+    holds_kept_path="$(collected_dir "kept.${holds_kept_index}")"
+    holds_kept_path="${holds_kept_path%x}"
+    case "${holds_kept_path}" in
+      "$1" | "${1%/}"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# The removal phase.  Each directory goes through
+# `git-remove-branch-directory`, which refuses to remove one that holds
+# uncommitted changes or commits that no remote-tracking ref holds, and says
+# why.  Nothing is printed on standard output; the only report of a directory
+# is the diagnostic about one that was kept.
+#
+# The order is the reverse of the order of discovery, which means innermost
+# first:  the scan descends into a directory that it reported, because such a
+# directory may contain another, and it reports the outer one first.  Removing
+# the outer one first would `rm -rf` the inner clone without ever asking
+# whether it holds work, and would then fail on an inner directory that no
+# longer exists.  Taking the inner one first puts it through its own checks,
+# and the outer one is removed only if they passed:  a directory that holds
+# one that was kept is kept as well, since removing it would destroy what
+# those checks just refused to destroy.
+if [ -n "${remove}" ]; then
+  removed_index=$((collected + 1))
+  while [ "${removed_index}" -gt 1 ]; do
+    removed_index=$((removed_index - 1))
+    removed_dir="$(collected_dir "${removed_index}")"
+    removed_dir="${removed_dir%x}"
+    if holds_kept_dir "${removed_dir}"; then
+      echo "${SCRIPT_NAME}: not removing ${removed_dir}, which contains a directory that was not removed" >&2
+      keep_dir "${removed_dir}"
+      status=1
+      continue
+    fi
+    # Redirect stdin from /dev/null, because this script must not stop to
+    # await input.
+    if ! "${SCRIPT_DIR}"/git-remove-branch-directory -- "${removed_dir}" \
+      < /dev/null; then
+      keep_dir "${removed_dir}"
+      status=1
+    fi
+  done
+fi
 
 exit "${status}"

@@ -1,0 +1,344 @@
+#!/bin/sh
+
+# Removes a branch directory:  a directory that holds a branch's working copy,
+# or one that holds nothing of value.  Refuses when the removal would lose
+# work.
+#
+# Usage:
+#   git-remove-branch-directory [--force] [--force-uncommitted]
+#                               [--force-unpushed] [--] DIRECTORY...
+#
+# Each DIRECTORY is the top level of a clone, or a directory that is no
+# repository at all -- the two kinds of directory that `git-orphaned-branches`
+# reports.  Removal is `rm -rf`, which destroys a clone's objects along with
+# its files, so nothing that `rm -rf` would lose is recoverable afterward.
+# Two checks therefore ask, first, whether anything would be lost:
+#
+#  * Uncommitted changes to tracked files, waived by `--force-uncommitted`.
+#    Untracked and ignored files do not count:  a branch directory is full of
+#    build output, and refusing on account of that would refuse nearly every
+#    directory and make this command useless.
+#  * Commits that no remote-tracking ref holds, waived by `--force-unpushed`.
+#    The question is about every ref of the clone, not just the branch that is
+#    checked out, because `rm -rf` takes all of them with it:  a clone with an
+#    unpushed commit on a branch that nobody has looked at in a year is
+#    exactly what this check exists to catch, and so are a stash entry and a
+#    commit made on a detached HEAD, which no branch names at all.  A bare
+#    repository is asked the same question:  it holds no working copy, so the
+#    first check has nothing to ask about, but its objects are its own.
+#
+# `--force` waives both.  Each refusal names the check, says how much would be
+# lost, and quotes the flag that waives it; each waiver says on standard error
+# what it overrode, so that a user who forces a removal still learns what they
+# destroyed.
+#
+# A check that cannot run refuses as well.  When `git status` or `git rev-list`
+# fails -- on a corrupt index, for instance -- its silence means that the
+# answer is unknown, not that there is nothing to lose, and none of the
+# `--force` flags waives such a refusal:  each of those waives a loss that this
+# command has measured and named.
+#
+# Two refusals cannot be waived, because they are certainly mistakes:
+#  * the main working tree of a repository that has a linked worktree
+#    registered, since removing it removes the repository that every one of
+#    those worktrees depends on, and
+#  * the current directory, or an ancestor of it.
+#
+# A working tree whose `.git` is a file -- a linked worktree, or a submodule's
+# working tree -- is refused as well.  Removing one means unregistering it,
+# which `rm -rf` does not do, and which is not this command's job.
+#
+# The exit status is 0 if every DIRECTORY was removed and 1 if any was not; a
+# refusal for one DIRECTORY does not stop the others, since a caller passes a
+# whole list.  This command says nothing when it succeeds.
+#
+# This command does not ask whether the branch was deleted in its remote.
+# `git-orphaned-branches` and `is-deleted-branch` answer that question, and a
+# user who names a directory has already decided.
+
+# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to the
+# commands run by `git rebase --exec`, `git bisect run`, and
+# `git submodule foreach`.  They take precedence over the `-C` argument of
+# `git`, so leaving them set would make every check below ask about whatever
+# repository the caller happened to be working in, rather than about the
+# directory that `rm -rf` is about to take:  a directory with uncommitted
+# changes and unpushed commits would be classified and cleared by the answers
+# of some other, clean repository.
+#
+# $GIT_INDEX_FILE names the index alone, and the uncommitted-changes check is
+# the one that reads an index.  A modified tracked file is still caught through
+# a foreign index, because it differs from whatever the index holds, but work
+# that exists *only* in the index is not:  a file that was created and staged
+# and never committed is absent from the foreign index, so it is untracked
+# there, and `--untracked-files=no` then says nothing about it.  Such a
+# directory was removed, silently and with exit status 0.
+unset GIT_DIR
+unset GIT_WORK_TREE
+unset GIT_INDEX_FILE
+
+SCRIPT_NAME="$(basename -- "$0")"
+
+usage() {
+  echo "Usage: ${SCRIPT_NAME} [--force] [--force-uncommitted] [--force-unpushed] [--] DIRECTORY..." >&2
+}
+
+force_uncommitted=0
+force_unpushed=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --force)
+      force_uncommitted=1
+      force_unpushed=1
+      ;;
+    --force-uncommitted) force_uncommitted=1 ;;
+    --force-unpushed) force_unpushed=1 ;;
+    --)
+      shift
+      break
+      ;;
+    -?*)
+      echo "${SCRIPT_NAME}: unrecognized option: $1" >&2
+      usage
+      exit 1
+      ;;
+    *) break ;;
+  esac
+  shift
+done
+
+if [ "$#" -eq 0 ]; then
+  echo "${SCRIPT_NAME}: no directory to remove" >&2
+  usage
+  exit 1
+fi
+
+# Prints the absolute pathname of directory $1, with symbolic links resolved.
+# `realpath` would be simpler, but POSIX added it only in 2024 and some
+# systems still lack it, whereas `cd` and `pwd -P` are portable.  `cd` writes
+# its own diagnostic on failure; discard it, because the callers below write a
+# better one.
+absolute_path() {
+  (CDPATH='' cd -- "$1" && pwd -P) 2> /dev/null
+}
+
+# Prints the number of lines of $1, which is 0 for the empty string.
+line_count() {
+  printf '%s' "$1" | grep -c '' || true
+}
+
+# Prints the number of linked worktrees of the repository in directory $1
+# whose directory still exists.
+#
+# `git worktree list --porcelain` prints the main working tree first and each
+# linked worktree after it, one `worktree PATH` line per entry.  A pathname
+# that contains a newline cannot be represented in that format; git offers
+# `-z` for that, which needs git 2.36, and a newline in the pathname of a
+# repository is pathological.
+#
+# A registration whose directory is gone protects nothing:  removing the
+# repository cannot break a working tree that does not exist, and
+# `git worktree prune` would drop the registration.  git lists such an entry
+# all the same, marked prunable, so test each one.  `live_dependent_worktree`
+# in `git-orphaned-branches` applies the same test, and the two must agree:
+# otherwise a stale registration makes a directory that that command lists one
+# that this command refuses, with a refusal that no flag can waive.
+live_linked_worktrees() {
+  git -C "$1" worktree list --porcelain 2> /dev/null \
+    | sed -n 's/^worktree //p' \
+    | (
+      # Discard the main working tree, which is $1 itself.  Only a linked
+      # worktree depends on the repository that removing $1 would take.
+      if ! IFS= read -r live_linked_main; then
+        echo 0
+        exit 0
+      fi
+      : "${live_linked_main}"
+      live_linked_count=0
+      while IFS= read -r live_linked_dir; do
+        if [ -d "${live_linked_dir}" ]; then
+          live_linked_count=$((live_linked_count + 1))
+        fi
+      done
+      echo "${live_linked_count}"
+    )
+}
+
+# Removes directory $1, unless one of the checks refuses.  Prints a diagnostic
+# and returns 1 if it does not remove the directory.
+remove_branch_directory() {
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+    echo "${SCRIPT_NAME}: no such directory: $1" >&2
+    return 1
+  fi
+  if [ ! -d "$1" ] || [ -L "$1" ]; then
+    # A symbolic link, even one to a directory, names something that this
+    # command was not asked to remove:  `rm -rf` would remove the link and
+    # leave the directory.
+    echo "${SCRIPT_NAME}: not a directory: $1" >&2
+    return 1
+  fi
+  if ! remove_dir="$(absolute_path "$1")"; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
+    return 1
+  fi
+  if [ -z "${remove_dir}" ]; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
+    return 1
+  fi
+
+  # Refusing to remove the current directory, or an ancestor of it, cannot be
+  # waived:  the shell would be left in a directory that no longer exists, and
+  # an ancestor holds more than the directory that was named.
+  remove_cwd="$(pwd -P)"
+  case "${remove_cwd}" in
+    "${remove_dir}" | "${remove_dir%/}"/*)
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: it is the current directory or an ancestor of it" >&2
+      return 1
+      ;;
+  esac
+
+  # Classify the directory.  Only the top level of a working tree is a working
+  # tree here:  a subdirectory of one is not a branch directory, though the
+  # check below still applies to it, because `rm -rf` would take its tracked
+  # files with it.
+  remove_toplevel="$(git -C "${remove_dir}" rev-parse --show-toplevel 2> /dev/null)"
+  if [ -n "${remove_toplevel}" ]; then
+    remove_toplevel="$(absolute_path "${remove_toplevel}")"
+  fi
+  if [ "${remove_toplevel}" = "${remove_dir}" ]; then
+    remove_kind='working-tree'
+  elif [ -n "${remove_toplevel}" ]; then
+    remove_kind='within-working-tree'
+  else
+    # Not a repository at all, or a bare repository.  A bare repository holds
+    # no working copy, so the uncommitted check below has nothing to ask
+    # about, but its refs and objects are its own and `rm -rf` takes every one
+    # of them, so the unpushed check applies to it exactly as it does to a
+    # clone.  Classifying it as `other`, which is checked for nothing, removed
+    # a repository that held the only copy of its commits and said nothing.
+    #
+    # `--is-bare-repository` answers about the repository that contains
+    # ${remove_dir}, not only about ${remove_dir} itself, which is what this
+    # check wants:  removing a directory inside a bare repository, `objects`
+    # for instance, loses those commits as surely as removing the repository
+    # directory does.  `git rev-parse --absolute-git-dir` would tell the two
+    # apart, but it needs git 2.13, which `live_superproject` in
+    # `git-orphaned-branches` does not assume.  `--is-bare-repository` is as
+    # old as `rev-parse`, and the distinction it does not draw is one that
+    # this check does not need.
+    remove_bare="$(git -C "${remove_dir}" rev-parse --is-bare-repository \
+      2> /dev/null)"
+    if [ "${remove_bare}" = 'true' ]; then
+      remove_kind='bare-repository'
+    else
+      remove_kind='other'
+    fi
+  fi
+
+  if [ "${remove_kind}" = 'working-tree' ] && [ ! -d "${remove_dir}/.git" ]; then
+    # A linked worktree, or a submodule's working tree.  Removing one means
+    # unregistering it as well, which this command does not do.
+    echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: its .git is a file, so it is a linked worktree or a submodule's working tree, which this command does not remove" >&2
+    echo "${SCRIPT_NAME}: remove a linked worktree with \`git worktree remove\`, and a submodule's working tree with \`git submodule deinit\`" >&2
+    return 1
+  fi
+
+  if [ "${remove_kind}" = 'working-tree' ]; then
+    # Removing the main working tree removes the repository that every linked
+    # worktree of it depends on, so refuse however orphaned this directory's
+    # own branch is.  This refusal cannot be waived.  It overlaps deliberately
+    # with the filter in `git-orphaned-branches`, which keeps such a directory
+    # out of the list:  this one refuses it even when a user names it.
+    remove_worktrees="$(live_linked_worktrees "${remove_dir}")"
+    if [ "${remove_worktrees}" -gt 0 ]; then
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: it holds the repository of ${remove_worktrees} linked worktree(s), which removing it would break" >&2
+      return 1
+    fi
+  fi
+
+  # The checks.  Both are gathered before anything is removed, because
+  # afterward the information is gone.
+  remove_refusals=0
+
+  if [ "${remove_kind}" = 'working-tree' ] || [ "${remove_kind}" = 'within-working-tree' ]; then
+    # Uncommitted changes to tracked files.  `--untracked-files=no` is the
+    # point:  a branch directory inherits build output and other untracked
+    # files, and refusing on account of those would refuse nearly every
+    # directory.  For a directory within a working tree, ask only about that
+    # directory, which is all that the removal would take.
+    remove_status_failed=0
+    if [ "${remove_kind}" = 'working-tree' ]; then
+      remove_modified="$(git -C "${remove_dir}" status --porcelain \
+        --untracked-files=no 2> /dev/null)" || remove_status_failed=1
+    else
+      remove_modified="$(git -C "${remove_dir}" status --porcelain \
+        --untracked-files=no -- . 2> /dev/null)" || remove_status_failed=1
+    fi
+    remove_modified_count="$(line_count "${remove_modified}")"
+    if [ "${remove_status_failed}" -ne 0 ]; then
+      # `git status` failed, so its empty output says nothing about the
+      # working tree.  Reading it as "no modified files" would remove a
+      # directory whose tracked files are modified -- and for a directory
+      # within a working tree this is the only check there is.  Refuse, as
+      # the unpushed check below refuses when its command answers nothing.
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot tell whether it holds uncommitted changes to tracked files" >&2
+      remove_refusals=1
+    elif [ "${remove_modified_count}" -gt 0 ]; then
+      if [ "${force_uncommitted}" -eq 0 ]; then
+        echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: ${remove_modified_count} tracked file(s) have uncommitted changes; re-run with --force-uncommitted" >&2
+        remove_refusals=1
+      else
+        echo "${SCRIPT_NAME}: ${remove_dir}: --force-uncommitted: deleting ${remove_modified_count} tracked file(s) with uncommitted changes" >&2
+      fi
+    fi
+  fi
+
+  if [ "${remove_kind}" = 'working-tree' ] \
+    || [ "${remove_kind}" = 'bare-repository' ]; then
+    # Commits that no remote-tracking ref holds.  `rm -rf` destroys the whole
+    # repository, so ask about every ref, not just the checked-out branch.
+    # `--all` is what makes that so:  it covers HEAD, and so a commit made on
+    # a detached HEAD, and every ref below `refs/`, and so a stash entry --
+    # each of them work that no branch names and that removing this directory
+    # would lose as surely as a commit on an unpushed branch.  `--branches`
+    # asked only about `refs/heads`, and a clone whose only unpushed work was
+    # stashed passed both checks, since stashing leaves the working tree
+    # clean and the other check saw nothing either.
+    # This is the question that matters -- would removing this directory lose
+    # commits? -- and it needs no upstream configuration, unlike
+    # `git branch --delete`'s merged-into-upstream test.  A remote-tracking
+    # ref counts as holding the commits, which is right:  those commits are in
+    # the remote.
+    remove_unpushed="$(git -C "${remove_dir}" rev-list --count --all \
+      --not --remotes 2> /dev/null)"
+    if [ -z "${remove_unpushed}" ]; then
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot tell whether it holds commits that no other ref holds" >&2
+      remove_refusals=1
+    elif [ "${remove_unpushed}" -gt 0 ]; then
+      if [ "${force_unpushed}" -eq 0 ]; then
+        echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: ${remove_unpushed} commit(s) are on no remote-tracking ref; re-run with --force-unpushed" >&2
+        remove_refusals=1
+      else
+        echo "${SCRIPT_NAME}: ${remove_dir}: --force-unpushed: deleting ${remove_unpushed} commit(s) that are on no remote-tracking ref" >&2
+      fi
+    fi
+  fi
+
+  if [ "${remove_refusals}" -ne 0 ]; then
+    return 1
+  fi
+
+  if ! rm -rf -- "${remove_dir}"; then
+    echo "${SCRIPT_NAME}: cannot remove: ${remove_dir}" >&2
+    return 1
+  fi
+  return 0
+}
+
+status=0
+for directory in "$@"; do
+  if ! remove_branch_directory "${directory}"; then
+    status=1
+  fi
+done
+exit "${status}"

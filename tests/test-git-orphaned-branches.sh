@@ -243,7 +243,7 @@ printf '%s\n' "${orphan_absolute}" > "${work}/print-newline.goal"
 cmp -s "${work}/print-newline.goal" "${work}/print-newline.actual" \
   || fail "default output differs from ${work}/print-newline.goal"
 
-# Test 3: the recommended cleanup command deletes the orphan and nothing else.
+# Test 3: the `--print0` pipeline deletes the orphan and nothing else.
 (cd "${work}/scan" && "${GIT_ORPHANED_BRANCHES}" --print0) | xargs -0 rm -rf
 [ ! -e "${orphan}" ] || fail "cleanup did not delete ${orphan}"
 [ -d "${work}/scan/my" ] || fail "cleanup deleted ${work}/scan/my"
@@ -549,6 +549,171 @@ git -C "${work}/queries-broken-two/p-branch-qi" config protocol.file.allow never
 scan_with_counted_queries "${work}/queries-broken-two"
 check_scan 3 'two directories whose own configuration breaks their queries' \
   "${work}/queries-broken-two/p-branch-qj"
+
+###########################################################################
+## $GIT_DIR and $GIT_WORK_TREE in the environment.
+###########################################################################
+
+# Git exports them to hooks and to the commands run by `git rebase --exec`,
+# `git bisect run`, and `git submodule foreach`, and they take precedence over
+# `git -C`.  Left set, they made every directory of the scan answer for the
+# one repository that they name:  an orphaned clone was classified by that
+# repository instead of by itself, so the scan listed nothing and `--remove`
+# removed nothing.  The scan must give the same answer as it does with them
+# unset.
+git -C "${work}/seed" push -q origin main:refs/heads/envfeat
+mkdir -p "${work}/env-scan"
+envorphan="${work}/env-scan/myrepo-branch-envfeat"
+git clone -q -b envfeat "${work}/remote.git" "${envorphan}"
+git -C "${work}/seed" push -q origin --delete envfeat
+# An unrelated repository, on a branch that still exists in the remote, for
+# the environment to name.
+git clone -q "${work}/remote.git" "${work}/env-other"
+
+printf '%s\n' "$(absolute_path "${envorphan}")" > "${work}/env.goal"
+(cd "${work}/env-scan" \
+  && GIT_DIR="${work}/env-other/.git" GIT_WORK_TREE="${work}/env-other" \
+    "${GIT_ORPHANED_BRANCHES}") > "${work}/env.actual"
+cmp -s "${work}/env.goal" "${work}/env.actual" \
+  || fail "the scan with GIT_DIR set differs from ${work}/env.goal: [$(cat "${work}/env.actual")]"
+
+###########################################################################
+## --remove
+###########################################################################
+
+# `--remove` removes each directory that it would otherwise list, by running
+# `git-remove-branch-directory`, and prints nothing on standard output.  That
+# script refuses a directory that holds work, so `--remove` can leave one
+# behind; it says why, and the exit status says that not everything was
+# removed.
+git -C "${work}/seed" push -q origin main:refs/heads/r1
+git -C "${work}/seed" push -q origin main:refs/heads/r2
+git -C "${work}/seed" push -q origin main:refs/heads/r3
+mkdir -p "${work}/removal"
+git clone -q -b r1 "${work}/remote.git" "${work}/removal/c-branch-r1"
+git clone -q -b r2 "${work}/remote.git" "${work}/removal/c-branch-r2"
+git clone -q -b r3 "${work}/remote.git" "${work}/removal/c-branch-r3"
+mkdir -p "${work}/removal/c-branch-project"
+touch "${work}/removal/c-branch-project/.project"
+echo "an uncommitted change" >> "${work}/removal/c-branch-r2/file.txt"
+git -C "${work}/seed" push -q origin --delete r1
+git -C "${work}/seed" push -q origin --delete r2
+
+removal_stderr="${work}/removal-stderr"
+if (cd "${work}/removal" && "${GIT_ORPHANED_BRANCHES}" --remove \
+  > "${work}/removal.out" 2> "${removal_stderr}"); then
+  fail "--remove exited with status 0 although a removal was refused"
+fi
+if [ -s "${work}/removal.out" ]; then
+  fail "--remove printed [$(cat "${work}/removal.out")], expected no output"
+fi
+if [ -e "${work}/removal/c-branch-r1" ]; then
+  fail "--remove did not remove ${work}/removal/c-branch-r1"
+fi
+if [ -e "${work}/removal/c-branch-project" ]; then
+  fail "--remove did not remove ${work}/removal/c-branch-project"
+fi
+if [ ! -d "${work}/removal/c-branch-r2" ]; then
+  fail "--remove removed a directory that holds uncommitted changes"
+fi
+if [ ! -d "${work}/removal/c-branch-r3" ]; then
+  fail "--remove removed a directory whose branch still exists"
+fi
+if ! grep -q -F -- 'uncommitted changes' "${removal_stderr}"; then
+  fail "--remove did not say why it left a directory behind: $(cat "${removal_stderr}")"
+fi
+
+# None of the force flags is passed through, so a second run refuses again.
+if (cd "${work}/removal" && "${GIT_ORPHANED_BRANCHES}" --remove > /dev/null 2>&1); then
+  fail "--remove exited with status 0 although a removal was refused again"
+fi
+if [ ! -d "${work}/removal/c-branch-r2" ]; then
+  fail "--remove removed a directory that holds uncommitted changes"
+fi
+
+# `--print0` says how to separate the directories that are printed, and
+# `--remove` prints none, so the two together still print nothing, and
+# `--remove` does its work as it does alone.
+git -C "${work}/seed" push -q origin main:refs/heads/r4
+mkdir -p "${work}/removal0"
+git clone -q -b r4 "${work}/remote.git" "${work}/removal0/c-branch-r4"
+git -C "${work}/seed" push -q origin --delete r4
+if ! (cd "${work}/removal0" && "${GIT_ORPHANED_BRANCHES}" --remove --print0) \
+  > "${work}/removal0.actual"; then
+  fail "--remove --print0 exited with a failure status although the removal succeeded"
+fi
+if [ -s "${work}/removal0.actual" ]; then
+  fail "--remove --print0 printed [$(cat "${work}/removal0.actual")], expected no output"
+fi
+if [ -e "${work}/removal0/c-branch-r4" ]; then
+  fail "--remove --print0 did not remove ${work}/removal0/c-branch-r4"
+fi
+
+# A reported directory can contain another, which is why the scan descends
+# into one.  The inner directory is removed first, through its own checks, and
+# the outer one after it.  Removing the outer one first would `rm -rf` the
+# inner clone without ever asking whether it held work, and would then fail on
+# an inner directory that no longer existed.
+git -C "${work}/seed" push -q origin main:refs/heads/n1
+git -C "${work}/seed" push -q origin main:refs/heads/n2
+mkdir -p "${work}/nested"
+git clone -q -b n1 "${work}/remote.git" "${work}/nested/c-branch-outer"
+git clone -q -b n2 "${work}/remote.git" \
+  "${work}/nested/c-branch-outer/c-branch-inner"
+git -C "${work}/seed" push -q origin --delete n1
+git -C "${work}/seed" push -q origin --delete n2
+if ! (cd "${work}/nested" && "${GIT_ORPHANED_BRANCHES}" --remove \
+  > "${work}/nested.out" 2> "${removal_stderr}"); then
+  fail "--remove exited with a failure status although both nested directories were removable: $(cat "${removal_stderr}")"
+fi
+if [ -s "${work}/nested.out" ]; then
+  fail "--remove printed [$(cat "${work}/nested.out")], expected no output"
+fi
+if [ -e "${work}/nested/c-branch-outer" ]; then
+  fail "--remove did not remove ${work}/nested/c-branch-outer"
+fi
+
+# When the inner directory is kept, the outer one is kept as well:  removing
+# it would destroy what the inner directory's checks just refused to destroy.
+git -C "${work}/seed" push -q origin main:refs/heads/n3
+git -C "${work}/seed" push -q origin main:refs/heads/n4
+mkdir -p "${work}/nested-kept"
+git clone -q -b n3 "${work}/remote.git" "${work}/nested-kept/c-branch-outer"
+git clone -q -b n4 "${work}/remote.git" \
+  "${work}/nested-kept/c-branch-outer/c-branch-inner"
+echo "an uncommitted change" \
+  >> "${work}/nested-kept/c-branch-outer/c-branch-inner/file.txt"
+git -C "${work}/seed" push -q origin --delete n3
+git -C "${work}/seed" push -q origin --delete n4
+if (cd "${work}/nested-kept" && "${GIT_ORPHANED_BRANCHES}" --remove \
+  > "${work}/nested-kept.out" 2> "${removal_stderr}"); then
+  fail "--remove exited with status 0 although a nested removal was refused"
+fi
+if [ ! -d "${work}/nested-kept/c-branch-outer/c-branch-inner" ]; then
+  fail "--remove removed a nested directory that holds uncommitted changes"
+fi
+if [ ! -d "${work}/nested-kept/c-branch-outer" ]; then
+  fail "--remove removed a directory that contains one that was not removed"
+fi
+if [ -s "${work}/nested-kept.out" ]; then
+  fail "--remove printed [$(cat "${work}/nested-kept.out")], expected no output"
+fi
+if ! grep -q -F -- 'contains a directory that was not removed' \
+  "${removal_stderr}"; then
+  fail "--remove did not say why it kept the outer directory: $(cat "${removal_stderr}")"
+fi
+
+# A scan that finds nothing removes nothing and exits with status 0.
+mkdir -p "${work}/removal-empty/not-a-branch-directory"
+if ! output="$(cd "${work}/removal-empty" && "${GIT_ORPHANED_BRANCHES}" --remove)"; then
+  fail "--remove exited with a failure status although it found nothing"
+fi
+if [ -n "${output}" ]; then
+  fail "--remove printed [${output}], expected no output"
+fi
+if [ ! -d "${work}/removal-empty/not-a-branch-directory" ]; then
+  fail "--remove removed a directory that it does not list"
+fi
 
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
