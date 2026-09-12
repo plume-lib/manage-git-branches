@@ -57,9 +57,7 @@ The commands are:
   alias below).
 * [`git-remove-branch-directory`](git-remove-branch-directory)
   `[--force] [--force-uncommitted] [--force-unpushed] DIRECTORY...`:
-  Removes a branch directory, unless the removal would lose work:  it refuses
-  a directory that holds uncommitted changes to tracked files, or commits
-  that no remote-tracking ref holds.
+  Removes a branch directory, unless the removal would lose work.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
