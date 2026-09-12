@@ -86,7 +86,8 @@ echo "first line" > "${work}/seed/file.txt"
 git -C "${work}/seed" add file.txt
 git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
-for branch in clean dirty unpushed both several1 several2 host inside; do
+for branch in clean dirty unpushed both several1 several2 host inside \
+  stashed detached corrupt stale; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -209,6 +210,66 @@ run_command 'both checks, --force' 0 --force "${both}"
 check_gone 'both checks, --force' "${both}"
 
 ###########################################################################
+## Work that no branch names.
+###########################################################################
+
+# Stashing leaves the working tree clean, so the uncommitted-changes check
+# sees nothing, and a stash entry is on no branch, so a check that asked only
+# about `refs/heads` saw nothing either:  the clone was removed and the only
+# copy of the work went with it.
+stashed="$(make_clone stashed)"
+echo "work in progress" >> "${stashed}/file.txt"
+git -C "${stashed}" stash -q
+run_command 'a stash entry' 1 "${stashed}"
+check_present 'a stash entry' "${stashed}"
+check_message 'a stash entry' \
+  "are on no remote-tracking ref; re-run with --force-unpushed"
+run_command 'a stash entry waived' 0 --force-unpushed "${stashed}"
+check_gone 'a stash entry waived' "${stashed}"
+
+# A commit made on a detached HEAD is on no branch either.
+detached="$(make_clone detached)"
+git -C "${detached}" checkout -q --detach
+echo "work on no branch" >> "${detached}/file.txt"
+git -C "${detached}" commit -q -a -m "A commit on a detached HEAD"
+run_command 'a commit on a detached HEAD' 1 "${detached}"
+check_present 'a commit on a detached HEAD' "${detached}"
+check_message 'a commit on a detached HEAD' \
+  "are on no remote-tracking ref; re-run with --force-unpushed"
+run_command 'a commit on a detached HEAD, waived' 0 --force-unpushed \
+  "${detached}"
+check_gone 'a commit on a detached HEAD, waived' "${detached}"
+
+###########################################################################
+## A check that cannot run.
+###########################################################################
+
+# `git status` fails on a corrupt index, and its empty output then says
+# nothing about the working tree.  Reading that as "no modified files" would
+# delete the modified file that it could not report.
+corrupt="$(make_clone corrupt)"
+echo "an uncommitted change" >> "${corrupt}/file.txt"
+echo "not an index" > "${corrupt}/.git/index"
+run_command 'a corrupt index' 1 "${corrupt}"
+check_present 'a corrupt index' "${corrupt}"
+check_message 'a corrupt index' \
+  "cannot tell whether it holds uncommitted changes"
+
+# Not even `--force` waives it:  each force flag waives a loss that this
+# command has measured and named, and this one it could not measure.
+run_command 'a corrupt index, with --force' 1 --force "${corrupt}"
+check_present 'a corrupt index, with --force' "${corrupt}"
+
+# For a directory within a working tree this is the only check there is, so
+# failing open there removed tracked files with nothing asked at all.
+mkdir -p "${corrupt}/subdir"
+run_command 'a corrupt index, within a working tree' 1 --force \
+  "${corrupt}/subdir"
+check_present 'a corrupt index, within a working tree' "${corrupt}/subdir"
+check_message 'a corrupt index, within a working tree' \
+  "cannot tell whether it holds uncommitted changes"
+
+###########################################################################
 ## The refusals that cannot be waived.
 ###########################################################################
 
@@ -235,6 +296,18 @@ run_command 'a working tree that hosts a worktree' 1 --force "${host}"
 check_present 'a working tree that hosts a worktree' "${host}"
 check_message 'a working tree that hosts a worktree' \
   "holds the repository of 1 linked worktree(s)"
+
+# A registration whose directory is gone is not a linked worktree that
+# removing this directory would break:  nothing depends on the repository any
+# longer, and `git worktree prune` would drop the registration.  Counting it
+# refused a directory that `git-orphaned-branches` lists, with a refusal that
+# no flag can waive.
+stale="$(make_clone stale)"
+git -C "${stale}" worktree add -q "${work}/myrepo-branch-stale-linked" \
+  -b stale-linked
+rm -rf "${work}/myrepo-branch-stale-linked"
+run_command 'a stale worktree registration' 0 "${stale}"
+check_gone 'a stale worktree registration' "${stale}"
 
 # A linked worktree, whose `.git` is a file:  removing one means
 # unregistering it, which this command does not do.

@@ -30,7 +30,10 @@
 # None of that script's `--force` flags is passed through:  a waiver that
 # applied to every directory of a recursive scan would be a foot-gun, so the
 # way to override one refusal is to run `git-remove-branch-directory` on that
-# directory with the flag that the refusal names.
+# directory with the flag that the refusal names.  A directory that contains
+# another reported directory is removed after the one it contains, and only if
+# that one was removed:  the inner directory's checks would be worth nothing if
+# the outer directory's `rm -rf` ran first.
 #
 # Usually, a remote branch disappears because its PR was merged.  It
 # is conceivable that the branch has local commits that were never
@@ -393,27 +396,71 @@ examine_directory() {
 
 examine_directory .
 
+# Prints the pathname collected as $1, followed by an `x`.  The caller strips
+# the `x`:  a command substitution removes trailing newlines, and this is what
+# lets a pathname that ends in one survive being read back.
+collected_dir() {
+  cat -- "${collect_dir}/$1"
+  printf 'x'
+}
+
+# Records that the directory $1 was not removed.
+kept=0
+keep_dir() {
+  kept=$((kept + 1))
+  printf '%s' "$1" > "${collect_dir}/kept.${kept}"
+}
+
+# Returns 0 (true) if a directory that was not removed is $1 or is below it.
+# Both pathnames come from `absolute_path`, so comparing them as text is
+# comparing the directories.  Each pattern is quoted, so a glob metacharacter
+# in a pathname matches itself.
+holds_kept_dir() {
+  holds_kept_index=0
+  while [ "${holds_kept_index}" -lt "${kept}" ]; do
+    holds_kept_index=$((holds_kept_index + 1))
+    holds_kept_path="$(collected_dir "kept.${holds_kept_index}")"
+    holds_kept_path="${holds_kept_path%x}"
+    case "${holds_kept_path}" in
+      "$1" | "${1%/}"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # The removal phase.  Each directory goes through
 # `git-remove-branch-directory`, which refuses to remove one that holds
 # uncommitted changes or commits that no remote-tracking ref holds, and says
 # why; only the directories that it removed are printed.
+#
+# The order is the reverse of the order of discovery, which means innermost
+# first:  the scan descends into a directory that it reported, because such a
+# directory may contain another, and it reports the outer one first.  Removing
+# the outer one first would `rm -rf` the inner clone without ever asking
+# whether it holds work, and would then fail on an inner directory that no
+# longer exists.  Taking the inner one first puts it through its own checks,
+# and the outer one is removed only if they passed:  a directory that holds
+# one that was kept is kept as well, since removing it would destroy what
+# those checks just refused to destroy.
 if [ -n "${remove}" ]; then
-  removed_index=0
-  while [ "${removed_index}" -lt "${collected}" ]; do
-    removed_index=$((removed_index + 1))
-    # Append a character and strip it, so that a pathname that ends in a
-    # newline survives the command substitution.
-    removed_dir="$(
-      cat -- "${collect_dir}/${removed_index}"
-      printf 'x'
-    )"
+  removed_index=$((collected + 1))
+  while [ "${removed_index}" -gt 1 ]; do
+    removed_index=$((removed_index - 1))
+    removed_dir="$(collected_dir "${removed_index}")"
     removed_dir="${removed_dir%x}"
+    if holds_kept_dir "${removed_dir}"; then
+      echo "${SCRIPT_NAME}: not removing ${removed_dir}, which contains a directory that was not removed" >&2
+      keep_dir "${removed_dir}"
+      status=1
+      continue
+    fi
     # Redirect stdin from /dev/null, because this script must not stop to
     # await input.
     if "${SCRIPT_DIR}"/git-remove-branch-directory -- "${removed_dir}" \
       < /dev/null; then
       print_dir "${removed_dir}"
     else
+      keep_dir "${removed_dir}"
       status=1
     fi
   done

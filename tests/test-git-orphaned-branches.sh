@@ -607,6 +607,64 @@ if [ -e "${work}/removal0/c-branch-r4" ]; then
   fail "--remove --print0 did not remove ${work}/removal0/c-branch-r4"
 fi
 
+# A reported directory can contain another, which is why the scan descends
+# into one.  The inner directory is removed first, through its own checks, and
+# the outer one after it.  Removing the outer one first would `rm -rf` the
+# inner clone without ever asking whether it held work, and would then fail on
+# an inner directory that no longer existed.
+git -C "${work}/seed" push -q origin main:refs/heads/n1
+git -C "${work}/seed" push -q origin main:refs/heads/n2
+mkdir -p "${work}/nested"
+git clone -q -b n1 "${work}/remote.git" "${work}/nested/c-branch-outer"
+git clone -q -b n2 "${work}/remote.git" \
+  "${work}/nested/c-branch-outer/c-branch-inner"
+git -C "${work}/seed" push -q origin --delete n1
+git -C "${work}/seed" push -q origin --delete n2
+nested_outer="$(absolute_path "${work}/nested/c-branch-outer")"
+nested_inner="$(absolute_path "${work}/nested/c-branch-outer/c-branch-inner")"
+if ! output="$(cd "${work}/nested" && "${GIT_ORPHANED_BRANCHES}" --remove \
+  2> "${removal_stderr}")"; then
+  fail "--remove exited with a failure status although both nested directories were removable: $(cat "${removal_stderr}")"
+fi
+nested_expected="$(printf '%s\n%s\n' "${nested_outer}" "${nested_inner}" | sort)"
+nested_actual="$(printf '%s\n' "${output}" | grep '.' | sort)"
+if [ "${nested_actual}" != "${nested_expected}" ]; then
+  fail "--remove printed [${nested_actual}], expected [${nested_expected}]"
+fi
+if [ -e "${work}/nested/c-branch-outer" ]; then
+  fail "--remove did not remove ${work}/nested/c-branch-outer"
+fi
+
+# When the inner directory is kept, the outer one is kept as well:  removing
+# it would destroy what the inner directory's checks just refused to destroy.
+git -C "${work}/seed" push -q origin main:refs/heads/n3
+git -C "${work}/seed" push -q origin main:refs/heads/n4
+mkdir -p "${work}/nested-kept"
+git clone -q -b n3 "${work}/remote.git" "${work}/nested-kept/c-branch-outer"
+git clone -q -b n4 "${work}/remote.git" \
+  "${work}/nested-kept/c-branch-outer/c-branch-inner"
+echo "an uncommitted change" \
+  >> "${work}/nested-kept/c-branch-outer/c-branch-inner/file.txt"
+git -C "${work}/seed" push -q origin --delete n3
+git -C "${work}/seed" push -q origin --delete n4
+if (cd "${work}/nested-kept" && "${GIT_ORPHANED_BRANCHES}" --remove \
+  > "${work}/nested-kept.out" 2> "${removal_stderr}"); then
+  fail "--remove exited with status 0 although a nested removal was refused"
+fi
+if [ ! -d "${work}/nested-kept/c-branch-outer/c-branch-inner" ]; then
+  fail "--remove removed a nested directory that holds uncommitted changes"
+fi
+if [ ! -d "${work}/nested-kept/c-branch-outer" ]; then
+  fail "--remove removed a directory that contains one that was not removed"
+fi
+if [ -s "${work}/nested-kept.out" ]; then
+  fail "--remove printed [$(cat "${work}/nested-kept.out")] although it removed nothing"
+fi
+if ! grep -q -F -- 'contains a directory that was not removed' \
+  "${removal_stderr}"; then
+  fail "--remove did not say why it kept the outer directory: $(cat "${removal_stderr}")"
+fi
+
 # A scan that finds nothing removes nothing and exits with status 0.
 mkdir -p "${work}/removal-empty/not-a-branch-directory"
 if ! output="$(cd "${work}/removal-empty" && "${GIT_ORPHANED_BRANCHES}" --remove)"; then
