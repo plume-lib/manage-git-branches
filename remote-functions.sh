@@ -721,10 +721,77 @@ remote_heads() {
   return "${remote_heads_status}"
 }
 
+## Usage: only_dot_project DIRECTORY
+## Returns 0 (true) if DIRECTORY holds nothing but Eclipse `.project` files:
+## that is, if every entry of DIRECTORY is a `.project` file or is a directory
+## that itself holds nothing but `.project` files.  A directory that holds
+## nothing at all satisfies this, which is what lets an empty subdirectory --
+## such as the `bin` that Eclipse makes for a project's build output -- count
+## as nothing.
+##
+## This says only what is in DIRECTORY; the caller decides what that means.
+## `is_deleted_branch` also requires a `.project` file at DIRECTORY's own top
+## level, so that an empty directory, which satisfies this test only
+## vacuously, is not reported as a deleted branch.
+##
+## A symbolic link is content, whether it names a directory, a file, or
+## nothing:  it is neither skipped as a `.project` file nor descended into.
+## Following one that names an ancestor would not terminate, and a link is
+## something that the user put there.
+##
+## `find "$1" ! -name .project ! -type d` would be simpler, but `find`
+## communicates through newline-separated text, which cannot represent a file
+## name that contains a newline, whereas the globs and the positional
+## parameters below can hold any file name.
+##
+## The entries that remain to be examined are held in the positional
+## parameters, which a shell makes local to a function call, so the recursive
+## call below gets its own and this call's are intact when it returns.  A
+## `for` loop over a variable could not recurse, because a shell function has
+## no local variables.
+only_dot_project() {
+  # In a directory that cannot be listed (but can be searched, such as one with
+  # mode 711), every glob below expands to nothing, which is indistinguishable
+  # from an empty directory.  Do not claim that such a directory holds nothing.
+  if [ ! -r "$1" ]; then
+    return 1
+  fi
+  set -- "$1"/* "$1"/.*
+  while [ "$#" -gt 0 ]; do
+    case "${1##*/}" in
+      '.' | '..')
+        shift
+        continue
+        ;;
+      '.project')
+        # Skip the Eclipse metadata itself.  A *directory* named `.project`
+        # can hold anything, so leave it to the test below, which descends
+        # into it like any other directory.
+        if [ -f "$1" ] && [ ! -L "$1" ]; then
+          shift
+          continue
+        fi
+        ;;
+    esac
+    # When a pattern matches nothing, the shell leaves it unexpanded.  Such a
+    # pathname names no entry, so it is not content.
+    if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+      shift
+      continue
+    fi
+    if [ ! -d "$1" ] || [ -L "$1" ] || ! only_dot_project "$1"; then
+      return 1
+    fi
+    shift
+  done
+  return 0
+}
+
 ## Usage: is_deleted_branch DIRECTORY
 ## Tests whether DIRECTORY is on a branch that was deleted in its remote, and
 ## returns the status that the `is-deleted-branch` command documents:  0 if
-## the branch was deleted in its remote, 1 if it still exists there, 2 if
+## the branch was deleted in its remote or if DIRECTORY is the leftover of
+## such a branch's directory, 1 if the branch still exists in its remote, 2 if
 ## DIRECTORY is not the top level of a working tree, and 3 if the question
 ## cannot be answered.  That command is a wrapper around this function, and
 ## its documentation is the documentation of this answer.
@@ -744,6 +811,30 @@ is_deleted_branch() {
   # directly.
   if [ ! -d "${is_deleted_branch_dir}" ]; then
     return 2
+  fi
+
+  # A directory that holds nothing but Eclipse `.project` files is the
+  # leftover of a branch directory whose working tree is gone:  what remains
+  # is metadata, a `.project` file for each Eclipse project of the branch and
+  # the directories that hold them, and none of the branch itself.  Such a
+  # directory is as removable as one whose branch was deleted in its remote,
+  # so answer 0 for it.
+  #
+  # Answer it before the tests below, which would call such a directory "not
+  # the top level of a working tree" (status 2):  that is true, and it would
+  # leave the caller's question -- may this directory be removed? -- unanswered
+  # when it has an answer.  The tests below still decide every directory that
+  # holds anything else, including a working tree, whose `.git` is not a
+  # `.project` file and which `only_dot_project` therefore rejects at its
+  # first entry.
+  #
+  # Require a `.project` file in DIRECTORY itself.  `only_dot_project` is
+  # satisfied by a directory that holds nothing at all, and an empty directory
+  # is not evidence of an Eclipse project that a branch directory once held.
+  if [ -f "${is_deleted_branch_dir}/.project" ] \
+    && [ ! -L "${is_deleted_branch_dir}/.project" ] \
+    && only_dot_project "${is_deleted_branch_dir}"; then
+    return 0
   fi
 
   # `git -C DIR rev-parse` succeeds for every directory within a working tree,

@@ -49,9 +49,13 @@ The commands are:
   working copy (that is, a git clone) and must each have an upstream branch.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
+  It is also true of a directory that holds nothing but Eclipse `.project`
+  files, which a branch directory may leave behind when its working tree
+  is gone.
 * [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
   Lists directories named `*-branch-*`, below the current directory, that are
-  working copies for branches that were deleted in the remote repository.
+  working copies for branches that were deleted in the remote repository, or
+  that hold nothing but Eclipse `.project` files.
   With `--remove`, removes each of them instead of printing them.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
   alias below).

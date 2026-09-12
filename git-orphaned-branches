@@ -5,7 +5,8 @@
 # below the current directory are considered.  Newly created branches are not
 # listed, only branches that have been deleted in the remote (for example,
 # because a pull request has been merged).
-# Also lists directories containing nothing but a `.project` file.
+# Also lists directories that hold nothing but Eclipse `.project` files,
+# which is what a branch directory leaves behind when its working tree is gone.
 #
 # A directory that another live working tree depends on -- one that hosts a
 # linked worktree, or one that is a submodule of a superproject -- is never
@@ -162,55 +163,6 @@ absolute_path() {
   (CDPATH='' cd -- "$1" && pwd -P)
 }
 
-# Returns 0 (true) if directory $1 contains no entry other than `.project`.
-# `find "$1" -mindepth 1 -maxdepth 1` would be simpler, but the `-mindepth` and
-# `-maxdepth` options are GNU extensions that POSIX `find` does not support.
-only_dot_project() {
-  # In a directory that cannot be listed (but can be searched, such as one with
-  # mode 711), every glob below expands to nothing, which is indistinguishable
-  # from an empty directory.  Do not claim that such a directory is empty.
-  if [ ! -r "$1" ]; then
-    return 1
-  fi
-  for entry in "$1"/* "$1"/.*; do
-    case "${entry##*/}" in
-      '.' | '..' | '.project') continue ;;
-    esac
-    # When a pattern matches nothing, the shell leaves it unexpanded.
-    if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
-      continue
-    fi
-    return 1
-  done
-  return 0
-}
-
-# Returns 0 (true) if directory $1 is the top level of a working tree.
-#
-# Ask git rather than testing whether `$1/.git` is a directory.  A submodule's
-# working tree and a linked worktree each have a `.git` *file* that names a
-# git directory elsewhere, so the directory test classified them as
-# non-repositories:  a worktree whose branch was deleted in the remote was
-# checked only for a lone `.project` file and was silently ignored.
-# `is-deleted-branch` answers correctly for both kinds of working tree.
-#
-# Require the *top level*, which is what `is-deleted-branch` answers about and
-# what `git -C "$1" rev-parse` alone does not establish:  every directory
-# within a working tree satisfies that.  A subdirectory is not a branch
-# directory, and it can still be a `.project`-only leftover that the other
-# branch of `check_directory` reports.
-is_working_tree() {
-  is_working_tree_toplevel="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" \
-    || return 1
-  # A bare repository has no working tree.
-  if [ -z "${is_working_tree_toplevel}" ]; then
-    return 1
-  fi
-  is_working_tree_dir="$(absolute_path "$1")" || return 1
-  is_working_tree_top="$(absolute_path "${is_working_tree_toplevel}")" || return 1
-  [ "${is_working_tree_dir}" = "${is_working_tree_top}" ]
-}
-
 # Prints the pathname of one linked worktree that depends on the repository in
 # directory $1, or nothing if none does.
 #
@@ -285,74 +237,70 @@ live_superproject() {
 }
 
 # Reports directory $1, whose name matches `*-branch-*`, if its branch was
-# deleted in the remote or if it holds nothing but a `.project` file.
+# deleted in the remote or if it holds nothing but Eclipse `.project` files.
+#
+# `is_deleted_branch` answers about both:  it reports a directory that holds
+# nothing but `.project` files as deleted (status 0), which is why this
+# function need not test for one itself, and for that matter cannot, since
+# such a directory is no working tree and is on no branch.
 check_directory() {
   dir="$1"
   if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
-  if is_working_tree "$dir"; then
-    # It is the top level of a working tree.
 
-    # If the branch was deleted in the remote, print the directory name.
-    # Only status 0 from `is_deleted_branch` means "the branch was deleted".
-    # Statuses 1, 2, and 3 are answers of "no" or "cannot tell", each of which
-    # it has already explained if it is worth explaining.  Any other status
-    # would mean that it could not answer at all, which must not be silently
-    # reported as "there is nothing to delete".
-    #
-    # Call the function of remote-functions.sh rather than running the
-    # `is-deleted-branch` command, which is a wrapper around it.  One process
-    # for the whole scan is what lets one `git ls-remote` answer for every
-    # directory that asks the same remote the same way:  what the function
-    # remembers, a subprocess per directory would throw away.
-    #
-    # Redirect stdin from /dev/null, because the function runs `git`, which
-    # runs `ssh`, and this script must not stop to await input.
-    is_deleted_branch "$dir" < /dev/null
-    is_deleted_status=$?
-    case "${is_deleted_status}" in
-      # `cd` prints its own diagnostic on failure.
-      0)
-        if ! dir_absolute="$(absolute_path "$dir")"; then
-          status=1
-        else
-          dependent_worktree="$(live_dependent_worktree "$dir")"
-          dependent_superproject="$(live_superproject "$dir")"
-          # In each of these two cases, say why rather than saying nothing:
-          # the branch really was deleted, and the user is entitled to know
-          # why this command is not offering the directory for deletion.
-          if [ -n "${dependent_worktree}" ]; then
-            # Removing this directory would remove the repository that the
-            # other worktree's `.git` file points into.
-            echo "${SCRIPT_NAME}: not listing ${dir_absolute}, which hosts the worktree ${dependent_worktree}" >&2
-          elif [ -n "${dependent_superproject}" ]; then
-            # Removing this directory would delete part of the superproject's
-            # working tree.
-            echo "${SCRIPT_NAME}: not listing ${dir_absolute}, which is a submodule of the working tree ${dependent_superproject}" >&2
-          else
-            report_dir "${dir_absolute}"
-          fi
-        fi
-        ;;
-      1 | 2 | 3) ;;
-      *)
-        echo "${SCRIPT_NAME}: is_deleted_branch returned status ${is_deleted_status} on: $dir" >&2
+  # Only status 0 from `is_deleted_branch` means "the branch was deleted".
+  # Statuses 1, 2, and 3 are answers of "no" or "cannot tell", each of which
+  # it has already explained if it is worth explaining.  Any other status
+  # would mean that it could not answer at all, which must not be silently
+  # reported as "there is nothing to delete".
+  #
+  # Call the function of remote-functions.sh rather than running the
+  # `is-deleted-branch` command, which is a wrapper around it.  One process
+  # for the whole scan is what lets one `git ls-remote` answer for every
+  # directory that asks the same remote the same way:  what the function
+  # remembers, a subprocess per directory would throw away.
+  #
+  # Redirect stdin from /dev/null, because the function runs `git`, which
+  # runs `ssh`, and this script must not stop to await input.
+  is_deleted_branch "$dir" < /dev/null
+  is_deleted_status=$?
+  case "${is_deleted_status}" in
+    # `cd` prints its own diagnostic on failure.
+    0)
+      if ! dir_absolute="$(absolute_path "$dir")"; then
         status=1
-        ;;
-    esac
-    # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
-    # git -C "$dir" remote prune origin 2>&1 > /dev/null
-  else
-    # It is not the top level of a working tree.
-    if [ -f "$dir/.project" ] && only_dot_project "$dir"; then
-      # It has only the `.project` file and no other content.
-      # `cd` prints its own diagnostic on failure.
-      if dir_absolute="$(absolute_path "$dir")"; then
-        report_dir "${dir_absolute}"
       else
-        status=1
+        # A directory that holds nothing but `.project` files is no
+        # repository, so these two queries find nothing in one and cost two
+        # `git` invocations that answer "no".  That is a scan of the leftovers
+        # of deleted branches, not of every directory examined, and asking
+        # unconditionally is what keeps the guard from depending on how the
+        # directory came to be reported.
+        dependent_worktree="$(live_dependent_worktree "$dir")"
+        dependent_superproject="$(live_superproject "$dir")"
+        # In each of these two cases, say why rather than saying nothing:
+        # the branch really was deleted, and the user is entitled to know
+        # why this command is not offering the directory for deletion.
+        if [ -n "${dependent_worktree}" ]; then
+          # Removing this directory would remove the repository that the
+          # other worktree's `.git` file points into.
+          echo "${SCRIPT_NAME}: not listing ${dir_absolute}, which hosts the worktree ${dependent_worktree}" >&2
+        elif [ -n "${dependent_superproject}" ]; then
+          # Removing this directory would delete part of the superproject's
+          # working tree.
+          echo "${SCRIPT_NAME}: not listing ${dir_absolute}, which is a submodule of the working tree ${dependent_superproject}" >&2
+        else
+          report_dir "${dir_absolute}"
+        fi
       fi
-    fi
-  fi
+      ;;
+    1 | 2 | 3) ;;
+    *)
+      echo "${SCRIPT_NAME}: is_deleted_branch returned status ${is_deleted_status} on: $dir" >&2
+      status=1
+      ;;
+  esac
+  # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
+  # git -C "$dir" remote prune origin 2>&1 > /dev/null
 }
 
 # Examines directory $1 and every directory below it.
