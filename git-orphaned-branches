@@ -20,10 +20,12 @@
 # rather than by a newline, which is safe for directory names that contain
 # whitespace, a newline, or a glob metacharacter.  Without it, a directory
 # name that contains a newline is indistinguishable from two directory names.
+# --print0 has no effect together with --remove, which prints no directory.
 #
 # With --remove, each directory that this command would list is removed, by
-# running `git-remove-branch-directory` on it, and the directories that were
-# removed are printed in the same format as without --remove.  That script
+# running `git-remove-branch-directory` on it, and nothing is printed on
+# standard output:  what the user asked for is the removal, and a list of
+# what is gone is of no use to a program or to a person.  That script
 # refuses to remove a directory that holds uncommitted changes or commits
 # that no remote-tracking ref holds, so --remove can leave a directory
 # behind; it says why, on standard error, and the exit status is then 1.
@@ -431,7 +433,8 @@ holds_kept_dir() {
 # The removal phase.  Each directory goes through
 # `git-remove-branch-directory`, which refuses to remove one that holds
 # uncommitted changes or commits that no remote-tracking ref holds, and says
-# why; only the directories that it removed are printed.
+# why.  Nothing is printed on standard output; the only report of a directory
+# is the diagnostic about one that was kept.
 #
 # The order is the reverse of the order of discovery, which means innermost
 # first:  the scan descends into a directory that it reported, because such a
@@ -456,10 +459,8 @@ if [ -n "${remove}" ]; then
     fi
     # Redirect stdin from /dev/null, because this script must not stop to
     # await input.
-    if "${SCRIPT_DIR}"/git-remove-branch-directory -- "${removed_dir}" \
+    if ! "${SCRIPT_DIR}"/git-remove-branch-directory -- "${removed_dir}" \
       < /dev/null; then
-      print_dir "${removed_dir}"
-    else
       keep_dir "${removed_dir}"
       status=1
     fi

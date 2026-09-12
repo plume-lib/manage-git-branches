@@ -538,7 +538,7 @@ check_scan 3 'two directories whose own configuration breaks their queries' \
 ###########################################################################
 
 # `--remove` removes each directory that it would otherwise list, by running
-# `git-remove-branch-directory`, and prints the ones that it removed.  That
+# `git-remove-branch-directory`, and prints nothing on standard output.  That
 # script refuses a directory that holds work, so `--remove` can leave one
 # behind; it says why, and the exit status says that not everything was
 # removed.
@@ -555,17 +555,13 @@ echo "an uncommitted change" >> "${work}/removal/c-branch-r2/file.txt"
 git -C "${work}/seed" push -q origin --delete r1
 git -C "${work}/seed" push -q origin --delete r2
 
-removal_r1="$(absolute_path "${work}/removal/c-branch-r1")"
-removal_project="$(absolute_path "${work}/removal/c-branch-project")"
 removal_stderr="${work}/removal-stderr"
-if output="$(cd "${work}/removal" && "${GIT_ORPHANED_BRANCHES}" --remove \
-  2> "${removal_stderr}")"; then
+if (cd "${work}/removal" && "${GIT_ORPHANED_BRANCHES}" --remove \
+  > "${work}/removal.out" 2> "${removal_stderr}"); then
   fail "--remove exited with status 0 although a removal was refused"
 fi
-removal_expected="$(printf '%s\n%s\n' "${removal_project}" "${removal_r1}" | sort)"
-removal_actual="$(printf '%s\n' "${output}" | grep '.' | sort)"
-if [ "${removal_actual}" != "${removal_expected}" ]; then
-  fail "--remove printed [${removal_actual}], expected [${removal_expected}]"
+if [ -s "${work}/removal.out" ]; then
+  fail "--remove printed [$(cat "${work}/removal.out")], expected no output"
 fi
 if [ -e "${work}/removal/c-branch-r1" ]; then
   fail "--remove did not remove ${work}/removal/c-branch-r1"
@@ -591,18 +587,20 @@ if [ ! -d "${work}/removal/c-branch-r2" ]; then
   fail "--remove removed a directory that holds uncommitted changes"
 fi
 
-# `--remove --print0` separates the names of the removed directories with NUL,
-# as `--print0` alone separates the names of the listed ones.
+# `--print0` says how to separate the directories that are printed, and
+# `--remove` prints none, so the two together still print nothing, and
+# `--remove` does its work as it does alone.
 git -C "${work}/seed" push -q origin main:refs/heads/r4
 mkdir -p "${work}/removal0"
 git clone -q -b r4 "${work}/remote.git" "${work}/removal0/c-branch-r4"
-removal_r4="$(absolute_path "${work}/removal0/c-branch-r4")"
 git -C "${work}/seed" push -q origin --delete r4
-printf '%s\0' "${removal_r4}" > "${work}/removal0.goal"
-(cd "${work}/removal0" && "${GIT_ORPHANED_BRANCHES}" --remove --print0) \
-  > "${work}/removal0.actual"
-cmp -s "${work}/removal0.goal" "${work}/removal0.actual" \
-  || fail "--remove --print0 output differs from ${work}/removal0.goal"
+if ! (cd "${work}/removal0" && "${GIT_ORPHANED_BRANCHES}" --remove --print0) \
+  > "${work}/removal0.actual"; then
+  fail "--remove --print0 exited with a failure status although the removal succeeded"
+fi
+if [ -s "${work}/removal0.actual" ]; then
+  fail "--remove --print0 printed [$(cat "${work}/removal0.actual")], expected no output"
+fi
 if [ -e "${work}/removal0/c-branch-r4" ]; then
   fail "--remove --print0 did not remove ${work}/removal0/c-branch-r4"
 fi
@@ -620,16 +618,12 @@ git clone -q -b n2 "${work}/remote.git" \
   "${work}/nested/c-branch-outer/c-branch-inner"
 git -C "${work}/seed" push -q origin --delete n1
 git -C "${work}/seed" push -q origin --delete n2
-nested_outer="$(absolute_path "${work}/nested/c-branch-outer")"
-nested_inner="$(absolute_path "${work}/nested/c-branch-outer/c-branch-inner")"
-if ! output="$(cd "${work}/nested" && "${GIT_ORPHANED_BRANCHES}" --remove \
-  2> "${removal_stderr}")"; then
+if ! (cd "${work}/nested" && "${GIT_ORPHANED_BRANCHES}" --remove \
+  > "${work}/nested.out" 2> "${removal_stderr}"); then
   fail "--remove exited with a failure status although both nested directories were removable: $(cat "${removal_stderr}")"
 fi
-nested_expected="$(printf '%s\n%s\n' "${nested_outer}" "${nested_inner}" | sort)"
-nested_actual="$(printf '%s\n' "${output}" | grep '.' | sort)"
-if [ "${nested_actual}" != "${nested_expected}" ]; then
-  fail "--remove printed [${nested_actual}], expected [${nested_expected}]"
+if [ -s "${work}/nested.out" ]; then
+  fail "--remove printed [$(cat "${work}/nested.out")], expected no output"
 fi
 if [ -e "${work}/nested/c-branch-outer" ]; then
   fail "--remove did not remove ${work}/nested/c-branch-outer"
@@ -658,7 +652,7 @@ if [ ! -d "${work}/nested-kept/c-branch-outer" ]; then
   fail "--remove removed a directory that contains one that was not removed"
 fi
 if [ -s "${work}/nested-kept.out" ]; then
-  fail "--remove printed [$(cat "${work}/nested-kept.out")] although it removed nothing"
+  fail "--remove printed [$(cat "${work}/nested-kept.out")], expected no output"
 fi
 if ! grep -q -F -- 'contains a directory that was not removed' \
   "${removal_stderr}"; then
@@ -671,7 +665,7 @@ if ! output="$(cd "${work}/removal-empty" && "${GIT_ORPHANED_BRANCHES}" --remove
   fail "--remove exited with a failure status although it found nothing"
 fi
 if [ -n "${output}" ]; then
-  fail "--remove printed [${output}] although it found nothing"
+  fail "--remove printed [${output}], expected no output"
 fi
 if [ ! -d "${work}/removal-empty/not-a-branch-directory" ]; then
   fail "--remove removed a directory that it does not list"
