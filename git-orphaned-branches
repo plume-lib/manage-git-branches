@@ -24,18 +24,14 @@
 #
 # With --remove, each directory that this command would list is removed, by
 # running `git-remove-branch-directory` on it, and nothing is printed on
-# standard output:  what the user asked for is the removal, and a list of
-# what is gone is of no use to a program or to a person.  That script
-# refuses to remove a directory that holds uncommitted changes or commits
-# that no remote-tracking ref holds, so --remove can leave a directory
-# behind; it says why, on standard error, and the exit status is then 1.
+# standard output.  `git-remove-branch-directory` can leave a directory
+# behind; if so, this script says why, on standard error, and the exit status is then 1.
 # None of that script's `--force` flags is passed through:  a waiver that
 # applied to every directory of a recursive scan would be a foot-gun, so the
 # way to override one refusal is to run `git-remove-branch-directory` on that
 # directory with the flag that the refusal names.  A directory that contains
 # another reported directory is removed after the one it contains, and only if
-# that one was removed:  the inner directory's checks would be worth nothing if
-# the outer directory's `rm -rf` ran first.
+# that one was removed.
 #
 # Usually, a remote branch disappears because its PR was merged.  It
 # is conceivable that the branch has local commits that were never

@@ -59,8 +59,7 @@ The commands are:
   `[--force] [--force-uncommitted] [--force-unpushed] DIRECTORY...`:
   Removes a branch directory, unless the removal would lose work:  it refuses
   a directory that holds uncommitted changes to tracked files, or commits
-  that no remote-tracking ref holds.  Each refusal says how much would be
-  lost and names the flag that waives that check.
+  that no remote-tracking ref holds.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
