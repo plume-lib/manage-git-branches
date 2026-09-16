@@ -18,7 +18,8 @@
 #    Untracked and ignored files do not count:  a branch directory is full of
 #    build output, and refusing on account of that would refuse nearly every
 #    directory and make this command useless.
-#  * Commits that no remote-tracking ref holds, waived by `--force-unpushed`.
+#  * Commits that no remote-tracking ref and no tag holds, waived by
+#    `--force-unpushed`.
 #    The question is about every ref of the clone, not just the branch that is
 #    checked out, because `rm -rf` takes all of them with it:  a clone with an
 #    unpushed commit on a branch that nobody has looked at in a year is
@@ -295,8 +296,9 @@ remove_branch_directory() {
 
   if [ "${remove_kind}" = 'working-tree' ] \
     || [ "${remove_kind}" = 'bare-repository' ]; then
-    # Commits that no remote-tracking ref holds.  `rm -rf` destroys the whole
-    # repository, so ask about every ref, not just the checked-out branch.
+    # Commits that no remote-tracking ref and no tag holds.  `rm -rf` destroys
+    # the whole repository, so ask about every ref, not just the checked-out
+    # branch.
     # `--all` is what makes that so:  it covers HEAD, and so a commit made on
     # a detached HEAD, and every ref below `refs/`, and so a stash entry --
     # each of them work that no branch names and that removing this directory
@@ -309,17 +311,30 @@ remove_branch_directory() {
     # `git branch --delete`'s merged-into-upstream test.  A remote-tracking
     # ref counts as holding the commits, which is right:  those commits are in
     # the remote.
+    # A tag counts as holding them too.  `git clone` and `git fetch` copy the
+    # remote's tags into `refs/tags`, the same namespace that a tag created
+    # here uses, and git keeps no remote-tracking ref for a tag, so nothing
+    # local tells the two apart and this command asks no remote.  Without
+    # `--tags`, every commit that only a tag names counted as unpushed work,
+    # which refused any clone of a repository whose tags name commits that no
+    # branch's history contains -- an old release tag, for one.  That is
+    # fetched history rather than work, it is as safe in the remote as any
+    # commit on a remote-tracking ref, and no push could have cleared the
+    # refusal, so such a clone could never be removed without a flag.  The
+    # cost is that work that a local tag alone names is not caught; a commit
+    # is nearly always on a branch, HEAD, or the stash as well, and each of
+    # those still counts.
     remove_unpushed="$(git -C "${remove_dir}" rev-list --count --all \
-      --not --remotes 2> /dev/null)"
+      --not --remotes --tags 2> /dev/null)"
     if [ -z "${remove_unpushed}" ]; then
       echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot tell whether it holds commits that no other ref holds" >&2
       remove_refusals=1
     elif [ "${remove_unpushed}" -gt 0 ]; then
       if [ "${force_unpushed}" -eq 0 ]; then
-        echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: ${remove_unpushed} commit(s) are on no remote-tracking ref; re-run with --force-unpushed" >&2
+        echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: ${remove_unpushed} commit(s) are on no remote-tracking ref or tag; re-run with --force-unpushed" >&2
         remove_refusals=1
       else
-        echo "${SCRIPT_NAME}: ${remove_dir}: --force-unpushed: deleting ${remove_unpushed} commit(s) that are on no remote-tracking ref" >&2
+        echo "${SCRIPT_NAME}: ${remove_dir}: --force-unpushed: deleting ${remove_unpushed} commit(s) that are on no remote-tracking ref or tag" >&2
       fi
     fi
   fi

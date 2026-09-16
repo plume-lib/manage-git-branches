@@ -385,9 +385,9 @@ holds_kept_dir() {
 
 # The removal phase.  Each directory goes through
 # `git-remove-branch-directory`, which refuses to remove one that holds
-# uncommitted changes or commits that no remote-tracking ref holds, and says
-# why.  Nothing is printed on standard output; the only report of a directory
-# is the diagnostic about one that was kept.
+# uncommitted changes or commits that no remote-tracking ref and no tag
+# holds, and says why.  Nothing is printed on standard output; the only report
+# of a directory is the diagnostic about one that was kept.
 #
 # The order is the reverse of the order of discovery, which means innermost
 # first:  the scan descends into a directory that it reported, because such a
