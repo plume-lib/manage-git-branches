@@ -87,7 +87,7 @@ git -C "${work}/seed" add file.txt
 git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
-  stashed detached corrupt stale envgitdir indexfile; do
+  stashed detached localtag corrupt stale envgitdir indexfile; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -99,10 +99,10 @@ make_clone() {
 }
 
 ## Usage: add_unpushed_commit DIRECTORY
-## Puts a commit that no remote-tracking ref holds on a branch that DIRECTORY
-## does not have checked out, and leaves the working tree clean.  That is the
-## case the check exists to catch:  a clone whose unpushed work is on a
-## branch nobody has looked at in a long time.
+## Puts a commit that no remote-tracking ref and no tag holds on a branch that
+## DIRECTORY does not have checked out, and leaves the working tree clean.
+## That is the case the check exists to catch:  a clone whose unpushed work is
+## on a branch nobody has looked at in a long time.
 add_unpushed_commit() {
   echo "unpushed work" > "$1/unpushed.txt"
   git -C "$1" add unpushed.txt
@@ -175,7 +175,7 @@ run_command 'a subdirectory with uncommitted changes, waived' 0 \
 check_gone 'a subdirectory with uncommitted changes, waived' "${inside}/subdir"
 
 ###########################################################################
-## Commits that no remote-tracking ref holds.
+## Commits that no remote-tracking ref and no tag holds.
 ###########################################################################
 
 unpushed="$(make_clone unpushed)"
@@ -183,7 +183,7 @@ add_unpushed_commit "${unpushed}"
 run_command 'unpushed commits' 1 "${unpushed}"
 check_present 'unpushed commits' "${unpushed}"
 check_message 'unpushed commits' \
-  "refusing to remove ${unpushed}: 1 commit(s) are on no remote-tracking ref; re-run with --force-unpushed"
+  "refusing to remove ${unpushed}: 1 commit(s) are on no remote-tracking ref or tag; re-run with --force-unpushed"
 
 # Each flag waives exactly one check.
 run_command 'unpushed commits, with the other flag' 1 \
@@ -192,7 +192,7 @@ check_present 'unpushed commits, with the other flag' "${unpushed}"
 run_command 'unpushed commits waived' 0 --force-unpushed "${unpushed}"
 check_gone 'unpushed commits waived' "${unpushed}"
 check_message 'unpushed commits waived' \
-  "--force-unpushed: deleting 1 commit(s) that are on no remote-tracking ref"
+  "--force-unpushed: deleting 1 commit(s) that are on no remote-tracking ref or tag"
 
 # A directory that fails both checks needs both waivers, which is what
 # `--force` is.
@@ -223,7 +223,7 @@ git -C "${stashed}" stash -q
 run_command 'a stash entry' 1 "${stashed}"
 check_present 'a stash entry' "${stashed}"
 check_message 'a stash entry' \
-  "are on no remote-tracking ref; re-run with --force-unpushed"
+  "are on no remote-tracking ref or tag; re-run with --force-unpushed"
 run_command 'a stash entry waived' 0 --force-unpushed "${stashed}"
 check_gone 'a stash entry waived' "${stashed}"
 
@@ -235,10 +235,63 @@ git -C "${detached}" commit -q -a -m "A commit on a detached HEAD"
 run_command 'a commit on a detached HEAD' 1 "${detached}"
 check_present 'a commit on a detached HEAD' "${detached}"
 check_message 'a commit on a detached HEAD' \
-  "are on no remote-tracking ref; re-run with --force-unpushed"
+  "are on no remote-tracking ref or tag; re-run with --force-unpushed"
 run_command 'a commit on a detached HEAD, waived' 0 --force-unpushed \
   "${detached}"
 check_gone 'a commit on a detached HEAD, waived' "${detached}"
+
+###########################################################################
+## Commits that only a tag names.
+###########################################################################
+
+# A tag that the remote holds names a commit that no branch's history
+# contains, as an old release tag can.  A clone fetches such a tag into
+# `refs/tags`, where git keeps no remote-tracking ref for it, so the check
+# counted its commit as unpushed work and refused a clone that held nothing
+# of the user's at all -- and no push could have cleared the refusal, since
+# the commit was in the remote already.
+#
+# This needs a remote of its own.  Pushing the tag to ${remote} would put it
+# in every later clone, where it names the history of `main` as well and so
+# would answer for commits that the tests above and below want asked about.
+tagremote="${work}/tagrepo.git"
+git init -q --bare -b main "${tagremote}"
+git clone -q "${tagremote}" "${work}/tagseed" 2> /dev/null
+echo "first line" > "${work}/tagseed/file.txt"
+git -C "${work}/tagseed" add file.txt
+git -C "${work}/tagseed" commit -q -m "Initial commit"
+git -C "${work}/tagseed" push -q -u origin main
+git -C "${work}/tagseed" checkout -q --detach
+echo "a line that only a tag names" >> "${work}/tagseed/file.txt"
+git -C "${work}/tagseed" commit -q -a -m "A commit that only a tag names"
+git -C "${work}/tagseed" tag fetched-tag
+git -C "${work}/tagseed" push -q origin fetched-tag
+
+tagged="${work}/tagrepo-branch-tagged"
+git clone -q -b main "${tagremote}" "${tagged}"
+# Guard the premise:  the clone really did fetch the tag, and the commit that
+# the tag names really is on no remote-tracking ref of the clone.
+if [ "$(git -C "${tagged}" rev-list --count --all --not --remotes)" -eq 0 ]; then
+  fail 'a fetched tag: the clone has no commit outside its remote-tracking refs'
+fi
+run_command 'a fetched tag' 0 "${tagged}"
+check_gone 'a fetched tag' "${tagged}"
+
+# The cost of counting a tag:  a commit that a tag made here alone names is
+# not caught.  Nothing local tells such a tag from a fetched one -- git
+# records no remote for either -- so this is the same case as the one above,
+# seen from the other side.  It loses little, because a commit is nearly
+# always on a branch, HEAD, or the stash as well, and each of those still
+# counts; the commit below is on none of them only because HEAD was moved off
+# it deliberately.
+localtag="$(make_clone localtag)"
+git -C "${localtag}" checkout -q --detach
+echo "work that only a local tag names" >> "${localtag}/file.txt"
+git -C "${localtag}" commit -q -a -m "A commit that only a local tag names"
+git -C "${localtag}" tag a-local-tag HEAD
+git -C "${localtag}" checkout -q localtag
+run_command 'a tag made locally' 0 "${localtag}"
+check_gone 'a tag made locally' "${localtag}"
 
 ###########################################################################
 ## A check that cannot run.
@@ -343,7 +396,7 @@ if [ "${envstatus}" -ne 1 ]; then
 fi
 check_present 'a target with GIT_DIR set' "${envtarget}"
 check_message 'a target with GIT_DIR set' "uncommitted changes"
-check_message 'a target with GIT_DIR set' "on no remote-tracking ref"
+check_message 'a target with GIT_DIR set' "on no remote-tracking ref or tag"
 
 # $GIT_INDEX_FILE names the index alone, and the uncommitted-changes check is
 # the one that reads an index.  A modified tracked file is caught through a
@@ -379,7 +432,7 @@ git clone -q --bare "${remote}" "${bareonly}"
 run_command 'a bare repository whose commits are nowhere else' 1 "${bareonly}"
 check_present 'a bare repository whose commits are nowhere else' "${bareonly}"
 check_message 'a bare repository whose commits are nowhere else' \
-  "on no remote-tracking ref"
+  "on no remote-tracking ref or tag"
 
 # The same refusal is waived by the same flag as a clone's.
 run_command 'a forced bare repository' 0 --force-unpushed "${bareonly}"
@@ -401,7 +454,7 @@ bareinside="${work}/myrepo-branch-bareinside.git"
 git clone -q --bare "${remote}" "${bareinside}"
 run_command 'a directory inside a bare repository' 1 "${bareinside}/objects"
 check_present 'a directory inside a bare repository' "${bareinside}/objects"
-check_message 'a directory inside a bare repository' "on no remote-tracking ref"
+check_message 'a directory inside a bare repository' "on no remote-tracking ref or tag"
 
 ###########################################################################
 ## Arguments.
