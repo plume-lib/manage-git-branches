@@ -311,19 +311,9 @@ remove_branch_directory() {
     # `git branch --delete`'s merged-into-upstream test.  A remote-tracking
     # ref counts as holding the commits, which is right:  those commits are in
     # the remote.
-    # A tag counts as holding them too.  `git clone` and `git fetch` copy the
-    # remote's tags into `refs/tags`, the same namespace that a tag created
-    # here uses, and git keeps no remote-tracking ref for a tag, so nothing
-    # local tells the two apart and this command asks no remote.  Without
-    # `--tags`, every commit that only a tag names counted as unpushed work,
-    # which refused any clone of a repository whose tags name commits that no
-    # branch's history contains -- an old release tag, for one.  That is
-    # fetched history rather than work, it is as safe in the remote as any
-    # commit on a remote-tracking ref, and no push could have cleared the
-    # refusal, so such a clone could never be removed without a flag.  The
-    # cost is that work that a local tag alone names is not caught; a commit
-    # is nearly always on a branch, HEAD, or the stash as well, and each of
-    # those still counts.
+    # A tag counts as holding them too.  With this code, work that a local tag
+    # alone names is not caught; however, a commit is nearly always also on a
+    # branch, HEAD, or the stash, and each of those still counts.
     remove_unpushed="$(git -C "${remove_dir}" rev-list --count --all \
       --not --remotes --tags 2> /dev/null)"
     if [ -z "${remove_unpushed}" ]; then
