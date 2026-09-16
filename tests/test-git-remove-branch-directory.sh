@@ -13,7 +13,7 @@
 
 SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
-COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
+COMMANDS_DIR="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)" || exit 1
 COMMAND="${COMMANDS_DIR}/git-remove-branch-directory"
 
 # shellcheck source=lib-git-test-env.sh

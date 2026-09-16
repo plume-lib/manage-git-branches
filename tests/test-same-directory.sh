@@ -13,7 +13,7 @@ set -e
 
 SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
-COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
+COMMANDS_DIR="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)" || exit 1
 
 . "${TESTS_DIR}/lib-git-test-env.sh"
 

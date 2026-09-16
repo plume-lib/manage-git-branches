@@ -11,8 +11,9 @@
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
-IS_DELETED_BRANCH="$(dirname -- "${SCRIPT_DIR}")/is-deleted-branch"
-GIT_ORPHANED_BRANCHES="$(dirname -- "${SCRIPT_DIR}")/git-orphaned-branches"
+COMMANDS_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)" || exit 1
+IS_DELETED_BRANCH="${COMMANDS_DIR}/is-deleted-branch"
+GIT_ORPHANED_BRANCHES="${COMMANDS_DIR}/git-orphaned-branches"
 
 . "${SCRIPT_DIR}/lib-git-test-env.sh"
 
