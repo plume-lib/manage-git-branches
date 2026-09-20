@@ -37,8 +37,11 @@
 # the empty `bin` that Eclipse leaves behind qualify.  Anything else -- a
 # regular file that is not named `.project`, a symbolic link, or a directory
 # that holds either -- is content, and the directory is then judged as a
-# working tree or not, like any other.  The directory itself must hold a
-# `.project` file:  an empty directory is not the leftover of anything.
+# working tree or not, like any other.  At least one `.project` file must
+# appear somewhere in the tree, though not necessarily in the directory
+# itself:  a tree of nothing but empty directories is the leftover of
+# nothing, whereas a branch whose Eclipse projects were all below its top
+# level leaves its `.project` files there and none at the top.
 #
 # Status 2 is about a working tree, not about a clone.  A submodule's working
 # tree and a linked worktree are working trees like any other -- what

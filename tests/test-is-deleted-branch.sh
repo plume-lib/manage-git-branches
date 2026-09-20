@@ -385,9 +385,14 @@ ln -s no-such-file "${testdir}/dotproject-plus-symlink/dangling"
 ## nothing.
 mkdir "${testdir}/dotproject-empty"
 
-## A `.project` file below the directory but not in it.
+## A `.project` file below the directory but not in it, which is what a
+## branch whose Eclipse projects were all below its top level leaves behind.
 mkdir -p "${testdir}/dotproject-nested-only/sub"
 : > "${testdir}/dotproject-nested-only/sub/.project"
+
+## A tree of nothing but empty directories, which holds no `.project` file
+## anywhere and is the leftover of nothing.
+mkdir -p "${testdir}/dotproject-empty-tree/sub/deeper"
 
 ## A working copy that holds a `.project` file, as an Eclipse project's clone
 ## does.  Its branch still exists in the remote, and the `.git` directory
@@ -465,8 +470,10 @@ expect_status 2 "${testdir}/dotproject-deep-file" \
 expect_status 2 "${testdir}/dotproject-plus-symlink" \
   'directory that holds a .project file and a symbolic link'
 expect_status 2 "${testdir}/dotproject-empty" 'directory that holds nothing'
-expect_status 2 "${testdir}/dotproject-nested-only" \
+expect_status 0 "${testdir}/dotproject-nested-only" \
   'directory with no .project file of its own, below which there is one'
+expect_status 2 "${testdir}/dotproject-empty-tree" \
+  'directory that holds nothing but empty directories'
 expect_status 1 "${testdir}/myrepo-live-project" \
   'working copy that holds a .project file and whose branch exists in the remote'
 expect_status 2 "${nonexistent}" 'path that does not exist'

@@ -730,9 +730,14 @@ remote_heads() {
 ## as nothing.
 ##
 ## This says only what is in DIRECTORY; the caller decides what that means.
-## `is_deleted_branch` also requires a `.project` file at DIRECTORY's own top
-## level, so that an empty directory, which satisfies this test only
-## vacuously, is not reported as a deleted branch.
+## A directory that holds nothing satisfies this test only vacuously, so the
+## variable `only_dot_project_found` is set to a nonempty value if at least
+## one `.project` file was seen, and is left alone otherwise.  A caller that
+## distinguishes a tree of `.project` files from a tree of nothing -- as
+## `is_deleted_branch` does -- sets that variable to the empty string before
+## the call and tests it after.  A shell function has no local variables, so
+## the recursive calls below all set the one variable, and it therefore
+## reports about the whole tree.
 ##
 ## A symbolic link is content, whether it names a directory, a file, or
 ## nothing:  it is neither skipped as a `.project` file nor descended into.
@@ -768,6 +773,7 @@ only_dot_project() {
         # can hold anything, so leave it to the test below, which descends
         # into it like any other directory.
         if [ -f "$1" ] && [ ! -L "$1" ]; then
+          only_dot_project_found=1
           shift
           continue
         fi
@@ -828,12 +834,16 @@ is_deleted_branch() {
   # `.project` file and which `only_dot_project` therefore rejects at its
   # first entry.
   #
-  # Require a `.project` file in DIRECTORY itself.  `only_dot_project` is
-  # satisfied by a directory that holds nothing at all, and an empty directory
-  # is not evidence of an Eclipse project that a branch directory once held.
-  if [ -f "${is_deleted_branch_dir}/.project" ] \
-    && [ ! -L "${is_deleted_branch_dir}/.project" ] \
-    && only_dot_project "${is_deleted_branch_dir}"; then
+  # Require a `.project` file somewhere in the tree.  `only_dot_project` is
+  # satisfied by a directory that holds nothing at all, and a tree of nothing
+  # but empty directories is not evidence of an Eclipse project that a branch
+  # directory once held.  The `.project` file need not be in DIRECTORY
+  # itself:  a branch whose Eclipse projects were all below its top level,
+  # such as a `java/lib` that Eclipse knew as a project, leaves its metadata
+  # there and none at the top.
+  only_dot_project_found=
+  if only_dot_project "${is_deleted_branch_dir}" \
+    && [ -n "${only_dot_project_found}" ]; then
     return 0
   fi
 

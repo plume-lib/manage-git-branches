@@ -116,9 +116,24 @@ mkdir -p "${work}/dot-project/p-plain-project"
 touch "${work}/dot-project/p-plain-project/.project"
 
 # A `*-branch-*` directory inside another one, which the walk has to descend
-# into:  a branch directory can hold a clone of another branch.
+# into:  a branch directory can hold a clone of another branch.  The outer
+# directory holds a file of its own, so that it is content rather than a
+# leftover of `.project` files and the walk descends into it instead of
+# reporting it.
 mkdir -p "${work}/dot-project/p-branch-outer/q-branch-inner"
-touch "${work}/dot-project/p-branch-outer/q-branch-inner/.project"
+touch "${work}/dot-project/p-branch-outer/other" \
+  "${work}/dot-project/p-branch-outer/q-branch-inner/.project"
+
+# Contains no `.project` file of its own, but holds one further down, which is
+# what a branch whose Eclipse projects were all below its top level leaves
+# behind.  The whole tree is a leftover, so it is reported and the walk does
+# not descend into it.
+mkdir -p "${work}/dot-project/p-branch-nested-project/java/lib"
+touch "${work}/dot-project/p-branch-nested-project/java/lib/.project"
+
+# Contains nothing but empty directories, so it holds no `.project` file
+# anywhere and is the leftover of nothing.
+mkdir -p "${work}/dot-project/p-branch-empty-tree/sub/deeper"
 
 # A `*-branch-*` directory behind a symbolic link to a directory.  The walk
 # does not follow such a link, which is what keeps a link to an ancestor from
@@ -169,6 +184,8 @@ check "p-branch-no-project" "unlisted"
 check "p-plain-project" "unlisted"
 check "p-branch-outer" "unlisted"
 check "p-branch-outer/q-branch-inner" "listed"
+check "p-branch-nested-project" "listed"
+check "p-branch-empty-tree" "unlisted"
 if printf '%s\n' "${output}" | grep -q -F -- 'p-branch-behind-link'; then
   echo "FAIL: git-orphaned-branches followed a symbolic link to a directory"
   status=1
