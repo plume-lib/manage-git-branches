@@ -13,7 +13,7 @@
 #
 # This script does the following:
 #  * pull FROM_DIR and TO_DIR from their remotes,
-#  * pull FROM_DIR into TO_DIR,
+#  * merge FROM_DIR's branch into TO_DIR,
 #  * build TO_DIR using `compile-project` (see its documentation),
 #    (Skips the compilation step if environment variable
 #    MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set.)
@@ -135,8 +135,8 @@ fi
 ## directory has checked out, or to the empty string if HEAD is detached or
 ## the directory is not a working copy.  It is the local branch, not the
 ## upstream branch that this function is named for; the two can differ.  The
-## `git pull` below names the branch it merges, and this is where the name is
-## determined.
+## `git fetch` and `git merge` below act on that branch, and this is where its
+## name is determined.
 check_upstream() {
   checked_out_branch=''
   # If the directory is not a working copy, or HEAD is detached, let a
@@ -264,8 +264,9 @@ git_push_to() {
   if ! check_upstream "${from_absolute}"; then
     return 1
   fi
-  # The branch that the `git pull` below merges.  Read it now:  the call to
-  # `check_upstream` for ${to_absolute} overwrites it with TO_DIR's branch.
+  # The branch that the `git fetch` below brings over.  Read it now:  the
+  # call to `check_upstream` for ${to_absolute} overwrites it with TO_DIR's
+  # branch.
   from_branch="${checked_out_branch}"
 
   if ! check_branch_exists "${from_absolute}"; then
@@ -297,8 +298,8 @@ git_push_to() {
     return 1
   fi
 
-  # Pull from a relative pathname, so that the merge commit message that git
-  # generates does not embed this machine's directory layout in shared history.
+  # Fetch from a relative pathname, so that the pathname that `git fetch`
+  # records in FETCH_HEAD does not embed this machine's directory layout.
   # `relative-path` is a portable version of `realpath --relative-to`, whose
   # `--relative-to` option the BSD and macOS versions of `realpath` lack.
   # Note: pwd=to_absolute
@@ -306,27 +307,16 @@ git_push_to() {
     echo "${SCRIPT_NAME}: cannot express ${from_absolute} relative to ${to_absolute}" >&2
     return 1
   fi
-  # `git pull` passes the repository to `git fetch`, which parses options again
-  # and interprets a colon in a bare pathname as an scp-style URL.
+  # `git fetch` parses a colon in a bare pathname as an scp-style URL.
   case "${from_relative}" in
     ./* | ../* | .) ;;
     *) from_relative="./${from_relative}" ;;
   esac
 
-  # Name the branch as well as the repository -- git's ordinary two-operand
-  # form -- so that git's own machinery can say what it merged:
-  #
-  #   Merge branch 'feature' of ../myrepo-branch-feature
-  #
-  # For a pathname with no refspec, `git fetch` writes "<sha>\t\t../DIR"
-  # into FETCH_HEAD, which leaves `fmt-merge-msg` nothing to name, so the
-  # message names the directory but not the branch.  Writing the message with
-  # `-m` instead would fabricate it rather than letting git describe what it
-  # merged, and would discard the commit summaries that `merge.log` turns on.
-  #
-  # This is also slightly more than cosmetic.  `git pull PATH` merges whatever
-  # FROM_DIR's HEAD points at, while `git pull PATH BRANCH` merges the branch
-  # that `check_upstream` determined and `check_branch_exists` validated.  If
+  # Name the branch as well as the repository, rather than fetching the
+  # pathname alone.  `git fetch PATH` brings over whatever FROM_DIR's HEAD
+  # points at, whereas `git fetch PATH BRANCH` brings over the branch that
+  # `check_upstream` determined and `check_branch_exists` validated.  If
   # FROM_DIR's HEAD moved in between, the one-operand form merges something
   # that this script never checked.
   #
@@ -337,15 +327,53 @@ git_push_to() {
   # name.  Given a bare name, such a tag is merged in place of the branch:
   # silently, and with exit status 0, because merging the tag is a perfectly
   # good merge as far as git is concerned.  The full refname admits no such
-  # ambiguity, and `fmt-merge-msg` still writes "Merge branch 'BRANCH' of DIR"
-  # for it.
+  # ambiguity.
   #
   # ${from_branch} is not empty here:  `check_upstream` leaves it empty for a
   # detached HEAD and for a directory that is not a working copy, and
   # `check_branch_exists` above refuses both.
-  if ! git pull -q -- "${from_relative}" "refs/heads/${from_branch}"; then
+  if ! git fetch -q -- "${from_relative}" "refs/heads/${from_branch}"; then
     # Note: pwd=to_absolute
-    echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
+    echo "${SCRIPT_NAME}: problem fetching ${from_absolute} into $(pwd)" >&2
+    return 1
+  fi
+  if ! merge_head="$(git rev-parse --verify --quiet FETCH_HEAD)"; then
+    echo "${SCRIPT_NAME}: cannot read FETCH_HEAD after fetching ${from_absolute} into $(pwd)" >&2
+    return 1
+  fi
+
+  # FROM_DIR and TO_DIR are clones of one project, so the merge should read
+  # the way it does when two branches of one clone are merged:
+  #
+  #   Merge branch 'feature' into main
+  #
+  # `git pull PATH BRANCH` would instead write "Merge branch 'feature' of
+  # ../myrepo-branch-feature into main", and would head the commit summaries
+  # that `merge.log` turns on with "* 'feature' of ../myrepo-branch-feature:".
+  # `fmt-merge-msg` appends " of SOURCE" for every source except ".", the local
+  # repository, and `git fetch` records the pathname that this script fetched
+  # from as the source.  So hand `fmt-merge-msg` the line that `git fetch`
+  # would have written for a branch of this repository.  Git still composes
+  # the message:  the "into BRANCH" suffix, which it omits on the default
+  # branch, and the commit summaries, which `merge.log` governs.
+  #
+  # Composing the message by hand would fabricate it rather than letting git
+  # describe what it merged, and would discard those commit summaries.
+  if ! merge_message="$(printf "%s\t\tbranch '%s' of .\n" \
+    "${merge_head}" "${from_branch}" | git fmt-merge-msg)"; then
+    echo "${SCRIPT_NAME}: cannot compose a merge message for ${from_branch} of ${from_absolute}" >&2
+    return 1
+  fi
+
+  # Merge rather than `git pull`, which rebases if `pull.rebase` is set.  A
+  # rebase would rewrite the branch that this script is about to push.
+  # `--no-edit` keeps a chain of directories from stopping at an editor.
+  # `--no-log` prevents a second copy of the commit summaries:  `git merge`
+  # appends them to a message given with `-m` when `merge.log` is set, and
+  # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
+  if ! git merge -q --no-edit --no-log -m "${merge_message}" "${merge_head}"; then
+    # Note: pwd=to_absolute
+    echo "${SCRIPT_NAME}: problem merging ${from_absolute} into $(pwd)" >&2
     return 1
   fi
 

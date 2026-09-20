@@ -131,19 +131,17 @@ if ! "${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}"; then
 fi
 git -C "${MAIN_DIR}" config branch.main.merge refs/heads/main
 
-# The merge commit that `git-push-to` creates names the branch that it merged
-# and names FROM_DIR by a relative pathname.  `git pull PATH` alone leaves
-# `fmt-merge-msg` nothing to name, because `git fetch` writes no branch name
-# into FETCH_HEAD for a pathname with no refspec; and an absolute pathname
-# would embed this machine's directory layout in shared history.
+# The merge commit that `git-push-to` creates reads the way a merge within a
+# single clone does:  it names the branch that it merged, and it names no
+# directory, neither FROM_DIR's relative pathname nor an absolute pathname
+# that would embed this machine's directory layout in shared history.
 #
 # Both branches get a commit of their own, so that the merge is a real merge
 # rather than a fast-forward, which would create no merge commit at all.
-# `sanitize_git_env` leaves the global configuration empty, and git refuses to
-# pull divergent branches unless something says how to reconcile them.  Merge
-# them, which is what this workflow does; a rebase would leave no merge commit
-# to inspect.
-git -C "${FEATURE_DIR}" config pull.rebase false
+# `git-push-to` merges rather than pulling FROM_DIR, so it creates that merge
+# commit even where `pull.rebase` asks for a rebase; a rebase would rewrite
+# the branch that `git-push-to` then pushes.
+git -C "${FEATURE_DIR}" config pull.rebase true
 echo "feature line" > "${FEATURE_DIR}/feature.txt"
 git -C "${FEATURE_DIR}" add feature.txt
 git -C "${FEATURE_DIR}" commit -q -m "A commit on the feature branch"
@@ -158,19 +156,43 @@ if [ "${merge_parents}" -ne 3 ]; then
   fail "git-push-to did not create a merge commit"
 fi
 merge_subject="$(git -C "${FEATURE_DIR}" log -1 --format=%s)"
+if [ "${merge_subject}" != "Merge branch 'main' into feature1" ]; then
+  fail "unexpected merge commit message: ${merge_subject}"
+fi
 case "${merge_subject}" in
-  *"branch 'main'"*) ;;
-  *) fail "the merge commit does not name the branch: ${merge_subject}" ;;
-esac
-case "${merge_subject}" in
-  *"../myrepo-branch-main"*) ;;
-  *) fail "the merge commit does not name FROM_DIR relatively: ${merge_subject}" ;;
+  *"myrepo-branch-main"*)
+    fail "the merge commit names FROM_DIR: ${merge_subject}"
+    ;;
 esac
 case "${merge_subject}" in
   *"${WORK_DIR}"*)
     fail "the merge commit embeds an absolute pathname: ${merge_subject}"
     ;;
 esac
+
+# `merge.log` puts the merged commits' subjects in the merge commit message,
+# under a heading that names the branch.  Each appears once:  `git-push-to`
+# composes the message with `fmt-merge-msg`, which writes the summaries that
+# `merge.log` asks for, and `git merge` must not append a second copy of them.
+git -C "${FEATURE_DIR}" config merge.log true
+echo "another feature line" >> "${FEATURE_DIR}/feature.txt"
+git -C "${FEATURE_DIR}" commit -q -a -m "Another commit on the feature branch"
+echo "fifth line" >> "${MAIN_DIR}/file.txt"
+git -C "${MAIN_DIR}" commit -q -a -m "Add a fifth line"
+git -C "${MAIN_DIR}" push -q
+if ! "${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}"; then
+  fail "git-push-to failed when merge.log is set"
+fi
+merge_message="$(git -C "${FEATURE_DIR}" log -1 --format=%B)"
+summary_headings="$(printf '%s\n' "${merge_message}" | grep -c "^\* main:")"
+if [ "${summary_headings}" -ne 1 ]; then
+  fail "expected 1 heading for the merged commits, found ${summary_headings}: ${merge_message}"
+fi
+summary_lines="$(printf '%s\n' "${merge_message}" | grep -c "Add a fifth line")"
+if [ "${summary_lines}" -ne 1 ]; then
+  fail "expected 1 summary of the merged commit, found ${summary_lines}: ${merge_message}"
+fi
+git -C "${FEATURE_DIR}" config --unset merge.log
 
 # A tag whose name is the branch's name does not displace the branch.  `git
 # fetch` resolves a bare `BRANCH` by trying `refs/tags/BRANCH` before
