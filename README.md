@@ -35,7 +35,8 @@ The commands are:
   directory is a sibling of the working copy.  This command does not push the
   new branch.
   Below is a definition for an alias `gnb`.
-* [`git-push-to`](git-push-to) `[--nocompile] FROM_DIR TO_DIR ...`:
+* [`git-push-to`](git-push-to)
+  `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.
   Each directory must be the top level of a working copy (that is, of a git
@@ -48,6 +49,15 @@ The commands are:
   directories for two or more of the slugs gets its own chain.
   A slug may also be just `BRANCH`, as in `git-push-to main feature`.
   It matches every ORG; each PROJECT and ORG gets its own chain.
+  With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
+* [`git-rebase-to`](git-rebase-to)
+  `[--nocompile] [--squash] FROM_DIR TO_DIR ...`:
+  Runs `git-push-to` on the arguments, then rebases each branch onto the
+  previous branch, to eliminate merge commits, and force-pushes each
+  branch.  This is useful for maintaining a stack of GitHub pull requests,
+  each of whose base is the previous one.  With `--squash`, each branch
+  becomes a single commit on top of the previous branch.
+  The arguments may be slugs, as for `git-push-to`.
 * [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
@@ -93,9 +103,9 @@ takes effect when it is set to a non-empty value.
 * `MAKE_FLAGS`: `compile-project` passes this to `make`.
 * `ERR_IF_NO_BUILDFILE`: `compile-project` fails if it finds no buildfile.
   Otherwise, `compile-project` succeeds when it finds no buildfile.
-* `MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT`: `git-push-to` and
-  `git-pull-from` skip the compilation step, and push whenever the merge
-  succeeds.
+* `MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT`: `git-push-to`,
+  `git-pull-from`, and `git-rebase-to` skip the compilation step, and push
+  whenever the merge succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
