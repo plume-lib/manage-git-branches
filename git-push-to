@@ -6,10 +6,36 @@
 #
 # Usage:
 #   git-push-to [--nocompile] FROM_DIR TO_DIR ...
+#   git-push-to [--nocompile] [ORG:]BRANCH [ORG:]BRANCH ...
 #
 # Each argument names the top level of a working copy (that is, of a clone).
 # Each may be absolute directory names or relative to the current directory.
 # The first argument may be "--nocompile" to skip the compilation step.
+#
+# Alternately, each argument may be a slug of the form ORG:BRANCH, which names
+# a directory in the current directory:  PROJECT-fork-ORG-branch-BRANCH, or
+# PROJECT-fork-ORG if that directory has BRANCH checked out and the former
+# does not exist.  A "/" in BRANCH is written as "-" in the directory name, as
+# `git-new-branch` does.  Every PROJECT that has a directory for any of the
+# slugs gets its own chain, made of the slugs' directories that exist for that
+# PROJECT.  For example,
+# `git-push-to typetools:master mernst:feature` is equivalent to
+#   git-push-to checker-framework-fork-typetools-branch-master \
+#               checker-framework-fork-mernst-branch-feature
+# and, if stubparser-fork-mernst-branch-feature exists but no stubparser
+# directory for typetools:master does, a PROJECT with a single directory has
+# nothing to push and is skipped.  Slugs and directories cannot be mixed.
+#
+# A slug may also be just BRANCH, which matches every ORG.  Then each PROJECT
+# and ORG gets its own chain, so a chain never goes from one ORG's BRANCH to
+# another ORG's BRANCH.  For example, `git-push-to main feature` pushes
+# PROJECT-fork-ORG-branch-main into PROJECT-fork-ORG-branch-feature for each
+# PROJECT and ORG.  A slug ORG:BRANCH in the same command belongs to every
+# chain of its PROJECT:  `git-push-to typetools:master master feature` pushes
+# typetools's master into each ORG's master, then that into ORG's feature.
+# An argument without ":" that is not a directory is a slug BRANCH only if
+# some directory in the current directory matches it; otherwise it is
+# reported as a missing directory.
 #
 # This script does the following:
 #  * pull FROM_DIR and TO_DIR from their remotes,
@@ -397,6 +423,125 @@ git_push_to() {
   return 0
 }
 
+## Pushes each given directory into the next one.  Returns 1 at the first
+## failure.
+push_chain() {
+  prev=''
+  for arg; do
+    if [ -n "$prev" ]; then
+      if ! git_push_to "$prev" "$arg"; then
+        return 1
+      fi
+    fi
+    prev="$arg"
+  done
+  return 0
+}
+
+## Returns 0 if the argument is a slug, ORG:BRANCH or BRANCH, rather than a
+## directory.  Git forbids a branch name that starts with "/" or ".", or whose
+## component starts with ".".  An argument BRANCH that names no directory in
+## the current directory is not a slug, so that a misspelled directory name
+## is reported as a missing directory.
+is_slug() {
+  if [ -d "$1" ]; then
+    return 1
+  fi
+  case "$1" in
+    '' | */*:* | :* | *: | /* | .* | */.*) return 1 ;;
+    *:*) return 0 ;;
+  esac
+  # slug_matches fails only if it finds a directory for the slug.
+  is_slug_matches="$(slug_matches "$1" 2> /dev/null)" || return 0
+  [ -n "${is_slug_matches}" ]
+}
+
+## Sets ${slug_org}, ${slug_branch}, and ${slug_branch_dir} from the slug
+## ORG:BRANCH or BRANCH.  ${slug_org} is empty if the slug has no ORG.
+## ${slug_branch_dir} is BRANCH as it appears in a directory name.
+parse_slug() {
+  case "$1" in
+    *:*)
+      slug_org="${1%%:*}"
+      slug_branch="${1#*:}"
+      ;;
+    *)
+      slug_org=''
+      slug_branch="$1"
+      ;;
+  esac
+  slug_branch_dir="$(printf '%s\n' "${slug_branch}" | sed -e "s:/:-:g")"
+}
+
+## Returns 0 if the given directory has the given branch checked out.
+has_branch_checked_out() {
+  has_branch_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 1
+  [ "${has_branch_ref}" = "refs/heads/$2" ]
+}
+
+## Prints the directory that the slug ORG:BRANCH names for the given project,
+## or prints nothing and returns 1 if there is none.
+slug_dir() {
+  parse_slug "$2"
+  if [ -d "$1-fork-${slug_org}-branch-${slug_branch_dir}" ]; then
+    if has_branch_checked_out "$1-fork-${slug_org}-branch-${slug_branch_dir}" "${slug_branch}"; then
+      printf '%s\n' "$1-fork-${slug_org}-branch-${slug_branch_dir}"
+      return 0
+    fi
+    return 1
+  fi
+  if [ -d "$1-fork-${slug_org}" ] \
+    && has_branch_checked_out "$1-fork-${slug_org}" "${slug_branch}"; then
+    printf '%s\n' "$1-fork-${slug_org}"
+    return 0
+  fi
+  return 1
+}
+
+## Prints, one per line, PROJECT:ORG for each directory in the current
+## directory that the slug names.  If the slug has no ORG, every ORG matches.
+## Returns 1, after printing an error message, if a directory
+## PROJECT-fork-ORG-branch-BRANCH that the slug names has some other branch
+## checked out, because merging into that directory would merge into the wrong
+## branch.
+slug_matches() {
+  parse_slug "$1"
+  match_status=0
+  for dir in ./*-fork-*-branch-"${slug_branch_dir}"; do
+    if [ ! -d "${dir}" ]; then continue; fi
+    name="${dir#./}"
+    name="${name%-branch-"${slug_branch_dir}"}"
+    project="${name%-fork-*}"
+    org="${name##*-fork-}"
+    # For example, "p-fork-o-branch-x-branch-main" is not a directory for
+    # branch "main".
+    case "${org}" in *-branch-*) continue ;; esac
+    if [ -n "${slug_org}" ] && [ "${org}" != "${slug_org}" ]; then continue; fi
+    if has_branch_checked_out "${dir}" "${slug_branch}"; then
+      printf '%s:%s\n' "${project}" "${org}"
+    else
+      match_actual="$(git -C "${dir}" symbolic-ref --quiet --short HEAD 2> /dev/null)" \
+        || match_actual="a detached HEAD"
+      echo "${SCRIPT_NAME}: ${dir#./} has ${match_actual} checked out, not ${slug_branch}" >&2
+      match_status=1
+    fi
+  done
+  for dir in ./*-fork-*; do
+    if [ ! -d "${dir}" ]; then continue; fi
+    name="${dir#./}"
+    project="${name%-fork-*}"
+    org="${name##*-fork-}"
+    case "${org}" in *-branch-*) continue ;; esac
+    if [ -n "${slug_org}" ] && [ "${org}" != "${slug_org}" ]; then continue; fi
+    # A PROJECT-fork-ORG-branch-BRANCH directory takes precedence.
+    if [ -d "${name}-branch-${slug_branch_dir}" ]; then continue; fi
+    if has_branch_checked_out "${dir}" "${slug_branch}"; then
+      printf '%s:%s\n' "${project}" "${org}"
+    fi
+  done
+  return "${match_status}"
+}
+
 ## Main program starts here.
 
 if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
@@ -407,15 +552,132 @@ fi
 if [ "$#" -lt 2 ]; then
   echo "${SCRIPT_NAME}: not enough arguments" >&2
   echo "Usage: ${SCRIPT_NAME} [--nocompile] FROM_DIR TO_DIR ..." >&2
+  echo "   or: ${SCRIPT_NAME} [--nocompile] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
   exit 1
 fi
 
-prev=''
+num_slugs=0
 for arg; do
-  if [ -n "$prev" ]; then
-    if ! git_push_to "$prev" "$arg"; then
+  if is_slug "$arg"; then
+    num_slugs=$((num_slugs + 1))
+  fi
+done
+
+if [ "${num_slugs}" -eq 0 ]; then
+  push_chain "$@"
+  exit
+fi
+
+if [ "${num_slugs}" -ne "$#" ]; then
+  for arg; do
+    if [ ! -d "$arg" ] && ! is_slug "$arg"; then
+      echo "${SCRIPT_NAME}: no such directory: $arg" >&2
       exit 1
     fi
+  done
+  echo "${SCRIPT_NAME}: cannot mix slugs with directories: $*" >&2
+  exit 1
+fi
+
+newline='
+'
+
+# Resolve every slug before pushing anything, so that a misspelled slug does
+# not leave the work half done.
+#
+# Each chain is identified by a key PROJECT:ORG.  A slug BRANCH, which has no
+# ORG, contributes to the chain for each PROJECT and ORG that has a directory
+# for it, so each chain stays within one ORG.  A slug ORG:BRANCH contributes
+# to every chain for its PROJECT.  A PROJECT with directories only for slugs
+# ORG:BRANCH gets a single chain whose key has an empty ORG.
+keys=''
+explicit_projects=''
+for arg; do
+  if ! arg_matches="$(slug_matches "$arg")"; then
+    exit 1
   fi
-  prev="$arg"
+  parse_slug "$arg"
+  if [ -z "${arg_matches}" ]; then
+    echo "${SCRIPT_NAME}: no directory *-fork-${slug_org:-*}-branch-${slug_branch_dir} (or *-fork-${slug_org:-*} on branch ${slug_branch}) in $(pwd) for $arg" >&2
+    exit 1
+  fi
+  if [ -n "${slug_org}" ]; then
+    explicit_projects="${explicit_projects}${newline}$(printf '%s\n' "${arg_matches}" | sed -e 's/:.*//')"
+  else
+    keys="${keys}${newline}${arg_matches}"
+  fi
 done
+saved_ifs="${IFS}"
+IFS="${newline}"
+for project in ${explicit_projects}; do
+  case "${keys}${newline}" in
+    *"${newline}${project}:"*) ;;
+    *) keys="${keys}${newline}${project}:" ;;
+  esac
+done
+IFS="${saved_ifs}"
+keys="$(printf '%s\n' "${keys}" | sed -e '/^$/d' | sort -u)"
+
+# Git forbids whitespace and glob characters in branch names, so the slugs can
+# be kept in a whitespace-separated string.
+slugs="$*"
+
+status=0
+num_chains=0
+IFS="${newline}"
+for key in ${keys}; do
+  IFS="${saved_ifs}"
+  project="${key%%:*}"
+  org="${key#*:}"
+  if [ -n "${org}" ]; then
+    chain_name="${project} (${org})"
+  else
+    chain_name="${project}"
+  fi
+  chain=''
+  chain_length=0
+  last_dir=''
+  for slug in ${slugs}; do
+    parse_slug "${slug}"
+    if [ -z "${slug_org}" ]; then
+      if [ -z "${org}" ]; then continue; fi
+      slug="${org}:${slug}"
+    fi
+    # For ORG, the slugs ORG:BRANCH and BRANCH name the same directory, which
+    # must not be pushed into itself.
+    if dir="$(slug_dir "${project}" "${slug}")" && [ "${dir}" != "${last_dir}" ]; then
+      last_dir="${dir}"
+      chain="${chain}${dir}${newline}"
+      chain_length=$((chain_length + 1))
+    fi
+  done
+  if [ "${chain_length}" -lt 2 ]; then
+    echo "${SCRIPT_NAME}: skipping ${chain_name}, which has only ${chain%"${newline}"}" >&2
+    IFS="${newline}"
+    continue
+  fi
+  num_chains=$((num_chains + 1))
+  # Run the chain in a subshell, because `git_push_to` changes the working
+  # directory and does not change it back when it fails.  Continue with the
+  # other chains after a failure, because they are independent of it.
+  if ! (
+    set -f
+    IFS="${newline}"
+    # shellcheck disable=SC2086 # Split ${chain} on newlines.
+    set -- ${chain}
+    IFS="${saved_ifs}"
+    set +f
+    push_chain "$@"
+  ); then
+    status=1
+  fi
+  IFS="${newline}"
+done
+IFS="${saved_ifs}"
+
+if [ "${num_chains}" -eq 0 ]; then
+  echo "${SCRIPT_NAME}: no project has directories for two or more of: ${slugs}" >&2
+  exit 1
+fi
+
+exit "${status}"
