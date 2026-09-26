@@ -241,4 +241,36 @@ if ! grep -q "plain-branch-part1 has experiment checked out, not part1" "${WORK_
 fi
 git -C "${WORK_DIR}/work3/plain-branch-part1" checkout -q part1
 
+# A slug BRANCH also names a clone PROJECT that has BRANCH checked out, as
+# when `git-new-branch` has created PROJECT-branch-BRANCH from that clone.
+mkdir "${WORK_DIR}/work4"
+make_remote solo feature
+make_clone solo main ../work4/solo
+make_clone solo feature ../work4/solo-branch-feature
+# Not a clone, so it does not stand for the branch of any enclosing repository.
+mkdir "${WORK_DIR}/work4/notes"
+add_line solo "solo line"
+git -C "${WORK_DIR}/work4/solo" pull -q
+if ! (cd "${WORK_DIR}/work4" && "${COMMANDS_DIR}/git-push-to" main feature); then
+  fail "git-push-to failed on a slug for a clone PROJECT"
+fi
+check_contains ../work4/solo-branch-feature "solo line"
+
+# A PROJECT-branch-BRANCH directory takes precedence over the clone PROJECT.
+make_clone solo main ../work4/solo-branch-main
+add_line solo "second solo line"
+git -C "${WORK_DIR}/work4/solo-branch-main" pull -q
+if ! (cd "${WORK_DIR}/work4" && "${COMMANDS_DIR}/git-push-to" main feature) 2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to failed with both PROJECT and PROJECT-branch-main: $(cat "${WORK_DIR}/stderr")"
+fi
+check_contains ../work4/solo-branch-feature "second solo line"
+if grep -q "second solo line" "${WORK_DIR}/work4/solo/file.txt"; then
+  fail "solo was used, but solo-branch-main takes precedence"
+fi
+
+# The clone PROJECT does not stand for a branch it does not have checked out.
+if (cd "${WORK_DIR}/work4" && "${COMMANDS_DIR}/git-push-to" other-branch feature) 2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to succeeded on a slug that names no directory"
+fi
+
 echo "${SCRIPT_NAME}: OK"

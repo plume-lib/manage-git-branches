@@ -34,7 +34,9 @@
 # and ORG gets its own chain, so a chain never goes from one ORG's BRANCH to
 # another ORG's BRANCH.  A slug BRANCH also names PROJECT-branch-BRANCH, a
 # directory whose name has no ORG, as `git-new-branch` creates from a clone
-# PROJECT; those directories form one more chain for each PROJECT.  For example, `git-push-to main feature` pushes
+# PROJECT, or the clone PROJECT itself if it has BRANCH checked out and the
+# former does not exist; those directories form one more chain for each
+# PROJECT.  For example, `git-push-to main feature` pushes
 # PROJECT-fork-ORG-branch-main into PROJECT-fork-ORG-branch-feature for each
 # PROJECT and ORG.  A slug ORG:BRANCH in the same command belongs to every
 # chain of its PROJECT:  `git-push-to typetools:master master feature` pushes
@@ -807,13 +809,19 @@ has_branch_checked_out() {
 
 ## Prints the directory that the slug ORG:BRANCH names for the given project,
 ## or prints nothing and returns 1 if there is none.  ORG "-" stands for a
-## directory whose name has no ORG.
+## directory whose name has no ORG:  PROJECT-branch-BRANCH, or PROJECT if it
+## has BRANCH checked out and the former does not exist.
 slug_dir() {
   parse_slug "$2"
   if [ "${slug_org}" = "-" ]; then
     if [ -d "$1-branch-${slug_branch_dir}" ] \
       && has_branch_checked_out "$1-branch-${slug_branch_dir}" "${slug_branch}"; then
       printf '%s\n' "$1-branch-${slug_branch_dir}"
+      return 0
+    fi
+    if [ ! -d "$1-branch-${slug_branch_dir}" ] && [ -e "$1/.git" ] \
+      && has_branch_checked_out "$1" "${slug_branch}"; then
+      printf '%s\n' "$1"
       return 0
     fi
     return 1
@@ -847,7 +855,8 @@ check_branch_dir() {
 
 ## Prints, one per line, PROJECT:ORG for each directory in the current
 ## directory that the slug names.  If the slug has no ORG, every ORG matches,
-## and so does PROJECT-branch-BRANCH, for which ORG is "-".
+## and so do PROJECT-branch-BRANCH and a clone PROJECT that has BRANCH
+## checked out, for which ORG is "-".
 ## Returns 1, after printing an error message, if a directory
 ## PROJECT[-fork-ORG]-branch-BRANCH that the slug names has some other branch
 ## checked out, because merging into that directory would merge into the wrong
@@ -882,6 +891,16 @@ slug_matches() {
         continue
       fi
       printf '%s:-\n' "${project}"
+    done
+    for dir in ./*; do
+      if [ ! -e "${dir}/.git" ]; then continue; fi
+      name="${dir#./}"
+      case "${name}" in *-fork-* | *-branch-*) continue ;; esac
+      # A PROJECT-branch-BRANCH directory takes precedence.
+      if [ -d "${name}-branch-${slug_branch_dir}" ]; then continue; fi
+      if has_branch_checked_out "${dir}" "${slug_branch}"; then
+        printf '%s:-\n' "${name}"
+      fi
     done
   fi
   for dir in ./*-fork-*; do
@@ -969,7 +988,7 @@ for arg; do
     if [ -n "${slug_org}" ]; then
       echo "${SCRIPT_NAME}: no directory *-fork-${slug_org}-branch-${slug_branch_dir} (or *-fork-${slug_org} on branch ${slug_branch}) in $(pwd) for $arg" >&2
     else
-      echo "${SCRIPT_NAME}: no directory *-branch-${slug_branch_dir} (or *-fork-* on branch ${slug_branch}) in $(pwd) for $arg" >&2
+      echo "${SCRIPT_NAME}: no directory *-branch-${slug_branch_dir} (or *-fork-* or a clone on branch ${slug_branch}) in $(pwd) for $arg" >&2
     fi
     exit 1
   fi
