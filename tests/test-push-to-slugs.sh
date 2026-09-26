@@ -143,4 +143,63 @@ if (cd "${WORK_DIR}/work" \
   fail "git-push-to succeeded on a mixture of slugs and directories"
 fi
 
+# A "-branch-" directory that has some other branch checked out is an error,
+# and nothing is pushed.
+git -C "${WORK_DIR}/work/proj-fork-me-branch-part1" checkout -q -b experiment
+if (cd "${WORK_DIR}/work" \
+  && "${COMMANDS_DIR}/git-push-to" upstream:main me:part1) 2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to succeeded on a directory with the wrong branch checked out"
+fi
+if ! grep -q "proj-fork-me-branch-part1 has experiment checked out, not part1" "${WORK_DIR}/stderr"; then
+  fail "git-push-to did not report the wrong branch: $(cat "${WORK_DIR}/stderr")"
+fi
+if grep -q "third proj line" "${WORK_DIR}/work/proj-fork-me-branch-part1/file.txt"; then
+  fail "git-push-to pushed into a directory with the wrong branch checked out"
+fi
+git -C "${WORK_DIR}/work/proj-fork-me-branch-part1" checkout -q part1
+
+# Because "/" is written as "-" in a directory name, the slug me:feature-part2
+# names proj-fork-me-branch-feature-part2, which has feature/part2 checked out.
+# That is an error, and nothing is pushed.
+if (cd "${WORK_DIR}/work" \
+  && "${COMMANDS_DIR}/git-push-to" upstream:main me:feature-part2) 2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to succeeded on a slug whose directory has feature/part2 checked out"
+fi
+if ! grep -q "proj-fork-me-branch-feature-part2 has feature/part2 checked out, not feature-part2" \
+  "${WORK_DIR}/stderr"; then
+  fail "git-push-to did not report the feature/part2 versus feature-part2 collision: $(cat "${WORK_DIR}/stderr")"
+fi
+if grep -q "third proj line" "${WORK_DIR}/work/proj-fork-me-branch-feature-part2/file.txt"; then
+  fail "git-push-to pushed into a directory for feature/part2 given slug me:feature-part2"
+fi
+
+# A slug BRANCH matches every ORG, but each chain stays within one ORG.  The
+# forks "a" and "b" of project "multi" have separate remotes with a common
+# history, in a separate work directory.
+mkdir "${WORK_DIR}/work2"
+make_remote multi-a part1
+git clone -q --bare "${WORK_DIR}/multi-a.git" "${WORK_DIR}/multi-b.git"
+make_clone multi-a main ../work2/multi-fork-a-branch-main
+make_clone multi-a part1 ../work2/multi-fork-a-branch-part1
+make_clone multi-b main ../work2/multi-fork-b-branch-main
+make_clone multi-b part1 ../work2/multi-fork-b-branch-part1
+add_line multi-a "a line"
+git -C "${WORK_DIR}/work2/multi-fork-a-branch-main" pull -q
+if ! (cd "${WORK_DIR}/work2" && "${COMMANDS_DIR}/git-push-to" main part1); then
+  fail "git-push-to failed on slugs without ORG"
+fi
+check_contains ../work2/multi-fork-a-branch-part1 "a line"
+for dir in multi-fork-b-branch-main multi-fork-b-branch-part1; do
+  if grep -q "a line" "${WORK_DIR}/work2/${dir}/file.txt"; then
+    fail "${dir} was changed, but a chain crossed from ORG a to ORG b"
+  fi
+done
+
+# A slug ORG:BRANCH belongs to the chain of every ORG.
+if ! (cd "${WORK_DIR}/work2" && "${COMMANDS_DIR}/git-push-to" a:main main part1); then
+  fail "git-push-to failed on a mixture of slugs with and without ORG"
+fi
+check_contains ../work2/multi-fork-b-branch-main "a line"
+check_contains ../work2/multi-fork-b-branch-part1 "a line"
+
 echo "${SCRIPT_NAME}: OK"

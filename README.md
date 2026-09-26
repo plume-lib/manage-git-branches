@@ -46,6 +46,8 @@ The commands are:
   directory `PROJECT-fork-ORG-branch-BRANCH` (or `PROJECT-fork-ORG`, if it has
   BRANCH checked out) in the current directory.  Each PROJECT that has
   directories for two or more of the slugs gets its own chain.
+  A slug may also be just `BRANCH`, as in `git-push-to main feature`.
+  It matches every ORG; each PROJECT and ORG gets its own chain.
 * [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
