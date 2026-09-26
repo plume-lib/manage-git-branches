@@ -56,31 +56,28 @@
 #
 # With "--rebase", after every pair has been pushed, each directory's branch
 # except the first is rebased onto the previous directory's branch, in order,
-# and is force-pushed (with `--force-with-lease`) if the rebase changed it.
-# This is useful for a stack of pull requests, each of whose base is the
-# previous one:  the branches' histories become linear, so each pull request
-# shows only its own commits.
+# and is force-pushed if the rebase changed it.  This is useful for a stack of
+# pull requests, each of whose base is the previous one:  the branches'
+# histories become linear, so each pull request shows only its own commits.
 #
 # The rebase replays only the branch's own commits:  those that are not in the
 # previous branch as it was when the branch was merged from it, nor in any
 # former head of the previous branch that its reflog records.  So when a
 # branch is rebased onto a previous branch that was itself rebased, in this run
 # or earlier, the previous branch's old commits are not replayed a second
-# time.  Merge commits are dropped.  If a force-push fails, the branch is reset
-# to its head before the rebase.
+# time.  Merge commits are dropped.
 #
-# The rebase resolves every conflict in favor of the commit being replayed
-# (`git checkout --theirs`), without asking.  This loses no information:  the
-# pushes above already merged the previous branch into this one, so the
-# branch's content before the rebase is the content that it should have
-# afterward.  If the replayed commits do not reproduce that content exactly --
-# for example, because a conflict resolution in a merge commit was dropped --
-# the rebase adds one more commit that restores it.  Thus the rebase never
-# changes the content of any branch, so there is no need to compile again.
+# The rebase resolves every conflict in favor of the commit being replayed.
+# This loses no information:  the pushes above already merged the previous
+# branch into this one, so the branch's content before the rebase is the
+# content that it should have afterward.  If the replayed commits do not
+# reproduce that content exactly -- for example, because a conflict resolution
+# in a merge commit was dropped -- the rebase adds one more commit that
+# restores it.  Thus the rebase never changes the content of any branch.
 #
-# With "--squash", each branch except the first becomes a single commit on top
-# of the previous branch, with the same content as before.  Its message
-# consists of the messages of the branch's own commits.
+# With "--squash", each branch becomes a single commit on top of the previous
+# branch, with the same content as before.  Its message consists of the
+# messages of the branch's own commits.
 
 # Here is an example of use.
 #
@@ -99,9 +96,9 @@
 # This helps to ensure that you will resolve each merge conflict just once.
 #
 # The history of the branches will contain many merges (most of which will be
-# clean merges that do not require your attention).  If you are using the
-# standard squash-and-merge handling of pull requests, the branch history will
-# not be reflected in your final repository.
+# clean merges that do not require your attention).  If you squash-and-merge
+# your pull requests, the branch history will not be reflected in your final
+# repository.
 
 # Here is a more complex example of use.
 #
