@@ -41,6 +41,11 @@ The commands are:
   Each directory must be the top level of a working copy (that is, of a git
   clone) and must have an upstream branch.
   You may also pass a list of directories: each is pushed into the subsequent one.
+  Instead of directories, you may pass slugs of the form `ORG:BRANCH`, such as
+  `git-push-to upstream:main myname:feature`.  Each slug names the
+  directory `PROJECT-fork-ORG-branch-BRANCH` (or `PROJECT-fork-ORG`, if it has
+  BRANCH checked out) in the current directory.  Each PROJECT that has
+  directories for two or more of the slugs gets its own chain.
 * [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
