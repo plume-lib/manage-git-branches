@@ -33,6 +33,9 @@
 # PROJECT and ORG.  A slug ORG:BRANCH in the same command belongs to every
 # chain of its PROJECT:  `git-push-to typetools:master master feature` pushes
 # typetools's master into each ORG's master, then that into ORG's feature.
+# An argument without ":" that is not a directory is a slug BRANCH only if
+# some directory in the current directory matches it; otherwise it is
+# reported as a missing directory.
 #
 # This script does the following:
 #  * pull FROM_DIR and TO_DIR from their remotes,
@@ -437,15 +440,20 @@ push_chain() {
 
 ## Returns 0 if the argument is a slug, ORG:BRANCH or BRANCH, rather than a
 ## directory.  Git forbids a branch name that starts with "/" or ".", or whose
-## component starts with ".".
+## component starts with ".".  An argument BRANCH that names no directory in
+## the current directory is not a slug, so that a misspelled directory name
+## is reported as a missing directory.
 is_slug() {
   if [ -d "$1" ]; then
     return 1
   fi
   case "$1" in
     '' | */*:* | :* | *: | /* | .* | */.*) return 1 ;;
-    *) return 0 ;;
+    *:*) return 0 ;;
   esac
+  # slug_matches fails only if it finds a directory for the slug.
+  is_slug_matches="$(slug_matches "$1" 2> /dev/null)" || return 0
+  [ -n "${is_slug_matches}" ]
 }
 
 ## Sets ${slug_org}, ${slug_branch}, and ${slug_branch_dir} from the slug
@@ -561,6 +569,12 @@ if [ "${num_slugs}" -eq 0 ]; then
 fi
 
 if [ "${num_slugs}" -ne "$#" ]; then
+  for arg; do
+    if [ ! -d "$arg" ] && ! is_slug "$arg"; then
+      echo "${SCRIPT_NAME}: no such directory: $arg" >&2
+      exit 1
+    fi
+  done
   echo "${SCRIPT_NAME}: cannot mix slugs with directories: $*" >&2
   exit 1
 fi

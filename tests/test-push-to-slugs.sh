@@ -143,6 +143,20 @@ if (cd "${WORK_DIR}/work" \
   fail "git-push-to succeeded on a mixture of slugs and directories"
 fi
 
+# A misspelled directory name is reported as a missing directory, whether it
+# follows a directory, follows a slug, or is the only kind of argument.
+for args in "proj-fork-me-branch-part1 proj-fork-me-typo" \
+  "upstream:main proj-fork-me-typo" \
+  "proj-fork-me-typo1 proj-fork-me-typo2"; do
+  # shellcheck disable=SC2086 # Split ${args} into arguments.
+  if (cd "${WORK_DIR}/work" && "${COMMANDS_DIR}/git-push-to" ${args}) 2> "${WORK_DIR}/stderr"; then
+    fail "git-push-to succeeded on a misspelled directory: ${args}"
+  fi
+  if ! grep -q "no such directory: proj-fork-me-typo" "${WORK_DIR}/stderr"; then
+    fail "git-push-to did not report the misspelled directory in \"${args}\": $(cat "${WORK_DIR}/stderr")"
+  fi
+done
+
 # A "-branch-" directory that has some other branch checked out is an error,
 # and nothing is pushed.
 git -C "${WORK_DIR}/work/proj-fork-me-branch-part1" checkout -q -b experiment
