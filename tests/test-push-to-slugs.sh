@@ -216,4 +216,29 @@ fi
 check_contains ../work2/multi-fork-b-branch-main "a line"
 check_contains ../work2/multi-fork-b-branch-part1 "a line"
 
+# A slug BRANCH also names PROJECT-branch-BRANCH, whose name has no ORG, and
+# those directories form their own chain.
+mkdir "${WORK_DIR}/work3"
+make_remote plain part1 part2
+make_clone plain main ../work3/plain-branch-main
+make_clone plain part1 ../work3/plain-branch-part1
+make_clone plain part2 ../work3/plain-branch-part2
+add_line plain "plain line"
+git -C "${WORK_DIR}/work3/plain-branch-main" pull -q
+if ! (cd "${WORK_DIR}/work3" && "${COMMANDS_DIR}/git-push-to" main part1 part2); then
+  fail "git-push-to failed on slugs for directories without ORG"
+fi
+check_contains ../work3/plain-branch-part1 "plain line"
+check_contains ../work3/plain-branch-part2 "plain line"
+
+# Such a directory that has some other branch checked out is an error.
+git -C "${WORK_DIR}/work3/plain-branch-part1" checkout -q -b experiment
+if (cd "${WORK_DIR}/work3" && "${COMMANDS_DIR}/git-push-to" main part1) 2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to succeeded on a directory without ORG with the wrong branch checked out"
+fi
+if ! grep -q "plain-branch-part1 has experiment checked out, not part1" "${WORK_DIR}/stderr"; then
+  fail "git-push-to did not report the wrong branch: $(cat "${WORK_DIR}/stderr")"
+fi
+git -C "${WORK_DIR}/work3/plain-branch-part1" checkout -q part1
+
 echo "${SCRIPT_NAME}: OK"
