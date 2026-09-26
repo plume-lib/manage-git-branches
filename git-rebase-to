@@ -1,0 +1,82 @@
+#!/bin/sh
+
+# Pushes each git repository into the next, as `git-push-to` does, then
+# rebases each branch onto the previous one, to eliminate merge commits.
+#
+# Usage:
+#   git-rebase-to [--nocompile] [--squash] FROM_DIR TO_DIR ...
+#   git-rebase-to [--nocompile] [--squash] [ORG:]BRANCH [ORG:]BRANCH ...
+#
+# The arguments are the same as those of `git-push-to`.  This command is
+# useful for maintaining a stack of GitHub pull requests, each of whose base
+# is the previous one:  afterward, each branch consists of the previous branch
+# followed by the branch's own commits, so each pull request shows only its own
+# commits.  With "--squash", each branch consists of the previous branch
+# followed by a single commit.
+#
+# The rebase replays the branch's own commits, dropping merge commits, and
+# resolves every conflict in favor of the branch's own commits, which loses no
+# information.  It does not change the content of any branch, and it leaves a
+# branch unchanged if the branch is already the previous branch followed by
+# commits that are not merges.  It force-pushes (with `--force-with-lease`)
+# each branch that it changes.
+#
+# All the work is done by `git-push-to --rebase`; see its documentation, under
+# "Rebasing".  Diagnostics mention `git-push-to`.
+
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other scripts even when this script
+# is invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
+# Count the arguments other than options here, so that the usage message names
+# this command rather than `git-push-to`.
+num_args=0
+for arg; do
+  case "${arg}" in
+    --nocompile | --squash) ;;
+    *) num_args=$((num_args + 1)) ;;
+  esac
+done
+if [ "${num_args}" -lt 2 ]; then
+  echo "${SCRIPT_NAME}: not enough arguments" >&2
+  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--squash] FROM_DIR TO_DIR ..." >&2
+  echo "   or: ${SCRIPT_NAME} [--nocompile] [--squash] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
+  exit 1
+fi
+
+exec "${SCRIPT_DIR}"/git-push-to --rebase "$@"

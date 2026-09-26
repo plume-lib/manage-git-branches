@@ -5,12 +5,16 @@
 # each is pushed into the next in turn.
 #
 # Usage:
-#   git-push-to [--nocompile] FROM_DIR TO_DIR ...
-#   git-push-to [--nocompile] [ORG:]BRANCH [ORG:]BRANCH ...
+#   git-push-to [--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...
+#   git-push-to [--nocompile] [--rebase | --squash] [ORG:]BRANCH [ORG:]BRANCH ...
 #
 # Each argument names the top level of a working copy (that is, of a clone).
 # Each may be absolute directory names or relative to the current directory.
-# The first argument may be "--nocompile" to skip the compilation step.
+# The "--nocompile" option skips the compilation step.
+# The "--rebase" option rebases each branch onto the previous one after
+# pushing, and the "--squash" option makes each branch a single commit on top
+# of the previous one; see "Rebasing" below.  `git-rebase-to` is a shorthand
+# for "--rebase".
 #
 # Alternately, each argument may be a slug of the form ORG:BRANCH, which names
 # a directory in the current directory:  PROJECT-fork-ORG-branch-BRANCH, or
@@ -47,6 +51,34 @@
 #
 # If more than two directories are supplied, the procedure is performed on each
 # pair of adjacent directories in turn.
+
+# Rebasing
+#
+# With "--rebase", after every pair has been pushed, each directory's branch
+# except the first is rebased onto the previous directory's branch, in order,
+# and is force-pushed (with `--force-with-lease`) if the rebase changed it.
+# This is useful for a stack of pull requests, each of whose base is the
+# previous one:  the branches' histories become linear, so each pull request
+# shows only its own commits.
+#
+# The rebase replays only the branch's own commits:  those that are not in the
+# previous branch as it was when the branch was merged from it.  So when a
+# branch is rebased onto a previous branch that was itself just rebased, the
+# previous branch's old commits are not replayed a second time.  Merge commits
+# are dropped.
+#
+# The rebase resolves every conflict in favor of the commit being replayed
+# (`git checkout --theirs`), without asking.  This loses no information:  the
+# pushes above already merged the previous branch into this one, so the
+# branch's content before the rebase is the content that it should have
+# afterward.  If the replayed commits do not reproduce that content exactly --
+# for example, because a conflict resolution in a merge commit was dropped --
+# the rebase adds one more commit that restores it.  Thus the rebase never
+# changes the content of any branch, so there is no need to compile again.
+#
+# With "--squash", each branch except the first becomes a single commit on top
+# of the previous branch, with the same content as before.  Its message
+# consists of the messages of the branch's own commits.
 
 # Here is an example of use.
 #
@@ -106,6 +138,8 @@
 #     MYDIR/myrepo-branch-allchanges
 
 nocompile=0
+rebase=0
+squash=0
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other scripts even when this script
@@ -242,6 +276,58 @@ absolute_path() {
   (CDPATH='' cd -- "$1" && pwd -P) 2> /dev/null
 }
 
+## Fetches the given branch of the given directory into the current directory,
+## which is the top level of a clone, and sets ${fetched_head} to the commit
+## that it fetched.  The directory is an absolute pathname.  Returns 1, after
+## printing a diagnostic, on failure.
+fetch_branch() {
+  fetch_from_absolute="$1"
+  fetch_from_branch="$2"
+
+  # Fetch from a relative pathname, so that the pathname that `git fetch`
+  # records in FETCH_HEAD does not embed this machine's directory layout.
+  # `relative-path` is a portable version of `realpath --relative-to`, whose
+  # `--relative-to` option the BSD and macOS versions of `realpath` lack.
+  if ! fetch_from_relative="$("${SCRIPT_DIR}"/relative-path "$(pwd)" "${fetch_from_absolute}")"; then
+    echo "${SCRIPT_NAME}: cannot express ${fetch_from_absolute} relative to $(pwd)" >&2
+    return 1
+  fi
+  # `git fetch` parses a colon in a bare pathname as an scp-style URL.
+  case "${fetch_from_relative}" in
+    ./* | ../* | .) ;;
+    *) fetch_from_relative="./${fetch_from_relative}" ;;
+  esac
+
+  # Name the branch as well as the repository, rather than fetching the
+  # pathname alone.  `git fetch PATH` brings over whatever FROM_DIR's HEAD
+  # points at, whereas `git fetch PATH BRANCH` brings over the branch that
+  # `check_upstream` determined and `check_branch_exists` validated.  If
+  # FROM_DIR's HEAD moved in between, the one-operand form merges or rebases
+  # onto something that this script never checked.
+  #
+  # Spell the branch as `refs/heads/BRANCH` rather than as a bare name.
+  # `git fetch` resolves a bare name by trying `refs/BRANCH` and
+  # `refs/tags/BRANCH` before `refs/heads/BRANCH` -- the same collision that
+  # `check_upstream` contends with above, where a tag and the branch share a
+  # name.  Given a bare name, such a tag is fetched in place of the branch:
+  # silently, and with exit status 0, because merging the tag is a perfectly
+  # good merge as far as git is concerned.  The full refname admits no such
+  # ambiguity.
+  #
+  # ${fetch_from_branch} is not empty:  `check_upstream` leaves it empty for a
+  # detached HEAD and for a directory that is not a working copy, and
+  # `check_branch_exists` refuses both before this function is called.
+  if ! git fetch -q -- "${fetch_from_relative}" "refs/heads/${fetch_from_branch}"; then
+    echo "${SCRIPT_NAME}: problem fetching ${fetch_from_absolute} into $(pwd)" >&2
+    return 1
+  fi
+  if ! fetched_head="$(git rev-parse --verify --quiet FETCH_HEAD)"; then
+    echo "${SCRIPT_NAME}: cannot read FETCH_HEAD after fetching ${fetch_from_absolute} into $(pwd)" >&2
+    return 1
+  fi
+  return 0
+}
+
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
@@ -324,49 +410,11 @@ git_push_to() {
     return 1
   fi
 
-  # Fetch from a relative pathname, so that the pathname that `git fetch`
-  # records in FETCH_HEAD does not embed this machine's directory layout.
-  # `relative-path` is a portable version of `realpath --relative-to`, whose
-  # `--relative-to` option the BSD and macOS versions of `realpath` lack.
   # Note: pwd=to_absolute
-  if ! from_relative="$("${SCRIPT_DIR}"/relative-path "${to_absolute}" "${from_absolute}")"; then
-    echo "${SCRIPT_NAME}: cannot express ${from_absolute} relative to ${to_absolute}" >&2
+  if ! fetch_branch "${from_absolute}" "${from_branch}"; then
     return 1
   fi
-  # `git fetch` parses a colon in a bare pathname as an scp-style URL.
-  case "${from_relative}" in
-    ./* | ../* | .) ;;
-    *) from_relative="./${from_relative}" ;;
-  esac
-
-  # Name the branch as well as the repository, rather than fetching the
-  # pathname alone.  `git fetch PATH` brings over whatever FROM_DIR's HEAD
-  # points at, whereas `git fetch PATH BRANCH` brings over the branch that
-  # `check_upstream` determined and `check_branch_exists` validated.  If
-  # FROM_DIR's HEAD moved in between, the one-operand form merges something
-  # that this script never checked.
-  #
-  # Spell the branch as `refs/heads/BRANCH` rather than as a bare name.
-  # `git fetch` resolves a bare name by trying `refs/BRANCH` and
-  # `refs/tags/BRANCH` before `refs/heads/BRANCH` -- the same collision that
-  # `check_upstream` contends with above, where a tag and the branch share a
-  # name.  Given a bare name, such a tag is merged in place of the branch:
-  # silently, and with exit status 0, because merging the tag is a perfectly
-  # good merge as far as git is concerned.  The full refname admits no such
-  # ambiguity.
-  #
-  # ${from_branch} is not empty here:  `check_upstream` leaves it empty for a
-  # detached HEAD and for a directory that is not a working copy, and
-  # `check_branch_exists` above refuses both.
-  if ! git fetch -q -- "${from_relative}" "refs/heads/${from_branch}"; then
-    # Note: pwd=to_absolute
-    echo "${SCRIPT_NAME}: problem fetching ${from_absolute} into $(pwd)" >&2
-    return 1
-  fi
-  if ! merge_head="$(git rev-parse --verify --quiet FETCH_HEAD)"; then
-    echo "${SCRIPT_NAME}: cannot read FETCH_HEAD after fetching ${from_absolute} into $(pwd)" >&2
-    return 1
-  fi
+  merge_head="${fetched_head}"
 
   # FROM_DIR and TO_DIR are clones of one project, so the merge should read
   # the way it does when two branches of one clone are merged:
@@ -423,8 +471,197 @@ git_push_to() {
   return 0
 }
 
-## Pushes each given directory into the next one.  Returns 1 at the first
-## failure.
+## Returns 0 if a rebase is in progress in the current directory.
+rebase_in_progress() {
+  [ -d "$(git rev-parse --git-path rebase-merge)" ] \
+    || [ -d "$(git rev-parse --git-path rebase-apply)" ]
+}
+
+## Resolves every conflict of the stopped rebase in the current directory in
+## favor of the commit being replayed, REBASE_HEAD:  each unmerged path gets
+## that commit's version, or is removed if that commit does not have it.
+resolve_conflicts_as_theirs() {
+  # `xargs -0` passes pathnames that contain whitespace or newlines intact.
+  # GIT_LITERAL_PATHSPECS keeps git from interpreting glob characters in them.
+  # shellcheck disable=SC2016 # The inner shell expands ${path}.
+  git diff --name-only --diff-filter=U -z \
+    | GIT_LITERAL_PATHSPECS=1 xargs -0 sh -c '
+        for path; do
+          if git cat-file -e "REBASE_HEAD:${path}" 2> /dev/null; then
+            git checkout -q REBASE_HEAD -- "${path}" || exit 1
+          else
+            git rm -q -f -- "${path}" || exit 1
+          fi
+        done' sh
+}
+
+## Rebases the branch in the current directory, which is the top level of a
+## clone, replaying the commits that are not reachable from the first argument
+## onto the second argument.  Merge commits are dropped, and every conflict is
+## resolved in favor of the commit being replayed.  Returns 1, after printing a
+## diagnostic and aborting the rebase, on failure.
+rebase_as_theirs() {
+  rebase_upstream="$1"
+  rebase_onto="$2"
+  # Override configuration variables that would change what the rebase does:
+  # `rebase.autoSquash` would reorder commits, `rebase.autoStash` would hide a
+  # dirty working tree, `rebase.rebaseMerges` would keep the merge commits
+  # that this rebase eliminates, and `rebase.updateRefs` would move other
+  # branches.  `--empty=drop` drops a commit whose changes are already in the
+  # new base.
+  # Git's output about conflicts is not of interest, because they are
+  # resolved below; show its output only if the rebase could not start.
+  if rebase_output="$(git rebase -q -X theirs --empty=drop --no-autosquash \
+    --no-autostash --no-rebase-merges --no-update-refs \
+    --onto "${rebase_onto}" "${rebase_upstream}" 2>&1)"; then
+    return 0
+  fi
+  if ! rebase_in_progress; then
+    printf '%s\n' "${rebase_output}" >&2
+    echo "${SCRIPT_NAME}: problem rebasing in $(pwd)" >&2
+    return 1
+  fi
+  while rebase_in_progress; do
+    if ! stopped_at="$(git rev-parse --verify --quiet REBASE_HEAD)"; then
+      echo "${SCRIPT_NAME}: rebase stopped without a commit to replay in $(pwd)" >&2
+      git rebase --abort
+      return 1
+    fi
+    if ! resolve_conflicts_as_theirs; then
+      echo "${SCRIPT_NAME}: cannot resolve conflicts in replaying ${stopped_at} in $(pwd)" >&2
+      git rebase --abort
+      return 1
+    fi
+    if [ -n "$(git ls-files -u)" ]; then
+      echo "${SCRIPT_NAME}: conflicts remain in replaying ${stopped_at} in $(pwd)" >&2
+      git rebase --abort
+      return 1
+    fi
+    # A commit whose changes are all in the new base leaves nothing to commit,
+    # and `git rebase --continue` refuses to proceed.
+    if git diff --cached --quiet; then
+      git rebase --skip > /dev/null 2>&1
+    else
+      GIT_EDITOR=true git rebase --continue > /dev/null 2>&1
+    fi
+    if rebase_in_progress \
+      && [ "$(git rev-parse --verify --quiet REBASE_HEAD)" = "${stopped_at}" ]; then
+      echo "${SCRIPT_NAME}: rebase is stuck at ${stopped_at} in $(pwd)" >&2
+      git rebase --abort
+      return 1
+    fi
+  done
+  return 0
+}
+
+## Rebases the branch in the second directory onto the branch in the first,
+## then pushes it if that changed it.  The third argument is the commit that
+## the first directory's branch pointed to when it was last merged into the
+## second's; the commits reachable from it are not replayed.  If ${squash} is
+## 1, the result is a single commit.  Whether or not ${squash} is 1, the
+## content of the second directory's branch does not change.  Both
+## directories have already been checked by `git_push_to`.
+git_rebase_onto() {
+  from_absolute="$(absolute_path "$1")"
+  to_absolute="$(absolute_path "$2")"
+  old_from_head="$3"
+
+  from_branch_ref="$(git -C "${from_absolute}" symbolic-ref --quiet HEAD)" || return 1
+  from_branch="${from_branch_ref#refs/heads/}"
+  to_branch_ref="$(git -C "${to_absolute}" symbolic-ref --quiet HEAD)" || return 1
+  to_branch="${to_branch_ref#refs/heads/}"
+
+  orig_dir=$(pwd)
+
+  if ! cd "$to_absolute"; then
+    echo "${SCRIPT_NAME}: cannot cd to ${to_absolute}" >&2
+    return 1
+  fi
+
+  if ! fetch_branch "${from_absolute}" "${from_branch}"; then
+    return 1
+  fi
+  new_from_head="${fetched_head}"
+
+  orig_head="$(git rev-parse --verify HEAD)" || return 1
+  orig_tree="$(git rev-parse --verify "HEAD^{tree}")" || return 1
+
+  # `git_push_to` merged ${old_from_head} into this branch, so it is an
+  # ancestor.  If it is not, then the branch changed in the meantime, and the
+  # rebase would replay commits that do not belong to this branch.
+  if ! git merge-base --is-ancestor "${old_from_head}" HEAD; then
+    echo "${SCRIPT_NAME}: ${from_branch} at ${old_from_head} is not an ancestor of ${to_branch} in $(pwd)" >&2
+    return 1
+  fi
+
+  if [ "${squash}" -eq 1 ]; then
+    # The message lists the messages of the branch's own commits, oldest
+    # first, as `git merge --squash` does.
+    if ! squash_message="$(git log --reverse --no-merges --format='%B' \
+      "${old_from_head}..HEAD")"; then
+      echo "${SCRIPT_NAME}: cannot read the commit messages of ${to_branch} in $(pwd)" >&2
+      return 1
+    fi
+    if [ -z "${squash_message}" ]; then
+      squash_message="Changes in ${to_branch}"
+    fi
+    if [ "$(git rev-parse "${new_from_head}^{tree}")" = "${orig_tree}" ]; then
+      new_head="${new_from_head}"
+    elif [ "$(git rev-parse --verify --quiet HEAD^2)" = "" ] \
+      && [ "$(git rev-parse --verify --quiet HEAD^1)" = "${new_from_head}" ]; then
+      # The branch is already a single commit on top of ${from_branch}.
+      new_head="${orig_head}"
+    elif ! new_head="$(printf '%s\n' "${squash_message}" \
+      | git commit-tree "${orig_tree}" -p "${new_from_head}")"; then
+      echo "${SCRIPT_NAME}: cannot create the squashed commit in $(pwd)" >&2
+      return 1
+    fi
+    if ! git merge -q --ff-only "${new_head}" 2> /dev/null \
+      && ! git reset -q --keep "${new_head}"; then
+      echo "${SCRIPT_NAME}: cannot move ${to_branch} to ${new_head} in $(pwd)" >&2
+      return 1
+    fi
+  else
+    if ! rebase_as_theirs "${old_from_head}" "${new_from_head}"; then
+      return 1
+    fi
+    # The replayed commits may not reproduce the branch's content, for example
+    # because a conflict resolution in a dropped merge commit is lost.  Restore
+    # the content with one more commit.
+    if [ "$(git rev-parse --verify "HEAD^{tree}")" != "${orig_tree}" ]; then
+      if ! restore_commit="$(git commit-tree "${orig_tree}" -p HEAD \
+        -m "Restore the content of ${to_branch} from before rebasing onto ${from_branch}")"; then
+        echo "${SCRIPT_NAME}: cannot create a commit to restore ${to_branch} in $(pwd)" >&2
+        return 1
+      fi
+      if ! git merge -q --ff-only "${restore_commit}"; then
+        echo "${SCRIPT_NAME}: cannot restore the content of ${to_branch} in $(pwd)" >&2
+        return 1
+      fi
+    fi
+  fi
+
+  if [ "$(git rev-parse --verify HEAD)" != "${orig_head}" ]; then
+    # The rebase rewrote the branch, so a plain push would be refused.
+    # `--force-with-lease` refuses to overwrite commits that someone else
+    # pushed since `git_push_to` last pulled.
+    if ! git push --quiet --force-with-lease; then
+      echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
+      return 1
+    fi
+  fi
+
+  if ! cd "${orig_dir}"; then
+    echo "${SCRIPT_NAME}: cannot cd back to ${orig_dir}" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+## Pushes each given directory into the next one.  Then, if ${rebase} is 1,
+## rebases each directory's branch, except the first, onto the previous one.
+## Returns 1 at the first failure.
 push_chain() {
   prev=''
   for arg; do
@@ -434,6 +671,26 @@ push_chain() {
       fi
     fi
     prev="$arg"
+  done
+  if [ "${rebase}" -eq 0 ]; then
+    return 0
+  fi
+  prev=''
+  # The previous directory's head before it was rebased, which is what the
+  # current directory merged from it.
+  old_prev_head=''
+  for arg; do
+    if ! arg_head="$(git -C "$arg" rev-parse --verify HEAD)"; then
+      echo "${SCRIPT_NAME}: cannot read HEAD in $arg" >&2
+      return 1
+    fi
+    if [ -n "$prev" ]; then
+      if ! git_rebase_onto "$prev" "$arg" "${old_prev_head}"; then
+        return 1
+      fi
+    fi
+    prev="$arg"
+    old_prev_head="${arg_head}"
   done
   return 0
 }
@@ -544,15 +801,23 @@ slug_matches() {
 
 ## Main program starts here.
 
-if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
-  nocompile=1
+while [ "$#" -ge 1 ]; do
+  case "$1" in
+    --nocompile) nocompile=1 ;;
+    --rebase) rebase=1 ;;
+    --squash)
+      rebase=1
+      squash=1
+      ;;
+    *) break ;;
+  esac
   shift
-fi
+done
 
 if [ "$#" -lt 2 ]; then
   echo "${SCRIPT_NAME}: not enough arguments" >&2
-  echo "Usage: ${SCRIPT_NAME} [--nocompile] FROM_DIR TO_DIR ..." >&2
-  echo "   or: ${SCRIPT_NAME} [--nocompile] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
+  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ..." >&2
+  echo "   or: ${SCRIPT_NAME} [--nocompile] [--rebase | --squash] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
   exit 1
 fi
 
