@@ -63,20 +63,35 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-# Count the arguments other than options here, so that the usage message names
-# this command rather than `git-push-to`.
-num_args=0
-for arg; do
-  case "${arg}" in
-    --nocompile | --squash) ;;
-    *) num_args=$((num_args + 1)) ;;
-  esac
-done
-if [ "${num_args}" -lt 2 ]; then
-  echo "${SCRIPT_NAME}: not enough arguments" >&2
+# Check the arguments here, so that the usage message names this command
+# rather than `git-push-to`.  As in `git-push-to`, options precede the other
+# arguments.  `git-push-to` would treat a later option as a directory, but only
+# after pushing the earlier ones.
+usage() {
   echo "Usage: ${SCRIPT_NAME} [--nocompile] [--squash] FROM_DIR TO_DIR ..." >&2
   echo "   or: ${SCRIPT_NAME} [--nocompile] [--squash] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
   exit 1
+}
+num_args=0
+in_options=1
+for arg; do
+  if [ "${in_options}" -eq 1 ]; then
+    case "${arg}" in
+      --nocompile | --rebase | --squash) continue ;;
+    esac
+    in_options=0
+  fi
+  case "${arg}" in
+    -*)
+      echo "${SCRIPT_NAME}: options must precede the other arguments: ${arg}" >&2
+      usage
+      ;;
+  esac
+  num_args=$((num_args + 1))
+done
+if [ "${num_args}" -lt 2 ]; then
+  echo "${SCRIPT_NAME}: not enough arguments" >&2
+  usage
 fi
 
 exec "${SCRIPT_DIR}"/git-push-to --rebase "$@"

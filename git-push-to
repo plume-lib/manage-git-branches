@@ -62,10 +62,12 @@
 # shows only its own commits.
 #
 # The rebase replays only the branch's own commits:  those that are not in the
-# previous branch as it was when the branch was merged from it.  So when a
-# branch is rebased onto a previous branch that was itself just rebased, the
-# previous branch's old commits are not replayed a second time.  Merge commits
-# are dropped.
+# previous branch as it was when the branch was merged from it, nor in any
+# former head of the previous branch that its reflog records.  So when a
+# branch is rebased onto a previous branch that was itself rebased, in this run
+# or earlier, the previous branch's old commits are not replayed a second
+# time.  Merge commits are dropped.  If a force-push fails, the branch is reset
+# to its head before the rebase.
 #
 # The rebase resolves every conflict in favor of the commit being replayed
 # (`git checkout --theirs`), without asking.  This loses no information:  the
@@ -554,6 +556,67 @@ rebase_as_theirs() {
   return 0
 }
 
+## Sets ${replay_base} to a commit such that the commits of the current
+## directory's branch that are not reachable from it are the branch's own
+## commits.  The first argument is the directory of the previous branch, the
+## second is that branch's ref, and the third is the commit of that branch
+## that was merged into the current branch, which is an ancestor of HEAD.
+##
+## The current branch may also contain commits that the previous branch
+## contained before it was rewritten -- for example, by an earlier run that
+## force-pushed the previous branch and then failed on the current one.  The
+## previous branch's reflog records its former heads.  If HEAD contains any of
+## them, ${replay_base} is a new merge commit whose parents are the third
+## argument and those former heads; otherwise, it is the third argument.
+## Returns 1, after printing a diagnostic, on failure.
+compute_replay_base() {
+  # A missing reflog, for example because `core.logAllRefUpdates` is false,
+  # leaves only the third argument.
+  former_heads="$(git -C "$1" reflog show --format=%H "$2" -- 2> /dev/null | sort -u)"
+  set -- "$3"
+  for former_head in ${former_heads}; do
+    # `git merge-base --is-ancestor` fails for a commit that is not in this
+    # clone, which therefore is not in HEAD.
+    if git merge-base --is-ancestor "${former_head}" HEAD 2> /dev/null \
+      && ! git merge-base --is-ancestor "${former_head}" "$1"; then
+      set -- "$@" "${former_head}"
+    fi
+  done
+  if [ "$#" -eq 1 ]; then
+    replay_base="$1"
+    return 0
+  fi
+  first_parent="$1"
+  for parent; do
+    shift
+    set -- "$@" -p "${parent}"
+  done
+  # The merge commit's tree is irrelevant, because it is used only to limit
+  # which commits are replayed.
+  if ! replay_base="$(git commit-tree "${first_parent}^{tree}" "$@" \
+    -m "Former heads of the previous branch")"; then
+    echo "${SCRIPT_NAME}: cannot create a commit that merges the former heads of the previous branch in $(pwd)" >&2
+    return 1
+  fi
+  return 0
+}
+
+## Resets the current directory's branch to ${orig_head}, its head before
+## `git_rebase_onto` rewrote it, after a failure.  If the branch stayed
+## rewritten, the next `git pull` would merge the remote's history into it,
+## and the next rebase would replay every commit twice.  `--keep` refuses to
+## discard local changes; then this tells the user how to reset.
+reset_to_orig_head() {
+  if [ "$(git rev-parse --verify HEAD)" = "${orig_head}" ]; then
+    return 0
+  fi
+  if git reset -q --keep "${orig_head}"; then
+    echo "${SCRIPT_NAME}: reset ${to_branch} to ${orig_head}, its head before rebasing" >&2
+  else
+    echo "${SCRIPT_NAME}: cannot reset ${to_branch}; run \`git reset --keep ${orig_head}\` in $(pwd)" >&2
+  fi
+}
+
 ## Rebases the branch in the second directory onto the branch in the first,
 ## then pushes it if that changed it.  The third argument is the commit that
 ## the first directory's branch pointed to when it was last merged into the
@@ -593,12 +656,15 @@ git_rebase_onto() {
     echo "${SCRIPT_NAME}: ${from_branch} at ${old_from_head} is not an ancestor of ${to_branch} in $(pwd)" >&2
     return 1
   fi
+  if ! compute_replay_base "${from_absolute}" "${from_branch_ref}" "${old_from_head}"; then
+    return 1
+  fi
 
   if [ "${squash}" -eq 1 ]; then
     # The message lists the messages of the branch's own commits, oldest
     # first, as `git merge --squash` does.
     if ! squash_message="$(git log --reverse --no-merges --format='%B' \
-      "${old_from_head}..HEAD")"; then
+      "${replay_base}..HEAD")"; then
       echo "${SCRIPT_NAME}: cannot read the commit messages of ${to_branch} in $(pwd)" >&2
       return 1
     fi
@@ -619,10 +685,11 @@ git_rebase_onto() {
     if ! git merge -q --ff-only "${new_head}" 2> /dev/null \
       && ! git reset -q --keep "${new_head}"; then
       echo "${SCRIPT_NAME}: cannot move ${to_branch} to ${new_head} in $(pwd)" >&2
+      reset_to_orig_head
       return 1
     fi
   else
-    if ! rebase_as_theirs "${old_from_head}" "${new_from_head}"; then
+    if ! rebase_as_theirs "${replay_base}" "${new_from_head}"; then
       return 1
     fi
     # The replayed commits may not reproduce the branch's content, for example
@@ -632,10 +699,12 @@ git_rebase_onto() {
       if ! restore_commit="$(git commit-tree "${orig_tree}" -p HEAD \
         -m "Restore the content of ${to_branch} from before rebasing onto ${from_branch}")"; then
         echo "${SCRIPT_NAME}: cannot create a commit to restore ${to_branch} in $(pwd)" >&2
+        reset_to_orig_head
         return 1
       fi
       if ! git merge -q --ff-only "${restore_commit}"; then
         echo "${SCRIPT_NAME}: cannot restore the content of ${to_branch} in $(pwd)" >&2
+        reset_to_orig_head
         return 1
       fi
     fi
@@ -647,6 +716,7 @@ git_rebase_onto() {
     # pushed since `git_push_to` last pulled.
     if ! git push --quiet --force-with-lease; then
       echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
+      reset_to_orig_head
       return 1
     fi
   fi

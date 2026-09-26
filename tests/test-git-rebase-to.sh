@@ -147,6 +147,19 @@ if [ "$(git -C "${PART1}" rev-parse HEAD)" != "${part1_head}" ] \
   fail "git-rebase-to rewrote branches that were already linear"
 fi
 
+## part1 is rewritten while part2 still contains part1's old commits, as when
+## a run force-pushes part1 and then fails on part2.  The next run does not
+## replay part1's old commits into part2.
+commit_file "${MAIN}" main.txt "main a2" "main commit a2"
+"${COMMANDS_DIR}/git-rebase-to" "${MAIN}" "${PART1}"
+"${COMMANDS_DIR}/git-rebase-to" "${MAIN}" "${PART1}" "${PART2}"
+check_linear "${PART1}" "${MAIN}"
+check_linear "${PART2}" "${PART1}"
+part2_subjects="$(subjects "${PART2}" "${PART1}")"
+if [ "${part2_subjects}" != "part2 commit a" ]; then
+  fail "after part1 was rewritten, part2 has commits: ${part2_subjects}"
+fi
+
 ## Conflicts that the user resolved in a merge commit, which the rebase drops:
 ## both main and part1 change a line, and main deletes a file that part1
 ## changes.  The rebase replays part1's commits, taking part1's side of every
@@ -183,6 +196,41 @@ if [ "$(sed -n 2p "${PART2}/file.txt")" != "line 2 from both" ] \
 fi
 if [ "$(git -C "${PART1}" log -1 --format=%s)" != "Restore the content of part1 from before rebasing onto main" ]; then
   fail "expected a commit that restores part1's content, got: $(git -C "${PART1}" log -1 --format=%s)"
+fi
+
+## The remote rejects the force-push of part2, but not its ordinary push, after
+## accepting part1's force-push.  part2
+## goes back to its head before the rebase, so that the next run's `git pull`
+## does not merge the remote's old history into the rebased history.
+commit_file "${MAIN}" main.txt "main b2" "main commit b2"
+part2_subjects_before="$(subjects "${PART2}" "${PART1}")"
+cat > "${REMOTE}/hooks/pre-receive" << 'EOF'
+#!/bin/sh
+while read -r old new ref; do
+  if [ "${ref}" = refs/heads/part2 ] \
+    && ! git merge-base --is-ancestor "${old}" "${new}"; then
+    echo "part2 rejects force-pushes" >&2
+    exit 1
+  fi
+done
+EOF
+chmod +x "${REMOTE}/hooks/pre-receive"
+if "${COMMANDS_DIR}/git-rebase-to" "${MAIN}" "${PART1}" "${PART2}" 2> "${WORK_DIR}/err.txt"; then
+  fail "git-rebase-to succeeded although the push of part2 was rejected"
+fi
+grep -q "problem pushing" "${WORK_DIR}/err.txt" \
+  || fail "unexpected diagnostic: $(cat "${WORK_DIR}/err.txt")"
+# The push phase merged part1 into part2 and pushed it.
+if [ "$(git -C "${PART2}" rev-parse HEAD)" != "$(git -C "${REMOTE}" rev-parse refs/heads/part2)" ]; then
+  fail "after the rejected push, part2 was not reset to its head before the rebase"
+fi
+rm "${REMOTE}/hooks/pre-receive"
+"${COMMANDS_DIR}/git-rebase-to" "${MAIN}" "${PART1}" "${PART2}"
+check_linear "${PART1}" "${MAIN}"
+check_linear "${PART2}" "${PART1}"
+part2_subjects="$(subjects "${PART2}" "${PART1}")"
+if [ "${part2_subjects}" != "${part2_subjects_before}" ]; then
+  fail "after the rejected push, part2 has commits: ${part2_subjects}; expected ${part2_subjects_before}"
 fi
 
 ## With "--squash", each branch becomes one commit, with the same content.
@@ -222,5 +270,18 @@ if "${COMMANDS_DIR}/git-rebase-to" --squash "${MAIN}" 2> "${WORK_DIR}/err.txt"; 
 fi
 grep -q "^git-rebase-to: not enough arguments" "${WORK_DIR}/err.txt" \
   || fail "unexpected diagnostic: $(cat "${WORK_DIR}/err.txt")"
+
+## An option after the directories is rejected before anything is pushed.
+part1_head="$(git -C "${PART1}" rev-parse HEAD)"
+git -C "${MAIN}" pull -q
+commit_file "${MAIN}" main.txt "main d" "main commit d"
+if "${COMMANDS_DIR}/git-rebase-to" "${MAIN}" "${PART1}" --squash 2> "${WORK_DIR}/err.txt"; then
+  fail "git-rebase-to accepted an option after the directories"
+fi
+grep -q "^git-rebase-to: options must precede the other arguments: --squash" "${WORK_DIR}/err.txt" \
+  || fail "unexpected diagnostic: $(cat "${WORK_DIR}/err.txt")"
+if [ "$(git -C "${PART1}" rev-parse HEAD)" != "${part1_head}" ]; then
+  fail "git-rebase-to changed part1 before rejecting a misplaced option"
+fi
 
 echo "${SCRIPT_NAME}: OK"
