@@ -87,7 +87,7 @@ make_remote other part1 feature/part2
 make_clone other part1 other-fork-me-branch-part1
 make_clone other feature/part2 other-fork-me-branch-feature-part2
 
-# Project "lonely" has only one of the directories, so it is skipped.
+# Project "lonely" has only one of the directories, so it is silently skipped.
 make_remote lonely part1
 make_clone lonely part1 lonely-fork-me-branch-part1
 
@@ -98,8 +98,11 @@ git -C "${WORK_DIR}/seed-other" commit -q -a -m "Add other line"
 git -C "${WORK_DIR}/seed-other" push -q "${WORK_DIR}/other.git" main:refs/heads/part1
 
 if ! (cd "${WORK_DIR}/work" \
-  && "${COMMANDS_DIR}/git-push-to" upstream:main me:part1 me:feature/part2); then
-  fail "git-push-to failed on slugs"
+  && "${COMMANDS_DIR}/git-push-to" upstream:main me:part1 me:feature/part2) 2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to failed on slugs: $(cat "${WORK_DIR}/stderr")"
+fi
+if grep -q "lonely" "${WORK_DIR}/stderr"; then
+  fail "git-push-to reported the skipped project: $(cat "${WORK_DIR}/stderr")"
 fi
 
 check_contains() {

@@ -1020,11 +1020,6 @@ for key in ${keys}; do
   IFS="${saved_ifs}"
   project="${key%%:*}"
   org="${key#*:}"
-  if [ -n "${org}" ] && [ "${org}" != "-" ]; then
-    chain_name="${project} (${org})"
-  else
-    chain_name="${project}"
-  fi
   chain=''
   chain_length=0
   last_dir=''
@@ -1042,8 +1037,9 @@ for key in ${keys}; do
       chain_length=$((chain_length + 1))
     fi
   done
+  # A project with fewer than two of the directories is silently skipped,
+  # because reporting every such project would be too verbose.
   if [ "${chain_length}" -lt 2 ]; then
-    echo "${SCRIPT_NAME}: skipping ${chain_name}, which has only ${chain%"${newline}"}" >&2
     IFS="${newline}"
     continue
   fi
