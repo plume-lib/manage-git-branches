@@ -49,6 +49,10 @@ The commands are:
   directories for two or more of the slugs gets its own chain.
   A slug may also be just `BRANCH`, as in `git-push-to main feature`.
   It matches every ORG; each PROJECT and ORG gets its own chain.
+  It also matches `PROJECT-branch-BRANCH`, as created by `git-new-branch`
+  from a clone `PROJECT`, and it matches the clone `PROJECT` itself if that
+  has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
+  directories form one more chain per PROJECT.
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--squash] FROM_DIR TO_DIR ...`:

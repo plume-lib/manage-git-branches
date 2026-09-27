@@ -32,7 +32,11 @@
 #
 # A slug may also be just BRANCH, which matches every ORG.  Then each PROJECT
 # and ORG gets its own chain, so a chain never goes from one ORG's BRANCH to
-# another ORG's BRANCH.  For example, `git-push-to main feature` pushes
+# another ORG's BRANCH.  A slug BRANCH also names PROJECT-branch-BRANCH, a
+# directory whose name has no ORG, as `git-new-branch` creates from a clone
+# PROJECT, or the clone PROJECT itself if it has BRANCH checked out and the
+# former does not exist; those directories form one more chain for each
+# PROJECT.  For example, `git-push-to main feature` pushes
 # PROJECT-fork-ORG-branch-main into PROJECT-fork-ORG-branch-feature for each
 # PROJECT and ORG.  A slug ORG:BRANCH in the same command belongs to every
 # chain of its PROJECT:  `git-push-to typetools:master master feature` pushes
@@ -804,9 +808,24 @@ has_branch_checked_out() {
 }
 
 ## Prints the directory that the slug ORG:BRANCH names for the given project,
-## or prints nothing and returns 1 if there is none.
+## or prints nothing and returns 1 if there is none.  ORG "-" stands for a
+## directory whose name has no ORG:  PROJECT-branch-BRANCH, or PROJECT if it
+## has BRANCH checked out and the former does not exist.
 slug_dir() {
   parse_slug "$2"
+  if [ "${slug_org}" = "-" ]; then
+    if [ -d "$1-branch-${slug_branch_dir}" ] \
+      && has_branch_checked_out "$1-branch-${slug_branch_dir}" "${slug_branch}"; then
+      printf '%s\n' "$1-branch-${slug_branch_dir}"
+      return 0
+    fi
+    if [ ! -d "$1-branch-${slug_branch_dir}" ] && [ -e "$1/.git" ] \
+      && has_branch_checked_out "$1" "${slug_branch}"; then
+      printf '%s\n' "$1"
+      return 0
+    fi
+    return 1
+  fi
   if [ -d "$1-fork-${slug_org}-branch-${slug_branch_dir}" ]; then
     if has_branch_checked_out "$1-fork-${slug_org}-branch-${slug_branch_dir}" "${slug_branch}"; then
       printf '%s\n' "$1-fork-${slug_org}-branch-${slug_branch_dir}"
@@ -822,10 +841,24 @@ slug_dir() {
   return 1
 }
 
+## Returns 0 if the given directory has ${slug_branch} checked out.  Otherwise,
+## prints an error message and returns 1.
+check_branch_dir() {
+  if has_branch_checked_out "$1" "${slug_branch}"; then
+    return 0
+  fi
+  check_actual="$(git -C "$1" symbolic-ref --quiet --short HEAD 2> /dev/null)" \
+    || check_actual="a detached HEAD"
+  echo "${SCRIPT_NAME}: ${1#./} has ${check_actual} checked out, not ${slug_branch}" >&2
+  return 1
+}
+
 ## Prints, one per line, PROJECT:ORG for each directory in the current
-## directory that the slug names.  If the slug has no ORG, every ORG matches.
+## directory that the slug names.  If the slug has no ORG, every ORG matches,
+## and so do PROJECT-branch-BRANCH and a clone PROJECT that has BRANCH
+## checked out, for which ORG is "-".
 ## Returns 1, after printing an error message, if a directory
-## PROJECT-fork-ORG-branch-BRANCH that the slug names has some other branch
+## PROJECT[-fork-ORG]-branch-BRANCH that the slug names has some other branch
 ## checked out, because merging into that directory would merge into the wrong
 ## branch.
 slug_matches() {
@@ -841,15 +874,35 @@ slug_matches() {
     # branch "main".
     case "${org}" in *-branch-*) continue ;; esac
     if [ -n "${slug_org}" ] && [ "${org}" != "${slug_org}" ]; then continue; fi
-    if has_branch_checked_out "${dir}" "${slug_branch}"; then
-      printf '%s:%s\n' "${project}" "${org}"
-    else
-      match_actual="$(git -C "${dir}" symbolic-ref --quiet --short HEAD 2> /dev/null)" \
-        || match_actual="a detached HEAD"
-      echo "${SCRIPT_NAME}: ${dir#./} has ${match_actual} checked out, not ${slug_branch}" >&2
+    if ! check_branch_dir "${dir}"; then
       match_status=1
+      continue
     fi
+    printf '%s:%s\n' "${project}" "${org}"
   done
+  if [ -z "${slug_org}" ]; then
+    for dir in ./*-branch-"${slug_branch_dir}"; do
+      if [ ! -d "${dir}" ]; then continue; fi
+      name="${dir#./}"
+      project="${name%-branch-"${slug_branch_dir}"}"
+      case "${project}" in *-fork-* | *-branch-*) continue ;; esac
+      if ! check_branch_dir "${dir}"; then
+        match_status=1
+        continue
+      fi
+      printf '%s:-\n' "${project}"
+    done
+    for dir in ./*; do
+      if [ ! -e "${dir}/.git" ]; then continue; fi
+      name="${dir#./}"
+      case "${name}" in *-fork-* | *-branch-*) continue ;; esac
+      # A PROJECT-branch-BRANCH directory takes precedence.
+      if [ -d "${name}-branch-${slug_branch_dir}" ]; then continue; fi
+      if has_branch_checked_out "${dir}" "${slug_branch}"; then
+        printf '%s:-\n' "${name}"
+      fi
+    done
+  fi
   for dir in ./*-fork-*; do
     if [ ! -d "${dir}" ]; then continue; fi
     name="${dir#./}"
@@ -904,6 +957,7 @@ if [ "${num_slugs}" -ne "$#" ]; then
   for arg; do
     if [ ! -d "$arg" ] && ! is_slug "$arg"; then
       echo "${SCRIPT_NAME}: no such directory: $arg" >&2
+      echo "${SCRIPT_NAME}: and, as a slug, $arg names no directory in $(pwd)" >&2
       exit 1
     fi
   done
@@ -921,7 +975,8 @@ newline='
 # ORG, contributes to the chain for each PROJECT and ORG that has a directory
 # for it, so each chain stays within one ORG.  A slug ORG:BRANCH contributes
 # to every chain for its PROJECT.  A PROJECT with directories only for slugs
-# ORG:BRANCH gets a single chain whose key has an empty ORG.
+# ORG:BRANCH gets a single chain whose key has an empty ORG.  The key
+# PROJECT:- is the chain of directories PROJECT-branch-BRANCH.
 keys=''
 explicit_projects=''
 for arg; do
@@ -930,7 +985,11 @@ for arg; do
   fi
   parse_slug "$arg"
   if [ -z "${arg_matches}" ]; then
-    echo "${SCRIPT_NAME}: no directory *-fork-${slug_org:-*}-branch-${slug_branch_dir} (or *-fork-${slug_org:-*} on branch ${slug_branch}) in $(pwd) for $arg" >&2
+    if [ -n "${slug_org}" ]; then
+      echo "${SCRIPT_NAME}: no directory *-fork-${slug_org}-branch-${slug_branch_dir} (or *-fork-${slug_org} on branch ${slug_branch}) in $(pwd) for $arg" >&2
+    else
+      echo "${SCRIPT_NAME}: no directory *-branch-${slug_branch_dir} (or *-fork-* or a clone on branch ${slug_branch}) in $(pwd) for $arg" >&2
+    fi
     exit 1
   fi
   if [ -n "${slug_org}" ]; then
@@ -961,7 +1020,7 @@ for key in ${keys}; do
   IFS="${saved_ifs}"
   project="${key%%:*}"
   org="${key#*:}"
-  if [ -n "${org}" ]; then
+  if [ -n "${org}" ] && [ "${org}" != "-" ]; then
     chain_name="${project} (${org})"
   else
     chain_name="${project}"
