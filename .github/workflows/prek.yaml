@@ -12,4 +12,4 @@ jobs:
           fetch-depth: 1
           show-progress: false
           persist-credentials: false
-      - uses: j178/prek-action@v3.0.0
+      - uses: j178/prek-action@v3.0.1
