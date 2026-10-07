@@ -24,13 +24,14 @@ fail() {
   failures=$((failures + 1))
 }
 
-# Usage: expect_outgoing DESCRIPTION EXPECTED
-# Runs `git-outgoing --format=%s` in ${clone}, and checks that it succeeds and
-# prints the subjects EXPECTED, one per line, in any order.
+# Usage: expect_outgoing DESCRIPTION EXPECTED [GIT-LOG-ARGS]
+# Runs `git-outgoing --format=%s GIT-LOG-ARGS` in ${clone}, and checks that it
+# succeeds and prints the subjects EXPECTED, one per line, in any order.
 expect_outgoing() {
   description="$1"
   expected="$(printf '%s' "$2" | sort)"
-  actual="$(cd "${clone}" && "${GIT_OUTGOING}" --format=%s)"
+  shift 2
+  actual="$(cd "${clone}" && "${GIT_OUTGOING}" --format=%s "$@")"
   status="$?"
   actual="$(printf '%s' "${actual}" | sort)"
   if [ "${status}" -ne 0 ]; then
@@ -84,6 +85,10 @@ commit_file "${feature}" g.txt 'g' 'Feature commit 2'
 expect_outgoing 'unpushed branch' 'Feature commit 1
 Feature commit 2'
 
+# A path limit in the arguments does not show pushed commits.
+expect_outgoing 'path limit, unpushed file' 'Feature commit 1' -- f.txt
+expect_outgoing 'path limit, pushed file' '' -- a.txt
+
 # The branch is pushed, squash-merged into main by someone else, and then
 # deleted from the remote.  Its commits are no longer on any remote branch,
 # but its changes are in origin/HEAD, so it is not outgoing.
@@ -108,6 +113,13 @@ Feature commit 2
 Feature commit 3'
 git -C "${feature}" reset -q --hard HEAD^
 
+# A later upstream change to a file that the branch changed does not make the
+# squash-merged branch outgoing.
+commit_file "${upstream_work}" f.txt 'f2' 'Upstream change to f.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+expect_outgoing 'squash-merged branch, later upstream change' ''
+
 # A branch whose changes conflict with origin/HEAD is outgoing.
 git -C "${clone}" branch -q conflicting origin/main
 git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-conflicting" conflicting
@@ -115,7 +127,14 @@ commit_file "${testdir}/myrepo-branch-conflicting" a.txt 'conflict' 'Conflicting
 commit_file "${upstream_work}" a.txt 'a3' 'Upstream change to a.txt'
 git -C "${upstream_work}" push -q origin main
 git -C "${clone}" fetch -q origin
+# The merge has conflicts, so its result has new objects, but the command
+# does not write them to the repository.
+objects_before="$(find "${clone}/.git/objects" -type f | wc -l)"
 expect_outgoing 'conflicting branch' 'Conflicting commit'
+objects_after="$(find "${clone}/.git/objects" -type f | wc -l)"
+if [ "${objects_before}" -ne "${objects_after}" ]; then
+  fail "conflicting branch: object count changed from ${objects_before} to ${objects_after}"
+fi
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-conflicting"
 git -C "${clone}" branch -q -D conflicting
 
@@ -139,6 +158,30 @@ git -C "${clone}" remote set-head upstream --delete
 : > "${clone}/feature"
 expect_outgoing 'file named like a branch' 'Feature commit 1
 Feature commit 2'
+
+# A remote whose name contains a slash is considered.
+git -C "${clone}" remote add foo/bar "${upstream_remote}"
+git -C "${clone}" fetch -q foo/bar
+git -C "${clone}" remote set-head foo/bar main > /dev/null
+expect_outgoing 'remote name with a slash' ''
+
+# If `git merge-tree --write-tree` is not supported, as before git 2.38, the
+# command fails rather than treating every branch as not merged.
+fake_git_dir="${testdir}/fake-git"
+mkdir "${fake_git_dir}"
+real_git="$(command -v git)"
+cat > "${fake_git_dir}/git" << EOF
+#!/bin/sh
+if [ "\$1" = merge-tree ]; then
+  echo 'usage: git merge-tree' >&2
+  exit 129
+fi
+exec "${real_git}" "\$@"
+EOF
+chmod +x "${fake_git_dir}/git"
+if (cd "${clone}" && PATH="${fake_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2>&1; then
+  fail 'git merge-tree unsupported: expected a failure status'
+fi
 
 # Outside a git repository, the command fails.
 if (cd "${testdir}" && "${GIT_OUTGOING}") > /dev/null 2>&1; then

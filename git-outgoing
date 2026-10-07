@@ -6,47 +6,147 @@
 # Usage:
 #   git-outgoing [GIT-LOG-ARGS]
 #
-# GIT-LOG-ARGS, such as `--oneline`, are passed to `git log`.
+# GIT-LOG-ARGS, such as `--oneline` or `-- PATH`, are passed to `git log`.
+# Any revisions among them are shown in addition to the local branches.
 #
 # Unlike `git log --branches --not --remotes`, this command omits a branch
 # whose changes are already in some remote's default branch (`REMOTE/HEAD`),
 # even though its commits are not.  That happens when a pull request is
 # squash-merged and its remote branch is then deleted.  A branch is omitted
-# when merging it into `REMOTE/HEAD` would not change any file.
+# when either:
+#  * merging it into `REMOTE/HEAD` would not change any file, or
+#  * some commit C in `REMOTE/HEAD` but not in the branch changes only files
+#    that the branch changes, and merging the branch into C's parent yields
+#    C's files.  C is then a squash-merge of the branch, and later changes
+#    to `REMOTE/HEAD` do not matter.
 # A remote with no `REMOTE/HEAD` is not considered; to create it, run
 # `git remote set-head REMOTE --auto`.
 #
 # This command does not contact any remote, so run `git fetch` first if
-# the remote-tracking branches might be out of date.
+# the remote-tracking branches might be out of date.  It does not change the
+# repository.
 #
 # This command requires git 2.38 or later, for `git merge-tree --write-tree`.
 
-# Each line is "COMMIT TREE" for one remote's default branch.
-bases="$(git for-each-ref --format='%(objectname) %(tree)' 'refs/remotes/*/HEAD')" || exit 1
+# Prints an error message and exits with a failure status.
+die() {
+  echo "git-outgoing: $*" >&2
+  exit 1
+}
 
-# The full names of the local branches to show, one per line.  A full name,
-# such as `refs/heads/main`, cannot be mistaken for a file name.
-branches="$(git for-each-ref --format='%(refname)' refs/heads | while read -r branch; do
-  # Skips a branch whose commits are all on some remote branch.
-  if [ -z "$(git rev-list -1 "${branch}" --not --remotes)" ]; then continue; fi
-  # Skips a branch if merging it into some remote's default branch yields that
-  # default branch's own tree.  A merge with conflicts yields some other tree,
-  # or none.
-  merged="$(printf '%s\n' "${bases}" | while read -r base_commit base_tree; do
+# The repository's object directory.  `git merge-tree --write-tree` writes the
+# merge result as objects; git_scratch puts them in ${tmpdir} instead.
+objects="$(git rev-parse --path-format=absolute --git-path objects)" || exit 1
+tmpdir="$(mktemp -d)" || exit 1
+trap 'rm -rf "${tmpdir}"' EXIT
+trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
+mkdir "${tmpdir}/objects" || exit 1
+
+# Usage: git_scratch GIT-ARGS
+# Runs git, writing any new objects to ${tmpdir} rather than to the repository.
+git_scratch() {
+  GIT_OBJECT_DIRECTORY="${tmpdir}/objects" \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES="${objects}${GIT_ALTERNATE_OBJECT_DIRECTORIES:+:${GIT_ALTERNATE_OBJECT_DIRECTORIES}}" \
+    git "$@"
+}
+
+# Usage: merge_yields COMMIT BRANCH TREE
+# Succeeds if merging BRANCH into COMMIT yields TREE without conflicts.
+merge_yields() {
+  merge_tree="$(git_scratch merge-tree --write-tree --no-messages "$1" "$2")"
+  merge_status="$?"
+  case "${merge_status}" in
+    0) [ "${merge_tree}" = "$3" ] ;;
+    1) return 1 ;; # The merge has conflicts.
+    129) die "git merge-tree --write-tree failed; it requires git 2.38 or later" ;;
+    *) die "git merge-tree $1 $2 failed with status ${merge_status}" ;;
+  esac
+}
+
+# Usage: has_squash_commit BASE BRANCH
+# Succeeds if BASE contains a commit, not in BRANCH, that changes only files
+# that BRANCH changes, and that equals merging BRANCH into its parent.
+has_squash_commit() {
+  merge_base="$(git merge-base "$1" "$2")"
+  case "$?" in
+    0) ;;
+    1) return 1 ;; # BASE and BRANCH have no common ancestor.
+    *) die "git merge-base $1 $2 failed" ;;
+  esac
+  git diff --no-renames --name-only "${merge_base}" "$2" > "${tmpdir}/branch-paths" \
+    || die "git diff ${merge_base} $2 failed"
+  if [ ! -s "${tmpdir}/branch-paths" ]; then return 1; fi
+  # Each commit is introduced by a line that starts with \001, which git quotes
+  # in a file name.
+  git log --no-merges --no-renames --format='%x01%H %T %P' --name-only "$1" --not "${merge_base}" > "${tmpdir}/base-log" \
+    || die "git log $1 failed"
+  # Each line is "PARENT TREE" for one possible squash commit.
+  squash_candidates="$(awk '
+    function report() { if (parent != "" && files > 0 && only_branch_files) print parent, tree }
+    FILENAME == ARGV[1] { branch_path[$0]; next }
+    /^\001/ { report(); split(substr($0, 2), fields, " "); tree = fields[2]; parent = fields[3]; files = 0; only_branch_files = 1; next }
+    $0 == "" { next }
+    { files++; if (!($0 in branch_path)) only_branch_files = 0 }
+    END { report() }
+  ' "${tmpdir}/branch-paths" "${tmpdir}/base-log")" || die "awk failed"
+  while read -r squash_parent squash_tree; do
+    if [ -z "${squash_parent}" ]; then continue; fi
+    if merge_yields "${squash_parent}" "$2" "${squash_tree}"; then return 0; fi
+  done << EOF
+${squash_candidates}
+EOF
+  return 1
+}
+
+# Usage: is_merged BRANCH
+# Succeeds if BRANCH's changes are in some remote's default branch.
+is_merged() {
+  while read -r base_commit base_tree; do
     if [ -z "${base_commit}" ]; then continue; fi
-    merge_tree="$(git merge-tree --write-tree "${base_commit}" "${branch}" 2> /dev/null | head -n 1)"
-    if [ "${merge_tree}" = "${base_tree}" ]; then
-      echo merged
-      break
-    fi
-  done)"
-  if [ -z "${merged}" ]; then
-    printf '%s\n' "${branch}"
+    if merge_yields "${base_commit}" "$1" "${base_tree}"; then return 0; fi
+    if has_squash_commit "${base_commit}" "$1"; then return 0; fi
+  done << EOF
+${bases}
+EOF
+  return 1
+}
+
+# Each line is "COMMIT TREE" for one remote's default branch.  A remote name
+# may contain a slash, so the refs are matched against the remote names.
+git remote > "${tmpdir}/remotes" || exit 1
+git for-each-ref --format='%(refname) %(objectname) %(tree)' refs/remotes > "${tmpdir}/remote-refs" || exit 1
+bases="$(awk '
+  FILENAME == ARGV[1] { want["refs/remotes/" $0 "/HEAD"]; next }
+  $1 in want { print $2, $3 }
+' "${tmpdir}/remotes" "${tmpdir}/remote-refs")" || die "awk failed"
+
+# The full names of the local branches whose tips are not on any remote
+# branch, one per line.  A full name, such as `refs/heads/main`, cannot be
+# mistaken for a file name.
+git rev-list --branches --not --remotes > "${tmpdir}/unpushed" || exit 1
+git for-each-ref --format='%(objectname) %(refname)' refs/heads > "${tmpdir}/heads" || exit 1
+unpushed_branches="$(awk '
+  FILENAME == ARGV[1] { unpushed[$1]; next }
+  $1 in unpushed { print $2 }
+' "${tmpdir}/unpushed" "${tmpdir}/heads")" || die "awk failed"
+
+# The branches to show, separated by spaces.
+branches=
+while read -r branch; do
+  if [ -z "${branch}" ]; then continue; fi
+  if ! is_merged "${branch}"; then
+    branches="${branches} ${branch}"
   fi
-done)" || exit 1
+done << EOF
+${unpushed_branches}
+EOF
 
 if [ -z "${branches}" ]; then exit 0; fi
 # A branch name contains no whitespace or glob character, so word splitting
 # yields one argument per branch.
+# The second `--not` makes any revisions in GIT-LOG-ARGS positive again.  The
+# GIT-LOG-ARGS come last, so that a `--` in them does not turn the branches
+# into paths.
 # shellcheck disable=SC2086
-git log "$@" ${branches} --not --remotes
+git log ${branches} --not --remotes --not "$@"
