@@ -1,0 +1,52 @@
+#!/bin/sh
+
+# Shows the commits on local branches that are not on any remote branch,
+# that is, commits that have not been pushed.
+#
+# Usage:
+#   git-outgoing [GIT-LOG-ARGS]
+#
+# GIT-LOG-ARGS, such as `--oneline`, are passed to `git log`.
+#
+# Unlike `git log --branches --not --remotes`, this command omits a branch
+# whose changes are already in some remote's default branch (`REMOTE/HEAD`),
+# even though its commits are not.  That happens when a pull request is
+# squash-merged and its remote branch is then deleted.  A branch is omitted
+# when merging it into `REMOTE/HEAD` would not change any file.
+# A remote with no `REMOTE/HEAD` is not considered; to create it, run
+# `git remote set-head REMOTE --auto`.
+#
+# This command does not contact any remote, so run `git fetch` first if
+# the remote-tracking branches might be out of date.
+#
+# This command requires git 2.38 or later, for `git merge-tree --write-tree`.
+
+# Each line is "COMMIT TREE" for one remote's default branch.
+bases="$(git for-each-ref --format='%(objectname) %(tree)' 'refs/remotes/*/HEAD')" || exit 1
+
+# The full names of the local branches to show, one per line.  A full name,
+# such as `refs/heads/main`, cannot be mistaken for a file name.
+branches="$(git for-each-ref --format='%(refname)' refs/heads | while read -r branch; do
+  # Skips a branch whose commits are all on some remote branch.
+  if [ -z "$(git rev-list -1 "${branch}" --not --remotes)" ]; then continue; fi
+  # Skips a branch if merging it into some remote's default branch yields that
+  # default branch's own tree.  A merge with conflicts yields some other tree,
+  # or none.
+  merged="$(printf '%s\n' "${bases}" | while read -r base_commit base_tree; do
+    if [ -z "${base_commit}" ]; then continue; fi
+    merge_tree="$(git merge-tree --write-tree "${base_commit}" "${branch}" 2> /dev/null | head -n 1)"
+    if [ "${merge_tree}" = "${base_tree}" ]; then
+      echo merged
+      break
+    fi
+  done)"
+  if [ -z "${merged}" ]; then
+    printf '%s\n' "${branch}"
+  fi
+done)" || exit 1
+
+if [ -z "${branches}" ]; then exit 0; fi
+# A branch name contains no whitespace or glob character, so word splitting
+# yields one argument per branch.
+# shellcheck disable=SC2086
+git log "$@" ${branches} --not --remotes
