@@ -8,6 +8,7 @@
 #
 # GIT-LOG-ARGS, such as `--oneline` or `-- PATH`, are passed to `git log`.
 # Any revisions among them are shown in addition to the local branches.
+# They may not include `--stdin`, which this command uses itself.
 #
 # Unlike `git log --branches --not --remotes`, this command omits a branch
 # whose changes are already in some remote's default branch (`REMOTE/HEAD`),
@@ -19,7 +20,8 @@
 #    that the branch changes, and merging the branch into C's parent yields
 #    C's files.  C is then a squash-merge of the branch, and later changes
 #    to `REMOTE/HEAD` do not matter.  To save time, only commits C that were
-#    committed at most a day before the branch's last commit are examined.
+#    committed at most a day before the branch's last commit was authored, or
+#    later, are examined.
 # The commits of an omitted branch are not shown even when another branch
 # contains them, as when that branch was started from the omitted one.
 # A remote with no `REMOTE/HEAD` is not considered; to create it, run
@@ -91,13 +93,9 @@ warned_partial_clone=
 # Usage: git_scratch GIT-ARGS
 # Runs git, writing any new objects to ${tmpdir} rather than to the repository.
 # In a partial clone, git does not fetch missing objects from the remote.
-# Pathspec magic, such as `:(literal)`, is honored, and pathspecs are case
-# sensitive, whatever the user's environment says.
 git_scratch() {
   GIT_OBJECT_DIRECTORY="${tmpdir}/objects" \
     GIT_NO_LAZY_FETCH=1 \
-    GIT_LITERAL_PATHSPECS=0 \
-    GIT_ICASE_PATHSPECS=0 \
     git "$@"
 }
 
@@ -141,54 +139,58 @@ merge_yields() {
 # The arguments for which ${tmpdir}/branch-paths was last computed.
 branch_paths_key=
 
-# Usage: has_squash_commit BASE BRANCH MERGE-BASE BRANCH-TIME
+# Usage: has_squash_commit BASE BRANCH MERGE-BASES BRANCH-TIME
 # Succeeds if BASE contains a commit, not in BRANCH, that changes only files
 # that BRANCH changes, and that equals merging BRANCH into its parent.
-# MERGE-BASE is the merge base of BASE and BRANCH, and BRANCH-TIME is the
-# committer date of BRANCH's last commit, in seconds since the epoch.
+# MERGE-BASES are the merge bases of BASE and BRANCH, one per line, and
+# BRANCH-TIME is the author date of BRANCH's last commit, in seconds since the
+# epoch.  Amending or rebasing BRANCH, unlike squash-merging it, keeps that
+# date.
 #
 # The git commands that produce file names for awk to parse override any user
 # configuration that would change their output.
 has_squash_commit() {
-  # Several remotes' default branches may have the same merge base with BRANCH.
+  # Several remotes' default branches may have the same merge bases with
+  # BRANCH.
   if [ "${branch_paths_key}" != "$3 $2" ]; then
     branch_paths_key=
-    # The file names are relative to the top of the working tree.  With
-    # `core.quotePath=false`, git quotes only a file name that contains a
-    # control character, a double quote, or a backslash.  Such a quoted name
-    # matches no path, so a commit that changes only such files is not found;
-    # then the branch is shown.
-    if ! git_scratch -c core.quotePath=false diff --no-relative --no-renames --name-only "$3" "$2" \
-      > "${tmpdir}/branch-paths" 2> "${tmpdir}/git-errors"; then
-      git_failed "git diff $3 $2"
-      return 1
-    fi
+    printf '%s\n' "$3" > "${tmpdir}/merge-bases" || die "cannot write ${tmpdir}/merge-bases"
+    # The files that BRANCH changes relative to any of its merge bases, since
+    # a squash commit may descend from any of them.  The file names are
+    # relative to the top of the working tree.  With `core.quotePath=false`,
+    # git quotes only a file name that contains a control character, a double
+    # quote, or a backslash.  Such a name is quoted the same way in the output
+    # of `git log` below, so it is compared correctly.
+    : > "${tmpdir}/all-branch-paths" || die "cannot write ${tmpdir}/all-branch-paths"
+    while read -r merge_base; do
+      if ! git_scratch -c core.quotePath=false diff --no-relative --no-renames --name-only "${merge_base}" "$2" \
+        >> "${tmpdir}/all-branch-paths" 2> "${tmpdir}/git-errors"; then
+        git_failed "git diff ${merge_base} $2"
+        return 1
+      fi
+    done < "${tmpdir}/merge-bases"
+    sort -u "${tmpdir}/all-branch-paths" > "${tmpdir}/branch-paths" || die "sort failed"
     branch_paths_key="$3 $2"
   fi
   if [ ! -s "${tmpdir}/branch-paths" ]; then return 1; fi
-  # A squash-merge is committed after the branch's last commit; the margin
-  # allows for clock skew between the computers that made the commits.
-  # `--since-as-filter`, unlike `--since`, does not stop at an older commit,
-  # which could hide a newer one behind it.
+  # A squash-merge is committed after the branch's last commit was authored;
+  # the margin allows for clock skew between the computers that made the
+  # commits.  `--since-as-filter`, unlike `--since`, does not stop at an older
+  # commit, which could hide a newer one behind it.
   since="$(($4 - 24 * 60 * 60))"
-  # `git log --stdin` reads the paths that follow `--`.  The `top` magic makes
-  # each path relative to the top of the working tree rather than to the
-  # current directory.  `--full-diff` lists all the files that each such
-  # commit changes, not just those paths.  `--full-history` examines commits
-  # on every side of a merge, even one whose result for those paths equals one
-  # of its parents.  `--ancestry-path` examines only descendants of
-  # MERGE-BASE, so each commit's parent has a common ancestor with BRANCH, as
-  # merge_yields requires.
-  {
-    echo '--'
-    sed 's/^/:(top,literal)/' "${tmpdir}/branch-paths"
-  } > "${tmpdir}/log-input" || die "cannot write ${tmpdir}/log-input"
+  # The merge bases are excluded through `--stdin`, as `^COMMIT`.
+  # `--ancestry-path` examines only descendants of a merge base, so each
+  # commit's parent has a common ancestor with BRANCH, as merge_yields
+  # requires.  There is no pathspec, which would make git compare each
+  # commit's files with its parent's during the walk; only the commits that
+  # pass `--since-as-filter` are compared, for `--name-only`.
+  sed 's/^/^/' "${tmpdir}/merge-bases" > "${tmpdir}/log-input" || die "cannot write ${tmpdir}/log-input"
   # Each commit is introduced by a line that starts with \001, which git quotes
   # in a file name.
-  if ! git_scratch -c core.quotePath=false log --no-merges --full-history --ancestry-path --no-renames \
+  if ! git_scratch -c core.quotePath=false log --no-merges --ancestry-path --no-renames --no-follow \
     --no-relative --no-show-signature --no-notes --no-color \
-    --full-diff --since-as-filter="@${since}" --format='%x01%H %T %P' --name-only \
-    "$1" --not "$3" --stdin < "${tmpdir}/log-input" > "${tmpdir}/base-log" 2> "${tmpdir}/git-errors"; then
+    --since-as-filter="@${since}" --format='%x01%H %T %P' --name-only \
+    "$1" --stdin < "${tmpdir}/log-input" > "${tmpdir}/base-log" 2> "${tmpdir}/git-errors"; then
     git_failed "git log $1"
     return 1
   fi
@@ -209,17 +211,17 @@ has_squash_commit() {
 
 # Usage: is_merged BRANCH BRANCH-TIME
 # Succeeds if BRANCH's changes are in some remote's default branch.
-# BRANCH-TIME is the committer date of BRANCH's last commit.
+# BRANCH-TIME is the author date of BRANCH's last commit.
 is_merged() {
   while read -r base_commit base_tree; do
-    base_merge_base="$(git merge-base "${base_commit}" "$1")"
+    base_merge_bases="$(git merge-base --all "${base_commit}" "$1")"
     case "$?" in
       0) ;;
       1) continue ;; # BRANCH has no history in common with this base.
       *) die "git merge-base ${base_commit} $1 failed" ;;
     esac
     if merge_yields "${base_commit}" "$1" "${base_tree}"; then return 0; fi
-    if has_squash_commit "${base_commit}" "$1" "${base_merge_base}" "$2"; then return 0; fi
+    if has_squash_commit "${base_commit}" "$1" "${base_merge_bases}" "$2"; then return 0; fi
   done < "${tmpdir}/bases"
   return 1
 }
@@ -236,33 +238,34 @@ awk '
 sort -u "${tmpdir}/all-bases" > "${tmpdir}/bases" || die "sort failed"
 
 # The local branches whose tips are not on any remote branch, one per line,
-# each as "TIME NAME", where TIME is the committer date of the tip in seconds
+# each as "TIME NAME", where TIME is the author date of the tip in seconds
 # since the epoch.  A full name, such as `refs/heads/main`, cannot be
 # mistaken for a file name.  Comparing the tips with the unpushed commits
 # avoids passing one argument per remote-tracking branch, as
 # `git for-each-ref --no-merged` would require; with many remote-tracking
 # branches, such arguments would exceed the limit on a command line's size.
-git for-each-ref --format='%(objectname) %(committerdate:unix) %(refname)' refs/heads > "${tmpdir}/local-branches" || exit 1
+git for-each-ref --format='%(objectname) %(authordate:unix) %(refname)' refs/heads > "${tmpdir}/local-branches" || exit 1
 git rev-list --branches --not --remotes > "${tmpdir}/unpushed-commits" || exit 1
 awk '
   FILENAME == ARGV[1] { line = $2 " " $3; refs[$1] = ($1 in refs) ? refs[$1] "\n" line : line; next }
   $0 in refs { print refs[$0]; delete refs[$0] }
 ' "${tmpdir}/local-branches" "${tmpdir}/unpushed-commits" > "${tmpdir}/unpushed-branches" || die "awk failed"
 
-# The branches to show, and those to omit, separated by spaces.
-branches=
-omitted=
+# The branches to show, one per line, and those to omit, each preceded by `^`.
+# They are passed through `--stdin` rather than as arguments, which might
+# exceed the limit on a command line's size.
+: > "${tmpdir}/log-refs" || die "cannot write ${tmpdir}/log-refs"
 while read -r branch_time branch; do
   if is_merged "${branch}" "${branch_time}"; then
-    omitted="${omitted} ${branch}"
+    printf '^%s\n' "${branch}"
   else
-    branches="${branches} ${branch}"
-  fi
+    printf '%s\n' "${branch}"
+  fi >> "${tmpdir}/log-refs" || die "cannot write ${tmpdir}/log-refs"
 done < "${tmpdir}/unpushed-branches"
 
-# The second `--not` makes any revisions in GIT-LOG-ARGS positive again.  The
-# GIT-LOG-ARGS come last, so that a `--` in them does not turn the branches
-# into paths.  Even with no branches, no remote-tracking branches, and no
-# revisions in GIT-LOG-ARGS, `--remotes` keeps `git log` from showing HEAD.
-# shellcheck disable=SC2086
-git log ${branches} --not --remotes ${omitted} --not "$@"
+# The `--not` makes the remote-tracking branches negative, and the second
+# `--not` makes any revisions in GIT-LOG-ARGS positive again.  The GIT-LOG-ARGS
+# come last, so that a `--` in them does not turn `--remotes` into a path.
+# Even with no branches, no remote-tracking branches, and no revisions in
+# GIT-LOG-ARGS, `--remotes` keeps `git log` from showing HEAD.
+git log --stdin --not --remotes --not "$@" < "${tmpdir}/log-refs"

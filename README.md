@@ -124,8 +124,6 @@ takes effect when it is set to a non-empty value.
   `git-new-branch`, `git-checkout-branch`, and `git-push-to` use this standard
   Git variable to determine whether the selected SSH command accepts OpenSSH
   options.
-* `GIT_ALTERNATE_OBJECT_DIRECTORIES`: `git-outgoing` uses this standard Git
-  variable to find objects in other repositories.
 
 ## Installation
 

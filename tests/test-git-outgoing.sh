@@ -15,6 +15,8 @@ COMMANDS_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)" || exit 1
 GIT_OUTGOING="${COMMANDS_DIR}/git-outgoing"
 
 . "${SCRIPT_DIR}/lib-git-test-env.sh"
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
 
 failures=0
 
@@ -217,12 +219,93 @@ git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-skew" skew
 commit_file "${testdir}/myrepo-branch-skew" k.txt 'k' 'Skew commit'
 squash_merge skew
 commit_file "${upstream_work}" k.txt 'k2' 'Upstream change to k.txt'
-GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' commit_file "${upstream_work}" old.txt 'old' 'Commit with an old date'
+(
+  GIT_COMMITTER_DATE='2000-01-01T00:00:00Z'
+  export GIT_COMMITTER_DATE
+  commit_file "${upstream_work}" old.txt 'old' 'Commit with an old date'
+)
+if [ "$(git -C "${upstream_work}" log -1 --format=%cI)" != '2000-01-01T00:00:00Z' ]; then
+  fail 'test setup: the commit should have an old committer date'
+fi
 git -C "${upstream_work}" push -q origin main
 git -C "${clone}" fetch -q origin
 expect_outgoing 'squash-merged branch, later commit with an old date' ''
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-skew"
 git -C "${clone}" branch -q -D skew
+
+# A squash-merged branch whose last commit is amended, with a later committer
+# date but the same author date, is not outgoing, even after a later upstream
+# change to the branch's file.
+git -C "${clone}" branch -q amended origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-amended" amended
+(
+  GIT_AUTHOR_DATE="$(($(date +%s) - 5 * 24 * 60 * 60)) +0000"
+  GIT_COMMITTER_DATE="${GIT_AUTHOR_DATE}"
+  export GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+  commit_file "${testdir}/myrepo-branch-amended" m.txt 'm' 'Amended commit'
+)
+(
+  GIT_COMMITTER_DATE="$(($(date +%s) - 4 * 24 * 60 * 60)) +0000"
+  export GIT_COMMITTER_DATE
+  squash_merge amended
+)
+commit_file "${upstream_work}" m.txt 'm2' 'Upstream change to m.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+git -C "${testdir}/myrepo-branch-amended" commit -q --amend --no-edit
+expect_outgoing 'squash-merged branch, amended afterward' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-amended"
+git -C "${clone}" branch -q -D amended
+
+# A squash-merged branch is not outgoing when it has two merge bases with
+# origin/HEAD and the squash commit descends from only one of them.  The
+# branch merges upstream's commit m1, and upstream squash-merges the branch on
+# top of the branch's first commit b1, so b1 and m1 are both merge bases.
+git -C "${clone}" branch -q crisscross origin/main
+crisscross="${testdir}/myrepo-branch-crisscross"
+git -C "${clone}" worktree add -q "${crisscross}" crisscross
+commit_file "${crisscross}" x.txt 'x' 'Crisscross commit b1'
+git -C "${clone}" push -q origin crisscross
+commit_file "${upstream_work}" y.txt 'y' 'Crisscross upstream commit m1'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+git -C "${crisscross}" merge -q --no-edit origin/main
+commit_file "${crisscross}" x.txt 'x2' 'Crisscross commit b2'
+git -C "${clone}" push -q origin crisscross
+git -C "${upstream_work}" pull -q origin main
+git -C "${upstream_work}" fetch -q origin crisscross
+crisscross_b1="$(git -C "${upstream_work}" rev-parse FETCH_HEAD~1^1)"
+git -C "${upstream_work}" checkout -q -b squashed "${crisscross_b1}"
+git -C "${upstream_work}" merge -q --squash FETCH_HEAD > /dev/null
+git -C "${upstream_work}" commit -q -m 'Squash-merged crisscross on b1'
+git -C "${upstream_work}" checkout -q main
+git -C "${upstream_work}" merge -q --no-edit squashed
+git -C "${upstream_work}" branch -q -D squashed
+commit_file "${upstream_work}" x.txt 'x3' 'Upstream change to x.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${upstream_work}" push -q origin --delete crisscross
+git -C "${clone}" fetch -q --prune origin
+if [ "$(git -C "${clone}" merge-base --all origin/main crisscross | wc -l)" -ne 2 ]; then
+  fail 'test setup: crisscross should have two merge bases with origin/main'
+fi
+expect_outgoing 'squash-merged branch, two merge bases' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-crisscross"
+git -C "${clone}" branch -q -D crisscross
+
+# A squash-merged branch that changes only one file is not outgoing, even with
+# `log.follow=true`.
+git -C "${clone}" branch -q follow origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-follow" follow
+commit_file "${testdir}/myrepo-branch-follow" w.txt 'w' 'Follow commit'
+squash_merge follow
+commit_file "${upstream_work}" w.txt 'w2' 'Upstream change to w.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+git -C "${clone}" config log.follow true
+expect_outgoing 'squash-merged branch, log.follow' ''
+git -C "${clone}" config --unset log.follow
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-follow"
+git -C "${clone}" branch -q -D follow
 
 # A commit in origin/HEAD that changes only the branch's files, but that comes
 # from a history unrelated to the branch, does not make the command fail.
@@ -313,33 +396,14 @@ expect_outgoing 'remote name with a slash' ''
 # If `git merge-tree --write-tree` is not supported, as before git 2.38, the
 # command fails rather than treating every branch as not merged.
 fake_git_dir="${testdir}/fake-git"
-mkdir "${fake_git_dir}"
-real_git="$(command -v git)"
-cat > "${fake_git_dir}/git" << EOF
-#!/bin/sh
-if [ "\$1" = merge-tree ]; then
-  echo 'usage: git merge-tree' >&2
-  exit 129
-fi
-exec "${real_git}" "\$@"
-EOF
-chmod +x "${fake_git_dir}/git"
+make_fake_git "${fake_git_dir}" merge-tree 129 'usage: git merge-tree'
 if (cd "${clone}" && PATH="${fake_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2>&1; then
   fail 'git merge-tree unsupported: expected a failure status'
 fi
 
 # A git older than 2.44 is rejected.
 old_git_dir="${testdir}/old-git"
-mkdir "${old_git_dir}"
-cat > "${old_git_dir}/git" << EOF
-#!/bin/sh
-if [ "\$1" = version ]; then
-  echo 'git version 2.43.0'
-  exit 0
-fi
-exec "${real_git}" "\$@"
-EOF
-chmod +x "${old_git_dir}/git"
+make_fake_git "${old_git_dir}" version 0 'git version 2.43.0'
 if (cd "${clone}" && PATH="${old_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2> "${testdir}/old-git-errors"; then
   fail 'git 2.43: expected a failure status'
 fi
@@ -350,16 +414,7 @@ fi
 # A git failure that is not due to a partial clone is reported, even when a
 # remote is configured, but not as a promisor remote.
 corrupt_git_dir="${testdir}/corrupt-git"
-mkdir "${corrupt_git_dir}"
-cat > "${corrupt_git_dir}/git" << EOF
-#!/bin/sh
-if [ "\$1" = merge-tree ]; then
-  echo 'fatal: simulated corruption' >&2
-  exit 128
-fi
-exec "${real_git}" "\$@"
-EOF
-chmod +x "${corrupt_git_dir}/git"
+make_fake_git "${corrupt_git_dir}" merge-tree 128 'fatal: simulated corruption'
 git -C "${clone}" config remote.origin.promisor false
 if (cd "${clone}" && PATH="${corrupt_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2> "${testdir}/corrupt-errors"; then
   fail 'git failure, not a partial clone: expected a failure status'
