@@ -185,6 +185,79 @@ expect_outgoing 'branch stacked on a squash-merged branch' 'Stacked commit'
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-stacked"
 git -C "${clone}" branch -q -D stacked
 
+# A squash-merged branch is not outgoing when the command runs from a
+# subdirectory, even with `diff.relative=true`, and even though the branch
+# also changes a file outside that subdirectory.
+git -C "${clone}" branch -q subdir origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-subdir" subdir
+mkdir "${testdir}/myrepo-branch-subdir/sub"
+printf '%s\n' 'x' > "${testdir}/myrepo-branch-subdir/sub/x.txt"
+printf '%s\n' 't' > "${testdir}/myrepo-branch-subdir/top.txt"
+git -C "${testdir}/myrepo-branch-subdir" add sub/x.txt top.txt
+git -C "${testdir}/myrepo-branch-subdir" commit -q -m 'Subdirectory commit'
+squash_merge subdir
+commit_file "${upstream_work}" sub/x.txt 'x2' 'Upstream change to sub/x.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+mkdir -p "${clone}/sub"
+saved_clone="${clone}"
+clone="${saved_clone}/sub"
+expect_outgoing 'squash-merged branch, run from a subdirectory' ''
+git -C "${saved_clone}" config diff.relative true
+expect_outgoing 'squash-merged branch, run from a subdirectory, diff.relative' ''
+git -C "${saved_clone}" config --unset diff.relative
+clone="${saved_clone}"
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-subdir"
+git -C "${clone}" branch -q -D subdir
+
+# A commit with an old committer date in origin/HEAD does not hide a squash
+# commit behind it.
+git -C "${clone}" branch -q skew origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-skew" skew
+commit_file "${testdir}/myrepo-branch-skew" k.txt 'k' 'Skew commit'
+squash_merge skew
+commit_file "${upstream_work}" k.txt 'k2' 'Upstream change to k.txt'
+GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' commit_file "${upstream_work}" old.txt 'old' 'Commit with an old date'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+expect_outgoing 'squash-merged branch, later commit with an old date' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-skew"
+git -C "${clone}" branch -q -D skew
+
+# A commit in origin/HEAD that changes only the branch's files, but that comes
+# from a history unrelated to the branch, does not make the command fail.
+git -C "${clone}" branch -q readme origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-readme" readme
+commit_file "${testdir}/myrepo-branch-readme" README.md 'readme' 'Readme commit'
+git -C "${upstream_work}" checkout -q --orphan unrelated
+git -C "${upstream_work}" rm -q -r -f .
+commit_file "${upstream_work}" u.txt 'u' 'Unrelated root commit'
+commit_file "${upstream_work}" README.md 'other readme' 'Unrelated readme commit'
+git -C "${upstream_work}" checkout -q main
+git -C "${upstream_work}" merge -q --no-edit --allow-unrelated-histories unrelated
+git -C "${upstream_work}" branch -q -D unrelated
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+expect_outgoing 'branch, with an unrelated history in origin/HEAD' 'Readme commit'
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-readme"
+git -C "${clone}" branch -q -D readme
+
+# A squash-merged branch is not outgoing in a repository whose path contains
+# a colon, which is the separator in GIT_ALTERNATE_OBJECT_DIRECTORIES.
+saved_clone="${clone}"
+clone="${testdir}/my:repo"
+git clone -q "${remote}" "${clone}"
+git -C "${clone}" checkout -q -b colon
+commit_file "${clone}" c.txt 'c' 'Colon commit'
+expect_outgoing 'unpushed branch, path with a colon' 'Colon commit'
+squash_merge colon
+commit_file "${upstream_work}" c.txt 'c2' 'Upstream change to c.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+expect_outgoing 'squash-merged branch, path with a colon' ''
+clone="${saved_clone}"
+git -C "${clone}" fetch -q origin
+
 # A branch with no history in common with origin/HEAD is outgoing.
 empty_tree="$(git -C "${clone}" mktree < /dev/null)"
 orphan_commit="$(git -C "${clone}" commit-tree -m 'Orphan commit' "${empty_tree}")"

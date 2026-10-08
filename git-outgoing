@@ -59,7 +59,17 @@ tmpdir="$(mktemp -d)" || exit 1
 trap 'rm -rf "${tmpdir}"' EXIT
 trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
-mkdir "${tmpdir}/objects" || exit 1
+mkdir "${tmpdir}/objects" "${tmpdir}/objects/info" || exit 1
+# The scratch object directory borrows the repository's objects through its
+# alternates file, which separates entries by newlines.  Setting
+# GIT_ALTERNATE_OBJECT_DIRECTORIES instead would split a path that contains
+# the path separator, `:` or `;`.  The entry is C-quoted, so that it may
+# contain any character.
+{
+  printf '"'
+  printf '%s\n' "${objects}" | sed 's/[\\"]/\\&/g' | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }'
+  printf '"\n'
+} > "${tmpdir}/objects/info/alternates" || die "cannot write ${tmpdir}/objects/info/alternates"
 
 # Whether this repository is a partial clone, whose file contents may be
 # missing until git fetches them on demand.  Non-empty if so.
@@ -81,10 +91,13 @@ warned_partial_clone=
 # Usage: git_scratch GIT-ARGS
 # Runs git, writing any new objects to ${tmpdir} rather than to the repository.
 # In a partial clone, git does not fetch missing objects from the remote.
+# Pathspec magic, such as `:(literal)`, is honored, and pathspecs are case
+# sensitive, whatever the user's environment says.
 git_scratch() {
   GIT_OBJECT_DIRECTORY="${tmpdir}/objects" \
-    GIT_ALTERNATE_OBJECT_DIRECTORIES="${objects}${GIT_ALTERNATE_OBJECT_DIRECTORIES:+:${GIT_ALTERNATE_OBJECT_DIRECTORIES}}" \
     GIT_NO_LAZY_FETCH=1 \
+    GIT_LITERAL_PATHSPECS=0 \
+    GIT_ICASE_PATHSPECS=0 \
     git "$@"
 }
 
@@ -125,34 +138,56 @@ merge_yields() {
   esac
 }
 
-# Usage: has_squash_commit BASE BRANCH MERGE-BASE
+# The arguments for which ${tmpdir}/branch-paths was last computed.
+branch_paths_key=
+
+# Usage: has_squash_commit BASE BRANCH MERGE-BASE BRANCH-TIME
 # Succeeds if BASE contains a commit, not in BRANCH, that changes only files
 # that BRANCH changes, and that equals merging BRANCH into its parent.
-# MERGE-BASE is the merge base of BASE and BRANCH.
+# MERGE-BASE is the merge base of BASE and BRANCH, and BRANCH-TIME is the
+# committer date of BRANCH's last commit, in seconds since the epoch.
+#
+# The git commands that produce file names for awk to parse override any user
+# configuration that would change their output.
 has_squash_commit() {
-  # With `core.quotePath=false`, git quotes only a file name that contains a
-  # control character, a double quote, or a backslash.  Such a quoted name
-  # matches no path, so a commit that changes only such files is not found;
-  # then the branch is shown.
-  if ! git_scratch -c core.quotePath=false diff --no-renames --name-only "$3" "$2" \
-    > "${tmpdir}/branch-paths" 2> "${tmpdir}/git-errors"; then
-    git_failed "git diff $3 $2"
-    return 1
+  # Several remotes' default branches may have the same merge base with BRANCH.
+  if [ "${branch_paths_key}" != "$3 $2" ]; then
+    branch_paths_key=
+    # The file names are relative to the top of the working tree.  With
+    # `core.quotePath=false`, git quotes only a file name that contains a
+    # control character, a double quote, or a backslash.  Such a quoted name
+    # matches no path, so a commit that changes only such files is not found;
+    # then the branch is shown.
+    if ! git_scratch -c core.quotePath=false diff --no-relative --no-renames --name-only "$3" "$2" \
+      > "${tmpdir}/branch-paths" 2> "${tmpdir}/git-errors"; then
+      git_failed "git diff $3 $2"
+      return 1
+    fi
+    branch_paths_key="$3 $2"
   fi
   if [ ! -s "${tmpdir}/branch-paths" ]; then return 1; fi
   # A squash-merge is committed after the branch's last commit; the margin
   # allows for clock skew between the computers that made the commits.
-  branch_time="$(git log -1 --format=%ct "$2")" || die "git log $2 failed"
-  since="$((branch_time - 24 * 60 * 60))"
-  # `git log --stdin` reads the paths that follow `--`, and `--full-diff`
-  # lists all the files that each such commit changes, not just those paths.
-  # `--full-history` examines commits on every side of a merge, even one whose
-  # result for those paths equals one of its parents.
-  { echo '--' && cat "${tmpdir}/branch-paths"; } > "${tmpdir}/log-input" || die "cannot write ${tmpdir}/log-input"
+  # `--since-as-filter`, unlike `--since`, does not stop at an older commit,
+  # which could hide a newer one behind it.
+  since="$(($4 - 24 * 60 * 60))"
+  # `git log --stdin` reads the paths that follow `--`.  The `top` magic makes
+  # each path relative to the top of the working tree rather than to the
+  # current directory.  `--full-diff` lists all the files that each such
+  # commit changes, not just those paths.  `--full-history` examines commits
+  # on every side of a merge, even one whose result for those paths equals one
+  # of its parents.  `--ancestry-path` examines only descendants of
+  # MERGE-BASE, so each commit's parent has a common ancestor with BRANCH, as
+  # merge_yields requires.
+  {
+    echo '--'
+    sed 's/^/:(top,literal)/' "${tmpdir}/branch-paths"
+  } > "${tmpdir}/log-input" || die "cannot write ${tmpdir}/log-input"
   # Each commit is introduced by a line that starts with \001, which git quotes
   # in a file name.
-  if ! git_scratch -c core.quotePath=false --literal-pathspecs log --no-merges --full-history --no-renames \
-    --full-diff --since="@${since}" --format='%x01%H %T %P' --name-only \
+  if ! git_scratch -c core.quotePath=false log --no-merges --full-history --ancestry-path --no-renames \
+    --no-relative --no-show-signature --no-notes --no-color \
+    --full-diff --since-as-filter="@${since}" --format='%x01%H %T %P' --name-only \
     "$1" --not "$3" --stdin < "${tmpdir}/log-input" > "${tmpdir}/base-log" 2> "${tmpdir}/git-errors"; then
     git_failed "git log $1"
     return 1
@@ -172,8 +207,9 @@ has_squash_commit() {
   return 1
 }
 
-# Usage: is_merged BRANCH
+# Usage: is_merged BRANCH BRANCH-TIME
 # Succeeds if BRANCH's changes are in some remote's default branch.
+# BRANCH-TIME is the committer date of BRANCH's last commit.
 is_merged() {
   while read -r base_commit base_tree; do
     base_merge_base="$(git merge-base "${base_commit}" "$1")"
@@ -183,7 +219,7 @@ is_merged() {
       *) die "git merge-base ${base_commit} $1 failed" ;;
     esac
     if merge_yields "${base_commit}" "$1" "${base_tree}"; then return 0; fi
-    if has_squash_commit "${base_commit}" "$1" "${base_merge_base}"; then return 0; fi
+    if has_squash_commit "${base_commit}" "$1" "${base_merge_base}" "$2"; then return 0; fi
   done < "${tmpdir}/bases"
   return 1
 }
@@ -199,24 +235,25 @@ awk '
 ' "${tmpdir}/remotes" "${tmpdir}/remote-refs" > "${tmpdir}/all-bases" || die "awk failed"
 sort -u "${tmpdir}/all-bases" > "${tmpdir}/bases" || die "sort failed"
 
-# The full names of the local branches whose tips are not on any remote
-# branch, one per line.  A full name, such as `refs/heads/main`, cannot be
+# The local branches whose tips are not on any remote branch, one per line,
+# each as "TIME NAME", where TIME is the committer date of the tip in seconds
+# since the epoch.  A full name, such as `refs/heads/main`, cannot be
 # mistaken for a file name.  Comparing the tips with the unpushed commits
 # avoids passing one argument per remote-tracking branch, as
 # `git for-each-ref --no-merged` would require; with many remote-tracking
 # branches, such arguments would exceed the limit on a command line's size.
-git for-each-ref --format='%(objectname) %(refname)' refs/heads > "${tmpdir}/local-branches" || exit 1
+git for-each-ref --format='%(objectname) %(committerdate:unix) %(refname)' refs/heads > "${tmpdir}/local-branches" || exit 1
 git rev-list --branches --not --remotes > "${tmpdir}/unpushed-commits" || exit 1
 awk '
-  FILENAME == ARGV[1] { refs[$1] = ($1 in refs) ? refs[$1] "\n" $2 : $2; next }
+  FILENAME == ARGV[1] { line = $2 " " $3; refs[$1] = ($1 in refs) ? refs[$1] "\n" line : line; next }
   $0 in refs { print refs[$0]; delete refs[$0] }
 ' "${tmpdir}/local-branches" "${tmpdir}/unpushed-commits" > "${tmpdir}/unpushed-branches" || die "awk failed"
 
 # The branches to show, and those to omit, separated by spaces.
 branches=
 omitted=
-while read -r branch; do
-  if is_merged "${branch}"; then
+while read -r branch_time branch; do
+  if is_merged "${branch}" "${branch_time}"; then
     omitted="${omitted} ${branch}"
   else
     branches="${branches} ${branch}"
