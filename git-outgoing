@@ -7,7 +7,8 @@
 #   git-outgoing [GIT-LOG-ARGS]
 #
 # GIT-LOG-ARGS, such as `--oneline` or `-- PATH`, are passed to `git log`.
-# Any revisions among them are shown in addition to the local branches.
+# Any revisions among them are shown in addition to the local branches,
+# except for commits on a remote branch or on an omitted branch (see below).
 # They may not include `--stdin`, which this command uses itself.
 #
 # Unlike `git log --branches --not --remotes`, this command omits a branch
@@ -30,10 +31,11 @@
 # This command does not contact any remote, so run `git fetch` first if
 # the remote-tracking branches might be out of date.  It does not change the
 # repository.  In a partial clone, a branch whose check needs file contents
-# that have not been fetched is shown, with a warning.
+# that have not been fetched is shown, with a warning, and GIT-LOG-ARGS that
+# need such file contents, such as `--stat` or `-p`, make `git log` fail.
 #
-# This command requires git 2.44 or later, for `git merge-tree --write-tree`
-# (git 2.38) and `GIT_NO_LAZY_FETCH` (git 2.44).
+# This command requires git 2.38 or later, for `git merge-tree --write-tree`.
+# In a partial clone, it requires git 2.44 or later, for `GIT_NO_LAZY_FETCH`.
 
 # Prints an error message and exits with a failure status.
 die() {
@@ -50,9 +52,15 @@ git_minor="${git_minor%%.*}"
 case "${git_major}.${git_minor}" in
   *[!0-9.]* | .* | *.) die "cannot parse git version: ${git_version}" ;;
 esac
-if [ "${git_major}" -lt 2 ] || { [ "${git_major}" -eq 2 ] && [ "${git_minor}" -lt 44 ]; }; then
-  die "requires git 2.44 or later, but found git ${git_version}"
-fi
+
+# Usage: require_git MINOR [WHY]
+# Dies unless git is version 2.MINOR or later.  WHY, if given, says why.
+require_git() {
+  if [ "${git_major}" -lt 2 ] || { [ "${git_major}" -eq 2 ] && [ "${git_minor}" -lt "$1" ]; }; then
+    die "requires git 2.$1 or later${2:+ $2}, but found git ${git_version}"
+  fi
+}
+require_git 38
 
 # The repository's object directory.  `git merge-tree --write-tree` writes the
 # merge result as objects; git_scratch puts them in ${tmpdir} instead.
@@ -89,25 +97,42 @@ if [ -z "${partial_clone}" ]; then
   partial_clone="$(printf '%s\n' "${promisor_remotes}" | awk '$2 == "true"')"
 fi
 warned_partial_clone=
+if [ -n "${partial_clone}" ]; then
+  require_git 44 'in a partial clone'
+fi
+
+# In a partial clone, git does not fetch missing objects from the remote.
+GIT_NO_LAZY_FETCH=1
+export GIT_NO_LAZY_FETCH
 
 # Usage: git_scratch GIT-ARGS
 # Runs git, writing any new objects to ${tmpdir} rather than to the repository.
-# In a partial clone, git does not fetch missing objects from the remote.
 git_scratch() {
-  GIT_OBJECT_DIRECTORY="${tmpdir}/objects" \
-    GIT_NO_LAZY_FETCH=1 \
-    git "$@"
+  GIT_OBJECT_DIRECTORY="${tmpdir}/objects" git "$@"
+}
+
+# Usage: names_missing_object FILE
+# Succeeds if FILE, an error message from git, names an object that is not in
+# the repository.
+names_missing_object() {
+  # An object name is 40 (SHA-1) or 64 (SHA-256) hexadecimal digits.
+  tr -cs '0-9a-f' '\n' < "$1" | awk 'length == 40 || length == 64' | sort -u \
+    > "${tmpdir}/named-objects" || die "cannot write ${tmpdir}/named-objects"
+  while read -r object; do
+    if ! git cat-file -e "${object}" 2> /dev/null; then return 0; fi
+  done < "${tmpdir}/named-objects"
+  return 1
 }
 
 # Usage: git_failed COMMAND
 # Handles the failure of COMMAND, a git command run by git_scratch whose
-# standard error is in ${tmpdir}/git-errors.  In a partial clone, the failure
-# is probably because some file contents have not been fetched, so this warns
-# (once, with the first such error) and returns.  Otherwise, it dies.
+# standard error is in ${tmpdir}/git-errors.  In a partial clone, if the error
+# names an object that has not been fetched, this warns (once, with the first
+# such error) and returns.  Otherwise, it dies.
 git_failed() {
-  if [ -n "${partial_clone}" ]; then
+  if [ -n "${partial_clone}" ] && names_missing_object "${tmpdir}/git-errors"; then
     if [ -z "${warned_partial_clone}" ]; then
-      echo "git-outgoing: this partial clone probably lacks file contents needed to check whether some branches are merged; showing them.  The first error, from $1, was:" >&2
+      echo "git-outgoing: this partial clone lacks file contents needed to check whether some branches are merged; showing them.  The first error, from $1, was:" >&2
       cat "${tmpdir}/git-errors" >&2
       warned_partial_clone=1
     fi
@@ -117,20 +142,31 @@ git_failed() {
   die "$1 failed"
 }
 
+# Usage: has_common_ancestor COMMIT BRANCH
+# Succeeds if COMMIT and BRANCH have a common ancestor.
+has_common_ancestor() {
+  git merge-base "$1" "$2" > /dev/null
+  case "$?" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) die "git merge-base $1 $2 failed" ;;
+  esac
+}
+
 # Usage: merge_yields COMMIT BRANCH TREE
 # Succeeds if merging BRANCH into COMMIT yields TREE without conflicts.
-# COMMIT and BRANCH must have a common ancestor.
+# Fails if COMMIT and BRANCH have no common ancestor.
 merge_yields() {
   merge_tree="$(git_scratch merge-tree --write-tree --no-messages "$1" "$2" 2> "${tmpdir}/git-errors")"
   case "$?" in
     0) [ "${merge_tree}" = "$3" ] ;;
     1) return 1 ;; # The merge has conflicts.
-    129)
-      cat "${tmpdir}/git-errors" >&2
-      die "git merge-tree --write-tree failed"
-      ;;
     *)
-      git_failed "git merge-tree $1 $2"
+      # git refuses to merge unrelated histories.  Checking for that only
+      # after a failure saves a process for each branch and base.
+      if has_common_ancestor "$1" "$2"; then
+        git_failed "git merge-tree $1 $2"
+      fi
       return 1
       ;;
   esac
@@ -180,10 +216,10 @@ has_squash_commit() {
   since="$(($4 - 24 * 60 * 60))"
   # The merge bases are excluded through `--stdin`, as `^COMMIT`.
   # `--ancestry-path` examines only descendants of a merge base, so each
-  # commit's parent has a common ancestor with BRANCH, as merge_yields
-  # requires.  There is no pathspec, which would make git compare each
-  # commit's files with its parent's during the walk; only the commits that
-  # pass `--since-as-filter` are compared, for `--name-only`.
+  # commit's parent has a common ancestor with BRANCH, without which
+  # merge_yields fails.  There is no pathspec, which would make git compare
+  # each commit's files with its parent's during the walk; only the commits
+  # that pass `--since-as-filter` are compared, for `--name-only`.
   sed 's/^/^/' "${tmpdir}/merge-bases" > "${tmpdir}/log-input" || die "cannot write ${tmpdir}/log-input"
   # Each commit is introduced by a line that starts with \001, which git quotes
   # in a file name.
@@ -214,13 +250,13 @@ has_squash_commit() {
 # BRANCH-TIME is the author date of BRANCH's last commit.
 is_merged() {
   while read -r base_commit base_tree; do
+    if merge_yields "${base_commit}" "$1" "${base_tree}"; then return 0; fi
     base_merge_bases="$(git merge-base --all "${base_commit}" "$1")"
     case "$?" in
       0) ;;
       1) continue ;; # BRANCH has no history in common with this base.
       *) die "git merge-base ${base_commit} $1 failed" ;;
     esac
-    if merge_yields "${base_commit}" "$1" "${base_tree}"; then return 0; fi
     if has_squash_commit "${base_commit}" "$1" "${base_merge_bases}" "$2"; then return 0; fi
   done < "${tmpdir}/bases"
   return 1
