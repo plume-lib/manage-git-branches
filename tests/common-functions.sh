@@ -184,6 +184,21 @@ working_tree_state() {
   git "$@" ls-files --stage
 }
 
+## Usage: wrapped_git DIRECTORY
+## Prints the absolute path of the real git, for a fake `git` in DIRECTORY to
+## run.  Fails if that git is in DIRECTORY, which is then already on PATH, so
+## that the fake `git` would exec itself forever.
+wrapped_git() {
+  wrapped_git_dir="$(CDPATH='' cd -- "$1" && pwd -P)" || return 1
+  wrapped_git_real="$(command -v git)" || return 1
+  wrapped_git_real_dir="$(CDPATH='' cd -- "$(dirname -- "${wrapped_git_real}")" && pwd -P)" || return 1
+  if [ "${wrapped_git_real_dir}" = "${wrapped_git_dir}" ]; then
+    echo "$1 is already on PATH" >&2
+    return 1
+  fi
+  printf '%s\n' "${wrapped_git_real_dir}/$(basename -- "${wrapped_git_real}")"
+}
+
 ## Usage: make_counting_git DIRECTORY LOG
 ## Creates, in DIRECTORY, a `git` command that appends its arguments to LOG,
 ## one invocation per line, and then runs the real git.  A test that puts
@@ -198,12 +213,7 @@ working_tree_state() {
 ## so that it holds only the commands that the test is about to run.
 make_counting_git() {
   mkdir -p "$1" || return 1
-  make_counting_git_real="$(command -v git)"
-  # If DIRECTORY is already on PATH, the fake `git` would exec itself forever.
-  if [ "${make_counting_git_real}" = "$1/git" ]; then
-    echo "make_counting_git: $1 is already on PATH" >&2
-    return 1
-  fi
+  make_counting_git_real="$(wrapped_git "$1")" || return 1
   GIT_COMMAND_LOG="$2"
   export GIT_COMMAND_LOG
   cat > "$1/git" << COUNTING_GIT_END
@@ -224,28 +234,25 @@ COUNTING_GIT_END
 ## a single quotation mark.
 make_fake_git() {
   mkdir -p "$1" || return 1
-  make_fake_git_real="$(command -v git)"
-  # If DIRECTORY is already on PATH, the fake `git` would exec itself forever.
-  if [ "${make_fake_git_real}" = "$1/git" ]; then
-    echo "make_fake_git: $1 is already on PATH" >&2
-    return 1
-  fi
+  make_fake_git_real="$(wrapped_git "$1")" || return 1
+  # The fake `git` may run in another directory, so it needs an absolute path.
+  make_fake_git_dir="$(CDPATH='' cd -- "$1" && pwd -P)" || return 1
   # The message is in a file of its own, so that it needs no quoting.
-  printf '%s\n' "$4" > "$1/git-message" || return 1
+  printf '%s\n' "$4" > "${make_fake_git_dir}/git-message" || return 1
   if [ "$3" -eq 0 ]; then
     make_fake_git_stream=1
   else
     make_fake_git_stream=2
   fi
-  cat > "$1/git" << FAKE_GIT_END
+  cat > "${make_fake_git_dir}/git" << FAKE_GIT_END
 #!/bin/sh
 if [ "\$1" = '$2' ]; then
-  cat '$1/git-message' >&${make_fake_git_stream}
+  cat '${make_fake_git_dir}/git-message' >&${make_fake_git_stream}
   exit $3
 fi
 exec "${make_fake_git_real}" "\$@"
 FAKE_GIT_END
-  chmod +x "$1/git" || return 1
+  chmod +x "${make_fake_git_dir}/git" || return 1
 }
 
 ## Usage: count_remote_queries

@@ -116,6 +116,8 @@ if [ -z "$(git -C "${clone}" log --format=%s --branches --not --remotes)" ]; the
   fail 'test setup: git log --branches --not --remotes should show the squash-merged commits'
 fi
 expect_outgoing 'squash-merged branch' ''
+# Naming the omitted branch does not show its commits.
+expect_outgoing 'squash-merged branch, named as a revision' '' refs/heads/feature
 
 # A commit after the squash-merge makes the branch outgoing again.  All of its
 # commits are shown, because none of them is on a remote branch.
@@ -206,22 +208,26 @@ git -C "${clone}" fetch -q foo/bar
 git -C "${clone}" remote set-head foo/bar main > /dev/null
 expect_outgoing 'remote name with a slash' ''
 
-# If `git merge-tree --write-tree` is not supported, as before git 2.38, the
-# command fails rather than treating every branch as not merged.
-fake_git_dir="${testdir}/fake-git"
-make_fake_git "${fake_git_dir}" merge-tree 129 'usage: git merge-tree'
-if (cd "${clone}" && PATH="${fake_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2>&1; then
-  fail 'git merge-tree unsupported: expected a failure status'
+# A git older than 2.38, which lacks `git merge-tree --write-tree`, is rejected.
+older_git_dir="${testdir}/older-git"
+make_fake_git "${older_git_dir}" version 0 'git version 2.37.0'
+if (cd "${clone}" && PATH="${older_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2> "${testdir}/older-git-errors"; then
+  fail 'git 2.37: expected a failure status'
+fi
+if ! grep -q 'requires git 2.38 or later' "${testdir}/older-git-errors"; then
+  fail 'git 2.37: expected a version error message'
 fi
 
-# A git older than 2.44 is rejected.
-old_git_dir="${testdir}/old-git"
-make_fake_git "${old_git_dir}" version 0 'git version 2.43.0'
-if (cd "${clone}" && PATH="${old_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2> "${testdir}/old-git-errors"; then
-  fail 'git 2.43: expected a failure status'
-fi
-if ! grep -q 'requires git 2.44 or later' "${testdir}/old-git-errors"; then
-  fail 'git 2.43: expected a version error message'
+# A git older than 2.44, which lacks `GIT_NO_LAZY_FETCH`, suffices outside a
+# partial clone.  A relative DIRECTORY for make_fake_git works after a `cd`.
+old_git_dir="old-git"
+(cd "${testdir}" && make_fake_git "${old_git_dir}" version 0 'git version 2.43.0')
+old_git_output="$(cd "${clone}" && PATH="${testdir}/${old_git_dir}:${PATH}" "${GIT_OUTGOING}" --format=%s 2> "${testdir}/old-git-errors")"
+old_git_status="$?"
+if [ "${old_git_status}" -ne 0 ]; then
+  fail "git 2.43: exited with status ${old_git_status}: $(cat "${testdir}/old-git-errors")"
+elif [ "${old_git_output}" != "$(cd "${clone}" && "${GIT_OUTGOING}" --format=%s)" ]; then
+  fail "git 2.43: printed [${old_git_output}]"
 fi
 
 # A git failure that is not due to a partial clone is reported, even when a
@@ -252,7 +258,6 @@ for filter in blob:none tree:0; do
   mv "${remote}" "${remote}.unreachable"
   partial_output="$(cd "${partial}" && "${GIT_OUTGOING}" --format=%s 2> "${testdir}/partial-errors")"
   partial_status="$?"
-  mv "${remote}.unreachable" "${remote}"
   if [ "${partial_status}" -ne 0 ]; then
     fail "partial clone ${filter}: exited with status ${partial_status}: $(cat "${testdir}/partial-errors")"
   elif [ "${partial_output}" != 'Partial clone commit' ]; then
@@ -261,6 +266,28 @@ for filter in blob:none tree:0; do
     fail "partial clone ${filter}: printed no warning"
   elif ! grep -q 'fatal:' "${testdir}/partial-errors"; then
     fail "partial clone ${filter}: printed no git error"
+  fi
+  # A git failure that names no missing object is reported.
+  if (cd "${partial}" && PATH="${corrupt_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2> "${testdir}/corrupt-errors"; then
+    fail "partial clone ${filter}, git failure: expected a failure status"
+  elif ! grep -q 'simulated corruption' "${testdir}/corrupt-errors"; then
+    fail "partial clone ${filter}, git failure: expected the git error message"
+  fi
+  # git 2.43 is rejected in a partial clone.
+  if (cd "${partial}" && PATH="${testdir}/${old_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2> "${testdir}/old-git-errors"; then
+    fail "partial clone ${filter}, git 2.43: expected a failure status"
+  elif ! grep -q 'requires git 2.44 or later in a partial clone' "${testdir}/old-git-errors"; then
+    fail "partial clone ${filter}, git 2.43: expected a version error message"
+  fi
+  mv "${remote}.unreachable" "${remote}"
+  # GIT-LOG-ARGS that need file contents that have not been fetched make the
+  # command fail rather than fetch them, even though the remote is reachable.
+  # The commit's parent is the upstream change, whose file contents have not
+  # been fetched.
+  on_upstream="$(git -C "${partial}" commit-tree -p origin/main -m 'On upstream' "edit^{tree}")"
+  git -C "${partial}" branch -q on-upstream "${on_upstream}"
+  if (cd "${partial}" && "${GIT_OUTGOING}" --stat) > /dev/null 2>&1; then
+    fail "partial clone ${filter}, --stat: expected a failure status"
   fi
 done
 
