@@ -215,6 +215,39 @@ COUNTING_GIT_END
   : > "${GIT_COMMAND_LOG}"
 }
 
+## Usage: make_fake_git DIRECTORY SUBCOMMAND STATUS MESSAGE
+## Creates, in DIRECTORY, a `git` command that, when its first argument is
+## SUBCOMMAND, prints MESSAGE and exits with STATUS, and otherwise runs the
+## real git.  MESSAGE goes to standard output if STATUS is 0, and to standard
+## error otherwise.  A test that puts DIRECTORY first on PATH can then
+## simulate an old or failing git.  DIRECTORY and SUBCOMMAND must not contain
+## a single quotation mark.
+make_fake_git() {
+  mkdir -p "$1" || return 1
+  make_fake_git_real="$(command -v git)"
+  # If DIRECTORY is already on PATH, the fake `git` would exec itself forever.
+  if [ "${make_fake_git_real}" = "$1/git" ]; then
+    echo "make_fake_git: $1 is already on PATH" >&2
+    return 1
+  fi
+  # The message is in a file of its own, so that it needs no quoting.
+  printf '%s\n' "$4" > "$1/git-message" || return 1
+  if [ "$3" -eq 0 ]; then
+    make_fake_git_stream=1
+  else
+    make_fake_git_stream=2
+  fi
+  cat > "$1/git" << FAKE_GIT_END
+#!/bin/sh
+if [ "\$1" = '$2' ]; then
+  cat '$1/git-message' >&${make_fake_git_stream}
+  exit $3
+fi
+exec "${make_fake_git_real}" "\$@"
+FAKE_GIT_END
+  chmod +x "$1/git" || return 1
+}
+
 ## Usage: count_remote_queries
 ## Prints the number of questions that the commands in ${GIT_COMMAND_LOG}
 ## asked a remote:  the `git ls-remote` invocations, except the

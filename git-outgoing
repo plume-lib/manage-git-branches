@@ -1,0 +1,188 @@
+#!/bin/sh
+
+# Shows the commits on local branches that are not on any remote branch,
+# that is, commits that have not been pushed.
+#
+# Usage:
+#   git-outgoing [GIT-LOG-ARGS]
+#
+# GIT-LOG-ARGS, such as `--oneline` or `-- PATH`, are passed to `git log`.
+# Any revisions among them are shown in addition to the local branches.
+# They may not include `--stdin`, which this command uses itself.
+#
+# Unlike `git log --branches --not --remotes`, this command omits a branch
+# whose changes are already in some remote's default branch (`REMOTE/HEAD`),
+# even though its commits are not.  That happens when a pull request is
+# squash-merged and its remote branch is then deleted.  A branch is omitted
+# when merging it into `REMOTE/HEAD` would not change any file.
+# The commits of an omitted branch are not shown even when another branch
+# contains them, as when that branch was started from the omitted one.
+# A remote with no `REMOTE/HEAD` is not considered; to create it, run
+# `git remote set-head REMOTE --auto`.
+#
+# This command does not contact any remote, so run `git fetch` first if
+# the remote-tracking branches might be out of date.  It does not change the
+# repository.  In a partial clone, a branch whose check needs file contents
+# that have not been fetched is shown, with a warning.
+#
+# This command requires git 2.44 or later, for `git merge-tree --write-tree`
+# (git 2.38) and `GIT_NO_LAZY_FETCH` (git 2.44).
+
+# Prints an error message and exits with a failure status.
+die() {
+  echo "git-outgoing: $*" >&2
+  exit 1
+}
+
+# Output is like "git version 2.44.0" or "git version 2.44.0.windows.1".
+git_version="$(git version)" || exit 1
+git_version="${git_version#git version }"
+git_major="${git_version%%.*}"
+git_minor="${git_version#*.}"
+git_minor="${git_minor%%.*}"
+case "${git_major}.${git_minor}" in
+  *[!0-9.]* | .* | *.) die "cannot parse git version: ${git_version}" ;;
+esac
+if [ "${git_major}" -lt 2 ] || { [ "${git_major}" -eq 2 ] && [ "${git_minor}" -lt 44 ]; }; then
+  die "requires git 2.44 or later, but found git ${git_version}"
+fi
+
+# The repository's object directory.  `git merge-tree --write-tree` writes the
+# merge result as objects; git_scratch puts them in ${tmpdir} instead.
+objects="$(git rev-parse --path-format=absolute --git-path objects)" || exit 1
+tmpdir="$(mktemp -d)" || exit 1
+trap 'rm -rf "${tmpdir}"' EXIT
+trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
+mkdir "${tmpdir}/objects" "${tmpdir}/objects/info" || exit 1
+# The scratch object directory borrows the repository's objects through its
+# alternates file, which separates entries by newlines.  Setting
+# GIT_ALTERNATE_OBJECT_DIRECTORIES instead would split a path that contains
+# the path separator, `:` or `;`.  The entry is C-quoted, so that it may
+# contain any character.
+{
+  printf '"'
+  printf '%s\n' "${objects}" | sed 's/[\\"]/\\&/g' | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }'
+  printf '"\n'
+} > "${tmpdir}/objects/info/alternates" || die "cannot write ${tmpdir}/objects/info/alternates"
+
+# Whether this repository is a partial clone, whose file contents may be
+# missing until git fetches them on demand.  Non-empty if so.
+partial_clone="$(git config --get extensions.partialclone)"
+case "$?" in
+  0 | 1) ;;
+  *) exit 1 ;;
+esac
+if [ -z "${partial_clone}" ]; then
+  promisor_remotes="$(git config --type=bool --get-regexp '^remote\..*\.promisor$')"
+  case "$?" in
+    0 | 1) ;;
+    *) exit 1 ;;
+  esac
+  partial_clone="$(printf '%s\n' "${promisor_remotes}" | awk '$2 == "true"')"
+fi
+warned_partial_clone=
+
+# Usage: git_scratch GIT-ARGS
+# Runs git, writing any new objects to ${tmpdir} rather than to the repository.
+# In a partial clone, git does not fetch missing objects from the remote.
+git_scratch() {
+  GIT_OBJECT_DIRECTORY="${tmpdir}/objects" \
+    GIT_NO_LAZY_FETCH=1 \
+    git "$@"
+}
+
+# Usage: git_failed COMMAND
+# Handles the failure of COMMAND, a git command run by git_scratch whose
+# standard error is in ${tmpdir}/git-errors.  In a partial clone, the failure
+# is probably because some file contents have not been fetched, so this warns
+# (once, with the first such error) and returns.  Otherwise, it dies.
+git_failed() {
+  if [ -n "${partial_clone}" ]; then
+    if [ -z "${warned_partial_clone}" ]; then
+      echo "git-outgoing: this partial clone probably lacks file contents needed to check whether some branches are merged; showing them.  The first error, from $1, was:" >&2
+      cat "${tmpdir}/git-errors" >&2
+      warned_partial_clone=1
+    fi
+    return 0
+  fi
+  cat "${tmpdir}/git-errors" >&2
+  die "$1 failed"
+}
+
+# Usage: merge_yields COMMIT BRANCH TREE
+# Succeeds if merging BRANCH into COMMIT yields TREE without conflicts.
+# COMMIT and BRANCH must have a common ancestor.
+merge_yields() {
+  merge_tree="$(git_scratch merge-tree --write-tree --no-messages "$1" "$2" 2> "${tmpdir}/git-errors")"
+  case "$?" in
+    0) [ "${merge_tree}" = "$3" ] ;;
+    1) return 1 ;; # The merge has conflicts.
+    129)
+      cat "${tmpdir}/git-errors" >&2
+      die "git merge-tree --write-tree failed"
+      ;;
+    *)
+      git_failed "git merge-tree $1 $2"
+      return 1
+      ;;
+  esac
+}
+
+# Usage: is_merged BRANCH
+# Succeeds if BRANCH's changes are in some remote's default branch.
+is_merged() {
+  while read -r base_commit base_tree; do
+    git merge-base "${base_commit}" "$1" > /dev/null
+    case "$?" in
+      0) ;;
+      1) continue ;; # BRANCH has no history in common with this base.
+      *) die "git merge-base ${base_commit} $1 failed" ;;
+    esac
+    if merge_yields "${base_commit}" "$1" "${base_tree}"; then return 0; fi
+  done < "${tmpdir}/bases"
+  return 1
+}
+
+# Each line of ${tmpdir}/bases is "COMMIT TREE" for one remote's default
+# branch, without duplicates.  A remote name may contain a slash, so the refs
+# are matched against the remote names.
+git remote > "${tmpdir}/remotes" || exit 1
+git for-each-ref --format='%(refname) %(objectname) %(tree)' refs/remotes > "${tmpdir}/remote-refs" || exit 1
+awk '
+  FILENAME == ARGV[1] { want["refs/remotes/" $0 "/HEAD"]; next }
+  $1 in want { print $2, $3 }
+' "${tmpdir}/remotes" "${tmpdir}/remote-refs" > "${tmpdir}/all-bases" || die "awk failed"
+sort -u "${tmpdir}/all-bases" > "${tmpdir}/bases" || die "sort failed"
+
+# The local branches whose tips are not on any remote branch, one per line.
+# A full name, such as `refs/heads/main`, cannot be mistaken for a file name.
+# Comparing the tips with the unpushed commits avoids passing one argument per
+# remote-tracking branch, as `git for-each-ref --no-merged` would require;
+# with many remote-tracking branches, such arguments would exceed the limit
+# on a command line's size.
+git for-each-ref --format='%(objectname) %(refname)' refs/heads > "${tmpdir}/local-branches" || exit 1
+git rev-list --branches --not --remotes > "${tmpdir}/unpushed-commits" || exit 1
+awk '
+  FILENAME == ARGV[1] { refs[$1] = ($1 in refs) ? refs[$1] "\n" $2 : $2; next }
+  $0 in refs { print refs[$0]; delete refs[$0] }
+' "${tmpdir}/local-branches" "${tmpdir}/unpushed-commits" > "${tmpdir}/unpushed-branches" || die "awk failed"
+
+# The branches to show, one per line, and those to omit, each preceded by `^`.
+# They are passed through `--stdin` rather than as arguments, which might
+# exceed the limit on a command line's size.
+: > "${tmpdir}/log-refs" || die "cannot write ${tmpdir}/log-refs"
+while read -r branch; do
+  if is_merged "${branch}"; then
+    printf '^%s\n' "${branch}"
+  else
+    printf '%s\n' "${branch}"
+  fi >> "${tmpdir}/log-refs" || die "cannot write ${tmpdir}/log-refs"
+done < "${tmpdir}/unpushed-branches"
+
+# The `--not` makes the remote-tracking branches negative, and the second
+# `--not` makes any revisions in GIT-LOG-ARGS positive again.  The GIT-LOG-ARGS
+# come last, so that a `--` in them does not turn `--remotes` into a path.
+# Even with no branches, no remote-tracking branches, and no revisions in
+# GIT-LOG-ARGS, `--remotes` keeps `git log` from showing HEAD.
+git log --stdin --not --remotes --not "$@" < "${tmpdir}/log-refs"
