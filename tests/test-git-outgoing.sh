@@ -120,6 +120,21 @@ git -C "${upstream_work}" push -q origin main
 git -C "${clone}" fetch -q origin
 expect_outgoing 'squash-merged branch, later upstream change' ''
 
+# A branch started from the squash-merged branch shows only its own commits.
+git -C "${clone}" branch -q stacked feature
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-stacked" stacked
+commit_file "${testdir}/myrepo-branch-stacked" s.txt 's' 'Stacked commit'
+expect_outgoing 'branch stacked on a squash-merged branch' 'Stacked commit'
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-stacked"
+git -C "${clone}" branch -q -D stacked
+
+# A branch with no history in common with origin/HEAD is outgoing.
+empty_tree="$(git -C "${clone}" mktree < /dev/null)"
+orphan_commit="$(git -C "${clone}" commit-tree -m 'Orphan commit' "${empty_tree}")"
+git -C "${clone}" branch -q orphan "${orphan_commit}"
+expect_outgoing 'orphan branch' 'Orphan commit'
+git -C "${clone}" branch -q -D orphan
+
 # A branch whose changes conflict with origin/HEAD is outgoing.
 git -C "${clone}" branch -q conflicting origin/main
 git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-conflicting" conflicting
@@ -181,6 +196,28 @@ EOF
 chmod +x "${fake_git_dir}/git"
 if (cd "${clone}" && PATH="${fake_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2>&1; then
   fail 'git merge-tree unsupported: expected a failure status'
+fi
+
+# In a partial clone, a branch whose check needs file contents that have not
+# been fetched is shown, and the command does not contact the remote.
+git -C "${remote}" config uploadpack.allowFilter true
+partial="${testdir}/myrepo-partial"
+git clone -q --filter=blob:none "file://${remote}" "${partial}"
+git -C "${partial}" checkout -q -b edit
+commit_file "${partial}" a.txt 'edit' 'Partial clone commit'
+commit_file "${upstream_work}" a.txt 'a4' 'Upstream change to a.txt again'
+git -C "${upstream_work}" push -q origin main
+git -C "${partial}" fetch -q origin
+mv "${remote}" "${remote}.unreachable"
+partial_output="$(cd "${partial}" && "${GIT_OUTGOING}" --format=%s 2> "${testdir}/partial-errors")"
+partial_status="$?"
+mv "${remote}.unreachable" "${remote}"
+if [ "${partial_status}" -ne 0 ]; then
+  fail "partial clone: exited with status ${partial_status}: $(cat "${testdir}/partial-errors")"
+elif [ "${partial_output}" != 'Partial clone commit' ]; then
+  fail "partial clone: printed [${partial_output}], expected [Partial clone commit]"
+elif ! grep -q 'partial clone' "${testdir}/partial-errors"; then
+  fail "partial clone: printed no warning"
 fi
 
 # Outside a git repository, the command fails.
