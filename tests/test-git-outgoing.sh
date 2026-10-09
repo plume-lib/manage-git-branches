@@ -134,6 +134,16 @@ git -C "${upstream_work}" push -q origin main
 git -C "${clone}" fetch -q origin
 expect_outgoing 'squash-merged branch, later upstream change' ''
 
+# A branch started after the squash-merge does not hide the squash commit,
+# which is an ancestor of the new branch's merge base but not of the
+# squash-merged branch's.
+git -C "${clone}" branch -q late origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-late" late
+commit_file "${testdir}/myrepo-branch-late" l.txt 'l' 'Late commit'
+expect_outgoing 'squash-merged branch, branch started after the squash-merge' 'Late commit'
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-late"
+git -C "${clone}" branch -q -D late
+
 # With no outgoing branch, a revision in the arguments is still shown, and an
 # invalid argument is still reported.
 loose_commit="$(git -C "${clone}" commit-tree -m 'Loose commit' "$(git -C "${clone}" mktree < /dev/null)")"
