@@ -144,6 +144,20 @@ expect_outgoing 'squash-merged branch, branch started after the squash-merge' 'L
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-late"
 git -C "${clone}" branch -q -D late
 
+# A squash-merged branch whose tip has a malformed author date, which git
+# reads as 0, or no author line at all, is not outgoing.
+feature_tip="$(git -C "${clone}" rev-parse feature)"
+bad_tip="$(git -C "${clone}" cat-file commit feature \
+  | sed 's/^author .*/author A U Thor <author@example.com> notadate +0000/' \
+  | git -C "${clone}" hash-object -t commit -w --literally --stdin)"
+git -C "${clone}" update-ref refs/heads/feature "${bad_tip}"
+expect_outgoing 'squash-merged branch, malformed author date' ''
+bad_tip="$(git -C "${clone}" cat-file commit "${feature_tip}" | sed '/^author /d' \
+  | git -C "${clone}" hash-object -t commit -w --literally --stdin)"
+git -C "${clone}" update-ref refs/heads/feature "${bad_tip}"
+expect_outgoing 'squash-merged branch, no author line' ''
+git -C "${clone}" update-ref refs/heads/feature "${feature_tip}"
+
 # With no outgoing branch, a revision in the arguments is still shown, and an
 # invalid argument is still reported.
 loose_commit="$(git -C "${clone}" commit-tree -m 'Loose commit' "$(git -C "${clone}" mktree < /dev/null)")"

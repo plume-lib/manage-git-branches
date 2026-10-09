@@ -253,16 +253,18 @@ sort -u "${tmpdir}/all-bases" > "${tmpdir}/bases" || die "sort failed"
 
 # Create ${tmpdir}/unpushed-branches, which the merges below read, such that
 # each line is "TIME BRANCH" for a local branch whose tip is not on any remote
-# branch, where TIME is the author date of the tip in seconds since the epoch.
+# branch, where TIME is the author date of the tip in seconds since the epoch,
+# or 0 if the tip has no author date.  The date comes last in the output of
+# `git for-each-ref`, so that a missing one does not shift the other fields.
 # A full name, such as `refs/heads/main`, cannot be mistaken for a file name.
 # Comparing the tips with the unpushed commits avoids passing one argument
 # per remote-tracking branch, as `git for-each-ref --no-merged` would
 # require; with many remote-tracking branches, such arguments would exceed
 # the limit on a command line's size.
-git for-each-ref --format='%(objectname) %(authordate:unix) %(refname)' refs/heads > "${tmpdir}/local-branches" || exit 1
+git for-each-ref --format='%(objectname) %(refname) %(authordate:unix)' refs/heads > "${tmpdir}/local-branches" || exit 1
 git rev-list --branches --not --remotes > "${tmpdir}/unpushed-commits" || exit 1
 awk '
-  FILENAME == ARGV[1] { line = $2 " " $3; refs[$1] = ($1 in refs) ? refs[$1] "\n" line : line; next }
+  FILENAME == ARGV[1] { line = ($3 == "" ? 0 : $3) " " $2; refs[$1] = ($1 in refs) ? refs[$1] "\n" line : line; next }
   $0 in refs { print refs[$0]; delete refs[$0] }
 ' "${tmpdir}/local-branches" "${tmpdir}/unpushed-commits" > "${tmpdir}/unpushed-branches" || die "awk failed"
 
@@ -366,6 +368,11 @@ while read -r base_commit base_tree; do
     || die "cannot write ${tmpdir}/base-merge-bases"
   common_ancestor "${tmpdir}/base-merge-bases" | sed 's/^/^/' > "${tmpdir}/log-input" || die "cannot write ${tmpdir}/log-input"
   since="$(awk 'NR == 1 || $3 < min { min = $3 } END { print min - 24 * 60 * 60 }' "${tmpdir}/base-pairs")" || die "awk failed"
+  # git reads `@N` as a time only if N has at least 9 digits, so an earlier
+  # time, as for a branch whose tip has no valid author date, gets no filter.
+  # The filter only saves time.
+  since_filter=
+  if [ "${since}" -ge 100000000 ]; then since_filter="--since-as-filter=@${since}"; fi
   # Each line is "COMMIT PARENT...", with each commit after its parents.
   git rev-list --topo-order --reverse --parents "${base_commit}" --stdin < "${tmpdir}/log-input" > "${tmpdir}/base-graph" \
     || die "git rev-list ${base_commit} failed"
@@ -377,7 +384,7 @@ while read -r base_commit base_tree; do
   # which git quotes in a file name.
   if ! git_scratch -c core.quotePath=false log --no-merges --no-renames --no-follow \
     --no-relative --no-show-signature --no-notes --no-color \
-    --since-as-filter="@${since}" --format='%x01%H %T %ct %P' --name-only \
+    ${since_filter:+"${since_filter}"} --format='%x01%H %T %ct %P' --name-only \
     "${base_commit}" --stdin < "${tmpdir}/log-input" > "${tmpdir}/base-log" 2> "${tmpdir}/git-errors"; then
     git_failed "git log ${base_commit}"
     continue
