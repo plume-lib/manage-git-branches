@@ -89,12 +89,12 @@ if [ -z "${partial_clone}" ]; then
   esac
   partial_clone="$(printf '%s\n' "${promisor_remotes}" | awk '$2 == "true"')"
 fi
-warned_partial_clone=
 if [ -n "${partial_clone}" ]; then
   require_git 44 'in a partial clone'
 fi
 
-# In a partial clone, git does not fetch missing objects from the remote.
+# Keep git from fetching missing objects, as it otherwise would in a partial
+# clone, so that this command never contacts a remote.
 GIT_NO_LAZY_FETCH=1
 export GIT_NO_LAZY_FETCH
 
@@ -116,6 +116,9 @@ names_missing_object() {
   done < "${tmpdir}/named-objects"
   return 1
 }
+
+# Non-empty once git_failed has warned about a partial clone.
+warned_partial_clone=
 
 # Usage: git_failed COMMAND
 # Handles the failure of COMMAND, a git command run by git_scratch whose
@@ -174,9 +177,9 @@ is_merged() {
   return 1
 }
 
-# Each line of ${tmpdir}/bases is "COMMIT TREE" for one remote's default
-# branch, without duplicates.  A remote name may contain a slash, so the refs
-# are matched against the remote names.
+# Create ${tmpdir}/bases, which is_merged reads, such that each line is
+# "COMMIT TREE" for one remote's default branch, without duplicates.  A remote
+# name may contain a slash, so the refs are matched against the remote names.
 git remote > "${tmpdir}/remotes" || exit 1
 git for-each-ref --format='%(refname) %(objectname) %(tree)' refs/remotes > "${tmpdir}/remote-refs" || exit 1
 awk '
@@ -185,12 +188,13 @@ awk '
 ' "${tmpdir}/remotes" "${tmpdir}/remote-refs" > "${tmpdir}/all-bases" || die "awk failed"
 sort -u "${tmpdir}/all-bases" > "${tmpdir}/bases" || die "sort failed"
 
-# The local branches whose tips are not on any remote branch, one per line.
-# A full name, such as `refs/heads/main`, cannot be mistaken for a file name.
-# Comparing the tips with the unpushed commits avoids passing one argument per
-# remote-tracking branch, as `git for-each-ref --no-merged` would require;
-# with many remote-tracking branches, such arguments would exceed the limit
-# on a command line's size.
+# Create ${tmpdir}/unpushed-branches, which the loop below reads, such that
+# each line is a local branch whose tip is not on any remote branch.  A full
+# name, such as `refs/heads/main`, cannot be mistaken for a file name.
+# Comparing the tips with the unpushed commits avoids passing one argument
+# per remote-tracking branch, as `git for-each-ref --no-merged` would
+# require; with many remote-tracking branches, such arguments would exceed
+# the limit on a command line's size.
 git for-each-ref --format='%(objectname) %(refname)' refs/heads > "${tmpdir}/local-branches" || exit 1
 git rev-list --branches --not --remotes > "${tmpdir}/unpushed-commits" || exit 1
 awk '
@@ -198,9 +202,10 @@ awk '
   $0 in refs { print refs[$0]; delete refs[$0] }
 ' "${tmpdir}/local-branches" "${tmpdir}/unpushed-commits" > "${tmpdir}/unpushed-branches" || die "awk failed"
 
-# The branches to show, one per line, and those to omit, each preceded by `^`.
-# They are passed through `--stdin` rather than as arguments, which might
-# exceed the limit on a command line's size.
+# Create ${tmpdir}/log-refs, which the final `git log` reads, such that each
+# line is a branch to show, or a branch to omit preceded by `^`.  The branches
+# are passed through `--stdin` rather than as arguments, which might exceed
+# the limit on a command line's size.
 : > "${tmpdir}/log-refs" || die "cannot write ${tmpdir}/log-refs"
 while read -r branch; do
   if is_merged "${branch}"; then

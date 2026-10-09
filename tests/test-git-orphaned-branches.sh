@@ -365,21 +365,21 @@ fi
 ## One remote query per remote URL, rather than one per directory.
 ###########################################################################
 
-# Count the queries with a fake `git` on PATH that logs its arguments and then
+# Count the queries with a git wrapper on PATH that logs its arguments and then
 # runs the real git.  These tests' remotes are local pathnames that never
 # reach SSH, so counting SSH invocations would count nothing.
 # shellcheck source=common-functions.sh
 . "${TESTS_DIR}/common-functions.sh"
-make_counting_git "${work}/fake-bin" "${work}/git-commands.log"
+make_counting_git "${work}/test-bin" "${work}/git-commands.log"
 
 # Usage: scan_with_counted_queries DIRECTORY
-# Runs `git-orphaned-branches` in DIRECTORY with the fake `git` on PATH.
+# Runs `git-orphaned-branches` in DIRECTORY with the counting `git` on PATH.
 # Sets ${scan_output} to what it listed and ${scan_queries} to the number of
 # questions it asked a remote.  `ls-remote --get-url` only prints a URL from
 # the local configuration, so it asks nothing and does not count.
 scan_with_counted_queries() {
   : > "${GIT_COMMAND_LOG}"
-  scan_output="$(PATH="${work}/fake-bin:${PATH}" \
+  scan_output="$(PATH="${work}/test-bin:${PATH}" \
     sh -c 'cd "$1" && "$2"' sh "$1" "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"
   scan_queries="$(count_remote_queries)"
 }
@@ -499,7 +499,7 @@ check_scan 2 'two clones that configure upload-pack differently' \
 # transport, and reusing the first clone's answer would report a live branch
 # as orphaned.
 mkdir -p "${work}/queries-vcs"
-cat > "${work}/fake-bin/git-remote-fakevcs" << HELPER_END
+cat > "${work}/test-bin/git-remote-fakevcs" << HELPER_END
 #!/bin/sh
 # Ignore the URL that git names, and serve a fixed list of refs.  Reading the
 # list from a file, rather than asking a repository for it, keeps this
@@ -512,7 +512,7 @@ while IFS= read -r fake_helper_command; do
   esac
 done
 HELPER_END
-chmod +x "${work}/fake-bin/git-remote-fakevcs"
+chmod +x "${work}/test-bin/git-remote-fakevcs"
 for branch in qf qg; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
   git clone -q -b "${branch}" "${work}/remote.git" \

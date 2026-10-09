@@ -60,7 +60,7 @@ make_clone() {
 ## sets ${queries} to the number of questions it asked a remote.
 push_to_chain() {
   : > "${GIT_COMMAND_LOG}"
-  PATH="${WORK_DIR}/fake-bin:${PATH}" "${COMMANDS_DIR}/git-push-to" "$@"
+  PATH="${WORK_DIR}/test-bin:${PATH}" "${COMMANDS_DIR}/git-push-to" "$@"
   queries="$(count_remote_queries)"
 }
 
@@ -83,7 +83,7 @@ for branch in part1 part2 part3; do
   make_clone "${REMOTE}" "${branch}" "${WORK_DIR}/myrepo-branch-${branch}"
 done
 
-make_counting_git "${WORK_DIR}/fake-bin" "${WORK_DIR}/git-commands.log"
+make_counting_git "${WORK_DIR}/test-bin" "${WORK_DIR}/git-commands.log"
 
 ## A change to propagate along the chain.
 echo "second line" >> "${MAIN_DIR}/file.txt"

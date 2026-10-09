@@ -184,24 +184,26 @@ working_tree_state() {
   git "$@" ls-files --stage
 }
 
-## Usage: wrapped_git DIRECTORY
-## Prints the absolute path of the real git, for a fake `git` in DIRECTORY to
-## run.  Fails if that git is in DIRECTORY, which is then already on PATH, so
-## that the fake `git` would exec itself forever.
-wrapped_git() {
-  wrapped_git_dir="$(CDPATH='' cd -- "$1" && pwd -P)" || return 1
-  wrapped_git_real="$(command -v git)" || return 1
-  wrapped_git_real_dir="$(CDPATH='' cd -- "$(dirname -- "${wrapped_git_real}")" && pwd -P)" || return 1
-  if [ "${wrapped_git_real_dir}" = "${wrapped_git_dir}" ]; then
-    echo "$1 is already on PATH" >&2
+## Usage: real_git DIRECTORY
+## Prints the absolute path of the real git, that is, the git currently on
+## PATH, for a git wrapper in DIRECTORY to run.  A git wrapper is a `git`
+## script that a test puts first on PATH and that runs the real git.  Fails if
+## the real git is in DIRECTORY, which is then already on PATH, so that the
+## wrapper would run itself forever.
+real_git() {
+  real_git_wrapper_dir="$(CDPATH='' cd -- "$1" && pwd -P)" || return 1
+  real_git_path="$(command -v git)" || return 1
+  real_git_dir="$(CDPATH='' cd -- "$(dirname -- "${real_git_path}")" && pwd -P)" || return 1
+  if [ "${real_git_dir}" = "${real_git_wrapper_dir}" ]; then
+    echo "real_git: $1 is already on PATH" >&2
     return 1
   fi
-  printf '%s\n' "${wrapped_git_real_dir}/$(basename -- "${wrapped_git_real}")"
+  printf '%s\n' "${real_git_dir}/$(basename -- "${real_git_path}")"
 }
 
 ## Usage: make_counting_git DIRECTORY LOG
-## Creates, in DIRECTORY, a `git` command that appends its arguments to LOG,
-## one invocation per line, and then runs the real git.  A test that puts
+## Creates, in DIRECTORY, a git wrapper script that appends its arguments to
+## LOG, one invocation per line, and then runs the real git.  A test that puts
 ## DIRECTORY first on PATH can then count the git commands that the command
 ## under test ran, and in particular the questions it asked a remote.
 ##
@@ -209,11 +211,11 @@ wrapped_git() {
 ## queries that these tests actually make, whose remotes are local pathnames
 ## that never reach SSH.
 ##
-## Exports GIT_COMMAND_LOG, which the fake `git` appends to, and empties it,
-## so that it holds only the commands that the test is about to run.
+## Exports GIT_COMMAND_LOG, which the counting `git` appends to, and empties
+## it, so that it holds only the commands that the test is about to run.
 make_counting_git() {
   mkdir -p "$1" || return 1
-  make_counting_git_real="$(wrapped_git "$1")" || return 1
+  make_counting_git_real="$(real_git "$1")" || return 1
   GIT_COMMAND_LOG="$2"
   export GIT_COMMAND_LOG
   cat > "$1/git" << COUNTING_GIT_END
@@ -226,15 +228,15 @@ COUNTING_GIT_END
 }
 
 ## Usage: make_fake_git DIRECTORY SUBCOMMAND STATUS MESSAGE
-## Creates, in DIRECTORY, a `git` command that, when its first argument is
-## SUBCOMMAND, prints MESSAGE and exits with STATUS, and otherwise runs the
-## real git.  MESSAGE goes to standard output if STATUS is 0, and to standard
-## error otherwise.  A test that puts DIRECTORY first on PATH can then
-## simulate an old or failing git.  DIRECTORY and SUBCOMMAND must not contain
-## a single quotation mark.
+## Creates, in DIRECTORY, a git wrapper script that fakes SUBCOMMAND:  when
+## its first argument is SUBCOMMAND, the fake `git` prints MESSAGE and exits
+## with STATUS, and otherwise it runs the real git.  MESSAGE goes to standard
+## output if STATUS is 0, and to standard error otherwise.  A test that puts
+## DIRECTORY first on PATH can then simulate an old or failing git.
+## DIRECTORY and SUBCOMMAND must not contain a single quotation mark.
 make_fake_git() {
   mkdir -p "$1" || return 1
-  make_fake_git_real="$(wrapped_git "$1")" || return 1
+  make_fake_git_real="$(real_git "$1")" || return 1
   # The fake `git` may run in another directory, so it needs an absolute path.
   make_fake_git_dir="$(CDPATH='' cd -- "$1" && pwd -P)" || return 1
   # The message is in a file of its own, so that it needs no quoting.
