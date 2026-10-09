@@ -83,6 +83,10 @@ The commands are:
 * [`git-remove-branch-directory`](git-remove-branch-directory)
   `[--force] [--force-uncommitted] [--force-unpushed] DIRECTORY...`:
   Removes a branch directory, unless the removal would lose work.
+* [`git-outgoing`](git-outgoing) `[GIT-LOG-ARGS]`:
+  Shows the commits on local branches that have not been pushed.
+  Unlike `git log --branches --not --remotes`, it omits a branch whose
+  changes are already in a remote's default branch, as after a squash-merge.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.

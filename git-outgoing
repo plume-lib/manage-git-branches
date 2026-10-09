@@ -1,0 +1,261 @@
+#!/bin/sh
+
+# Shows the commits on local branches that are not on any remote branch,
+# that is, commits that have not been pushed.
+#
+# Usage:
+#   git-outgoing [GIT-LOG-ARGS]
+#
+# GIT-LOG-ARGS, such as `--oneline` or `-- PATH`, are passed to `git log`.
+# Any revisions among them are shown in addition to the local branches,
+# except for commits on a remote branch or on an omitted branch (see below).
+# They may not include `--stdin`, which this command uses itself.
+#
+# Unlike `git log --branches --not --remotes`, this command omits a branch
+# whose changes are already in some remote's default branch (`REMOTE/HEAD`),
+# even though its commits are not.  That happens when a pull request is
+# squash-merged and its remote branch is then deleted.  A branch is omitted
+# when merging it into `REMOTE/HEAD` would not change any file.
+# The commits of an omitted branch are not shown even when another branch
+# contains them, as when that branch was started from the omitted one.
+# A remote with no `REMOTE/HEAD` is not considered; to create it, run
+# `git remote set-head REMOTE --auto`.
+#
+# This command does not contact any remote, so run `git fetch` first if
+# the remote-tracking branches might be out of date.  It does not change the
+# repository.  In a partial clone, a branch whose check needs file contents
+# that have not been fetched is shown, with a warning, and GIT-LOG-ARGS that
+# need such file contents, such as `--stat` or `-p`, make `git log` fail.
+#
+# This command requires git 2.40 or later, for `git merge-tree --stdin`.
+# In a partial clone, it requires git 2.44 or later, for `GIT_NO_LAZY_FETCH`.
+
+# Prints an error message and exits with a failure status.
+die() {
+  echo "git-outgoing: $*" >&2
+  exit 1
+}
+
+# Output is like "git version 2.44.0" or "git version 2.44.0.windows.1".
+git_version="$(git version)" || exit 1
+git_version="${git_version#git version }"
+git_major="${git_version%%.*}"
+git_minor="${git_version#*.}"
+git_minor="${git_minor%%.*}"
+case "${git_major}.${git_minor}" in
+  *[!0-9.]* | .* | *.) die "cannot parse git version: ${git_version}" ;;
+esac
+
+# Usage: require_git MINOR [WHY]
+# Dies unless git is version 2.MINOR or later.  WHY, if given, says why.
+require_git() {
+  if [ "${git_major}" -lt 2 ] || { [ "${git_major}" -eq 2 ] && [ "${git_minor}" -lt "$1" ]; }; then
+    die "requires git 2.$1 or later${2:+ $2}, but found git ${git_version}"
+  fi
+}
+require_git 40
+
+# The repository's object directory.  `git merge-tree` writes the merge
+# results as objects; git_scratch puts them in ${tmpdir} instead.
+objects="$(git rev-parse --path-format=absolute --git-path objects)" || exit 1
+tmpdir="$(mktemp -d)" || exit 1
+trap 'rm -rf "${tmpdir}"' EXIT
+trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
+mkdir "${tmpdir}/objects" "${tmpdir}/objects/info" || exit 1
+# The scratch object directory borrows the repository's objects through its
+# alternates file, which separates entries by newlines.  Setting
+# GIT_ALTERNATE_OBJECT_DIRECTORIES instead would split a path that contains
+# the path separator, `:` or `;`.  The entry is C-quoted, so that it may
+# contain any character.
+{
+  printf '"'
+  printf '%s\n' "${objects}" | sed 's/[\\"]/\\&/g' | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }'
+  printf '"\n'
+} > "${tmpdir}/objects/info/alternates" || die "cannot write ${tmpdir}/objects/info/alternates"
+
+# Whether this repository is a partial clone, whose file contents may be
+# missing until git fetches them on demand.  Non-empty if so.
+partial_clone="$(git config --get extensions.partialclone)"
+case "$?" in
+  0 | 1) ;;
+  *) exit 1 ;;
+esac
+if [ -z "${partial_clone}" ]; then
+  promisor_remotes="$(git config --type=bool --get-regexp '^remote\..*\.promisor$')"
+  case "$?" in
+    0 | 1) ;;
+    *) exit 1 ;;
+  esac
+  partial_clone="$(printf '%s\n' "${promisor_remotes}" | awk '$2 == "true"')"
+fi
+if [ -n "${partial_clone}" ]; then
+  require_git 44 'in a partial clone'
+fi
+
+# Keep git from fetching missing objects, as it otherwise would in a partial
+# clone, so that this command never contacts a remote.
+GIT_NO_LAZY_FETCH=1
+export GIT_NO_LAZY_FETCH
+
+# Usage: git_scratch GIT-ARGS
+# Runs git, writing any new objects to ${tmpdir} rather than to the repository.
+git_scratch() {
+  GIT_OBJECT_DIRECTORY="${tmpdir}/objects" git "$@"
+}
+
+# Usage: names_missing_object FILE
+# Succeeds if FILE, an error message from git, names an object that is not in
+# the repository.
+names_missing_object() {
+  # An object name is 40 (SHA-1) or 64 (SHA-256) hexadecimal digits.
+  tr -cs '0-9a-f' '\n' < "$1" | awk 'length == 40 || length == 64' | sort -u \
+    > "${tmpdir}/named-objects" || die "cannot write ${tmpdir}/named-objects"
+  while read -r object; do
+    if ! git cat-file -e "${object}" 2> /dev/null; then return 0; fi
+  done < "${tmpdir}/named-objects"
+  return 1
+}
+
+# Non-empty once git_failed has warned about a partial clone.
+warned_partial_clone=
+
+# Usage: git_failed COMMAND
+# Handles the failure of COMMAND, a git command run by git_scratch whose
+# standard error is in ${tmpdir}/git-errors.  In a partial clone, if the error
+# names an object that has not been fetched, this warns (once, with the first
+# such error) and returns.  Otherwise, it dies.
+git_failed() {
+  if [ -n "${partial_clone}" ] && names_missing_object "${tmpdir}/git-errors"; then
+    if [ -z "${warned_partial_clone}" ]; then
+      echo "git-outgoing: this partial clone lacks file contents needed to check whether some branches are merged; showing them.  The first error, from $1, was:" >&2
+      cat "${tmpdir}/git-errors" >&2
+      warned_partial_clone=1
+    fi
+    return 0
+  fi
+  cat "${tmpdir}/git-errors" >&2
+  die "$1 failed"
+}
+
+# Usage: has_common_ancestor COMMIT BRANCH
+# Succeeds if COMMIT and BRANCH have a common ancestor.
+has_common_ancestor() {
+  git merge-base "$1" "$2" > /dev/null
+  case "$?" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) die "git merge-base $1 $2 failed" ;;
+  esac
+}
+
+# Usage: merge_yields COMMIT BRANCH TREE
+# Succeeds if merging BRANCH into COMMIT yields TREE without conflicts.
+# Fails if COMMIT and BRANCH have no common ancestor.
+merge_yields() {
+  merge_tree="$(git_scratch merge-tree --write-tree --no-messages "$1" "$2" 2> "${tmpdir}/git-errors")"
+  case "$?" in
+    0) [ "${merge_tree}" = "$3" ] ;;
+    1) return 1 ;; # The merge has conflicts.
+    *)
+      # git refuses to merge unrelated histories.  Checking for that only
+      # after a failure saves a process for each branch and base.
+      if has_common_ancestor "$1" "$2"; then
+        git_failed "git merge-tree $1 $2"
+      fi
+      return 1
+      ;;
+  esac
+}
+
+# Create ${tmpdir}/bases, which the merges below read, such that each line
+# is "COMMIT TREE" for one remote's default branch, without duplicates.  A
+# remote name may contain a slash, so the refs are matched against the remote
+# names.
+git remote > "${tmpdir}/remotes" || exit 1
+git for-each-ref --format='%(refname) %(objectname) %(tree)' refs/remotes > "${tmpdir}/remote-refs" || exit 1
+awk '
+  FILENAME == ARGV[1] { want["refs/remotes/" $0 "/HEAD"]; next }
+  $1 in want { print $2, $3 }
+' "${tmpdir}/remotes" "${tmpdir}/remote-refs" > "${tmpdir}/all-bases" || die "awk failed"
+sort -u "${tmpdir}/all-bases" > "${tmpdir}/bases" || die "sort failed"
+
+# Create ${tmpdir}/unpushed-branches, which the merges below read, such that
+# each line is a local branch whose tip is not on any remote branch.  A full
+# name, such as `refs/heads/main`, cannot be mistaken for a file name.
+# Comparing the tips with the unpushed commits avoids passing one argument
+# per remote-tracking branch, as `git for-each-ref --no-merged` would
+# require; with many remote-tracking branches, such arguments would exceed
+# the limit on a command line's size.
+git for-each-ref --format='%(objectname) %(refname)' refs/heads > "${tmpdir}/local-branches" || exit 1
+git rev-list --branches --not --remotes > "${tmpdir}/unpushed-commits" || exit 1
+awk '
+  FILENAME == ARGV[1] { refs[$1] = ($1 in refs) ? refs[$1] "\n" $2 : $2; next }
+  $0 in refs { print refs[$0]; delete refs[$0] }
+' "${tmpdir}/local-branches" "${tmpdir}/unpushed-commits" > "${tmpdir}/unpushed-branches" || die "awk failed"
+
+# Create ${tmpdir}/pairs, which the merges below read, such that each line is
+# "BRANCH COMMIT TREE" for one unpushed branch and one line of
+# ${tmpdir}/bases.
+awk '
+  FILENAME == ARGV[1] { bases[++n] = $0; next }
+  { for (i = 1; i <= n; i++) print $0, bases[i] }
+' "${tmpdir}/bases" "${tmpdir}/unpushed-branches" > "${tmpdir}/pairs" || die "awk failed"
+pair_count="$(wc -l < "${tmpdir}/pairs")" || die "cannot read ${tmpdir}/pairs"
+
+# Create ${tmpdir}/results, which the step below reads, such that line N is
+# "STATUS TREE" for merging the BRANCH on line N of ${tmpdir}/pairs into its
+# COMMIT:  STATUS is 1 if the merge is clean and 0 otherwise, and TREE is
+# the result.  One `git merge-tree --stdin` does many merges, which saves a
+# process for each branch and base.  But it stops at the first merge that
+# fails, as for unrelated histories or for file contents that a partial clone
+# lacks.  merge_yields then redoes that merge alone, which tells those cases
+# apart, and the merges after it are batched again.
+: > "${tmpdir}/results" || die "cannot write ${tmpdir}/results"
+next_pair=1
+while [ "${next_pair}" -le "${pair_count}" ]; do
+  awk -v first="${next_pair}" 'NR >= first { print $2, $1 }' "${tmpdir}/pairs" > "${tmpdir}/merge-input" || die "awk failed"
+  git_scratch merge-tree --stdin --no-messages < "${tmpdir}/merge-input" > "${tmpdir}/merge-output" 2> "${tmpdir}/git-errors"
+  merge_status="$?"
+  # The output of each merge is NUL-terminated fields:  the status, the tree,
+  # any conflicted files, and an empty field.  tr makes each field a line,
+  # after changing any newline in a file name to another character.
+  tr '\n\000' '\001\n' < "${tmpdir}/merge-output" | awk '
+    field == 0 { status = $0; field = 1; next }
+    field == 1 { tree = $0; field = 2; next }
+    $0 == "" { print status, tree; field = 0 }
+  ' >> "${tmpdir}/results" || die "cannot write ${tmpdir}/results"
+  next_pair="$(($(wc -l < "${tmpdir}/results") + 1))"
+  if [ "${next_pair}" -le "${pair_count}" ]; then
+    if [ "${merge_status}" -eq 0 ]; then
+      cat "${tmpdir}/git-errors" >&2
+      die "git merge-tree --stdin did not do every merge"
+    fi
+    sed -n "${next_pair}p" "${tmpdir}/pairs" > "${tmpdir}/failed-pair" || die "sed failed"
+    read -r branch base_commit base_tree < "${tmpdir}/failed-pair"
+    if merge_yields "${base_commit}" "${branch}" "${base_tree}"; then
+      echo "1 ${base_tree}"
+    else
+      echo "0 -"
+    fi >> "${tmpdir}/results" || die "cannot write ${tmpdir}/results"
+    next_pair="$((next_pair + 1))"
+  fi
+done
+
+# Create ${tmpdir}/log-refs, which the final `git log` reads, such that each
+# line is a branch to show, or a branch to omit preceded by `^`.  A branch is
+# omitted if merging it into some base yields that base's tree.  The branches
+# are passed through `--stdin` rather than as arguments, which might exceed
+# the limit on a command line's size.
+awk '
+  FILENAME == ARGV[1] { result[FNR] = $0; next }
+  FILENAME == ARGV[2] { if (result[FNR] == "1 " $3) merged[$1]; next }
+  { print (($0 in merged) ? "^" : "") $0 }
+' "${tmpdir}/results" "${tmpdir}/pairs" "${tmpdir}/unpushed-branches" > "${tmpdir}/log-refs" || die "awk failed"
+
+# The `--not` makes the remote-tracking branches negative, and the second
+# `--not` makes any revisions in GIT-LOG-ARGS positive again.  The GIT-LOG-ARGS
+# come last, so that a `--` in them does not turn `--remotes` into a path.
+# Even with no branches, no remote-tracking branches, and no revisions in
+# GIT-LOG-ARGS, `--remotes` keeps `git log` from showing HEAD.
+git log --stdin --not --remotes --not "$@" < "${tmpdir}/log-refs"
