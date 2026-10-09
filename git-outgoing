@@ -34,7 +34,7 @@
 # that have not been fetched is shown, with a warning, and GIT-LOG-ARGS that
 # need such file contents, such as `--stat` or `-p`, make `git log` fail.
 #
-# This command requires git 2.38 or later, for `git merge-tree --write-tree`.
+# This command requires git 2.40 or later, for `git merge-tree --stdin`.
 # In a partial clone, it requires git 2.44 or later, for `GIT_NO_LAZY_FETCH`.
 
 # Prints an error message and exits with a failure status.
@@ -60,10 +60,10 @@ require_git() {
     die "requires git 2.$1 or later${2:+ $2}, but found git ${git_version}"
   fi
 }
-require_git 38
+require_git 40
 
-# The repository's object directory.  `git merge-tree --write-tree` writes the
-# merge result as objects; git_scratch puts them in ${tmpdir} instead.
+# The repository's object directory.  `git merge-tree` writes the merge
+# results as objects; git_scratch puts them in ${tmpdir} instead.
 objects="$(git rev-parse --path-format=absolute --git-path objects)" || exit 1
 tmpdir="$(mktemp -d)" || exit 1
 trap 'rm -rf "${tmpdir}"' EXIT
@@ -96,12 +96,12 @@ if [ -z "${partial_clone}" ]; then
   esac
   partial_clone="$(printf '%s\n' "${promisor_remotes}" | awk '$2 == "true"')"
 fi
-warned_partial_clone=
 if [ -n "${partial_clone}" ]; then
   require_git 44 'in a partial clone'
 fi
 
-# In a partial clone, git does not fetch missing objects from the remote.
+# Keep git from fetching missing objects, as it otherwise would in a partial
+# clone, so that this command never contacts a remote.
 GIT_NO_LAZY_FETCH=1
 export GIT_NO_LAZY_FETCH
 
@@ -123,6 +123,9 @@ names_missing_object() {
   done < "${tmpdir}/named-objects"
   return 1
 }
+
+# Non-empty once git_failed has warned about a partial clone.
+warned_partial_clone=
 
 # Usage: git_failed COMMAND
 # Handles the failure of COMMAND, a git command run by git_scratch whose
@@ -245,12 +248,12 @@ has_squash_commit() {
   return 1
 }
 
-# Usage: is_merged BRANCH BRANCH-TIME
-# Succeeds if BRANCH's changes are in some remote's default branch.
-# BRANCH-TIME is the author date of BRANCH's last commit.
-is_merged() {
+# Usage: is_squash_merged BRANCH BRANCH-TIME
+# Succeeds if some remote's default branch contains a squash commit of BRANCH,
+# as has_squash_commit determines.  BRANCH-TIME is the author date of
+# BRANCH's last commit.
+is_squash_merged() {
   while read -r base_commit base_tree; do
-    if merge_yields "${base_commit}" "$1" "${base_tree}"; then return 0; fi
     base_merge_bases="$(git merge-base --all "${base_commit}" "$1")"
     case "$?" in
       0) ;;
@@ -262,9 +265,10 @@ is_merged() {
   return 1
 }
 
-# Each line of ${tmpdir}/bases is "COMMIT TREE" for one remote's default
-# branch, without duplicates.  A remote name may contain a slash, so the refs
-# are matched against the remote names.
+# Create ${tmpdir}/bases, which the merges below read, such that each line
+# is "COMMIT TREE" for one remote's default branch, without duplicates.  A
+# remote name may contain a slash, so the refs are matched against the remote
+# names.
 git remote > "${tmpdir}/remotes" || exit 1
 git for-each-ref --format='%(refname) %(objectname) %(tree)' refs/remotes > "${tmpdir}/remote-refs" || exit 1
 awk '
@@ -273,13 +277,14 @@ awk '
 ' "${tmpdir}/remotes" "${tmpdir}/remote-refs" > "${tmpdir}/all-bases" || die "awk failed"
 sort -u "${tmpdir}/all-bases" > "${tmpdir}/bases" || die "sort failed"
 
-# The local branches whose tips are not on any remote branch, one per line,
-# each as "TIME NAME", where TIME is the author date of the tip in seconds
-# since the epoch.  A full name, such as `refs/heads/main`, cannot be
-# mistaken for a file name.  Comparing the tips with the unpushed commits
-# avoids passing one argument per remote-tracking branch, as
-# `git for-each-ref --no-merged` would require; with many remote-tracking
-# branches, such arguments would exceed the limit on a command line's size.
+# Create ${tmpdir}/unpushed-branches, which the merges below read, such that
+# each line is "TIME BRANCH" for a local branch whose tip is not on any remote
+# branch, where TIME is the author date of the tip in seconds since the epoch.
+# A full name, such as `refs/heads/main`, cannot be mistaken for a file name.
+# Comparing the tips with the unpushed commits avoids passing one argument
+# per remote-tracking branch, as `git for-each-ref --no-merged` would
+# require; with many remote-tracking branches, such arguments would exceed
+# the limit on a command line's size.
 git for-each-ref --format='%(objectname) %(authordate:unix) %(refname)' refs/heads > "${tmpdir}/local-branches" || exit 1
 git rev-list --branches --not --remotes > "${tmpdir}/unpushed-commits" || exit 1
 awk '
@@ -287,17 +292,78 @@ awk '
   $0 in refs { print refs[$0]; delete refs[$0] }
 ' "${tmpdir}/local-branches" "${tmpdir}/unpushed-commits" > "${tmpdir}/unpushed-branches" || die "awk failed"
 
-# The branches to show, one per line, and those to omit, each preceded by `^`.
-# They are passed through `--stdin` rather than as arguments, which might
-# exceed the limit on a command line's size.
+# Create ${tmpdir}/pairs, which the merges below read, such that each line is
+# "BRANCH COMMIT TREE" for one unpushed branch and one line of
+# ${tmpdir}/bases.
+awk '
+  FILENAME == ARGV[1] { bases[++n] = $0; next }
+  { for (i = 1; i <= n; i++) print $2, bases[i] }
+' "${tmpdir}/bases" "${tmpdir}/unpushed-branches" > "${tmpdir}/pairs" || die "awk failed"
+pair_count="$(wc -l < "${tmpdir}/pairs")" || die "cannot read ${tmpdir}/pairs"
+
+# Create ${tmpdir}/results, which the step below reads, such that line N is
+# "STATUS TREE" for merging the BRANCH on line N of ${tmpdir}/pairs into its
+# COMMIT:  STATUS is 1 if the merge is clean and 0 otherwise, and TREE is
+# the result.  One `git merge-tree --stdin` does many merges, which saves a
+# process for each branch and base.  But it stops at the first merge that
+# fails, as for unrelated histories or for file contents that a partial clone
+# lacks.  merge_yields then redoes that merge alone, which tells those cases
+# apart, and the merges after it are batched again.
+: > "${tmpdir}/results" || die "cannot write ${tmpdir}/results"
+next_pair=1
+while [ "${next_pair}" -le "${pair_count}" ]; do
+  awk -v first="${next_pair}" 'NR >= first { print $2, $1 }' "${tmpdir}/pairs" > "${tmpdir}/merge-input" || die "awk failed"
+  git_scratch merge-tree --stdin --no-messages < "${tmpdir}/merge-input" > "${tmpdir}/merge-output" 2> "${tmpdir}/git-errors"
+  merge_status="$?"
+  # The output of each merge is NUL-terminated fields:  the status, the tree,
+  # any conflicted files, and an empty field.  tr makes each field a line,
+  # after changing any newline in a file name to another character.
+  tr '\n\000' '\001\n' < "${tmpdir}/merge-output" | awk '
+    field == 0 { status = $0; field = 1; next }
+    field == 1 { tree = $0; field = 2; next }
+    $0 == "" { print status, tree; field = 0 }
+  ' >> "${tmpdir}/results" || die "cannot write ${tmpdir}/results"
+  next_pair="$(($(wc -l < "${tmpdir}/results") + 1))"
+  if [ "${next_pair}" -le "${pair_count}" ]; then
+    if [ "${merge_status}" -eq 0 ]; then
+      cat "${tmpdir}/git-errors" >&2
+      die "git merge-tree --stdin did not do every merge"
+    fi
+    sed -n "${next_pair}p" "${tmpdir}/pairs" > "${tmpdir}/failed-pair" || die "sed failed"
+    read -r branch base_commit base_tree < "${tmpdir}/failed-pair"
+    if merge_yields "${base_commit}" "${branch}" "${base_tree}"; then
+      echo "1 ${base_tree}"
+    else
+      echo "0 -"
+    fi >> "${tmpdir}/results" || die "cannot write ${tmpdir}/results"
+    next_pair="$((next_pair + 1))"
+  fi
+done
+
+# Create ${tmpdir}/merge-status, which the step below reads, such that each
+# line is "STATUS TIME BRANCH" for one line "TIME BRANCH" of
+# ${tmpdir}/unpushed-branches:  STATUS is 1 if merging BRANCH into some base
+# yields that base's tree, and 0 otherwise.
+awk '
+  FILENAME == ARGV[1] { result[FNR] = $0; next }
+  FILENAME == ARGV[2] { if (result[FNR] == "1 " $3) merged[$1]; next }
+  { print (($2 in merged) ? 1 : 0), $0 }
+' "${tmpdir}/results" "${tmpdir}/pairs" "${tmpdir}/unpushed-branches" > "${tmpdir}/merge-status" || die "awk failed"
+
+# Create ${tmpdir}/log-refs, which the final `git log` reads, such that each
+# line is a branch to show, or a branch to omit preceded by `^`.  A branch is
+# omitted if merging it into some base yields that base's tree, or if some
+# base contains a squash commit of it.  The branches are passed through
+# `--stdin` rather than as arguments, which might exceed the limit on a
+# command line's size.
 : > "${tmpdir}/log-refs" || die "cannot write ${tmpdir}/log-refs"
-while read -r branch_time branch; do
-  if is_merged "${branch}" "${branch_time}"; then
+while read -r merged branch_time branch; do
+  if [ "${merged}" -eq 1 ] || is_squash_merged "${branch}" "${branch_time}"; then
     printf '^%s\n' "${branch}"
   else
     printf '%s\n' "${branch}"
   fi >> "${tmpdir}/log-refs" || die "cannot write ${tmpdir}/log-refs"
-done < "${tmpdir}/unpushed-branches"
+done < "${tmpdir}/merge-status"
 
 # The `--not` makes the remote-tracking branches negative, and the second
 # `--not` makes any revisions in GIT-LOG-ARGS positive again.  The GIT-LOG-ARGS
