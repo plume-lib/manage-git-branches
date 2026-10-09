@@ -156,9 +156,12 @@ expect_outgoing 'squash-merged branch, path with a colon' ''
 clone="${saved_clone}"
 git -C "${clone}" fetch -q origin
 
-# A branch with no history in common with origin/HEAD is outgoing.
+# A branch with no history in common with origin/HEAD is outgoing.  The
+# merge for it fails, which stops `git merge-tree --stdin`, but the merges
+# after it are still done, so the squash-merged branch is still not outgoing.
+# The orphan commit is the newest, so its merge comes first.
 empty_tree="$(git -C "${clone}" mktree < /dev/null)"
-orphan_commit="$(git -C "${clone}" commit-tree -m 'Orphan commit' "${empty_tree}")"
+orphan_commit="$(GIT_COMMITTER_DATE='2099-01-01T00:00:00Z' git -C "${clone}" commit-tree -m 'Orphan commit' "${empty_tree}")"
 git -C "${clone}" branch -q orphan "${orphan_commit}"
 expect_outgoing 'orphan branch' 'Orphan commit'
 git -C "${clone}" branch -q -D orphan
@@ -208,14 +211,14 @@ git -C "${clone}" fetch -q foo/bar
 git -C "${clone}" remote set-head foo/bar main > /dev/null
 expect_outgoing 'remote name with a slash' ''
 
-# A git older than 2.38, which lacks `git merge-tree --write-tree`, is rejected.
+# A git older than 2.40, which lacks `git merge-tree --stdin`, is rejected.
 older_git_dir="${testdir}/older-git"
-make_fake_git "${older_git_dir}" version 0 'git version 2.37.0'
+make_fake_git "${older_git_dir}" version 0 'git version 2.39.0'
 if (cd "${clone}" && PATH="${older_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2> "${testdir}/older-git-errors"; then
-  fail 'git 2.37: expected a failure status'
+  fail 'git 2.39: expected a failure status'
 fi
-if ! grep -q 'requires git 2.38 or later' "${testdir}/older-git-errors"; then
-  fail 'git 2.37: expected a version error message'
+if ! grep -q 'requires git 2.40 or later' "${testdir}/older-git-errors"; then
+  fail 'git 2.39: expected a version error message'
 fi
 
 # A git older than 2.44, which lacks `GIT_NO_LAZY_FETCH`, suffices outside a
