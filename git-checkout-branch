@@ -90,6 +90,20 @@ if ! cd "${TOPLEVEL}"; then
   exit 1
 fi
 
+# Refuse a working tree that does not hold its own `.git` directory -- one
+# whose `.git` is a file (a submodule's working tree, a linked worktree, or
+# the working tree of a repository made with `--separate-git-dir`), one whose
+# `.git` is a symbolic link, and one that has no `.git` at all -- before
+# anything expensive happens:  before the `git pull`, before any query to a
+# remote, and before the copy.  Copying such a working tree produces a
+# directory that shares this one's git directory, and the checkout then moves
+# this working tree's HEAD and rewrites its index.
+# `check_git_dir_is_directory`, in remote-functions.sh, explains the mechanism
+# and prints the diagnostic.
+if ! check_git_dir_is_directory "${TOPLEVEL}"; then
+  exit 1
+fi
+
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
 BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
@@ -112,16 +126,6 @@ if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
   fi
   if [ -n "$(git ls-files --unmerged)" ]; then
     echo "${SCRIPT_NAME}: ERROR: the failed pull left conflicts in ${TOPLEVEL}." >&2
-    # Resolving the conflicts is only half of the way out of a rebase or a
-    # cherry-pick:  until its `--continue` runs, HEAD is the operation's
-    # intermediate commit, and re-running this script from there would branch
-    # from a commit that lacks the commits that the operation has not replayed.
-    CONTINUE_COMMAND="$(conflict_continue_command .)"
-    if [ -n "${CONTINUE_COMMAND}" ]; then
-      echo "${SCRIPT_NAME}: Resolve them and run \`${CONTINUE_COMMAND}\`, or run \`$(conflict_abort_command .)\` to abandon the pull; then re-run ${SCRIPT_NAME}." >&2
-    else
-      echo "${SCRIPT_NAME}: Resolve them, or run \`$(conflict_abort_command .)\`, then re-run ${SCRIPT_NAME}." >&2
-    fi
     exit 1
   fi
   echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
@@ -247,7 +251,6 @@ find_branch() {
     else
       echo "${SCRIPT_NAME}: ERROR: branch $1 exists on several remotes of this clone, so which one to check out is ambiguous:" >&2
       printf '%s\n' "${find_branch_remotes}" | sed "s/^/${SCRIPT_NAME}:   /" >&2
-      echo "${SCRIPT_NAME}: Run \`git config checkout.defaultRemote REMOTE\` in ${TOPLEVEL} to choose one of them, then re-run ${SCRIPT_NAME}." >&2
       exit 1
     fi
     CHECKOUT_START_POINT="${find_branch_chosen}/$1"

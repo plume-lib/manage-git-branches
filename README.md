@@ -35,12 +35,33 @@ The commands are:
   directory is a sibling of the working copy.  This command does not push the
   new branch.
   Below is a definition for an alias `gnb`.
-* [`git-push-to`](git-push-to) `[--nocompile] FROM_DIR TO_DIR ...`:
+* [`git-push-to`](git-push-to)
+  `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.
   Each directory must be the top level of a working copy (that is, of a git
   clone) and must have an upstream branch.
   You may also pass a list of directories: each is pushed into the subsequent one.
+  Instead of directories, you may pass slugs of the form `ORG:BRANCH`, such as
+  `git-push-to upstream:main myname:feature`.  Each slug names the
+  directory `PROJECT-fork-ORG-branch-BRANCH` (or `PROJECT-fork-ORG`, if it has
+  BRANCH checked out) in the current directory.  Each PROJECT that has
+  directories for two or more of the slugs gets its own chain.
+  A slug may also be just `BRANCH`, as in `git-push-to main feature`.
+  It matches every ORG; each PROJECT and ORG gets its own chain.
+  It also matches `PROJECT-branch-BRANCH`, as created by `git-new-branch`
+  from a clone `PROJECT`, and it matches the clone `PROJECT` itself if that
+  has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
+  directories form one more chain per PROJECT.
+  With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
+* [`git-rebase-to`](git-rebase-to)
+  `[--nocompile] [--squash] FROM_DIR TO_DIR ...`:
+  Runs `git-push-to` on the arguments, then rebases each branch onto the
+  previous branch, to eliminate merge commits, and force-pushes each
+  branch.  This is useful for maintaining a stack of GitHub pull requests,
+  each of whose base is the previous one.  With `--squash`, each branch
+  becomes a single commit on top of the previous branch.
+  The arguments may be slugs, as for `git-push-to`.
 * [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
@@ -49,11 +70,23 @@ The commands are:
   working copy (that is, a git clone) and must each have an upstream branch.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
-* [`git-orphaned-branches`](git-orphaned-branches) `[--print0]`:
+  It is also true of a directory that holds nothing but Eclipse `.project`
+  files, which a branch directory may leave behind when its working tree
+  is gone.
+* [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
   Lists directories named `*-branch-*`, below the current directory, that are
-  working copies for branches that were deleted in the remote repository.
-  Typical usage is `git-orphaned-branches --print0 | xargs -0 rm -rf` or
-  `rmgob` (see alias below).
+  working copies for branches that were deleted in the remote repository, or
+  that hold nothing but Eclipse `.project` files.
+  With `--remove`, removes each of them instead of printing them.
+  Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
+  alias below).
+* [`git-remove-branch-directory`](git-remove-branch-directory)
+  `[--force] [--force-uncommitted] [--force-unpushed] DIRECTORY...`:
+  Removes a branch directory, unless the removal would lose work.
+* [`git-outgoing`](git-outgoing) `[GIT-LOG-ARGS]`:
+  Shows the commits on local branches that have not been pushed.
+  Unlike `git log --branches --not --remotes`, it omits a branch whose
+  changes are already in a remote's default branch, as after a squash-merge.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
@@ -78,17 +111,19 @@ takes effect when it is set to a non-empty value.
 * `MAKE_FLAGS`: `compile-project` passes this to `make`.
 * `ERR_IF_NO_BUILDFILE`: `compile-project` fails if it finds no buildfile.
   Otherwise, `compile-project` succeeds when it finds no buildfile.
-* `MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT`: `git-push-to` and
-  `git-pull-from` skip the compilation step, and push whenever the merge
-  succeeds.
+* `MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT`: `git-push-to`,
+  `git-pull-from`, and `git-rebase-to` skip the compilation step, and push
+  whenever the merge succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
-* `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`, `git-new-branch`, and
-  `git-checkout-branch` use these standard Git variables to select the SSH
-  command when they query a remote repository.
-* `GIT_SSH_VARIANT`: `is-deleted-branch`, `git-new-branch`, and
-  `git-checkout-branch` use this standard Git variable to determine whether the
-  selected SSH command accepts OpenSSH options.
+* `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
+  `git-orphaned-branches`, `git-new-branch`, `git-checkout-branch`, and
+  `git-push-to` use these standard Git variables to select the SSH command
+  when they query a remote repository.
+* `GIT_SSH_VARIANT`: `is-deleted-branch`, `git-orphaned-branches`,
+  `git-new-branch`, `git-checkout-branch`, and `git-push-to` use this standard
+  Git variable to determine whether the selected SSH command accepts OpenSSH
+  options.
 
 ## Installation
 
@@ -105,7 +140,7 @@ such as `~/.profile`.
 export PATH="/path/to/manage-git-branches:${PATH}"
 alias gcb=git-checkout-branch
 alias gnb=git-new-branch
-alias rmgob='git-orphaned-branches --print0 | xargs -0 rm -rf'
+alias rmgob='git-orphaned-branches --remove'
 ```
 
 ## Testing

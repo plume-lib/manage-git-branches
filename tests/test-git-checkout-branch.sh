@@ -324,6 +324,152 @@ elif ! grep -q -- '-o BatchMode=yes' "${tmpdir}/ssh-arguments"; then
   fail "the query to origin did not disable SSH's prompts: $(cat "${tmpdir}/ssh-arguments")"
 fi
 
+# A working tree that does not hold its own `.git` directory is refused
+# before anything else happens.  Copying such a working tree produces a
+# directory that names the *same* git directory, so the two share one HEAD and
+# one index, and the `git checkout` that follows moves the source's HEAD and
+# rewrites the source's index -- data loss in a working tree that the user did
+# not name.  The cases have different remedies, so each message names the
+# right one.
+
+submodule_parent="${tmpdir}/submodule"
+mkdir -p "${submodule_parent}" || exit 1
+# Canonicalize the pathname, because the messages below name the directory as
+# the command resolves it.  On macOS, `mktemp -d` returns a pathname under a
+# symbolic link.
+submodule_parent="$(CDPATH='' cd -- "${submodule_parent}" && pwd -P)" || exit 1
+make_submodule_superproject "${submodule_parent}" || exit 1
+superproject="${submodule_parent}/super-branch-main"
+submodule="${superproject}/sub"
+submodule_before="$(working_tree_state "${submodule}")"
+if out="$(cd "${submodule}" && "${GIT_CHECKOUT_BRANCH}" extra 2>&1)"; then
+  fail "zero exit status in the working tree of a submodule"
+fi
+case "${out}" in
+  *"is the working tree of a submodule"*"superproject ${superproject}"*) ;;
+  *) fail "unexpected message in the working tree of a submodule: ${out}" ;;
+esac
+for leftover in "${superproject}/sub-branch-extra" \
+  "${superproject}/sub-branch-extra-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "directory was created in the working tree of a submodule: ${leftover}"
+  fi
+done
+if [ "$(working_tree_state "${submodule}")" != "${submodule_before}" ]; then
+  fail "the submodule's HEAD or index changed"
+fi
+
+worktree_parent="${tmpdir}/worktree"
+mkdir -p "${worktree_parent}" || exit 1
+worktree_parent="$(CDPATH='' cd -- "${worktree_parent}" && pwd -P)" || exit 1
+make_linked_worktree "${worktree_parent}" || exit 1
+worktree_main="${worktree_parent}/worktree-branch-main"
+linked="${worktree_parent}/worktree-branch-linked"
+linked_before="$(working_tree_state "${linked}")"
+if out="$(cd "${linked}" && "${GIT_CHECKOUT_BRANCH}" extra 2>&1)"; then
+  fail "zero exit status in a linked worktree"
+fi
+case "${out}" in
+  *"is a linked worktree"*"main working tree ${worktree_main}"*) ;;
+  *) fail "unexpected message in a linked worktree: ${out}" ;;
+esac
+for leftover in "${worktree_parent}/worktree-branch-extra" \
+  "${worktree_parent}/worktree-branch-extra-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "directory was created in a linked worktree: ${leftover}"
+  fi
+done
+if [ "$(working_tree_state "${linked}")" != "${linked_before}" ]; then
+  fail "the linked worktree's HEAD or index changed"
+fi
+
+# A working tree whose git directory lies outside it is a main working tree,
+# not a linked worktree:  the diagnostic must not send the user to another
+# working tree, nor name the git directory as one.
+separate_parent="${tmpdir}/separate"
+mkdir -p "${separate_parent}" || exit 1
+separate_parent="$(CDPATH='' cd -- "${separate_parent}" && pwd -P)" || exit 1
+make_separate_git_dir_worktree "${separate_parent}" || exit 1
+separate="${separate_parent}/separate-branch-main"
+separate_before="$(working_tree_state "${separate}")"
+if out="$(cd "${separate}" && "${GIT_CHECKOUT_BRANCH}" extra 2>&1)"; then
+  fail "zero exit status in a working tree whose git directory lies outside it"
+fi
+case "${out}" in
+  *"is a linked worktree"* | *"main working tree"*)
+    fail "a working tree whose git directory lies outside it was called a linked worktree: ${out}" ;;
+  *"names the git directory ${separate_parent}/separate-git-dir"*) ;;
+  *) fail "unexpected message in a working tree whose git directory lies outside it: ${out}" ;;
+esac
+for leftover in "${separate_parent}/separate-branch-extra" \
+  "${separate_parent}/separate-branch-extra-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "directory was created in a working tree whose git directory lies outside it: ${leftover}"
+  fi
+done
+if [ "$(working_tree_state "${separate}")" != "${separate_before}" ]; then
+  fail "the HEAD or index changed in a working tree whose git directory lies outside it"
+fi
+
+# A working tree whose `.git` is a symbolic link to a directory is refused as
+# well.  `test -d` follows the link, but `cp -Rp` copies the link itself, so
+# the copy's `.git` names the same git directory that this one's does.
+symlink_parent="${tmpdir}/symlink"
+mkdir -p "${symlink_parent}" || exit 1
+symlink_parent="$(CDPATH='' cd -- "${symlink_parent}" && pwd -P)" || exit 1
+make_symlinked_git_dir_worktree "${symlink_parent}" || exit 1
+symlinked="${symlink_parent}/symlink-branch-main"
+symlinked_before="$(working_tree_state "${symlinked}")"
+if out="$(cd "${symlinked}" && "${GIT_CHECKOUT_BRANCH}" extra 2>&1)"; then
+  fail "zero exit status in a working tree whose .git is a symbolic link"
+fi
+case "${out}" in
+  *"is a symbolic link that names ../symlink-git-dir"*) ;;
+  *) fail "unexpected message in a working tree whose .git is a symbolic link: ${out}" ;;
+esac
+for leftover in "${symlink_parent}/symlink-branch-extra" \
+  "${symlink_parent}/symlink-branch-extra-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "directory was created in a working tree whose .git is a symbolic link: ${leftover}"
+  fi
+done
+if [ "$(working_tree_state "${symlinked}")" != "${symlinked_before}" ]; then
+  fail "the HEAD or index changed in a working tree whose .git is a symbolic link"
+fi
+
+# A working tree that holds no `.git` at all, because GIT_DIR and
+# GIT_WORK_TREE in the environment name its repository, is refused too.  The
+# copy would hold no repository, and the environment would still name this
+# working tree's git directory, so the checkout would move this working
+# tree's HEAD.  `env` sets the two variables for the command under test
+# alone, rather than for this test, whose other cases must not see them.
+envdir_parent="${tmpdir}/envgitdir"
+mkdir -p "${envdir_parent}" || exit 1
+envdir_parent="$(CDPATH='' cd -- "${envdir_parent}" && pwd -P)" || exit 1
+make_env_git_dir_worktree "${envdir_parent}" || exit 1
+envtree="${envdir_parent}/env-branch-main"
+envgitdir="${envdir_parent}/env-git-dir"
+envtree_before="$(working_tree_state "${envtree}" "${envgitdir}")"
+if out="$(cd "${envtree}" \
+  && env GIT_DIR="${envgitdir}" GIT_WORK_TREE="${envtree}" \
+    "${GIT_CHECKOUT_BRANCH}" extra 2>&1)"; then
+  fail "zero exit status in a working tree that has no .git"
+fi
+case "${out}" in
+  *"${envtree} has no .git"*) ;;
+  *) fail "unexpected message in a working tree that has no .git: ${out}" ;;
+esac
+for leftover in "${envdir_parent}/env-branch-extra" \
+  "${envdir_parent}/env-branch-extra-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "directory was created in a working tree that has no .git: ${leftover}"
+  fi
+done
+envtree_after="$(working_tree_state "${envtree}" "${envgitdir}")"
+if [ "${envtree_after}" != "${envtree_before}" ]; then
+  fail "the HEAD or index changed in a working tree that has no .git"
+fi
+
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_CHECKOUT_BRANCH}" > /dev/null 2>&1); then
   fail "zero exit status when given no argument"

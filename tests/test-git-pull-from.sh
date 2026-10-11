@@ -52,8 +52,7 @@ git -C "${workdir}/from" push -q -u origin main
 make_clone "${workdir}/to"
 
 # A commit that only "to" has, so that pulling "from" into it creates a merge
-# commit.  Git generates that commit's message from the pathname that was
-# pulled, so the message shows which pathname `git-push-to` passed to `git`.
+# commit, whose message the assertions below inspect.
 date > "${workdir}/to/to-change.txt"
 git -C "${workdir}/to" add to-change.txt
 git -C "${workdir}/to" commit -q -m "a change in the destination"
@@ -75,16 +74,24 @@ if [ "$(git -C "${remote}" rev-parse main)" != "$(git -C "${workdir}/to" rev-par
   fail "git-pull-from --nocompile did not push"
 fi
 
-# The merge commit must name the other repository relative to this one, not by
-# an absolute pathname:  an absolute pathname would record this machine's
-# directory layout in history that is shared with everyone else.
+# The merge commit message names the branch and no directory at all, just as
+# it does for a merge within a single clone.  In particular it contains no
+# absolute pathname, which would record this machine's directory layout in
+# history that is shared with everyone else.
 subject="$(git -C "${workdir}/to" log -1 --format=%s)"
-case "${subject}" in
-  *"${workdir}"*) fail "merge commit message contains an absolute pathname: ${subject}" ;;
+if [ "${subject}" != "Merge branch 'main'" ]; then
+  fail "unexpected merge commit message: ${subject}"
+fi
+
+# `git-push-to` fetches the other repository by a pathname relative to this
+# one.  FETCH_HEAD is where git records the pathname that it fetched from.
+fetch_head="$(cat "${workdir}/to/.git/FETCH_HEAD")"
+case "${fetch_head}" in
+  *"${workdir}"*) fail "git-push-to fetched from an absolute pathname: ${fetch_head}" ;;
 esac
-case "${subject}" in
+case "${fetch_head}" in
   *../from*) ;;
-  *) fail "merge commit message does not name ../from: ${subject}" ;;
+  *) fail "git-push-to did not fetch from ../from: ${fetch_head}" ;;
 esac
 
 # `git-pull-from` requires the current directory to be the top level of a

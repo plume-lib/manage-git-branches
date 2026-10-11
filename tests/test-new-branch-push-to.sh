@@ -14,7 +14,7 @@ set -e
 
 SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
-COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
+COMMANDS_DIR="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)" || exit 1
 
 . "${TESTS_DIR}/lib-git-test-env.sh"
 
@@ -131,62 +131,101 @@ if ! "${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}"; then
 fi
 git -C "${MAIN_DIR}" config branch.main.merge refs/heads/main
 
+# The merge commit that `git-push-to` creates reads the way a merge within a
+# single clone does:  it names the branch that it merged, and it names no
+# directory, neither FROM_DIR's relative pathname nor an absolute pathname
+# that would embed this machine's directory layout in shared history.
+#
+# Both branches get a commit of their own, so that the merge is a real merge
+# rather than a fast-forward, which would create no merge commit at all.
+# `git-push-to` merges rather than pulling FROM_DIR, so it creates that merge
+# commit even where `pull.rebase` asks for a rebase; a rebase would rewrite
+# the branch that `git-push-to` then pushes.
+git -C "${FEATURE_DIR}" config pull.rebase true
+echo "feature line" > "${FEATURE_DIR}/feature.txt"
+git -C "${FEATURE_DIR}" add feature.txt
+git -C "${FEATURE_DIR}" commit -q -m "A commit on the feature branch"
+echo "third line" >> "${MAIN_DIR}/file.txt"
+git -C "${MAIN_DIR}" commit -q -a -m "Add a third line"
+git -C "${MAIN_DIR}" push -q
+if ! "${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}"; then
+  fail "git-push-to failed when each branch had a commit of its own"
+fi
+merge_parents="$(git -C "${FEATURE_DIR}" rev-list --parents -n 1 HEAD | wc -w)"
+if [ "${merge_parents}" -ne 3 ]; then
+  fail "git-push-to did not create a merge commit"
+fi
+merge_subject="$(git -C "${FEATURE_DIR}" log -1 --format=%s)"
+if [ "${merge_subject}" != "Merge branch 'main' into feature1" ]; then
+  fail "unexpected merge commit message: ${merge_subject}"
+fi
+case "${merge_subject}" in
+  *"myrepo-branch-main"*)
+    fail "the merge commit names FROM_DIR: ${merge_subject}"
+    ;;
+esac
+case "${merge_subject}" in
+  *"${WORK_DIR}"*)
+    fail "the merge commit embeds an absolute pathname: ${merge_subject}"
+    ;;
+esac
+
+# `merge.log` puts the merged commits' subjects in the merge commit message,
+# under a heading that names the branch.  Each appears once:  `git-push-to`
+# composes the message with `fmt-merge-msg`, which writes the summaries that
+# `merge.log` asks for, and `git merge` must not append a second copy of them.
+git -C "${FEATURE_DIR}" config merge.log true
+echo "another feature line" >> "${FEATURE_DIR}/feature.txt"
+git -C "${FEATURE_DIR}" commit -q -a -m "Another commit on the feature branch"
+echo "fifth line" >> "${MAIN_DIR}/file.txt"
+git -C "${MAIN_DIR}" commit -q -a -m "Add a fifth line"
+git -C "${MAIN_DIR}" push -q
+if ! "${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}"; then
+  fail "git-push-to failed when merge.log is set"
+fi
+merge_message="$(git -C "${FEATURE_DIR}" log -1 --format=%B)"
+summary_headings="$(printf '%s\n' "${merge_message}" | grep -c "^\* main:")"
+if [ "${summary_headings}" -ne 1 ]; then
+  fail "expected 1 heading for the merged commits, found ${summary_headings}: ${merge_message}"
+fi
+summary_lines="$(printf '%s\n' "${merge_message}" | grep -c "Add a fifth line")"
+if [ "${summary_lines}" -ne 1 ]; then
+  fail "expected 1 summary of the merged commit, found ${summary_lines}: ${merge_message}"
+fi
+git -C "${FEATURE_DIR}" config --unset merge.log
+
+# A tag whose name is the branch's name does not displace the branch.  `git
+# fetch` resolves a bare `BRANCH` by trying `refs/tags/BRANCH` before
+# `refs/heads/BRANCH`, so naming the branch bare merges the tag -- here, a
+# commit that FROM_DIR has already left behind -- and reports success while
+# merging none of the branch's own commits.
+git -C "${MAIN_DIR}" tag main
+echo "fourth line" >> "${MAIN_DIR}/file.txt"
+git -C "${MAIN_DIR}" commit -q -a -m "Add a fourth line"
+git -C "${MAIN_DIR}" push -q
+if ! "${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}"; then
+  fail "git-push-to failed when a tag and the branch have the same name"
+fi
+if ! grep -q "fourth line" "${FEATURE_DIR}/file.txt"; then
+  fail "git-push-to merged the tag rather than the branch of ${MAIN_DIR}"
+fi
+merge_subject="$(git -C "${FEATURE_DIR}" log -1 --format=%s)"
+case "${merge_subject}" in
+  *"branch 'main'"*) ;;
+  *) fail "the merge commit does not name the branch: ${merge_subject}" ;;
+esac
+# Leave the repository as the rest of this test found it.
+git -C "${MAIN_DIR}" tag -d main > /dev/null
+
 # A working copy with no upstream branch gets an explanation, not git's
 # "There is no tracking information for the current branch".
 git -C "${FEATURE_DIR}" branch --unset-upstream
-git -C "${FEATURE_DIR}" remote rename origin github
 if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
   fail "git-push-to succeeded on a working copy with no upstream branch"
 fi
 case "${output}" in
   *"has no upstream branch"*) ;;
   *) fail "git-push-to did not explain the missing upstream branch: ${output}" ;;
-esac
-case "${output}" in
-  *"git push --set-upstream 'github' 'feature1'"*) ;;
-  *) fail "git-push-to did not recommend the configured remote: ${output}" ;;
-esac
-
-# When several remotes exist and none is named origin, no remote can be chosen
-# for the user, so the advice names the remotes instead of a placeholder that
-# would fail if the user pasted it.
-git -C "${FEATURE_DIR}" remote add elsewhere "${REMOTE}"
-if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
-  fail "git-push-to succeeded on a working copy with no upstream branch"
-fi
-case "${output}" in
-  *"several remotes and none is named origin"*) ;;
-  *) fail "git-push-to did not explain that it could not choose a remote: ${output}" ;;
-esac
-case "${output}" in
-  *"--set-upstream REMOTE"* | *"--set-upstream 'REMOTE'"*)
-    fail "git-push-to recommended a command that names a placeholder remote: ${output}"
-    ;;
-esac
-case "${output}" in
-  *"  github"*) ;;
-  *) fail "git-push-to did not list the remotes to choose from: ${output}" ;;
-esac
-
-# A working copy with no remote at all cannot be given an upstream by `git
-# push` alone, so the advice says to add a remote first.
-git -C "${FEATURE_DIR}" remote remove elsewhere
-git -C "${FEATURE_DIR}" remote remove github
-if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
-  fail "git-push-to succeeded on a working copy with no remote"
-fi
-case "${output}" in
-  *"has no remote"*) ;;
-  *) fail "git-push-to did not explain that the clone has no remote: ${output}" ;;
-esac
-case "${output}" in
-  *"--set-upstream REMOTE"* | *"--set-upstream 'REMOTE'"*)
-    fail "git-push-to recommended a command that names a placeholder remote: ${output}"
-    ;;
-esac
-case "${output}" in
-  *"git remote add"*) ;;
-  *) fail "git-push-to did not say to add a remote first: ${output}" ;;
 esac
 
 # A subdirectory of a working copy is a git repository, so saying merely "not a
@@ -281,35 +320,6 @@ branch="$(git -C "${WORK_DIR}/fork-branch-feature1" rev-parse --abbrev-ref HEAD)
 if [ "${branch}" != "feature1" ]; then
   fail "${WORK_DIR}/fork-branch-feature1 is on branch ${branch}, not feature1"
 fi
-
-# `git-push-to` recommends a remote that the clone has, for the same reason.
-ADVICE_DIR="${WORK_DIR}/advice"
-git clone -q "${REMOTE}" "${ADVICE_DIR}"
-git -C "${ADVICE_DIR}" branch --unset-upstream
-git -C "${ADVICE_DIR}" config remote.pushDefault fork
-if output="$("${COMMANDS_DIR}/git-push-to" "${ADVICE_DIR}" "${MAIN_DIR}" 2>&1)"; then
-  fail "git-push-to succeeded on a working copy with no upstream branch"
-fi
-case "${output}" in
-  *fork*) fail "git-push-to recommended a remote that the clone does not have: ${output}" ;;
-esac
-case "${output}" in
-  *"git push --set-upstream 'origin' 'main'"*) ;;
-  *) fail "git-push-to did not recommend a remote that the clone has: ${output}" ;;
-esac
-
-# `git-push-to` and `is-deleted-branch` must agree about which remote a branch
-# would be pushed to, so `git-push-to` also prefers the branch's own remote to
-# the clone-wide `remote.pushDefault`.
-git -C "${ADVICE_DIR}" remote add fork "${REMOTE}"
-git -C "${ADVICE_DIR}" config branch.main.remote origin
-if output="$("${COMMANDS_DIR}/git-push-to" "${ADVICE_DIR}" "${MAIN_DIR}" 2>&1)"; then
-  fail "git-push-to succeeded on a working copy with no upstream branch"
-fi
-case "${output}" in
-  *"git push --set-upstream 'origin' 'main'"*) ;;
-  *) fail "git-push-to did not prefer the branch's own remote to remote.pushDefault: ${output}" ;;
-esac
 
 # In a clone whose sole remote has some other name, a branch name that no
 # remote has is created, just as it is in a clone whose remote is "origin".

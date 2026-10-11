@@ -28,13 +28,23 @@
 # TODO: Handle other build systems too, such as Ant.
 # TODO: Have a list of per-directory or per-repository commands, to override the default.
 
-# Git exports $GIT_DIR and $GIT_WORK_TREE to hooks and to the commands run by
-# `git rebase --exec`, `git bisect run`, and `git submodule foreach`.  They take
-# precedence over the `-C` argument of `git`, so leaving them set would make
-# this script compile whatever repository the caller happened to be working in,
-# rather than the current or given directory.
+# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to the
+# commands run by `git rebase --exec`, `git bisect run`, and
+# `git submodule foreach`.  The first two take precedence over the `-C`
+# argument of `git`, so leaving them set would make this script compile
+# whatever repository the caller happened to be working in, rather than the
+# current or given directory.
+#
+# $GIT_INDEX_FILE names the index alone, which this script's own
+# `rev-parse --show-toplevel` does not read, so unsetting it changes no answer
+# here.  Unset it all the same:  the build command runs with this environment,
+# and a build that consults git -- one that stamps a version from
+# `git describe`, or a formatter that checks only what changed -- would read
+# some other repository's index.  The three variables travel together, and a
+# script that unsets two of them invites the reader to wonder about the third.
 unset GIT_DIR
 unset GIT_WORK_TREE
+unset GIT_INDEX_FILE
 # `cd` consults $CDPATH, so leaving it set would make `cd "$dir"` compile some
 # other directory named "$dir" (and print the directory it chose to stdout).
 CDPATH=''

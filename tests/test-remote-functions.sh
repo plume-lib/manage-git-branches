@@ -12,7 +12,7 @@ set -e
 
 SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
-COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
+COMMANDS_DIR="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)" || exit 1
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
 # The signal handlers re-raise the signal with the handler removed, so that
@@ -167,8 +167,8 @@ if [ "${remote}" != 'origin' ]; then
 fi
 
 # `is_remote_name` distinguishes the two kinds of value that `push_remote`
-# reports, so that advice which requires the name of a remote is given only
-# where such a command would work.
+# reports, so that a caller fetches into a remote-tracking namespace only where
+# the remote has one.
 if ! is_remote_name "${WORK_DIR}/clone" 'origin'; then
   fail 'is_remote_name said that "origin" is not a remote of the clone'
 fi
@@ -281,56 +281,69 @@ if [ "${remote}" != 'elsewhere' ]; then
   fail "push_remote reported [${remote}] for a clone whose sole remote is elsewhere"
 fi
 
-# `conflict_abort_command` names the command that ends the operation in
-# progress, and `conflict_continue_command` the command that resumes it:  each
-# operation rejects every other one's `--abort` and `--continue`.
-
-## Usage: check_conflict_commands SITUATION ABORT CONTINUE
-## Fails the test unless the two functions report ABORT and CONTINUE for the
-## state that the clone is currently in, which SITUATION names.
-check_conflict_commands() {
-  check_conflict_commands_abort="$(conflict_abort_command "${WORK_DIR}/clone")"
-  if [ "${check_conflict_commands_abort}" != "$2" ]; then
-    fail "conflict_abort_command reported [${check_conflict_commands_abort}] rather than [$2] $1"
-  fi
-  check_conflict_commands_continue="$(conflict_continue_command "${WORK_DIR}/clone")"
-  if [ "${check_conflict_commands_continue}" != "$3" ]; then
-    fail "conflict_continue_command reported [${check_conflict_commands_continue}] rather than [$3] $1"
+## Usage: check_is_deleted_branch DIRECTORY EXPECTED DESCRIPTION
+## Checks that `is_deleted_branch DIRECTORY` returns status EXPECTED.
+check_is_deleted_branch() {
+  check_is_deleted_branch_status=0
+  is_deleted_branch "$1" || check_is_deleted_branch_status="$?"
+  if [ "${check_is_deleted_branch_status}" -ne "$2" ]; then
+    fail "is_deleted_branch on $3 returned ${check_is_deleted_branch_status}, not $2"
   fi
 }
 
-# With no operation in progress, every `--abort` fails, and resolving the
-# conflicts finishes nothing, so there is no `--continue` to advise.
-check_conflict_commands 'with no operation in progress' 'git reset --merge' ''
-mkdir -p "${WORK_DIR}/clone/.git/rebase-merge"
-check_conflict_commands 'during a rebase' 'git rebase --abort' 'git rebase --continue'
-rmdir "${WORK_DIR}/clone/.git/rebase-merge"
-mkdir -p "${WORK_DIR}/clone/.git/rebase-apply"
-check_conflict_commands 'during a patch-applying rebase' \
-  'git rebase --abort' 'git rebase --continue'
-# `git am` uses the same directory as a patch-applying rebase, and only it
-# creates `applying` there.  Advising `git rebase --abort` during a `git am`
-# gives the user a command that exits 128 with "It looks like 'git am' is in
-# progress.  Cannot rebase."
-touch "${WORK_DIR}/clone/.git/rebase-apply/applying"
-check_conflict_commands 'during a git am' 'git am --abort' 'git am --continue'
-rm -rf "${WORK_DIR}/clone/.git/rebase-apply"
-touch "${WORK_DIR}/clone/.git/MERGE_HEAD"
-check_conflict_commands 'during a merge' 'git merge --abort' 'git merge --continue'
-rm -f "${WORK_DIR}/clone/.git/MERGE_HEAD"
-touch "${WORK_DIR}/clone/.git/CHERRY_PICK_HEAD"
-check_conflict_commands 'during a cherry-pick' \
-  'git cherry-pick --abort' 'git cherry-pick --continue'
-# A rebase that stops at a conflict can leave `CHERRY_PICK_HEAD` as well, and
-# `git cherry-pick --abort` is not what leaves that state, so the rebase
-# directory outranks the pseudo-ref.
-mkdir -p "${WORK_DIR}/clone/.git/rebase-merge"
-check_conflict_commands 'during a rebase that left CHERRY_PICK_HEAD' \
-  'git rebase --abort' 'git rebase --continue'
-rmdir "${WORK_DIR}/clone/.git/rebase-merge"
-rm -f "${WORK_DIR}/clone/.git/CHERRY_PICK_HEAD"
-touch "${WORK_DIR}/clone/.git/REVERT_HEAD"
-check_conflict_commands 'during a revert' 'git revert --abort' 'git revert --continue'
-rm -f "${WORK_DIR}/clone/.git/REVERT_HEAD"
+# `is_deleted_branch` is the body of the `is-deleted-branch` command, which is
+# a wrapper around it.  tests/test-is-deleted-branch.sh exercises the answers
+# in depth through the command; what this checks is that the function answers
+# the same way when a script sources it and calls it directly, which is how
+# the other commands of this package use it.
+git init -q --bare -b main "${WORK_DIR}/idb-remote.git"
+# Redirect stderr to suppress the "you appear to have cloned an empty
+# repository" warning.
+git clone -q "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-seed" 2> /dev/null
+echo 'content' > "${WORK_DIR}/idb-seed/file.txt"
+git -C "${WORK_DIR}/idb-seed" add file.txt
+git -C "${WORK_DIR}/idb-seed" commit -q -m 'Initial commit'
+git -C "${WORK_DIR}/idb-seed" push -q -u origin main
+git -C "${WORK_DIR}/idb-seed" push -q origin main:refs/heads/doomed
+git clone -q -b doomed "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-dead"
+git clone -q -b main "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-live"
+git -C "${WORK_DIR}/idb-seed" push -q origin --delete doomed
+check_is_deleted_branch "${WORK_DIR}/idb-dead" 0 'a branch deleted in its remote'
+check_is_deleted_branch "${WORK_DIR}/idb-live" 1 'a branch that still exists'
+mkdir -p "${WORK_DIR}/idb-plain-directory"
+check_is_deleted_branch "${WORK_DIR}/idb-plain-directory" 2 'no working tree'
+
+# `check_is_deleted_branch` calls the function on the left of `||`, which
+# suppresses `set -e` for the whole of the function's body.  A caller that acts
+# on the answer instead -- the commands of this package run under `set -e` --
+# gets no such suppression, so check that the function survives one.  Do it in
+# a separate script, because a failure here kills the shell that runs it.
+#
+# The branch is pushed without `-u`, so it has no upstream configuration and
+# the `git config --get` queries fail, and it is then deleted in the remote, so
+# the `ls-remote` query fails too.  Both failures are answers rather than
+# errors, and the function must return 0 rather than let them abort the caller.
+git clone -q -b main "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-errexit"
+git -C "${WORK_DIR}/idb-errexit" checkout -q -b unconfigured
+git -C "${WORK_DIR}/idb-errexit" push -q origin unconfigured
+# Delete it from another clone, so that this one keeps the remote-tracking ref
+# that shows that the branch was pushed.
+git -C "${WORK_DIR}/idb-seed" push -q origin --delete unconfigured
+cat > "${WORK_DIR}/errexit-caller.sh" << 'EOF'
+#!/bin/sh
+set -e
+SCRIPT_NAME='errexit-caller.sh'
+SCRIPT_DIR="$2"
+# shellcheck source=/dev/null
+. "$2/remote-functions.sh"
+is_deleted_branch "$1"
+echo 'survived'
+EOF
+errexit_output="$(sh "${WORK_DIR}/errexit-caller.sh" "${WORK_DIR}/idb-errexit" \
+  "${COMMANDS_DIR}" 2>&1)" \
+  || fail "is_deleted_branch aborted a caller that runs under set -e: [${errexit_output}]"
+if [ "${errexit_output}" != 'survived' ]; then
+  fail "is_deleted_branch under set -e printed [${errexit_output}], not [survived]"
+fi
 
 echo "${SCRIPT_NAME}: OK"

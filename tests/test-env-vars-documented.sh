@@ -14,7 +14,7 @@
 set -eu
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
-TOPLEVEL="$(dirname -- "${SCRIPT_DIR}")"
+TOPLEVEL="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)" || exit 1
 SCRIPT_NAME="$(basename -- "$0")"
 
 README="${TOPLEVEL}/README.md"

@@ -15,7 +15,7 @@ set -e
 
 SCRIPT_NAME="$(basename -- "$0")"
 TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
-COMMANDS_DIR="$(dirname -- "${TESTS_DIR}")"
+COMMANDS_DIR="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)" || exit 1
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
 # The signal handlers re-raise the signal with the handler removed, so that
@@ -265,10 +265,6 @@ fi
 case "${output}" in
   *"branch feature1 exists on several remotes of this clone"*) ;;
   *) fail "git-checkout-branch did not say that several remotes have the branch: ${output}" ;;
-esac
-case "${output}" in
-  *"checkout.defaultRemote"*) ;;
-  *) fail "git-checkout-branch did not say how to choose a remote: ${output}" ;;
 esac
 for leftover in "${WORK_DIR}/ambiguous-branch-feature1" "${WORK_DIR}/ambiguous-branch-feature1-TMP"; do
   if [ -e "${leftover}" ]; then
