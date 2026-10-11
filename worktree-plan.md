@@ -342,8 +342,12 @@ Implementation notes:
 ### 4.4 `.git` is a file
 
 Any tool that tests `-d .git` stops recognizing a branch directory as a working
-copy.  In this package that is exactly one place, `git-orphaned-branches:123`,
-which claude-review.md:149 already reports as a bug.
+copy.  `git-orphaned-branches` already handles a `.git` file.  The package's
+two remaining `-d .git` tests are deliberate refusals, and each is relaxed for
+linked worktrees by this plan: `check_git_dir_is_directory` in
+remote-functions.sh, which both branch commands call (§6.1), and
+`git-remove-branch-directory`'s refusal to remove a directory whose `.git` is a
+file (§7.2).
 
 ## 5. Detailed design for `git-new-branch`
 

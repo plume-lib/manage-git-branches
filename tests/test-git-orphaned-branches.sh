@@ -271,9 +271,9 @@ cmp -s "${work}/print-newline.goal" "${work}/print-newline.actual" \
 ###########################################################################
 
 # A linked worktree is a working tree, and `is-deleted-branch` answers about
-# it correctly, so an orphaned one must be listed.  Before this was fixed,
-# such a directory failed the `[ -d "$dir/.git" ]` test, was checked only for
-# a lone `.project` file, and was silently ignored.
+# it correctly, so an orphaned one must be listed.  A `[ -d "$dir/.git" ]`
+# test would not recognize it as a working tree, would check it only for a
+# lone `.project` file, and would silently ignore it.
 #
 # The main working tree that hosts it must not be listed, even when its own
 # branch was deleted as well:  removing it would remove the repository that
