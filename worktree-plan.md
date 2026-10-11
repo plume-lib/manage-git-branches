@@ -1,15 +1,5 @@
 # Plan: make `git-new-branch` create a worktree instead of a copied clone
 
-**Already implemented:** the changes that do not depend on this one.  Both
-branch commands refuse when the top level's `.git` is not a directory
-(`check_git_dir_is_directory` in remote-functions.sh), which closes a corruption
-bug in their `cp -Rp`; `git-orphaned-branches` recognizes a working tree whose
-`.git` is a file and never reports a directory that another live worktree
-depends on; the merge message names the branch (§6.4); remote queries are
-batched by URL; and `git-remove-branch-directory` exists in its clone-only form,
-with `git-orphaned-branches --remove` and the `rmgob` alias built on it.  This
-plan builds on them and says so at each point.  §10 lists what remains here.
-
 ## 1. Goals and what they buy
 
 Two goals: less disk space (§1.1), and fewer network accesses (§1.2) -- though
@@ -1641,15 +1631,10 @@ is a local pathname that never reaches SSH at all:
 Each step is independently reviewable and leaves the tree working, which matches
 this repository's history of small PRs.
 
-**Already implemented**, independently of this plan: the
-`.git`-is-not-a-directory corruption guard, the `git-orphaned-branches` fix and
-host filter, the `is-deleted-branch` wording, the merge message that names the
-branch, the extraction of `is-deleted-branch` into remote-functions.sh, the
-URL-keyed query batching (which also deduplicates a chain's queries), and the
-removal script with `--remove` and the `rmgob` change.  So the steps below
-contain no `git-orphaned-branches` fix and no batched `ls-remote`, removal adds
-only its worktree half, and step 2's interim refusal narrows an existing guard
-rather than adding one.
+The changes that do not depend on worktrees -- the `git-orphaned-branches`
+fix, the batched `ls-remote`, and the clone-only removal script -- are already
+implemented, so removal adds only its worktree half, and step 2's interim
+refusal narrows an existing guard rather than adding one.
 
 1. **remote-functions.sh: the worktree-aware helpers.**
    `git_supports_worktree` (§5.5), `is_linked_worktree DIRECTORY`,
