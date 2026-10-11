@@ -15,7 +15,17 @@
 # whose changes are already in some remote's default branch (`REMOTE/HEAD`),
 # even though its commits are not.  That happens when a pull request is
 # squash-merged and its remote branch is then deleted.  A branch is omitted
-# when merging it into `REMOTE/HEAD` would not change any file.
+# when either:
+#  * merging it into `REMOTE/HEAD` would not change any file, or
+#  * some commit C in `REMOTE/HEAD` but not in the branch changes only files
+#    that the branch changes, and merging the branch into C's parent yields
+#    C's files.  C is then a squash-merge of the branch, and later changes
+#    to `REMOTE/HEAD` do not matter.  C must not be a merge commit, and it
+#    must descend from a commit that both the branch and `REMOTE/HEAD`
+#    contain; so a squash-merge into a branch that forked from `REMOTE/HEAD`
+#    before the branch did is not found.  To save time, only commits C that
+#    were committed at most a day before the branch's last commit was
+#    authored, or later, are examined.
 # The commits of an omitted branch are not shown even when another branch
 # contains them, as when that branch was started from the omitted one.
 # A remote with no `REMOTE/HEAD` is not considered; to create it, run
@@ -168,6 +178,67 @@ merge_yields() {
   esac
 }
 
+# Usage: run_merges PAIRS RESULTS
+# Creates RESULTS such that line N is "STATUS TREE" for merging the BRANCH on
+# line N of PAIRS, each of whose lines is "BRANCH COMMIT TREE", into its
+# COMMIT:  STATUS is 1 if the merge is clean and 0 otherwise, and TREE is the
+# result.  One `git merge-tree --stdin` does many merges, which saves a
+# process for each merge.  But it stops at the first merge that fails, as for
+# unrelated histories or for file contents that a partial clone lacks.
+# merge_yields then redoes that merge alone, which tells those cases apart,
+# and the merges after it are batched again.
+run_merges() {
+  : > "$2" || die "cannot write $2"
+  pair_count="$(wc -l < "$1")" || die "cannot read $1"
+  next_pair=1
+  while [ "${next_pair}" -le "${pair_count}" ]; do
+    awk -v first="${next_pair}" 'NR >= first { print $2, $1 }' "$1" > "${tmpdir}/merge-input" || die "awk failed"
+    git_scratch merge-tree --stdin --no-messages < "${tmpdir}/merge-input" > "${tmpdir}/merge-output" 2> "${tmpdir}/git-errors"
+    merge_status="$?"
+    # The output of each merge is NUL-terminated fields:  the status, the tree,
+    # any conflicted files, and an empty field.  tr makes each field a line,
+    # after changing any newline in a file name to another character.
+    tr '\n\000' '\001\n' < "${tmpdir}/merge-output" | awk '
+      field == 0 { status = $0; field = 1; next }
+      field == 1 { tree = $0; field = 2; next }
+      $0 == "" { print status, tree; field = 0 }
+    ' >> "$2" || die "cannot write $2"
+    next_pair="$(($(wc -l < "$2") + 1))"
+    if [ "${next_pair}" -le "${pair_count}" ]; then
+      if [ "${merge_status}" -eq 0 ]; then
+        cat "${tmpdir}/git-errors" >&2
+        die "git merge-tree --stdin did not do every merge"
+      fi
+      sed -n "${next_pair}p" "$1" > "${tmpdir}/failed-pair" || die "sed failed"
+      read -r branch base_commit base_tree < "${tmpdir}/failed-pair"
+      if merge_yields "${base_commit}" "${branch}" "${base_tree}"; then
+        echo "1 ${base_tree}"
+      else
+        echo "0 -"
+      fi >> "$2" || die "cannot write $2"
+      next_pair="$((next_pair + 1))"
+    fi
+  done
+}
+
+# Usage: common_ancestor FILE
+# Prints a commit that is an ancestor of every commit in FILE, which lists
+# them one per line, or prints nothing if there is none.  xargs runs as few
+# `git merge-base --octopus` as the limit on a command line's size allows,
+# and their results are combined the same way.  Each prints one of the best
+# common ancestors, or fails with status 1 if there is none.
+common_ancestor() {
+  cp "$1" "${tmpdir}/ancestors" || die "cannot write ${tmpdir}/ancestors"
+  while [ "$(wc -l < "${tmpdir}/ancestors")" -gt 1 ]; do
+    # shellcheck disable=SC2016 # The expansions are for the inner shell.
+    xargs sh -c 'git merge-base --octopus "$@"; status="$?"; if [ "${status}" -eq 1 ]; then echo none; fi; [ "${status}" -le 1 ]' sh \
+      < "${tmpdir}/ancestors" > "${tmpdir}/next-ancestors" || die "git merge-base --octopus failed"
+    if grep -qx none "${tmpdir}/next-ancestors"; then return 0; fi
+    mv "${tmpdir}/next-ancestors" "${tmpdir}/ancestors" || die "cannot write ${tmpdir}/ancestors"
+  done
+  cat "${tmpdir}/ancestors"
+}
+
 # Create ${tmpdir}/bases, which the merges below read, such that each line
 # is "COMMIT TREE" for one remote's default branch, without duplicates.  A
 # remote name may contain a slash, so the refs are matched against the remote
@@ -181,16 +252,19 @@ awk '
 sort -u "${tmpdir}/all-bases" > "${tmpdir}/bases" || die "sort failed"
 
 # Create ${tmpdir}/unpushed-branches, which the merges below read, such that
-# each line is a local branch whose tip is not on any remote branch.  A full
-# name, such as `refs/heads/main`, cannot be mistaken for a file name.
+# each line is "TIME BRANCH" for a local branch whose tip is not on any remote
+# branch, where TIME is the author date of the tip in seconds since the epoch,
+# or 0 if the tip has no author date.  The date comes last in the output of
+# `git for-each-ref`, so that a missing one does not shift the other fields.
+# A full name, such as `refs/heads/main`, cannot be mistaken for a file name.
 # Comparing the tips with the unpushed commits avoids passing one argument
 # per remote-tracking branch, as `git for-each-ref --no-merged` would
 # require; with many remote-tracking branches, such arguments would exceed
 # the limit on a command line's size.
-git for-each-ref --format='%(objectname) %(refname)' refs/heads > "${tmpdir}/local-branches" || exit 1
+git for-each-ref --format='%(objectname) %(refname) %(authordate:unix)' refs/heads > "${tmpdir}/local-branches" || exit 1
 git rev-list --branches --not --remotes > "${tmpdir}/unpushed-commits" || exit 1
 awk '
-  FILENAME == ARGV[1] { refs[$1] = ($1 in refs) ? refs[$1] "\n" $2 : $2; next }
+  FILENAME == ARGV[1] { line = ($3 == "" ? 0 : $3) " " $2; refs[$1] = ($1 in refs) ? refs[$1] "\n" line : line; next }
   $0 in refs { print refs[$0]; delete refs[$0] }
 ' "${tmpdir}/local-branches" "${tmpdir}/unpushed-commits" > "${tmpdir}/unpushed-branches" || die "awk failed"
 
@@ -199,59 +273,180 @@ awk '
 # ${tmpdir}/bases.
 awk '
   FILENAME == ARGV[1] { bases[++n] = $0; next }
-  { for (i = 1; i <= n; i++) print $0, bases[i] }
+  { for (i = 1; i <= n; i++) print $2, bases[i] }
 ' "${tmpdir}/bases" "${tmpdir}/unpushed-branches" > "${tmpdir}/pairs" || die "awk failed"
 pair_count="$(wc -l < "${tmpdir}/pairs")" || die "cannot read ${tmpdir}/pairs"
 
 # Create ${tmpdir}/results, which the step below reads, such that line N is
 # "STATUS TREE" for merging the BRANCH on line N of ${tmpdir}/pairs into its
-# COMMIT:  STATUS is 1 if the merge is clean and 0 otherwise, and TREE is
-# the result.  One `git merge-tree --stdin` does many merges, which saves a
-# process for each branch and base.  But it stops at the first merge that
-# fails, as for unrelated histories or for file contents that a partial clone
-# lacks.  merge_yields then redoes that merge alone, which tells those cases
-# apart, and the merges after it are batched again.
-: > "${tmpdir}/results" || die "cannot write ${tmpdir}/results"
-next_pair=1
-while [ "${next_pair}" -le "${pair_count}" ]; do
-  awk -v first="${next_pair}" 'NR >= first { print $2, $1 }' "${tmpdir}/pairs" > "${tmpdir}/merge-input" || die "awk failed"
-  git_scratch merge-tree --stdin --no-messages < "${tmpdir}/merge-input" > "${tmpdir}/merge-output" 2> "${tmpdir}/git-errors"
-  merge_status="$?"
-  # The output of each merge is NUL-terminated fields:  the status, the tree,
-  # any conflicted files, and an empty field.  tr makes each field a line,
-  # after changing any newline in a file name to another character.
-  tr '\n\000' '\001\n' < "${tmpdir}/merge-output" | awk '
-    field == 0 { status = $0; field = 1; next }
-    field == 1 { tree = $0; field = 2; next }
-    $0 == "" { print status, tree; field = 0 }
-  ' >> "${tmpdir}/results" || die "cannot write ${tmpdir}/results"
-  next_pair="$(($(wc -l < "${tmpdir}/results") + 1))"
-  if [ "${next_pair}" -le "${pair_count}" ]; then
-    if [ "${merge_status}" -eq 0 ]; then
-      cat "${tmpdir}/git-errors" >&2
-      die "git merge-tree --stdin did not do every merge"
-    fi
-    sed -n "${next_pair}p" "${tmpdir}/pairs" > "${tmpdir}/failed-pair" || die "sed failed"
-    read -r branch base_commit base_tree < "${tmpdir}/failed-pair"
-    if merge_yields "${base_commit}" "${branch}" "${base_tree}"; then
-      echo "1 ${base_tree}"
-    else
-      echo "0 -"
-    fi >> "${tmpdir}/results" || die "cannot write ${tmpdir}/results"
-    next_pair="$((next_pair + 1))"
-  fi
-done
+# COMMIT, as run_merges describes.
+run_merges "${tmpdir}/pairs" "${tmpdir}/results"
 
-# Create ${tmpdir}/log-refs, which the final `git log` reads, such that each
-# line is a branch to show, or a branch to omit preceded by `^`.  A branch is
-# omitted if merging it into some base yields that base's tree.  The branches
-# are passed through `--stdin` rather than as arguments, which might exceed
-# the limit on a command line's size.
+# Create ${tmpdir}/merge-status, which the step below reads, such that each
+# line is "STATUS TIME BRANCH" for one line "TIME BRANCH" of
+# ${tmpdir}/unpushed-branches:  STATUS is 1 if merging BRANCH into some base
+# yields that base's tree, and 0 otherwise.
 awk '
   FILENAME == ARGV[1] { result[FNR] = $0; next }
   FILENAME == ARGV[2] { if (result[FNR] == "1 " $3) merged[$1]; next }
-  { print (($0 in merged) ? "^" : "") $0 }
-' "${tmpdir}/results" "${tmpdir}/pairs" "${tmpdir}/unpushed-branches" > "${tmpdir}/log-refs" || die "awk failed"
+  { print (($2 in merged) ? 1 : 0), $0 }
+' "${tmpdir}/results" "${tmpdir}/pairs" "${tmpdir}/unpushed-branches" > "${tmpdir}/merge-status" || die "awk failed"
+
+# Create ${tmpdir}/squash-pairs, which the walks below read, such that each
+# line is "BASE PATHS-ID TIME BRANCH MERGE-BASE..." for one line "0 TIME
+# BRANCH" of ${tmpdir}/merge-status and one base with which BRANCH has history
+# in common, where the MERGE-BASEs are those of BASE and BRANCH.  Create
+# ${tmpdir}/squash-paths such that each line is "PATHS-ID FILE" for one file
+# that BRANCH changes relative to any of those merge bases, since a squash
+# commit may descend from any of them.  The file names are relative to the top
+# of the working tree.  With `core.quotePath=false`, git quotes only a file
+# name that contains a control character, a double quote, or a backslash.
+# Such a name is quoted the same way in the output of `git log` below, so it is
+# compared correctly.
+#
+# The git commands that produce file names for awk to parse override any user
+# configuration that would change their output.
+: > "${tmpdir}/squash-pairs" || die "cannot write ${tmpdir}/squash-pairs"
+: > "${tmpdir}/squash-paths" || die "cannot write ${tmpdir}/squash-paths"
+paths_id=0
+# The merge bases and branch for which PATHS-ID ${paths_id} was computed.
+# Several remotes' default branches may have the same merge bases with a
+# branch.
+paths_key=
+while read -r merged branch_time branch; do
+  if [ "${merged}" -eq 1 ]; then continue; fi
+  while read -r base_commit base_tree; do
+    merge_bases="$(git merge-base --all "${base_commit}" "${branch}")"
+    case "$?" in
+      0) ;;
+      1) continue ;; # The branch has no history in common with this base.
+      *) die "git merge-base ${base_commit} ${branch} failed" ;;
+    esac
+    merge_bases="$(printf '%s\n' "${merge_bases}" | paste -sd ' ' -)" || die "paste failed"
+    if [ "${paths_key}" != "${merge_bases} ${branch}" ]; then
+      paths_key=
+      paths_id="$((paths_id + 1))"
+      : > "${tmpdir}/branch-paths" || die "cannot write ${tmpdir}/branch-paths"
+      # The merge bases are hexadecimal, so word splitting is safe.
+      # shellcheck disable=SC2086
+      for merge_base in ${merge_bases}; do
+        if ! git_scratch -c core.quotePath=false diff --no-relative --no-renames --name-only "${merge_base}" "${branch}" \
+          >> "${tmpdir}/branch-paths" 2> "${tmpdir}/git-errors"; then
+          git_failed "git diff ${merge_base} ${branch}"
+          continue 2
+        fi
+      done
+      if [ ! -s "${tmpdir}/branch-paths" ]; then continue; fi
+      sed "s/^/${paths_id} /" "${tmpdir}/branch-paths" >> "${tmpdir}/squash-paths" || die "cannot write ${tmpdir}/squash-paths"
+      paths_key="${merge_bases} ${branch}"
+    fi
+    echo "${base_commit} ${paths_id} ${branch_time} ${branch} ${merge_bases}" >> "${tmpdir}/squash-pairs" || die "cannot write ${tmpdir}/squash-pairs"
+  done < "${tmpdir}/bases"
+done < "${tmpdir}/merge-status"
+
+# Create ${tmpdir}/squash-candidates, which the merges below read, such that
+# each line is "BRANCH PARENT TREE" for a commit in some base but not in
+# BRANCH, that is not a merge commit, that descends from one of the
+# MERGE-BASEs on a line of ${tmpdir}/squash-pairs for BRANCH and that base,
+# and that changes only files that BRANCH changes; PARENT is its parent and
+# TREE its tree.  Each base's history is walked and diffed once for all of
+# its lines of ${tmpdir}/squash-pairs.
+#
+# A squash-merge is committed after the branch's last commit was authored; the
+# margin of a day allows for clock skew between the computers that made the
+# commits.  Amending or rebasing a branch, unlike squash-merging it, keeps
+# that date.
+: > "${tmpdir}/squash-candidates" || die "cannot write ${tmpdir}/squash-candidates"
+while read -r base_commit base_tree; do
+  awk -v base="${base_commit}" '$1 == base' "${tmpdir}/squash-pairs" > "${tmpdir}/base-pairs" || die "awk failed"
+  if [ ! -s "${tmpdir}/base-pairs" ]; then continue; fi
+  # The walks exclude the ancestors of a common ancestor of all the merge
+  # bases.  None of those is in the base but not in some branch.  Excluding
+  # every merge base would wrongly exclude, for a branch that forked earlier,
+  # the commits after its merge base that are ancestors of another branch's.
+  awk '{ for (i = 5; i <= NF; i++) print $i }' "${tmpdir}/base-pairs" | sort -u > "${tmpdir}/base-merge-bases" \
+    || die "cannot write ${tmpdir}/base-merge-bases"
+  common_ancestor "${tmpdir}/base-merge-bases" | sed 's/^/^/' > "${tmpdir}/log-input" || die "cannot write ${tmpdir}/log-input"
+  since="$(awk 'NR == 1 || $3 < min { min = $3 } END { print min - 24 * 60 * 60 }' "${tmpdir}/base-pairs")" || die "awk failed"
+  # git reads `@N` as a time only if N has at least 9 digits, so an earlier
+  # time, as for a branch whose tip has no valid author date, gets no filter.
+  # The filter only saves time.
+  since_filter=
+  if [ "${since}" -ge 100000000 ]; then since_filter="--since-as-filter=@${since}"; fi
+  # Each line is "COMMIT PARENT...", with each commit after its parents.
+  git rev-list --topo-order --reverse --parents "${base_commit}" --stdin < "${tmpdir}/log-input" > "${tmpdir}/base-graph" \
+    || die "git rev-list ${base_commit} failed"
+  # `--since-as-filter`, unlike `--since`, does not stop at an older commit,
+  # which could hide a newer one behind it.  There is no pathspec, which would
+  # make git compare each commit's files with its parent's during the walk;
+  # only the commits that pass `--since-as-filter` are compared, for
+  # `--name-only`.  Each commit is introduced by a line that starts with \001,
+  # which git quotes in a file name.
+  if ! git_scratch -c core.quotePath=false log --no-merges --no-renames --no-follow \
+    --no-relative --no-show-signature --no-notes --no-color \
+    ${since_filter:+"${since_filter}"} --format='%x01%H %T %ct %P' --name-only \
+    "${base_commit}" --stdin < "${tmpdir}/log-input" > "${tmpdir}/base-log" 2> "${tmpdir}/git-errors"; then
+    git_failed "git log ${base_commit}"
+    continue
+  fi
+  awk '
+    FILENAME == ARGV[1] {
+      n++; paths_id[n] = $2; since[n] = $3 - 24 * 60 * 60; branch[n] = $4
+      for (i = 5; i <= NF; i++) merge_base[n, $i]
+      next
+    }
+    FILENAME == ARGV[2] { space = index($0, " "); path[substr($0, 1, space - 1), substr($0, space + 1)]; next }
+    FILENAME == ARGV[3] { commits++; commit[commits] = $1; parents[commits] = $0; next }
+    /^\001/ {
+      split(substr($0, 2), fields, " ")
+      current = fields[1]; logged[++logged_count] = current
+      tree[current] = fields[2]; time[current] = fields[3]; parent[current] = fields[4]
+      next
+    }
+    $0 == "" { next }
+    { file[current, ++files[current]] = $0 }
+    END {
+      for (k = 1; k <= n; k++) {
+        # The commits that descend from one of the merge bases.
+        split("", descends)
+        for (j = 1; j <= commits; j++) {
+          parent_count = split(parents[j], fields, " ")
+          for (p = 2; p <= parent_count; p++) {
+            if (((k, fields[p]) in merge_base) || (fields[p] in descends)) { descends[commit[j]]; break }
+          }
+        }
+        for (j = 1; j <= logged_count; j++) {
+          c = logged[j]
+          if (!(c in descends) || time[c] < since[k] || files[c] == 0) continue
+          only_branch_files = 1
+          for (f = 1; f <= files[c]; f++) if (!((paths_id[k], file[c, f]) in path)) { only_branch_files = 0; break }
+          if (only_branch_files) print branch[k], parent[c], tree[c]
+        }
+      }
+    }
+  ' "${tmpdir}/base-pairs" "${tmpdir}/squash-paths" "${tmpdir}/base-graph" "${tmpdir}/base-log" \
+    >> "${tmpdir}/squash-candidates" || die "awk failed"
+done < "${tmpdir}/bases"
+
+# Create ${tmpdir}/squashed, which the step below reads, such that each line
+# is a branch that some line of ${tmpdir}/squash-candidates shows to be
+# squash-merged:  merging it into PARENT yields TREE.
+run_merges "${tmpdir}/squash-candidates" "${tmpdir}/squash-results"
+awk '
+  FILENAME == ARGV[1] { result[FNR] = $0; next }
+  result[FNR] == "1 " $3 { print $1 }
+' "${tmpdir}/squash-results" "${tmpdir}/squash-candidates" > "${tmpdir}/squashed" || die "awk failed"
+
+# Create ${tmpdir}/log-refs, which the final `git log` reads, such that each
+# line is a branch to show, or a branch to omit preceded by `^`.  A branch is
+# omitted if merging it into some base yields that base's tree, or if some
+# base contains a squash commit of it.  The branches are passed through
+# `--stdin` rather than as arguments, which might exceed the limit on a
+# command line's size.
+awk '
+  FILENAME == ARGV[1] { squashed[$0]; next }
+  { print (($1 == 1 || $3 in squashed) ? "^" : "") $3 }
+' "${tmpdir}/squashed" "${tmpdir}/merge-status" > "${tmpdir}/log-refs" || die "awk failed"
 
 # The `--not` makes the remote-tracking branches negative, and the second
 # `--not` makes any revisions in GIT-LOG-ARGS positive again.  The GIT-LOG-ARGS

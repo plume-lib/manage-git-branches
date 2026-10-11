@@ -127,6 +127,37 @@ Feature commit 2
 Feature commit 3'
 git -C "${feature}" reset -q --hard HEAD^
 
+# A later upstream change to a file that the branch changed does not make the
+# squash-merged branch outgoing.
+commit_file "${upstream_work}" f.txt 'f2' 'Upstream change to f.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+expect_outgoing 'squash-merged branch, later upstream change' ''
+
+# A branch started after the squash-merge does not hide the squash commit,
+# which is an ancestor of the new branch's merge base but not of the
+# squash-merged branch's.
+git -C "${clone}" branch -q late origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-late" late
+commit_file "${testdir}/myrepo-branch-late" l.txt 'l' 'Late commit'
+expect_outgoing 'squash-merged branch, branch started after the squash-merge' 'Late commit'
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-late"
+git -C "${clone}" branch -q -D late
+
+# A squash-merged branch whose tip has a malformed author date, which git
+# reads as 0, or no author line at all, is not outgoing.
+feature_tip="$(git -C "${clone}" rev-parse feature)"
+bad_tip="$(git -C "${clone}" cat-file commit feature \
+  | sed 's/^author .*/author A U Thor <author@example.com> notadate +0000/' \
+  | git -C "${clone}" hash-object -t commit -w --literally --stdin)"
+git -C "${clone}" update-ref refs/heads/feature "${bad_tip}"
+expect_outgoing 'squash-merged branch, malformed author date' ''
+bad_tip="$(git -C "${clone}" cat-file commit "${feature_tip}" | sed '/^author /d' \
+  | git -C "${clone}" hash-object -t commit -w --literally --stdin)"
+git -C "${clone}" update-ref refs/heads/feature "${bad_tip}"
+expect_outgoing 'squash-merged branch, no author line' ''
+git -C "${clone}" update-ref refs/heads/feature "${feature_tip}"
+
 # With no outgoing branch, a revision in the arguments is still shown, and an
 # invalid argument is still reported.
 loose_commit="$(git -C "${clone}" commit-tree -m 'Loose commit' "$(git -C "${clone}" mktree < /dev/null)")"
@@ -135,6 +166,45 @@ if (cd "${clone}" && "${GIT_OUTGOING}" --no-such-option) > /dev/null 2>&1; then
   fail 'no outgoing branch, invalid argument: expected a failure status'
 fi
 
+# A squash-merged branch that changes only a file with a non-ASCII name is not
+# outgoing, even after a later upstream change to that file.
+git -C "${clone}" branch -q unicode origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-unicode" unicode
+commit_file "${testdir}/myrepo-branch-unicode" 'résumé.txt' 'r' 'Non-ASCII file name commit'
+squash_merge unicode
+commit_file "${upstream_work}" 'résumé.txt' 'r2' 'Upstream change to résumé.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+expect_outgoing 'squash-merged branch, non-ASCII file name' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-unicode"
+git -C "${clone}" branch -q -D unicode
+
+# A squash commit on the second parent of a merge is found, even though the
+# merge's result for the branch's files equals its first parent's.
+git -C "${clone}" branch -q sidesquash origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-sidesquash" sidesquash
+commit_file "${testdir}/myrepo-branch-sidesquash" s2.txt 's2' 'Side squash commit'
+git -C "${clone}" push -q origin sidesquash
+git -C "${upstream_work}" pull -q origin main
+git -C "${upstream_work}" checkout -q -b side
+git -C "${upstream_work}" fetch -q origin sidesquash
+git -C "${upstream_work}" merge -q --squash FETCH_HEAD > /dev/null
+git -C "${upstream_work}" commit -q -m 'Squash-merged sidesquash on a side branch'
+git -C "${upstream_work}" checkout -q main
+printf '%s\n' 's2' > "${upstream_work}/s2.txt"
+printf '%s\n' 'o' > "${upstream_work}/other.txt"
+git -C "${upstream_work}" add s2.txt other.txt
+git -C "${upstream_work}" commit -q -m 'Same change to s2.txt, and a change to other.txt'
+git -C "${upstream_work}" merge -q --no-edit side
+git -C "${upstream_work}" branch -q -D side
+commit_file "${upstream_work}" s2.txt 's2b' 'Upstream change to s2.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${upstream_work}" push -q origin --delete sidesquash
+git -C "${clone}" fetch -q --prune origin
+expect_outgoing 'squash commit on the second parent of a merge' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-sidesquash"
+git -C "${clone}" branch -q -D sidesquash
+
 # A branch started from the squash-merged branch shows only its own commits.
 git -C "${clone}" branch -q stacked feature
 git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-stacked" stacked
@@ -142,6 +212,144 @@ commit_file "${testdir}/myrepo-branch-stacked" s.txt 's' 'Stacked commit'
 expect_outgoing 'branch stacked on a squash-merged branch' 'Stacked commit'
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-stacked"
 git -C "${clone}" branch -q -D stacked
+
+# A squash-merged branch is not outgoing when the command runs from a
+# subdirectory, even with `diff.relative=true`, and even though the branch
+# also changes a file outside that subdirectory.
+git -C "${clone}" branch -q subdir origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-subdir" subdir
+mkdir "${testdir}/myrepo-branch-subdir/sub"
+printf '%s\n' 'x' > "${testdir}/myrepo-branch-subdir/sub/x.txt"
+printf '%s\n' 't' > "${testdir}/myrepo-branch-subdir/top.txt"
+git -C "${testdir}/myrepo-branch-subdir" add sub/x.txt top.txt
+git -C "${testdir}/myrepo-branch-subdir" commit -q -m 'Subdirectory commit'
+squash_merge subdir
+commit_file "${upstream_work}" sub/x.txt 'x2' 'Upstream change to sub/x.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+mkdir -p "${clone}/sub"
+saved_clone="${clone}"
+clone="${saved_clone}/sub"
+expect_outgoing 'squash-merged branch, run from a subdirectory' ''
+git -C "${saved_clone}" config diff.relative true
+expect_outgoing 'squash-merged branch, run from a subdirectory, diff.relative' ''
+git -C "${saved_clone}" config --unset diff.relative
+clone="${saved_clone}"
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-subdir"
+git -C "${clone}" branch -q -D subdir
+
+# A commit with an old committer date in origin/HEAD does not hide a squash
+# commit behind it.
+git -C "${clone}" branch -q skew origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-skew" skew
+commit_file "${testdir}/myrepo-branch-skew" k.txt 'k' 'Skew commit'
+squash_merge skew
+commit_file "${upstream_work}" k.txt 'k2' 'Upstream change to k.txt'
+(
+  GIT_COMMITTER_DATE='2000-01-01T00:00:00Z'
+  export GIT_COMMITTER_DATE
+  commit_file "${upstream_work}" old.txt 'old' 'Commit with an old date'
+)
+if [ "$(git -C "${upstream_work}" log -1 --format=%cI)" != '2000-01-01T00:00:00Z' ]; then
+  fail 'test setup: the commit should have an old committer date'
+fi
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+expect_outgoing 'squash-merged branch, later commit with an old date' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-skew"
+git -C "${clone}" branch -q -D skew
+
+# A squash-merged branch whose last commit is amended, with a later committer
+# date but the same author date, is not outgoing, even after a later upstream
+# change to the branch's file.
+git -C "${clone}" branch -q amended origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-amended" amended
+(
+  GIT_AUTHOR_DATE="$(($(date +%s) - 5 * 24 * 60 * 60)) +0000"
+  GIT_COMMITTER_DATE="${GIT_AUTHOR_DATE}"
+  export GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+  commit_file "${testdir}/myrepo-branch-amended" m.txt 'm' 'Amended commit'
+)
+(
+  GIT_COMMITTER_DATE="$(($(date +%s) - 4 * 24 * 60 * 60)) +0000"
+  export GIT_COMMITTER_DATE
+  squash_merge amended
+)
+commit_file "${upstream_work}" m.txt 'm2' 'Upstream change to m.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+git -C "${testdir}/myrepo-branch-amended" commit -q --amend --no-edit
+expect_outgoing 'squash-merged branch, amended afterward' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-amended"
+git -C "${clone}" branch -q -D amended
+
+# A squash-merged branch is not outgoing when it has two merge bases with
+# origin/HEAD and the squash commit descends from only one of them.  The
+# branch merges upstream's commit m1, and upstream squash-merges the branch on
+# top of the branch's first commit b1, so b1 and m1 are both merge bases.
+git -C "${clone}" branch -q crisscross origin/main
+crisscross="${testdir}/myrepo-branch-crisscross"
+git -C "${clone}" worktree add -q "${crisscross}" crisscross
+commit_file "${crisscross}" x.txt 'x' 'Crisscross commit b1'
+git -C "${clone}" push -q origin crisscross
+commit_file "${upstream_work}" y.txt 'y' 'Crisscross upstream commit m1'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+git -C "${crisscross}" merge -q --no-edit origin/main
+commit_file "${crisscross}" x.txt 'x2' 'Crisscross commit b2'
+git -C "${clone}" push -q origin crisscross
+git -C "${upstream_work}" pull -q origin main
+git -C "${upstream_work}" fetch -q origin crisscross
+crisscross_b1="$(git -C "${upstream_work}" rev-parse FETCH_HEAD~1^1)"
+git -C "${upstream_work}" checkout -q -b squashed "${crisscross_b1}"
+git -C "${upstream_work}" merge -q --squash FETCH_HEAD > /dev/null
+git -C "${upstream_work}" commit -q -m 'Squash-merged crisscross on b1'
+git -C "${upstream_work}" checkout -q main
+git -C "${upstream_work}" merge -q --no-edit squashed
+git -C "${upstream_work}" branch -q -D squashed
+commit_file "${upstream_work}" x.txt 'x3' 'Upstream change to x.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${upstream_work}" push -q origin --delete crisscross
+git -C "${clone}" fetch -q --prune origin
+if [ "$(git -C "${clone}" merge-base --all origin/main crisscross | wc -l)" -ne 2 ]; then
+  fail 'test setup: crisscross should have two merge bases with origin/main'
+fi
+expect_outgoing 'squash-merged branch, two merge bases' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-crisscross"
+git -C "${clone}" branch -q -D crisscross
+
+# A squash-merged branch that changes only one file is not outgoing, even with
+# `log.follow=true`.
+git -C "${clone}" branch -q follow origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-follow" follow
+commit_file "${testdir}/myrepo-branch-follow" w.txt 'w' 'Follow commit'
+squash_merge follow
+commit_file "${upstream_work}" w.txt 'w2' 'Upstream change to w.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+git -C "${clone}" config log.follow true
+expect_outgoing 'squash-merged branch, log.follow' ''
+git -C "${clone}" config --unset log.follow
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-follow"
+git -C "${clone}" branch -q -D follow
+
+# A commit in origin/HEAD that changes only the branch's files, but that comes
+# from a history unrelated to the branch, does not make the command fail.
+git -C "${clone}" branch -q readme origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-readme" readme
+commit_file "${testdir}/myrepo-branch-readme" README.md 'readme' 'Readme commit'
+git -C "${upstream_work}" checkout -q --orphan unrelated
+git -C "${upstream_work}" rm -q -r -f .
+commit_file "${upstream_work}" u.txt 'u' 'Unrelated root commit'
+commit_file "${upstream_work}" README.md 'other readme' 'Unrelated readme commit'
+git -C "${upstream_work}" checkout -q main
+git -C "${upstream_work}" merge -q --no-edit --allow-unrelated-histories unrelated
+git -C "${upstream_work}" branch -q -D unrelated
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+expect_outgoing 'branch, with an unrelated history in origin/HEAD' 'Readme commit'
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-readme"
+git -C "${clone}" branch -q -D readme
 
 # A squash-merged branch is not outgoing in a repository whose path contains
 # a colon, which is the separator in GIT_ALTERNATE_OBJECT_DIRECTORIES.
@@ -152,6 +360,9 @@ git -C "${clone}" checkout -q -b colon
 commit_file "${clone}" c.txt 'c' 'Colon commit'
 expect_outgoing 'unpushed branch, path with a colon' 'Colon commit'
 squash_merge colon
+commit_file "${upstream_work}" c.txt 'c2' 'Upstream change to c.txt'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
 expect_outgoing 'squash-merged branch, path with a colon' ''
 clone="${saved_clone}"
 git -C "${clone}" fetch -q origin
