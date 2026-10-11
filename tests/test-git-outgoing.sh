@@ -118,6 +118,10 @@ fi
 expect_outgoing 'squash-merged branch' ''
 # Naming the omitted branch does not show its commits.
 expect_outgoing 'squash-merged branch, named as a revision' '' refs/heads/feature
+# Two branches whose tip is the same squash-merged commit are both omitted.
+git -C "${clone}" branch -q feature-copy feature
+expect_outgoing 'two squash-merged branches with the same tip' ''
+git -C "${clone}" branch -q -D feature-copy
 
 # A commit after the squash-merge makes the branch outgoing again.  All of its
 # commits are shown, because none of them is on a remote branch.
@@ -280,6 +284,10 @@ git -C "${upstream_work}" push -q origin main
 git -C "${clone}" fetch -q origin
 git -C "${testdir}/myrepo-branch-amended" commit -q --amend --no-edit
 expect_outgoing 'squash-merged branch, amended afterward' ''
+# An author date more than a day after the squash commit puts the squash
+# commit outside the commits that are examined, so the branch is outgoing.
+git -C "${testdir}/myrepo-branch-amended" commit -q --amend --no-edit --reset-author
+expect_outgoing 'squash-merged branch, amended afterward with a new author date' 'Amended commit'
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-amended"
 git -C "${clone}" branch -q -D amended
 
@@ -400,6 +408,11 @@ git -C "${clone}" branch -q -D conflicting
 git -C "${clone}" remote set-head origin --delete
 expect_outgoing 'no origin/HEAD' 'Feature commit 1
 Feature commit 2'
+# Neither is a remote whose REMOTE/HEAD names a branch that does not exist.
+git -C "${clone}" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/no-such-branch
+expect_outgoing 'dangling origin/HEAD' 'Feature commit 1
+Feature commit 2'
+git -C "${clone}" remote set-head origin --delete
 
 # A second remote, "upstream", whose default branch contains the changes,
 # suffices for the branch not to be outgoing, even though "origin" does not.
@@ -456,6 +469,26 @@ if ! grep -q 'simulated corruption' "${testdir}/corrupt-errors"; then
   fail 'git failure, not a partial clone: expected the git error message'
 fi
 git -C "${clone}" config --unset remote.origin.promisor
+
+# A failure of `git merge-base --octopus`, which finds a common ancestor of
+# the merge bases of several branches, is reported.  The two branches fork
+# from different commits of main, so their merge bases differ.
+octopus="${testdir}/octopus"
+git clone -q "${remote}" "${octopus}"
+git -C "${octopus}" branch -q octopus-1 origin/main^
+git -C "${octopus}" branch -q octopus-2 origin/main
+git -C "${octopus}" switch -q octopus-1
+commit_file "${octopus}" octopus-1.txt 'o1' 'Octopus commit 1'
+git -C "${octopus}" switch -q octopus-2
+commit_file "${octopus}" octopus-2.txt 'o2' 'Octopus commit 2'
+octopus_git_dir="${testdir}/octopus-git"
+make_fake_git "${octopus_git_dir}" merge-base 128 'fatal: simulated octopus failure' --octopus
+if (cd "${octopus}" && PATH="${octopus_git_dir}:${PATH}" "${GIT_OUTGOING}") > /dev/null 2> "${testdir}/octopus-errors"; then
+  fail 'git merge-base --octopus failure: expected a failure status'
+fi
+if ! grep -q 'simulated octopus failure' "${testdir}/octopus-errors"; then
+  fail 'git merge-base --octopus failure: expected the git error message'
+fi
 
 # In a partial clone, a branch whose check needs file contents or directories
 # that have not been fetched is shown, with a warning that includes git's

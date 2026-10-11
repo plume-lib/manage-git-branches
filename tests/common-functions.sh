@@ -227,13 +227,15 @@ COUNTING_GIT_END
   : > "${GIT_COMMAND_LOG}"
 }
 
-## Usage: make_fake_git DIRECTORY SUBCOMMAND STATUS MESSAGE
+## Usage: make_fake_git DIRECTORY SUBCOMMAND STATUS MESSAGE [ARGUMENT]
 ## Creates, in DIRECTORY, a git wrapper script that fakes SUBCOMMAND:  when
-## its first argument is SUBCOMMAND, the fake `git` prints MESSAGE and exits
-## with STATUS, and otherwise it runs the real git.  MESSAGE goes to standard
-## output if STATUS is 0, and to standard error otherwise.  A test that puts
-## DIRECTORY first on PATH can then simulate an old or failing git.
-## DIRECTORY and SUBCOMMAND must not contain a single quotation mark.
+## its first argument is SUBCOMMAND, and its second is ARGUMENT if ARGUMENT
+## is given, the fake `git` prints MESSAGE and exits with STATUS, and
+## otherwise it runs the real git.  MESSAGE goes to standard output if STATUS
+## is 0, and to standard error otherwise.  A test that puts DIRECTORY first on
+## PATH can then simulate an old or failing git.
+## DIRECTORY, SUBCOMMAND, and ARGUMENT must not contain a single quotation
+## mark.
 make_fake_git() {
   mkdir -p "$1" || return 1
   make_fake_git_real="$(real_git "$1")" || return 1
@@ -248,7 +250,7 @@ make_fake_git() {
   fi
   cat > "${make_fake_git_dir}/git" << FAKE_GIT_END
 #!/bin/sh
-if [ "\$1" = '$2' ]; then
+if [ "\$1" = '$2' ] && { [ -z '$5' ] || [ "\$2" = '$5' ]; }; then
   cat '${make_fake_git_dir}/git-message' >&${make_fake_git_stream}
   exit $3
 fi
