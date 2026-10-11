@@ -341,13 +341,11 @@ Implementation notes:
 
 ### 4.4 `.git` is a file
 
-Any tool that tests `-d .git` stops recognizing a branch directory as a working
-copy.  `git-orphaned-branches` already handles a `.git` file.  The package's
-two remaining `-d .git` tests are deliberate refusals, and each is relaxed for
-linked worktrees by this plan: `check_git_dir_is_directory` in
-remote-functions.sh, which both branch commands call (§6.1), and
-`git-remove-branch-directory`'s refusal to remove a directory whose `.git` is a
-file (§7.2).
+A branch directory's `.git` becomes a file.  A tool that tests `-d .git` to
+recognize a working tree -- a user's script, a shell prompt, an editor plugin --
+will no longer recognize one.  Such a tool should ask git instead
+(`git rev-parse --show-toplevel`).  Nothing in this package tests `-d .git` that
+way.
 
 ## 5. Detailed design for `git-new-branch`
 
@@ -748,7 +746,7 @@ command there works.  A bare refusal here would be a dead end.
 The way out is real and now nearly free: `git clone --local` of the common dir,
 then the working-tree copy of §5.1 over it.  Step 4 adds exactly that helper for
 `git-checkout-branch`'s submodule fallback (§6.1), so after it lands this case is
-a few lines rather than a new subsystem.  Recorded as item 6 of §10.7, flagged
+a few lines rather than a new subsystem.  Recorded as item 6 of §10.1, flagged
 there as the deferred item a user is most likely to hit.
 
 ### 5.13 Update the header comment
@@ -956,7 +954,7 @@ directories, so the recursive filesystem walk -- which descends into every
 comments lament -- could be skipped for the worktrees of repositories already
 found.  It cannot replace the walk, which spans repositories the command was
 never told about and also finds `--copy` directories and `.project`-only ones.
-§10.7 item 7.
+§10.1 item 7.
 
 #### `--remove`
 
@@ -1502,8 +1500,10 @@ is an error.
     inherited.  Add the second benefit (§1.2): because the branch directories of
     one repository are related, `git-push-to` fetches from a remote once for the
     whole group rather than pulling once per directory.
-  * A new subsection on the worktree layout: `.git` is a file; config, hooks, and
-    refs are shared; repositories with submodules get a full copy (§4.3).
+  * A new subsection on the worktree layout: `.git` is a file, so a tool that
+    tests `-d .git` no longer recognizes a branch directory (§4.4); config,
+    hooks, and refs are shared; repositories with submodules get a full copy
+    (§4.3).
   * **Do not delete or move a branch directory with file-system commands**, the
     same warning that §5.13 puts in the header comment: `rm -rf` leaves the
     branch ref and a stale registration (use `git-remove-branch-directory`), and
@@ -1635,16 +1635,10 @@ is a local pathname that never reaches SSH at all:
 Each step is independently reviewable and leaves the tree working, which matches
 this repository's history of small PRs.
 
-The changes that do not depend on worktrees -- the `git-orphaned-branches`
-fix, the batched `ls-remote`, and the clone-only removal script -- are already
-implemented, so removal adds only its worktree half, and step 2's interim
-refusal narrows an existing guard rather than adding one.
-
 1. **remote-functions.sh: the worktree-aware helpers.**
    `git_supports_worktree` (§5.5), `is_linked_worktree DIRECTORY`,
    `related_worktrees DIR1 DIR2` (§6.6), and the cleanup helper of §5.6, with
-   tests in tests/test-remote-functions.sh. These join `is_deleted_branch`,
-   `remote_heads`, and `check_git_dir_is_directory`, which are already there.
+   tests in tests/test-remote-functions.sh.
 2. **`git-new-branch`: create a worktree.**  §5 in full -- the default mode, the
    `--clean` and `--copy` options (§5.10-§5.12), the §4.3 submodule fallback that
    `--copy` also implements, and the §5.8 refusal -- plus the interim refusal in
@@ -1659,11 +1653,10 @@ refusal narrows an existing guard rather than adding one.
    checked out in another worktree"; adds the `git clone --local` submodule
    fallback; documents the two behavior changes (no inherited build output, and
    no more "local changes would be overwritten" failure).
-4. **Removal: the worktree half.**  Teach `git-remove-branch-directory`, which
-   already removes clones and refuses a host directory (§7.4), to remove a
-   linked worktree with `git worktree remove --force` instead of refusing it,
-   delete the branch ref, remove the one administrative directory rather than
-   prune (§7.2), and handle the already-deleted case (§7.5).
+4. **Removal: the worktree half.**  Teach `git-remove-branch-directory` to
+   remove a linked worktree with `git worktree remove --force` instead of
+   refusing it, delete the branch ref, remove the one administrative directory
+   rather than prune (§7.2), and handle the already-deleted case (§7.5).
 5. **Saving 2 and the fetch-free merge.**  Replace `git-push-to`'s
    per-directory `git pull` with one `git fetch` per group plus the
    "integrate the way git would" step (§6.6), and merge a related worktree's
@@ -1676,7 +1669,7 @@ Risk and rollback: steps 2 and 3 are self-contained, and branch directories
 created by the current version keep working, so old and new branch directories
 coexist and a revert affects only directories created after it.
 
-### 10.7 Deferred: not part of this change
+### 10.1 Deferred: not part of this change
 
 **Decided: document these as future todos and implement none of them here.**  Each
 is a genuine improvement, none is needed for the change to be correct or
@@ -1837,7 +1830,7 @@ Settled:
 * §7.5 -- `git-remove-branch-directory` also cleans up after a branch directory
   that was already deleted by hand, taking `--repository DIR` (defaulting to the
   current directory) to find the registration.
-* §10.7 -- the optional items are deferred: documented as future todos, none
+* §10.1 -- the optional items are deferred: documented as future todos, none
   implemented as part of this change.
 * §8 -- adopt git's term "working tree" instead of "working copy" throughout the
   package's documentation, reserving "clone" for a directory that is one.
@@ -1853,8 +1846,8 @@ directories are worktrees, where `git-new-branch` currently has to refuse
 because `cp -Rp` of a worktree would alias it (fact 9).  With the helper
 available, that case could instead clone the common dir, overlay the non-`.git`
 entries with the copy of §5.1, and create the branch there.  Not part of this
-change; recorded in §10.7 as item 6.
+change; recorded in §10.1 as item 6.
 
 Nothing is open.  The plan is ready to implement, in the five steps of §10, on
 top of the independent changes that are already implemented.  The deferred
-items are §10.7.
+items are §10.1.
