@@ -230,7 +230,10 @@ merged_branches() {
 
 # Usage: common_ancestor FILE
 # Prints a commit that is an ancestor of every commit in FILE, which lists
-# them one per line, or prints nothing if there is none.  xargs runs as few
+# them one per line, or prints nothing if there is none.  Dies if
+# `git merge-base --octopus` fails otherwise or if xargs passes it too few
+# commits, so a caller must not run it in a pipeline, whose subshell the
+# `die` would exit instead of the script.  xargs runs as few
 # `git merge-base --octopus` as the limit on a command line's size allows,
 # and their results are combined the same way.  Each prints one of the best
 # common ancestors, or fails with status 1 if there is none.
@@ -357,13 +360,14 @@ while read -r merged branch_time branch; do
 done < "${tmpdir}/merge-status"
 
 # Create ${tmpdir}/squash-candidates, which the merges below read, such that
-# each line is "ORDER BRANCH PARENT TREE" for a commit in some base but not in
-# BRANCH, that is not a merge commit, that descends from one of the
+# each line is "TIER DELAY BRANCH PARENT TREE" for a commit in some base but
+# not in BRANCH, that is not a merge commit, that descends from one of the
 # MERGE-BASEs on a line of ${tmpdir}/squash-pairs for BRANCH and that base,
 # and that changes only files that BRANCH changes; PARENT is its parent, TREE
-# its tree, and ORDER is smaller the likelier the commit is to be BRANCH's
-# squash commit, as described below.  Each base's history is walked and diffed once for all of
-# its lines of ${tmpdir}/squash-pairs.
+# its tree, TIER is 0 if it was committed at or after BRANCH's last commit
+# was authored and 1 otherwise, and DELAY is the number of seconds between
+# those times.  Each base's history is walked and diffed once for all of its
+# lines of ${tmpdir}/squash-pairs.
 #
 # A squash-merge is committed after the branch's last commit was authored; the
 # margin of a day allows for clock skew between the computers that made the
@@ -441,10 +445,8 @@ while read -r base_commit base_tree; do
           if (!((set[k], c) in descends) || time[c] < since[k] || files[c] == 0) continue
           only_branch_files = 1
           for (f = 1; f <= files[c]; f++) if (!((paths_id[k], file[c, f]) in path)) { only_branch_files = 0; break }
-          # The commits at or after the branch time come first, the earliest
-          # first, and then the others, the latest first.
           delay = time[c] - branch_time[k]
-          if (only_branch_files) print (delay >= 0 ? delay : 2 * 24 * 60 * 60 - delay), branch[k], parent[c], tree[c]
+          if (only_branch_files) print (delay >= 0 ? 0 : 1), (delay >= 0 ? delay : -delay), branch[k], parent[c], tree[c]
         }
       }
     }
@@ -460,23 +462,19 @@ done < "${tmpdir}/bases"
 # suffices.  So the merges are done in two rounds:  first each branch's
 # likeliest candidate, and then the other candidates of the branches that the
 # first round did not find.  A squash-merge usually soon follows the branch's
-# last commit, so the likeliest candidate is the earliest one committed at or
-# after the branch's last commit was authored, if any, and otherwise the
-# latest one.
+# last commit, so the candidates are sorted by TIER and then by DELAY:  the
+# likeliest is the earliest one committed at or after the branch's last
+# commit was authored, if any, and otherwise the latest one.
 # The keys cover every field, so `-u` removes only identical lines.
-LC_ALL=C sort -u -k2,2 -k1,1n -k3 "${tmpdir}/squash-candidates" > "${tmpdir}/sorted-candidates" || die "sort failed"
-awk '
-  !($2 in seen) { seen[$2]; print $2, $3, $4 > first; next }
-  { print $2, $3, $4 > rest }
-' first="${tmpdir}/first-candidates" rest="${tmpdir}/other-candidates" "${tmpdir}/sorted-candidates" \
+LC_ALL=C sort -u -k3,3 -k1,1n -k2,2n -k4 "${tmpdir}/squash-candidates" > "${tmpdir}/sorted-candidates" || die "sort failed"
+awk '!($3 in seen) { seen[$3]; print $3, $4, $5 }' "${tmpdir}/sorted-candidates" > "${tmpdir}/first-candidates" \
   || die "awk failed"
-: >> "${tmpdir}/first-candidates" || die "cannot write ${tmpdir}/first-candidates"
-: >> "${tmpdir}/other-candidates" || die "cannot write ${tmpdir}/other-candidates"
 merged_branches "${tmpdir}/first-candidates" "${tmpdir}/squashed"
 awk '
   FILENAME == ARGV[1] { squashed[$0]; next }
-  !($1 in squashed)
-' "${tmpdir}/squashed" "${tmpdir}/other-candidates" > "${tmpdir}/remaining-candidates" || die "awk failed"
+  !($3 in squashed) && ($3 in seen) { print $3, $4, $5 }
+  { seen[$3] }
+' "${tmpdir}/squashed" "${tmpdir}/sorted-candidates" > "${tmpdir}/remaining-candidates" || die "awk failed"
 merged_branches "${tmpdir}/remaining-candidates" "${tmpdir}/squashed-later"
 cat "${tmpdir}/squashed-later" >> "${tmpdir}/squashed" || die "cannot write ${tmpdir}/squashed"
 
