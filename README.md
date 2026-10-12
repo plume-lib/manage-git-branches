@@ -27,8 +27,14 @@ The commands are:
 * [`git-checkout-branch`](git-checkout-branch) `BRANCHNAME`:
   Checks out the given branch of the repository in a new working tree
   directory.  Run this command from within a working tree; the new directory
-  is a sibling of the working tree.  Below is a definition for an alias
-  `gcb`.
+  is a sibling of the working tree.  The new directory is a worktree (see
+  [below](#worktrees)) that holds a fresh checkout of the branch:  it does
+  not inherit the current directory's uncommitted changes, untracked files,
+  or build output, so the first build there is a full one.  A branch can be
+  checked out in only one directory at a time.  A repository that has
+  submodules gets a copy of the whole directory instead, which is an
+  independent clone.
+  Below is a definition for an alias `gcb`.
 * [`git-new-branch`](git-new-branch) `[--clean | --copy] BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   tree directory.  Run this command from within a working tree; the new
@@ -195,8 +201,9 @@ main branch.
 
 ## Worktrees
 
-`git-new-branch` makes each branch directory a linked worktree of the
-repository that you ran it in, made by `git worktree add`.  All the branch
+`git-new-branch` and `git-checkout-branch` make each branch directory a
+linked worktree of the repository that you ran them in, made by
+`git worktree add`.  All the branch
 directories of one repository share one object store, so the repository is
 not copied.  This has some consequences:
 
@@ -207,8 +214,9 @@ not copied.  This has some consequences:
 * The branch directories share their configuration, hooks, and branches:
   `git config` in one affects all of them.
 * A repository that has submodules is an exception.  Git does not support a
-  submodule in more than one worktree, so `git-new-branch` makes a full copy
-  instead, which is an independent clone.
+  submodule in more than one worktree, so `git-new-branch` and
+  `git-checkout-branch` make a full copy instead, which is an independent
+  clone.
 
 Do not remove or move a worktree with file-system commands:
 
@@ -230,7 +238,7 @@ one made by a version of `git-new-branch` that predates worktrees:  each of
 those is an independent clone, which you may remove or move like any other
 directory.
 
-`git-new-branch` requires git 2.31 or later.
+`git-new-branch` and `git-checkout-branch` require git 2.31 or later.
 
 ## Programs for managing multiple git clones
 

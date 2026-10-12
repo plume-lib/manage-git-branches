@@ -91,8 +91,9 @@ undo_worktree_add() {
 ## "linked-worktree", a linked worktree is accepted as well, by a caller that
 ## does not copy `.git`.
 ##
-## `git-new-branch --copy` and `git-checkout-branch` copy the top level with
-## `cp -Rp`, which copies `.git` along with everything else.  That is the
+## `git-new-branch --copy`, and both branch commands in a repository with
+## submodules, copy the top level with `cp -Rp`, which copies `.git` along
+## with everything else.  That is the
 ## design when `.git` is a directory:  the copy is an independent clone.  When
 ## `.git` is a *file* that names a git directory elsewhere, the copy names the
 ## **same** git directory as the original -- a relative `gitdir:` resolves to

@@ -204,7 +204,8 @@ fi
 # one index, and the `git checkout` that follows moves the source's HEAD and
 # rewrites the source's index -- data loss in a working tree that the user did
 # not name.  The cases have different remedies, so each message names the
-# right one.
+# right one.  A linked worktree is the exception:  the worktree modes do not
+# copy `.git`, so only `--copy` refuses one.
 
 submodule_parent="${tmpdir}/submodule"
 mkdir -p "${submodule_parent}" || exit 1

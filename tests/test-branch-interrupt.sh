@@ -1,10 +1,9 @@
 #!/bin/sh
 
-# Tests that `git-checkout-branch` and `git-new-branch` remove their
-# `-TMP` directory when they are interrupted by a signal, so that a
-# subsequent invocation is not blocked by a leftover directory.  For
-# `git-new-branch`, which creates a worktree, it also tests that nothing of
-# the worktree is left:  no directory, no registration, and no branch.
+# Tests that `git-checkout-branch` and `git-new-branch` clean up when they are
+# interrupted by a signal, so that a subsequent invocation is not blocked by a
+# leftover:  no `-TMP` directory, and nothing of the worktree that they were
+# creating -- no directory, no registration, and no branch.
 #
 # Usage:
 #   tests/test-branch-interrupt
@@ -172,11 +171,20 @@ if [ "${status}" -le 128 ]; then
 fi
 check_nothing_left cleanregistered 'after git worktree add --clean'
 
-# `git-checkout-branch`, interrupted while copying the working tree.
+# `git-checkout-branch`, interrupted just after the worktree was registered.
+# The branch was created from the remote-tracking branch, so it is removed
+# along with the worktree.
 CHECKOUT_DIR="${WORK_DIR}/myrepo-branch-feature1"
-run_interrupted git-checkout-branch feature1
-if [ -e "${CHECKOUT_DIR}-TMP" ]; then
-  fail "interrupted git-checkout-branch left ${CHECKOUT_DIR}-TMP behind"
+run_interrupted git-checkout-branch feature1 "${FAKE_GIT_BIN}"
+if [ -e "${CHECKOUT_DIR}" ]; then
+  fail "interrupted git-checkout-branch left ${CHECKOUT_DIR} behind"
+fi
+if [ -e "$(git -C "${MAIN_DIR}" rev-parse --path-format=absolute \
+  --git-common-dir)/worktrees/myrepo-branch-feature1" ]; then
+  fail "interrupted git-checkout-branch left an administrative directory"
+fi
+if git -C "${MAIN_DIR}" rev-parse --verify --quiet refs/heads/feature1 > /dev/null; then
+  fail "interrupted git-checkout-branch left the branch feature1 behind"
 fi
 if ! (cd "${MAIN_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" feature1 > /dev/null); then
   fail "git-checkout-branch failed after an interrupted invocation"

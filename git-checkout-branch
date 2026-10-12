@@ -5,6 +5,32 @@
 #
 # Usage:
 #   git-checkout-branch BRANCHNAME
+#
+# The new directory is a linked worktree of the current repository, made by
+# `git worktree add`, so that it shares the repository's object store.  It
+# holds a fresh checkout of the branch:  none of the current directory's
+# uncommitted changes, untracked files, or ignored files such as build output
+# are carried into it, because checking out an existing branch starts from
+# what that branch contains.  (`git-new-branch`, which continues the work in
+# hand, does carry them.)  So the first build in the new directory is a full
+# one.
+#
+# A branch can be checked out in only one worktree at a time.  If another
+# directory already has the branch checked out, git refuses, naming that
+# directory.
+#
+# A repository that has submodules is an exception, because git does not
+# support a submodule in more than one worktree.  There, the new directory is
+# a copy of the whole current directory, `.git` included, in which the branch
+# is then checked out:  an independent clone, which carries along the current
+# directory's untracked files and those of its uncommitted changes that the
+# checkout does not conflict with.
+#
+# The warnings of `git-new-branch` about removing and moving a worktree apply
+# to the new directory too:  remove it with `git-remove-branch-directory`, and
+# move it with `git worktree move`.
+#
+# This command requires git 2.31 or later.
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
@@ -59,15 +85,30 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
+# The same demand, with the same message, as `git-new-branch`.
+require_git 31
+
 STARTDIR="${PWD}"
 # Set to the temporary directory just before we create it, so that the traps
 # remove it if the script fails or is interrupted partway through.  Left empty
 # otherwise, so the traps never remove a pre-existing directory that we did not
 # create.
 TMPDIR_TO_CLEAN=""
+# Set to the new worktree's directory just before `git worktree add` runs, and
+# cleared once the worktree is complete; and the branch and its commit, if the
+# add creates the branch and it does not exist just before the add.  See
+# `undo_worktree_add` in remote-functions.sh.
+WORKTREE_TO_CLEAN=""
+BRANCH_TO_CLEAN=""
+BRANCH_COMMIT_TO_CLEAN=""
 cleanup() {
   cd -- "${STARTDIR}" 2> /dev/null || true
   if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf -- "${TMPDIR_TO_CLEAN}"; fi
+  # ${STARTDIR} may no longer resolve, so name the repository explicitly.
+  if [ -n "${WORKTREE_TO_CLEAN}" ]; then
+    undo_worktree_add "${TOPLEVEL}" "${WORKTREE_TO_CLEAN}" '' \
+      "${BRANCH_TO_CLEAN}" "${BRANCH_COMMIT_TO_CLEAN}"
+  fi
 }
 # A POSIX shell such as dash does not run an EXIT trap when the shell is killed
 # by a signal, so trap the signals too.  Each signal handler restores the
@@ -90,17 +131,35 @@ if ! cd "${TOPLEVEL}"; then
   exit 1
 fi
 
-# Refuse a working tree that does not hold its own `.git` directory -- one
-# whose `.git` is a file (a submodule's working tree, a linked worktree, or
-# the working tree of a repository made with `--separate-git-dir`), one whose
-# `.git` is a symbolic link, and one that has no `.git` at all -- before
-# anything expensive happens:  before the `git pull`, before any query to a
-# remote, and before the copy.  Copying such a working tree produces a
-# directory that shares this one's git directory, and the checkout then moves
-# this working tree's HEAD and rewrites its index.
+# A repository with submodules gets a copy of this directory rather than a
+# worktree, because git does not support a submodule in more than one
+# worktree.  `git-new-branch` explains the problem.
+if [ -e "${TOPLEVEL}/.gitmodules" ]; then
+  COPY=1
+else
+  COPY=0
+fi
+
+# Refuse, before anything expensive happens -- before the `git pull`, before
+# any query to a remote, and before the copy -- a working tree that does not
+# hold its own `.git` directory:  one whose `.git` is a file (a submodule's
+# working tree, a linked worktree, or the working tree of a repository made
+# with `--separate-git-dir`), one whose `.git` is a symbolic link, and one
+# that has no `.git` at all.  Copying such a working tree, `.git` included,
+# produces a directory that shares this one's git directory, and the checkout
+# then moves this working tree's HEAD and rewrites its index.
 # `check_git_dir_is_directory`, in remote-functions.sh, explains the mechanism
 # and prints the diagnostic.
-if ! check_git_dir_is_directory "${TOPLEVEL}"; then
+#
+# `git worktree add` copies nothing, so a linked worktree is accepted unless
+# this repository has submodules:  the new worktree is registered in the
+# repository that this one belongs to.
+if [ "${COPY}" -eq 1 ]; then
+  check_git_dir_accept=''
+else
+  check_git_dir_accept='linked-worktree'
+fi
+if ! check_git_dir_is_directory "${TOPLEVEL}" "${check_git_dir_accept}"; then
   exit 1
 fi
 
@@ -210,16 +269,17 @@ remotes_with_branch() {
 # asked.
 #
 # Every remote is consulted for a remote-tracking branch, not just ${REMOTE},
-# because `git checkout` creates the new local branch from a remote-tracking
-# branch of any remote.  Which remote's branch it is created from is decided
-# here rather than left to `git checkout BRANCHNAME`, whose own search fails
-# outright when several remotes have a remote-tracking branch of that name
-# ("matched multiple ... remote tracking branches").  Among several,
+# because git creates the new local branch from a remote-tracking branch of
+# any remote.  Which remote's branch it is created from is decided
+# here rather than left to `git worktree add` or `git checkout`, whose own
+# search for a branch named BRANCHNAME fails outright when several remotes
+# have a remote-tracking branch of that name ("matched multiple ... remote
+# tracking branches").  Among several,
 # `checkout.defaultRemote` picks one, as it does for git's own search, and
 # otherwise ${REMOTE} does, being the remote that this clone fetches the
 # current branch from.  If neither picks one, the name is ambiguous, and
 # saying so is more use than either guessing or letting the checkout fail
-# after the copy.
+# after the new directory has been made.
 #
 # A branch that only ${REMOTE} has is fetched, not merely queried with
 # `ls-remote`.  A successful query does not make the checkout succeed:  the
@@ -300,8 +360,9 @@ find_branch() {
   return 0
 }
 
-# This test precedes the copy of the working tree, so that a branch that
-# cannot be checked out does not cost the user a full copy of the repository.
+# This test precedes the creation of the new directory, so that a branch that
+# cannot be checked out does not cost the user a full copy of the repository,
+# where the new directory is one.
 find_branch "${BRANCHNAME}"
 case "$?" in
   0) ;;
@@ -333,32 +394,64 @@ if [ -e "${BRANCHDIR}" ]; then
   echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
   exit 1
 fi
-if [ -e "${BRANCH_TMPDIR}" ]; then
-  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
-  exit 1
-fi
 
-# We just checked that ${BRANCH_TMPDIR} does not exist, so whatever the copy
-# leaves at that location was created by this script and the traps may remove
-# it, even if the copy is interrupted before it finishes.
-TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
-if ! \cp -Rp -- . "${BRANCH_TMPDIR}"; then
-  echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
-  exit 1
-fi
 # Create the branch from the start point that `find_branch` chose, rather than
-# letting `git checkout BRANCHNAME` search for one:  git's search fails when
-# several remotes have a remote-tracking branch of that name, and it finds
-# nothing at all in a clone whose narrowed fetch refspec keeps the branch out
-# of the remote-tracking namespace.
-if [ -z "${CHECKOUT_START_POINT}" ]; then
-  set -- checkout -q "${BRANCHNAME}"
+# letting git search for one:  git's search fails when several remotes have a
+# remote-tracking branch of that name, and it finds nothing at all in a clone
+# whose narrowed fetch refspec keeps the branch out of the remote-tracking
+# namespace.
+if [ "${COPY}" -eq 1 ]; then
+  if [ -e "${BRANCH_TMPDIR}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
+    exit 1
+  fi
+  # We just checked that ${BRANCH_TMPDIR} does not exist, so whatever the copy
+  # leaves at that location was created by this script and the traps may
+  # remove it, even if the copy is interrupted before it finishes.
+  TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
+  NEWDIR="${BRANCH_TMPDIR}"
+  if ! \cp -Rp -- . "${BRANCH_TMPDIR}"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
+    exit 1
+  fi
+  if [ -z "${CHECKOUT_START_POINT}" ]; then
+    set -- checkout -q "${BRANCHNAME}"
+  else
+    set -- checkout -q -b "${BRANCHNAME}" "${CHECKOUT_START_POINT}"
+  fi
+  if ! (cd -- "${BRANCH_TMPDIR}" && git "$@"); then
+    echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git $*)" >&2
+    exit 1
+  fi
 else
-  set -- checkout -q -b "${BRANCHNAME}" "${CHECKOUT_START_POINT}"
-fi
-if ! (cd -- "${BRANCH_TMPDIR}" && git "$@"); then
-  echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git $*)" >&2
-  exit 1
+  # Neither operand may be dropped.  Without a commit-ish, `git worktree add`
+  # creates a branch named after the directory, and without `-b`, a
+  # remote-tracking start point gives a detached HEAD.  ${BRANCHDIR} is
+  # absolute, so it cannot be mistaken for an option.
+  #
+  # When the branch is checked out in another worktree, git refuses and names
+  # that worktree.  `--force` is deliberately not offered:  two working trees
+  # of one branch are the branch confusion that this package exists to
+  # prevent.
+  NEWDIR="${BRANCHDIR}"
+  if [ -z "${CHECKOUT_START_POINT}" ]; then
+    set -- worktree add -q "${BRANCHDIR}" "${BRANCHNAME}"
+  else
+    if ! BRANCH_COMMIT_TO_CLEAN="$(git rev-parse --verify \
+      "${CHECKOUT_START_POINT}^{commit}")"; then
+      echo "${SCRIPT_NAME}: ERROR: cannot resolve ${CHECKOUT_START_POINT}" >&2
+      exit 1
+    fi
+    if ! git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
+      BRANCH_TO_CLEAN="${BRANCHNAME}"
+    fi
+    set -- worktree add -q -b "${BRANCHNAME}" "${BRANCHDIR}" "${CHECKOUT_START_POINT}"
+  fi
+  WORKTREE_TO_CLEAN="${BRANCHDIR}"
+  if ! git "$@"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${BRANCHDIR}" >&2
+    exit 1
+  fi
 fi
 
 # Give the new branch an upstream, which `git-push-to` and `git-pull-from`
@@ -371,18 +464,24 @@ fi
 # have written; git accepts a URL or a pathname in the first of them, as
 # `git push --set-upstream ../other.git BRANCH` writes there.
 if [ -n "${CHECKOUT_REMOTE}" ] \
-  && [ -z "$(git -C "${BRANCH_TMPDIR}" config --get "branch.${BRANCHNAME}.remote")" ]; then
-  if ! git -C "${BRANCH_TMPDIR}" config "branch.${BRANCHNAME}.remote" "${CHECKOUT_REMOTE}" \
-    || ! git -C "${BRANCH_TMPDIR}" config "branch.${BRANCHNAME}.merge" "refs/heads/${BRANCHNAME}"; then
-    echo "${SCRIPT_NAME}: ERROR: cannot configure ${CHECKOUT_REMOTE} as the upstream of ${BRANCHNAME} in ${BRANCH_TMPDIR}" >&2
+  && [ -z "$(git -C "${NEWDIR}" config --get "branch.${BRANCHNAME}.remote")" ]; then
+  if ! git -C "${NEWDIR}" config "branch.${BRANCHNAME}.remote" "${CHECKOUT_REMOTE}" \
+    || ! git -C "${NEWDIR}" config "branch.${BRANCHNAME}.merge" "refs/heads/${BRANCHNAME}"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot configure ${CHECKOUT_REMOTE} as the upstream of ${BRANCHNAME} in ${NEWDIR}" >&2
     exit 1
   fi
 fi
 
-if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
-  echo "${SCRIPT_NAME}: ERROR in: mv -- \"${BRANCH_TMPDIR}\" \"${BRANCHDIR}\"" >&2
-  exit 1
+if [ "${COPY}" -eq 1 ]; then
+  # The copy is an independent clone, not a registered worktree, so moving it
+  # with `mv` is safe.
+  if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
+    echo "${SCRIPT_NAME}: ERROR in: mv -- \"${BRANCH_TMPDIR}\" \"${BRANCHDIR}\"" >&2
+    exit 1
+  fi
+  TMPDIR_TO_CLEAN=""
 fi
-TMPDIR_TO_CLEAN=""
+WORKTREE_TO_CLEAN=""
+BRANCH_TO_CLEAN=""
 
 echo "Success: checked out to ${BRANCHDIR}"

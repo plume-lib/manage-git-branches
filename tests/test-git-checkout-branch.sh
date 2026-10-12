@@ -330,7 +330,8 @@ fi
 # one index, and the `git checkout` that follows moves the source's HEAD and
 # rewrites the source's index -- data loss in a working tree that the user did
 # not name.  The cases have different remedies, so each message names the
-# right one.
+# right one.  A linked worktree is the exception:  `git worktree add` copies
+# nothing, so it is accepted, except in a repository with submodules.
 
 submodule_parent="${tmpdir}/submodule"
 mkdir -p "${submodule_parent}" || exit 1
@@ -366,21 +367,32 @@ make_linked_worktree "${worktree_parent}" || exit 1
 worktree_main="${worktree_parent}/worktree-branch-main"
 linked="${worktree_parent}/worktree-branch-linked"
 linked_before="$(working_tree_state "${linked}")"
-if out="$(cd "${linked}" && "${GIT_CHECKOUT_BRANCH}" extra 2>&1)"; then
-  fail "zero exit status in a linked worktree"
+
+# `git worktree add` copies nothing, so a linked worktree is accepted, and the
+# new worktree is a sibling registered in the main repository.
+if ! out="$(cd "${linked}" && "${GIT_CHECKOUT_BRANCH}" extra 2>&1)"; then
+  fail "nonzero exit status in a linked worktree: ${out}"
 fi
-case "${out}" in
-  *"is a linked worktree"*"main working tree ${worktree_main}"*) ;;
-  *) fail "unexpected message in a linked worktree: ${out}" ;;
-esac
-for leftover in "${worktree_parent}/worktree-branch-extra" \
-  "${worktree_parent}/worktree-branch-extra-TMP"; do
-  if [ -e "${leftover}" ]; then
-    fail "directory was created in a linked worktree: ${leftover}"
-  fi
-done
+if ! git -C "${worktree_main}" worktree list --porcelain \
+  | grep -q -x -F "worktree ${worktree_parent}/worktree-branch-extra"; then
+  fail "the worktree checked out from a linked worktree is not registered in the main repository"
+fi
 if [ "$(working_tree_state "${linked}")" != "${linked_before}" ]; then
   fail "the linked worktree's HEAD or index changed"
+fi
+
+# A branch can be checked out in only one worktree at a time.  Git refuses,
+# and its message, which names the directory that holds the branch, reaches
+# the user.
+if out="$(cd "${worktree_main}" && "${GIT_CHECKOUT_BRANCH}" linked 2>&1)"; then
+  fail "zero exit status for a branch that another worktree has checked out"
+fi
+case "${out}" in
+  *"${linked}"*) ;;
+  *) fail "unexpected message for a branch that another worktree has checked out: ${out}" ;;
+esac
+if git -C "${worktree_main}" worktree list --porcelain | grep -q 'prunable'; then
+  fail "a refused checkout left a registration behind"
 fi
 
 # A working tree whose git directory lies outside it is a main working tree,
@@ -468,6 +480,64 @@ done
 envtree_after="$(working_tree_state "${envtree}" "${envgitdir}")"
 if [ "${envtree_after}" != "${envtree_before}" ]; then
   fail "the HEAD or index changed in a working tree that has no .git"
+fi
+
+# The new directory is a fresh checkout of the branch.  None of the source's
+# local changes are carried into it -- not an uncommitted modification, an
+# untracked file, or an ignored file -- and the source is unchanged.  A
+# modification that conflicts with the branch, which a `git checkout` in a
+# copy of the source would refuse to overwrite, does not get in the way.
+fresh_parent="${tmpdir}/fresh"
+mkdir -p "${fresh_parent}" || exit 1
+fresh_parent="$(CDPATH='' cd -- "${fresh_parent}" && pwd -P)" || exit 1
+fresh="${fresh_parent}/fresh-branch-main"
+git init -q -b main "${fresh}"
+echo 'ignored.txt' > "${fresh}/.gitignore"
+echo 'original' > "${fresh}/file.txt"
+git -C "${fresh}" add .gitignore file.txt
+git -C "${fresh}" commit -q -m 'Initial commit'
+git -C "${fresh}" checkout -q -b other
+echo 'changed on other' > "${fresh}/file.txt"
+git -C "${fresh}" commit -q -a -m 'Change on other'
+git -C "${fresh}" checkout -q main
+echo 'uncommitted' > "${fresh}/file.txt"
+echo 'untracked' > "${fresh}/untracked.txt"
+echo 'ignored' > "${fresh}/ignored.txt"
+fresh_status="$(git -C "${fresh}" status --porcelain --ignored)"
+fresh_state="$(working_tree_state "${fresh}")"
+if ! out="$(cd "${fresh}" && "${GIT_CHECKOUT_BRANCH}" other 2>&1)"; then
+  fail "nonzero exit status from a source with a conflicting modification: ${out}"
+fi
+fresh_other="${fresh_parent}/fresh-branch-other"
+if [ -n "$(git -C "${fresh_other}" status --porcelain --ignored)" ]; then
+  fail "the checkout is not clean: $(git -C "${fresh_other}" status --porcelain --ignored)"
+fi
+if [ "$(cat "${fresh_other}/file.txt")" != 'changed on other' ]; then
+  fail "the checkout does not hold the branch's contents"
+fi
+if [ ! -f "${fresh_other}/.git" ]; then
+  fail "the checkout is not a worktree"
+fi
+if [ "$(git -C "${fresh}" status --porcelain --ignored)" != "${fresh_status}" ] \
+  || [ "$(working_tree_state "${fresh}")" != "${fresh_state}" ]; then
+  fail "the source's status, HEAD, or index changed"
+fi
+
+# A repository with submodules gets a copy of the whole directory, which is an
+# independent clone, rather than a worktree.
+git -C "${superproject}" branch extra-super
+if ! out="$(cd "${superproject}" && "${GIT_CHECKOUT_BRANCH}" extra-super 2>&1)"; then
+  fail "nonzero exit status in a repository with submodules: ${out}"
+fi
+super_extra="${submodule_parent}/super-branch-extra-super"
+if [ ! -d "${super_extra}/.git" ]; then
+  fail "the checkout in a repository with submodules is not an independent clone"
+fi
+if [ "$(git -C "${super_extra}" rev-parse --abbrev-ref HEAD)" != 'extra-super' ]; then
+  fail "the checkout in a repository with submodules is not on extra-super"
+fi
+if ! git -C "${super_extra}/sub" status > /dev/null 2>&1; then
+  fail "the submodule of the checkout in a repository with submodules is not usable"
 fi
 
 # The wrong number of arguments is an error.
