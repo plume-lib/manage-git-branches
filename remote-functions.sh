@@ -234,11 +234,17 @@ add_worktree() {
 ## rather than whether `.gitmodules` exists:  that file can outlive the last
 ## submodule, and the working tree that this command runs in can hold
 ## submodules that the branch to be checked out does not, or the reverse.
+##
+## A TREE-ISH without `.gitmodules` is answered without listing its whole
+## tree, which in a large repository is slow:  a gitlink without that file is
+## a submodule that `git submodule` cannot set up, and nearly every tree
+## without the file has no gitlink.
 has_gitlinks() {
   if [ "$#" -eq 0 ]; then
     git ls-files --stage | grep -q '^160000 '
   else
-    git ls-tree -r "$1" | grep -q '^160000 '
+    git cat-file -e "$1:.gitmodules" 2> /dev/null \
+      && git ls-tree -r "$1" | grep -q '^160000 '
   fi
 }
 
@@ -259,28 +265,28 @@ note_copy_for_submodules() {
 ## is an independent clone.  BRANCH is the branch that the caller will check
 ## out in the copy, if it is an existing one.  Exits on failure.
 ##
-## The copy's `.git/worktrees` is removed.  It holds the registrations of this
+## `.git/worktrees` is not copied.  It holds the registrations of this
 ## repository's linked worktrees, which belong to this repository alone:  in
 ## the copy they would make git refuse to check out those worktrees'
 ## branches, let `git worktree remove` run from the copy delete those
 ## worktrees, and make git-remove-branch-directory refuse to remove the copy.
 ## `git worktree prune` would not remove them, because the worktrees exist.
+## It is left out rather than copied and removed, because each worktree's
+## administrative directory holds that worktree's index and the repositories
+## of its submodules, which can be large.
 ##
-## So are the branches that `add_worktree` created for those worktrees, which
+## The branches that `add_worktree` created for those worktrees, which
 ## `branch.NAME.createdForBranchDirectory` marks, except BRANCH and the
 ## branch that HEAD names.  They belong to the other branch directories, and
 ## their commits remain in this repository; in the copy, their unpushed
 ## commits would make git-remove-branch-directory refuse to remove the copy.
+## So they are deleted from the copy.
 copy_repository() {
   if ! mkdir -- "$1"; then
     echo "${SCRIPT_NAME}: ERROR: cannot create $1" >&2
     exit 1
   fi
-  copy_working_tree "$1"
-  if ! rm -rf -- "$1/.git/worktrees"; then
-    echo "${SCRIPT_NAME}: ERROR: cannot remove $1/.git/worktrees" >&2
-    exit 1
-  fi
+  copy_working_tree "$1" .git/worktrees
   copy_repository_head="$(git -C "$1" symbolic-ref --quiet HEAD)"
   # `--bool` normalizes the value, and git prints the key in lower case.
   copy_repository_marked="$(git -C "$1" config --bool --get-regexp \
@@ -301,10 +307,10 @@ copy_repository() {
 
 ## Usage: copy_working_tree DESTINATION [OMIT]
 ## Copies the contents of the current directory, the top level of a working
-## tree, into the existing directory DESTINATION, except the top-level entry
-## OMIT and each worktree of this repository that is nested in the current
-## directory.  Says on standard error which nested worktrees it leaves out.
-## Exits on failure.
+## tree, into the existing directory DESTINATION, except the entry OMIT, a
+## pathname relative to the current directory, and each worktree of this
+## repository that is nested in the current directory.  Says on standard error
+## which nested worktrees it leaves out.  Exits on failure.
 ##
 ## A worktree's `.git` is a file that names its administrative directory, and
 ## a copy would keep that file unchanged, so the copy of a nested worktree

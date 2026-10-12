@@ -81,11 +81,10 @@
 # a worktree:  one that was removed with `rm -rf` leaves behind its
 # registration and its branch, which keep the branch name from being used
 # again.  This command removes both, after the check for unpushed commits.
-# `--repository DIR` names a working tree of the repository that the
-# worktree belonged to; it defaults to the current directory, if that is a
-# working tree.  A DIRECTORY that is not registered there is an error, as it
-# is when no repository is given, so that a mistyped name fails wherever this
-# command is run.
+# `--repository DIR` names the repository that the worktree belonged to, or
+# a working tree of it; it defaults to the current directory.  A DIRECTORY
+# that is not registered there is an error, as it is when no repository is
+# given, so that a mistyped name fails wherever this command is run.
 #
 # This command never runs `git worktree prune`, which would remove every
 # registration whose directory is missing, including that of a worktree that
@@ -219,8 +218,8 @@ line_count() {
 # Prints the number of linked worktrees of the repository in directory $1
 # whose directory still exists.
 #
-# `git worktree list --porcelain` prints the main working tree first and each
-# linked worktree after it, one `worktree PATH` line per entry.  A pathname
+# `git worktree list --porcelain` prints the main working tree, or the bare
+# repository, first and each linked worktree after it, one `worktree PATH` line per entry.  A pathname
 # that contains a newline cannot be represented in that format; git offers
 # `-z` for that, which needs git 2.36, and a newline in the pathname of a
 # repository is pathological.
@@ -236,8 +235,9 @@ live_linked_worktrees() {
   git -C "$1" worktree list --porcelain 2> /dev/null \
     | sed -n 's/^worktree //p' \
     | (
-      # Discard the main working tree, which is $1 itself.  Only a linked
-      # worktree depends on the repository that removing $1 would take.
+      # Discard the main working tree or the bare repository, which is $1
+      # itself or contains it.  Only a linked worktree depends on the
+      # repository that removing $1 would take.
       if ! IFS= read -r live_linked_main; then
         echo 0
         exit 0
@@ -300,12 +300,13 @@ worktree_admin_dir() {
 # Checks whether removing a linked worktree would lose commits, and sets
 # ${remove_refusals} to 1 if the removal must not proceed.  $1 is the common
 # git directory of the worktree's repository, $2 the commit that the
-# worktree's HEAD names, $3 its branch (empty for a detached HEAD), and $4 the
-# worktree's pathname, for the messages.
+# worktree's HEAD names, $3 the branch that the removal deletes (empty for a
+# detached HEAD, or for a branch that `worktree_branch_kept` keeps), and $4
+# the worktree's pathname, for the messages.
 #
-# The removal deletes the worktree's HEAD and its branch, and nothing else, so
-# ask about those alone:  a commit that another branch, a remote-tracking ref,
-# or a tag holds is not lost.  Not `--all`, which in a repository with
+# The removal deletes the worktree's HEAD and that branch, and nothing else,
+# so ask about those alone:  a commit that another branch, including a branch
+# that is kept, a remote-tracking ref, or a tag holds is not lost.  Not `--all`, which in a repository with
 # worktrees includes every worktree's HEAD -- among them the HEAD of the
 # worktree being removed -- so that the count is always 0.  `--exclude`
 # applies only to the option that follows it, and a pattern for `--branches`
@@ -426,17 +427,41 @@ report_submodule_counts() {
   fi
 }
 
-# Deletes the branch $2, which a removed linked worktree had checked out, from
-# the repository whose common git directory is $1, if the branch still names
-# the commit $3.  Prints a diagnostic and returns 1 if it cannot.
+# Prints why the branch $2, which the linked worktree registered at the
+# absolute pathname $3 has checked out, outlives the removal of that worktree,
+# or prints nothing if `delete_worktree_branch` deletes it.  $1 is the common
+# git directory of the repository.  $3 is the pathname that the registration
+# names, which differs from the worktree's own after a `mv`; it is empty once
+# the registration is gone.
 #
 # Only a branch that `git-new-branch` or `git-checkout-branch` created for its
 # worktree, as `branch.$2.createdForBranchDirectory` records, is deleted.
 # Any other branch -- `main` in a worktree that the user added by hand, say --
 # predates the worktree and outlives it, with its configuration; so does a
 # branch that another worktree has checked out, which `update-ref`, unlike
-# `git branch --delete`, would not refuse to delete.  Either is kept, and a
-# note says so.
+# `git branch --delete`, would not refuse to delete.
+#
+# The entries of `git worktree list --porcelain` are separated by blank
+# lines, and each begins with a `worktree` line.  The pathnames reach awk
+# through the environment rather than `-v`, which would interpret a backslash
+# in them as an escape.
+worktree_branch_kept() {
+  if [ "$(git --git-dir="$1" config --bool \
+    "branch.$2.createdForBranchDirectory")" != 'true' ]; then
+    echo 'which git-new-branch and git-checkout-branch did not create'
+  elif git --git-dir="$1" worktree list --porcelain \
+    | kept_branch="refs/heads/$2" kept_dir="$3" awk '
+        /^worktree / { dir = substr($0, 10) }
+        $0 == "branch " ENVIRON["kept_branch"] && dir != ENVIRON["kept_dir"] { found = 1 }
+        END { exit !found }'; then
+    echo 'which another worktree has checked out'
+  fi
+}
+
+# Deletes the branch $2, which a removed linked worktree had checked out, from
+# the repository whose common git directory is $1, if the branch still names
+# the commit $3, and if `worktree_branch_kept` does not keep it, in which case
+# a note says so.  Prints a diagnostic and returns 1 if it cannot.
 #
 # `update-ref` rather than `git branch --delete`, because it takes a full
 # refname, so a branch name that begins with "-" cannot be read as an option.
@@ -447,14 +472,9 @@ delete_worktree_branch() {
   if [ -z "$2" ]; then
     return 0
   fi
-  if [ "$(git --git-dir="$1" config --bool \
-    "branch.$2.createdForBranchDirectory")" != 'true' ]; then
-    echo "${SCRIPT_NAME}: note: kept the branch $2, which git-new-branch and git-checkout-branch did not create" >&2
-    return 0
-  fi
-  if git --git-dir="$1" worktree list --porcelain \
-    | grep -q -x -F "branch refs/heads/$2"; then
-    echo "${SCRIPT_NAME}: note: kept the branch $2, which another worktree has checked out" >&2
+  delete_worktree_branch_kept="$(worktree_branch_kept "$1" "$2" '')"
+  if [ -n "${delete_worktree_branch_kept}" ]; then
+    echo "${SCRIPT_NAME}: note: kept the branch $2, ${delete_worktree_branch_kept}" >&2
     return 0
   fi
   if ! git --git-dir="$1" update-ref -d "refs/heads/$2" "$3"; then
@@ -468,15 +488,18 @@ delete_worktree_branch() {
 # registration and deletes its branch, unless the check for unpushed commits
 # refuses.  The facts come from the repository that ${repository} names, or
 # from the current directory's, because without the directory nothing else
-# can supply them.  Prints a diagnostic and returns 1 if it does not finish.
+# can supply them.  The repository may be bare, so ask for its common git
+# directory, not its top level.  Prints a diagnostic and returns 1 if it does
+# not finish.
 remove_missing_worktree() {
-  if ! missing_repository="$(git -C "${repository:-.}" rev-parse \
-    --show-toplevel 2> /dev/null)" || [ -z "${missing_repository}" ]; then
+  if ! missing_common="$(git -C "${repository:-.}" rev-parse \
+    --path-format=absolute --git-common-dir 2> /dev/null)" \
+    || [ -z "${missing_common}" ]; then
     echo "${SCRIPT_NAME}: no such directory: $1" >&2
     if [ -z "${repository}" ]; then
-      echo "${SCRIPT_NAME}: to clean up after a worktree whose directory is gone, run this command in a working tree of its repository, or name one with --repository" >&2
+      echo "${SCRIPT_NAME}: to clean up after a worktree whose directory is gone, run this command in its repository or a working tree of it, or name one with --repository" >&2
     else
-      echo "${SCRIPT_NAME}: --repository ${repository} is not a working tree" >&2
+      echo "${SCRIPT_NAME}: --repository ${repository} is not a git repository" >&2
     fi
     return 1
   fi
@@ -499,23 +522,18 @@ remove_missing_worktree() {
   # line.  A missing worktree is still listed, with its branch.  The
   # directory reaches awk through the environment rather than `-v`, which
   # would interpret a backslash in it as an escape.
-  missing_entry="$(git -C "${missing_repository}" worktree list --porcelain \
+  missing_entry="$(git --git-dir="${missing_common}" worktree list --porcelain \
     | missing_dir="${missing_dir}" awk '
         $0 == "worktree " ENVIRON["missing_dir"] { found = 1; next }
         found && $0 == "" { exit }
         found { print }')"
   if [ -z "${missing_entry}" ]; then
-    echo "${SCRIPT_NAME}: no such directory, and no worktree registered there in ${missing_repository}: $1" >&2
+    echo "${SCRIPT_NAME}: no such directory, and no worktree registered there in ${missing_common}: $1" >&2
     return 1
   fi
   missing_head="$(printf '%s\n' "${missing_entry}" | sed -n 's/^HEAD //p')"
   missing_branch="$(printf '%s\n' "${missing_entry}" \
     | sed -n 's|^branch refs/heads/||p')"
-  if ! missing_common="$(git -C "${missing_repository}" rev-parse \
-    --path-format=absolute --git-common-dir)" || [ -z "${missing_common}" ]; then
-    echo "${SCRIPT_NAME}: cannot determine the repository of ${missing_repository}" >&2
-    return 1
-  fi
   missing_admin="$(worktree_admin_dir "${missing_common}" "${missing_dir}")"
   if [ -z "${missing_admin}" ]; then
     echo "${SCRIPT_NAME}: refusing to clean up after ${missing_dir}: cannot find its administrative directory in ${missing_common}/worktrees" >&2
@@ -541,8 +559,13 @@ remove_missing_worktree() {
   # `delete_worktree_branch` then deletes nothing but the branch's mark.
   case "${missing_head}" in
     *[!0]*)
+      missing_doomed="${missing_branch}"
+      if [ -n "${missing_branch}" ] && [ -n "$(worktree_branch_kept \
+        "${missing_common}" "${missing_branch}" "${missing_dir}")" ]; then
+        missing_doomed=''
+      fi
       check_worktree_unpushed "${missing_common}" "${missing_head}" \
-        "${missing_branch}" "${missing_dir}"
+        "${missing_doomed}" "${missing_dir}"
       ;;
   esac
   check_module_repositories "${missing_admin}" "${missing_dir}"
@@ -736,10 +759,11 @@ remove_branch_directory() {
     fi
   fi
 
-  if [ "${remove_kind}" = 'working-tree' ]; then
-    # Removing the main working tree removes the repository that every linked
-    # worktree of it depends on, so refuse however orphaned this directory's
-    # own branch is.  This refusal cannot be waived.  It overlaps deliberately
+  if [ "${remove_kind}" = 'working-tree' ] \
+    || [ "${remove_kind}" = 'bare-repository' ]; then
+    # Removing the main working tree, or a bare repository, removes the
+    # repository that every linked worktree of it depends on, so refuse
+    # however orphaned this directory's own branch is.  This refusal cannot be waived.  It overlaps deliberately
     # with the filter in `git-orphaned-branches`, which keeps such a directory
     # out of the list:  this one refuses it even when a user names it.
     remove_worktrees="$(live_linked_worktrees "${remove_dir}")"
@@ -824,8 +848,13 @@ remove_branch_directory() {
   fi
 
   if [ "${remove_kind}" = 'linked-worktree' ]; then
+    remove_doomed="${remove_branch}"
+    if [ -n "${remove_branch}" ] && [ -n "$(worktree_branch_kept \
+      "${remove_common}" "${remove_branch}" "${remove_registered%/.git}")" ]; then
+      remove_doomed=''
+    fi
     check_worktree_unpushed "${remove_common}" "${remove_head}" \
-      "${remove_branch}" "${remove_dir}"
+      "${remove_doomed}" "${remove_dir}"
   fi
 
   if [ "${remove_kind}" = 'working-tree' ] \

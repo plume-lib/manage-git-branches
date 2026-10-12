@@ -180,22 +180,27 @@ fi
 #
 # The question is whether the new worktree would hold a submodule:  the
 # default mode reproduces this working tree's index, and `--clean` checks out
-# the current commit.
-case "${MODE}" in
-  clean)
-    if has_gitlinks HEAD; then
-      echo "${SCRIPT_NAME}: ERROR: --clean makes a worktree, and the current commit has submodules, which a worktree cannot hold." >&2
-      echo "${SCRIPT_NAME}: --copy works here, but it copies this whole directory, including .git." >&2
-      exit 1
-    fi
-    ;;
-  worktree)
-    if has_gitlinks; then
-      note_copy_for_submodules 'this working tree'
-      MODE='copy'
-    fi
-    ;;
-esac
+# the current commit.  The `git pull` below can change both, so the question
+# is asked again after it; asking it now as well reports a refusal before the
+# pull, and lets the tests that depend on the mode precede the pull too.
+choose_mode_for_submodules() {
+  case "${MODE}" in
+    clean)
+      if has_gitlinks HEAD; then
+        echo "${SCRIPT_NAME}: ERROR: --clean makes a worktree, and the current commit has submodules, which a worktree cannot hold." >&2
+        echo "${SCRIPT_NAME}: --copy works here, but it copies this whole directory, including .git." >&2
+        exit 1
+      fi
+      ;;
+    worktree)
+      if has_gitlinks; then
+        note_copy_for_submodules 'this working tree'
+        MODE='copy'
+      fi
+      ;;
+  esac
+}
+choose_mode_for_submodules
 
 # The default mode copies this working tree's index, whose skip-worktree bits
 # a sparse checkout sets according to its patterns, which lie in this working
@@ -215,14 +220,17 @@ fi
 # worktree modes do not copy `.git`, so they accept a linked worktree.  The
 # test is of the mode that will actually run, which in a working tree with
 # submodules is the copy.
-if [ "${MODE}" = 'copy' ]; then
-  check_git_dir_accept=''
-else
-  check_git_dir_accept='linked-worktree'
-fi
-if ! check_git_dir_is_directory "${TOPLEVEL}" "${check_git_dir_accept}"; then
-  exit 1
-fi
+check_git_dir_for_mode() {
+  if [ "${MODE}" = 'copy' ]; then
+    check_git_dir_accept=''
+  else
+    check_git_dir_accept='linked-worktree'
+  fi
+  if ! check_git_dir_is_directory "${TOPLEVEL}" "${check_git_dir_accept}"; then
+    exit 1
+  fi
+}
+check_git_dir_for_mode
 
 # The default mode and `--copy` carry this working tree's index into the new
 # directory, but not the state of an operation in progress:  the default mode
@@ -318,6 +326,15 @@ if ! PULL_OUTPUT="$(git_batch_ssh . pull -q 2>&1)"; then
     exit 1
   fi
   echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
+fi
+
+# The pull may have brought in a submodule.  If it switched the mode to the
+# copy, the copy's own test of `.git` applies.  The sparse-checkout test above
+# matters only to the default mode, which this cannot switch to.
+PRE_PULL_MODE="${MODE}"
+choose_mode_for_submodules
+if [ "${MODE}" != "${PRE_PULL_MODE}" ]; then
+  check_git_dir_for_mode
 fi
 
 # Determine which remote the new branch would collide with:  the remote that

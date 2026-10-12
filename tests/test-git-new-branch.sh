@@ -710,6 +710,42 @@ if [ "$(working_tree_state "${superproject}")" != "${superproject_before}" ]; th
   fail "the superproject's HEAD or index changed"
 fi
 
+# A pull that brings in the first submodule switches the default mode to the
+# copy, and makes `--clean` refuse, as if the submodule had been there before
+# the pull.
+pullsub_origin="${submodule_parent}/pullsub-origin.git"
+git init -q --bare -b main "${pullsub_origin}"
+git clone -q "${pullsub_origin}" "${submodule_parent}/pullsub-seed" 2> /dev/null
+echo 'seed' > "${submodule_parent}/pullsub-seed/seed.txt"
+git -C "${submodule_parent}/pullsub-seed" add seed.txt
+git -C "${submodule_parent}/pullsub-seed" commit -q -m 'Initial commit'
+git -C "${submodule_parent}/pullsub-seed" push -q origin main
+pullsub="${submodule_parent}/pullsub-branch-main"
+git clone -q "${pullsub_origin}" "${pullsub}"
+git -C "${submodule_parent}/pullsub-seed" -c protocol.file.allow=always \
+  submodule add -q "${submodule_parent}/submodule-origin" sub
+git -C "${submodule_parent}/pullsub-seed" commit -q -m 'Add a submodule'
+git -C "${submodule_parent}/pullsub-seed" push -q origin main
+if out="$(cd "${pullsub}" && "${GIT_NEW_BRANCH}" --clean pullsubclean 2>&1)"; then
+  fail "zero exit status for --clean when the pull brings in a submodule"
+fi
+case "${out}" in
+  *"has submodules"*"--copy works here"*) ;;
+  *) fail "unexpected message for --clean when the pull brings in a submodule: ${out}" ;;
+esac
+check_nothing_left "${pullsub}" pullsubclean "--clean when the pull brings in a submodule"
+git -C "${pullsub}" reset -q --hard HEAD~1
+if ! out="$(cd "${pullsub}" && "${GIT_NEW_BRANCH}" pullsubdefault 2>&1)"; then
+  fail "nonzero exit status when the pull brings in a submodule: ${out}"
+fi
+case "${out}" in
+  *"has submodules"*"full copy"*) ;;
+  *) fail "the default mode did not say that it copies, when the pull brings in a submodule: ${out}" ;;
+esac
+if [ ! -d "${submodule_parent}/pullsub-branch-pullsubdefault/.git" ]; then
+  fail "the default mode made a worktree when the pull brought in a submodule"
+fi
+
 # A repository with submodules whose branch directories are worktrees:  the
 # default mode falls back to the copy, which refuses a linked worktree, and
 # the message says where to run the command instead.

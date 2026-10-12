@@ -597,6 +597,29 @@ if ! git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtunmarked > /dev/
   fail "a branch that this package did not create: the branch or its configuration is gone"
 fi
 
+# A branch that is kept holds its commits, so an unpushed commit on it is not
+# lost and does not refuse the removal.  The same holds for a worktree whose
+# directory is already gone.
+git -C "${wthost}" worktree add -q -b wtkeptcommit "${work}/myrepo-branch-wtkeptcommit"
+echo 'kept' > "${work}/myrepo-branch-wtkeptcommit/kept.txt"
+git -C "${work}/myrepo-branch-wtkeptcommit" add kept.txt
+git -C "${work}/myrepo-branch-wtkeptcommit" commit -q -m 'An unpushed commit on wtkeptcommit'
+run_command 'an unpushed commit on a branch that is kept' 0 \
+  "${work}/myrepo-branch-wtkeptcommit"
+check_gone 'an unpushed commit on a branch that is kept' \
+  "${work}/myrepo-branch-wtkeptcommit"
+check_message 'an unpushed commit on a branch that is kept' \
+  "kept the branch wtkeptcommit"
+git -C "${wthost}" worktree add -q -b wtkeptgone "${work}/myrepo-branch-wtkeptgone"
+echo 'kept' > "${work}/myrepo-branch-wtkeptgone/kept.txt"
+git -C "${work}/myrepo-branch-wtkeptgone" add kept.txt
+git -C "${work}/myrepo-branch-wtkeptgone" commit -q -m 'An unpushed commit on wtkeptgone'
+rm -rf "${work}/myrepo-branch-wtkeptgone"
+run_command 'an unpushed commit on a kept branch of a removed worktree' 0 \
+  --repository "${wthost}" "${work}/myrepo-branch-wtkeptgone"
+check_message 'an unpushed commit on a kept branch of a removed worktree' \
+  "kept the branch wtkeptgone"
+
 # A branch that another worktree also has checked out, which only
 # `git worktree add --force` allows, is kept, because deleting it would leave
 # that worktree on a branch that does not exist.
@@ -860,6 +883,29 @@ git clone -q --bare "${remote}" "${bareinside}"
 run_command 'a directory inside a bare repository' 1 "${bareinside}/objects"
 check_present 'a directory inside a bare repository' "${bareinside}/objects"
 check_message 'a directory inside a bare repository' "on no remote-tracking ref or tag"
+
+# A bare repository holds the repository of its linked worktrees, which
+# removing it would break, however pushed its commits are.  A worktree of it
+# whose directory is gone is cleaned up given the bare repository.
+barehost="${work}/myrepo-branch-barehost.git"
+git init -q --bare -b main "${barehost}"
+git -C "${barehost}" remote add origin "${remote}"
+git -C "${barehost}" fetch -q origin
+git -C "${barehost}" worktree add -q -b barewt "${work}/myrepo-branch-barewt" \
+  refs/remotes/origin/main
+git -C "${barehost}" config branch.barewt.createdForBranchDirectory true
+run_command 'a bare repository with a linked worktree' 1 "${barehost}"
+check_present 'a bare repository with a linked worktree' "${barehost}"
+check_message 'a bare repository with a linked worktree' \
+  "it holds the repository of 1 linked worktree(s)"
+rm -rf "${work}/myrepo-branch-barewt"
+run_command 'a removed worktree of a bare repository' 0 \
+  --repository "${barehost}" "${work}/myrepo-branch-barewt"
+if git -C "${barehost}" rev-parse --verify --quiet refs/heads/barewt > /dev/null; then
+  fail "a removed worktree of a bare repository: its branch remains"
+fi
+run_command 'a bare repository whose worktree is gone' 0 "${barehost}"
+check_gone 'a bare repository whose worktree is gone' "${barehost}"
 
 ###########################################################################
 ## Arguments.
