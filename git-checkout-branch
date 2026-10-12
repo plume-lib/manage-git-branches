@@ -113,17 +113,12 @@ if ! cd "${TOPLEVEL}"; then
   exit 1
 fi
 
-# Refuse, before anything expensive happens -- before the `git pull` and
-# before any query to a remote -- a working tree that does not hold its own
-# `.git` directory, unless it is a linked worktree:  one whose `.git` is a file
-# (a submodule's working tree, or the working tree of a repository made with
-# `--separate-git-dir`), one whose `.git` is a symbolic link, and one that has
-# no `.git` at all.  `git worktree add` copies nothing, so a linked worktree is
-# accepted:  the new worktree is registered in the repository that this one
-# belongs to.  The copy that a branch with submodules gets, below, accepts
-# only a `.git` directory, but which branch to check out is known only later.
-# `check_git_dir_is_directory`, in remote-functions.sh, explains the mechanism
-# and prints the diagnostic.
+# Refuse a working tree that does not hold its own `.git` directory, before
+# anything expensive happens:  before the `git pull` and before any query to a
+# remote.  `check_git_dir_is_directory` explains why.  `git worktree add`
+# copies nothing, so a linked worktree is accepted here; the copy that a
+# branch with submodules gets, below, refuses one too, but which branch to
+# check out is known only later.
 if ! check_git_dir_is_directory "${TOPLEVEL}" 'linked-worktree'; then
   exit 1
 fi
@@ -363,9 +358,7 @@ fi
 # A branch with submodules gets a copy of this directory rather than a
 # worktree, because git does not support a submodule in more than one
 # worktree.  `git-new-branch` explains the problem.  A copy includes `.git`,
-# and copying a `.git` that is not a directory produces a directory that
-# shares this one's git directory, so the checkout would move this working
-# tree's HEAD and rewrite its index; this linked worktree is refused now.
+# so `check_git_dir_is_directory` now refuses a linked worktree too.
 if has_gitlinks "${CHECKOUT_START_POINT:-refs/heads/${BRANCHNAME}}"; then
   if ! check_git_dir_is_directory "${TOPLEVEL}"; then
     echo "${SCRIPT_NAME}: Branch ${BRANCHNAME} has submodules, which a worktree cannot hold, so the new directory must be a copy of this one." >&2

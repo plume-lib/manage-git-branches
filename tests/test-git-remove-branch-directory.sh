@@ -553,6 +553,17 @@ run_command 'a removed linked worktree with a backslash' 0 \
 check_unregistered 'a removed linked worktree with a backslash' \
   "${wthost}" "${work}/myrepo-branch-wt\\back" wtbackslash
 
+# A worktree whose administrative directory is gone is refused, even with
+# --force, because git can no longer say what the directory holds.
+git -C "${wthost}" worktree add -q -b wtnoadmin "${work}/myrepo-branch-wtnoadmin"
+rm -rf "$(git -C "${work}/myrepo-branch-wtnoadmin" rev-parse --absolute-git-dir)"
+run_command 'a worktree without its administrative directory' 1 --force \
+  "${work}/myrepo-branch-wtnoadmin"
+check_present 'a worktree without its administrative directory' \
+  "${work}/myrepo-branch-wtnoadmin"
+check_message 'a worktree without its administrative directory' \
+  "is not a git directory that git can use"
+
 # A worktree on a branch that has no commit yet is refused, with a message
 # that names the branch.
 git -C "${wthost}" worktree add -q -b wtunborn "${work}/myrepo-branch-wtunborn"

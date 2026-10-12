@@ -193,20 +193,11 @@ case "${MODE}" in
     ;;
 esac
 
-# Refuse, before anything expensive happens -- before the `git pull`, before
-# any query to a remote, and before the copy -- a working tree that does not
-# hold its own `.git` directory:  one whose `.git` is a file (a submodule's
-# working tree, a linked worktree, or the working tree of a repository made
-# with `--separate-git-dir`), one whose `.git` is a symbolic link, and one
-# that has no `.git` at all.  Copying such a working tree, `.git` included,
-# produces a directory that shares this one's git directory, and the checkout
-# then moves this working tree's HEAD and rewrites its index.
-# `check_git_dir_is_directory`, in remote-functions.sh, explains the mechanism
-# and prints the diagnostic.
-#
-# The worktree modes do not copy `.git`, so they accept a linked worktree:  the
-# new worktree is registered in the repository that this one belongs to.  The
-# test is of the mode that will actually run, which in a repository with
+# Refuse a working tree that does not hold its own `.git` directory, before
+# anything expensive happens:  before the `git pull`, before any query to a
+# remote, and before the copy.  `check_git_dir_is_directory` explains why.  The
+# worktree modes do not copy `.git`, so they accept a linked worktree.  The
+# test is of the mode that will actually run, which in a working tree with
 # submodules is the copy.
 if [ "${MODE}" = 'copy' ]; then
   check_git_dir_accept=''

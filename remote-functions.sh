@@ -229,10 +229,10 @@ has_gitlinks() {
 ## "linked-worktree", a linked worktree is accepted as well, by a caller that
 ## does not copy `.git`.
 ##
-## `git-new-branch --copy`, and both branch commands in a repository with
-## submodules, copy the top level with `cp -Rp`, which copies `.git` along
-## with everything else.  That is the
-## design when `.git` is a directory:  the copy is an independent clone.  When
+## `git-new-branch --copy`, and both branch commands when the new directory
+## would hold submodules, copy the top level with `cp -Rp`, which copies
+## `.git` along with everything else.  That is the design when `.git` is a
+## directory:  the copy is an independent clone.  When
 ## `.git` is a *file* that names a git directory elsewhere, the copy names the
 ## **same** git directory as the original -- a relative `gitdir:` resolves to
 ## the same place from a sibling directory, and an absolute one names it

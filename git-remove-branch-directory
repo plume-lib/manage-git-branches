@@ -502,6 +502,16 @@ remove_branch_directory() {
       2> /dev/null)"
     if [ "${remove_bare}" = 'true' ]; then
       remove_kind='bare-repository'
+    elif [ -e "${remove_dir}/.git" ] || [ -L "${remove_dir}/.git" ]; then
+      # A `.git` that git cannot use, typically the `.git` file of a worktree
+      # whose administrative directory is gone because the worktree was moved
+      # with `mv` and its registration then pruned.  Git can no longer say
+      # what the directory holds, so neither check can be made, and `other`
+      # would remove it unchecked.  No flag waives this refusal, because the
+      # flags waive the outcome of a check that was made.
+      remove_gitfile="$(sed -n 's/^gitdir: //p' -- "${remove_dir}/.git" 2> /dev/null)"
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: its .git${remove_gitfile:+ names ${remove_gitfile}, which} is not a git directory that git can use, so its uncommitted and unpushed work cannot be checked; if it is a worktree that was moved, \`git worktree repair ${remove_dir}\` in its repository may reconnect it, and otherwise inspect it and remove it with \`rm -rf\`" >&2
+      return 1
     else
       remove_kind='other'
     fi
