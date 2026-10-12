@@ -381,10 +381,12 @@ remove_missing_worktree() {
 
   # The entry of `git worktree list --porcelain` for ${missing_dir}:  a
   # `worktree` line, then `HEAD`, then `branch` or `detached`, then a blank
-  # line.  A missing worktree is still listed, with its branch.
+  # line.  A missing worktree is still listed, with its branch.  The
+  # directory reaches awk through the environment rather than `-v`, which
+  # would interpret a backslash in it as an escape.
   missing_entry="$(git -C "${missing_repository}" worktree list --porcelain \
-    | awk -v dir="${missing_dir}" '
-        $0 == "worktree " dir { found = 1; next }
+    | missing_dir="${missing_dir}" awk '
+        $0 == "worktree " ENVIRON["missing_dir"] { found = 1; next }
         found && $0 == "" { exit }
         found { print }')"
   if [ -z "${missing_entry}" ]; then
@@ -520,10 +522,18 @@ remove_branch_directory() {
       --git-common-dir 2> /dev/null)"
     remove_superproject="$(git -C "${remove_dir}" rev-parse \
       --show-superproject-working-tree 2> /dev/null)"
-    if [ -z "${remove_gitdir}" ] || [ -z "${remove_common}" ] \
-      || [ "${remove_gitdir}" = "${remove_common}" ] \
-      || [ -n "${remove_superproject}" ]; then
-      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: its .git is a file, but it is not a linked worktree; it may be a submodule's working tree, which \`git submodule deinit\` removes" >&2
+    # Each refusal says which kind of working tree this is, because the
+    # remedies differ.
+    if [ -z "${remove_gitdir}" ] || [ -z "${remove_common}" ]; then
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: its .git is a file, but git cannot determine its git directory" >&2
+      return 1
+    fi
+    if [ -n "${remove_superproject}" ]; then
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: it is a submodule's working tree, in ${remove_superproject}, which \`git submodule deinit\` and \`git rm\` there remove" >&2
+      return 1
+    fi
+    if [ "${remove_gitdir}" = "${remove_common}" ]; then
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: it is the working tree of a repository whose git directory, ${remove_gitdir}, lies elsewhere, not a linked worktree; removing it would leave that repository behind" >&2
       return 1
     fi
     remove_kind='linked-worktree'
@@ -533,7 +543,11 @@ remove_branch_directory() {
     remove_branch="${remove_branch#refs/heads/}"
     remove_head="$(git -C "${remove_dir}" rev-parse --verify --quiet HEAD)"
     if [ -z "${remove_head}" ]; then
-      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot determine its HEAD" >&2
+      if [ -n "${remove_branch}" ]; then
+        echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: its branch ${remove_branch} has no commit yet, so its work cannot be checked; inspect it and run \`git worktree remove --force ${remove_dir}\`" >&2
+      else
+        echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot determine its HEAD" >&2
+      fi
       return 1
     fi
     # `git worktree lock` writes `locked`, holding the reason if one was

@@ -21,10 +21,13 @@
 #    directory, `.git` included, so it is an independent clone that shares
 #    nothing with the current repository.
 #
-# A repository that has submodules gets `--copy` automatically, because git
-# does not support a submodule in more than one worktree, and it refuses
-# `--clean`.  A repository that has no commit is refused, because there is
-# nothing to branch from.
+# A working tree that has submodules gets `--copy` automatically, because git
+# does not support a submodule in more than one worktree, and `--clean` is
+# refused when the current commit has submodules.  A repository that has no
+# commit is refused, because there is nothing to branch from.  Every mode but
+# `--clean` is refused while a merge, cherry-pick, revert, or rebase is in
+# progress, because the new directory would get the operation's staged
+# changes without the operation itself.
 #
 # In the worktree modes, this script writes into the current repository:  it
 # creates the new branch there and registers the new worktree in its `.git`.
@@ -46,6 +49,17 @@
 #    or run `git worktree repair` in a directory that was already moved.
 #
 # This command requires git 2.31 or later.
+
+# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to the
+# commands run by `git rebase --exec`, `git bisect run`, and
+# `git submodule foreach`.  They take precedence over the location of a working
+# tree, so leaving them set would make git commands that this script runs in
+# the new directory act on the current repository instead.  For example,
+# `git worktree add` would write the new worktree's index over the file that
+# $GIT_INDEX_FILE names, discarding the changes that are staged there.
+unset GIT_DIR
+unset GIT_WORK_TREE
+unset GIT_INDEX_FILE
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
@@ -154,24 +168,30 @@ fi
 # Git does not support a submodule in more than one worktree:  a copied
 # submodule's `.git` file does not resolve from a linked worktree, which makes
 # every git command there fail, and the repair would give both worktrees one
-# submodule checkout, with one HEAD and one index.  So a repository with
+# submodule checkout, with one HEAD and one index.  So a working tree with
 # submodules gets the full copy that `--copy` makes, which is an independent
 # clone.  `--clean` is refused rather than given a worktree whose submodules
 # are empty, because the only way to populate them leads to that shared
 # checkout.
-if [ -e "${TOPLEVEL}/.gitmodules" ]; then
-  case "${MODE}" in
-    clean)
-      echo "${SCRIPT_NAME}: ERROR: --clean makes a worktree, and this repository has submodules, which a worktree cannot hold." >&2
+#
+# The question is whether the new worktree would hold a submodule:  the
+# default mode reproduces this working tree's index, and `--clean` checks out
+# the current commit.
+case "${MODE}" in
+  clean)
+    if has_gitlinks HEAD; then
+      echo "${SCRIPT_NAME}: ERROR: --clean makes a worktree, and the current commit has submodules, which a worktree cannot hold." >&2
       echo "${SCRIPT_NAME}: --copy works here, but it copies this whole directory, including .git." >&2
       exit 1
-      ;;
-    worktree)
-      echo "${SCRIPT_NAME}: this repository has submodules, which a worktree cannot hold, so the new directory is a full copy of this one, as with --copy." >&2
+    fi
+    ;;
+  worktree)
+    if has_gitlinks; then
+      echo "${SCRIPT_NAME}: this working tree has submodules, which a worktree cannot hold, so the new directory is a full copy of this one, as with --copy." >&2
       MODE='copy'
-      ;;
-  esac
-fi
+    fi
+    ;;
+esac
 
 # Refuse, before anything expensive happens -- before the `git pull`, before
 # any query to a remote, and before the copy -- a working tree that does not
@@ -195,6 +215,29 @@ else
 fi
 if ! check_git_dir_is_directory "${TOPLEVEL}" "${check_git_dir_accept}"; then
   exit 1
+fi
+
+# The default mode and `--copy` carry this working tree's index into the new
+# directory, but not the state of an operation in progress:  the default mode
+# does not copy this working tree's git directory, where that state lies, and
+# the `git checkout -b` of `--copy` deletes it.  An index that holds a merge's
+# resolved result would arrive without the merge, so a commit in the new
+# directory would be an ordinary commit that silently includes the other
+# side's changes.  `--clean` carries neither.
+if [ "${MODE}" != 'clean' ]; then
+  for state_file in MERGE_HEAD:merge CHERRY_PICK_HEAD:cherry-pick \
+    REVERT_HEAD:revert rebase-merge:rebase rebase-apply:rebase; do
+    if ! state_path="$(git rev-parse --git-path "${state_file%%:*}")" \
+      || [ -z "${state_path}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: cannot determine the git directory of ${TOPLEVEL}" >&2
+      exit 1
+    fi
+    if [ -e "${state_path}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: a ${state_file#*:} is in progress in ${TOPLEVEL}, and the new worktree would get its staged changes without the ${state_file#*:} itself." >&2
+      echo "${SCRIPT_NAME}: Conclude or abort the ${state_file#*:} first, or use --clean, which carries no changes." >&2
+      exit 1
+    fi
+  done
 fi
 
 REPO=$(basename "$(pwd)")
@@ -456,23 +499,28 @@ case "${MODE}" in
     # the new directory, because they have new inode numbers, and then
     # rewrites the index.
     #
-    # `--git-path index` names the index that git actually uses here, which
-    # is `.git/worktrees/NAME/index` in a linked worktree and is what
-    # ${GIT_INDEX_FILE} says if that is set.  The new worktree's index is
-    # named directly, because ${GIT_INDEX_FILE} would redirect a
-    # `--git-path index` query there as well.
-    if ! SRC_INDEX="$(git rev-parse --path-format=absolute --git-path index)" \
-      || [ -z "${SRC_INDEX}" ]; then
-      echo "${SCRIPT_NAME}: ERROR: cannot determine the index of ${TOPLEVEL}" >&2
+    # The index lies in this working tree's own git directory, which is
+    # `.git/worktrees/NAME` in a linked worktree.  Under `core.splitIndex`, the
+    # index holds only recent changes and names a `sharedindex.SHA` file, in
+    # the same git directory, that holds the rest; without that file, every
+    # git command in the new worktree fails.  Every shared index file is
+    # copied, rather than only the one that the index names, which is
+    # recorded in binary; git deletes the others once they expire.
+    if ! SRC_GITDIR="$(git rev-parse --absolute-git-dir)" \
+      || [ -z "${SRC_GITDIR}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: cannot determine the git directory of ${TOPLEVEL}" >&2
       exit 1
     fi
     # A working tree that has no index at all has staged nothing, and the new
-    # worktree's empty index says the same.
-    if [ -e "${SRC_INDEX}" ] \
-      && ! \cp -p -- "${SRC_INDEX}" "${WORKTREE_GITDIR_TO_CLEAN}/index"; then
-      echo "${SCRIPT_NAME}: ERROR: cannot copy ${SRC_INDEX} to ${WORKTREE_GITDIR_TO_CLEAN}/index" >&2
-      exit 1
-    fi
+    # worktree's empty index says the same.  A pattern that matches nothing
+    # is left unexpanded, and names no file.
+    for index_file in "${SRC_GITDIR}/index" "${SRC_GITDIR}"/sharedindex.*; do
+      if [ -e "${index_file}" ] \
+        && ! \cp -p -- "${index_file}" "${WORKTREE_GITDIR_TO_CLEAN}/"; then
+        echo "${SCRIPT_NAME}: ERROR: cannot copy ${index_file} to ${WORKTREE_GITDIR_TO_CLEAN}" >&2
+        exit 1
+      fi
+    done
     ;;
 esac
 WORKTREE_TO_CLEAN=""

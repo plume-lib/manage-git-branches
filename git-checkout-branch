@@ -19,7 +19,7 @@
 # directory already has the branch checked out, git refuses, naming that
 # directory.
 #
-# A repository that has submodules is an exception, because git does not
+# A branch that has submodules is an exception, because git does not
 # support a submodule in more than one worktree.  There, the new directory is
 # a copy of the whole current directory, `.git` included, in which the branch
 # is then checked out:  an independent clone, which carries along the current
@@ -31,6 +31,17 @@
 # move it with `git worktree move`.
 #
 # This command requires git 2.31 or later.
+
+# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to the
+# commands run by `git rebase --exec`, `git bisect run`, and
+# `git submodule foreach`.  They take precedence over the location of a working
+# tree, so leaving them set would make git commands that this script runs in
+# the new directory act on the current repository instead.  For example,
+# `git worktree add` would write the new worktree's index over the file that
+# $GIT_INDEX_FILE names, discarding the changes that are staged there.
+unset GIT_DIR
+unset GIT_WORK_TREE
+unset GIT_INDEX_FILE
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
@@ -102,35 +113,18 @@ if ! cd "${TOPLEVEL}"; then
   exit 1
 fi
 
-# A repository with submodules gets a copy of this directory rather than a
-# worktree, because git does not support a submodule in more than one
-# worktree.  `git-new-branch` explains the problem.
-if [ -e "${TOPLEVEL}/.gitmodules" ]; then
-  COPY=1
-else
-  COPY=0
-fi
-
-# Refuse, before anything expensive happens -- before the `git pull`, before
-# any query to a remote, and before the copy -- a working tree that does not
-# hold its own `.git` directory:  one whose `.git` is a file (a submodule's
-# working tree, a linked worktree, or the working tree of a repository made
-# with `--separate-git-dir`), one whose `.git` is a symbolic link, and one
-# that has no `.git` at all.  Copying such a working tree, `.git` included,
-# produces a directory that shares this one's git directory, and the checkout
-# then moves this working tree's HEAD and rewrites its index.
+# Refuse, before anything expensive happens -- before the `git pull` and
+# before any query to a remote -- a working tree that does not hold its own
+# `.git` directory, unless it is a linked worktree:  one whose `.git` is a file
+# (a submodule's working tree, or the working tree of a repository made with
+# `--separate-git-dir`), one whose `.git` is a symbolic link, and one that has
+# no `.git` at all.  `git worktree add` copies nothing, so a linked worktree is
+# accepted:  the new worktree is registered in the repository that this one
+# belongs to.  The copy that a branch with submodules gets, below, accepts
+# only a `.git` directory, but which branch to check out is known only later.
 # `check_git_dir_is_directory`, in remote-functions.sh, explains the mechanism
 # and prints the diagnostic.
-#
-# `git worktree add` copies nothing, so a linked worktree is accepted unless
-# this repository has submodules:  the new worktree is registered in the
-# repository that this one belongs to.
-if [ "${COPY}" -eq 1 ]; then
-  check_git_dir_accept=''
-else
-  check_git_dir_accept='linked-worktree'
-fi
-if ! check_git_dir_is_directory "${TOPLEVEL}" "${check_git_dir_accept}"; then
+if ! check_git_dir_is_directory "${TOPLEVEL}" 'linked-worktree'; then
   exit 1
 fi
 
@@ -364,6 +358,22 @@ esac
 if [ -e "${BRANCHDIR}" ]; then
   echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
   exit 1
+fi
+
+# A branch with submodules gets a copy of this directory rather than a
+# worktree, because git does not support a submodule in more than one
+# worktree.  `git-new-branch` explains the problem.  A copy includes `.git`,
+# and copying a `.git` that is not a directory produces a directory that
+# shares this one's git directory, so the checkout would move this working
+# tree's HEAD and rewrite its index; this linked worktree is refused now.
+if has_gitlinks "${CHECKOUT_START_POINT:-refs/heads/${BRANCHNAME}}"; then
+  if ! check_git_dir_is_directory "${TOPLEVEL}"; then
+    echo "${SCRIPT_NAME}: Branch ${BRANCHNAME} has submodules, which a worktree cannot hold, so the new directory must be a copy of this one." >&2
+    exit 1
+  fi
+  COPY=1
+else
+  COPY=0
 fi
 
 # Create the branch from the start point that `find_branch` chose, rather than

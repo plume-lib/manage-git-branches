@@ -31,7 +31,7 @@ The commands are:
   [below](#worktrees)) that holds a fresh checkout of the branch:  it does
   not inherit the current directory's uncommitted changes, untracked files,
   or build output, so the first build there is a full one.  A branch can be
-  checked out in only one directory at a time.  A repository that has
+  checked out in only one directory at a time.  A branch that has
   submodules gets a copy of the whole directory instead, which is an
   independent clone.
   Below is a definition for an alias `gcb`.
@@ -45,7 +45,7 @@ The commands are:
   same as the current directory's, including uncommitted changes and
   untracked files.  With `--clean`, it is a worktree that holds a clean
   checkout and nothing else.  With `--copy`, it is a copy of the whole
-  directory, `.git` included, and so an independent clone; a repository
+  directory, `.git` included, and so an independent clone; a working tree
   that has submodules always gets this.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
@@ -219,7 +219,7 @@ not copied.  This has some consequences:
   `git rev-parse --show-toplevel`.
 * The branch directories share their configuration, hooks, and branches:
   `git config` in one affects all of them.
-* A repository that has submodules is an exception.  Git does not support a
+* A branch that has submodules is an exception.  Git does not support a
   submodule in more than one worktree, so `git-new-branch` and
   `git-checkout-branch` make a full copy instead, which is an independent
   clone.

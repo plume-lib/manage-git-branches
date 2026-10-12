@@ -344,11 +344,11 @@ if [ "$(working_tree_state "${symlinked}")" != "${symlinked_before}" ]; then
 fi
 
 # A working tree that holds no `.git` at all, because GIT_DIR and
-# GIT_WORK_TREE in the environment name its repository, is refused too.  The
-# copy would hold no repository, and the environment would still name this
-# working tree's git directory, so the checkout would move this working
-# tree's HEAD.  `env` sets the two variables for the command under test
-# alone, rather than for this test, whose other cases must not see them.
+# GIT_WORK_TREE in the environment name its repository, is refused too:  the
+# command unsets the two variables, which a hook would otherwise pass to the
+# git commands that it runs in the new directory, so it finds no repository.
+# `env` sets the two variables for the command under test alone, rather than
+# for this test, whose other cases must not see them.
 envdir_parent="${tmpdir}/envgitdir"
 mkdir -p "${envdir_parent}" || exit 1
 envdir_parent="$(CDPATH='' cd -- "${envdir_parent}" && pwd -P)" || exit 1
@@ -362,7 +362,7 @@ if out="$(cd "${envtree}" \
   fail "zero exit status in a working tree that has no .git"
 fi
 case "${out}" in
-  *"${envtree} has no .git"*) ;;
+  *"Cannot determine top-level directory"*) ;;
   *) fail "unexpected message in a working tree that has no .git: ${out}" ;;
 esac
 for leftover in "${envdir_parent}/env-branch-newname" \
@@ -671,6 +671,82 @@ case "${out}" in
 esac
 check_nothing_left "${superproject}" fromsublinked \
   "a linked worktree of a repository with submodules"
+
+# GIT_INDEX_FILE, which git exports to hooks, does not redirect the new
+# worktree's checkout onto this working tree's index, which would discard its
+# staged changes.
+envindex="${tmpdir}/envindex-branch-main"
+make_repo "${envindex}" || exit 1
+echo 'staged' > "${envindex}/staged.txt"
+git -C "${envindex}" add staged.txt
+envindex_before="$(status_of "${envindex}")"
+if ! out="$(cd "${envindex}" \
+  && env GIT_INDEX_FILE="$(git rev-parse --absolute-git-dir)/index" \
+    "${GIT_NEW_BRANCH}" --clean fromenvindex 2>&1)"; then
+  fail "nonzero exit status with GIT_INDEX_FILE set: ${out}"
+fi
+if [ "$(status_of "${envindex}")" != "${envindex_before}" ]; then
+  fail "GIT_INDEX_FILE: the staged changes of the source changed"
+fi
+if [ -n "$(status_of "${tmpdir}/envindex-branch-fromenvindex")" ]; then
+  fail "GIT_INDEX_FILE: the --clean worktree is not clean"
+fi
+
+# Under core.splitIndex, the index that the default mode copies names a
+# shared index file, which must be copied too.
+split="${tmpdir}/split-branch-main"
+make_repo "${split}" || exit 1
+git -C "${split}" config core.splitIndex true
+echo 'staged' > "${split}/staged.txt"
+git -C "${split}" add staged.txt
+if ! out="$(cd "${split}" && "${GIT_NEW_BRANCH}" fromsplit 2>&1)"; then
+  fail "nonzero exit status under core.splitIndex: ${out}"
+elif ! split_status="$(status_of "${tmpdir}/split-branch-fromsplit" 2>&1)"; then
+  fail "core.splitIndex: git status fails in the new worktree: ${split_status}"
+elif [ "${split_status}" != "$(status_of "${split}")" ]; then
+  fail "core.splitIndex: the new worktree's status differs from the source's"
+fi
+
+# The default mode and `--copy` refuse while a merge is in progress, because
+# the new directory would get the staged result without the merge.
+# `--clean` carries no changes, so it is accepted.
+merging="${tmpdir}/merging-branch-main"
+make_repo "${merging}" || exit 1
+git -C "${merging}" checkout -q localonly
+echo 'other' > "${merging}/other.txt"
+git -C "${merging}" add other.txt
+git -C "${merging}" commit -q -m 'Other side'
+git -C "${merging}" checkout -q main
+git -C "${merging}" merge -q --no-commit --no-ff localonly > /dev/null 2>&1
+if out="$(cd "${merging}" && "${GIT_NEW_BRANCH}" frommerging 2>&1)"; then
+  fail "zero exit status while a merge is in progress"
+fi
+case "${out}" in
+  *"a merge is in progress"*) ;;
+  *) fail "unexpected message while a merge is in progress: ${out}" ;;
+esac
+check_nothing_left "${merging}" frommerging "a merge in progress"
+if out="$(cd "${merging}" && "${GIT_NEW_BRANCH}" --copy frommerging 2>&1)"; then
+  fail "zero exit status for --copy while a merge is in progress"
+fi
+check_nothing_left "${merging}" frommerging "--copy with a merge in progress"
+if ! out="$(cd "${merging}" && "${GIT_NEW_BRANCH}" --clean frommerging 2>&1)"; then
+  fail "nonzero exit status for --clean while a merge is in progress: ${out}"
+fi
+
+# A `.gitmodules` that names no submodule that the index holds does not make
+# the default mode copy the repository.
+stalemodules="${tmpdir}/stalemodules-branch-main"
+make_repo "${stalemodules}" || exit 1
+printf '[submodule "gone"]\n\tpath = gone\n\turl = ../gone\n' \
+  > "${stalemodules}/.gitmodules"
+git -C "${stalemodules}" add .gitmodules
+git -C "${stalemodules}" commit -q -m 'Add a .gitmodules without submodules'
+if ! out="$(cd "${stalemodules}" && "${GIT_NEW_BRANCH}" fromstale 2>&1)"; then
+  fail "nonzero exit status with a .gitmodules but no submodule: ${out}"
+elif [ ! -f "${tmpdir}/stalemodules-branch-fromstale/.git" ]; then
+  fail "a .gitmodules but no submodule: the new directory is not a worktree"
+fi
 
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then

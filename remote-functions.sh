@@ -165,9 +165,20 @@ branch_cleanup() {
 ## function never runs `git worktree prune` to smooth that over, because prune
 ## also deletes the registration of a worktree that the user moved with `mv`,
 ## which cannot be repaired afterward.
+##
+## WORKTREE must not exist; if it does, this function exits with status 1.
+## It tests for WORKTREE itself, even when the caller already has, so that
+## nothing slow -- a remote query or a copy -- runs between the test and the
+## recording of WORKTREE.  Otherwise a directory that another process created
+## in between would make the add fail, and the traps would then remove that
+## directory, which this command did not create.
 add_worktree() {
   add_worktree_dir="$1"
   add_worktree_branch="$2"
+  if [ -e "${add_worktree_dir}" ] || [ -L "${add_worktree_dir}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: directory exists: ${add_worktree_dir}" >&2
+    exit 1
+  fi
   if [ "$#" -lt 3 ]; then
     WORKTREE_TO_CLEAN="${add_worktree_dir}"
     # WORKTREE is absolute, so it cannot be mistaken for an option.
@@ -192,6 +203,21 @@ add_worktree() {
     "${add_worktree_dir}" "${add_worktree_start}"; then
     echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${add_worktree_dir}" >&2
     exit 1
+  fi
+}
+
+## Usage: has_gitlinks [TREE-ISH]
+## Succeeds if TREE-ISH, or the index of the current working tree if TREE-ISH
+## is omitted, contains a submodule, which git records as a gitlink, an entry
+## of mode 160000.  This is the question that matters for making a worktree,
+## rather than whether `.gitmodules` exists:  that file can outlive the last
+## submodule, and the working tree that this command runs in can hold
+## submodules that the branch to be checked out does not, or the reverse.
+has_gitlinks() {
+  if [ "$#" -eq 0 ]; then
+    git ls-files --stage | grep -q '^160000 '
+  else
+    git ls-tree -r "$1" | grep -q '^160000 '
   fi
 }
 
@@ -295,9 +321,9 @@ check_git_dir_is_directory() {
     return 1
   fi
   if [ ! -e "$1/.git" ]; then
-    echo "${SCRIPT_NAME}: ERROR: $1 has no .git, so its git directory is named by the environment or by configuration elsewhere." >&2
+    echo "${SCRIPT_NAME}: ERROR: $1 has no .git, so its git directory is named by configuration elsewhere, such as core.worktree." >&2
     echo "${SCRIPT_NAME}: A copy of it would hold no repository, and the checkout would move this working tree's HEAD and rewrite its index." >&2
-    echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a working tree that holds its own .git directory, with GIT_DIR and GIT_WORK_TREE unset." >&2
+    echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a working tree that holds its own .git directory." >&2
     return 1
   fi
   check_git_dir_superproject="$(git -C "$1" rev-parse \

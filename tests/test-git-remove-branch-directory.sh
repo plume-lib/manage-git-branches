@@ -371,7 +371,7 @@ run_command "a submodule's working tree" 1 --force \
   "${work}/submodule/super-branch-main/sub"
 check_present "a submodule's working tree" \
   "${work}/submodule/super-branch-main/sub"
-check_message "a submodule's working tree" "it is not a linked worktree"
+check_message "a submodule's working tree" "it is a submodule's working tree"
 if [ "$(working_tree_state "${work}/submodule/super-branch-main/sub")" \
   != "${submodule_before}" ]; then
   fail "a submodule's working tree: its HEAD or index changed"
@@ -542,6 +542,26 @@ if git -C "${wthost}" worktree add -q --relative-paths -b wtrelative \
   check_unregistered 'a removed linked worktree with relative paths' \
     "${wthost}" "${work}/myrepo-branch-wtrelative" wtrelative
 fi
+
+# A removed linked worktree whose path contains a backslash is matched to its
+# registration, which awk's `-v` would not do, because it reads a backslash
+# as an escape.
+git -C "${wthost}" worktree add -q -b wtbackslash "${work}/myrepo-branch-wt\\back"
+rm -rf "${work}/myrepo-branch-wt\\back"
+run_command 'a removed linked worktree with a backslash' 0 \
+  --repository "${wthost}" "${work}/myrepo-branch-wt\\back"
+check_unregistered 'a removed linked worktree with a backslash' \
+  "${wthost}" "${work}/myrepo-branch-wt\\back" wtbackslash
+
+# A worktree on a branch that has no commit yet is refused, with a message
+# that names the branch.
+git -C "${wthost}" worktree add -q -b wtunborn "${work}/myrepo-branch-wtunborn"
+git -C "${work}/myrepo-branch-wtunborn" checkout -q --orphan wtorphan
+run_command 'a worktree on an unborn branch' 1 --force \
+  "${work}/myrepo-branch-wtunborn"
+check_present 'a worktree on an unborn branch' "${work}/myrepo-branch-wtunborn"
+check_message 'a worktree on an unborn branch' \
+  "its branch wtorphan has no commit yet"
 
 # The repository defaults to the current directory, when that is a working
 # tree.

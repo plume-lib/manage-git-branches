@@ -331,7 +331,7 @@ fi
 # rewrites the source's index -- data loss in a working tree that the user did
 # not name.  The cases have different remedies, so each message names the
 # right one.  A linked worktree is the exception:  `git worktree add` copies
-# nothing, so it is accepted, except in a repository with submodules.
+# nothing, so it is accepted, except for a branch with submodules.
 
 submodule_parent="${tmpdir}/submodule"
 mkdir -p "${submodule_parent}" || exit 1
@@ -450,11 +450,11 @@ if [ "$(working_tree_state "${symlinked}")" != "${symlinked_before}" ]; then
 fi
 
 # A working tree that holds no `.git` at all, because GIT_DIR and
-# GIT_WORK_TREE in the environment name its repository, is refused too.  The
-# copy would hold no repository, and the environment would still name this
-# working tree's git directory, so the checkout would move this working
-# tree's HEAD.  `env` sets the two variables for the command under test
-# alone, rather than for this test, whose other cases must not see them.
+# GIT_WORK_TREE in the environment name its repository, is refused too:  the
+# command unsets the two variables, which a hook would otherwise pass to the
+# git commands that it runs in the new directory, so it finds no repository.
+# `env` sets the two variables for the command under test alone, rather than
+# for this test, whose other cases must not see them.
 envdir_parent="${tmpdir}/envgitdir"
 mkdir -p "${envdir_parent}" || exit 1
 envdir_parent="$(CDPATH='' cd -- "${envdir_parent}" && pwd -P)" || exit 1
@@ -468,7 +468,7 @@ if out="$(cd "${envtree}" \
   fail "zero exit status in a working tree that has no .git"
 fi
 case "${out}" in
-  *"${envtree} has no .git"*) ;;
+  *"Cannot determine top-level directory"*) ;;
   *) fail "unexpected message in a working tree that has no .git: ${out}" ;;
 esac
 for leftover in "${envdir_parent}/env-branch-extra" \
@@ -523,7 +523,7 @@ if [ "$(git -C "${fresh}" status --porcelain --ignored)" != "${fresh_status}" ] 
   fail "the source's status, HEAD, or index changed"
 fi
 
-# A repository with submodules gets a copy of the whole directory, which is an
+# A branch with submodules gets a copy of the whole directory, which is an
 # independent clone, rather than a worktree.
 git -C "${superproject}" branch extra-super
 if ! out="$(cd "${superproject}" && "${GIT_CHECKOUT_BRANCH}" extra-super 2>&1)"; then
@@ -538,6 +538,17 @@ if [ "$(git -C "${super_extra}" rev-parse --abbrev-ref HEAD)" != 'extra-super' ]
 fi
 if ! git -C "${super_extra}/sub" status > /dev/null 2>&1; then
   fail "the submodule of the checkout in a repository with submodules is not usable"
+fi
+
+# Whether a branch has submodules is decided by the branch, not by the
+# working tree that the command runs in:  a branch of a repository with
+# submodules that itself has none gets a worktree.
+git -C "${superproject}" branch nosub-super HEAD~1
+if ! out="$(cd "${superproject}" && "${GIT_CHECKOUT_BRANCH}" nosub-super 2>&1)"; then
+  fail "nonzero exit status for a branch without submodules: ${out}"
+fi
+if [ ! -f "${submodule_parent}/super-branch-nosub-super/.git" ]; then
+  fail "the checkout of a branch without submodules is not a worktree"
 fi
 
 # The wrong number of arguments is an error.
