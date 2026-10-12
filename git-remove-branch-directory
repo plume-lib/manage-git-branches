@@ -41,6 +41,9 @@
 #    which are all that the removal deletes, and a commit also counts as held
 #    if another branch holds it.  Its commits remain in the shared repository
 #    until `git gc`, so `git fsck --lost-found` can recover them for a while.
+#    For a clone and a linked worktree, the question is also asked of every
+#    checked-out submodule, about every ref, because the submodule's
+#    repository goes with the directory.
 #
 # `--force` waives both.  Each refusal names the check, says how much would be
 # lost, and quotes the flag that waives it; each waiver says on standard error
@@ -92,26 +95,6 @@
 # `git-orphaned-branches` and `is-deleted-branch` answer that question, and a
 # user who names a directory has already decided.
 
-# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to the
-# commands run by `git rebase --exec`, `git bisect run`, and
-# `git submodule foreach`.  They take precedence over the `-C` argument of
-# `git`, so leaving them set would make every check below ask about whatever
-# repository the caller happened to be working in, rather than about the
-# directory that `rm -rf` is about to take:  a directory with uncommitted
-# changes and unpushed commits would be classified and cleared by the answers
-# of some other, clean repository.
-#
-# $GIT_INDEX_FILE names the index alone, and the uncommitted-changes check is
-# the one that reads an index.  A modified tracked file is still caught through
-# a foreign index, because it differs from whatever the index holds, but work
-# that exists *only* in the index is not:  a file that was created and staged
-# and never committed is absent from the foreign index, so it is untracked
-# there, and `--untracked-files=no` then says nothing about it.  Such a
-# directory would be removed, silently and with exit status 0.
-unset GIT_DIR
-unset GIT_WORK_TREE
-unset GIT_INDEX_FILE
-
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
 # invoked through a symbolic link from elsewhere, such as ~/bin.
@@ -157,6 +140,21 @@ if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
 fi
 # shellcheck source=remote-functions.sh
 . "${SCRIPT_DIR}/remote-functions.sh"
+
+# Without this, every check below would ask about whatever repository the
+# caller happened to be working in, rather than about the directory that
+# `rm -rf` is about to take:  a directory with uncommitted changes and unpushed
+# commits would be classified and cleared by the answers of some other, clean
+# repository.
+#
+# $GIT_INDEX_FILE names the index alone, and the uncommitted-changes check is
+# the one that reads an index.  A modified tracked file is still caught through
+# a foreign index, because it differs from whatever the index holds, but work
+# that exists *only* in the index is not:  a file that was created and staged
+# and never committed is absent from the foreign index, so it is untracked
+# there, and `--untracked-files=no` then says nothing about it.  Such a
+# directory would be removed, silently and with exit status 0.
+unset_git_location_variables
 
 usage() {
   echo "Usage: ${SCRIPT_NAME} [--force] [--force-uncommitted] [--force-unpushed] [--repository DIR] [--] DIRECTORY..." >&2
@@ -325,6 +323,44 @@ check_worktree_unpushed() {
       remove_refusals=1
     else
       echo "${SCRIPT_NAME}: ${check_worktree_unpushed_dir}: --force-unpushed: deleting ${check_worktree_unpushed_count} commit(s) that are on no other branch, remote-tracking ref, or tag; until \`git gc\` runs, \`git fsck --lost-found\` can recover them" >&2
+    fi
+  fi
+}
+
+# Asks each checked-out submodule of the working tree $1, recursively, the
+# question that the check of a clone asks:  does it hold commits that no
+# remote-tracking ref and no tag holds?  Sets remove_refusals to 1 if the
+# removal must not proceed.
+#
+# A submodule's git directory lies in the git directory of the working tree
+# that holds it, or in the submodule's own working tree, so removing that
+# working tree destroys the submodule's repository, whatever kind of working
+# tree it is.  The checks of the superproject do not see those commits:
+# `git status` reports a submodule whose HEAD differs from the commit that the
+# superproject records, but not a commit on a submodule branch that is not
+# checked out, nor a commit that the superproject records but that was never
+# pushed from the submodule.  `git submodule foreach` visits only checked-out
+# submodules; the git directory of one that `git submodule deinit` has
+# removed from the working tree is not asked about.
+check_submodules_unpushed() {
+  # shellcheck disable=SC2016 # The expansions are for the inner shell.
+  if ! check_submodules_counts="$(git -C "$1" submodule --quiet foreach \
+    --recursive 'count="$(git rev-list --count --all --not --remotes --tags)" \
+      && printf "%s %s\n" "${count}" "${displaypath}"' 2> /dev/null)"; then
+    echo "${SCRIPT_NAME}: refusing to remove $1: cannot tell whether its submodules hold commits that no other ref holds" >&2
+    remove_refusals=1
+    return
+  fi
+  check_submodules_total="$(printf '%s\n' "${check_submodules_counts}" \
+    | awk '{ n += $1 } END { print n + 0 }')"
+  check_submodules_paths="$(printf '%s\n' "${check_submodules_counts}" \
+    | awk '$1 > 0 { sub(/^[0-9]+ /, ""); printf "%s%s", sep, $0; sep = ", " }')"
+  if [ "${check_submodules_total}" -gt 0 ]; then
+    if [ "${force_unpushed}" -eq 0 ]; then
+      echo "${SCRIPT_NAME}: refusing to remove $1: ${check_submodules_total} commit(s) in submodule(s) ${check_submodules_paths} are on no remote-tracking ref or tag; re-run with --force-unpushed" >&2
+      remove_refusals=1
+    else
+      echo "${SCRIPT_NAME}: $1: --force-unpushed: deleting ${check_submodules_total} commit(s) in submodule(s) ${check_submodules_paths} that are on no remote-tracking ref or tag" >&2
     fi
   fi
 }
@@ -599,10 +635,10 @@ remove_branch_directory() {
     remove_status_failed=0
     if [ "${remove_kind}" != 'within-working-tree' ]; then
       remove_modified="$(git -C "${remove_dir}" status --porcelain \
-        --untracked-files=no 2> /dev/null)" || remove_status_failed=1
+        --untracked-files=no --ignore-submodules=none 2> /dev/null)" || remove_status_failed=1
     else
       remove_modified="$(git -C "${remove_dir}" status --porcelain \
-        --untracked-files=no -- . 2> /dev/null)" || remove_status_failed=1
+        --untracked-files=no --ignore-submodules=none -- . 2> /dev/null)" || remove_status_failed=1
     fi
     remove_modified_count="$(line_count "${remove_modified}")"
     if [ "${remove_status_failed}" -ne 0 ]; then
@@ -663,6 +699,11 @@ remove_branch_directory() {
       "${remove_branch}" "${remove_dir}"
   fi
 
+  if [ "${remove_kind}" = 'working-tree' ] \
+    || [ "${remove_kind}" = 'linked-worktree' ]; then
+    check_submodules_unpushed "${remove_dir}"
+  fi
+
   if [ "${remove_refusals}" -ne 0 ]; then
     return 1
   fi
@@ -672,8 +713,11 @@ remove_branch_directory() {
     # modification, including the ignored build output that these
     # directories are full of; the checks above have decided what is safe.
     # If git cannot remove it -- its registration names some other path,
-    # say, because it was moved with `mv` -- remove the directory and the one
-    # administrative directory that is its own, rather than pruning.
+    # say, because it was moved with `mv`, or it holds submodules, which git
+    # never removes -- remove the directory and the one administrative
+    # directory that is its own, rather than pruning.  That administrative
+    # directory holds the submodules' repositories, which
+    # `check_submodules_unpushed` has asked about.
     if ! git --git-dir="${remove_common}" worktree remove --force \
       "${remove_dir}" > /dev/null 2>&1; then
       if ! rm -rf -- "${remove_dir}" || ! rm -rf -- "${remove_gitdir}"; then

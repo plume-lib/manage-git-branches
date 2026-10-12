@@ -9,6 +9,19 @@
 # from that directory.  It must also set ${SCRIPT_NAME} to its own name, which
 # the diagnostics below use.
 
+## Usage: unset_git_location_variables
+## Unsets $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE.  Git exports them to
+## hooks and to the commands run by `git rebase --exec`, `git bisect run`, and
+## `git submodule foreach`.  They take precedence over the location of a
+## working tree, including the `-C` argument of `git`, so a command that runs
+## git in a directory other than the caller's must unset them before it runs
+## git at all.
+unset_git_location_variables() {
+  unset GIT_DIR
+  unset GIT_WORK_TREE
+  unset GIT_INDEX_FILE
+}
+
 ## Usage: require_git MINOR [WHY]
 ## Exits with status 1, after printing a diagnostic, unless git is version
 ## 2.MINOR or later.  WHY, if given, says why that version is needed.
@@ -219,6 +232,81 @@ has_gitlinks() {
   else
     git ls-tree -r "$1" | grep -q '^160000 '
   fi
+}
+
+## Usage: copy_repository DESTINATION
+## Copies the current directory, the top level of a working tree whose `.git`
+## is a directory, to DESTINATION, which must not exist, so that DESTINATION
+## is an independent clone.  Exits on failure.
+##
+## The copy's `.git/worktrees` is removed.  It holds the registrations of this
+## repository's linked worktrees, which belong to this repository alone:  in
+## the copy they would make git refuse to check out those worktrees'
+## branches, let `git worktree remove` run from the copy delete those
+## worktrees, and make git-remove-branch-directory refuse to remove the copy.
+## `git worktree prune` would not remove them, because the worktrees exist.
+copy_repository() {
+  if ! \cp -Rp -- . "$1"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to $1" >&2
+    exit 1
+  fi
+  if ! rm -rf -- "$1/.git/worktrees"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot remove $1/.git/worktrees" >&2
+    exit 1
+  fi
+  remove_borrowed_working_trees "$1"
+}
+
+## Usage: remove_borrowed_working_trees DIRECTORY
+## Removes from DIRECTORY, a copy just made, each nested working tree whose
+## git directory lies outside DIRECTORY, and says on standard error which ones
+## it removed.  Exits on failure.
+##
+## Such a working tree, typically an ignored linked worktree such as
+## `.claude/worktrees/NAME`, has a `.git` file, or a symbolic link, that the
+## copy keeps unchanged, so the copy names the *same* git directory as the
+## original:  a commit or a checkout in the copy would move the original's
+## HEAD and rewrite its index.  A nested working tree whose git directory
+## does lie inside DIRECTORY -- a submodule of a copied repository, or a
+## nested clone, whose `.git` is a directory -- is independent, and is kept.
+## A `.git` that names no usable git directory is removed too.  Git
+## disregards a `.git` symbolic link whose target is missing, and searches the
+## parent directories instead, so a git directory counts only if git also
+## reports the nested directory as the top level of its working tree.
+##
+## The nested `.git` entries are all found before any is removed, so that
+## `find` does not traverse a directory that is being deleted.  `find`'s
+## output is one pathname per line, so a line is acted on only if it names an
+## existing `.git` entry within DIRECTORY; a pathname that contains a newline
+## splits into lines that are not, and is left alone.
+remove_borrowed_working_trees() {
+  if ! remove_borrowed_top="$(physical_path "$1")" \
+    || ! remove_borrowed_list="$(find "$1" -name .git -type d -prune \
+      -o -name .git -print)"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot search $1 for nested working trees" >&2
+    exit 1
+  fi
+  printf '%s\n' "${remove_borrowed_list}" | while IFS= read -r remove_borrowed_git; do
+    case "${remove_borrowed_git}" in "$1"/*/.git) ;; *) continue ;; esac
+    if [ ! -e "${remove_borrowed_git}" ] && [ ! -L "${remove_borrowed_git}" ]; then
+      continue
+    fi
+    remove_borrowed_dir="${remove_borrowed_git%/.git}"
+    if remove_borrowed_gitdir="$(git -C "${remove_borrowed_dir}" rev-parse \
+      --absolute-git-dir 2> /dev/null)" \
+      && remove_borrowed_gitdir="$(physical_path "${remove_borrowed_gitdir}" 2> /dev/null)" \
+      && remove_borrowed_toplevel="$(git -C "${remove_borrowed_dir}" rev-parse \
+        --show-toplevel 2> /dev/null)" \
+      && [ "$(physical_path "${remove_borrowed_toplevel}" 2> /dev/null)" \
+        = "$(physical_path "${remove_borrowed_dir}" 2> /dev/null)" ]; then
+      case "${remove_borrowed_gitdir}/" in "${remove_borrowed_top}"/*) continue ;; esac
+    fi
+    echo "${SCRIPT_NAME}: not copying ${remove_borrowed_dir#"$1"/}, a working tree of a repository outside the copy" >&2
+    if ! rm -rf -- "${remove_borrowed_dir}"; then
+      echo "${SCRIPT_NAME}: ERROR: cannot remove ${remove_borrowed_dir}" >&2
+      exit 1
+    fi
+  done || exit 1
 }
 
 ## Usage: check_git_dir_is_directory DIRECTORY [ACCEPT]

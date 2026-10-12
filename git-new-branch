@@ -21,6 +21,11 @@
 #    directory, `.git` included, so it is an independent clone that shares
 #    nothing with the current repository.
 #
+# The default mode and `--copy` leave out a nested working tree whose git
+# directory lies outside the new directory, such as an ignored linked worktree
+# in `.claude/worktrees/`, because its copy would share that working tree's
+# HEAD and index; they say which ones they left out.
+#
 # A working tree that has submodules gets `--copy` automatically, because git
 # does not support a submodule in more than one worktree, and `--clean` is
 # refused when the current commit has submodules.  A repository that has no
@@ -48,18 +53,8 @@
 #    directory is no longer a working tree.  Use `git worktree move` instead,
 #    or run `git worktree repair` in a directory that was already moved.
 #
-# This command requires git 2.31 or later.
-
-# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to the
-# commands run by `git rebase --exec`, `git bisect run`, and
-# `git submodule foreach`.  They take precedence over the location of a working
-# tree, so leaving them set would make git commands that this script runs in
-# the new directory act on the current repository instead.  For example,
-# `git worktree add` would write the new worktree's index over the file that
-# $GIT_INDEX_FILE names, discarding the changes that are staged there.
-unset GIT_DIR
-unset GIT_WORK_TREE
-unset GIT_INDEX_FILE
+# This command requires git 2.31 or later, and its default mode requires git
+# 2.36 or later in a sparse checkout or with per-worktree configuration.
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
@@ -109,6 +104,12 @@ fi
 # shellcheck source=remote-functions.sh
 . "${SCRIPT_DIR}/remote-functions.sh"
 
+# Without this, git commands that this script runs in the new directory would
+# act on the current repository instead.  For example, `git worktree add` would
+# write the new worktree's index over the file that $GIT_INDEX_FILE names,
+# discarding the changes that are staged there.
+unset_git_location_variables
+
 usage() {
   echo "Usage: ${SCRIPT_NAME} [--clean | --copy] NEWBRANCHNAME" >&2
 }
@@ -148,7 +149,10 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
-# For `git rev-parse --path-format=absolute`.
+# This command needs nothing that git 2.31 added, but the worktrees that it
+# makes are safely removed only by `git-remove-branch-directory`, which needs
+# git 2.31.  Making a worktree that cannot be removed safely would be worse
+# than refusing to make it.
 require_git 31
 
 trap_branch_cleanup
@@ -192,6 +196,18 @@ case "${MODE}" in
     fi
     ;;
 esac
+
+# The default mode copies this working tree's index, whose skip-worktree bits
+# a sparse checkout sets according to its patterns, which lie in this working
+# tree's own git directory, as does its per-worktree configuration.  Git 2.36
+# and later give the new worktree both, in `git worktree add`; with an older
+# git, the new worktree would have the index without the patterns that it
+# depends on.
+if [ "${MODE}" = 'worktree' ] \
+  && { [ "$(git config --bool core.sparseCheckout)" = 'true' ] \
+    || [ "$(git config --bool extensions.worktreeConfig)" = 'true' ]; }; then
+  require_git 36 'for a sparse checkout or per-worktree configuration, unless given --clean or --copy'
+fi
 
 # Refuse a working tree that does not hold its own `.git` directory, before
 # anything expensive happens:  before the `git pull`, before any query to a
@@ -406,10 +422,7 @@ case "${MODE}" in
     # an independent clone.  It is not a registered worktree, so moving it
     # with `mv` is safe.
     make_tmpdir
-    if ! \cp -Rp -- . "${BRANCH_TMPDIR}"; then
-      echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
-      exit 1
-    fi
+    copy_repository "${BRANCH_TMPDIR}"
     if ! (cd -- "${BRANCH_TMPDIR}" && git checkout -b "${BRANCHNAME}" -q); then
       echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)" >&2
       exit 1
@@ -458,6 +471,7 @@ case "${MODE}" in
         exit 1
       fi
     done
+    remove_borrowed_working_trees "${BRANCH_TMPDIR}"
 
     # 2. Create the worktree.  With `--no-checkout`, git creates ${BRANCHDIR}
     # holding nothing but the `.git` file, rather than writing tracked files

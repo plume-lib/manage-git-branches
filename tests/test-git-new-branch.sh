@@ -538,6 +538,10 @@ fi
 if git -C "${modes}" worktree list --porcelain | grep -q -x -F "worktree ${copied}"; then
   fail "--copy's directory is registered as a worktree"
 fi
+# The source has linked worktrees by now; their registrations stay with it.
+if [ "$(git -C "${copied}" worktree list --porcelain | grep -c '^worktree ')" -ne 1 ]; then
+  fail "--copy holds the source's worktree registrations: $(git -C "${copied}" worktree list)"
+fi
 if [ "$(git -C "${copied}" symbolic-ref HEAD)" != 'refs/heads/copied' ]; then
   fail "--copy did not check out the branch copied"
 fi
@@ -617,6 +621,44 @@ case "${out}" in
   *) fail "unexpected message with git 2.30.0: ${out}" ;;
 esac
 check_nothing_left "${modes}" ancient "git 2.30.0"
+
+# A sparse checkout:  the default mode gives the new worktree the index's
+# skip-worktree bits and the patterns that they depend on, which only git 2.36
+# and later copy, so an older git is refused.
+sparse="${tmpdir}/sparse/sparse-branch-main"
+make_repo "${sparse}" || exit 1
+mkdir "${sparse}/in" "${sparse}/out"
+echo 'in' > "${sparse}/in/in.txt"
+echo 'out' > "${sparse}/out/out.txt"
+git -C "${sparse}" add in out
+git -C "${sparse}" commit -q -m 'Add directories'
+git -C "${sparse}" sparse-checkout set in
+make_fake_git "${tmpdir}/sparsegit" version 0 'git version 2.35.0'
+if out="$(cd "${sparse}" && PATH="${tmpdir}/sparsegit:${PATH}" \
+  "${GIT_NEW_BRANCH}" oldsparse 2>&1)"; then
+  fail "zero exit status for a sparse checkout with git 2.35.0"
+fi
+case "${out}" in
+  *"requires git 2.36 or later for a sparse checkout"*) ;;
+  *) fail "unexpected message for a sparse checkout with git 2.35.0: ${out}" ;;
+esac
+check_nothing_left "${sparse}" oldsparse "a sparse checkout with git 2.35.0"
+if ! out="$(cd "${sparse}" && "${GIT_NEW_BRANCH}" newsparse 2>&1)"; then
+  fail "nonzero exit status for a sparse checkout: ${out}"
+fi
+newsparse="${tmpdir}/sparse/sparse-branch-newsparse"
+if [ "$(git -C "${newsparse}" sparse-checkout list)" != 'in' ]; then
+  fail "a sparse checkout: the new worktree's patterns are [$(git -C "${newsparse}" sparse-checkout list)]"
+fi
+if [ -n "$(status_of "${newsparse}")" ] || [ -e "${newsparse}/out" ]; then
+  fail "a sparse checkout: the new worktree is not the same sparse checkout: $(status_of "${newsparse}")"
+fi
+# The same old git is accepted for a working tree that is not a sparse
+# checkout.
+if ! out="$(cd "${modes}" && PATH="${tmpdir}/sparsegit:${PATH}" \
+  "${GIT_NEW_BRANCH}" notsparse 2>&1)"; then
+  fail "nonzero exit status without a sparse checkout, with git 2.35.0: ${out}"
+fi
 
 # A repository with submodules.  `--clean` is refused, with a message that
 # names `--copy`; `--copy` succeeds; and the default mode falls back to the
@@ -747,6 +789,45 @@ if ! out="$(cd "${stalemodules}" && "${GIT_NEW_BRANCH}" fromstale 2>&1)"; then
 elif [ ! -f "${tmpdir}/stalemodules-branch-fromstale/.git" ]; then
   fail "a .gitmodules but no submodule: the new directory is not a worktree"
 fi
+
+# An ignored linked worktree nested in the source, such as
+# `.claude/worktrees/NAME`, keeps a `.git` file that names the source's
+# repository, so a copy of it would share its HEAD and index.  Both copying
+# modes leave it out, and say so; a nested clone, whose `.git` is a
+# directory, is independent and is copied.
+for mode in '' --copy; do
+  nested="${tmpdir}/nested${mode}/nested-branch-main"
+  make_repo "${nested}" || exit 1
+  printf '.claude/\n' > "${nested}/.gitignore"
+  git -C "${nested}" add .gitignore
+  git -C "${nested}" commit -q -m 'Ignore .claude'
+  git -C "${nested}" worktree add -q -b inner "${nested}/.claude/worktrees/inner"
+  echo 'kept' > "${nested}/.claude/kept.txt"
+  git clone -q "${nested}" "${nested}/.claude/clone"
+  inner_before="$(working_tree_state "${nested}/.claude/worktrees/inner")"
+  if ! out="$(cd "${nested}" && "${GIT_NEW_BRANCH}" ${mode:+"${mode}"} outer 2>&1)"; then
+    fail "nested worktree, mode '${mode}': nonzero exit status: ${out}"
+    continue
+  fi
+  outer="${tmpdir}/nested${mode}/nested-branch-outer"
+  case "${out}" in
+    *"not copying .claude/worktrees/inner"*) ;;
+    *) fail "nested worktree, mode '${mode}': unexpected message: ${out}" ;;
+  esac
+  if [ -e "${outer}/.claude/worktrees/inner" ]; then
+    fail "nested worktree, mode '${mode}': the nested linked worktree was copied"
+  fi
+  if [ ! -f "${outer}/.claude/kept.txt" ]; then
+    fail "nested worktree, mode '${mode}': the rest of .claude was not copied"
+  fi
+  if [ ! -d "${outer}/.claude/clone/.git" ]; then
+    fail "nested worktree, mode '${mode}': the nested clone was not copied"
+  fi
+  if [ "$(working_tree_state "${nested}/.claude/worktrees/inner")" \
+    != "${inner_before}" ]; then
+    fail "nested worktree, mode '${mode}': the nested worktree's HEAD or index changed"
+  fi
+done
 
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then

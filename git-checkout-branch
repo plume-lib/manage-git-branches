@@ -32,17 +32,6 @@
 #
 # This command requires git 2.31 or later.
 
-# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to the
-# commands run by `git rebase --exec`, `git bisect run`, and
-# `git submodule foreach`.  They take precedence over the location of a working
-# tree, so leaving them set would make git commands that this script runs in
-# the new directory act on the current repository instead.  For example,
-# `git worktree add` would write the new worktree's index over the file that
-# $GIT_INDEX_FILE names, discarding the changes that are staged there.
-unset GIT_DIR
-unset GIT_WORK_TREE
-unset GIT_INDEX_FILE
-
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
 # invoked through a symbolic link from elsewhere, such as ~/bin.  Do this
@@ -90,6 +79,12 @@ if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
 fi
 # shellcheck source=remote-functions.sh
 . "${SCRIPT_DIR}/remote-functions.sh"
+
+# Without this, git commands that this script runs in the new directory would
+# act on the current repository instead.  For example, `git worktree add` would
+# write the new worktree's index over the file that $GIT_INDEX_FILE names,
+# discarding the changes that are staged there.
+unset_git_location_variables
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} BRANCHNAME" >&2
@@ -384,10 +379,7 @@ if [ "${COPY}" -eq 1 ]; then
   # remove it, even if the copy is interrupted before it finishes.
   TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
   NEWDIR="${BRANCH_TMPDIR}"
-  if ! \cp -Rp -- . "${BRANCH_TMPDIR}"; then
-    echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
-    exit 1
-  fi
+  copy_repository "${BRANCH_TMPDIR}"
   if [ -z "${CHECKOUT_START_POINT}" ]; then
     set -- checkout -q "${BRANCHNAME}"
   else

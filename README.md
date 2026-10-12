@@ -214,7 +214,7 @@ directories of one repository share one object store, so the repository is
 not copied.  This has some consequences:
 
 * A branch directory's `.git` is a file, not a directory.  A tool that tests
-  for a `.git` directory to recognize a working tree no longer recognizes a
+  for a `.git` directory to recognize a working tree does not recognize a
   branch directory; such a tool should ask git, with
   `git rev-parse --show-toplevel`.
 * The branch directories share their configuration, hooks, and branches:
@@ -245,7 +245,8 @@ those is an independent clone, which you may remove or move like any other
 directory.
 
 `git-new-branch`, `git-checkout-branch`, and `git-remove-branch-directory`
-require git 2.31 or later.
+require git 2.31 or later.  The default mode of `git-new-branch` requires git
+2.36 or later in a sparse checkout or with per-worktree configuration.
 
 ## Programs for managing multiple git clones
 

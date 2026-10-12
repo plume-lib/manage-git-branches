@@ -496,6 +496,39 @@ check_gone 'a moved linked worktree' "${work}/myrepo-branch-wtmoved-elsewhere"
 check_unregistered 'a moved linked worktree' "${wthost}" \
   "${work}/myrepo-branch-wtmoved" wtmoved
 
+# A linked worktree that holds a submodule, whose repository lies in the
+# worktree's administrative directory.  Git refuses to remove such a
+# worktree, so the removal falls back to `rm -rf`, which takes the
+# submodule's repository too; a commit that only the submodule holds is
+# therefore refused, and the refusal is waived by --force-unpushed.
+wtsub="${work}/myrepo-branch-wtsub"
+git -C "${wthost}" worktree add -q -b wtsub "${wtsub}"
+git -C "${wtsub}" -c protocol.file.allow=always submodule add -q "${remote}" sub
+git -C "${wtsub}" commit -q -m 'Add a submodule'
+git -C "${wtsub}" push -q origin wtsub
+add_unpushed_commit "${wtsub}/sub"
+run_command 'a submodule with an unpushed commit' 1 "${wtsub}"
+check_present 'a submodule with an unpushed commit' "${wtsub}"
+check_message 'a submodule with an unpushed commit' \
+  "1 commit(s) in submodule(s) sub are on no remote-tracking ref or tag"
+run_command 'a submodule with an unpushed commit, forced' 0 \
+  --force-unpushed "${wtsub}"
+check_gone 'a submodule with an unpushed commit, forced' "${wtsub}"
+check_unregistered 'a submodule with an unpushed commit, forced' "${wthost}" \
+  "${wtsub}" wtsub
+
+# A submodule that holds nothing at risk does not prevent the removal.
+wtsubclean="${work}/myrepo-branch-wtsubclean"
+git -C "${wthost}" worktree add -q -b wtsubclean "${wtsubclean}"
+git -C "${wtsubclean}" -c protocol.file.allow=always submodule add -q \
+  "${remote}" sub
+git -C "${wtsubclean}" commit -q -m 'Add a submodule'
+git -C "${wtsubclean}" push -q origin wtsubclean
+run_command 'a submodule with nothing at risk' 0 "${wtsubclean}"
+check_gone 'a submodule with nothing at risk' "${wtsubclean}"
+check_unregistered 'a submodule with nothing at risk' "${wthost}" \
+  "${wtsubclean}" wtsubclean
+
 # A linked worktree that is already gone, removed with `rm -rf`, leaves its
 # registration and its branch, which are cleaned up given the repository.  A
 # worktree elsewhere in the repository that was moved with `mv`, and not
