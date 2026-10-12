@@ -87,7 +87,7 @@ git -C "${work}/seed" add file.txt
 git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
-  stashed detached localtag corrupt stale envgitdir indexfile; do
+  stashed detached localtag corrupt stale envgitdir indexfile wthost; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -362,20 +362,171 @@ rm -rf "${work}/myrepo-branch-stale-linked"
 run_command 'a stale worktree registration' 0 "${stale}"
 check_gone 'a stale worktree registration' "${stale}"
 
-# A linked worktree, whose `.git` is a file:  removing one means
-# unregistering it, which this command does not do.
-run_command 'a linked worktree' 1 --force "${work}/myrepo-branch-linked"
-check_present 'a linked worktree' "${work}/myrepo-branch-linked"
-check_message 'a linked worktree' "its .git is a file"
-
-# A submodule's working tree, whose `.git` is a file as well.
+# A submodule's working tree, whose `.git` is a file as well, is not a
+# linked worktree, and is refused and left intact.
 mkdir -p "${work}/submodule"
 make_submodule_superproject "${work}/submodule"
+submodule_before="$(working_tree_state "${work}/submodule/super-branch-main/sub")"
 run_command "a submodule's working tree" 1 --force \
   "${work}/submodule/super-branch-main/sub"
 check_present "a submodule's working tree" \
   "${work}/submodule/super-branch-main/sub"
-check_message "a submodule's working tree" "its .git is a file"
+check_message "a submodule's working tree" "it is not a linked worktree"
+if [ "$(working_tree_state "${work}/submodule/super-branch-main/sub")" \
+  != "${submodule_before}" ]; then
+  fail "a submodule's working tree: its HEAD or index changed"
+fi
+
+###########################################################################
+## Linked worktrees.
+###########################################################################
+
+## Usage: check_unregistered DESCRIPTION HOST DIRECTORY BRANCH
+## Checks that the repository of the working tree HOST registers no worktree
+## at DIRECTORY, keeps no administrative directory for it, and has no branch
+## BRANCH, and that HOST itself is intact.  DIRECTORY is where the worktree
+## was added.
+check_unregistered() {
+  if git -C "$2" worktree list --porcelain | grep -q -x -F "worktree $3"; then
+    fail "$1: $3 is still registered"
+  fi
+  # The administrative directory is named after the directory that the
+  # worktree was added at.
+  if [ -e "$(git -C "$2" rev-parse --path-format=absolute \
+    --git-common-dir)/worktrees/$(basename -- "$3")" ]; then
+    fail "$1: an administrative directory is left in $2"
+  fi
+  if git -C "$2" rev-parse --verify --quiet "refs/heads/$4" > /dev/null; then
+    fail "$1: the branch $4 is left in $2"
+  fi
+  if ! git -C "$2" status > /dev/null 2>&1; then
+    fail "$1: $2 is no longer a working tree"
+  fi
+}
+
+# A linked worktree is removed, along with its registration and its branch,
+# and the branch name can then be used again.  Its HEAD is where the remote
+# has it, so nothing is lost.  It holds modified and untracked build output,
+# which `git worktree remove` would refuse without git's own `--force`.
+wthost="$(make_clone wthost)"
+git -C "${wthost}" worktree add -q -b wtgone "${work}/myrepo-branch-wtgone"
+echo 'build output' > "${work}/myrepo-branch-wtgone/output.o"
+run_command 'a linked worktree' 0 "${work}/myrepo-branch-wtgone"
+check_gone 'a linked worktree' "${work}/myrepo-branch-wtgone"
+check_unregistered 'a linked worktree' "${wthost}" \
+  "${work}/myrepo-branch-wtgone" wtgone
+if ! (cd "${wthost}" && "${COMMANDS_DIR}/git-new-branch" wtgone > /dev/null 2>&1); then
+  fail "git-new-branch could not reuse the name of a removed worktree's branch"
+fi
+
+# The unpushed check of a linked worktree asks about its own branch alone.
+# It refuses for an unpushed commit on that branch, and not for one on another
+# branch of the repository, which the removal does not touch.
+git -C "${wthost}" worktree add -q -b wtmine "${work}/myrepo-branch-wtmine"
+echo 'mine' > "${work}/myrepo-branch-wtmine/mine.txt"
+git -C "${work}/myrepo-branch-wtmine" add mine.txt
+git -C "${work}/myrepo-branch-wtmine" commit -q -m 'An unpushed commit on wtmine'
+git -C "${wthost}" worktree add -q -b wtother "${work}/myrepo-branch-wtother"
+add_unpushed_commit "${wthost}"
+run_command 'a linked worktree with an unpushed commit' 1 \
+  "${work}/myrepo-branch-wtmine"
+check_present 'a linked worktree with an unpushed commit' \
+  "${work}/myrepo-branch-wtmine"
+check_message 'a linked worktree with an unpushed commit' \
+  "1 commit(s) are on no other branch, remote-tracking ref, or tag; re-run with --force-unpushed"
+if ! git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtmine > /dev/null; then
+  fail "a linked worktree with an unpushed commit: its branch was deleted"
+fi
+run_command "another branch's unpushed commit" 0 "${work}/myrepo-branch-wtother"
+check_gone "another branch's unpushed commit" "${work}/myrepo-branch-wtother"
+run_command 'a linked worktree with an unpushed commit, waived' 0 \
+  --force-unpushed "${work}/myrepo-branch-wtmine"
+check_gone 'a linked worktree with an unpushed commit, waived' \
+  "${work}/myrepo-branch-wtmine"
+check_message 'a linked worktree with an unpushed commit, waived' \
+  "git fsck --lost-found"
+if git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtmine > /dev/null; then
+  fail "a linked worktree with an unpushed commit, waived: its branch is left"
+fi
+
+# Uncommitted changes in a linked worktree are refused, as in a clone.
+git -C "${wthost}" worktree add -q -b wtdirty "${work}/myrepo-branch-wtdirty"
+echo 'modified' >> "${work}/myrepo-branch-wtdirty/file.txt"
+run_command 'a linked worktree with uncommitted changes' 1 \
+  "${work}/myrepo-branch-wtdirty"
+check_present 'a linked worktree with uncommitted changes' \
+  "${work}/myrepo-branch-wtdirty"
+check_message 'a linked worktree with uncommitted changes' "--force-uncommitted"
+run_command 'a linked worktree with uncommitted changes, waived' 0 \
+  --force-uncommitted "${work}/myrepo-branch-wtdirty"
+check_gone 'a linked worktree with uncommitted changes, waived' \
+  "${work}/myrepo-branch-wtdirty"
+
+# A linked worktree that was moved with `mv`, and not repaired, is no longer
+# where its registration says.  `git worktree remove` cannot remove it, so the
+# directory and its own administrative directory are removed instead.
+git -C "${wthost}" worktree add -q -b wtmoved "${work}/myrepo-branch-wtmoved"
+mv "${work}/myrepo-branch-wtmoved" "${work}/myrepo-branch-wtmoved-elsewhere"
+run_command 'a moved linked worktree' 0 "${work}/myrepo-branch-wtmoved-elsewhere"
+check_gone 'a moved linked worktree' "${work}/myrepo-branch-wtmoved-elsewhere"
+check_unregistered 'a moved linked worktree' "${wthost}" \
+  "${work}/myrepo-branch-wtmoved" wtmoved
+
+# A linked worktree that is already gone, removed with `rm -rf`, leaves its
+# registration and its branch, which are cleaned up given the repository.  A
+# worktree elsewhere in the repository that was moved with `mv`, and not
+# repaired, is left alone, which is what distinguishes this from
+# `git worktree prune`.
+git -C "${wthost}" worktree add -q -b wtrmrf "${work}/myrepo-branch-wtrmrf"
+rm -rf "${work}/myrepo-branch-wtrmrf"
+git -C "${wthost}" worktree add -q -b wtbystander "${work}/myrepo-branch-wtbystander"
+mv "${work}/myrepo-branch-wtbystander" "${work}/myrepo-branch-wtbystander-moved"
+run_command 'a removed linked worktree, from the repository' 0 \
+  --repository "${wthost}" "${work}/myrepo-branch-wtrmrf"
+if git -C "${wthost}" worktree list --porcelain | grep -q -x -F \
+  "worktree ${work}/myrepo-branch-wtrmrf"; then
+  fail "a removed linked worktree: it is still registered"
+fi
+if git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtrmrf > /dev/null; then
+  fail "a removed linked worktree: its branch is left"
+fi
+if ! (cd "${wthost}" && "${COMMANDS_DIR}/git-new-branch" wtrmrf > /dev/null 2>&1); then
+  fail "git-new-branch could not reuse the name of a removed worktree"
+fi
+if ! git -C "${wthost}" worktree repair "${work}/myrepo-branch-wtbystander-moved" \
+  > /dev/null 2>&1 \
+  || ! git -C "${work}/myrepo-branch-wtbystander-moved" status > /dev/null 2>&1; then
+  fail "cleaning up after a removed linked worktree disturbed a moved one"
+fi
+
+# The repository defaults to the current directory, when that is a working
+# tree.
+git -C "${wthost}" worktree add -q -b wtrmrf2 "${work}/myrepo-branch-wtrmrf2"
+rm -rf "${work}/myrepo-branch-wtrmrf2"
+out="$(cd "${wthost}" && "${COMMAND}" "${work}/myrepo-branch-wtrmrf2" 2>&1)" \
+  || fail "a removed linked worktree, from the current directory: ${out}"
+if git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtrmrf2 > /dev/null; then
+  fail "a removed linked worktree, from the current directory: its branch is left"
+fi
+
+# A removed linked worktree whose branch holds unpushed work is refused, so
+# that the branch survives.
+git -C "${wthost}" worktree add -q -b wtrmrfwork "${work}/myrepo-branch-wtrmrfwork"
+git -C "${work}/myrepo-branch-wtrmrfwork" commit -q --allow-empty -m 'Unpushed'
+rm -rf "${work}/myrepo-branch-wtrmrfwork"
+run_command 'a removed linked worktree with an unpushed commit' 1 \
+  --repository "${wthost}" "${work}/myrepo-branch-wtrmrfwork"
+check_message 'a removed linked worktree with an unpushed commit' \
+  "--force-unpushed"
+if ! git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtrmrfwork > /dev/null; then
+  fail "a removed linked worktree with an unpushed commit: its branch was deleted"
+fi
+
+# A path that no repository registers has nothing to clean up, which is not
+# an error.
+run_command 'a path that no worktree is registered at' 0 \
+  --repository "${wthost}" "${work}/never-a-worktree"
+check_message 'a path that no worktree is registered at' "nothing to do"
 
 # $GIT_DIR and $GIT_WORK_TREE in the environment (as when running under a git
 # hook, or `git rebase --exec`) take precedence over `git -C`, so leaving them
@@ -463,8 +614,12 @@ check_message 'a directory inside a bare repository' "on no remote-tracking ref 
 run_command 'no argument' 1
 check_message 'no argument' "no directory to remove"
 
-run_command 'a path that does not exist' 1 "${work}/no-such-directory"
+# A path that does not exist, with no repository to consult about it.  The
+# command runs in ${work}, which is not a working tree.
+out="$(cd "${work}" && "${COMMAND}" "${work}/no-such-directory" 2>&1)" \
+  && fail "a path that does not exist: exit status 0: ${out}"
 check_message 'a path that does not exist' "no such directory"
+check_message 'a path that does not exist' "--repository"
 
 touch "${work}/a-file"
 run_command 'a path that is not a directory' 1 "${work}/a-file"
@@ -478,7 +633,7 @@ check_message 'an unrecognized option' "unrecognized option"
 # says that not everything was removed.
 git -C "${work}/seed" push -q origin main:refs/heads/after-refusal
 after="$(make_clone after-refusal)"
-run_command 'a refusal among removals' 1 "${work}/no-such-directory" "${after}"
+run_command 'a refusal among removals' 1 "${work}/a-file" "${after}"
 check_gone 'a refusal among removals' "${after}"
 
 if [ "${status}" = 0 ]; then

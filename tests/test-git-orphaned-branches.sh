@@ -317,25 +317,38 @@ fi
 
 # A worktree that `git-new-branch` made, once its branch was pushed and then
 # deleted in the remote, is listed; the clone that hosts it, whose branch
-# still exists, is not.
-git clone -q -b main "${work}/remote.git" "${work}/worktrees/g-branch-main"
-if ! (cd "${work}/worktrees/g-branch-main" \
-  && "${TOPLEVEL}/git-new-branch" gnbgone > /dev/null 2>&1); then
+# still exists, is not.  `--remove` removes the worktree and deletes its
+# branch, and leaves the host in place.
+mkdir -p "${work}/gnb"
+gnbhost="${work}/gnb/g-branch-main"
+git clone -q -b main "${work}/remote.git" "${gnbhost}"
+if ! (cd "${gnbhost}" && "${TOPLEVEL}/git-new-branch" gnbgone > /dev/null 2>&1); then
   fail "git-new-branch failed"
 fi
-gnbgone="${work}/worktrees/g-branch-gnbgone"
+gnbgone="${work}/gnb/g-branch-gnbgone"
 git -C "${gnbgone}" push -q -u origin gnbgone
 git -C "${work}/seed" push -q origin --delete gnbgone
-if ! output="$(cd "${work}/worktrees" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
+if ! output="$(cd "${work}/gnb" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
   fail "git-orphaned-branches exited with a failure status for a git-new-branch worktree"
 fi
 if ! printf '%s\n' "${output}" | grep -q -x -F -- "$(absolute_path "${gnbgone}")"; then
   fail "git-orphaned-branches did not list the orphaned worktree ${gnbgone}"
 fi
-if printf '%s\n' "${output}" | grep -q -x -F -- "$(absolute_path "${work}/worktrees/g-branch-main")"; then
-  fail "git-orphaned-branches listed g-branch-main, whose branch still exists"
+if printf '%s\n' "${output}" | grep -q -x -F -- "$(absolute_path "${gnbhost}")"; then
+  fail "git-orphaned-branches listed ${gnbhost}, whose branch still exists"
 fi
-rm -rf "${work}/worktrees/g-branch-main" "${gnbgone}"
+if ! output="$(cd "${work}/gnb" && "${GIT_ORPHANED_BRANCHES}" --remove 2>&1)"; then
+  fail "git-orphaned-branches --remove failed for a git-new-branch worktree: ${output}"
+fi
+if [ -e "${gnbgone}" ]; then
+  fail "git-orphaned-branches --remove did not remove ${gnbgone}"
+fi
+if git -C "${gnbhost}" rev-parse --verify --quiet refs/heads/gnbgone > /dev/null; then
+  fail "git-orphaned-branches --remove left the branch of ${gnbgone}"
+fi
+if ! git -C "${gnbhost}" status > /dev/null 2>&1; then
+  fail "git-orphaned-branches --remove broke the host ${gnbhost}"
+fi
 
 # A submodule's working tree is a working tree too, and its `.git` is a file
 # as well, so the same test decides it.  Its branch can be deleted in the

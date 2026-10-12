@@ -213,7 +213,7 @@ live_dependent_worktree() {
 # A submodule's working tree is part of its superproject's working tree, so
 # removing it leaves the superproject with a deleted directory that the user
 # never asked to change and a `.gitmodules` that still names it.  As with a
-# linked worktree, this command's output is fed to `rm -rf`, so such a
+# linked worktree, this command's output is fed to a removal, so such a
 # directory must not appear in it however orphaned the submodule's own branch
 # is.
 #
@@ -385,8 +385,7 @@ holds_kept_dir() {
 
 # The removal phase.  Each directory goes through
 # `git-remove-branch-directory`, which refuses to remove one that holds
-# uncommitted changes or commits that no remote-tracking ref and no tag
-# holds, and says why.  Nothing is printed on standard output; the only report
+# uncommitted changes or commits that the removal would lose, and says why.  Nothing is printed on standard output; the only report
 # of a directory is the diagnostic about one that was kept.
 #
 # The order is the reverse of the order of discovery, which means innermost
