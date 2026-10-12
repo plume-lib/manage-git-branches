@@ -4,19 +4,26 @@
 # that is, commits that have not been pushed.
 #
 # Usage:
-#   git-outgoing [GIT-LOG-ARGS]
+#   git-outgoing [--only-branch BRANCH]... [GIT-LOG-ARGS]
 #
 # GIT-LOG-ARGS, such as `--oneline` or `-- PATH`, are passed to `git log`.
 # Any revisions among them are shown in addition to the local branches,
 # except for commits on a remote branch or on an omitted branch (see below).
 # They may not include `--stdin`, which this command uses itself.
 #
+# `--only-branch BRANCH`, which may be repeated and may appear anywhere
+# before a `--`, limits the local branches to those named, such as `main`;
+# the others are neither shown nor examined.  Examining a branch is most of
+# this command's work.
+#
 # Unlike `git log --branches --not --remotes`, this command omits a branch
 # whose changes are already in some remote's default branch (`REMOTE/HEAD`),
 # even though its commits are not.  That happens when a pull request is
 # squash-merged and its remote branch is then deleted.  A branch is omitted
 # when either:
-#  * merging it into `REMOTE/HEAD` would not change any file, or
+#  * merging it into `REMOTE/HEAD` would not change any file, though the
+#    branch changes some file relative to where it forked from
+#    `REMOTE/HEAD`, or
 #  * some commit C in `REMOTE/HEAD` but not in the branch changes only files
 #    that the branch changes, and merging the branch into C's parent yields
 #    C's files.  C is then a squash-merge of the branch, and later changes
@@ -28,6 +35,8 @@
 #    authored, or later, are examined.  So a squash-merge is not found if
 #    the last commit's author date was later changed to more than a day
 #    after C, as by `git commit --amend --reset-author`.
+# A branch that changes no file, such as one whose only commits are empty,
+# is not omitted:  none of its work has landed.
 # The commits of an omitted branch are not shown even when another branch
 # contains them, as when that branch was started from the omitted one.
 # A remote with no `REMOTE/HEAD` is not considered; to create it, run
@@ -95,6 +104,37 @@ die() {
 }
 
 require_git 40
+
+# Each line is a full branch name that `--only-branch` names.  Empty if
+# `--only-branch` is not given.  The other arguments, which are for `git log`,
+# are moved in turn to the end of "$@", and the `--only-branch` arguments are
+# dropped.
+only_branches=
+args_left="$#"
+past_paths_separator=
+while [ "${args_left}" -gt 0 ]; do
+  arg="$1"
+  shift
+  args_left="$((args_left - 1))"
+  case "${past_paths_separator}${arg}" in
+    --only-branch)
+      if [ "${args_left}" -eq 0 ]; then die "--only-branch requires a branch"; fi
+      only_branches="${only_branches}refs/heads/$1
+"
+      shift
+      args_left="$((args_left - 1))"
+      ;;
+    --only-branch=*)
+      only_branches="${only_branches}refs/heads/${arg#--only-branch=}
+"
+      ;;
+    --)
+      past_paths_separator=1
+      set -- "$@" "${arg}"
+      ;;
+    *) set -- "$@" "${arg}" ;;
+  esac
+done
 
 # The repository's object directory.  `git merge-tree` writes the merge
 # results as objects; git_scratch puts them in ${tmpdir} instead.
@@ -210,9 +250,8 @@ merge_yields() {
 }
 
 # Usage: merged_branches PAIRS MERGED
-# Creates MERGED such that each line is the BRANCH of a line "BRANCH COMMIT
-# TREE" of PAIRS for which merging BRANCH into COMMIT yields TREE without
-# conflicts.  One `git merge-tree --stdin` does many merges, which saves a
+# Creates MERGED such that each line is a line "BRANCH COMMIT TREE" of PAIRS
+# for which merging BRANCH into COMMIT yields TREE without conflicts.  One `git merge-tree --stdin` does many merges, which saves a
 # process for each merge.  But it stops at the first merge that fails, as for
 # unrelated histories or for file contents that a partial clone lacks.
 # merge_yields then redoes that merge alone, which tells those cases apart,
@@ -253,7 +292,7 @@ merged_branches() {
   done
   awk '
     FILENAME == ARGV[1] { result[FNR] = $0; next }
-    result[FNR] == "1 " $3 { print $1 }
+    result[FNR] == "1 " $3
   ' "${tmpdir}/merge-results" "$1" > "$2" || die "cannot write $2"
 }
 
@@ -308,7 +347,16 @@ sort -u "${tmpdir}/all-bases" > "${tmpdir}/bases" || die "sort failed"
 # per remote-tracking branch, as `git for-each-ref --no-merged` would
 # require; with many remote-tracking branches, such arguments would exceed
 # the limit on a command line's size.
-git for-each-ref --format='%(objectname) %(refname) %(authordate:unix)' refs/heads > "${tmpdir}/local-branches" || exit 1
+git for-each-ref --format='%(objectname) %(refname) %(authordate:unix)' refs/heads > "${tmpdir}/all-local-branches" || exit 1
+if [ -n "${only_branches}" ]; then
+  printf '%s' "${only_branches}" > "${tmpdir}/only-branches" || die "cannot write ${tmpdir}/only-branches"
+  awk '
+    FILENAME == ARGV[1] { only[$0]; next }
+    $2 in only
+  ' "${tmpdir}/only-branches" "${tmpdir}/all-local-branches" > "${tmpdir}/local-branches" || die "awk failed"
+else
+  mv "${tmpdir}/all-local-branches" "${tmpdir}/local-branches" || die "cannot write ${tmpdir}/local-branches"
+fi
 git rev-list --branches --not --remotes > "${tmpdir}/unpushed-commits" || exit 1
 awk '
   FILENAME == ARGV[1] { line = ($3 == "" ? 0 : $3) " " $2; refs[$1] = ($1 in refs) ? refs[$1] "\n" line : line; next }
@@ -324,8 +372,29 @@ awk '
 ' "${tmpdir}/bases" "${tmpdir}/unpushed-branches" > "${tmpdir}/pairs" || die "awk failed"
 
 # Create ${tmpdir}/merged, which the step below reads, such that each line is
-# a branch whose merge into some base yields that base's tree.
-merged_branches "${tmpdir}/pairs" "${tmpdir}/merged"
+# a branch whose merge into some base yields that base's tree, and which
+# changes some file relative to one of its merge bases with that base.  A
+# branch that changes no file, such as one whose only commits are empty or
+# one whose last commit reverts the others, has nothing to merge, so merging
+# it yields the base's tree although none of its work has landed.  Comparing
+# trees, rather than diffing them, needs no file contents.
+merged_branches "${tmpdir}/pairs" "${tmpdir}/yielding-pairs"
+: > "${tmpdir}/merged" || die "cannot write ${tmpdir}/merged"
+while read -r branch base_commit base_tree; do
+  merge_bases="$(git merge-base --all "${base_commit}" "${branch}")"
+  case "$?" in
+    0) ;;
+    1) continue ;; # The branch has no history in common with this base.
+    *) die "git merge-base ${base_commit} ${branch} failed" ;;
+  esac
+  # The merge bases are hexadecimal, so word splitting is safe.
+  # shellcheck disable=SC2086
+  trees="$(printf '%s\n' "${branch}" ${merge_bases} | sed 's/$/^{tree}/' | xargs git rev-parse)" \
+    || die "git rev-parse ${branch} ${merge_bases} failed"
+  if printf '%s\n' "${trees}" | awk 'NR == 1 { tip = $0; next } $0 != tip { changed = 1 } END { exit !changed }'; then
+    echo "${branch}" >> "${tmpdir}/merged" || die "cannot write ${tmpdir}/merged"
+  fi
+done < "${tmpdir}/yielding-pairs"
 
 # Create ${tmpdir}/merge-status, which the step below reads, such that each
 # line is "STATUS TIME BRANCH" for one line "TIME BRANCH" of
@@ -484,8 +553,8 @@ while read -r base_commit base_tree; do
 done < "${tmpdir}/bases"
 
 # Create ${tmpdir}/squashed, which the step below reads, such that each line
-# is a branch that some line of ${tmpdir}/squash-candidates shows to be
-# squash-merged:  merging it into PARENT yields TREE.  A commit in several
+# is "BRANCH PARENT TREE" for a line of ${tmpdir}/squash-candidates that
+# shows BRANCH to be squash-merged:  merging it into PARENT yields TREE.  A commit in several
 # bases is a candidate only once.  One branch has many candidates when the
 # bases have many commits that change only its files, but one squash commit
 # suffices.  So the merges are done in two rounds:  first each branch's
@@ -500,7 +569,7 @@ awk '!($3 in seen) { seen[$3]; print $3, $4, $5 }' "${tmpdir}/sorted-candidates"
   || die "awk failed"
 merged_branches "${tmpdir}/first-candidates" "${tmpdir}/squashed"
 awk '
-  FILENAME == ARGV[1] { squashed[$0]; next }
+  FILENAME == ARGV[1] { squashed[$1]; next }
   !($3 in squashed) && ($3 in seen) { print $3, $4, $5 }
   { seen[$3] }
 ' "${tmpdir}/squashed" "${tmpdir}/sorted-candidates" > "${tmpdir}/remaining-candidates" || die "awk failed"
@@ -514,7 +583,7 @@ cat "${tmpdir}/squashed-later" >> "${tmpdir}/squashed" || die "cannot write ${tm
 # `--stdin` rather than as arguments, which might exceed the limit on a
 # command line's size.
 awk '
-  FILENAME == ARGV[1] { squashed[$0]; next }
+  FILENAME == ARGV[1] { squashed[$1]; next }
   { print (($1 == 1 || $3 in squashed) ? "^" : "") $3 }
 ' "${tmpdir}/squashed" "${tmpdir}/merge-status" > "${tmpdir}/log-refs" || die "awk failed"
 

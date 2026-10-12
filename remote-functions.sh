@@ -39,6 +39,17 @@ unset_git_location_variables() {
 ## several requirements runs `git version` only once.
 require_git_version=''
 require_git() {
+  if ! git_at_least "$1"; then
+    echo "${SCRIPT_NAME}: requires git 2.$1 or later${2:+ $2}, but found git ${require_git_version}" >&2
+    exit 1
+  fi
+}
+
+## Usage: git_at_least MINOR
+## Succeeds if git is version 2.MINOR or later.  Exits with status 1, after
+## printing a diagnostic, if the version cannot be parsed.  It reads the
+## version as `require_git` does, and only once.
+git_at_least() {
   if [ -z "${require_git_version}" ]; then
     # Output is like "git version 2.44.0" or "git version 2.44.0.windows.1".
     require_git_version="$(git version)" || exit 1
@@ -53,11 +64,8 @@ require_git() {
       exit 1
       ;;
   esac
-  if [ "${require_git_major}" -lt 2 ] \
-    || { [ "${require_git_major}" -eq 2 ] && [ "${require_git_minor}" -lt "$1" ]; }; then
-    echo "${SCRIPT_NAME}: requires git 2.$1 or later${2:+ $2}, but found git ${require_git_version}" >&2
-    exit 1
-  fi
+  [ "${require_git_major}" -gt 2 ] \
+    || { [ "${require_git_major}" -eq 2 ] && [ "${require_git_minor}" -ge "$1" ]; }
 }
 
 ## Usage: undo_worktree_add REPOSITORY WORKTREE GITDIR BRANCH COMMIT

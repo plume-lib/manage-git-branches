@@ -105,7 +105,7 @@ The commands are:
   removes what that left behind:  the worktree's registration and, under the
   same conditions, its branch, in the repository that `--repository` names
   (by default, the current directory's).
-* [`git-outgoing`](git-outgoing) `[GIT-LOG-ARGS]`:
+* [`git-outgoing`](git-outgoing) `[--only-branch BRANCH]... [GIT-LOG-ARGS]`:
   Shows the commits on local branches that have not been pushed.
   Unlike `git log --branches --not --remotes`, it omits a branch whose
   changes are already in a remote's default branch, as after a squash-merge.

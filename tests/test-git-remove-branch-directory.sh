@@ -88,7 +88,7 @@ git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
   stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost \
-  squashed; do
+  squashed empty; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -241,6 +241,17 @@ check_message 'work after a squash-merge' \
 git -C "${squashed}" reset -q --hard HEAD~1
 run_command 'a squash-merged branch' 0 "${squashed}"
 check_gone 'a squash-merged branch' "${squashed}"
+
+# A branch that changes no file has nothing to land, so merging it into the
+# remote's default branch changes nothing, but its commits have not landed.
+empty="$(make_clone empty)"
+git -C "${empty}" commit -q --allow-empty -m 'Empty commit'
+run_command 'an empty commit' 1 "${empty}"
+check_present 'an empty commit' "${empty}"
+check_message 'an empty commit' \
+  "refusing to remove ${empty}: 1 commit(s) are on no remote-tracking ref or tag"
+run_command 'an empty commit, waived' 0 --force-unpushed "${empty}"
+check_gone 'an empty commit, waived' "${empty}"
 
 ###########################################################################
 ## Work that no branch names.
@@ -828,9 +839,7 @@ fi
 # that the branch survives.
 git -C "${wthost}" worktree add -q -b wtrmrfwork "${work}/myrepo-branch-wtrmrfwork"
 mark_created wtrmrfwork
-echo 'unpushed' > "${work}/myrepo-branch-wtrmrfwork/unpushed.txt"
-git -C "${work}/myrepo-branch-wtrmrfwork" add unpushed.txt
-git -C "${work}/myrepo-branch-wtrmrfwork" commit -q -m 'Unpushed'
+git -C "${work}/myrepo-branch-wtrmrfwork" commit -q --allow-empty -m 'Unpushed'
 rm -rf "${work}/myrepo-branch-wtrmrfwork"
 run_command 'a removed linked worktree with an unpushed commit' 1 \
   --repository "${wthost}" "${work}/myrepo-branch-wtrmrfwork"

@@ -148,6 +148,28 @@ expect_outgoing 'squash-merged branch, branch started after the squash-merge' 'L
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-late"
 git -C "${clone}" branch -q -D late
 
+# A branch that changes no file is outgoing, though merging it into
+# origin/HEAD changes nothing:  none of its work has landed.
+git -C "${clone}" branch -q empty origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-empty" empty
+git -C "${testdir}/myrepo-branch-empty" commit -q --allow-empty -m 'Empty commit'
+expect_outgoing 'branch with only an empty commit' 'Empty commit'
+# `--only-branch` examines and shows only the branches that it names.
+expect_outgoing '--only-branch, an outgoing branch' 'Empty commit' --only-branch empty
+expect_outgoing '--only-branch, a squash-merged branch' '' --only-branch feature
+expect_outgoing '--only-branch=, both branches' 'Empty commit' \
+  --only-branch=feature --only-branch=empty
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-empty"
+git -C "${clone}" branch -q -D empty
+git -C "${clone}" branch -q reverted origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-reverted" reverted
+commit_file "${testdir}/myrepo-branch-reverted" r.txt 'r' 'Reverted commit'
+git -C "${testdir}/myrepo-branch-reverted" revert --no-edit HEAD > /dev/null
+expect_outgoing 'branch whose last commit reverts the others' 'Reverted commit
+Revert "Reverted commit"'
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-reverted"
+git -C "${clone}" branch -q -D reverted
+
 # A squash-merged branch whose tip has a malformed author date, which git
 # reads as 0, or no author line at all, is not outgoing.
 feature_tip="$(git -C "${clone}" rev-parse feature)"
