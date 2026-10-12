@@ -346,4 +346,115 @@ if [ "${errexit_output}" != 'survived' ]; then
   fail "is_deleted_branch under set -e printed [${errexit_output}], not [survived]"
 fi
 
+# `require_git` accepts the git that runs this test for a requirement that it
+# meets, and refuses one that it does not, naming the version that it found.
+# It exits rather than returning, so run it in a subshell.
+if ! require_git_output="$( (require_git 0) 2>&1)"; then
+  fail "require_git 0 refused git: [${require_git_output}]"
+fi
+if require_git_output="$( (require_git 9999 'for a test') 2>&1)"; then
+  fail "require_git 9999 accepted git"
+fi
+case "${require_git_output}" in
+  *"requires git 2.9999 or later for a test, but found git $(git version | sed 's/^git version //')") ;;
+  *) fail "unexpected message from require_git 9999: [${require_git_output}]" ;;
+esac
+# A git that reports an old version, or one that cannot be parsed.  The
+# subshells change PATH for `require_git` alone, which is the point.
+. "${TESTS_DIR}/common-functions.sh"
+make_fake_git "${WORK_DIR}/oldgit" version 0 'git version 2.30.9'
+# shellcheck disable=SC2030
+if require_git_output="$( (PATH="${WORK_DIR}/oldgit:${PATH}" && require_git 31) 2>&1)"; then
+  fail "require_git 31 accepted git 2.30.9"
+fi
+case "${require_git_output}" in
+  *"requires git 2.31 or later, but found git 2.30.9") ;;
+  *) fail "unexpected message from require_git 31 for git 2.30.9: [${require_git_output}]" ;;
+esac
+make_fake_git "${WORK_DIR}/oddgit" version 0 'git version unknown'
+# shellcheck disable=SC2031
+if require_git_output="$( (PATH="${WORK_DIR}/oddgit:${PATH}" && require_git 31) 2>&1)"; then
+  fail "require_git 31 accepted an unparsable version"
+fi
+case "${require_git_output}" in
+  *"cannot parse git version: unknown") ;;
+  *) fail "unexpected message for an unparsable version: [${require_git_output}]" ;;
+esac
+
+# `undo_worktree_add` removes a worktree, its registration, and its branch,
+# and leaves everything else of the repository alone.
+uwa_main="${WORK_DIR}/uwa-branch-main"
+git init -q -b main "${uwa_main}"
+echo 'content' > "${uwa_main}/file.txt"
+git -C "${uwa_main}" add file.txt
+git -C "${uwa_main}" commit -q -m 'Initial commit'
+uwa_commit="$(git -C "${uwa_main}" rev-parse HEAD)"
+git -C "${uwa_main}" worktree add -q -b doomed "${WORK_DIR}/uwa-branch-doomed"
+uwa_gitdir="$(git -C "${WORK_DIR}/uwa-branch-doomed" rev-parse --absolute-git-dir)"
+# A half-built worktree has modifications, which `git worktree remove` would
+# refuse without `--force`.
+echo 'modified' > "${WORK_DIR}/uwa-branch-doomed/file.txt"
+# A moved worktree elsewhere in the repository, which `git worktree prune`
+# would destroy, must survive.
+git -C "${uwa_main}" worktree add -q -b moved "${WORK_DIR}/uwa-branch-moved"
+mv "${WORK_DIR}/uwa-branch-moved" "${WORK_DIR}/uwa-branch-moved-elsewhere"
+undo_worktree_add "${uwa_main}" "${WORK_DIR}/uwa-branch-doomed" "${uwa_gitdir}" \
+  doomed "${uwa_commit}"
+if [ -e "${WORK_DIR}/uwa-branch-doomed" ] || [ -e "${uwa_gitdir}" ]; then
+  fail "undo_worktree_add left the worktree or its administrative directory"
+fi
+if git -C "${uwa_main}" rev-parse --verify --quiet refs/heads/doomed > /dev/null; then
+  fail "undo_worktree_add left the branch doomed"
+fi
+if ! git -C "${uwa_main}" worktree list --porcelain | grep -q -x -F \
+  "worktree ${WORK_DIR}/uwa-branch-moved"; then
+  fail "undo_worktree_add removed the registration of a moved worktree"
+fi
+git -C "${uwa_main}" worktree repair "${WORK_DIR}/uwa-branch-moved-elsewhere" > /dev/null 2>&1
+
+# Interrupted between the renames that put a worktree in place, the caller has
+# no directory at the registered path, only the administrative directory that
+# it learned.  That is removed, and the registration with it, without
+# disturbing the registration of a path that is missing for another reason.
+git -C "${uwa_main}" worktree add -q --no-checkout -b halfway "${WORK_DIR}/uwa-branch-halfway"
+uwa_gitdir="$(git -C "${WORK_DIR}/uwa-branch-halfway" rev-parse --absolute-git-dir)"
+rm -rf "${WORK_DIR}/uwa-branch-halfway"
+git -C "${uwa_main}" worktree add -q -b stale "${WORK_DIR}/uwa-branch-stale"
+rm -rf "${WORK_DIR}/uwa-branch-stale"
+undo_worktree_add "${uwa_main}" "${WORK_DIR}/uwa-branch-halfway" "${uwa_gitdir}" \
+  halfway "${uwa_commit}"
+if [ -e "${uwa_gitdir}" ]; then
+  fail "undo_worktree_add left the administrative directory of a missing worktree"
+fi
+if git -C "${uwa_main}" worktree list --porcelain | grep -q -x -F \
+  "worktree ${WORK_DIR}/uwa-branch-halfway"; then
+  fail "undo_worktree_add left the registration of a missing worktree"
+fi
+
+# A `git worktree add` that failed has nothing at the path, and the caller
+# learned no administrative directory.  A registration of that path that is
+# not the caller's -- a stale one, which is what made the add fail -- is left
+# alone, but the branch that the add created before it failed is deleted.
+git -C "${uwa_main}" branch stalebranch
+uwa_stale_gitdir="$(git -C "${uwa_main}" rev-parse --path-format=absolute \
+  --git-common-dir)/worktrees/uwa-branch-stale"
+undo_worktree_add "${uwa_main}" "${WORK_DIR}/uwa-branch-stale" '' \
+  stalebranch "${uwa_commit}"
+if [ ! -d "${uwa_stale_gitdir}" ]; then
+  fail "undo_worktree_add removed a stale registration that was not its own"
+fi
+if git -C "${uwa_main}" rev-parse --verify --quiet refs/heads/stalebranch > /dev/null; then
+  fail "undo_worktree_add left the branch stalebranch"
+fi
+
+# A branch that is no longer at the commit that the caller created it at was
+# moved by something else, and is left alone.
+git -C "${uwa_main}" commit -q --allow-empty -m 'Second commit'
+git -C "${uwa_main}" branch movedbranch
+undo_worktree_add "${uwa_main}" "${WORK_DIR}/uwa-branch-nothing" '' \
+  movedbranch "${uwa_commit}"
+if ! git -C "${uwa_main}" rev-parse --verify --quiet refs/heads/movedbranch > /dev/null; then
+  fail "undo_worktree_add deleted a branch that is not at the given commit"
+fi
+
 echo "${SCRIPT_NAME}: OK"

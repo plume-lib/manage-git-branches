@@ -9,6 +9,80 @@
 # from that directory.  It must also set ${SCRIPT_NAME} to its own name, which
 # the diagnostics below use.
 
+## Usage: require_git MINOR [WHY]
+## Exits with status 1, after printing a diagnostic, unless git is version
+## 2.MINOR or later.  WHY, if given, says why that version is needed.
+##
+## The version is parsed rather than probed for:  one mechanism gives every
+## command one message, and the message can say which version it found.  A
+## probe would also need care, because `git rev-parse` prints an option that it
+## does not recognize, and exits 0, rather than failing.
+require_git() {
+  # Output is like "git version 2.44.0" or "git version 2.44.0.windows.1".
+  require_git_version="$(git version)" || exit 1
+  require_git_version="${require_git_version#git version }"
+  require_git_major="${require_git_version%%.*}"
+  require_git_minor="${require_git_version#*.}"
+  require_git_minor="${require_git_minor%%.*}"
+  case "${require_git_major}.${require_git_minor}" in
+    *[!0-9.]* | .* | *.)
+      echo "${SCRIPT_NAME}: cannot parse git version: ${require_git_version}" >&2
+      exit 1
+      ;;
+  esac
+  if [ "${require_git_major}" -lt 2 ] \
+    || { [ "${require_git_major}" -eq 2 ] && [ "${require_git_minor}" -lt "$1" ]; }; then
+    echo "${SCRIPT_NAME}: requires git 2.$1 or later${2:+ $2}, but found git ${require_git_version}" >&2
+    exit 1
+  fi
+}
+
+## Usage: undo_worktree_add REPOSITORY WORKTREE GITDIR BRANCH COMMIT
+## Undoes a `git worktree add` that the calling command ran, or began to run,
+## in the repository of the working tree REPOSITORY:  removes the directory
+## WORKTREE, its administrative directory GITDIR, and the branch BRANCH.  It is
+## for a command's cleanup after a failure or a signal, so it prints nothing,
+## reads nothing from standard input, and returns 0.
+##
+## GITDIR is the worktree's administrative directory, from
+## `git -C WORKTREE rev-parse --absolute-git-dir`, or empty if the caller never
+## learned it.  BRANCH is empty if the caller did not create a branch.
+## COMMIT is the commit that the caller created BRANCH at, and the branch is
+## deleted only if it is still there, so that a branch that something else
+## created or moved is left alone; an empty COMMIT deletes BRANCH wherever it
+## is.
+##
+## `git worktree remove --force` is the removal when WORKTREE holds a `.git`,
+## which only the caller's `git worktree add` can have put there, since the
+## caller made sure that WORKTREE did not exist.  `--force` is needed because a
+## half-built worktree has modifications by construction.  The test matters:
+## given a path that is registered but missing, `git worktree remove --force`
+## succeeds and drops the registration, which is no business of this function
+## if the registration was not this command's -- a stale one, say, that made
+## the `git worktree add` fail.
+##
+## When that does not apply or does not work, remove WORKTREE and GITDIR
+## directly.  Never `git worktree prune`, which drops every registration whose
+## directory is missing, including that of a worktree that the user moved with
+## `mv` and has not repaired; that worktree cannot be repaired afterward.
+undo_worktree_add() {
+  if [ -e "$2/.git" ] \
+    && git -C "$1" worktree remove --force "$2" < /dev/null > /dev/null 2>&1; then
+    :
+  else
+    rm -rf -- "$2" || true
+    if [ -n "$3" ]; then
+      rm -rf -- "$3" || true
+    fi
+  fi
+  # `|| true`, so that a branch that is not there, or is not at COMMIT, does
+  # not abort a caller that runs under `set -e`.
+  if [ -n "$4" ]; then
+    git -C "$1" update-ref -d "refs/heads/$4" ${5:+"$5"} \
+      < /dev/null > /dev/null 2>&1 || true
+  fi
+}
+
 ## Usage: check_git_dir_is_directory DIRECTORY
 ## Tests whether DIRECTORY, the top level of a working tree, holds its own
 ## repository:  that is, whether DIRECTORY/.git is a directory and is not a

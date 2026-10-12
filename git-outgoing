@@ -42,29 +42,58 @@
 # This command requires git 2.40 or later, for `git merge-tree --stdin`.
 # In a partial clone, it requires git 2.44 or later, for `GIT_NO_LAZY_FETCH`.
 
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
+if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=remote-functions.sh
+. "${SCRIPT_DIR}/remote-functions.sh"
+
 # Prints an error message and exits with a failure status.
 die() {
-  echo "git-outgoing: $*" >&2
+  echo "${SCRIPT_NAME}: $*" >&2
   exit 1
 }
 
-# Output is like "git version 2.44.0" or "git version 2.44.0.windows.1".
-git_version="$(git version)" || exit 1
-git_version="${git_version#git version }"
-git_major="${git_version%%.*}"
-git_minor="${git_version#*.}"
-git_minor="${git_minor%%.*}"
-case "${git_major}.${git_minor}" in
-  *[!0-9.]* | .* | *.) die "cannot parse git version: ${git_version}" ;;
-esac
-
-# Usage: require_git MINOR [WHY]
-# Dies unless git is version 2.MINOR or later.  WHY, if given, says why.
-require_git() {
-  if [ "${git_major}" -lt 2 ] || { [ "${git_major}" -eq 2 ] && [ "${git_minor}" -lt "$1" ]; }; then
-    die "requires git 2.$1 or later${2:+ $2}, but found git ${git_version}"
-  fi
-}
 require_git 40
 
 # The repository's object directory.  `git merge-tree` writes the merge
