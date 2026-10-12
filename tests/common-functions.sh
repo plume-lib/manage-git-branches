@@ -37,7 +37,7 @@ FAKE_SSH_END
 ##
 ## A submodule's working tree has a `.git` *file* that names a git directory
 ## in the superproject, which is one of the three states that the commands
-## that copy a working copy must refuse.  `protocol.file.allow` is needed
+## that copy a working tree must refuse.  `protocol.file.allow` is needed
 ## because git 2.38.1 and later refuse the "file" transport for a submodule
 ## by default.
 make_submodule_superproject() {
@@ -69,7 +69,7 @@ make_submodule_superproject() {
 ##
 ## A linked worktree's `.git` is a file that names a git directory inside the
 ## main working tree's repository, which is another of the states that the
-## commands that copy a working copy must refuse.
+## commands that copy a working tree must refuse.
 make_linked_worktree() {
   (
     cd -- "$1" || exit 1
@@ -92,7 +92,7 @@ make_linked_worktree() {
 ##
 ## Such a working tree is a *main* working tree, but its `.git` is a file that
 ## names the git directory beside it, which is the third state that the
-## commands that copy a working copy must refuse.  It is not a linked
+## commands that copy a working tree must refuse.  It is not a linked
 ## worktree, and it has no other working tree to send the user to:  git takes
 ## the main working tree to be the parent of the git directory, so
 ## `git worktree list` names the git directory itself here.
@@ -120,7 +120,7 @@ make_separate_git_dir_worktree() {
 ## Such a `.git` answers `test -d`, because `-d` follows symbolic links, but
 ## `cp -Rp` copies the link rather than what it names, and the relative target
 ## `../symlink-git-dir` resolves to the same git directory from the sibling
-## copy.  So this is a fourth state that the commands that copy a working copy
+## copy.  So this is a fourth state that the commands that copy a working tree
 ## must refuse.
 make_symlinked_git_dir_worktree() {
   (
@@ -147,7 +147,7 @@ make_symlinked_git_dir_worktree() {
 ## A copy of such a working tree holds no repository, and the environment
 ## still names the original's git directory, so the checkout moves the
 ## original's HEAD.  It is the fifth state that the commands that copy a
-## working copy must refuse.
+## working tree must refuse.
 make_env_git_dir_worktree() {
   (
     cd -- "$1" || exit 1

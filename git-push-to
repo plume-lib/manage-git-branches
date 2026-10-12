@@ -8,7 +8,7 @@
 #   git-push-to [--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...
 #   git-push-to [--nocompile] [--rebase | --squash] [ORG:]BRANCH [ORG:]BRANCH ...
 #
-# Each argument names the top level of a working copy (that is, of a clone).
+# Each argument names the top level of a working tree.
 # Each may be absolute directory names or relative to the current directory.
 # The "--nocompile" option skips the compilation step.
 # The "--rebase" option rebases each branch onto the previous one after
@@ -190,19 +190,19 @@ fi
 # shellcheck source=remote-functions.sh
 . "${SCRIPT_DIR}/remote-functions.sh"
 
-## Tests whether the working copy in the given directory has an upstream
+## Tests whether the working tree in the given directory has an upstream
 ## branch, which `git pull` and `git push` require.  If it does not, prints an
 ## explanation and returns 1.
 ##
 ## Also sets ${checked_out_branch} to the name of the branch that the
 ## directory has checked out, or to the empty string if HEAD is detached or
-## the directory is not a working copy.  It is the local branch, not the
+## the directory is not a working tree.  It is the local branch, not the
 ## upstream branch that this function is named for; the two can differ.  The
 ## `git fetch` and `git merge` below act on that branch, and this is where its
 ## name is determined.
 check_upstream() {
   checked_out_branch=''
-  # If the directory is not a working copy, or HEAD is detached, let a
+  # If the directory is not a working tree, or HEAD is detached, let a
   # subsequent command diagnose that:  `check_branch_exists` does so
   # accurately, whereas `git rev-parse --abbrev-ref HEAD` prints "HEAD" for a
   # detached HEAD, which this function would then report as a branch name.
@@ -220,11 +220,11 @@ check_upstream() {
   return 1
 }
 
-## Returns 0 if the given directory is the top level of a clone whose branch
-## still exists in its remote.  Otherwise, prints a diagnostic and returns 1.
-## Only status 1 from `is_deleted_branch` means "the branch still exists"; any
-## other status is a reason not to proceed, because treating it as success
-## would silently disable this check.
+## Returns 0 if the given directory is the top level of a working tree whose
+## branch still exists in its remote.  Otherwise, prints a diagnostic and
+## returns 1.  Only status 1 from `is_deleted_branch` means "the branch still
+## exists"; any other status is a reason not to proceed, because treating it
+## as success would silently disable this check.
 ##
 ## Call the function of remote-functions.sh rather than running the
 ## `is-deleted-branch` command, which is a wrapper around it.  One process for
@@ -244,9 +244,9 @@ check_branch_exists() {
     1) ;;
     2)
       # Status 2 also means a bare repository or a subdirectory of a working
-      # copy, so do not say merely "not a git clone", which would send a user
-      # who is in such a directory looking for the wrong problem.
-      echo "${SCRIPT_NAME}: not the top level of a git clone: $1" >&2
+      # tree, so do not say merely "not a git working tree", which would send
+      # a user who is in such a directory looking for the wrong problem.
+      echo "${SCRIPT_NAME}: not the top level of a git working tree: $1" >&2
       return 1
       ;;
     3)
@@ -280,9 +280,9 @@ absolute_path() {
 }
 
 ## Fetches the given branch of the given directory into the current directory,
-## which is the top level of a clone, and sets ${fetched_head} to the commit
-## that it fetched.  The directory is an absolute pathname.  Returns 1, after
-## printing a diagnostic, on failure.
+## which is the top level of a working tree, and sets ${fetched_head} to the
+## commit that it fetched.  The directory is an absolute pathname.  Returns 1,
+## after printing a diagnostic, on failure.
 fetch_branch() {
   fetch_from_absolute="$1"
   fetch_from_branch="$2"
@@ -318,7 +318,7 @@ fetch_branch() {
   # ambiguity.
   #
   # ${fetch_from_branch} is not empty:  `check_upstream` leaves it empty for a
-  # detached HEAD and for a directory that is not a working copy, and
+  # detached HEAD and for a directory that is not a working tree, and
   # `check_branch_exists` refuses both before this function is called.
   if ! git fetch -q -- "${fetch_from_relative}" "refs/heads/${fetch_from_branch}"; then
     echo "${SCRIPT_NAME}: problem fetching ${fetch_from_absolute} into $(pwd)" >&2

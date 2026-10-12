@@ -8,9 +8,9 @@
 # Usage:
 #   git-pull-from [--nocompile] OTHER-REPO-DIR
 #
-# Run this command from the top level of a working copy (that is, a
-# clone).  OTHER-REPO-DIR is the top level of another working copy; it
-# may be an absolute or relative pathname.
+# Run this command from the top level of a working tree.  OTHER-REPO-DIR is
+# the top level of another working tree; it may be an absolute or relative
+# pathname.
 
 # This script does the following:
 #  * pull another directory from its remote,
@@ -20,10 +20,11 @@
 #
 # All the work is done by `git-push-to OTHER-REPO-DIR .`; diagnostics from that
 # step mention `git-push-to`.  Before running it, this script checks that the
-# current directory is the top level of a clone, because `git-push-to` would
-# report that about the "." that this script passes on, which does not tell the
-# user which directory to run this command in.  It checks OTHER-REPO-DIR too,
-# so that a diagnostic about it appears to come from the command the user ran.
+# current directory is the top level of a working tree, because `git-push-to`
+# would report that about the "." that this script passes on, which does not
+# tell the user which directory to run this command in.  It checks
+# OTHER-REPO-DIR too, so that a diagnostic about it appears to come from the
+# command the user ran.
 #
 # Calling `git-push-to` is often more readable, because it makes both directory names explicit.
 
@@ -98,9 +99,9 @@ absolute_path() {
 # working tree, git before version 2.25 printed nothing and exited with status
 # 0 rather than failing.
 if ! toplevel="$(git rev-parse --show-toplevel 2> /dev/null)" || [ -z "${toplevel}" ]; then
-  # The current directory is not in a working copy at all:  it is outside any
-  # repository, or it is in a bare repository, which has no working copy.
-  echo "${SCRIPT_NAME}: not the top level of a git clone: $(pwd)" >&2
+  # The current directory is not in a working tree at all:  it is outside any
+  # repository, or it is in a bare repository, which has no working tree.
+  echo "${SCRIPT_NAME}: not the top level of a git working tree: $(pwd)" >&2
   exit 1
 fi
 # Compare physical pathnames, because the current directory may be reached
@@ -108,14 +109,15 @@ fi
 # Canonicalize what git printed as well, rather than depending on git to have
 # done so; git documents the pathname as absolute but not as physical.
 if [ "$(pwd -P)" != "$(absolute_path "${toplevel}")" ]; then
-  echo "${SCRIPT_NAME}: not the top level of a git clone: $(pwd)" >&2
+  echo "${SCRIPT_NAME}: not the top level of a git working tree: $(pwd)" >&2
   echo "${SCRIPT_NAME}: its top level is: ${toplevel}" >&2
   exit 1
 fi
 
-# OTHER-REPO-DIR must be the top level of a clone too.  `git-push-to` also
-# checks this, but check it here so that the diagnostic names this command's
-# argument rather than appearing to come from a command the user did not run.
+# OTHER-REPO-DIR must be the top level of a working tree too.  `git-push-to`
+# also checks this, but check it here so that the diagnostic names this
+# command's argument rather than appearing to come from a command the user did
+# not run.
 # Canonicalize the argument before running `git` in it:  `git -C` fails on a
 # directory that cannot be entered, so without this test such a directory would
 # be reported as not being a clone, which is not what is known about it.
@@ -130,12 +132,12 @@ if [ -z "${other_physical}" ]; then
 fi
 if ! other_toplevel="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" \
   || [ -z "${other_toplevel}" ]; then
-  echo "${SCRIPT_NAME}: not the top level of a git clone: $1" >&2
+  echo "${SCRIPT_NAME}: not the top level of a git working tree: $1" >&2
   exit 1
 fi
 # As above, compare physical pathnames, canonicalizing both.
 if [ "${other_physical}" != "$(absolute_path "${other_toplevel}")" ]; then
-  echo "${SCRIPT_NAME}: not the top level of a git clone: $1" >&2
+  echo "${SCRIPT_NAME}: not the top level of a git working tree: $1" >&2
   echo "${SCRIPT_NAME}: its top level is: ${other_toplevel}" >&2
   exit 1
 fi

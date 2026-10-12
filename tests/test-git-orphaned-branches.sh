@@ -271,9 +271,9 @@ cmp -s "${work}/print-newline.goal" "${work}/print-newline.actual" \
 ###########################################################################
 
 # A linked worktree is a working tree, and `is-deleted-branch` answers about
-# it correctly, so an orphaned one must be listed.  Before this was fixed,
-# such a directory failed the `[ -d "$dir/.git" ]` test, was checked only for
-# a lone `.project` file, and was silently ignored.
+# it correctly, so an orphaned one must be listed.  A `[ -d "$dir/.git" ]`
+# test would not recognize it as a working tree, would check it only for a
+# lone `.project` file, and would silently ignore it.
 #
 # The main working tree that hosts it must not be listed, even when its own
 # branch was deleted as well:  removing it would remove the repository that
@@ -313,6 +313,52 @@ if ! output="$(cd "${work}/worktrees" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null
 fi
 if ! printf '%s\n' "${output}" | grep -q -x -F -- "${host_absolute}"; then
   fail "git-orphaned-branches did not list ${host} once its worktree was gone"
+fi
+
+# A locked registration whose directory is missing, such as one on removable
+# media that is not mounted, still depends on the host.
+git -C "${host}" worktree lock --reason 'removable media' "${dependent}"
+if ! output="$(cd "${work}/worktrees" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
+  fail "git-orphaned-branches exited with a failure status for a locked registration"
+fi
+if printf '%s\n' "${output}" | grep -q -x -F -- "${host_absolute}"; then
+  fail "git-orphaned-branches listed ${host}, which hosts a locked worktree"
+fi
+git -C "${host}" worktree unlock "${dependent}"
+
+# A worktree that `git-new-branch` made, once its branch was pushed and then
+# deleted in the remote, is listed; the clone that hosts it, whose branch
+# still exists, is not.  `--remove` removes the worktree and deletes its
+# branch, and leaves the host in place.
+mkdir -p "${work}/gnb"
+gnbhost="${work}/gnb/g-branch-main"
+git clone -q -b main "${work}/remote.git" "${gnbhost}"
+if ! (cd "${gnbhost}" && "${TOPLEVEL}/git-new-branch" gnbgone > /dev/null 2>&1); then
+  fail "git-new-branch failed"
+fi
+gnbgone="${work}/gnb/g-branch-gnbgone"
+git -C "${gnbgone}" push -q -u origin gnbgone
+git -C "${work}/seed" push -q origin --delete gnbgone
+if ! output="$(cd "${work}/gnb" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
+  fail "git-orphaned-branches exited with a failure status for a git-new-branch worktree"
+fi
+if ! printf '%s\n' "${output}" | grep -q -x -F -- "$(absolute_path "${gnbgone}")"; then
+  fail "git-orphaned-branches did not list the orphaned worktree ${gnbgone}"
+fi
+if printf '%s\n' "${output}" | grep -q -x -F -- "$(absolute_path "${gnbhost}")"; then
+  fail "git-orphaned-branches listed ${gnbhost}, whose branch still exists"
+fi
+if ! output="$(cd "${work}/gnb" && "${GIT_ORPHANED_BRANCHES}" --remove 2>&1)"; then
+  fail "git-orphaned-branches --remove failed for a git-new-branch worktree: ${output}"
+fi
+if [ -e "${gnbgone}" ]; then
+  fail "git-orphaned-branches --remove did not remove ${gnbgone}"
+fi
+if git -C "${gnbhost}" rev-parse --verify --quiet refs/heads/gnbgone > /dev/null; then
+  fail "git-orphaned-branches --remove left the branch of ${gnbgone}"
+fi
+if ! git -C "${gnbhost}" status > /dev/null 2>&1; then
+  fail "git-orphaned-branches --remove broke the host ${gnbhost}"
 fi
 
 # A submodule's working tree is a working tree too, and its `.git` is a file
@@ -731,6 +777,18 @@ fi
 if [ ! -d "${work}/removal-empty/not-a-branch-directory" ]; then
   fail "--remove removed a directory that it does not list"
 fi
+
+# Too old a git is refused before anything happens.
+make_fake_git "${work}/oldgit" version 0 'git version 2.30.0'
+mkdir -p "${work}/oldgit-scan"
+if output="$(cd "${work}/oldgit-scan" && PATH="${work}/oldgit:${PATH}" \
+  "${GIT_ORPHANED_BRANCHES}" 2>&1)"; then
+  fail "git-orphaned-branches exited with status 0 with git 2.30.0"
+fi
+case "${output}" in
+  *"requires git 2.31 or later, but found git 2.30.0"*) ;;
+  *) fail "unexpected message with git 2.30.0: ${output}" ;;
+esac
 
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"

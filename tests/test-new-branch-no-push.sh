@@ -3,7 +3,7 @@
 # Tests that `git-new-branch` has only local effects: it does not push the new
 # branch, and it creates the branch directory even when the remote cannot be
 # contacted at all.  `git-new-branch` contacts the remote to bring the working
-# copy up to date and to ask whether the branch already exists; it reports
+# tree up to date and to ask whether the branch already exists; it reports
 # being unable to do the former, but neither failure is an error.
 #
 # Usage:
@@ -84,7 +84,7 @@ if [ -e "${FEATURE_DIR}-TMP" ]; then
 fi
 
 # The new branch was not pushed:  the remote is exactly as it was, and the new
-# working copy has no upstream branch and no remote-tracking branch.
+# working tree has no upstream branch and no remote-tracking branch.
 if [ "$(git -C "${REMOTE}" for-each-ref)" != "${refs_before}" ]; then
   fail "git-new-branch changed the refs of ${REMOTE}:
 $(git -C "${REMOTE}" for-each-ref)"
@@ -96,13 +96,13 @@ if git -C "${FEATURE_DIR}" show-ref --verify --quiet refs/remotes/origin/feature
   fail "git-new-branch created a remote-tracking branch for feature1"
 fi
 
-# The new working copy is on the new branch, even though it has no upstream.
+# The new working tree is on the new branch, even though it has no upstream.
 branch="$(git -C "${FEATURE_DIR}" rev-parse --abbrev-ref HEAD)"
 if [ "${branch}" != "feature1" ]; then
   fail "${FEATURE_DIR} is on branch ${branch}, not feature1"
 fi
 
-# The branch exists only in the new working copy.
+# The branch exists only locally.
 check_not_pushed feature1
 if git -C "${FEATURE_DIR}" rev-parse --symbolic-full-name '@{upstream}' \
   > /dev/null 2>&1; then
@@ -134,7 +134,7 @@ fi
 check_not_pushed feature2
 if git -C "${WORK_DIR}/pushremote-branch-feature2" \
   rev-parse --symbolic-full-name '@{upstream}' > /dev/null 2>&1; then
-  fail "the new working copy has an upstream, but nothing should have been pushed"
+  fail "the new working tree has an upstream, but nothing should have been pushed"
 fi
 
 # A remote that cannot be contacted at all is not an error either, because
@@ -156,7 +156,7 @@ if [ "${branch}" != "feature2" ]; then
   fail "${OFFLINE_DIR} is on branch ${branch}, not feature2"
 fi
 
-# The `git pull` that brings this working copy up to date fails when the remote
+# The `git pull` that brings this working tree up to date fails when the remote
 # is unreachable, and that failure is reported, because the new branch is based
 # on a possibly stale commit; see `tests/test-branch-pull-failure.sh`.
 case "${output}" in

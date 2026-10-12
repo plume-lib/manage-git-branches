@@ -52,7 +52,7 @@
 # a path that is no part of a repository.
 #
 # Status 0 says that the branch was deleted in its remote, not that the
-# working copy holds nothing of value:  the branch can hold commits that were
+# working tree holds nothing of value:  the branch can hold commits that were
 # never pushed, and deleting the directory would lose them.
 #
 # A branch that has no upstream configuration is reported as deleted only if

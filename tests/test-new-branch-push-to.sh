@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Tests that a working copy created by `git-new-branch`, once its branch has
+# Tests that a working tree created by `git-new-branch`, once its branch has
 # been given an upstream, can be used by `git-push-to`, which is the workflow
 # that the README describes.
 #
@@ -98,7 +98,7 @@ git -C "${MAIN_DIR}" commit -q -a -m "Add a second line"
 git -C "${MAIN_DIR}" push -q
 
 if ! "${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}"; then
-  fail "git-push-to failed on a working copy created by git-new-branch"
+  fail "git-push-to failed on a working tree created by git-new-branch"
 fi
 
 if ! grep -q "second line" "${FEATURE_DIR}/file.txt"; then
@@ -217,25 +217,57 @@ esac
 # Leave the repository as the rest of this test found it.
 git -C "${MAIN_DIR}" tag -d main > /dev/null
 
-# A working copy with no upstream branch gets an explanation, not git's
+# `git-push-to` and `git-pull-from` work between two worktrees of one
+# repository:  `git-new-branch` run in the worktree ${FEATURE_DIR} makes a
+# second worktree of the same repository.
+FEATURE2_DIR="${WORK_DIR}/myrepo-branch-feature2"
+if ! (cd "${FEATURE_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature2 > /dev/null); then
+  fail "git-new-branch failed in a worktree"
+fi
+if [ "$(git -C "${FEATURE2_DIR}" rev-parse --path-format=absolute --git-common-dir)" \
+  != "$(git -C "${FEATURE_DIR}" rev-parse --path-format=absolute --git-common-dir)" ]; then
+  fail "${FEATURE2_DIR} and ${FEATURE_DIR} are not worktrees of one repository"
+fi
+git -C "${FEATURE2_DIR}" push -q --set-upstream origin feature2
+echo "worktree line" >> "${FEATURE_DIR}/feature.txt"
+git -C "${FEATURE_DIR}" commit -q -a -m "A commit to push between worktrees"
+git -C "${FEATURE_DIR}" push -q
+if ! "${COMMANDS_DIR}/git-push-to" "${FEATURE_DIR}" "${FEATURE2_DIR}"; then
+  fail "git-push-to failed between two worktrees"
+fi
+if [ "$(git -C "${REMOTE}" rev-parse refs/heads/feature2)" \
+  != "$(git -C "${FEATURE_DIR}" rev-parse HEAD)" ]; then
+  fail "git-push-to did not push feature2 after merging from a sibling worktree"
+fi
+echo "pulled line" >> "${FEATURE_DIR}/feature.txt"
+git -C "${FEATURE_DIR}" commit -q -a -m "A commit to pull between worktrees"
+git -C "${FEATURE_DIR}" push -q
+if ! (cd "${FEATURE2_DIR}" && "${COMMANDS_DIR}/git-pull-from" "${FEATURE_DIR}" > /dev/null); then
+  fail "git-pull-from failed between two worktrees"
+fi
+if ! grep -q "pulled line" "${FEATURE2_DIR}/feature.txt"; then
+  fail "git-pull-from did not merge from a sibling worktree"
+fi
+
+# A working tree with no upstream branch gets an explanation, not git's
 # "There is no tracking information for the current branch".
 git -C "${FEATURE_DIR}" branch --unset-upstream
 if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}" "${FEATURE_DIR}" 2>&1)"; then
-  fail "git-push-to succeeded on a working copy with no upstream branch"
+  fail "git-push-to succeeded on a working tree with no upstream branch"
 fi
 case "${output}" in
   *"has no upstream branch"*) ;;
   *) fail "git-push-to did not explain the missing upstream branch: ${output}" ;;
 esac
 
-# A subdirectory of a working copy is a git repository, so saying merely "not a
+# A subdirectory of a working tree is a git repository, so saying merely "not a
 # git clone" would send the user looking for the wrong problem.
 mkdir -p "${MAIN_DIR}/subdir"
 if output="$("${COMMANDS_DIR}/git-push-to" "${MAIN_DIR}/subdir" "${FEATURE_DIR}" 2>&1)"; then
-  fail "git-push-to succeeded on a subdirectory of a working copy"
+  fail "git-push-to succeeded on a subdirectory of a working tree"
 fi
 case "${output}" in
-  *"not the top level of a git clone"*) ;;
+  *"not the top level of a git working tree"*) ;;
   *) fail "git-push-to did not say that the directory is not a top level: ${output}" ;;
 esac
 

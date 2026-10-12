@@ -76,24 +76,19 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-# Git exports $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE to hooks and to
-# the commands run by `git rebase --exec`, `git bisect run`, and
-# `git submodule foreach`.  They take precedence over the `-C` argument of
-# `git`, so leaving them set would make every question below answer for
-# whatever repository the caller happened to be working in, rather than for
-# the directory being examined.  `git-remove-branch-directory` unsets the
-# three itself, so `--remove` is covered twice over; unset them here as well,
-# because a scan asks its own questions before it removes anything.
-unset GIT_DIR
-unset GIT_WORK_TREE
-unset GIT_INDEX_FILE
-
 if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
   echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
   exit 1
 fi
 # shellcheck source=remote-functions.sh
 . "${SCRIPT_DIR}/remote-functions.sh"
+
+# Without this, every question below would answer for whatever repository the
+# caller happened to be working in, rather than for the directory being
+# examined.  `git-remove-branch-directory` does this itself, so `--remove` is
+# covered twice over; do it here as well, because a scan asks its own
+# questions before it removes anything.
+unset_git_location_variables
 
 # If variable `print0` is non-empty, separate the output directories by NUL rather than by newline.
 print0=""
@@ -114,6 +109,11 @@ if [ "$#" -ne 0 ]; then
   echo "Usage: ${SCRIPT_NAME} [--print0] [--remove]" >&2
   exit 1
 fi
+
+# For the `locked` line of `git worktree list --porcelain`, which
+# `live_dependent_worktree` reads; without it, a locked worktree whose
+# directory is missing would not protect its repository.
+require_git 31
 
 # Where the directories to remove are collected, one per file, named by
 # position.  The removal happens after the scan rather than during it, so
@@ -177,29 +177,37 @@ absolute_path() {
 # directory must not appear in it however orphaned its own branch is.
 #
 # `git worktree list --porcelain` prints the main working tree first and each
-# linked worktree after it, one `worktree PATH` line per entry.  A pathname
-# that contains a newline cannot be represented in that format; git offers
-# `-z` for that, which needs git 2.36, and a newline in the pathname of a
-# repository is pathological.
+# linked worktree after it, in entries separated by blank lines, each
+# beginning with a `worktree PATH` line.  awk reduces each entry to one line,
+# the path preceded by "L " if the entry has a `locked` line and by "- "
+# otherwise.  A pathname that contains a newline cannot be represented in that
+# format; git offers `-z` for that, which needs git 2.36, and a newline in the
+# pathname of a repository is pathological.
 #
 # A registration whose directory is gone protects nothing, because removing $1
-# cannot break a working tree that does not exist.
+# cannot break a working tree that does not exist -- unless it is locked:  its
+# directory may be missing only for now, on removable media that is not
+# mounted, and the lock is what says so.
 live_dependent_worktree() {
   live_dependent_worktree_dir="$(absolute_path "$1")" || return 0
   git -C "$1" worktree list --porcelain 2> /dev/null \
-    | sed -n 's/^worktree //p' \
+    | awk '
+        /^worktree / { if (n++) print flag " " dir; dir = substr($0, 10); flag = "-" }
+        $1 == "locked" { flag = "L" }
+        END { if (n) print flag " " dir }' \
     | (
       # Only the main working tree holds the repository that the others
       # depend on, so a linked worktree is at no risk of taking one down.
       IFS= read -r live_dependent_worktree_main || exit 0
-      live_dependent_worktree_main_absolute="$(absolute_path "${live_dependent_worktree_main}")" \
+      live_dependent_worktree_main_absolute="$(absolute_path "${live_dependent_worktree_main#? }")" \
         || exit 0
       if [ "${live_dependent_worktree_main_absolute}" != "${live_dependent_worktree_dir}" ]; then
         exit 0
       fi
-      while IFS= read -r live_dependent_worktree_linked; do
-        if [ -d "${live_dependent_worktree_linked}" ]; then
-          printf '%s\n' "${live_dependent_worktree_linked}"
+      while IFS= read -r live_dependent_worktree_entry; do
+        if [ "${live_dependent_worktree_entry%% *}" = 'L' ] \
+          || [ -d "${live_dependent_worktree_entry#? }" ]; then
+          printf '%s\n' "${live_dependent_worktree_entry#? }"
           exit 0
         fi
       done
@@ -213,7 +221,7 @@ live_dependent_worktree() {
 # A submodule's working tree is part of its superproject's working tree, so
 # removing it leaves the superproject with a deleted directory that the user
 # never asked to change and a `.gitmodules` that still names it.  As with a
-# linked worktree, this command's output is fed to `rm -rf`, so such a
+# linked worktree, this command's output is fed to a removal, so such a
 # directory must not appear in it however orphaned the submodule's own branch
 # is.
 #
@@ -385,9 +393,9 @@ holds_kept_dir() {
 
 # The removal phase.  Each directory goes through
 # `git-remove-branch-directory`, which refuses to remove one that holds
-# uncommitted changes or commits that no remote-tracking ref and no tag
-# holds, and says why.  Nothing is printed on standard output; the only report
-# of a directory is the diagnostic about one that was kept.
+# uncommitted changes or commits that the removal would lose, and says why.
+# Nothing is printed on standard output; the only report of a directory is the
+# diagnostic about one that was kept.
 #
 # The order is the reverse of the order of discovery, which means innermost
 # first:  the scan descends into a directory that it reported, because such a

@@ -136,7 +136,7 @@ actual_commit="$(git -C "${WORK_DIR}/unfetched-branch-feature1" rev-parse HEAD)"
 if [ "${actual_commit}" != "${expected_commit}" ]; then
   fail "${WORK_DIR}/unfetched-branch-feature1 is at ${actual_commit}, not at the remote's feature1 (${expected_commit})"
 fi
-# The new working copy gets an upstream even though this clone's fetch refspec
+# The new working tree gets an upstream even though this clone's fetch refspec
 # does not cover the branch, so git set none up:  `git-push-to` and
 # `git-pull-from` require one.
 upstream_remote="$(git -C "${WORK_DIR}/unfetched-branch-feature1" config --get branch.feature1.remote)"
@@ -224,7 +224,10 @@ fi
 if [ "${upstream}" != "origin/feature1" ]; then
   fail "${WORK_DIR}/multiremote-branch-feature1 tracks [${upstream}], not the origin/feature1 of the fetch remote"
 fi
-rm -rf "${WORK_DIR}/multiremote-branch-feature1"
+# The new directory is a worktree, whose branch is in ${MULTI_DIR}'s
+# repository, so remove both before checking the branch out again.
+git -C "${MULTI_DIR}" worktree remove --force "${WORK_DIR}/multiremote-branch-feature1"
+git -C "${MULTI_DIR}" branch -q -D feature1
 
 # `checkout.defaultRemote` outranks the fetch remote, as it does for git's own
 # search, and the branch is created from that remote's branch.
@@ -245,8 +248,8 @@ fi
 
 # When none of the remotes that have the branch is the fetch remote and
 # `checkout.defaultRemote` names none of them either, which one to check out
-# is ambiguous.  Saying so before the copy both explains the problem and saves
-# the user a full copy of the repository.
+# is ambiguous.  Saying so before the new directory is made explains the
+# problem.
 AMBIGUOUS_DIR="${WORK_DIR}/ambiguous"
 THIRD_REMOTE="${WORK_DIR}/third.git"
 git clone -q --bare "${REMOTE}" "${THIRD_REMOTE}"
@@ -268,7 +271,7 @@ case "${output}" in
 esac
 for leftover in "${WORK_DIR}/ambiguous-branch-feature1" "${WORK_DIR}/ambiguous-branch-feature1-TMP"; do
   if [ -e "${leftover}" ]; then
-    fail "git-checkout-branch copied the working copy before refusing: ${leftover}"
+    fail "git-checkout-branch created a directory before refusing: ${leftover}"
   fi
 done
 
@@ -298,7 +301,7 @@ esac
 # of the repository.
 for leftover in "${WORK_DIR}/blockedfetch-branch-feature1" "${WORK_DIR}/blockedfetch-branch-feature1-TMP"; do
   if [ -e "${leftover}" ]; then
-    fail "git-checkout-branch copied the working copy although the fetch failed: ${leftover}"
+    fail "git-checkout-branch created a directory although the fetch failed: ${leftover}"
   fi
 done
 

@@ -9,15 +9,438 @@
 # from that directory.  It must also set ${SCRIPT_NAME} to its own name, which
 # the diagnostics below use.
 
-## Usage: check_git_dir_is_directory DIRECTORY
+## Usage: unset_git_location_variables
+## Unsets $GIT_DIR, $GIT_WORK_TREE, $GIT_INDEX_FILE, $GIT_COMMON_DIR, and
+## $GIT_OBJECT_DIRECTORY.  Git exports the first three to hooks and to the
+## commands run by `git rebase --exec`, `git bisect run`, and
+## `git submodule foreach`, and it exports $GIT_OBJECT_DIRECTORY to the hooks
+## that run while a push is received.  They take precedence over the location
+## of a working tree, including the `-C` argument of `git`, so a command that
+## runs git in a directory other than the caller's must unset them before it
+## runs git at all.
+unset_git_location_variables() {
+  unset GIT_DIR
+  unset GIT_WORK_TREE
+  unset GIT_INDEX_FILE
+  unset GIT_COMMON_DIR
+  unset GIT_OBJECT_DIRECTORY
+}
+
+## Usage: require_git MINOR [WHY]
+## Exits with status 1, after printing a diagnostic, unless git is version
+## 2.MINOR or later.  WHY, if given, says why that version is needed.
+##
+## The version is parsed rather than probed for:  one mechanism gives every
+## command one message, and the message can say which version it found.  A
+## probe would also need care, because `git rev-parse` prints an option that it
+## does not recognize, and exits 0, rather than failing.
+##
+## The version is read once, by the first call, so that a command that states
+## several requirements runs `git version` only once.
+require_git_version=''
+require_git() {
+  if [ -z "${require_git_version}" ]; then
+    # Output is like "git version 2.44.0" or "git version 2.44.0.windows.1".
+    require_git_version="$(git version)" || exit 1
+    require_git_version="${require_git_version#git version }"
+  fi
+  require_git_major="${require_git_version%%.*}"
+  require_git_minor="${require_git_version#*.}"
+  require_git_minor="${require_git_minor%%.*}"
+  case "${require_git_major}.${require_git_minor}" in
+    *[!0-9.]* | .* | *.)
+      echo "${SCRIPT_NAME}: cannot parse git version: ${require_git_version}" >&2
+      exit 1
+      ;;
+  esac
+  if [ "${require_git_major}" -lt 2 ] \
+    || { [ "${require_git_major}" -eq 2 ] && [ "${require_git_minor}" -lt "$1" ]; }; then
+    echo "${SCRIPT_NAME}: requires git 2.$1 or later${2:+ $2}, but found git ${require_git_version}" >&2
+    exit 1
+  fi
+}
+
+## Usage: undo_worktree_add REPOSITORY WORKTREE GITDIR BRANCH COMMIT
+## Undoes a `git worktree add` that the calling command ran, or began to run,
+## in the repository of the working tree REPOSITORY:  removes the directory
+## WORKTREE, its administrative directory GITDIR, and the branch BRANCH.  It is
+## for a command's cleanup after a failure or a signal, so it prints nothing,
+## reads nothing from standard input, and returns 0.
+##
+## GITDIR is the worktree's administrative directory, from
+## `git -C WORKTREE rev-parse --absolute-git-dir`, or empty if the caller never
+## learned it.  BRANCH is empty if the caller did not create a branch.
+## COMMIT is the commit that the caller created BRANCH at, and the branch is
+## deleted only if it is still there, so that a branch that something else
+## created or moved is left alone; an empty COMMIT deletes BRANCH wherever it
+## is.
+##
+## `git worktree remove --force` is the removal when WORKTREE holds a `.git`,
+## which only the caller's `git worktree add` can have put there, since the
+## caller made sure that WORKTREE did not exist.  `--force` is needed because a
+## half-built worktree has modifications by construction.  The test matters:
+## given a path that is registered but missing, `git worktree remove --force`
+## succeeds and drops the registration, which is no business of this function
+## if the registration was not this command's -- a stale one, say, that made
+## the `git worktree add` fail.
+##
+## When that does not apply or does not work, remove WORKTREE and GITDIR
+## directly.  Never `git worktree prune`, which drops every registration whose
+## directory is missing, including that of a worktree that the user moved with
+## `mv` and has not repaired; that worktree cannot be repaired afterward.
+undo_worktree_add() {
+  if [ -e "$2/.git" ] \
+    && git -C "$1" worktree remove --force "$2" < /dev/null > /dev/null 2>&1; then
+    :
+  else
+    rm -rf -- "$2" || true
+    if [ -n "$3" ]; then
+      rm -rf -- "$3" || true
+    fi
+  fi
+  # A branch that is not there, or is not at COMMIT, is left alone, without
+  # aborting a caller that runs under `set -e`.  Deleting the branch also
+  # removes its configuration, as `git branch --delete` would.
+  if [ -n "$4" ] \
+    && git -C "$1" update-ref -d "refs/heads/$4" ${5:+"$5"} \
+      < /dev/null > /dev/null 2>&1; then
+    git -C "$1" config --remove-section "branch.$4" \
+      < /dev/null > /dev/null 2>&1 || true
+  fi
+}
+
+## Usage: trap_branch_cleanup
+## For `git-new-branch` and `git-checkout-branch`.  Installs traps that, when
+## the command exits or is killed by a signal, undo whatever partial work these
+## variables record.  It sets each of them to empty, and the command sets each
+## one just before it creates what the variable names, and empties it once
+## that is complete:
+##  * TMPDIR_TO_CLEAN, a temporary directory.  It is left empty otherwise, so
+##    the traps never remove a pre-existing directory that the command did not
+##    create.
+##  * WORKTREE_TO_CLEAN, BRANCH_TO_CLEAN, and BRANCH_COMMIT_TO_CLEAN, the new
+##    worktree, and the branch that the add creates and its commit; see
+##    `add_worktree`.
+##  * WORKTREE_GITDIR_TO_CLEAN, the new worktree's administrative directory,
+##    which the command records as soon as the add succeeds, if it learns it.
+## The command must also set TOPLEVEL, the top level of its working tree,
+## before it sets WORKTREE_TO_CLEAN.
+##
+## A POSIX shell such as dash does not run an EXIT trap when the shell is
+## killed by a signal, so trap the signals too.  Each signal handler restores
+## the default disposition and re-sends the signal to this shell, so that the
+## caller still sees the exit status that the signal produces.
+trap_branch_cleanup() {
+  branch_cleanup_startdir="${PWD}"
+  TMPDIR_TO_CLEAN=""
+  WORKTREE_TO_CLEAN=""
+  WORKTREE_GITDIR_TO_CLEAN=""
+  BRANCH_TO_CLEAN=""
+  BRANCH_COMMIT_TO_CLEAN=""
+  trap branch_cleanup EXIT
+  trap 'branch_cleanup; trap - HUP EXIT; kill -s HUP "$$"' HUP
+  trap 'branch_cleanup; trap - INT EXIT; kill -s INT "$$"' INT
+  trap 'branch_cleanup; trap - TERM EXIT; kill -s TERM "$$"' TERM
+}
+
+## Usage: branch_cleanup
+## The traps that `trap_branch_cleanup` installs run this.
+branch_cleanup() {
+  cd -- "${branch_cleanup_startdir}" 2> /dev/null || true
+  if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf -- "${TMPDIR_TO_CLEAN}"; fi
+  # The starting directory may no longer resolve, so name the repository
+  # explicitly.
+  if [ -n "${WORKTREE_TO_CLEAN}" ]; then
+    undo_worktree_add "${TOPLEVEL}" "${WORKTREE_TO_CLEAN}" \
+      "${WORKTREE_GITDIR_TO_CLEAN}" "${BRANCH_TO_CLEAN}" \
+      "${BRANCH_COMMIT_TO_CLEAN}"
+  fi
+}
+
+## Usage: add_worktree WORKTREE BRANCH [START-POINT [OPTION...]]
+## Runs `git worktree add` in the current repository, with the OPTIONs, to make
+## a new worktree at the absolute pathname WORKTREE.  With START-POINT, it
+## creates the branch BRANCH there; without, it checks out the existing BRANCH.
+## START-POINT is passed to git as given, so that git sets up an upstream for
+## it as it would for `git branch`.  Exits with status 1, after printing a
+## diagnostic, if the add fails; git's own message says why.
+##
+## It records, for the traps of `trap_branch_cleanup`, WORKTREE and, if it
+## creates BRANCH, BRANCH and the commit that START-POINT names.  A BRANCH
+## that it creates gets `branch.BRANCH.createdForBranchDirectory`, so that
+## `git-remove-branch-directory` deletes it along with the worktree.  BRANCH is
+## recorded only if it does not exist just before the add, so that the traps
+## never delete a branch that this command did not create;
+## `git worktree add -b` creates the branch before it tests the path, and
+## leaves it behind when the test fails.
+##
+## The worktree is added at its final path, never at a temporary one:  a
+## worktree that is later moved with `mv` keeps a registration that names its
+## old path, and one that is moved with `git worktree move` keeps an
+## administrative directory named after its old path forever.
+##
+## When a branch directory was removed with `rm -rf`, the add fails because
+## the path is still registered, and git's message names the ways out.  This
+## function never runs `git worktree prune` to smooth that over, because prune
+## also deletes the registration of a worktree that the user moved with `mv`,
+## which cannot be repaired afterward.
+##
+## WORKTREE must not exist; if it does, this function exits with status 1.
+## It tests for WORKTREE itself, even when the caller already has, so that
+## nothing slow -- a remote query or a copy -- runs between the test and the
+## recording of WORKTREE.  Otherwise a directory that another process created
+## in between would make the add fail, and the traps would then remove that
+## directory, which this command did not create.
+add_worktree() {
+  add_worktree_dir="$1"
+  add_worktree_branch="$2"
+  if [ -e "${add_worktree_dir}" ] || [ -L "${add_worktree_dir}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: directory exists: ${add_worktree_dir}" >&2
+    exit 1
+  fi
+  if [ "$#" -lt 3 ]; then
+    WORKTREE_TO_CLEAN="${add_worktree_dir}"
+    # WORKTREE is absolute, so it cannot be mistaken for an option.
+    if ! git worktree add -q "${add_worktree_dir}" "${add_worktree_branch}"; then
+      echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${add_worktree_dir}" >&2
+      exit 1
+    fi
+    return 0
+  fi
+  add_worktree_start="$3"
+  shift 3
+  if ! BRANCH_COMMIT_TO_CLEAN="$(git rev-parse --verify \
+    "${add_worktree_start}^{commit}")"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot resolve ${add_worktree_start}" >&2
+    exit 1
+  fi
+  if ! git rev-parse --verify --quiet "refs/heads/${add_worktree_branch}" > /dev/null; then
+    BRANCH_TO_CLEAN="${add_worktree_branch}"
+  fi
+  WORKTREE_TO_CLEAN="${add_worktree_dir}"
+  if ! git worktree add "$@" -q -b "${add_worktree_branch}" \
+    "${add_worktree_dir}" "${add_worktree_start}"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${add_worktree_dir}" >&2
+    exit 1
+  fi
+  # `git-remove-branch-directory` deletes a branch only if this mark says
+  # that this package created it for its worktree.  Without the mark, the
+  # branch merely outlives its worktree.
+  if ! git config "branch.${add_worktree_branch}.createdForBranchDirectory" true; then
+    echo "${SCRIPT_NAME}: warning: cannot mark the branch ${add_worktree_branch}, so git-remove-branch-directory will keep it" >&2
+  fi
+}
+
+## Usage: has_gitlinks [TREE-ISH]
+## Succeeds if TREE-ISH, or the index of the current working tree if TREE-ISH
+## is omitted, contains a submodule, which git records as a gitlink, an entry
+## of mode 160000.  This is the question that matters for making a worktree,
+## rather than whether `.gitmodules` exists:  that file can outlive the last
+## submodule, and the working tree that this command runs in can hold
+## submodules that the branch to be checked out does not, or the reverse.
+##
+## A TREE-ISH or index without `.gitmodules` is answered without listing all
+## of it, which in a large repository is slow:  a gitlink without that file
+## is a submodule that `git submodule` cannot set up, and nearly every tree
+## without the file has no gitlink.  `:.gitmodules` names the index's entry.
+has_gitlinks() {
+  if [ "$#" -eq 0 ]; then
+    git cat-file -e :.gitmodules 2> /dev/null \
+      && git ls-files --stage | grep -q '^160000 '
+  else
+    git cat-file -e "$1:.gitmodules" 2> /dev/null \
+      && git ls-tree -r "$1" | grep -q '^160000 '
+  fi
+}
+
+## Usage: note_copy_for_submodules WHAT
+## Says that WHAT has submodules, so that the new directory is a full copy of
+## the current one rather than a worktree, because git does not support a
+## submodule in more than one worktree.  `git-new-branch` and
+## `git-checkout-branch` print this note before `check_git_dir_is_directory`
+## decides whether the current directory can be copied, so that a refusal
+## follows the reason for the copy.
+note_copy_for_submodules() {
+  echo "${SCRIPT_NAME}: $1 has submodules, which a worktree cannot hold, so the new directory is a full copy of this one, as with --copy." >&2
+}
+
+## Usage: copy_repository DESTINATION [BRANCH]
+## Copies the current directory, the top level of a working tree whose `.git`
+## is a directory, to DESTINATION, which must not exist, so that DESTINATION
+## is an independent clone.  BRANCH is the branch that the caller will check
+## out in the copy, if it is an existing one.  Exits on failure.
+##
+## `.git/worktrees` is not copied.  It holds the registrations of this
+## repository's linked worktrees, which belong to this repository alone:  in
+## the copy they would make git refuse to check out those worktrees'
+## branches, let `git worktree remove` run from the copy delete those
+## worktrees, and make git-remove-branch-directory refuse to remove the copy.
+## `git worktree prune` would not remove them, because the worktrees exist.
+## It is left out rather than copied and removed, because each worktree's
+## administrative directory holds that worktree's index and the repositories
+## of its submodules, which can be large.
+##
+## The branches that `add_worktree` created for those worktrees, which
+## `branch.NAME.createdForBranchDirectory` marks, except BRANCH and the
+## branch that HEAD names.  They belong to the other branch directories, and
+## their commits remain in this repository; in the copy, their unpushed
+## commits would make git-remove-branch-directory refuse to remove the copy.
+## So they are deleted from the copy.
+copy_repository() {
+  if ! mkdir -- "$1"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot create $1" >&2
+    exit 1
+  fi
+  copy_working_tree "$1" .git/worktrees
+  copy_repository_head="$(git -C "$1" symbolic-ref --quiet HEAD)" \
+    || copy_repository_head=''
+  # `--bool` normalizes the value, and git prints the key in lower case.
+  copy_repository_marked="$(git -C "$1" config --bool --get-regexp \
+    '^branch\..*\.createdforbranchdirectory$' \
+    | sed -n 's/^branch\.\(.*\)\.createdforbranchdirectory true$/\1/p')"
+  printf '%s\n' "${copy_repository_marked}" \
+    | while IFS= read -r copy_repository_branch; do
+      case "${copy_repository_branch}" in
+        '' | "${2-}" | "${copy_repository_head#refs/heads/}") continue ;;
+      esac
+      if ! git -C "$1" update-ref -d "refs/heads/${copy_repository_branch}" \
+        || ! git -C "$1" config --remove-section "branch.${copy_repository_branch}"; then
+        echo "${SCRIPT_NAME}: ERROR: cannot delete the branch ${copy_repository_branch} from $1" >&2
+        exit 1
+      fi
+    done || exit 1
+}
+
+## Usage: copy_working_tree DESTINATION [OMIT]
+## Copies the contents of the current directory, the top level of a working
+## tree, into the existing directory DESTINATION, except the entry OMIT, a
+## pathname relative to the current directory, and each worktree of this
+## repository that is nested in the current directory.  Says on standard error
+## which nested worktrees it leaves out.  Exits on failure.
+##
+## A worktree's `.git` is a file that names its administrative directory, and
+## a copy would keep that file unchanged, so the copy of a nested worktree
+## would name the *same* administrative directory as the original:  a commit
+## or a checkout in the copy would move the original's HEAD and rewrite its
+## index.  It is left out of the copy rather than copied and removed, because
+## a nested worktree, such as one in `.claude/worktrees/NAME`, holds a working
+## tree of its own, build output included, which can be large.
+copy_working_tree() {
+  if ! copy_working_tree_top="$(physical_path .)" \
+    || ! copy_working_tree_nested="$(nested_worktrees "${copy_working_tree_top}")"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot list the worktrees of $(pwd)" >&2
+    exit 1
+  fi
+  copy_working_tree_omit="${2-}"
+  if [ -n "${copy_working_tree_nested}" ]; then
+    printf '%s\n' "${copy_working_tree_nested}" | while IFS= read -r copy_working_tree_rel; do
+      if [ -e "${copy_working_tree_rel}" ] || [ -L "${copy_working_tree_rel}" ]; then
+        echo "${SCRIPT_NAME}: not copying ${copy_working_tree_rel}, which is a worktree of its own" >&2
+      fi
+    done
+    copy_working_tree_omit="${copy_working_tree_omit:+${copy_working_tree_omit}
+}${copy_working_tree_nested}"
+  fi
+  if ! copy_tree_into . "$1" '' "${copy_working_tree_omit}"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to $1" >&2
+    exit 1
+  fi
+}
+
+## Usage: copy_tree_into SOURCE DESTINATION PREFIX OMIT
+## Copies each entry of the directory SOURCE into the existing directory
+## DESTINATION, except those named in OMIT, a list of pathnames relative to
+## the top of the copy, one per line; PREFIX is SOURCE's pathname relative to
+## that top, empty or ending in "/".  Returns 1, after a diagnostic from `cp`
+## or `mkdir`, on failure.
+##
+## An entry that is neither omitted nor an ancestor of an omitted one is copied
+## whole, by `cp -Rp`, which copies a symbolic link as a link.  An ancestor of
+## an omitted entry is created with `mkdir` and filled by recursion; its
+## modification time is copied, but `mkdir` gives it the default permissions.
+## The body is a subshell, so that the recursion's variables are its own.
+##
+## The globs begin with SOURCE, which is "." or begins with "./", so that an
+## entry whose name begins with "-" cannot be read as an option; between them
+## they name every entry, and "." and ".." are skipped by name.  A pattern
+## that matches nothing is left unexpanded, and names no entry; testing `-L`
+## as well as `-e` keeps a dangling symbolic link, which is an entry.
+copy_tree_into() (
+  for entry in "$1"/* "$1"/.*; do
+    name="${entry##*/}"
+    case "${name}" in '.' | '..') continue ;; esac
+    if [ ! -e "${entry}" ] && [ ! -L "${entry}" ]; then continue; fi
+    rel="$3${name}"
+    # The shell splits OMIT on newlines, with globbing off so that no line is
+    # expanded; the patterns are quoted, so that a line is matched literally.
+    # This forks nothing, which matters because it runs for every entry.
+    relation=''
+    saved_ifs="${IFS}"
+    IFS='
+'
+    set -f
+    for omitted in $4; do
+      case "${omitted}" in
+        "${rel}")
+          relation='omitted'
+          break
+          ;;
+        "${rel}"/*) relation='ancestor' ;;
+      esac
+    done
+    set +f
+    IFS="${saved_ifs}"
+    case "${relation}" in
+      omitted) continue ;;
+      ancestor)
+        if [ -d "${entry}" ] && [ ! -L "${entry}" ]; then
+          mkdir -- "$2/${name}" || exit 1
+          copy_tree_into "${entry}" "$2/${name}" "${rel}/" "$4" || exit 1
+          touch -r "${entry}" -- "$2/${name}" || exit 1
+          continue
+        fi
+        ;;
+    esac
+    \cp -Rp -- "${entry}" "$2/" || exit 1
+  done
+)
+
+## Usage: nested_worktrees DIRECTORY
+## Prints, one per line, the pathname relative to DIRECTORY of each registered
+## worktree of the repository that contains DIRECTORY, whether its directory
+## exists or not, that lies strictly within DIRECTORY.  DIRECTORY must be a
+## physical pathname, as `physical_path` prints, because git registers a
+## worktree under one.  Returns 1 if git cannot list the worktrees.
+##
+## Asking git, rather than searching DIRECTORY for nested `.git` files, costs
+## nothing in a directory full of build output.  It finds the worktrees of
+## this repository only, which is where a nested one comes from:  a tool such
+## as Claude Code adds a worktree in an ignored directory such as
+## `.claude/worktrees/NAME`.  A pathname that contains a newline cannot be
+## represented in `git worktree list --porcelain`, and one that does is
+## pathological.
+nested_worktrees() {
+  nested_worktrees_list="$(git -C "$1" worktree list --porcelain)" || return 1
+  printf '%s\n' "${nested_worktrees_list}" | sed -n 's/^worktree //p' \
+    | while IFS= read -r nested_worktrees_dir; do
+      case "${nested_worktrees_dir}" in
+        "$1"/*) printf '%s\n' "${nested_worktrees_dir#"$1"/}" ;;
+      esac
+    done
+}
+
+## Usage: check_git_dir_is_directory DIRECTORY [ACCEPT]
 ## Tests whether DIRECTORY, the top level of a working tree, holds its own
 ## repository:  that is, whether DIRECTORY/.git is a directory and is not a
 ## symbolic link to one.  Returns 0 if it is.  Otherwise prints a diagnostic
-## that says where to run the command instead, and returns 1.
+## that says where to run the command instead, and returns 1.  If ACCEPT is
+## "linked-worktree", a linked worktree is accepted as well, by a caller that
+## does not copy `.git`.
 ##
-## `git-new-branch` and `git-checkout-branch` copy the top level with
-## `cp -Rp`, which copies `.git` along with everything else.  That is the
-## design when `.git` is a directory:  the copy is an independent clone.  When
+## `git-new-branch --copy`, and both branch commands when the new directory
+## would hold submodules, copy the top level with `cp -Rp`, which copies
+## `.git` along with everything else.  That is the design when `.git` is a
+## directory:  the copy is an independent clone.  When
 ## `.git` is a *file* that names a git directory elsewhere, the copy names the
 ## **same** git directory as the original -- a relative `gitdir:` resolves to
 ## the same place from a sibling directory, and an absolute one names it
@@ -40,19 +463,9 @@
 ## the whole git directory is what lies elsewhere, because a git directory
 ## that has no `commondir` file is its own common directory.  That equal case
 ## prints one path twice, and the unequal case names two different
-## directories, so comparing the two as strings needs no
-## `--path-format=absolute`, which git gained only in version 2.31.
-##
-## `git rev-parse` prints an option that it does not recognize, rather than
-## failing, so a git too old for one of these options answers with the
-## option's own name.  Such an answer, and a query that fails outright, leave
-## the distinction unavailable; the diagnostic then says only that the git
-## directory lies elsewhere, which is the part that is certain.  A git that
-## does not recognize `--show-superproject-working-tree` cannot rule out a
-## submodule, whose `--git-dir` and `--git-common-dir` are equal just as they
-## are in a repository made with `--separate-git-dir`, so that answer
-## discards the comparison as well, rather than offering the remedy for the
-## wrong one of the two.
+## directories, so comparing the two as strings is enough.  A query that
+## fails leaves the distinction unavailable; the diagnostic then says only
+## that the git directory lies elsewhere, which is the part that is certain.
 ##
 ## `git worktree list` names the main working tree, and is worth consulting
 ## only for a linked worktree:  the other kinds have no other working tree to
@@ -66,7 +479,7 @@
 ## The test is "`.git` is not a directory" rather than a comparison of git
 ## directories.  `--git-dir` differs from `--git-common-dir` in a linked
 ## worktree but not in a submodule, whose two are equal, so that comparison
-## would miss the submodule; and `-d` answers in every version of git.
+## would miss the submodule.
 ##
 ## A `.git` that is a *symbolic link* to a directory answers `-d`, which
 ## follows links, but it is no safer than a `.git` file:  `cp -Rp` copies the
@@ -106,20 +519,14 @@ check_git_dir_is_directory() {
     return 1
   fi
   if [ ! -e "$1/.git" ]; then
-    echo "${SCRIPT_NAME}: ERROR: $1 has no .git, so its git directory is named by the environment or by configuration elsewhere." >&2
+    echo "${SCRIPT_NAME}: ERROR: $1 has no .git, so its git directory is named by configuration elsewhere, such as core.worktree." >&2
     echo "${SCRIPT_NAME}: A copy of it would hold no repository, and the checkout would move this working tree's HEAD and rewrite its index." >&2
-    echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a working tree that holds its own .git directory, with GIT_DIR and GIT_WORK_TREE unset." >&2
+    echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a working tree that holds its own .git directory." >&2
     return 1
   fi
+  check_git_dir_known=1
   check_git_dir_superproject="$(git -C "$1" rev-parse \
-    --show-superproject-working-tree 2> /dev/null)"
-  check_git_dir_submodule_known=1
-  case "${check_git_dir_superproject}" in
-    --show-superproject-working-tree)
-      check_git_dir_superproject=
-      check_git_dir_submodule_known=
-      ;;
-  esac
+    --show-superproject-working-tree 2> /dev/null)" || check_git_dir_known=
   if [ -n "${check_git_dir_superproject}" ]; then
     echo "${SCRIPT_NAME}: ERROR: $1 is the working tree of a submodule, whose .git is a file rather than a directory." >&2
     echo "${SCRIPT_NAME}: A copy of it would share this working tree's git directory, so the checkout would move this working tree's HEAD and rewrite its index." >&2
@@ -128,11 +535,8 @@ check_git_dir_is_directory() {
   fi
   check_git_dir_gitdir="$(git -C "$1" rev-parse --git-dir 2> /dev/null)"
   check_git_dir_common="$(git -C "$1" rev-parse --git-common-dir 2> /dev/null)"
-  case "${check_git_dir_common}" in
-    --git-common-dir) check_git_dir_common= ;;
-  esac
   if [ -z "${check_git_dir_gitdir}" ] || [ -z "${check_git_dir_common}" ] \
-    || [ -z "${check_git_dir_submodule_known}" ]; then
+    || [ -z "${check_git_dir_known}" ]; then
     echo "${SCRIPT_NAME}: ERROR: $1 has a .git that is a file rather than a directory, so its git directory lies elsewhere." >&2
     echo "${SCRIPT_NAME}: A copy of it would share this working tree's git directory, so the checkout would move this working tree's HEAD and rewrite its index." >&2
     echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a working tree whose .git is a directory instead." >&2
@@ -143,6 +547,9 @@ check_git_dir_is_directory() {
     echo "${SCRIPT_NAME}: A copy of it would share this working tree's git directory, so the checkout would move this working tree's HEAD and rewrite its index." >&2
     echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a clone whose .git is a directory instead." >&2
     return 1
+  fi
+  if [ "${2-}" = 'linked-worktree' ]; then
+    return 0
   fi
   echo "${SCRIPT_NAME}: ERROR: $1 is a linked worktree, whose .git is a file rather than a directory." >&2
   echo "${SCRIPT_NAME}: A copy of it would share this worktree's git directory, so the checkout would move this worktree's HEAD and rewrite its index." >&2
