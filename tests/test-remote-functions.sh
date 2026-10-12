@@ -15,6 +15,10 @@ TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMMANDS_DIR="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)" || exit 1
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
+# Resolve symbolic links, as git does in the pathnames that
+# `git worktree list` prints:  on macOS, $TMPDIR is below /var, a symbolic
+# link to /private/var.
+WORK_DIR="$(CDPATH='' cd -- "${WORK_DIR}" && pwd -P)" || exit 1
 # The signal handlers re-raise the signal with the handler removed, so that
 # the script dies of the signal rather than resuming where it was
 # interrupted, and so that the caller sees that it was killed by a signal.

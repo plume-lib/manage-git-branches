@@ -75,10 +75,13 @@ undo_worktree_add() {
       rm -rf -- "$3" || true
     fi
   fi
-  # `|| true`, so that a branch that is not there, or is not at COMMIT, does
-  # not abort a caller that runs under `set -e`.
-  if [ -n "$4" ]; then
-    git -C "$1" update-ref -d "refs/heads/$4" ${5:+"$5"} \
+  # A branch that is not there, or is not at COMMIT, is left alone, without
+  # aborting a caller that runs under `set -e`.  Deleting the branch also
+  # removes its configuration, as `git branch --delete` would.
+  if [ -n "$4" ] \
+    && git -C "$1" update-ref -d "refs/heads/$4" ${5:+"$5"} \
+      < /dev/null > /dev/null 2>&1; then
+    git -C "$1" config --remove-section "branch.$4" \
       < /dev/null > /dev/null 2>&1 || true
   fi
 }
