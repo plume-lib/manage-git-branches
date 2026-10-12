@@ -242,10 +242,22 @@ has_gitlinks() {
   fi
 }
 
-## Usage: copy_repository DESTINATION
+## Usage: note_copy_for_submodules WHAT
+## Says that WHAT has submodules, so that the new directory is a full copy of
+## the current one rather than a worktree, because git does not support a
+## submodule in more than one worktree.  `git-new-branch` and
+## `git-checkout-branch` print this note before `check_git_dir_is_directory`
+## decides whether the current directory can be copied, so that a refusal
+## follows the reason for the copy.
+note_copy_for_submodules() {
+  echo "${SCRIPT_NAME}: $1 has submodules, which a worktree cannot hold, so the new directory is a full copy of this one, as with --copy." >&2
+}
+
+## Usage: copy_repository DESTINATION [BRANCH]
 ## Copies the current directory, the top level of a working tree whose `.git`
 ## is a directory, to DESTINATION, which must not exist, so that DESTINATION
-## is an independent clone.  Exits on failure.
+## is an independent clone.  BRANCH is the branch that the caller will check
+## out in the copy, if it is an existing one.  Exits on failure.
 ##
 ## The copy's `.git/worktrees` is removed.  It holds the registrations of this
 ## repository's linked worktrees, which belong to this repository alone:  in
@@ -253,17 +265,118 @@ has_gitlinks() {
 ## branches, let `git worktree remove` run from the copy delete those
 ## worktrees, and make git-remove-branch-directory refuse to remove the copy.
 ## `git worktree prune` would not remove them, because the worktrees exist.
+##
+## So are the branches that `add_worktree` created for those worktrees, which
+## `branch.NAME.createdForBranchDirectory` marks, except BRANCH and the
+## branch that HEAD names.  They belong to the other branch directories, and
+## their commits remain in this repository; in the copy, their unpushed
+## commits would make git-remove-branch-directory refuse to remove the copy.
 copy_repository() {
-  if ! \cp -Rp -- . "$1"; then
-    echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to $1" >&2
+  if ! mkdir -- "$1"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot create $1" >&2
     exit 1
   fi
+  copy_working_tree "$1"
   if ! rm -rf -- "$1/.git/worktrees"; then
     echo "${SCRIPT_NAME}: ERROR: cannot remove $1/.git/worktrees" >&2
     exit 1
   fi
-  remove_nested_worktrees . "$1"
+  copy_repository_head="$(git -C "$1" symbolic-ref --quiet HEAD)"
+  # `--bool` normalizes the value, and git prints the key in lower case.
+  copy_repository_marked="$(git -C "$1" config --bool --get-regexp \
+    '^branch\..*\.createdforbranchdirectory$' \
+    | sed -n 's/^branch\.\(.*\)\.createdforbranchdirectory true$/\1/p')"
+  printf '%s\n' "${copy_repository_marked}" \
+    | while IFS= read -r copy_repository_branch; do
+      case "${copy_repository_branch}" in
+        '' | "${2-}" | "${copy_repository_head#refs/heads/}") continue ;;
+      esac
+      if ! git -C "$1" update-ref -d "refs/heads/${copy_repository_branch}" \
+        || ! git -C "$1" config --remove-section "branch.${copy_repository_branch}"; then
+        echo "${SCRIPT_NAME}: ERROR: cannot delete the branch ${copy_repository_branch} from $1" >&2
+        exit 1
+      fi
+    done || exit 1
 }
+
+## Usage: copy_working_tree DESTINATION [OMIT]
+## Copies the contents of the current directory, the top level of a working
+## tree, into the existing directory DESTINATION, except the top-level entry
+## OMIT and each worktree of this repository that is nested in the current
+## directory.  Says on standard error which nested worktrees it leaves out.
+## Exits on failure.
+##
+## A worktree's `.git` is a file that names its administrative directory, and
+## a copy would keep that file unchanged, so the copy of a nested worktree
+## would name the *same* administrative directory as the original:  a commit
+## or a checkout in the copy would move the original's HEAD and rewrite its
+## index.  It is left out of the copy rather than copied and removed, because
+## a nested worktree, such as one in `.claude/worktrees/NAME`, holds a working
+## tree of its own, build output included, which can be large.
+copy_working_tree() {
+  if ! copy_working_tree_top="$(physical_path .)" \
+    || ! copy_working_tree_nested="$(nested_worktrees "${copy_working_tree_top}")"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot list the worktrees of $(pwd)" >&2
+    exit 1
+  fi
+  copy_working_tree_omit="${2-}"
+  if [ -n "${copy_working_tree_nested}" ]; then
+    printf '%s\n' "${copy_working_tree_nested}" | while IFS= read -r copy_working_tree_rel; do
+      if [ -e "${copy_working_tree_rel}" ] || [ -L "${copy_working_tree_rel}" ]; then
+        echo "${SCRIPT_NAME}: not copying ${copy_working_tree_rel}, which is a worktree of its own" >&2
+      fi
+    done
+    copy_working_tree_omit="${copy_working_tree_omit:+${copy_working_tree_omit}
+}${copy_working_tree_nested}"
+  fi
+  if ! copy_tree_into . "$1" '' "${copy_working_tree_omit}"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to $1" >&2
+    exit 1
+  fi
+}
+
+## Usage: copy_tree_into SOURCE DESTINATION PREFIX OMIT
+## Copies each entry of the directory SOURCE into the existing directory
+## DESTINATION, except those named in OMIT, a list of pathnames relative to
+## the top of the copy, one per line; PREFIX is SOURCE's pathname relative to
+## that top, empty or ending in "/".  Returns 1, after a diagnostic from `cp`
+## or `mkdir`, on failure.
+##
+## An entry that is neither omitted nor an ancestor of an omitted one is copied
+## whole, by `cp -Rp`, which copies a symbolic link as a link.  An ancestor of
+## an omitted entry is created with `mkdir` and filled by recursion; its
+## modification time is copied, but `mkdir` gives it the default permissions.
+## The body is a subshell, so that the recursion's variables are its own.
+##
+## The globs begin with SOURCE, which is "." or begins with "./", so that an
+## entry whose name begins with "-" cannot be read as an option; between them
+## they name every entry, and "." and ".." are skipped by name.  A pattern
+## that matches nothing is left unexpanded, and names no entry; testing `-L`
+## as well as `-e` keeps a dangling symbolic link, which is an entry.
+copy_tree_into() (
+  for entry in "$1"/* "$1"/.*; do
+    name="${entry##*/}"
+    case "${name}" in '.' | '..') continue ;; esac
+    if [ ! -e "${entry}" ] && [ ! -L "${entry}" ]; then continue; fi
+    rel="$3${name}"
+    relation="$(printf '%s\n' "$4" | rel="${rel}" awk '
+      $0 == ENVIRON["rel"] { print "omitted"; exit }
+      index($0, ENVIRON["rel"] "/") == 1 { found = 1 }
+      END { if (found) print "ancestor" }')"
+    case "${relation}" in
+      omitted) continue ;;
+      ancestor)
+        if [ -d "${entry}" ] && [ ! -L "${entry}" ]; then
+          mkdir -- "$2/${name}" || exit 1
+          copy_tree_into "${entry}" "$2/${name}" "${rel}/" "$4" || exit 1
+          touch -r "${entry}" -- "$2/${name}" || exit 1
+          continue
+        fi
+        ;;
+    esac
+    \cp -Rp -- "${entry}" "$2/" || exit 1
+  done
+)
 
 ## Usage: nested_worktrees DIRECTORY
 ## Prints, one per line, the pathname relative to DIRECTORY of each registered
@@ -287,35 +400,6 @@ nested_worktrees() {
         "$1"/*) printf '%s\n' "${nested_worktrees_dir#"$1"/}" ;;
       esac
     done
-}
-
-## Usage: remove_nested_worktrees SOURCE COPY
-## Removes from COPY, which was just copied from the top level of the working
-## tree SOURCE, the copy of each worktree of SOURCE's repository that is
-## nested in SOURCE, and says on standard error which ones it removed.  Exits
-## on failure.
-##
-## A worktree's `.git` is a file that names its administrative directory, and
-## the copy keeps that file unchanged, so the copy of a nested worktree names
-## the *same* administrative directory as the original:  a commit or a
-## checkout in the copy would move the original's HEAD and rewrite its index.
-remove_nested_worktrees() {
-  if ! remove_nested_source="$(physical_path "$1")" \
-    || ! remove_nested_list="$(nested_worktrees "${remove_nested_source}")"; then
-    echo "${SCRIPT_NAME}: ERROR: cannot list the worktrees of $1" >&2
-    exit 1
-  fi
-  printf '%s\n' "${remove_nested_list}" | while IFS= read -r remove_nested_rel; do
-    if [ -z "${remove_nested_rel}" ] \
-      || { [ ! -e "$2/${remove_nested_rel}" ] && [ ! -L "$2/${remove_nested_rel}" ]; }; then
-      continue
-    fi
-    echo "${SCRIPT_NAME}: not copying ${remove_nested_rel}, which is a worktree of its own" >&2
-    if ! rm -rf -- "${2:?}/${remove_nested_rel:?}"; then
-      echo "${SCRIPT_NAME}: ERROR: cannot remove $2/${remove_nested_rel}" >&2
-      exit 1
-    fi
-  done || exit 1
 }
 
 ## Usage: check_git_dir_is_directory DIRECTORY [ACCEPT]
@@ -352,19 +436,9 @@ remove_nested_worktrees() {
 ## the whole git directory is what lies elsewhere, because a git directory
 ## that has no `commondir` file is its own common directory.  That equal case
 ## prints one path twice, and the unequal case names two different
-## directories, so comparing the two as strings needs no
-## `--path-format=absolute`, which git gained only in version 2.31.
-##
-## `git rev-parse` prints an option that it does not recognize, rather than
-## failing, so a git too old for one of these options answers with the
-## option's own name.  Such an answer, and a query that fails outright, leave
-## the distinction unavailable; the diagnostic then says only that the git
-## directory lies elsewhere, which is the part that is certain.  A git that
-## does not recognize `--show-superproject-working-tree` cannot rule out a
-## submodule, whose `--git-dir` and `--git-common-dir` are equal just as they
-## are in a repository made with `--separate-git-dir`, so that answer
-## discards the comparison as well, rather than offering the remedy for the
-## wrong one of the two.
+## directories, so comparing the two as strings is enough.  A query that
+## fails leaves the distinction unavailable; the diagnostic then says only
+## that the git directory lies elsewhere, which is the part that is certain.
 ##
 ## `git worktree list` names the main working tree, and is worth consulting
 ## only for a linked worktree:  the other kinds have no other working tree to
@@ -378,7 +452,7 @@ remove_nested_worktrees() {
 ## The test is "`.git` is not a directory" rather than a comparison of git
 ## directories.  `--git-dir` differs from `--git-common-dir` in a linked
 ## worktree but not in a submodule, whose two are equal, so that comparison
-## would miss the submodule; and `-d` answers in every version of git.
+## would miss the submodule.
 ##
 ## A `.git` that is a *symbolic link* to a directory answers `-d`, which
 ## follows links, but it is no safer than a `.git` file:  `cp -Rp` copies the
@@ -423,15 +497,9 @@ check_git_dir_is_directory() {
     echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a working tree that holds its own .git directory." >&2
     return 1
   fi
+  check_git_dir_known=1
   check_git_dir_superproject="$(git -C "$1" rev-parse \
-    --show-superproject-working-tree 2> /dev/null)"
-  check_git_dir_submodule_known=1
-  case "${check_git_dir_superproject}" in
-    --show-superproject-working-tree)
-      check_git_dir_superproject=
-      check_git_dir_submodule_known=
-      ;;
-  esac
+    --show-superproject-working-tree 2> /dev/null)" || check_git_dir_known=
   if [ -n "${check_git_dir_superproject}" ]; then
     echo "${SCRIPT_NAME}: ERROR: $1 is the working tree of a submodule, whose .git is a file rather than a directory." >&2
     echo "${SCRIPT_NAME}: A copy of it would share this working tree's git directory, so the checkout would move this working tree's HEAD and rewrite its index." >&2
@@ -440,11 +508,8 @@ check_git_dir_is_directory() {
   fi
   check_git_dir_gitdir="$(git -C "$1" rev-parse --git-dir 2> /dev/null)"
   check_git_dir_common="$(git -C "$1" rev-parse --git-common-dir 2> /dev/null)"
-  case "${check_git_dir_common}" in
-    --git-common-dir) check_git_dir_common= ;;
-  esac
   if [ -z "${check_git_dir_gitdir}" ] || [ -z "${check_git_dir_common}" ] \
-    || [ -z "${check_git_dir_submodule_known}" ]; then
+    || [ -z "${check_git_dir_known}" ]; then
     echo "${SCRIPT_NAME}: ERROR: $1 has a .git that is a file rather than a directory, so its git directory lies elsewhere." >&2
     echo "${SCRIPT_NAME}: A copy of it would share this working tree's git directory, so the checkout would move this working tree's HEAD and rewrite its index." >&2
     echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a working tree whose .git is a directory instead." >&2

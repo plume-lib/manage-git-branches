@@ -191,7 +191,7 @@ case "${MODE}" in
     ;;
   worktree)
     if has_gitlinks; then
-      echo "${SCRIPT_NAME}: this working tree has submodules, which a worktree cannot hold, so the new directory is a full copy of this one, as with --copy." >&2
+      note_copy_for_submodules 'this working tree'
       MODE='copy'
     fi
     ;;
@@ -451,27 +451,12 @@ case "${MODE}" in
     # duplicate the object store, which is what this mode exists to avoid, and
     # copying the `.git` file of a linked worktree would give the copy the
     # *same* git directory as this worktree, with one HEAD and one index.
-    #
-    # The globs begin with "./", so that an entry whose name begins with "-"
-    # cannot be read as an option; between them they name every entry, and
-    # "." and ".." are skipped by name.  `cp -Rp` copies a symbolic link as a
-    # link.  A pattern that matches nothing is left unexpanded, and names no
-    # entry; testing `-L` as well as `-e` keeps a dangling symbolic link, which
-    # is an entry.
     make_tmpdir
     if ! mkdir -- "${BRANCH_TMPDIR}"; then
       echo "${SCRIPT_NAME}: ERROR: cannot create ${BRANCH_TMPDIR}" >&2
       exit 1
     fi
-    for entry in ./* ./.*; do
-      case "${entry##*/}" in '.' | '..' | '.git') continue ;; esac
-      if [ ! -e "${entry}" ] && [ ! -L "${entry}" ]; then continue; fi
-      if ! \cp -Rp -- "${entry}" "${BRANCH_TMPDIR}/"; then
-        echo "${SCRIPT_NAME}: ERROR: cannot copy ${entry} to ${BRANCH_TMPDIR}" >&2
-        exit 1
-      fi
-    done
-    remove_nested_worktrees . "${BRANCH_TMPDIR}"
+    copy_working_tree "${BRANCH_TMPDIR}" .git
 
     # 2. Create the worktree.  With `--no-checkout`, git creates ${BRANCHDIR}
     # holding nothing but the `.git` file, rather than writing tracked files

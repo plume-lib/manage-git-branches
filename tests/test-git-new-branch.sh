@@ -538,7 +538,18 @@ fi
 if git -C "${modes}" worktree list --porcelain | grep -q -x -F "worktree ${copied}"; then
   fail "--copy's directory is registered as a worktree"
 fi
-# The source has linked worktrees by now; their registrations stay with it.
+# The source has linked worktrees by now, made by git-new-branch.  Their
+# registrations and their branches stay with it, so that the branches'
+# commits do not make the copy look as if it held unpushed work; the source's
+# own branch is kept.
+for other in inherit fresh; do
+  if git -C "${copied}" rev-parse --verify --quiet "refs/heads/${other}" > /dev/null; then
+    fail "--copy holds the branch ${other} of another branch directory"
+  fi
+done
+if ! git -C "${copied}" rev-parse --verify --quiet refs/heads/main > /dev/null; then
+  fail "--copy lost the source's branch main"
+fi
 if [ "$(git -C "${copied}" worktree list --porcelain | grep -c '^worktree ')" -ne 1 ]; then
   fail "--copy holds the source's worktree registrations: $(git -C "${copied}" worktree list)"
 fi
@@ -802,10 +813,17 @@ for mode in '' --copy; do
   git -C "${nested}" add .gitignore
   git -C "${nested}" commit -q -m 'Ignore .claude'
   git -C "${nested}" worktree add -q -b inner "${nested}/.claude/worktrees/inner"
+  # A file that cannot be read makes any attempt to copy the nested worktree
+  # fail, which shows that it is skipped rather than copied and removed.
+  echo 'secret' > "${nested}/.claude/worktrees/inner/unreadable.txt"
+  chmod 000 "${nested}/.claude/worktrees/inner/unreadable.txt"
   echo 'kept' > "${nested}/.claude/kept.txt"
   git clone -q "${nested}" "${nested}/.claude/clone"
   inner_before="$(working_tree_state "${nested}/.claude/worktrees/inner")"
-  if ! out="$(cd "${nested}" && "${GIT_NEW_BRANCH}" ${mode:+"${mode}"} outer 2>&1)"; then
+  out="$(cd "${nested}" && "${GIT_NEW_BRANCH}" ${mode:+"${mode}"} outer 2>&1)"
+  outer_status=$?
+  chmod 644 "${nested}/.claude/worktrees/inner/unreadable.txt"
+  if [ "${outer_status}" -ne 0 ]; then
     fail "nested worktree, mode '${mode}': nonzero exit status: ${out}"
     continue
   fi

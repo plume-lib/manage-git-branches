@@ -353,10 +353,12 @@ fi
 # A branch with submodules gets a copy of this directory rather than a
 # worktree, because git does not support a submodule in more than one
 # worktree.  `git-new-branch` explains the problem.  A copy includes `.git`,
-# so `check_git_dir_is_directory` now refuses a linked worktree too.
+# so `check_git_dir_is_directory` now refuses a linked worktree too.  This
+# second test cannot be merged with the first, which runs before the `git
+# pull`, because whether the branch has submodules is known only now.
 if has_gitlinks "${CHECKOUT_START_POINT:-refs/heads/${BRANCHNAME}}"; then
+  note_copy_for_submodules "branch ${BRANCHNAME}"
   if ! check_git_dir_is_directory "${TOPLEVEL}"; then
-    echo "${SCRIPT_NAME}: Branch ${BRANCHNAME} has submodules, which a worktree cannot hold, so the new directory must be a copy of this one." >&2
     exit 1
   fi
   COPY=1
@@ -379,7 +381,7 @@ if [ "${COPY}" -eq 1 ]; then
   # remove it, even if the copy is interrupted before it finishes.
   TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
   NEWDIR="${BRANCH_TMPDIR}"
-  copy_repository "${BRANCH_TMPDIR}"
+  copy_repository "${BRANCH_TMPDIR}" "${BRANCHNAME}"
   if [ -z "${CHECKOUT_START_POINT}" ]; then
     set -- checkout -q "${BRANCHNAME}"
   else

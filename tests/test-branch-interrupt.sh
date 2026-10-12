@@ -61,6 +61,11 @@ create_repositories() {
 ## script that invoked it.  The scripts run `\cp`, which suppresses alias
 ## expansion but still searches PATH, so putting this command first on PATH
 ## makes it the one that runs.
+##
+## The script may run `cp` from a subshell, whose command line is the
+## script's own.  A real interrupt reaches every process in the foreground
+## process group, so the signal goes to the parent and to each ancestor that
+## shares its command line, which ends at the script itself.
 create_interrupting_cp() {
   mkdir -p "${FAKE_BIN}"
   cat > "${FAKE_BIN}/cp" << 'INNER'
@@ -73,7 +78,15 @@ dest=""
 for arg in "$@"; do dest="${arg}"; done
 mkdir -p "${dest}"
 echo "partial copy" > "${dest}/partial-file"
-kill -s INT "${PPID}"
+pid="${PPID}"
+args="$(ps -o args= -p "${pid}")"
+targets=""
+while [ -n "${pid}" ] && [ "$(ps -o args= -p "${pid}")" = "${args}" ]; do
+  targets="${targets} ${pid}"
+  pid="$(ps -o ppid= -p "${pid}" | tr -d ' ')"
+done
+# shellcheck disable=SC2086 # Split ${targets} into process IDs.
+kill -s INT ${targets}
 INNER
   chmod +x "${FAKE_BIN}/cp"
 
