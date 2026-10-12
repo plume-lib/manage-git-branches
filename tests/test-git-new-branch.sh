@@ -240,21 +240,52 @@ make_linked_worktree "${worktree_parent}" || exit 1
 worktree_main="${worktree_parent}/worktree-branch-main"
 linked="${worktree_parent}/worktree-branch-linked"
 linked_before="$(working_tree_state "${linked}")"
-if out="$(cd "${linked}" && "${GIT_NEW_BRANCH}" newname 2>&1)"; then
-  fail "zero exit status in a linked worktree"
+
+# `--copy` copies `.git`, so it refuses a linked worktree, whose copied `.git`
+# file would name this worktree's git directory.
+if out="$(cd "${linked}" && "${GIT_NEW_BRANCH}" --copy newname 2>&1)"; then
+  fail "zero exit status for --copy in a linked worktree"
 fi
 case "${out}" in
   *"is a linked worktree"*"main working tree ${worktree_main}"*) ;;
-  *) fail "unexpected message in a linked worktree: ${out}" ;;
+  *) fail "unexpected message for --copy in a linked worktree: ${out}" ;;
 esac
 for leftover in "${worktree_parent}/worktree-branch-newname" \
   "${worktree_parent}/worktree-branch-newname-TMP"; do
   if [ -e "${leftover}" ]; then
-    fail "directory was created in a linked worktree: ${leftover}"
+    fail "directory was created for --copy in a linked worktree: ${leftover}"
   fi
 done
 if [ "$(working_tree_state "${linked}")" != "${linked_before}" ]; then
   fail "the linked worktree's HEAD or index changed"
+fi
+
+# The worktree modes do not copy `.git`, so they accept a linked worktree.  The
+# new worktree is a sibling, registered in the main repository rather than
+# nested in this worktree, and it gets this worktree's index rather than the
+# main working tree's:  a change staged here is staged there.
+echo 'staged in the linked worktree' > "${linked}/file.txt"
+git -C "${linked}" add file.txt
+linked_before="$(working_tree_state "${linked}")"
+if ! out="$(cd "${linked}" && "${GIT_NEW_BRANCH}" fromlinked 2>&1)"; then
+  fail "nonzero exit status in a linked worktree: ${out}"
+fi
+fromlinked="${worktree_parent}/worktree-branch-fromlinked"
+if ! git -C "${worktree_main}" worktree list --porcelain \
+  | grep -q -x -F "worktree ${fromlinked}"; then
+  fail "the worktree made from a linked worktree is not registered in the main repository"
+fi
+if [ "$(git -C "${fromlinked}" diff --cached --name-only)" != 'file.txt' ]; then
+  fail "the worktree made from a linked worktree does not have its staged change"
+fi
+if [ "$(working_tree_state "${linked}")" != "${linked_before}" ]; then
+  fail "the linked worktree's HEAD or index changed"
+fi
+if ! out="$(cd "${linked}" && "${GIT_NEW_BRANCH}" --clean cleanfromlinked 2>&1)"; then
+  fail "nonzero exit status for --clean in a linked worktree: ${out}"
+fi
+if [ ! -f "${worktree_parent}/worktree-branch-cleanfromlinked/.git" ]; then
+  fail "--clean in a linked worktree did not create a worktree"
 fi
 
 # A working tree whose git directory lies outside it is a main working tree,
@@ -343,6 +374,302 @@ envtree_after="$(working_tree_state "${envtree}" "${envgitdir}")"
 if [ "${envtree_after}" != "${envtree_before}" ]; then
   fail "the HEAD or index changed in a working tree that has no .git"
 fi
+
+# Prints the state of the working tree $1 that `git status` reports, ignored
+# files included, for comparing two working trees.
+status_of() {
+  git -C "$1" status --porcelain=v1 --ignored
+}
+
+# Fails unless no directory, temporary directory, worktree registration, or
+# branch named $2 was left behind in the repository of the working tree $1,
+# whose branch directories are siblings named REPO-branch-$2.  $3 says what
+# was run.
+check_nothing_left() {
+  check_nothing_left_dir="$(dirname -- "$1")/$(basename -- "$1" \
+    | sed 's/-branch-.*//')-branch-$2"
+  for leftover in "${check_nothing_left_dir}" "${check_nothing_left_dir}-TMP"; do
+    if [ -e "${leftover}" ]; then
+      fail "$3 left ${leftover} behind"
+    fi
+  done
+  if git -C "$1" worktree list --porcelain \
+    | grep -q -x -F "worktree ${check_nothing_left_dir}"; then
+    fail "$3 left a worktree registered at ${check_nothing_left_dir}"
+  fi
+  if git -C "$1" rev-parse --verify --quiet "refs/heads/$2" > /dev/null; then
+    fail "$3 left the branch $2 behind"
+  fi
+}
+
+modes_parent="${tmpdir}/modes"
+mkdir -p "${modes_parent}" || exit 1
+modes_parent="$(CDPATH='' cd -- "${modes_parent}" && pwd -P)" || exit 1
+modes="${modes_parent}/modes-branch-main"
+make_repo "${modes}" || exit 1
+
+# Option parsing.  Each usage error creates nothing.
+for options in '--clean --copy' '--copy --clean'; do
+  # shellcheck disable=SC2086 # The options are separate words.
+  if out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" ${options} both 2>&1)"; then
+    fail "zero exit status for ${options}"
+  fi
+  case "${out}" in
+    *"--clean and --copy cannot be used together"*) ;;
+    *) fail "unexpected message for ${options}: ${out}" ;;
+  esac
+  check_nothing_left "${modes}" both "${options}"
+done
+if out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" --cleann typo 2>&1)"; then
+  fail "zero exit status for an unrecognized option"
+fi
+case "${out}" in
+  *"unrecognized option: --cleann"*) ;;
+  *) fail "unexpected message for an unrecognized option: ${out}" ;;
+esac
+check_nothing_left "${modes}" typo "an unrecognized option"
+check_nothing_left "${modes}" --cleann "an unrecognized option"
+if (cd "${modes}" && "${GIT_NEW_BRANCH}" late --clean > /dev/null 2>&1); then
+  fail "zero exit status for an option after the branch name"
+fi
+check_nothing_left "${modes}" late "an option after the branch name"
+# Repeating an option is harmless.
+if ! out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" --clean --clean twice 2>&1)"; then
+  fail "nonzero exit status for a repeated option: ${out}"
+fi
+# `--` lets a branch name that begins with "-" through to `git worktree add`,
+# whose `git branch` reads it as an option and fails, as `git checkout -b`
+# did.  That failure leaves nothing behind.
+if out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" -- -dash 2>&1)"; then
+  fail "zero exit status for the branch -dash"
+fi
+case "${out}" in
+  *"unrecognized option"*) fail "-- did not end the options: ${out}" ;;
+esac
+check_nothing_left "${modes}" -dash "a branch name that begins with -"
+
+# A source that holds every kind of local change:  a staged change, an
+# unstaged change, an uncommitted deletion of a tracked file, an untracked
+# file, an untracked directory, an ignored file, and a dotfile.
+printf 'ignored.txt\n' > "${modes}/.gitignore"
+echo 'tracked' > "${modes}/deleted.txt"
+echo 'tracked' > "${modes}/unstaged.txt"
+git -C "${modes}" add .gitignore deleted.txt unstaged.txt
+git -C "${modes}" commit -q -m 'More files'
+echo 'staged' >> "${modes}/file.txt"
+git -C "${modes}" add file.txt
+echo 'unstaged' >> "${modes}/unstaged.txt"
+rm "${modes}/deleted.txt"
+echo 'untracked' > "${modes}/untracked.txt"
+mkdir "${modes}/untracked-dir"
+echo 'untracked' > "${modes}/untracked-dir/inner.txt"
+echo 'ignored' > "${modes}/ignored.txt"
+echo 'dotfile' > "${modes}/.dotfile"
+modes_status="$(status_of "${modes}")"
+modes_state="$(working_tree_state "${modes}")"
+modes_common="$(git -C "${modes}" rev-parse --path-format=absolute --git-common-dir)"
+
+# The default mode:  a worktree whose contents, and whose status, are the
+# source's.
+if ! out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" inherit 2>&1)"; then
+  fail "nonzero exit status for the default mode: ${out}"
+fi
+inherit="${modes_parent}/modes-branch-inherit"
+if [ "$(git -C "${inherit}" symbolic-ref HEAD)" != 'refs/heads/inherit' ]; then
+  fail "the default mode did not check out the branch inherit"
+fi
+if [ "$(status_of "${inherit}")" != "${modes_status}" ]; then
+  fail "the default mode's status differs from the source's: $(status_of "${inherit}")"
+fi
+if ! diff -r --exclude=.git "${modes}" "${inherit}" > /dev/null; then
+  fail "the default mode's contents differ from the source's"
+fi
+# The objects are shared.
+if [ ! -f "${inherit}/.git" ]; then
+  fail "the default mode's .git is not a file"
+fi
+if [ "$(git -C "${inherit}" rev-parse --path-format=absolute --git-common-dir)" \
+  != "${modes_common}" ]; then
+  fail "the default mode does not share the source's repository"
+fi
+# Registered under its final name, with no "-TMP" in its administrative
+# directory.
+inherit_gitdir="$(git -C "${inherit}" rev-parse --absolute-git-dir)"
+if [ "${inherit_gitdir}" != "${modes_common}/worktrees/modes-branch-inherit" ]; then
+  fail "the default mode's administrative directory is ${inherit_gitdir}"
+fi
+if ! git -C "${modes}" worktree list --porcelain | grep -q -x -F "worktree ${inherit}"; then
+  fail "the default mode's worktree is not registered"
+fi
+if git -C "${modes}" worktree list --porcelain | grep -q 'prunable'; then
+  fail "a worktree is prunable: $(git -C "${modes}" worktree list --porcelain)"
+fi
+
+# `--clean`:  a worktree that holds a clean checkout, and nothing else.
+if ! out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" --clean fresh 2>&1)"; then
+  fail "nonzero exit status for --clean: ${out}"
+fi
+fresh="${modes_parent}/modes-branch-fresh"
+if [ "$(git -C "${fresh}" symbolic-ref HEAD)" != 'refs/heads/fresh' ]; then
+  fail "--clean did not check out the branch fresh"
+fi
+if [ -n "$(status_of "${fresh}")" ]; then
+  fail "--clean's working tree is not clean: $(status_of "${fresh}")"
+fi
+if [ "$(git -C "${fresh}" rev-parse --path-format=absolute --git-common-dir)" \
+  != "${modes_common}" ]; then
+  fail "--clean does not share the source's repository"
+fi
+
+# `--copy`:  an independent clone whose contents, and whose status, are the
+# source's.
+if ! out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" --copy copied 2>&1)"; then
+  fail "nonzero exit status for --copy: ${out}"
+fi
+copied="${modes_parent}/modes-branch-copied"
+if [ ! -d "${copied}/.git" ]; then
+  fail "--copy's .git is not a directory"
+fi
+if [ "$(git -C "${copied}" rev-parse --path-format=absolute --git-common-dir)" \
+  = "${modes_common}" ]; then
+  fail "--copy shares the source's repository"
+fi
+if git -C "${modes}" worktree list --porcelain | grep -q -x -F "worktree ${copied}"; then
+  fail "--copy's directory is registered as a worktree"
+fi
+if [ "$(git -C "${copied}" symbolic-ref HEAD)" != 'refs/heads/copied' ]; then
+  fail "--copy did not check out the branch copied"
+fi
+if [ "$(status_of "${copied}")" != "${modes_status}" ]; then
+  fail "--copy's status differs from the source's: $(status_of "${copied}")"
+fi
+if ! diff -r --exclude=.git "${modes}" "${copied}" > /dev/null; then
+  fail "--copy's contents differ from the source's"
+fi
+
+# No mode changes the source.
+if [ "$(status_of "${modes}")" != "${modes_status}" ] \
+  || [ "$(working_tree_state "${modes}")" != "${modes_state}" ]; then
+  fail "the source's status, HEAD, or index changed"
+fi
+
+# A branch directory that was removed with `rm -rf` leaves its branch behind,
+# and then its registration, so the name cannot be used again until both are
+# gone.  The first is reported by this script, the second by git, whose
+# message names the ways out; neither is cleared behind the user's back.
+rm -rf "${fresh}"
+if out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" fresh 2>&1)"; then
+  fail "zero exit status for the branch of a removed worktree"
+fi
+case "${out}" in
+  *"branch fresh already exists"*) ;;
+  *) fail "unexpected message for the branch of a removed worktree: ${out}" ;;
+esac
+git -C "${modes}" update-ref -d refs/heads/fresh
+if out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" fresh 2>&1)"; then
+  fail "zero exit status for the path of a removed worktree"
+fi
+case "${out}" in
+  *"missing but already registered worktree"*) ;;
+  *) fail "unexpected message for the path of a removed worktree: ${out}" ;;
+esac
+if [ ! -d "${modes_common}/worktrees/modes-branch-fresh" ]; then
+  fail "the registration of a removed worktree was removed"
+fi
+if git -C "${modes}" rev-parse --verify --quiet refs/heads/fresh > /dev/null; then
+  fail "a failed git worktree add left the branch fresh behind"
+fi
+for leftover in "${fresh}" "${fresh}-TMP"; do
+  if [ -e "${leftover}" ]; then
+    fail "a failed git worktree add left ${leftover} behind"
+  fi
+done
+
+# A repository with no commit has nothing to branch from, in every mode.
+unborn="${modes_parent}/unborn-branch-main"
+git init -q -b main "${unborn}"
+for mode in '' --clean --copy; do
+  # shellcheck disable=SC2086 # An empty mode is no argument at all.
+  if out="$(cd "${unborn}" && "${GIT_NEW_BRANCH}" ${mode} nothing 2>&1)"; then
+    fail "zero exit status in a repository with no commit, mode [${mode}]"
+  fi
+  case "${out}" in
+    *"has no commit, so there is nothing to branch from"*) ;;
+    *) fail "unexpected message in a repository with no commit, mode [${mode}]: ${out}" ;;
+  esac
+  for leftover in "${modes_parent}/unborn-branch-nothing" \
+    "${modes_parent}/unborn-branch-nothing-TMP"; do
+    if [ -e "${leftover}" ]; then
+      fail "${leftover} was created in a repository with no commit, mode [${mode}]"
+    fi
+  done
+done
+
+# Too old a git is refused before anything happens.
+make_fake_git "${tmpdir}/oldgit" version 0 'git version 2.30.0'
+if out="$(cd "${modes}" && PATH="${tmpdir}/oldgit:${PATH}" \
+  "${GIT_NEW_BRANCH}" ancient 2>&1)"; then
+  fail "zero exit status with git 2.30.0"
+fi
+case "${out}" in
+  *"requires git 2.31 or later, but found git 2.30.0"*) ;;
+  *) fail "unexpected message with git 2.30.0: ${out}" ;;
+esac
+check_nothing_left "${modes}" ancient "git 2.30.0"
+
+# A repository with submodules.  `--clean` is refused, with a message that
+# names `--copy`; `--copy` succeeds; and the default mode falls back to the
+# copy, whose submodule has a git directory of its own.  `protocol.file.allow`
+# lets `git pull` reach the submodule's local origin.
+superproject_before="$(working_tree_state "${superproject}")"
+if out="$(cd "${superproject}" && "${GIT_NEW_BRANCH}" --clean subclean 2>&1)"; then
+  fail "zero exit status for --clean in a repository with submodules"
+fi
+case "${out}" in
+  *"has submodules"*"--copy works here"*) ;;
+  *) fail "unexpected message for --clean in a repository with submodules: ${out}" ;;
+esac
+check_nothing_left "${superproject}" subclean "--clean with submodules"
+if ! out="$(cd "${superproject}" && "${GIT_NEW_BRANCH}" --copy subcopy 2>&1)"; then
+  fail "nonzero exit status for --copy in a repository with submodules: ${out}"
+fi
+if ! out="$(cd "${superproject}" && "${GIT_NEW_BRANCH}" subdefault 2>&1)"; then
+  fail "nonzero exit status in a repository with submodules: ${out}"
+fi
+case "${out}" in
+  *"has submodules"*"full copy"*) ;;
+  *) fail "the default mode did not say that it copies, with submodules: ${out}" ;;
+esac
+subdefault="${submodule_parent}/super-branch-subdefault"
+if [ ! -d "${subdefault}/.git" ]; then
+  fail "the default mode made a worktree in a repository with submodules"
+fi
+if ! git -C "${subdefault}" status > /dev/null 2>&1 \
+  || ! git -C "${subdefault}/sub" status > /dev/null 2>&1; then
+  fail "the copy of a repository with submodules is not usable"
+fi
+if [ "$(git -C "${subdefault}/sub" rev-parse --absolute-git-dir)" \
+  = "$(git -C "${submodule}" rev-parse --absolute-git-dir)" ]; then
+  fail "the copy of a repository with submodules shares the submodule's git directory"
+fi
+if [ "$(working_tree_state "${superproject}")" != "${superproject_before}" ]; then
+  fail "the superproject's HEAD or index changed"
+fi
+
+# A repository with submodules whose branch directories are worktrees:  the
+# default mode falls back to the copy, which refuses a linked worktree, and
+# the message says where to run the command instead.
+git -C "${superproject}" worktree add -q -b sublinked "${submodule_parent}/super-branch-sublinked"
+if out="$(cd "${submodule_parent}/super-branch-sublinked" \
+  && "${GIT_NEW_BRANCH}" fromsublinked 2>&1)"; then
+  fail "zero exit status in a linked worktree of a repository with submodules"
+fi
+case "${out}" in
+  *"has submodules"*"is a linked worktree"*"main working tree ${superproject}"*) ;;
+  *) fail "unexpected message in a linked worktree of a repository with submodules: ${out}" ;;
+esac
+check_nothing_left "${superproject}" fromsublinked \
+  "a linked worktree of a repository with submodules"
 
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then

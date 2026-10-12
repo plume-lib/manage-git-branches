@@ -217,6 +217,38 @@ esac
 # Leave the repository as the rest of this test found it.
 git -C "${MAIN_DIR}" tag -d main > /dev/null
 
+# `git-push-to` and `git-pull-from` work between two worktrees of one
+# repository:  `git-new-branch` run in the worktree ${FEATURE_DIR} makes a
+# second worktree of the same repository.
+FEATURE2_DIR="${WORK_DIR}/myrepo-branch-feature2"
+if ! (cd "${FEATURE_DIR}" && "${COMMANDS_DIR}/git-new-branch" feature2 > /dev/null); then
+  fail "git-new-branch failed in a worktree"
+fi
+if [ "$(git -C "${FEATURE2_DIR}" rev-parse --path-format=absolute --git-common-dir)" \
+  != "$(git -C "${FEATURE_DIR}" rev-parse --path-format=absolute --git-common-dir)" ]; then
+  fail "${FEATURE2_DIR} and ${FEATURE_DIR} are not worktrees of one repository"
+fi
+git -C "${FEATURE2_DIR}" push -q --set-upstream origin feature2
+echo "worktree line" >> "${FEATURE_DIR}/feature.txt"
+git -C "${FEATURE_DIR}" commit -q -a -m "A commit to push between worktrees"
+git -C "${FEATURE_DIR}" push -q
+if ! "${COMMANDS_DIR}/git-push-to" "${FEATURE_DIR}" "${FEATURE2_DIR}"; then
+  fail "git-push-to failed between two worktrees"
+fi
+if [ "$(git -C "${REMOTE}" rev-parse refs/heads/feature2)" \
+  != "$(git -C "${FEATURE_DIR}" rev-parse HEAD)" ]; then
+  fail "git-push-to did not push feature2 after merging from a sibling worktree"
+fi
+echo "pulled line" >> "${FEATURE_DIR}/feature.txt"
+git -C "${FEATURE_DIR}" commit -q -a -m "A commit to pull between worktrees"
+git -C "${FEATURE_DIR}" push -q
+if ! (cd "${FEATURE2_DIR}" && "${COMMANDS_DIR}/git-pull-from" "${FEATURE_DIR}" > /dev/null); then
+  fail "git-pull-from failed between two worktrees"
+fi
+if ! grep -q "pulled line" "${FEATURE2_DIR}/feature.txt"; then
+  fail "git-pull-from did not merge from a sibling worktree"
+fi
+
 # A working tree with no upstream branch gets an explanation, not git's
 # "There is no tracking information for the current branch".
 git -C "${FEATURE_DIR}" branch --unset-upstream

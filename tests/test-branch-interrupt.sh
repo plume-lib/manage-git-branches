@@ -2,7 +2,9 @@
 
 # Tests that `git-checkout-branch` and `git-new-branch` remove their
 # `-TMP` directory when they are interrupted by a signal, so that a
-# subsequent invocation is not blocked by a leftover directory.
+# subsequent invocation is not blocked by a leftover directory.  For
+# `git-new-branch`, which creates a worktree, it also tests that nothing of
+# the worktree is left:  no directory, no registration, and no branch.
 #
 # Usage:
 #   tests/test-branch-interrupt
@@ -36,6 +38,7 @@ fail() {
 REMOTE="${WORK_DIR}/myrepo.git"
 MAIN_DIR="${WORK_DIR}/myrepo-branch-main"
 FAKE_BIN="${WORK_DIR}/fakebin"
+FAKE_GIT_BIN="${WORK_DIR}/fakegitbin"
 SYSTEM_REALPATH="$(command -v realpath)"
 export SYSTEM_REALPATH
 
@@ -86,12 +89,32 @@ INNER
   chmod +x "${FAKE_BIN}/realpath"
 }
 
+## Creates a `git` command that stands in for a `git worktree add` that the
+## user interrupts just after it finishes:  it runs the real git, and then, if
+## the command was `git worktree add`, sends SIGINT to the script that invoked
+## it.
+create_interrupting_git() {
+  mkdir -p "${FAKE_GIT_BIN}"
+  real_git="$(command -v git)"
+  cat > "${FAKE_GIT_BIN}/git" << INNER
+#!/bin/sh
+"${real_git}" "\$@"
+git_status="\$?"
+if [ "\$1" = worktree ] && [ "\$2" = add ]; then
+  kill -s INT "\${PPID}"
+fi
+exit "\${git_status}"
+INNER
+  chmod +x "${FAKE_GIT_BIN}/git"
+}
+
 ## Runs the given branch script on the given branch, in MAIN_DIR and with the
-## interrupting `cp` first on PATH.  Fails the test unless the script reports
-## signal termination.
+## given directory -- by default, the one that holds the interrupting `cp` --
+## first on PATH.  Fails the test unless the script reports signal
+## termination.
 run_interrupted() {
   status=0
-  (cd "${MAIN_DIR}" && PATH="${FAKE_BIN}:${PATH}" "${COMMANDS_DIR}/$1" "$2") \
+  (cd "${MAIN_DIR}" && PATH="${3:-${FAKE_BIN}}:${PATH}" "${COMMANDS_DIR}/$1" "$2") \
     > /dev/null 2>&1 || status="$?"
   # A shell reports a command killed by a signal with an exit status greater than 128.
   if [ "${status}" -le 128 ]; then
@@ -99,22 +122,55 @@ run_interrupted() {
   fi
 }
 
+## Fails unless an interrupted `git-new-branch` of the branch $1 left nothing
+## behind:  no directory, no temporary directory, no worktree registration,
+## and no branch.  $2 says when it was interrupted.
+check_nothing_left() {
+  if [ -e "${WORK_DIR}/myrepo-branch-$1-TMP" ]; then
+    fail "git-new-branch interrupted $2 left myrepo-branch-$1-TMP behind"
+  fi
+  if [ -e "${WORK_DIR}/myrepo-branch-$1" ]; then
+    fail "git-new-branch interrupted $2 left myrepo-branch-$1 behind"
+  fi
+  if git -C "${MAIN_DIR}" worktree list --porcelain | grep -q "myrepo-branch-$1"; then
+    fail "git-new-branch interrupted $2 left a worktree registered"
+  fi
+  if [ -e "$(git -C "${MAIN_DIR}" rev-parse --path-format=absolute \
+    --git-common-dir)/worktrees/myrepo-branch-$1" ]; then
+    fail "git-new-branch interrupted $2 left an administrative directory"
+  fi
+  if git -C "${MAIN_DIR}" rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
+    fail "git-new-branch interrupted $2 left the branch $1 behind"
+  fi
+  # A retry must succeed, rather than being blocked by a leftover.
+  if ! (cd "${MAIN_DIR}" && "${COMMANDS_DIR}/git-new-branch" "$1" > /dev/null); then
+    fail "git-new-branch failed after an invocation interrupted $2"
+  fi
+  if [ ! -d "${WORK_DIR}/myrepo-branch-$1" ]; then
+    fail "git-new-branch did not create myrepo-branch-$1 after an invocation interrupted $2"
+  fi
+}
+
 create_repositories
 create_interrupting_cp
+create_interrupting_git
 
 # `git-new-branch`, interrupted while copying the working tree.
-NEW_DIR="${WORK_DIR}/myrepo-branch-newfeature"
 run_interrupted git-new-branch newfeature
-if [ -e "${NEW_DIR}-TMP" ]; then
-  fail "interrupted git-new-branch left ${NEW_DIR}-TMP behind"
+check_nothing_left newfeature 'while copying the working tree'
+
+# `git-new-branch`, interrupted just after the worktree was registered, in
+# each mode that registers one.
+run_interrupted git-new-branch registered "${FAKE_GIT_BIN}"
+check_nothing_left registered 'after git worktree add'
+status=0
+(cd "${MAIN_DIR}" && PATH="${FAKE_GIT_BIN}:${PATH}" \
+  "${COMMANDS_DIR}/git-new-branch" --clean cleanregistered) > /dev/null 2>&1 \
+  || status="$?"
+if [ "${status}" -le 128 ]; then
+  fail "git-new-branch --clean exited with status ${status}, not greater than 128 (killed by a signal)"
 fi
-# A retry must succeed, rather than being blocked by a leftover directory.
-if ! (cd "${MAIN_DIR}" && "${COMMANDS_DIR}/git-new-branch" newfeature > /dev/null); then
-  fail "git-new-branch failed after an interrupted invocation"
-fi
-if [ ! -d "${NEW_DIR}" ]; then
-  fail "git-new-branch did not create ${NEW_DIR}"
-fi
+check_nothing_left cleanregistered 'after git worktree add --clean'
 
 # `git-checkout-branch`, interrupted while copying the working tree.
 CHECKOUT_DIR="${WORK_DIR}/myrepo-branch-feature1"

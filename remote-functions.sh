@@ -83,13 +83,15 @@ undo_worktree_add() {
   fi
 }
 
-## Usage: check_git_dir_is_directory DIRECTORY
+## Usage: check_git_dir_is_directory DIRECTORY [ACCEPT]
 ## Tests whether DIRECTORY, the top level of a working tree, holds its own
 ## repository:  that is, whether DIRECTORY/.git is a directory and is not a
 ## symbolic link to one.  Returns 0 if it is.  Otherwise prints a diagnostic
-## that says where to run the command instead, and returns 1.
+## that says where to run the command instead, and returns 1.  If ACCEPT is
+## "linked-worktree", a linked worktree is accepted as well, by a caller that
+## does not copy `.git`.
 ##
-## `git-new-branch` and `git-checkout-branch` copy the top level with
+## `git-new-branch --copy` and `git-checkout-branch` copy the top level with
 ## `cp -Rp`, which copies `.git` along with everything else.  That is the
 ## design when `.git` is a directory:  the copy is an independent clone.  When
 ## `.git` is a *file* that names a git directory elsewhere, the copy names the
@@ -217,6 +219,9 @@ check_git_dir_is_directory() {
     echo "${SCRIPT_NAME}: A copy of it would share this working tree's git directory, so the checkout would move this working tree's HEAD and rewrite its index." >&2
     echo "${SCRIPT_NAME}: Run ${SCRIPT_NAME} in a clone whose .git is a directory instead." >&2
     return 1
+  fi
+  if [ "${2-}" = 'linked-worktree' ]; then
+    return 0
   fi
   echo "${SCRIPT_NAME}: ERROR: $1 is a linked worktree, whose .git is a file rather than a directory." >&2
   echo "${SCRIPT_NAME}: A copy of it would share this worktree's git directory, so the checkout would move this worktree's HEAD and rewrite its index." >&2

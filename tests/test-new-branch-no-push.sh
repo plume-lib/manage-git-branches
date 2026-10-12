@@ -102,7 +102,7 @@ if [ "${branch}" != "feature1" ]; then
   fail "${FEATURE_DIR} is on branch ${branch}, not feature1"
 fi
 
-# The branch exists only in the new working tree.
+# The branch exists only locally.
 check_not_pushed feature1
 if git -C "${FEATURE_DIR}" rev-parse --symbolic-full-name '@{upstream}' \
   > /dev/null 2>&1; then

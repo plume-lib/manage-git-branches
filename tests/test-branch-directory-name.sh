@@ -23,14 +23,15 @@ fail() {
 # Runs `git-new-branch ${branchname}` under ${shell}, in a repository where the
 # directory that ${branchname} should map to already exists.  `git-new-branch`
 # refuses to overwrite an existing directory, and its error message contains the
-# directory name it computed, which is what this test checks.
+# directory name it computed, which is what this test checks.  `--` ends the
+# options, so that a branch name that begins with "-" is not taken for one.
 #
 # Arguments: the branch name, and the directory suffix it should map to.
 check_branch_directory() {
   branchname="$1"
   expected="${workdir}/repo-branch-$2"
   mkdir -- "${expected}"
-  if output="$(cd "${workdir}/repo" && "${shell}" "${REPO_DIR}/git-new-branch" "${branchname}" 2>&1)"; then
+  if output="$(cd "${workdir}/repo" && "${shell}" "${REPO_DIR}/git-new-branch" -- "${branchname}" 2>&1)"; then
     fail "${shell} git-new-branch '${branchname}' unexpectedly succeeded: ${output}"
   fi
   case "${output}" in

@@ -29,11 +29,18 @@ The commands are:
   directory.  Run this command from within a working tree; the new directory
   is a sibling of the working tree.  Below is a definition for an alias
   `gcb`.
-* [`git-new-branch`](git-new-branch) `BRANCHNAME`:
+* [`git-new-branch`](git-new-branch) `[--clean | --copy] BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
   new branch.
+  By default, the new directory is a worktree (see
+  [below](#worktrees)) that shares the repository, and its contents are the
+  same as the current directory's, including uncommitted changes and
+  untracked files.  With `--clean`, it is a worktree that holds a clean
+  checkout and nothing else.  With `--copy`, it is a copy of the whole
+  directory, `.git` included, and so an independent clone; a repository
+  that has submodules always gets this.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
@@ -172,15 +179,58 @@ This convention enables you to easily work on multiple branches at a time:
   searching multiple branches, reconciling branches, copying text between
   them, etc.
 * A disadvantage is greater disk usage than if you have a single clone and
-  you switch branches within that clone.  Usually, disk space is plentiful
-  and the foregoing advantages are worthwhile.  If you have very large
-  repositories and limited disk space, however, this approach may be
+  you switch branches within that clone.  The branch directories share one
+  repository, but each has its own working tree and build output, which is
+  usually most of a directory's size:  sharing the repository saves 10-30%
+  of each branch directory.  (`git-new-branch --clean` saves more, because
+  the new directory holds no build output.)  Usually, disk space is
+  plentiful and the foregoing advantages are worthwhile.  If you have very
+  large repositories and limited disk space, however, this approach may be
   undesirable.
 
 If other programs need a specific name for your repository, then you may wish to
 make the directory `REPONAME` be a symbolic link to whichever branch you are
 working on at the time, such as `REPONAME-branch-main` when you want to use the
 main branch.
+
+## Worktrees
+
+`git-new-branch` makes each branch directory a linked worktree of the
+repository that you ran it in, made by `git worktree add`.  All the branch
+directories of one repository share one object store, so the repository is
+not copied.  This has some consequences:
+
+* A branch directory's `.git` is a file, not a directory.  A tool that tests
+  for a `.git` directory to recognize a working tree no longer recognizes a
+  branch directory; such a tool should ask git, with
+  `git rev-parse --show-toplevel`.
+* The branch directories share their configuration, hooks, and branches:
+  `git config` in one affects all of them.
+* A repository that has submodules is an exception.  Git does not support a
+  submodule in more than one worktree, so `git-new-branch` makes a full copy
+  instead, which is an independent clone.
+
+Do not remove or move a worktree with file-system commands:
+
+* Do not `rm -rf` it.  That leaves its branch, so the branch name stays
+  taken, and a stale registration in the repository.  Use
+  `git-remove-branch-directory` instead.
+* Do not `mv` it.  It keeps working, so nothing looks wrong, but its
+  registration still names the old path, and the `git worktree prune` that
+  `git gc` eventually runs then deletes the registration, after which the
+  directory is no longer a working tree.  Use `git worktree move` instead,
+  or run `git worktree repair` in a directory that was already moved.
+* Do not remove or move the main working tree -- the clone that the
+  worktrees were made from -- while worktrees depend on it.  Removing it
+  removes the repository that all of them use, and moving it breaks them
+  until you run `git worktree repair` in it.
+
+None of this applies to a directory made by `git-new-branch --copy`, nor to
+one made by a version of `git-new-branch` that predates worktrees:  each of
+those is an independent clone, which you may remove or move like any other
+directory.
+
+`git-new-branch` requires git 2.31 or later.
 
 ## Programs for managing multiple git clones
 
