@@ -87,7 +87,8 @@ git -C "${work}/seed" add file.txt
 git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
-  stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost; do
+  stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost \
+  squashed empty; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -109,6 +110,17 @@ add_unpushed_commit() {
   git -C "$1" commit -q -m "An unpushed commit"
   git -C "$1" update-ref refs/heads/side HEAD
   git -C "$1" reset -q --hard HEAD~1
+}
+
+## Usage: squash_merge DIRECTORY
+## Squash-merges the HEAD of DIRECTORY into the remote's `main`, as landing a
+## pull request does, and fetches the result into DIRECTORY.
+squash_merge() {
+  git -C "${work}/seed" fetch -q "$1" HEAD
+  git -C "${work}/seed" merge -q --squash FETCH_HEAD > /dev/null 2>&1
+  git -C "${work}/seed" commit -q -m "Squash-merge of $(basename -- "$1")"
+  git -C "${work}/seed" push -q origin main
+  git -C "$1" fetch -q origin
 }
 
 ###########################################################################
@@ -208,6 +220,38 @@ run_command 'both checks, the other waiver' 1 --force-unpushed "${both}"
 check_present 'both checks, the other waiver' "${both}"
 run_command 'both checks, --force' 0 --force "${both}"
 check_gone 'both checks, --force' "${both}"
+
+# A squash-merge puts a branch's changes in the remote's default branch, but
+# not its commits, which no remote holds.  Removing them loses nothing.
+squashed="$(make_clone squashed)"
+echo "squashed work" > "${squashed}/squashed.txt"
+git -C "${squashed}" add squashed.txt
+git -C "${squashed}" commit -q -m "Work to squash-merge"
+echo "more squashed work" >> "${squashed}/squashed.txt"
+git -C "${squashed}" commit -q -a -m "More work to squash-merge"
+squash_merge "${squashed}"
+# Work after the squash-merge has not landed, and neither, then, has the
+# branch.
+echo "work after the squash-merge" >> "${squashed}/squashed.txt"
+git -C "${squashed}" commit -q -a -m "Work after the squash-merge"
+run_command 'work after a squash-merge' 1 "${squashed}"
+check_present 'work after a squash-merge' "${squashed}"
+check_message 'work after a squash-merge' \
+  "refusing to remove ${squashed}: 3 commit(s) are on no remote-tracking ref or tag"
+git -C "${squashed}" reset -q --hard HEAD~1
+run_command 'a squash-merged branch' 0 "${squashed}"
+check_gone 'a squash-merged branch' "${squashed}"
+
+# A branch that changes no file has nothing to land, so merging it into the
+# remote's default branch changes nothing, but its commits have not landed.
+empty="$(make_clone empty)"
+git -C "${empty}" commit -q --allow-empty -m 'Empty commit'
+run_command 'an empty commit' 1 "${empty}"
+check_present 'an empty commit' "${empty}"
+check_message 'an empty commit' \
+  "refusing to remove ${empty}: 1 commit(s) are on no remote-tracking ref or tag"
+run_command 'an empty commit, waived' 0 --force-unpushed "${empty}"
+check_gone 'an empty commit, waived' "${empty}"
 
 ###########################################################################
 ## Work that no branch names.
@@ -480,6 +524,21 @@ check_message 'a linked worktree with an unpushed commit, waived' \
 if git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtmine > /dev/null; then
   fail "a linked worktree with an unpushed commit, waived: its branch is left"
 fi
+
+# A linked worktree whose branch was squash-merged holds nothing to lose,
+# though no remote holds its commits, even after the remote's default branch
+# is merged into it.
+git -C "${wthost}" worktree add -q -b wtsquashed "${work}/myrepo-branch-wtsquashed"
+mark_created wtsquashed
+echo 'squashed' > "${work}/myrepo-branch-wtsquashed/wtsquashed.txt"
+git -C "${work}/myrepo-branch-wtsquashed" add wtsquashed.txt
+git -C "${work}/myrepo-branch-wtsquashed" commit -q -m 'Work to squash-merge'
+squash_merge "${work}/myrepo-branch-wtsquashed"
+git -C "${work}/myrepo-branch-wtsquashed" merge -q --no-edit origin/main
+run_command 'a linked worktree whose branch was squash-merged' 0 \
+  "${work}/myrepo-branch-wtsquashed"
+check_unregistered 'a linked worktree whose branch was squash-merged' \
+  "${wthost}" "${work}/myrepo-branch-wtsquashed" wtsquashed
 
 # Uncommitted changes in a linked worktree are refused, as in a clone.
 git -C "${wthost}" worktree add -q -b wtdirty "${work}/myrepo-branch-wtdirty"

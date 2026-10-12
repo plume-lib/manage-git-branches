@@ -116,6 +116,23 @@ if [ -z "$(git -C "${clone}" log --format=%s --branches --not --remotes)" ]; the
   fail 'test setup: git log --branches --not --remotes should show the squash-merged commits'
 fi
 expect_outgoing 'squash-merged branch' ''
+# `--omitted` names the omitted branch, and takes no git log arguments.
+omitted="$(cd "${clone}" && "${GIT_OUTGOING}" --omitted 2> "${testdir}/errors")"
+if [ "${omitted}" != refs/heads/feature ] || [ -s "${testdir}/errors" ]; then
+  fail "--omitted: printed [${omitted}], expected [refs/heads/feature]: $(cat "${testdir}/errors")"
+fi
+if (cd "${clone}" && "${GIT_OUTGOING}" --omitted --oneline) > /dev/null 2>&1; then
+  fail '--omitted with a git log argument: expected a failure status'
+fi
+# Merging origin/HEAD into the squash-merged branch makes the branch's tree
+# match origin/HEAD and moves its merge base to the squash commit, but the
+# branch is still omitted.
+git -C "${clone}" branch -q remerged feature
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-remerged" remerged
+git -C "${testdir}/myrepo-branch-remerged" merge -q --no-edit origin/main
+expect_outgoing 'squash-merged branch, then merged with origin/HEAD' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-remerged"
+git -C "${clone}" branch -q -D remerged
 # Naming the omitted branch does not show its commits.
 expect_outgoing 'squash-merged branch, named as a revision' '' refs/heads/feature
 # Two branches whose tip is the same squash-merged commit are both omitted.
@@ -147,6 +164,55 @@ commit_file "${testdir}/myrepo-branch-late" l.txt 'l' 'Late commit'
 expect_outgoing 'squash-merged branch, branch started after the squash-merge' 'Late commit'
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-late"
 git -C "${clone}" branch -q -D late
+
+# A branch that changes no file is outgoing, though merging it into
+# origin/HEAD changes nothing:  none of its work has landed.
+git -C "${clone}" branch -q empty origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-empty" empty
+git -C "${testdir}/myrepo-branch-empty" commit -q --allow-empty -m 'Empty commit'
+expect_outgoing 'branch with only an empty commit' 'Empty commit'
+# `--only-branch` examines and shows only the branches that it names.
+expect_outgoing '--only-branch, an outgoing branch' 'Empty commit' --only-branch empty
+expect_outgoing '--only-branch, a squash-merged branch' '' --only-branch feature
+expect_outgoing '--only-branch=, both branches' 'Empty commit' \
+  --only-branch=feature --only-branch=empty
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-empty"
+git -C "${clone}" branch -q -D empty
+# A branch name may contain quotes.
+quoted_commit="$(git -C "${clone}" commit-tree -p origin/main -m 'Quoted commit' 'origin/main^{tree}')"
+git -C "${clone}" branch -q "quote'\"d" "${quoted_commit}"
+expect_outgoing 'branch name with quotes' 'Quoted commit'
+git -C "${clone}" branch -q -D "quote'\"d"
+git -C "${clone}" branch -q reverted origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-reverted" reverted
+commit_file "${testdir}/myrepo-branch-reverted" r.txt 'r' 'Reverted commit'
+git -C "${testdir}/myrepo-branch-reverted" revert --no-edit HEAD > /dev/null
+# A branch whose last commit reverts the others is omitted, like a branch
+# whose changes have landed:  telling them apart would require replaying the
+# branch's commits without its merges.
+expect_outgoing 'branch whose last commit reverts the others' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-reverted"
+git -C "${clone}" branch -q -D reverted
+
+# An empty commit on a squash-merged branch that is still on the remote is
+# outgoing:  the branch's commits that the remote branch holds are not its
+# own work.
+git -C "${clone}" branch -q kept origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-kept" kept
+commit_file "${testdir}/myrepo-branch-kept" k.txt 'k' 'Kept commit'
+git -C "${clone}" push -q origin kept
+git -C "${upstream_work}" pull -q origin main
+git -C "${upstream_work}" fetch -q origin kept
+git -C "${upstream_work}" merge -q --squash FETCH_HEAD > /dev/null
+git -C "${upstream_work}" commit -q -m 'Squash-merged kept'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+git -C "${testdir}/myrepo-branch-kept" commit -q --allow-empty -m 'Empty commit on kept'
+expect_outgoing 'empty commit on a squash-merged branch still on the remote' \
+  'Empty commit on kept'
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-kept"
+git -C "${clone}" branch -q -D kept
+git -C "${clone}" push -q origin --delete kept
 
 # A squash-merged branch whose tip has a malformed author date, which git
 # reads as 0, or no author line at all, is not outgoing.
