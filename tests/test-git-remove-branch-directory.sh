@@ -692,6 +692,20 @@ run_command 'a removed linked worktree with a backslash' 0 \
 check_unregistered 'a removed linked worktree with a backslash' \
   "${wthost}" "${work}/myrepo-branch-wt\\back" wtbackslash
 
+# A removed linked worktree whose branch was deleted has a HEAD of all zeros.
+# It holds no commit, so it is cleaned up, mark and all.
+git -C "${wthost}" worktree add -q -b wtnobranch "${work}/myrepo-branch-wtnobranch"
+mark_created wtnobranch
+rm -rf "${work}/myrepo-branch-wtnobranch"
+git -C "${wthost}" update-ref -d refs/heads/wtnobranch
+run_command 'a removed linked worktree whose branch was deleted' 0 \
+  --repository "${wthost}" "${work}/myrepo-branch-wtnobranch"
+check_unregistered 'a removed linked worktree whose branch was deleted' \
+  "${wthost}" "${work}/myrepo-branch-wtnobranch" wtnobranch
+if git -C "${wthost}" config branch.wtnobranch.createdForBranchDirectory > /dev/null; then
+  fail "a removed linked worktree whose branch was deleted: its mark is left"
+fi
+
 # A worktree whose administrative directory is gone is refused, even with
 # --force, because git can no longer say what the directory holds.
 git -C "${wthost}" worktree add -q -b wtnoadmin "${work}/myrepo-branch-wtnoadmin"

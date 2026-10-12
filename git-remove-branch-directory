@@ -536,8 +536,15 @@ remove_missing_worktree() {
     echo "${SCRIPT_NAME}: refusing to clean up after ${missing_dir}: cannot determine its HEAD" >&2
     return 1
   fi
-  check_worktree_unpushed "${missing_common}" "${missing_head}" \
-    "${missing_branch}" "${missing_dir}"
+  # A HEAD of all zeros is a branch that holds no commit:  one that was never
+  # born, or one that was deleted.  It holds no commit to lose, and
+  # `delete_worktree_branch` then deletes nothing but the branch's mark.
+  case "${missing_head}" in
+    *[!0]*)
+      check_worktree_unpushed "${missing_common}" "${missing_head}" \
+        "${missing_branch}" "${missing_dir}"
+      ;;
+  esac
   check_module_repositories "${missing_admin}" "${missing_dir}"
   if [ "${remove_refusals}" -ne 0 ]; then
     return 1
