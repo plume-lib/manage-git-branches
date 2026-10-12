@@ -315,6 +315,17 @@ if ! printf '%s\n' "${output}" | grep -q -x -F -- "${host_absolute}"; then
   fail "git-orphaned-branches did not list ${host} once its worktree was gone"
 fi
 
+# A locked registration whose directory is missing, such as one on removable
+# media that is not mounted, still depends on the host.
+git -C "${host}" worktree lock --reason 'removable media' "${dependent}"
+if ! output="$(cd "${work}/worktrees" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
+  fail "git-orphaned-branches exited with a failure status for a locked registration"
+fi
+if printf '%s\n' "${output}" | grep -q -x -F -- "${host_absolute}"; then
+  fail "git-orphaned-branches listed ${host}, which hosts a locked worktree"
+fi
+git -C "${host}" worktree unlock "${dependent}"
+
 # A worktree that `git-new-branch` made, once its branch was pushed and then
 # deleted in the remote, is listed; the clone that hosts it, whose branch
 # still exists, is not.  `--remove` removes the worktree and deletes its

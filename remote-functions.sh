@@ -235,13 +235,14 @@ add_worktree() {
 ## submodule, and the working tree that this command runs in can hold
 ## submodules that the branch to be checked out does not, or the reverse.
 ##
-## A TREE-ISH without `.gitmodules` is answered without listing its whole
-## tree, which in a large repository is slow:  a gitlink without that file is
-## a submodule that `git submodule` cannot set up, and nearly every tree
-## without the file has no gitlink.
+## A TREE-ISH or index without `.gitmodules` is answered without listing all
+## of it, which in a large repository is slow:  a gitlink without that file
+## is a submodule that `git submodule` cannot set up, and nearly every tree
+## without the file has no gitlink.  `:.gitmodules` names the index's entry.
 has_gitlinks() {
   if [ "$#" -eq 0 ]; then
-    git ls-files --stage | grep -q '^160000 '
+    git cat-file -e :.gitmodules 2> /dev/null \
+      && git ls-files --stage | grep -q '^160000 '
   else
     git cat-file -e "$1:.gitmodules" 2> /dev/null \
       && git ls-tree -r "$1" | grep -q '^160000 '
@@ -365,10 +366,25 @@ copy_tree_into() (
     case "${name}" in '.' | '..') continue ;; esac
     if [ ! -e "${entry}" ] && [ ! -L "${entry}" ]; then continue; fi
     rel="$3${name}"
-    relation="$(printf '%s\n' "$4" | rel="${rel}" awk '
-      $0 == ENVIRON["rel"] { print "omitted"; exit }
-      index($0, ENVIRON["rel"] "/") == 1 { found = 1 }
-      END { if (found) print "ancestor" }')"
+    # The shell splits OMIT on newlines, with globbing off so that no line is
+    # expanded; the patterns are quoted, so that a line is matched literally.
+    # This forks nothing, which matters because it runs for every entry.
+    relation=''
+    saved_ifs="${IFS}"
+    IFS='
+'
+    set -f
+    for omitted in $4; do
+      case "${omitted}" in
+        "${rel}")
+          relation='omitted'
+          break
+          ;;
+        "${rel}"/*) relation='ancestor' ;;
+      esac
+    done
+    set +f
+    IFS="${saved_ifs}"
     case "${relation}" in
       omitted) continue ;;
       ancestor)

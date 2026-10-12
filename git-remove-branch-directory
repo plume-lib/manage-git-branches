@@ -215,25 +215,32 @@ line_count() {
   printf '%s' "$1" | grep -c '' || true
 }
 
-# Prints the number of linked worktrees of the repository in directory $1
-# whose directory still exists.
+# Prints the number of live linked worktrees of the repository in directory
+# $1:  those whose directory still exists, and those that are locked.
 #
 # `git worktree list --porcelain` prints the main working tree, or the bare
-# repository, first and each linked worktree after it, one `worktree PATH` line per entry.  A pathname
-# that contains a newline cannot be represented in that format; git offers
-# `-z` for that, which needs git 2.36, and a newline in the pathname of a
-# repository is pathological.
+# repository, first and each linked worktree after it, in entries separated
+# by blank lines, each beginning with a `worktree PATH` line.  awk reduces
+# each entry to one line, the path preceded by "L " if the entry has a
+# `locked` line and by "- " otherwise.  A pathname that contains a newline
+# cannot be represented in that format; git offers `-z` for that, which needs
+# git 2.36, and a newline in the pathname of a repository is pathological.
 #
 # A registration whose directory is gone protects nothing:  removing the
 # repository cannot break a working tree that does not exist, and
 # `git worktree prune` would drop the registration.  git lists such an entry
-# all the same, marked prunable, so test each one.  `live_dependent_worktree`
+# all the same, marked prunable, so test each one.  A locked one is the
+# exception:  its directory may be missing only for now, on removable media
+# that is not mounted, and the lock is what says so.  `live_dependent_worktree`
 # in `git-orphaned-branches` applies the same test, and the two must agree:
 # otherwise a stale registration makes a directory that that command lists one
 # that this command refuses, with a refusal that no flag can waive.
 live_linked_worktrees() {
   git -C "$1" worktree list --porcelain 2> /dev/null \
-    | sed -n 's/^worktree //p' \
+    | awk '
+        /^worktree / { if (n++) print flag " " dir; dir = substr($0, 10); flag = "-" }
+        $1 == "locked" { flag = "L" }
+        END { if (n) print flag " " dir }' \
     | (
       # Discard the main working tree or the bare repository, which is $1
       # itself or contains it.  Only a linked worktree depends on the
@@ -244,8 +251,8 @@ live_linked_worktrees() {
       fi
       : "${live_linked_main}"
       live_linked_count=0
-      while IFS= read -r live_linked_dir; do
-        if [ -d "${live_linked_dir}" ]; then
+      while IFS= read -r live_linked_entry; do
+        if [ "${live_linked_entry%% *}" = 'L' ] || [ -d "${live_linked_entry#? }" ]; then
           live_linked_count=$((live_linked_count + 1))
         fi
       done
@@ -429,10 +436,9 @@ report_submodule_counts() {
 
 # Prints why the branch $2, which the linked worktree registered at the
 # absolute pathname $3 has checked out, outlives the removal of that worktree,
-# or prints nothing if `delete_worktree_branch` deletes it.  $1 is the common
-# git directory of the repository.  $3 is the pathname that the registration
-# names, which differs from the worktree's own after a `mv`; it is empty once
-# the registration is gone.
+# or prints nothing if the branch is to be deleted.  $1 is the common git
+# directory of the repository.  $3 is the pathname that the registration
+# names, which differs from the worktree's own after a `mv`.
 #
 # Only a branch that `git-new-branch` or `git-checkout-branch` created for its
 # worktree, as `branch.$2.createdForBranchDirectory` records, is deleted.
@@ -460,8 +466,9 @@ worktree_branch_kept() {
 
 # Deletes the branch $2, which a removed linked worktree had checked out, from
 # the repository whose common git directory is $1, if the branch still names
-# the commit $3, and if `worktree_branch_kept` does not keep it, in which case
-# a note says so.  Prints a diagnostic and returns 1 if it cannot.
+# the commit $3.  $4 is what `worktree_branch_kept` printed for the branch
+# before the removal; if it is not empty, the branch is kept, and a note says
+# so.  Prints a diagnostic and returns 1 if it cannot.
 #
 # `update-ref` rather than `git branch --delete`, because it takes a full
 # refname, so a branch name that begins with "-" cannot be read as an option.
@@ -472,9 +479,8 @@ delete_worktree_branch() {
   if [ -z "$2" ]; then
     return 0
   fi
-  delete_worktree_branch_kept="$(worktree_branch_kept "$1" "$2" '')"
-  if [ -n "${delete_worktree_branch_kept}" ]; then
-    echo "${SCRIPT_NAME}: note: kept the branch $2, ${delete_worktree_branch_kept}" >&2
+  if [ -n "$4" ]; then
+    echo "${SCRIPT_NAME}: note: kept the branch $2, $4" >&2
     return 0
   fi
   if ! git --git-dir="$1" update-ref -d "refs/heads/$2" "$3"; then
@@ -554,16 +560,20 @@ remove_missing_worktree() {
     echo "${SCRIPT_NAME}: refusing to clean up after ${missing_dir}: cannot determine its HEAD" >&2
     return 1
   fi
+  missing_kept=''
+  missing_doomed="${missing_branch}"
+  if [ -n "${missing_branch}" ]; then
+    missing_kept="$(worktree_branch_kept "${missing_common}" \
+      "${missing_branch}" "${missing_dir}")"
+    if [ -n "${missing_kept}" ]; then
+      missing_doomed=''
+    fi
+  fi
   # A HEAD of all zeros is a branch that holds no commit:  one that was never
   # born, or one that was deleted.  It holds no commit to lose, and
   # `delete_worktree_branch` then deletes nothing but the branch's mark.
   case "${missing_head}" in
     *[!0]*)
-      missing_doomed="${missing_branch}"
-      if [ -n "${missing_branch}" ] && [ -n "$(worktree_branch_kept \
-        "${missing_common}" "${missing_branch}" "${missing_dir}")" ]; then
-        missing_doomed=''
-      fi
       check_worktree_unpushed "${missing_common}" "${missing_head}" \
         "${missing_doomed}" "${missing_dir}"
       ;;
@@ -577,7 +587,8 @@ remove_missing_worktree() {
     echo "${SCRIPT_NAME}: cannot remove: ${missing_admin}" >&2
     return 1
   fi
-  delete_worktree_branch "${missing_common}" "${missing_branch}" "${missing_head}"
+  delete_worktree_branch "${missing_common}" "${missing_branch}" \
+    "${missing_head}" "${missing_kept}"
 }
 
 # Removes directory $1, unless one of the checks refuses.  Prints a diagnostic
@@ -848,10 +859,14 @@ remove_branch_directory() {
   fi
 
   if [ "${remove_kind}" = 'linked-worktree' ]; then
+    remove_kept=''
     remove_doomed="${remove_branch}"
-    if [ -n "${remove_branch}" ] && [ -n "$(worktree_branch_kept \
-      "${remove_common}" "${remove_branch}" "${remove_registered%/.git}")" ]; then
-      remove_doomed=''
+    if [ -n "${remove_branch}" ]; then
+      remove_kept="$(worktree_branch_kept "${remove_common}" \
+        "${remove_branch}" "${remove_registered%/.git}")"
+      if [ -n "${remove_kept}" ]; then
+        remove_doomed=''
+      fi
     fi
     check_worktree_unpushed "${remove_common}" "${remove_head}" \
       "${remove_doomed}" "${remove_dir}"
@@ -890,7 +905,8 @@ remove_branch_directory() {
       echo "${SCRIPT_NAME}: cannot remove: ${remove_dir}" >&2
       return 1
     fi
-    delete_worktree_branch "${remove_common}" "${remove_branch}" "${remove_head}"
+    delete_worktree_branch "${remove_common}" "${remove_branch}" \
+      "${remove_head}" "${remove_kept}"
     return
   fi
 

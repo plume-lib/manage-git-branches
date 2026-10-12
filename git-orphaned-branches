@@ -172,29 +172,37 @@ absolute_path() {
 # directory must not appear in it however orphaned its own branch is.
 #
 # `git worktree list --porcelain` prints the main working tree first and each
-# linked worktree after it, one `worktree PATH` line per entry.  A pathname
-# that contains a newline cannot be represented in that format; git offers
-# `-z` for that, which needs git 2.36, and a newline in the pathname of a
-# repository is pathological.
+# linked worktree after it, in entries separated by blank lines, each
+# beginning with a `worktree PATH` line.  awk reduces each entry to one line,
+# the path preceded by "L " if the entry has a `locked` line and by "- "
+# otherwise.  A pathname that contains a newline cannot be represented in that
+# format; git offers `-z` for that, which needs git 2.36, and a newline in the
+# pathname of a repository is pathological.
 #
 # A registration whose directory is gone protects nothing, because removing $1
-# cannot break a working tree that does not exist.
+# cannot break a working tree that does not exist -- unless it is locked:  its
+# directory may be missing only for now, on removable media that is not
+# mounted, and the lock is what says so.
 live_dependent_worktree() {
   live_dependent_worktree_dir="$(absolute_path "$1")" || return 0
   git -C "$1" worktree list --porcelain 2> /dev/null \
-    | sed -n 's/^worktree //p' \
+    | awk '
+        /^worktree / { if (n++) print flag " " dir; dir = substr($0, 10); flag = "-" }
+        $1 == "locked" { flag = "L" }
+        END { if (n) print flag " " dir }' \
     | (
       # Only the main working tree holds the repository that the others
       # depend on, so a linked worktree is at no risk of taking one down.
       IFS= read -r live_dependent_worktree_main || exit 0
-      live_dependent_worktree_main_absolute="$(absolute_path "${live_dependent_worktree_main}")" \
+      live_dependent_worktree_main_absolute="$(absolute_path "${live_dependent_worktree_main#? }")" \
         || exit 0
       if [ "${live_dependent_worktree_main_absolute}" != "${live_dependent_worktree_dir}" ]; then
         exit 0
       fi
-      while IFS= read -r live_dependent_worktree_linked; do
-        if [ -d "${live_dependent_worktree_linked}" ]; then
-          printf '%s\n' "${live_dependent_worktree_linked}"
+      while IFS= read -r live_dependent_worktree_entry; do
+        if [ "${live_dependent_worktree_entry%% *}" = 'L' ] \
+          || [ -d "${live_dependent_worktree_entry#? }" ]; then
+          printf '%s\n' "${live_dependent_worktree_entry#? }"
           exit 0
         fi
       done

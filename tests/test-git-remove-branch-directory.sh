@@ -87,7 +87,7 @@ git -C "${work}/seed" add file.txt
 git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
-  stashed detached localtag corrupt stale envgitdir indexfile wthost; do
+  stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -361,6 +361,21 @@ git -C "${stale}" worktree add -q "${work}/myrepo-branch-stale-linked" \
 rm -rf "${work}/myrepo-branch-stale-linked"
 run_command 'a stale worktree registration' 0 "${stale}"
 check_gone 'a stale worktree registration' "${stale}"
+
+# A locked registration whose directory is missing, such as one on removable
+# media that is not mounted, still depends on the repository.
+lockedstale="$(make_clone lockedstale)"
+git -C "${lockedstale}" worktree add -q "${work}/myrepo-branch-lockedstale-linked" \
+  -b lockedstale-linked
+git -C "${lockedstale}" worktree lock --reason 'removable media' \
+  "${work}/myrepo-branch-lockedstale-linked"
+rm -rf "${work}/myrepo-branch-lockedstale-linked"
+run_command 'a locked worktree registration whose directory is missing' 1 \
+  --force "${lockedstale}"
+check_present 'a locked worktree registration whose directory is missing' \
+  "${lockedstale}"
+check_message 'a locked worktree registration whose directory is missing' \
+  "holds the repository of 1 linked worktree(s)"
 
 # A submodule's working tree, whose `.git` is a file as well, is not a
 # linked worktree, and is refused and left intact.
