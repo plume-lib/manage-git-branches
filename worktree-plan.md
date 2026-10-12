@@ -55,8 +55,8 @@ What genuinely needs a shared object store is narrower, and stays here:
 
 * **One `git fetch` per group instead of one `git pull` per directory**, in
   `git-push-to`.  Related worktrees share the remote-tracking refs, so one fetch
-  freshens the whole group and each directory's update becomes a local
-  integration step.  Saving 2 of §6.6.
+  freshens the whole group, and each directory that has nothing of its own to
+  combine is then updated by a local fast-forward.  Saving 2 of §6.6.
 * **No fetch at all between two related worktrees.**  FROM's commits are already
   in TO, so `git-push-to` can merge the commit that FROM's branch ref names
   instead of fetching it from FROM's directory (§6.4).
@@ -69,8 +69,9 @@ For scale, the command whose accounting motivates the rest: per adjacent pair,
 in one process, so one `git ls-remote` answers for a whole chain of clones of one
 upstream (git-push-to:229-235).  A directory in the middle of a chain is in two
 pairs, so it is pulled twice.  For a chain of k related worktrees with one
-remote, 2(k-1) pulls become 1 fetch, plus the k-1 pushes, which are not batched
-and should not be (§6.6).
+remote, 2(k-1) pulls become 1 fetch -- plus one `git pull` for each directory
+whose branch has diverged from its upstream -- plus the k-1 pushes, which are
+not batched and should not be (§6.6).
 
 Each access is a separate SSH connection and authentication, which on a slow or
 high-latency link costs far more than the data transferred.
@@ -504,33 +505,29 @@ What each version buys:
 | 2.9 | `git worktree add --no-checkout` | §5.2 |
 | 2.17 | `git worktree remove` | the cleanup of §5.6 |
 | 2.30 | `git worktree repair` | the recovery documented in §4.2 and §8 |
-| 2.31 | `git rev-parse --path-format=absolute` | §5.4, §6.1, §6.6, §7.2 |
+| 2.31 | `git rev-parse --path-format=absolute` | §5.4, §6.6, §7.2 |
 
-Check once, before any work:
+Check once, before any work, with `git-outgoing`'s `require_git`, moved into
+remote-functions.sh so that every command shares it:
 
 ```sh
-if ! git rev-parse --path-format=absolute --git-dir > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: ERROR: requires git 2.31 or later" >&2
-  exit 1
-fi
+require_git 31
 ```
 
-One probe suffices, because `--path-format` is the newest of the four features
-and support for it implies the rest.  Probing a capability, rather than parsing
-`git --version`, tests what is actually used and does not misjudge a distribution
-that backported a feature.  This probe needs a repository, which the script has
-established by then (git-new-branch:91-99); a probe that works outside one, if
-some caller ever needs it, is `git worktree remove -h`, which only reaches back
-to 2.17.
+`require_git` parses `git version` and, for too old a git, prints "requires git
+2.31 or later, but found git X" and exits 1.  Moving it means also moving the
+version parsing that feeds it, and making `die`'s hard-coded `git-outgoing:`
+prefix use `${SCRIPT_NAME}`.
 
-The package already depends on 2.31 without saying so: `git-outgoing` runs
-`git rev-parse --path-format=absolute` with no version check.  So this
-requirement is less new than it looks, and `git-outgoing` should make the same
-check.
+Parse the version rather than probing for `--path-format`.  One mechanism for
+the whole package gives one message format, and that message can report the
+version it found.  A probe would also need care: `git rev-parse` echoes an
+option it does not recognize and exits 0, so the obvious
+`git rev-parse --path-format=absolute --git-dir` succeeds on an old git.  The
+usual argument for probing -- a distribution that backported a feature into an
+older version number -- rarely applies to git.
 
-Document the requirement in the README (§8), and put the check in the shared
-helper of step 1 of §10, so that every command makes the same demand with the
-same message.
+Document the requirement in the README (§8).
 
 ### 5.6 Cleanup on failure and on a signal
 
@@ -1013,8 +1010,7 @@ the refs are shared, so the commit is already present in TO.  Details:
   bare name resolves a same-named tag first.
 * Everything after that is unchanged: the same `fmt-merge-msg` line, the same
   `git merge --no-edit --no-log -m`.  `git-push-to` merges rather than pulls, so
-  `pull.rebase` does not apply to this step, and no "integrate the way git
-  would" helper is needed here.
+  `pull.rebase` does not apply to this step.
 * When it is false -- independent clones, `--copy` directories, and the §4.3
   submodule fallback -- keep `fetch_branch`.  `relative-path` and the
   `./`-prefix hack keep their full rationale there.
@@ -1075,36 +1071,57 @@ through `git_batch_ssh`, with a per-directory query for an upstream ref outside
 `git-push-to` brings each directory up to date with `git pull` (git-push-to:391
 and :411), and each of those fetches from the remote.  Related worktrees share
 the remote-tracking refs, so **one `git fetch REMOTE`** updates them for the
-whole group, after which each directory's update is a purely local merge.
+whole group.
 
-This is the more delicate saving, because `git pull` is fetch *plus* an
-integration step whose kind depends on configuration.  The replacement must
-integrate the same way git would:
+**Decided: after the group fetch, update a directory locally only by a
+fast-forward, and run `git pull` as today in every other case.**  Take the fast
+path when both of these hold:
 
-* Read the effective mode -- `branch.BRANCH.rebase`, then `pull.rebase` -- and
-  run `git merge` or `git rebase` against the branch's upstream accordingly.
-* When that value is one of the modes this logic does not reproduce
-  (`merges`, `interactive`), or when the branch has no upstream, run `git pull`
-  as today.  Correctness first; the saving is an optimization, and a directory
-  that opts out of it costs only what it costs now.
-* **A narrowed fetch refspec also opts out.**  `git pull` fetches the branch's
-  upstream by name; one `git fetch REMOTE` fetches whatever
-  `remote.REMOTE.fetch` maps.  In a clone made with `--single-branch`, or with
-  any narrowed refspec, the group fetch may not update this branch's upstream ref
-  at all, and the local merge would then silently integrate nothing -- a wrong
+* The branch has no commits that its upstream lacks:
+  `git merge-base --is-ancestor HEAD @{upstream}`.  The update is then a
+  fast-forward or nothing at all.
+* The effective mode is not "merge, with fast-forwarding disabled": that is,
+  not `pull.ff=false`, nor `merge.ff=false` with `pull.ff` unset, while the
+  branch's rebase setting (`branch.BRANCH.rebase`, then `pull.rebase`) is unset
+  or false.  In that mode `git pull` makes a merge commit even when it could
+  fast-forward.
+
+The fast path is then `git merge -q --ff-only @{upstream}`.
+
+The reason for so narrow a fast path: a fast-forward is the one update on which
+every pull mode agrees -- merge, rebase, and `pull.ff=only` all produce it.
+Reproducing `git pull` for a diverged branch would mean reimplementing every
+setting it reads: the "Need to specify how to reconcile divergent branches"
+refusal when no mode is configured, `pull.ff`, the `merges` and `interactive`
+rebase modes, the fork-point computation of `git pull --rebase`, autostash, the
+boolean spellings of each setting, and a merge message ("Merge branch 'main' of
+URL") that `git merge @{upstream}` does not write.  That is a permanent
+maintenance burden in a shell script, for a case that costs, with the
+fallback, only what it costs today.
+
+The fast path is also the common case in `git-push-to`'s chains: a directory
+that was just pushed, or a middle directory being updated for the second time,
+has nothing of its own to combine.
+
+Two more conditions send a directory to `git pull`:
+
+* **No upstream.**  The fast path has nothing to compare against.
+* **A narrowed fetch refspec.**  `git pull` fetches the branch's upstream by
+  name; one `git fetch REMOTE` fetches whatever `remote.REMOTE.fetch` maps.  In
+  a clone made with `--single-branch`, or with any narrowed refspec, the group
+  fetch may not update this branch's upstream ref at all, and the fast path
+  would then report "already up to date" for a branch that is behind -- a wrong
   answer, not a slow one.  This package already reasons about that case
   (git-checkout-branch's `find_branch` handles a branch that no refspec maps).
   So check, per directory, that the refspecs of ${REMOTE} map the branch's
   upstream ref -- `is_deleted_branch_tracking_refs` in remote-functions.sh
   already computes exactly that mapping -- and fall back to `git pull` for any
   directory they do not.
-* The group's key is (repository, remote).  Two related worktrees whose
-  branches have upstreams on different remotes are in different groups, and each
-  group gets its own `fetch`.  (Saving 1's key is coarser -- URL and SSH
-  configuration -- and needs no change.)
 
-Prove the equivalence with a test that runs both paths against the same
-repositories and compares the resulting commit graphs, not just the exit status.
+The group's key is (repository, remote).  Two related worktrees whose branches
+have upstreams on different remotes are in different groups, and each group
+gets its own `fetch`.  (Saving 1's key is coarser -- URL and SSH configuration
+-- and needs no change.)
 
 #### What is not batched
 
@@ -1138,8 +1155,8 @@ snapshot showed as present cannot have been deleted by the run itself.
 beside those, and `related_worktrees` (§6.6's predicate) belongs there too.
 
 What this plan adds to that file is therefore small: the predicate, the
-integration helper of saving 2, and the worktree-aware helpers
-of §10 step 1 (`git_supports_worktree`, `is_linked_worktree`, and the cleanup of
+fast-path test of saving 2, and the worktree-aware helpers
+of §10 step 1 (`require_git`, `is_linked_worktree`, and the cleanup of
 §5.6).
 
 ## 7. The teardown story (the biggest gap)
@@ -1500,8 +1517,8 @@ Add:
   (§6.4).
 * Too old a git is refused with the §5.5 message and a nonzero status, and
   creates no directory.  If no old git is available, drive it with a fake `git`
-  on PATH that fails `rev-parse --path-format=absolute` (the §5.5 probe) and
-  passes everything else through.
+  on PATH that reports an old version for `git version` and passes everything
+  else through.
 
 For the second goal (§6.6), where the assertion is about *how many* times a
 remote is asked, count the queries with a fake `git` on PATH that appends its
@@ -1516,9 +1533,11 @@ is a local pathname that never reaches SSH at all:
   directory.
 * Unrelated clones cost exactly what they cost today, with no additional query
   to discover that there is nothing to batch.
-* The `git pull` replacement of saving 2 produces the same commit graph as
-  `git pull` does, under `pull.rebase` both false and true, and falls back to
-  `git pull` for a mode it does not reproduce.
+* Saving 2 fast-forwards a directory that is behind its upstream, with no
+  `git pull`; and it runs `git pull` for a directory that has diverged -- with
+  `pull.rebase` unset, false, and true, so that the outcome is exactly
+  `git pull`'s, including the refusal when no mode is configured -- and for one
+  with `pull.ff=false`, which gets a merge commit rather than a fast-forward.
 * **The merge** (§6.4) between two related worktrees: the merge commit's
   subject is the same as between two independent clones (`Merge branch
   'FROM_BRANCH'`, plus "into TO_BRANCH" off the default branch), its second
@@ -1532,7 +1551,7 @@ Each step is independently reviewable and leaves the tree working, which matches
 this repository's history of small PRs.
 
 1. **remote-functions.sh: the worktree-aware helpers.**
-   `git_supports_worktree` (§5.5), `is_linked_worktree DIRECTORY`,
+   `require_git`, moved from `git-outgoing` (§5.5), `is_linked_worktree DIRECTORY`,
    `related_worktrees DIR1 DIR2` (§6.6), and the cleanup helper of §5.6, with
    tests in tests/test-remote-functions.sh.
 2. **`git-new-branch`: create a worktree.**  §5 in full -- the default mode, the
@@ -1555,12 +1574,12 @@ this repository's history of small PRs.
    the branch ref, remove the one administrative directory rather than prune
    (§7.2), and handle the already-deleted case (§7.5).
 5. **Saving 2 and the fetch-free merge.**  Replace `git-push-to`'s
-   per-directory `git pull` with one `git fetch` per group plus the
-   "integrate the way git would" step (§6.6), and merge a related worktree's
+   per-directory `git pull` with one `git fetch` per group plus a local
+   fast-forward where one suffices (§6.6), and merge a related worktree's
    branch from the shared ref rather than fetching it from FROM's directory
-   (§6.4).  These can be one commit or two; only saving 2 needs the integration
-   helper.  Needs step 1's `related_worktrees`, and pays off only once
-   the branch directories are worktrees, so it comes last.
+   (§6.4).  These can be one commit or two.  Needs step 1's
+   `related_worktrees`, and pays off only once the branch directories are
+   worktrees, so it comes last.
 
 Risk and rollback: steps 2 and 3 are self-contained, and branch directories
 created by the current version keep working, so old and new branch directories
@@ -1579,7 +1598,7 @@ README -- when the series lands.
    worktree and its repository as relative paths, so moving the whole tree of
    branch directories keeps them working, where today it needs
    `git worktree repair` (§4.2, fact 3).  Deferred because it raises the version
-   requirement well past the 2.31 of §5.5 -- or needs a capability probe and two
+   requirement well past the 2.31 of §5.5 -- or needs a version test and two
    code paths -- to fix a problem that `git worktree repair` already fixes.
 2. **A dash-safe branch name.**  `git worktree add -b -n` fails in `git branch`'s
    option parsing, exactly as today's `git checkout -b -n` does (fact 11).  §5.9
@@ -1672,8 +1691,8 @@ Settled:
 * §7 -- `git-remove-branch-directory` removes linked worktrees too.
 * §5.5 -- require git 2.31; no fallback for anything older.  This also makes
   `git worktree repair` (2.30) always available, so §4.2 and §8 can recommend it
-  without qualification, and it lets §6.1 use
-  `rev-parse --path-format=absolute` directly.
+  without qualification.  The check is `git-outgoing`'s `require_git`, shared
+  through remote-functions.sh.
 * §6.1 -- `git-checkout-branch` gets the interim refusal in step 2 of §10 and the
   conversion in step 3.
 * §5.4 -- install the new worktree's index by copying the source's index file.
