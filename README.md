@@ -249,9 +249,10 @@ None of this applies to a directory made by `git-new-branch --copy`:  each of
 those is an independent clone, which you may remove or move like any other
 directory.
 
-`git-new-branch`, `git-checkout-branch`, and `git-remove-branch-directory`
-require git 2.31 or later.  The default mode of `git-new-branch` requires git
-2.36 or later in a sparse checkout or with per-worktree configuration.
+`git-new-branch`, `git-checkout-branch`, `git-remove-branch-directory`, and
+`git-orphaned-branches` require git 2.31 or later.  The default mode of
+`git-new-branch` requires git 2.36 or later in a sparse checkout or with
+per-worktree configuration.
 
 ## Programs for managing multiple git clones
 

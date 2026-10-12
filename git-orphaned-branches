@@ -110,6 +110,11 @@ if [ "$#" -ne 0 ]; then
   exit 1
 fi
 
+# For the `locked` line of `git worktree list --porcelain`, which
+# `live_dependent_worktree` reads; without it, a locked worktree whose
+# directory is missing would not protect its repository.
+require_git 31
+
 # Where the directories to remove are collected, one per file, named by
 # position.  The removal happens after the scan rather than during it, so
 # that the walk does not descend into a directory that was just deleted, and

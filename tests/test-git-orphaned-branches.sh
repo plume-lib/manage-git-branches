@@ -778,6 +778,18 @@ if [ ! -d "${work}/removal-empty/not-a-branch-directory" ]; then
   fail "--remove removed a directory that it does not list"
 fi
 
+# Too old a git is refused before anything happens.
+make_fake_git "${work}/oldgit" version 0 'git version 2.30.0'
+mkdir -p "${work}/oldgit-scan"
+if output="$(cd "${work}/oldgit-scan" && PATH="${work}/oldgit:${PATH}" \
+  "${GIT_ORPHANED_BRANCHES}" 2>&1)"; then
+  fail "git-orphaned-branches exited with status 0 with git 2.30.0"
+fi
+case "${output}" in
+  *"requires git 2.31 or later, but found git 2.30.0"*) ;;
+  *) fail "unexpected message with git 2.30.0: ${output}" ;;
+esac
+
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
 fi

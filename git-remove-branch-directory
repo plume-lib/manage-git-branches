@@ -207,7 +207,8 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
-# For `git rev-parse --path-format=absolute`.
+# For `git rev-parse --path-format=absolute`, and for the `locked` line of
+# `git worktree list --porcelain`, which `live_linked_worktrees` reads.
 require_git 31
 
 # Prints the number of lines of $1, which is 0 for the empty string.
