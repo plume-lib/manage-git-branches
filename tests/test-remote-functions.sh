@@ -394,6 +394,8 @@ git -C "${uwa_main}" add file.txt
 git -C "${uwa_main}" commit -q -m 'Initial commit'
 uwa_commit="$(git -C "${uwa_main}" rev-parse HEAD)"
 git -C "${uwa_main}" worktree add -q -b doomed "${WORK_DIR}/uwa-branch-doomed"
+git -C "${uwa_main}" config branch.doomed.remote origin
+git -C "${uwa_main}" config branch.doomed.merge refs/heads/doomed
 uwa_gitdir="$(git -C "${WORK_DIR}/uwa-branch-doomed" rev-parse --absolute-git-dir)"
 # A half-built worktree has modifications, which `git worktree remove` would
 # refuse without `--force`.
@@ -409,6 +411,9 @@ if [ -e "${WORK_DIR}/uwa-branch-doomed" ] || [ -e "${uwa_gitdir}" ]; then
 fi
 if git -C "${uwa_main}" rev-parse --verify --quiet refs/heads/doomed > /dev/null; then
   fail "undo_worktree_add left the branch doomed"
+fi
+if git -C "${uwa_main}" config --get-regexp '^branch\.doomed\.' > /dev/null; then
+  fail "undo_worktree_add left the configuration of the branch doomed"
 fi
 if ! git -C "${uwa_main}" worktree list --porcelain | grep -q -x -F \
   "worktree ${WORK_DIR}/uwa-branch-moved"; then
@@ -455,10 +460,14 @@ fi
 # moved by something else, and is left alone.
 git -C "${uwa_main}" commit -q --allow-empty -m 'Second commit'
 git -C "${uwa_main}" branch movedbranch
+git -C "${uwa_main}" config branch.movedbranch.merge refs/heads/movedbranch
 undo_worktree_add "${uwa_main}" "${WORK_DIR}/uwa-branch-nothing" '' \
   movedbranch "${uwa_commit}"
 if ! git -C "${uwa_main}" rev-parse --verify --quiet refs/heads/movedbranch > /dev/null; then
   fail "undo_worktree_add deleted a branch that is not at the given commit"
+fi
+if ! git -C "${uwa_main}" config --get branch.movedbranch.merge > /dev/null; then
+  fail "undo_worktree_add removed the configuration of a branch that it left"
 fi
 
 echo "${SCRIPT_NAME}: OK"

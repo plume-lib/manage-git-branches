@@ -215,8 +215,8 @@ check_gone 'both checks, --force' "${both}"
 
 # Stashing leaves the working tree clean, so the uncommitted-changes check
 # sees nothing, and a stash entry is on no branch, so a check that asked only
-# about `refs/heads` saw nothing either:  the clone was removed and the only
-# copy of the work went with it.
+# about `refs/heads` would see nothing either:  the clone would be removed and
+# the only copy of the work would go with it.
 stashed="$(make_clone stashed)"
 echo "work in progress" >> "${stashed}/file.txt"
 git -C "${stashed}" stash -q
@@ -246,10 +246,10 @@ check_gone 'a commit on a detached HEAD, waived' "${detached}"
 
 # A tag that the remote holds names a commit that no branch's history
 # contains, as an old release tag can.  A clone fetches such a tag into
-# `refs/tags`, where git keeps no remote-tracking ref for it, so the check
-# counted its commit as unpushed work and refused a clone that held nothing
-# of the user's at all -- and no push could have cleared the refusal, since
-# the commit was in the remote already.
+# `refs/tags`, where git keeps no remote-tracking ref for it, so a check that
+# did not count tags would count its commit as unpushed work and refuse a
+# clone that holds nothing of the user's at all -- and no push could clear the
+# refusal, since the commit is in the remote already.
 #
 # This needs a remote of its own.  Pushing the tag to ${remote} would put it
 # in every later clone, where it names the history of `main` as well and so
@@ -384,8 +384,8 @@ fi
 ## Usage: check_unregistered DESCRIPTION HOST DIRECTORY BRANCH
 ## Checks that the repository of the working tree HOST registers no worktree
 ## at DIRECTORY, keeps no administrative directory for it, and has no branch
-## BRANCH, and that HOST itself is intact.  DIRECTORY is where the worktree
-## was added.
+## BRANCH and no configuration for it, and that HOST itself is intact.
+## DIRECTORY is where the worktree was added.
 check_unregistered() {
   if git -C "$2" worktree list --porcelain | grep -q -x -F "worktree $3"; then
     fail "$1: $3 is still registered"
@@ -399,6 +399,11 @@ check_unregistered() {
   if git -C "$2" rev-parse --verify --quiet "refs/heads/$4" > /dev/null; then
     fail "$1: the branch $4 is left in $2"
   fi
+  # A new branch of the same name would inherit this configuration, such as
+  # an upstream that was deleted in its remote.
+  if git -C "$2" config --get-regexp "^branch\\.$4\\." > /dev/null; then
+    fail "$1: the configuration of the branch $4 is left in $2"
+  fi
   if ! git -C "$2" status > /dev/null 2>&1; then
     fail "$1: $2 is no longer a working tree"
   fi
@@ -410,6 +415,8 @@ check_unregistered() {
 # which `git worktree remove` would refuse without git's own `--force`.
 wthost="$(make_clone wthost)"
 git -C "${wthost}" worktree add -q -b wtgone "${work}/myrepo-branch-wtgone"
+git -C "${wthost}" config branch.wtgone.remote origin
+git -C "${wthost}" config branch.wtgone.merge refs/heads/wtgone
 echo 'build output' > "${work}/myrepo-branch-wtgone/output.o"
 run_command 'a linked worktree' 0 "${work}/myrepo-branch-wtgone"
 check_gone 'a linked worktree' "${work}/myrepo-branch-wtgone"
@@ -462,6 +469,23 @@ run_command 'a linked worktree with uncommitted changes, waived' 0 \
 check_gone 'a linked worktree with uncommitted changes, waived' \
   "${work}/myrepo-branch-wtdirty"
 
+# A locked linked worktree is refused, even with `--force`, and its lock
+# reason is reported.  `git worktree remove --force` refuses it too, and the
+# fallback must not then remove it anyway.
+git -C "${wthost}" worktree add -q -b wtlocked "${work}/myrepo-branch-wtlocked"
+git -C "${wthost}" worktree lock --reason 'on a USB drive' \
+  "${work}/myrepo-branch-wtlocked"
+run_command 'a locked linked worktree' 1 --force "${work}/myrepo-branch-wtlocked"
+check_present 'a locked linked worktree' "${work}/myrepo-branch-wtlocked"
+check_message 'a locked linked worktree' "it is locked (on a USB drive)"
+if ! git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtlocked > /dev/null; then
+  fail "a locked linked worktree: its branch was deleted"
+fi
+git -C "${wthost}" worktree unlock "${work}/myrepo-branch-wtlocked"
+run_command 'an unlocked linked worktree' 0 "${work}/myrepo-branch-wtlocked"
+check_unregistered 'an unlocked linked worktree' "${wthost}" \
+  "${work}/myrepo-branch-wtlocked" wtlocked
+
 # A linked worktree that was moved with `mv`, and not repaired, is no longer
 # where its registration says.  `git worktree remove` cannot remove it, so the
 # directory and its own administrative directory are removed instead.
@@ -478,11 +502,15 @@ check_unregistered 'a moved linked worktree' "${wthost}" \
 # repaired, is left alone, which is what distinguishes this from
 # `git worktree prune`.
 git -C "${wthost}" worktree add -q -b wtrmrf "${work}/myrepo-branch-wtrmrf"
+git -C "${wthost}" config branch.wtrmrf.remote origin
+git -C "${wthost}" config branch.wtrmrf.merge refs/heads/wtrmrf
 rm -rf "${work}/myrepo-branch-wtrmrf"
 git -C "${wthost}" worktree add -q -b wtbystander "${work}/myrepo-branch-wtbystander"
 mv "${work}/myrepo-branch-wtbystander" "${work}/myrepo-branch-wtbystander-moved"
 run_command 'a removed linked worktree, from the repository' 0 \
   --repository "${wthost}" "${work}/myrepo-branch-wtrmrf"
+check_unregistered 'a removed linked worktree' "${wthost}" \
+  "${work}/myrepo-branch-wtrmrf" wtrmrf
 if git -C "${wthost}" worktree list --porcelain | grep -q -x -F \
   "worktree ${work}/myrepo-branch-wtrmrf"; then
   fail "a removed linked worktree: it is still registered"
@@ -497,6 +525,22 @@ if ! git -C "${wthost}" worktree repair "${work}/myrepo-branch-wtbystander-moved
   > /dev/null 2>&1 \
   || ! git -C "${work}/myrepo-branch-wtbystander-moved" status > /dev/null 2>&1; then
   fail "cleaning up after a removed linked worktree disturbed a moved one"
+fi
+
+# With `worktree.useRelativePaths`, the administrative directory names its
+# worktree with a relative path, which must still be matched to the missing
+# directory.  `--relative-paths` needs git 2.48, so skip this test otherwise.
+if git -C "${wthost}" worktree add -q --relative-paths -b wtrelative \
+  "${work}/myrepo-branch-wtrelative" 2> /dev/null; then
+  case "$(cat -- "$(git -C "${work}/myrepo-branch-wtrelative" rev-parse \
+    --absolute-git-dir)/gitdir")" in
+    /*) fail "a removed linked worktree with relative paths: its gitdir file is absolute" ;;
+  esac
+  rm -rf "${work}/myrepo-branch-wtrelative"
+  run_command 'a removed linked worktree with relative paths' 0 \
+    --repository "${wthost}" "${work}/myrepo-branch-wtrelative"
+  check_unregistered 'a removed linked worktree with relative paths' \
+    "${wthost}" "${work}/myrepo-branch-wtrelative" wtrelative
 fi
 
 # The repository defaults to the current directory, when that is a working
@@ -522,18 +566,39 @@ if ! git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtrmrfwork > /dev/
   fail "a removed linked worktree with an unpushed commit: its branch was deleted"
 fi
 
-# A path that no repository registers has nothing to clean up, which is not
-# an error.
-run_command 'a path that no worktree is registered at' 0 \
+# A locked linked worktree whose directory is gone may be on removable media
+# that is not mounted, so it is refused, even with `--force`.
+git -C "${wthost}" worktree add -q -b wtrmrflocked "${work}/myrepo-branch-wtrmrflocked"
+git -C "${wthost}" worktree lock --reason 'on a USB drive' \
+  "${work}/myrepo-branch-wtrmrflocked"
+mv "${work}/myrepo-branch-wtrmrflocked" "${work}/myrepo-branch-wtrmrflocked-unmounted"
+run_command 'a removed locked linked worktree' 1 --force \
+  --repository "${wthost}" "${work}/myrepo-branch-wtrmrflocked"
+check_message 'a removed locked linked worktree' "it is locked (on a USB drive)"
+if ! git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtrmrflocked > /dev/null; then
+  fail "a removed locked linked worktree: its branch was deleted"
+fi
+mv "${work}/myrepo-branch-wtrmrflocked-unmounted" "${work}/myrepo-branch-wtrmrflocked"
+if ! git -C "${work}/myrepo-branch-wtrmrflocked" status > /dev/null 2>&1; then
+  fail "a removed locked linked worktree: it is no longer a working tree once remounted"
+fi
+
+# A path that does not exist and that no repository registers is an error,
+# whether or not a repository is given, so that a mistyped name fails.
+run_command 'a path that no worktree is registered at' 1 \
   --repository "${wthost}" "${work}/never-a-worktree"
-check_message 'a path that no worktree is registered at' "nothing to do"
+check_message 'a path that no worktree is registered at' \
+  "no worktree registered there"
+out="$(cd "${wthost}" && "${COMMAND}" "${work}/never-a-worktree" 2>&1)" \
+  && fail "a path that no worktree is registered at, from a working tree: exit status 0: ${out}"
 
 # $GIT_DIR and $GIT_WORK_TREE in the environment (as when running under a git
 # hook, or `git rebase --exec`) take precedence over `git -C`, so leaving them
 # set would make every check ask about the repository that they name rather
 # than about the directory that `rm -rf` is about to take.  A directory with
-# uncommitted changes and unpushed commits was removed with nothing asked,
-# because the clean repository named by the environment answered for it.
+# uncommitted changes and unpushed commits would be removed with nothing
+# asked, because the clean repository named by the environment would answer
+# for it.
 envtarget="$(make_clone envgitdir)"
 add_unpushed_commit "${envtarget}"
 echo "a modification" >> "${envtarget}/file.txt"
@@ -554,8 +619,8 @@ check_message 'a target with GIT_DIR set' "on no remote-tracking ref or tag"
 # foreign index anyway, because it differs from whatever that index holds, but
 # work that exists only in the index is not:  a file created and staged and
 # never committed is absent from the foreign index, so it is untracked there,
-# and `--untracked-files=no` says nothing about it.  The directory was removed,
-# silently and with exit status 0.
+# and `--untracked-files=no` says nothing about it.  The directory would be
+# removed, silently and with exit status 0.
 indextarget="$(make_clone indexfile)"
 echo "work that exists only in the index" > "${indextarget}/staged.txt"
 git -C "${indextarget}" add staged.txt
@@ -575,9 +640,9 @@ check_message 'a target with GIT_INDEX_FILE set' "uncommitted changes"
 
 # A bare repository holds no working tree, so the uncommitted check has
 # nothing to ask about, but its objects are its own and `rm -rf` takes every
-# one of them.  It was classified with the directories that are no repository
-# at all, which are checked for nothing, so a bare repository that held the
-# only copy of its commits was removed and nothing was said.
+# one of them.  Classified with the directories that are no repository at
+# all, which are checked for nothing, a bare repository that holds the only
+# copy of its commits would be removed and nothing would be said.
 bareonly="${work}/myrepo-branch-bareonly.git"
 git clone -q --bare "${remote}" "${bareonly}"
 run_command 'a bare repository whose commits are nowhere else' 1 "${bareonly}"

@@ -88,36 +88,7 @@ fi
 # The same demand, with the same message, as `git-new-branch`.
 require_git 31
 
-STARTDIR="${PWD}"
-# Set to the temporary directory just before we create it, so that the traps
-# remove it if the script fails or is interrupted partway through.  Left empty
-# otherwise, so the traps never remove a pre-existing directory that we did not
-# create.
-TMPDIR_TO_CLEAN=""
-# Set to the new worktree's directory just before `git worktree add` runs, and
-# cleared once the worktree is complete; and the branch and its commit, if the
-# add creates the branch and it does not exist just before the add.  See
-# `undo_worktree_add` in remote-functions.sh.
-WORKTREE_TO_CLEAN=""
-BRANCH_TO_CLEAN=""
-BRANCH_COMMIT_TO_CLEAN=""
-cleanup() {
-  cd -- "${STARTDIR}" 2> /dev/null || true
-  if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf -- "${TMPDIR_TO_CLEAN}"; fi
-  # ${STARTDIR} may no longer resolve, so name the repository explicitly.
-  if [ -n "${WORKTREE_TO_CLEAN}" ]; then
-    undo_worktree_add "${TOPLEVEL}" "${WORKTREE_TO_CLEAN}" '' \
-      "${BRANCH_TO_CLEAN}" "${BRANCH_COMMIT_TO_CLEAN}"
-  fi
-}
-# A POSIX shell such as dash does not run an EXIT trap when the shell is killed
-# by a signal, so trap the signals too.  Each signal handler restores the
-# default disposition and re-sends the signal to this shell, so that the caller
-# still sees the exit status that the signal produces.
-trap cleanup EXIT
-trap 'cleanup; trap - HUP EXIT; kill -s HUP "$$"' HUP
-trap 'cleanup; trap - INT EXIT; kill -s INT "$$"' INT
-trap 'cleanup; trap - TERM EXIT; kill -s TERM "$$"' TERM
+trap_branch_cleanup
 
 # Capture the top level first: under a POSIX `sh` (e.g., dash), `cd ""` succeeds
 # as a no-op, so testing `cd "$(...)"` directly would not catch an empty result.
@@ -435,22 +406,9 @@ else
   # prevent.
   NEWDIR="${BRANCHDIR}"
   if [ -z "${CHECKOUT_START_POINT}" ]; then
-    set -- worktree add -q "${BRANCHDIR}" "${BRANCHNAME}"
+    add_worktree "${BRANCHDIR}" "${BRANCHNAME}"
   else
-    if ! BRANCH_COMMIT_TO_CLEAN="$(git rev-parse --verify \
-      "${CHECKOUT_START_POINT}^{commit}")"; then
-      echo "${SCRIPT_NAME}: ERROR: cannot resolve ${CHECKOUT_START_POINT}" >&2
-      exit 1
-    fi
-    if ! git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
-      BRANCH_TO_CLEAN="${BRANCHNAME}"
-    fi
-    set -- worktree add -q -b "${BRANCHNAME}" "${BRANCHDIR}" "${CHECKOUT_START_POINT}"
-  fi
-  WORKTREE_TO_CLEAN="${BRANCHDIR}"
-  if ! git "$@"; then
-    echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${BRANCHDIR}" >&2
-    exit 1
+    add_worktree "${BRANCHDIR}" "${BRANCHNAME}" "${CHECKOUT_START_POINT}"
   fi
 fi
 

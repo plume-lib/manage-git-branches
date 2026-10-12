@@ -16,11 +16,10 @@
 #    make.  It is removed with `git worktree remove --force`, and its branch
 #    is deleted from the repository that it shares, so that the branch name
 #    can be used again.
-#  * The top level of a clone, such as `git-new-branch --copy` makes, and
-#    such as every branch directory was before the branch commands made
-#    worktrees.  It is removed with `rm -rf`, which destroys the clone's
-#    objects and refs along with its files, so nothing that `rm -rf` would
-#    lose is recoverable afterward.
+#  * The top level of a clone, such as `git-new-branch --copy` makes.  It is
+#    removed with `rm -rf`, which destroys the clone's objects and refs along
+#    with its files, so nothing that `rm -rf` would lose is recoverable
+#    afterward.
 #  * A directory that is no repository at all.  It is removed with `rm -rf`.
 #
 # Two checks therefore ask, first, whether anything would be lost:
@@ -61,6 +60,9 @@
 #  * the main working tree of a repository that has a linked worktree
 #    registered, since removing it removes the repository that every one of
 #    those worktrees depends on;
+#  * a linked worktree that is locked, whether or not its directory exists,
+#    since `git worktree lock` is the user's own statement that it must not
+#    be removed;
 #  * the current directory, or an ancestor of it; and
 #  * any other working tree whose `.git` is a file, such as a submodule's
 #    working tree, which is `git submodule deinit`'s to remove.
@@ -71,8 +73,9 @@
 # again.  This command removes both, after the check for unpushed commits.
 # `--repository DIR` names a working tree of the repository that the
 # worktree belonged to; it defaults to the current directory, if that is a
-# working tree.  A DIRECTORY that is not registered there has nothing to
-# clean up, which is reported but is not an error.
+# working tree.  A DIRECTORY that is not registered there is an error, as it
+# is when no repository is given, so that a mistyped name fails wherever this
+# command is run.
 #
 # This command never runs `git worktree prune`, which would remove every
 # registration whose directory is missing, including that of a worktree that
@@ -104,7 +107,7 @@
 # that exists *only* in the index is not:  a file that was created and staged
 # and never committed is absent from the foreign index, so it is untracked
 # there, and `--untracked-files=no` then says nothing about it.  Such a
-# directory was removed, silently and with exit status 0.
+# directory would be removed, silently and with exit status 0.
 unset GIT_DIR
 unset GIT_WORK_TREE
 unset GIT_INDEX_FILE
@@ -385,10 +388,8 @@ remove_missing_worktree() {
         found && $0 == "" { exit }
         found { print }')"
   if [ -z "${missing_entry}" ]; then
-    # A clone that is gone took its refs with it, and so does a worktree that
-    # was removed properly, so there is nothing left to clean up.
-    echo "${SCRIPT_NAME}: no such directory, and no worktree registered there in ${missing_repository}; nothing to do: $1" >&2
-    return 0
+    echo "${SCRIPT_NAME}: no such directory, and no worktree registered there in ${missing_repository}: $1" >&2
+    return 1
   fi
   missing_head="$(printf '%s\n' "${missing_entry}" | sed -n 's/^HEAD //p')"
   missing_branch="$(printf '%s\n' "${missing_entry}" \
@@ -401,6 +402,13 @@ remove_missing_worktree() {
   missing_admin="$(worktree_admin_dir "${missing_common}" "${missing_dir}")"
   if [ -z "${missing_admin}" ]; then
     echo "${SCRIPT_NAME}: refusing to clean up after ${missing_dir}: cannot find its administrative directory in ${missing_common}/worktrees" >&2
+    return 1
+  fi
+  # A lock is what keeps a worktree that is missing only for now -- one on
+  # removable media that is not mounted -- from being cleaned up.
+  if [ -f "${missing_admin}/locked" ]; then
+    missing_lock_reason="$(cat -- "${missing_admin}/locked" 2> /dev/null)"
+    echo "${SCRIPT_NAME}: refusing to clean up after ${missing_dir}: it is locked${missing_lock_reason:+ (${missing_lock_reason})}; run \`git worktree unlock\` first" >&2
     return 1
   fi
 
@@ -475,8 +483,9 @@ remove_branch_directory() {
     # no working tree, so the uncommitted check below has nothing to ask
     # about, but its refs and objects are its own and `rm -rf` takes every one
     # of them, so the unpushed check applies to it exactly as it does to a
-    # clone.  Classifying it as `other`, which is checked for nothing, removed
-    # a repository that held the only copy of its commits and said nothing.
+    # clone.  Classifying it as `other`, which is checked for nothing, would
+    # remove a repository that holds the only copy of its commits and say
+    # nothing.
     #
     # `--is-bare-repository` answers about the repository that contains
     # ${remove_dir}, not only about ${remove_dir} itself, which is what this
@@ -525,6 +534,15 @@ remove_branch_directory() {
     remove_head="$(git -C "${remove_dir}" rev-parse --verify --quiet HEAD)"
     if [ -z "${remove_head}" ]; then
       echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot determine its HEAD" >&2
+      return 1
+    fi
+    # `git worktree lock` writes `locked`, holding the reason if one was
+    # given, in the worktree's own git directory.  The removal below falls
+    # back to `rm -rf` when `git worktree remove` fails, so without this test
+    # a lock, which makes git refuse, would be overridden silently.
+    if [ -f "${remove_gitdir}/locked" ]; then
+      remove_lock_reason="$(cat -- "${remove_gitdir}/locked" 2> /dev/null)"
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: it is locked${remove_lock_reason:+ (${remove_lock_reason})}; run \`git worktree unlock\` first" >&2
       return 1
     fi
   fi
@@ -590,9 +608,9 @@ remove_branch_directory() {
     # a detached HEAD, and every ref below `refs/`, and so a stash entry --
     # each of them work that no branch names and that removing this directory
     # would lose as surely as a commit on an unpushed branch.  `--branches`
-    # asked only about `refs/heads`, and a clone whose only unpushed work was
-    # stashed passed both checks, since stashing leaves the working tree
-    # clean and the other check saw nothing either.
+    # would ask only about `refs/heads`, and a clone whose only unpushed work
+    # is stashed would pass both checks, since stashing leaves the working
+    # tree clean and the other check sees nothing either.
     # This is the question that matters -- would removing this directory lose
     # commits? -- and it needs no upstream configuration, unlike
     # `git branch --delete`'s merged-into-upstream test.  A remote-tracking

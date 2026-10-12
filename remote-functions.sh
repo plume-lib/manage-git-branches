@@ -17,10 +17,16 @@
 ## command one message, and the message can say which version it found.  A
 ## probe would also need care, because `git rev-parse` prints an option that it
 ## does not recognize, and exits 0, rather than failing.
+##
+## The version is read once, by the first call, so that a command that states
+## several requirements runs `git version` only once.
+require_git_version=''
 require_git() {
-  # Output is like "git version 2.44.0" or "git version 2.44.0.windows.1".
-  require_git_version="$(git version)" || exit 1
-  require_git_version="${require_git_version#git version }"
+  if [ -z "${require_git_version}" ]; then
+    # Output is like "git version 2.44.0" or "git version 2.44.0.windows.1".
+    require_git_version="$(git version)" || exit 1
+    require_git_version="${require_git_version#git version }"
+  fi
   require_git_major="${require_git_version%%.*}"
   require_git_minor="${require_git_version#*.}"
   require_git_minor="${require_git_minor%%.*}"
@@ -83,6 +89,109 @@ undo_worktree_add() {
       < /dev/null > /dev/null 2>&1; then
     git -C "$1" config --remove-section "branch.$4" \
       < /dev/null > /dev/null 2>&1 || true
+  fi
+}
+
+## Usage: trap_branch_cleanup
+## For `git-new-branch` and `git-checkout-branch`.  Installs traps that, when
+## the command exits or is killed by a signal, undo whatever partial work these
+## variables record.  It sets each of them to empty, and the command sets each
+## one just before it creates what the variable names, and empties it once
+## that is complete:
+##  * TMPDIR_TO_CLEAN, a temporary directory.  It is left empty otherwise, so
+##    the traps never remove a pre-existing directory that the command did not
+##    create.
+##  * WORKTREE_TO_CLEAN, BRANCH_TO_CLEAN, and BRANCH_COMMIT_TO_CLEAN, the new
+##    worktree, and the branch that the add creates and its commit; see
+##    `add_worktree`.
+##  * WORKTREE_GITDIR_TO_CLEAN, the new worktree's administrative directory,
+##    which the command records as soon as the add succeeds, if it learns it.
+## The command must also set TOPLEVEL, the top level of its working tree,
+## before it sets WORKTREE_TO_CLEAN.
+##
+## A POSIX shell such as dash does not run an EXIT trap when the shell is
+## killed by a signal, so trap the signals too.  Each signal handler restores
+## the default disposition and re-sends the signal to this shell, so that the
+## caller still sees the exit status that the signal produces.
+trap_branch_cleanup() {
+  branch_cleanup_startdir="${PWD}"
+  TMPDIR_TO_CLEAN=""
+  WORKTREE_TO_CLEAN=""
+  WORKTREE_GITDIR_TO_CLEAN=""
+  BRANCH_TO_CLEAN=""
+  BRANCH_COMMIT_TO_CLEAN=""
+  trap branch_cleanup EXIT
+  trap 'branch_cleanup; trap - HUP EXIT; kill -s HUP "$$"' HUP
+  trap 'branch_cleanup; trap - INT EXIT; kill -s INT "$$"' INT
+  trap 'branch_cleanup; trap - TERM EXIT; kill -s TERM "$$"' TERM
+}
+
+## Usage: branch_cleanup
+## The traps that `trap_branch_cleanup` installs run this.
+branch_cleanup() {
+  cd -- "${branch_cleanup_startdir}" 2> /dev/null || true
+  if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf -- "${TMPDIR_TO_CLEAN}"; fi
+  # The starting directory may no longer resolve, so name the repository
+  # explicitly.
+  if [ -n "${WORKTREE_TO_CLEAN}" ]; then
+    undo_worktree_add "${TOPLEVEL}" "${WORKTREE_TO_CLEAN}" \
+      "${WORKTREE_GITDIR_TO_CLEAN}" "${BRANCH_TO_CLEAN}" \
+      "${BRANCH_COMMIT_TO_CLEAN}"
+  fi
+}
+
+## Usage: add_worktree WORKTREE BRANCH [START-POINT [OPTION...]]
+## Runs `git worktree add` in the current repository, with the OPTIONs, to make
+## a new worktree at the absolute pathname WORKTREE.  With START-POINT, it
+## creates the branch BRANCH there; without, it checks out the existing BRANCH.
+## START-POINT is passed to git as given, so that git sets up an upstream for
+## it as it would for `git branch`.  Exits with status 1, after printing a
+## diagnostic, if the add fails; git's own message says why.
+##
+## It records, for the traps of `trap_branch_cleanup`, WORKTREE and, if it
+## creates BRANCH, BRANCH and the commit that START-POINT names.  BRANCH is
+## recorded only if it does not exist just before the add, so that the traps
+## never delete a branch that this command did not create;
+## `git worktree add -b` creates the branch before it tests the path, and
+## leaves it behind when the test fails.
+##
+## The worktree is added at its final path, never at a temporary one:  a
+## worktree that is later moved with `mv` keeps a registration that names its
+## old path, and one that is moved with `git worktree move` keeps an
+## administrative directory named after its old path forever.
+##
+## When a branch directory was removed with `rm -rf`, the add fails because
+## the path is still registered, and git's message names the ways out.  This
+## function never runs `git worktree prune` to smooth that over, because prune
+## also deletes the registration of a worktree that the user moved with `mv`,
+## which cannot be repaired afterward.
+add_worktree() {
+  add_worktree_dir="$1"
+  add_worktree_branch="$2"
+  if [ "$#" -lt 3 ]; then
+    WORKTREE_TO_CLEAN="${add_worktree_dir}"
+    # WORKTREE is absolute, so it cannot be mistaken for an option.
+    if ! git worktree add -q "${add_worktree_dir}" "${add_worktree_branch}"; then
+      echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${add_worktree_dir}" >&2
+      exit 1
+    fi
+    return 0
+  fi
+  add_worktree_start="$3"
+  shift 3
+  if ! BRANCH_COMMIT_TO_CLEAN="$(git rev-parse --verify \
+    "${add_worktree_start}^{commit}")"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot resolve ${add_worktree_start}" >&2
+    exit 1
+  fi
+  if ! git rev-parse --verify --quiet "refs/heads/${add_worktree_branch}" > /dev/null; then
+    BRANCH_TO_CLEAN="${add_worktree_branch}"
+  fi
+  WORKTREE_TO_CLEAN="${add_worktree_dir}"
+  if ! git worktree add "$@" -q -b "${add_worktree_branch}" \
+    "${add_worktree_dir}" "${add_worktree_start}"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${add_worktree_dir}" >&2
+    exit 1
   fi
 }
 

@@ -35,8 +35,7 @@
 #
 # Do not remove or move a worktree that this script created with file-system
 # commands.  This applies to the default mode and `--clean`, not to `--copy`,
-# whose directory is an independent clone, as is every directory that earlier
-# versions of this script created.
+# whose directory is an independent clone.
 #  * Do not `rm -rf` it.  That leaves the branch, so the branch name stays
 #    taken, and a stale registration in the repository.  Use
 #    `git-remove-branch-directory` instead.
@@ -138,39 +137,7 @@ fi
 # For `git rev-parse --path-format=absolute`.
 require_git 31
 
-STARTDIR="${PWD}"
-# Set to the temporary directory just before we create it, so that the traps
-# remove it if the script fails or is interrupted partway through.  Left empty
-# otherwise, so the traps never remove a pre-existing directory that we did not
-# create.
-TMPDIR_TO_CLEAN=""
-# Set to the new worktree's directory just before `git worktree add` runs, and
-# cleared once the worktree is complete.  The worktree's administrative
-# directory is recorded as soon as the add succeeds, and the branch and its
-# commit just before the add, if the branch does not exist then.  Each is empty
-# in a mode that does not use it, so one `cleanup` serves every mode.
-WORKTREE_TO_CLEAN=""
-WORKTREE_GITDIR_TO_CLEAN=""
-BRANCH_TO_CLEAN=""
-BRANCH_COMMIT_TO_CLEAN=""
-cleanup() {
-  cd -- "${STARTDIR}" 2> /dev/null || true
-  if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf -- "${TMPDIR_TO_CLEAN}"; fi
-  # ${STARTDIR} may no longer resolve, so name the repository explicitly.
-  if [ -n "${WORKTREE_TO_CLEAN}" ]; then
-    undo_worktree_add "${TOPLEVEL}" "${WORKTREE_TO_CLEAN}" \
-      "${WORKTREE_GITDIR_TO_CLEAN}" "${BRANCH_TO_CLEAN}" \
-      "${BRANCH_COMMIT_TO_CLEAN}"
-  fi
-}
-# A POSIX shell such as dash does not run an EXIT trap when the shell is killed
-# by a signal, so trap the signals too.  Each signal handler restores the
-# default disposition and re-sends the signal to this shell, so that the caller
-# still sees the exit status that the signal produces.
-trap cleanup EXIT
-trap 'cleanup; trap - HUP EXIT; kill -s HUP "$$"' HUP
-trap 'cleanup; trap - INT EXIT; kill -s INT "$$"' INT
-trap 'cleanup; trap - TERM EXIT; kill -s TERM "$$"' TERM
+trap_branch_cleanup
 
 # Capture the top level first: under a POSIX `sh` (e.g., dash), `cd ""` succeeds
 # as a no-op, so testing `cd "$(...)"` directly would not catch an empty result.
@@ -386,40 +353,17 @@ make_tmpdir() {
   TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
 }
 
-# Usage: add_worktree GIT-WORKTREE-ADD-OPTION...
-# Runs `git worktree add` with the given options, creating the branch
-# ${BRANCHNAME} at the current commit in a new worktree at ${BRANCHDIR}.
-#
-# The worktree is added at its final path, never at a temporary one:  a
-# worktree that is later moved with `mv` keeps a registration that names its
-# old path, and one that is moved with `git worktree move` keeps an
-# administrative directory named after its old path forever.
-#
-# The branch is recorded for the traps only if it does not exist just before
-# the add, so that they never delete a branch that this script did not
-# create; `git worktree add -b` creates the branch before it tests the path,
-# and leaves it behind when the test fails.  Git's own message reaches the
-# user when the add fails.  In particular, when a branch directory was
-# removed with `rm -rf`, the add fails because the path is still registered,
-# and git's message names the ways out.  This script never runs
-# `git worktree prune` to smooth that over, because prune also deletes the
-# registration of a worktree that the user moved with `mv`, which cannot be
-# repaired afterward.
-add_worktree() {
-  if ! BRANCH_COMMIT_TO_CLEAN="$(git rev-parse --verify HEAD)"; then
+# Usage: add_worktree_here GIT-WORKTREE-ADD-OPTION...
+# Creates the branch ${BRANCHNAME} at the current commit in a new worktree at
+# ${BRANCHDIR}.  The current commit is passed to git as a commit, not as HEAD,
+# so that git sets up no upstream for the new branch even under
+# `branch.autoSetupMerge=always`.
+add_worktree_here() {
+  if ! add_worktree_here_commit="$(git rev-parse --verify HEAD)"; then
     echo "${SCRIPT_NAME}: ERROR: cannot determine the current commit" >&2
     exit 1
   fi
-  if ! git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
-    BRANCH_TO_CLEAN="${BRANCHNAME}"
-  fi
-  WORKTREE_TO_CLEAN="${BRANCHDIR}"
-  # ${BRANCHDIR} is absolute, so it cannot be mistaken for an option.
-  if ! git worktree add "$@" -q -b "${BRANCHNAME}" "${BRANCHDIR}" \
-    "${BRANCH_COMMIT_TO_CLEAN}"; then
-    echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${BRANCHDIR}" >&2
-    exit 1
-  fi
+  add_worktree "${BRANCHDIR}" "${BRANCHNAME}" "${add_worktree_here_commit}" "$@"
 }
 
 case "${MODE}" in
@@ -449,7 +393,7 @@ case "${MODE}" in
     # directly at its final name with nothing to follow, which is acceptable
     # because `git worktree add` is one fast command; the default mode, whose
     # copy is slow, does its work under a temporary name instead.
-    add_worktree
+    add_worktree_here
     ;;
 
   worktree)
@@ -484,7 +428,7 @@ case "${MODE}" in
     # 2. Create the worktree.  With `--no-checkout`, git creates ${BRANCHDIR}
     # holding nothing but the `.git` file, rather than writing tracked files
     # that the copy would replace.
-    add_worktree --no-checkout
+    add_worktree_here --no-checkout
     if ! WORKTREE_GITDIR_TO_CLEAN="$(git -C "${BRANCHDIR}" rev-parse \
       --absolute-git-dir)" || [ -z "${WORKTREE_GITDIR_TO_CLEAN}" ]; then
       echo "${SCRIPT_NAME}: ERROR: cannot determine the git directory of ${BRANCHDIR}" >&2
