@@ -161,7 +161,7 @@ fi
 # When several remotes have a branch of that name and the fetch remote is not
 # one of them, which one to check out is ambiguous.  Saying so costs the user
 # nothing, whereas letting the checkout choose fails only after the working
-# copy has been copied:  `git checkout BRANCH` reports "matched multiple
+# tree has been copied:  `git checkout BRANCH` reports "matched multiple
 # remote tracking branches" and nothing is checked out.
 ambiguous="${tmpdir}/ambiguous-branch-main"
 git clone -q "${repo}" "${ambiguous}"
@@ -233,7 +233,7 @@ fi
 # the branch is fetched rather than only queried.  A successful query does not
 # make the checkout succeed:  `git checkout BRANCH` needs a ref in the clone,
 # and reports "pathspec 'BRANCH' did not match" without one.  The new working
-# copy still gets an upstream, which `git-push-to` and `git-pull-from` require.
+# tree still gets an upstream, which `git-push-to` and `git-pull-from` require.
 narrow="${tmpdir}/narrow-branch-main"
 git clone -q --single-branch -b main "${repo}" "${narrow}"
 if ! out="$(cd "${narrow}" && "${GIT_CHECKOUT_BRANCH}" localonly 2>&1)"; then

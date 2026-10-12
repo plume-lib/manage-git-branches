@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Tests that `git-checkout-branch` and `git-new-branch` report a failure of the
-# `git pull` that they run in the current working copy, rather than ignoring it.
+# `git pull` that they run in the current working tree, rather than ignoring it.
 #
 # Usage:
 #   tests/test-branch-pull-failure.sh
@@ -112,7 +112,7 @@ if [ ! -d "${WORK_DIR}/myrepo-branch-newfeature" ]; then
 fi
 
 # A pull that fails with a merge conflict.  The script reports the failure and
-# does nothing, rather than copying a conflicted working copy.
+# does nothing, rather than copying a conflicted working tree.
 git -C "${MAIN_DIR}" branch --set-upstream-to=origin/main main > /dev/null
 create_conflict
 

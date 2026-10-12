@@ -123,7 +123,7 @@ fi
 BRANCHDIR="${PARENTDIR%/}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
-# The tests below precede the copy of the working copy, so that a name
+# The tests below precede the copy of the working tree, so that a name
 # collision does not cost the user a full copy of the repository.  Among them,
 # every test that needs no network access comes first -- including the test for
 # ${BRANCHDIR} and the `git pull` that follows them -- so that a purely local
@@ -133,7 +133,7 @@ BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 # "HEAD" is not the name of a branch, though it looks like one to a user and a
 # clone even has a symbolic ref `refs/remotes/REMOTE/HEAD` that resolves.
 # `git checkout -b` below rejects it, but only after the remote has been asked
-# and the working copy has been copied, and its message names this script's own
+# and the working tree has been copied, and its message names this script's own
 # command line rather than the problem.  `git-checkout-branch` rejects the name
 # too.
 if [ "${BRANCHNAME}" = 'HEAD' ]; then
@@ -154,7 +154,7 @@ if [ -e "${BRANCHDIR}" ]; then
   exit 1
 fi
 
-# Bring this working copy up to date, so that the branch is based on the most
+# Bring this working tree up to date, so that the branch is based on the most
 # recent commit and the remote-tracking branches that the next test consults
 # are as current as this clone can make them.  A failed pull is not fatal,
 # because the repository might have no remote or the current branch might have
@@ -182,7 +182,7 @@ fi
 # remote-functions.sh determines it, which is also the remote that
 # `is-deleted-branch` and `git-push-to` use.  The new branch has no
 # configuration of its own yet -- `git checkout -b` creates none -- and the new
-# working copy is a copy of this one, so this branch's configuration is what
+# working tree is a copy of this one, so this branch's configuration is what
 # says which remote the new branch would eventually be pushed to.
 #
 # ${REMOTE} is empty if no remote can be determined; then no remote can be

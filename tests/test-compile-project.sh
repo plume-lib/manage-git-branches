@@ -55,7 +55,7 @@ if ! tmpdir="$(CDPATH='' cd -- "${tmpdir}" && pwd)" || [ -z "${tmpdir}" ]; then
 fi
 
 # Do not let a repository above ${tmpdir} (say, if TMPDIR is within a working
-# copy) affect the top-level directory that `compile-project` discovers.
+# tree) affect the top-level directory that `compile-project` discovers.
 GIT_CEILING_DIRECTORIES="${tmpdir}"
 export GIT_CEILING_DIRECTORIES
 

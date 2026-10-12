@@ -422,7 +422,7 @@ check_message 'a target with GIT_INDEX_FILE set' "uncommitted changes"
 ## Bare repositories.
 ###########################################################################
 
-# A bare repository holds no working copy, so the uncommitted check has
+# A bare repository holds no working tree, so the uncommitted check has
 # nothing to ask about, but its objects are its own and `rm -rf` takes every
 # one of them.  It was classified with the directories that are no repository
 # at all, which are checked for nothing, so a bare repository that held the

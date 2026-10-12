@@ -115,7 +115,7 @@ fi
 BRANCHDIR="${PARENTDIR%/}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
-# Bring this working copy up to date, so that the branch is based on the most
+# Bring this working tree up to date, so that the branch is based on the most
 # recent commit.  A failed pull is not fatal, because the repository might have
 # no remote or the current branch might have no upstream, but it is reported:
 # the branch will be based on a possibly stale commit.
@@ -300,7 +300,7 @@ find_branch() {
   return 0
 }
 
-# This test precedes the copy of the working copy, so that a branch that
+# This test precedes the copy of the working tree, so that a branch that
 # cannot be checked out does not cost the user a full copy of the repository.
 find_branch "${BRANCHNAME}"
 case "$?" in

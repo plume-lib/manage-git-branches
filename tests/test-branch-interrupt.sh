@@ -102,7 +102,7 @@ run_interrupted() {
 create_repositories
 create_interrupting_cp
 
-# `git-new-branch`, interrupted while copying the working copy.
+# `git-new-branch`, interrupted while copying the working tree.
 NEW_DIR="${WORK_DIR}/myrepo-branch-newfeature"
 run_interrupted git-new-branch newfeature
 if [ -e "${NEW_DIR}-TMP" ]; then
@@ -116,7 +116,7 @@ if [ ! -d "${NEW_DIR}" ]; then
   fail "git-new-branch did not create ${NEW_DIR}"
 fi
 
-# `git-checkout-branch`, interrupted while copying the working copy.
+# `git-checkout-branch`, interrupted while copying the working tree.
 CHECKOUT_DIR="${WORK_DIR}/myrepo-branch-feature1"
 run_interrupted git-checkout-branch feature1
 if [ -e "${CHECKOUT_DIR}-TMP" ]; then

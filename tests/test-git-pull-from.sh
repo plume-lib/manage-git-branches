@@ -4,7 +4,7 @@
 # `git-push-to` does, that the merge commit it creates names the other
 # repository by a relative pathname, and that it diagnoses the current
 # directory and OTHER-REPO-DIR itself when either is not the top level of a
-# clone.
+# working tree.
 #
 # Usage:
 #   tests/test-git-pull-from
@@ -95,15 +95,15 @@ case "${fetch_head}" in
 esac
 
 # `git-pull-from` requires the current directory to be the top level of a
-# clone.  A subdirectory of a working copy is in a git repository, so the
-# diagnostic must not say merely that this is not a clone.
+# working tree.  A subdirectory of a working tree is in a git repository, so
+# the diagnostic must not say merely that this is not a working tree.
 mkdir -p "${workdir}/to/subdir"
 if output="$(cd "${workdir}/to/subdir" \
   && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from" 2>&1)"; then
-  fail "git-pull-from succeeded in a subdirectory of a working copy"
+  fail "git-pull-from succeeded in a subdirectory of a working tree"
 fi
 case "${output}" in
-  *"not the top level of a git clone"*) ;;
+  *"not the top level of a git working tree"*) ;;
   *) fail "git-pull-from did not say that the directory is not a top level: ${output}" ;;
 esac
 case "${output}" in
@@ -111,24 +111,24 @@ case "${output}" in
   *) fail "git-pull-from did not name the top level to run in: ${output}" ;;
 esac
 
-# The same requirement holds outside a working copy altogether.
+# The same requirement holds outside a working tree altogether.
 if output="$(cd "${workdir}" \
   && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from" 2>&1)"; then
-  fail "git-pull-from succeeded outside a working copy"
+  fail "git-pull-from succeeded outside a working tree"
 fi
 case "${output}" in
-  *"not the top level of a git clone"*) ;;
-  *) fail "git-pull-from did not reject a directory outside a working copy: ${output}" ;;
+  *"not the top level of a git working tree"*) ;;
+  *) fail "git-pull-from did not reject a directory outside a working tree: ${output}" ;;
 esac
 
-# OTHER-REPO-DIR must be the top level of a clone too.
+# OTHER-REPO-DIR must be the top level of a working tree too.
 mkdir -p "${workdir}/from/subdir"
 if output="$(cd "${workdir}/to" \
   && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from/subdir" 2>&1)"; then
   fail "git-pull-from accepted a subdirectory as OTHER-REPO-DIR"
 fi
 case "${output}" in
-  *"git-pull-from: not the top level of a git clone: "*"/from/subdir"*) ;;
+  *"git-pull-from: not the top level of a git working tree: "*"/from/subdir"*) ;;
   *) fail "git-pull-from did not reject OTHER-REPO-DIR: ${output}" ;;
 esac
 # The diagnostic is about this command's argument, so it names this command.

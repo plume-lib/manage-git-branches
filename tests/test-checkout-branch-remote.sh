@@ -136,7 +136,7 @@ actual_commit="$(git -C "${WORK_DIR}/unfetched-branch-feature1" rev-parse HEAD)"
 if [ "${actual_commit}" != "${expected_commit}" ]; then
   fail "${WORK_DIR}/unfetched-branch-feature1 is at ${actual_commit}, not at the remote's feature1 (${expected_commit})"
 fi
-# The new working copy gets an upstream even though this clone's fetch refspec
+# The new working tree gets an upstream even though this clone's fetch refspec
 # does not cover the branch, so git set none up:  `git-push-to` and
 # `git-pull-from` require one.
 upstream_remote="$(git -C "${WORK_DIR}/unfetched-branch-feature1" config --get branch.feature1.remote)"
@@ -268,7 +268,7 @@ case "${output}" in
 esac
 for leftover in "${WORK_DIR}/ambiguous-branch-feature1" "${WORK_DIR}/ambiguous-branch-feature1-TMP"; do
   if [ -e "${leftover}" ]; then
-    fail "git-checkout-branch copied the working copy before refusing: ${leftover}"
+    fail "git-checkout-branch copied the working tree before refusing: ${leftover}"
   fi
 done
 
@@ -298,7 +298,7 @@ esac
 # of the repository.
 for leftover in "${WORK_DIR}/blockedfetch-branch-feature1" "${WORK_DIR}/blockedfetch-branch-feature1-TMP"; do
   if [ -e "${leftover}" ]; then
-    fail "git-checkout-branch copied the working copy although the fetch failed: ${leftover}"
+    fail "git-checkout-branch copied the working tree although the fetch failed: ${leftover}"
   fi
 done
 

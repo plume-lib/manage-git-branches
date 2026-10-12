@@ -58,7 +58,7 @@ for leftover in "${tmpdir}/myrepo-branch-localonly" "${tmpdir}/myrepo-branch-loc
   fi
 done
 
-# The local name collision is detected before the working copy is copied.  The
+# The local name collision is detected before the working tree is copied.  The
 # copy is made unable to succeed, by making a subdirectory unreadable; if
 # `git-new-branch` attempts the copy, it reports the copy failure instead.
 # Only an unprivileged user is stopped by the permissions.
@@ -72,7 +72,7 @@ if [ "$(id -u)" != 0 ]; then
   fi
   case "${out}" in
     *"git-new-branch: ERROR: branch localonly already exists"*) ;;
-    *) fail "the working copy was copied before the local branch localonly was detected: ${out}" ;;
+    *) fail "the working tree was copied before the local branch localonly was detected: ${out}" ;;
   esac
   chmod 700 "${unreadable_repo}/subdir"
 fi
@@ -156,7 +156,7 @@ fi
 
 # `HEAD` is not the name of a branch, even though a clone has a symbolic ref
 # `refs/remotes/origin/HEAD` that resolves.  It is rejected before the working
-# copy is copied, and with a diagnosis rather than a raw `git checkout`
+# tree is copied, and with a diagnosis rather than a raw `git checkout`
 # failure.
 if out="$(cd "${clone}" && "${GIT_NEW_BRANCH}" HEAD 2>&1)"; then
   fail "zero exit status for HEAD"
@@ -172,7 +172,7 @@ for leftover in "${tmpdir}/myclone-branch-HEAD" "${tmpdir}/myclone-branch-HEAD-T
 done
 
 # Every remote operation disables SSH's own interactive prompts, as the README
-# promises:  the `git pull` that brings the working copy up to date as well as
+# promises:  the `git pull` that brings the working tree up to date as well as
 # the query that asks the remote about the branch name.  Their output is
 # captured or discarded, so a prompt for an unknown host key or for the
 # passphrase of a key would be invisible and would block forever.  The fake

@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Removes a branch directory:  a directory that holds a branch's working copy,
+# Removes a branch directory:  a directory that holds a branch's working tree,
 # or one that holds nothing of value.  Refuses when the removal would lose
 # work.
 #
@@ -25,7 +25,7 @@
 #    unpushed commit on a branch that nobody has looked at in a year is
 #    exactly what this check exists to catch, and so are a stash entry and a
 #    commit made on a detached HEAD, which no branch names at all.  A bare
-#    repository is asked the same question:  it holds no working copy, so the
+#    repository is asked the same question:  it holds no working tree, so the
 #    first check has nothing to ask about, but its objects are its own.
 #
 # `--force` waives both.  Each refusal names the check, says how much would be
@@ -212,7 +212,7 @@ remove_branch_directory() {
     remove_kind='within-working-tree'
   else
     # Not a repository at all, or a bare repository.  A bare repository holds
-    # no working copy, so the uncommitted check below has nothing to ask
+    # no working tree, so the uncommitted check below has nothing to ask
     # about, but its refs and objects are its own and `rm -rf` takes every one
     # of them, so the unpushed check applies to it exactly as it does to a
     # clone.  Classifying it as `other`, which is checked for nothing, removed

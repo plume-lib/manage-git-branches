@@ -3,16 +3,16 @@
 This package provides scripts to support managing multiple branches of a
 git repository.
 
-The scripts support a work style in which you have a separate working copy
-(a.k.a. "clone") for each branch that you work on.  You never switch
-branches within a working copy.  I find that this reduces branch confusion.
+The scripts support a work style in which you have a separate working tree
+for each branch that you work on.  You never switch branches within a
+working tree.  I find that this reduces branch confusion.
 This work style replaces mechanisms such as `git stash`.
 
 The key principles of this work style are:
 
 1. Do not run git commands in the main branch, except `git pull`.  (Or,
    use [`mvc pull`](https://github.com/plume-lib/multi-version-control).)
-2. Do not change branches in any working copy.
+2. Do not change branches in any working tree.
    That is, never run `git checkout`, and never run `git stash`.
 3. To create a new branch, run the command `gnb` or `git-new-branch`.  It
    creates a new directory holding a new branch that starts as a copy of
@@ -25,22 +25,22 @@ The key principles of this work style are:
 The commands are:
 
 * [`git-checkout-branch`](git-checkout-branch) `BRANCHNAME`:
-  Checks out the given branch of the repository in a new working copy
-  directory.  Run this command from within a working copy; the new directory
-  is a sibling of the working copy.  Below is a definition for an alias
+  Checks out the given branch of the repository in a new working tree
+  directory.  Run this command from within a working tree; the new directory
+  is a sibling of the working tree.  Below is a definition for an alias
   `gcb`.
 * [`git-new-branch`](git-new-branch) `BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
-  copy directory.  Run this command from within a working copy; the new
-  directory is a sibling of the working copy.  This command does not push the
+  tree directory.  Run this command from within a working tree; the new
+  directory is a sibling of the working tree.  This command does not push the
   new branch.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.
-  Each directory must be the top level of a working copy (that is, of a git
-  clone) and must have an upstream branch.
+  Each directory must be the top level of a working tree and must have an
+  upstream branch.
   You may also pass a list of directories: each is pushed into the subsequent one.
   Instead of directories, you may pass slugs of the form `ORG:BRANCH`, such as
   `git-push-to upstream:main myname:feature`.  Each slug names the
@@ -67,7 +67,7 @@ The commands are:
   directory, then pushes the current directory to its remote if compilation
   succeeds.
   OTHER-REPO-DIR and the current directory must both be the top level of a
-  working copy (that is, a git clone) and must each have an upstream branch.
+  working tree and must each have an upstream branch.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but Eclipse `.project`
@@ -75,7 +75,7 @@ The commands are:
   is gone.
 * [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
   Lists directories named `*-branch-*`, below the current directory, that are
-  working copies for branches that were deleted in the remote repository, or
+  working trees for branches that were deleted in the remote repository, or
   that hold nothing but Eclipse `.project` files.
   With `--remove`, removes each of them instead of printing them.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
@@ -151,7 +151,7 @@ repositories under a temporary directory and removes them afterward.
 ## One branch per directory
 
 If you use `git-checkout-branch` and `git-new-branch`, then you will never
-switch the branch for a working copy.  That is, you will never run `git checkout
+switch the branch for a working tree.  That is, you will never run `git checkout
 BRANCHNAME`.  Instead, you will have a separate working directory for each
 branch that you work on.  The directory's name will be
 `REPONAME-branch-BRANCHNAME`.
