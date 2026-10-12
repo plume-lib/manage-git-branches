@@ -46,6 +46,11 @@
 #    For a clone and a linked worktree, the question is also asked of every
 #    checked-out submodule, about every ref, because the submodule's
 #    repository goes with the directory.
+#    A commit of a clone or a linked worktree also counts as held if its
+#    changes have landed in a remote's default branch, as `git-outgoing`
+#    decides; that is what squash-merging a pull request leaves behind.
+#    Removing such a commit loses its message and its place in history, but
+#    not its changes.
 #
 # `--force` waives both.  Each refusal names the check, says how much would be
 # lost, and quotes the flag that waives it; each waiver says on standard error
@@ -96,7 +101,8 @@
 # whole list.  This command says nothing when it succeeds, except to note a
 # branch that it kept.
 #
-# This command requires git 2.31 or later.
+# This command requires git 2.31 or later.  Before git 2.40, `git-outgoing`
+# fails, so a commit counts as held only if a ref holds it.
 #
 # This command does not ask whether the branch was deleted in its remote.
 # `git-orphaned-branches` and `is-deleted-branch` answer that question, and a
@@ -216,6 +222,46 @@ line_count() {
   printf '%s' "$1" | grep -c '' || true
 }
 
+# Prints the number of commits that `git rev-list` lists for the arguments
+# $3... in the repository of directory $1, other than those whose changes
+# have landed in a remote's default branch.  Prints nothing if `git rev-list`
+# fails.  $2 is the revision that `git-outgoing`, which decides what has
+# landed, is asked about in addition to the local branches.
+#
+# A squash-merged pull request is the reason:  its commits are on no remote,
+# because the squash commit replaces them, and its remote branch is deleted,
+# but its changes are in the remote's default branch, so removing the only
+# copy of its commits loses nothing.  `git-outgoing` shows each commit that
+# is on no remote-tracking ref and on no branch whose changes have landed,
+# so a commit that `git rev-list` lists and `git-outgoing` does not show has
+# landed.  If `git-outgoing` fails, as it does before git 2.40, every commit
+# counts.
+count_unlanded() {
+  count_unlanded_dir="$1"
+  count_unlanded_rev="$2"
+  shift 2
+  count_unlanded_commits="$(git -C "${count_unlanded_dir}" rev-list "$@" \
+    2> /dev/null)" || return 0
+  if [ -z "${count_unlanded_commits}" ]; then
+    echo 0
+    return 0
+  fi
+  if ! count_unlanded_shown="$(cd -- "${count_unlanded_dir}" \
+    && "${SCRIPT_DIR}"/git-outgoing --format=%H "${count_unlanded_rev}")"; then
+    echo "${SCRIPT_NAME}: cannot tell whether the changes of the commits in ${count_unlanded_dir} have landed, so counting them all" >&2
+    line_count "${count_unlanded_commits}"
+    return 0
+  fi
+  # The shown commits, a blank line, and then the listed commits.
+  {
+    printf '%s\n\n' "${count_unlanded_shown}"
+    printf '%s\n' "${count_unlanded_commits}"
+  } | awk '
+      !listing { if ($0 == "") listing = 1; else shown[$0]; next }
+      $0 in shown { n++ }
+      END { print n + 0 }'
+}
+
 # Prints the number of live linked worktrees of the repository in directory
 # $1:  those whose directory still exists, and those that are locked.
 #
@@ -314,9 +360,11 @@ worktree_admin_dir() {
 #
 # The removal deletes the worktree's HEAD and that branch, and nothing else,
 # so ask about those alone:  a commit that another branch, including a branch
-# that is kept, a remote-tracking ref, or a tag holds is not lost.  Not `--all`, which in a repository with
-# worktrees includes every worktree's HEAD -- among them the HEAD of the
-# worktree being removed -- so that the count is always 0.  `--exclude`
+# that is kept, a remote-tracking ref, or a tag holds is not lost, nor is one
+# whose changes have landed, as `count_unlanded` explains.  Not `--all`,
+# which in a repository with worktrees includes every worktree's HEAD -- among
+# them the HEAD of the worktree being removed -- so that the count is always
+# 0.  `--exclude`
 # applies only to the option that follows it, and a pattern for `--branches`
 # omits `refs/heads/`.
 check_worktree_unpushed() {
@@ -326,8 +374,8 @@ check_worktree_unpushed() {
     set -- "$1" "$2" "$3" "$4"
   fi
   check_worktree_unpushed_dir="$4"
-  check_worktree_unpushed_count="$(git --git-dir="$1" rev-list --count "$2" \
-    ${5:+"$5"} --not ${6:+"$6"} --branches --tags --remotes 2> /dev/null)"
+  check_worktree_unpushed_count="$(count_unlanded "$1" "$2" "$2" ${5:+"$5"} \
+    --not ${6:+"$6"} --branches --tags --remotes)"
   if [ -z "${check_worktree_unpushed_count}" ]; then
     echo "${SCRIPT_NAME}: refusing to remove ${check_worktree_unpushed_dir}: cannot tell whether it holds commits that no other ref holds" >&2
     remove_refusals=1
@@ -841,11 +889,14 @@ remove_branch_directory() {
     # `git branch --delete`'s merged-into-upstream test.  A remote-tracking
     # ref counts as holding the commits, which is right:  those commits are in
     # the remote.
+    # So does a remote's default branch that holds their changes, as
+    # `count_unlanded` explains; `--all` asks `git-outgoing` about the same
+    # refs.
     # A tag counts as holding them too.  With this code, work that a local tag
     # alone names is not caught; however, a commit is nearly always also on a
     # branch, HEAD, or the stash, and each of those still counts.
-    remove_unpushed="$(git -C "${remove_dir}" rev-list --count --all \
-      --not --remotes --tags 2> /dev/null)"
+    remove_unpushed="$(count_unlanded "${remove_dir}" --all --all \
+      --not --remotes --tags)"
     if [ -z "${remove_unpushed}" ]; then
       echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot tell whether it holds commits that no other ref holds" >&2
       remove_refusals=1
