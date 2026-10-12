@@ -31,7 +31,8 @@ The commands are:
   [below](#worktrees)) that holds a fresh checkout of the branch:  it does
   not inherit the current directory's uncommitted changes, untracked files,
   or build output, so the first build there is a full one.  A branch can be
-  checked out in only one directory at a time.  A branch that has
+  checked out in only one worktree of a repository at a time, though
+  separate clones can each check it out.  A branch that has
   submodules gets a copy of the whole directory instead, which is an
   independent clone.
   Below is a definition for an alias `gcb`.
@@ -98,11 +99,12 @@ The commands are:
   DIRECTORY...`:
   Removes a branch directory, unless the removal would lose work.
   It removes a worktree with `git worktree remove` and deletes its branch, if
-  `git-new-branch` or `git-checkout-branch` created that branch, and it
-  removes anything else with `rm -rf`.  Given a worktree whose directory was
-  already removed with `rm -rf`, it removes what that left behind:  the
-  worktree's registration and its branch, in the repository that
-  `--repository` names (by default, the current directory's).
+  `git-new-branch` or `git-checkout-branch` created that branch and no other
+  worktree has it checked out, and it removes anything else with `rm -rf`.
+  Given a worktree whose directory was already removed with `rm -rf`, it
+  removes what that left behind:  the worktree's registration and, under the
+  same conditions, its branch, in the repository that `--repository` names
+  (by default, the current directory's).
 * [`git-outgoing`](git-outgoing) `[GIT-LOG-ARGS]`:
   Shows the commits on local branches that have not been pushed.
   Unlike `git log --branches --not --remotes`, it omits a branch whose
@@ -223,7 +225,10 @@ not copied.  This has some consequences:
 * A branch that has submodules is an exception.  Git does not support a
   submodule in more than one worktree, so `git-new-branch` and
   `git-checkout-branch` make a full copy instead, which is an independent
-  clone.
+  clone.  The copy includes `.git`, so it can be made only from a directory
+  whose `.git` is a directory, such as a clone:  run in a linked worktree,
+  whose `.git` is a file, the commands refuse, and say to run them in the
+  main working tree instead.
 
 Do not remove or move a worktree with file-system commands:
 
@@ -240,8 +245,7 @@ Do not remove or move a worktree with file-system commands:
   removes the repository that all of them use, and moving it breaks them
   until you run `git worktree repair` in it.
 
-None of this applies to a directory made by `git-new-branch --copy`, nor to
-one made by a version of `git-new-branch` that predates worktrees:  each of
+None of this applies to a directory made by `git-new-branch --copy`:  each of
 those is an independent clone, which you may remove or move like any other
 directory.
 

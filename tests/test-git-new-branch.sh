@@ -850,9 +850,12 @@ for mode in '' --copy; do
   git -C "${nested}" commit -q -m 'Ignore .claude'
   git -C "${nested}" worktree add -q -b inner "${nested}/.claude/worktrees/inner"
   # A file that cannot be read makes any attempt to copy the nested worktree
-  # fail, which shows that it is skipped rather than copied and removed.
+  # fail, which shows that it is skipped rather than copied and removed.  Only
+  # an unprivileged user is stopped by the permissions.
   echo 'secret' > "${nested}/.claude/worktrees/inner/unreadable.txt"
-  chmod 000 "${nested}/.claude/worktrees/inner/unreadable.txt"
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "${nested}/.claude/worktrees/inner/unreadable.txt"
+  fi
   echo 'kept' > "${nested}/.claude/kept.txt"
   git clone -q "${nested}" "${nested}/.claude/clone"
   inner_before="$(working_tree_state "${nested}/.claude/worktrees/inner")"

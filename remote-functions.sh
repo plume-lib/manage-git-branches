@@ -10,16 +10,20 @@
 # the diagnostics below use.
 
 ## Usage: unset_git_location_variables
-## Unsets $GIT_DIR, $GIT_WORK_TREE, and $GIT_INDEX_FILE.  Git exports them to
-## hooks and to the commands run by `git rebase --exec`, `git bisect run`, and
-## `git submodule foreach`.  They take precedence over the location of a
-## working tree, including the `-C` argument of `git`, so a command that runs
-## git in a directory other than the caller's must unset them before it runs
-## git at all.
+## Unsets $GIT_DIR, $GIT_WORK_TREE, $GIT_INDEX_FILE, $GIT_COMMON_DIR, and
+## $GIT_OBJECT_DIRECTORY.  Git exports the first three to hooks and to the
+## commands run by `git rebase --exec`, `git bisect run`, and
+## `git submodule foreach`, and it exports $GIT_OBJECT_DIRECTORY to the hooks
+## that run while a push is received.  They take precedence over the location
+## of a working tree, including the `-C` argument of `git`, so a command that
+## runs git in a directory other than the caller's must unset them before it
+## runs git at all.
 unset_git_location_variables() {
   unset GIT_DIR
   unset GIT_WORK_TREE
   unset GIT_INDEX_FILE
+  unset GIT_COMMON_DIR
+  unset GIT_OBJECT_DIRECTORY
 }
 
 ## Usage: require_git MINOR [WHY]
@@ -288,7 +292,8 @@ copy_repository() {
     exit 1
   fi
   copy_working_tree "$1" .git/worktrees
-  copy_repository_head="$(git -C "$1" symbolic-ref --quiet HEAD)"
+  copy_repository_head="$(git -C "$1" symbolic-ref --quiet HEAD)" \
+    || copy_repository_head=''
   # `--bool` normalizes the value, and git prints the key in lower case.
   copy_repository_marked="$(git -C "$1" config --bool --get-regexp \
     '^branch\..*\.createdforbranchdirectory$' \
