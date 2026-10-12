@@ -526,13 +526,15 @@ if git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtmine > /dev/null; 
 fi
 
 # A linked worktree whose branch was squash-merged holds nothing to lose,
-# though no remote holds its commits.
+# though no remote holds its commits, even after the remote's default branch
+# is merged into it.
 git -C "${wthost}" worktree add -q -b wtsquashed "${work}/myrepo-branch-wtsquashed"
 mark_created wtsquashed
 echo 'squashed' > "${work}/myrepo-branch-wtsquashed/wtsquashed.txt"
 git -C "${work}/myrepo-branch-wtsquashed" add wtsquashed.txt
 git -C "${work}/myrepo-branch-wtsquashed" commit -q -m 'Work to squash-merge'
 squash_merge "${work}/myrepo-branch-wtsquashed"
+git -C "${work}/myrepo-branch-wtsquashed" merge -q --no-edit origin/main
 run_command 'a linked worktree whose branch was squash-merged' 0 \
   "${work}/myrepo-branch-wtsquashed"
 check_unregistered 'a linked worktree whose branch was squash-merged' \

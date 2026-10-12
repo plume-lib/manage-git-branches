@@ -21,9 +21,9 @@
 # even though its commits are not.  That happens when a pull request is
 # squash-merged and its remote branch is then deleted.  A branch is omitted
 # when either:
-#  * merging it into `REMOTE/HEAD` would not change any file, though the
-#    branch changes some file relative to where it forked from
-#    `REMOTE/HEAD`, or
+#  * merging it into `REMOTE/HEAD` would not change any file, though some
+#    commit of the branch, not in `REMOTE/HEAD` and not a merge, changes a
+#    file, or
 #  * some commit C in `REMOTE/HEAD` but not in the branch changes only files
 #    that the branch changes, and merging the branch into C's parent yields
 #    C's files.  C is then a squash-merge of the branch, and later changes
@@ -35,8 +35,9 @@
 #    authored, or later, are examined.  So a squash-merge is not found if
 #    the last commit's author date was later changed to more than a day
 #    after C, as by `git commit --amend --reset-author`.
-# A branch that changes no file, such as one whose only commits are empty,
-# is not omitted:  none of its work has landed.
+# A branch none of whose commits, other than merges, changes a file, such as
+# one whose only commits are empty, is not omitted:  none of its work has
+# landed.  But a branch whose last commit reverts the others is omitted.
 # The commits of an omitted branch are not shown even when another branch
 # contains them, as when that branch was started from the omitted one.
 # A remote with no `REMOTE/HEAD` is not considered; to create it, run
@@ -373,32 +374,26 @@ awk '
 ' "${tmpdir}/bases" "${tmpdir}/unpushed-branches" > "${tmpdir}/pairs" || die "awk failed"
 
 # Create ${tmpdir}/merged, which the step below reads, such that each line is
-# a branch whose merge into some base yields that base's tree, and which
-# changes some file relative to one of its merge bases with that base.  A
-# branch that changes no file, such as one whose only commits are empty or
-# one whose last commit reverts the others, has nothing to merge, so merging
-# it yields the base's tree although none of its work has landed.  Comparing
-# trees, rather than diffing them, needs no file contents.
+# a branch whose merge into some base yields that base's tree, and which has
+# a commit, not in that base and not a merge, that changes some file.  A
+# branch with no such commit, such as one whose only commits are empty, has
+# nothing to merge, so merging it yields the base's tree although none of its
+# work has landed.  Merges are not asked about, because merging the base into
+# a squash-merged branch makes its tree match the base's and moves its merge
+# base to the squash commit, so that comparing the branch with its merge base
+# would find no change.  `--full-history` keeps git from following only the
+# base's side of such a merge, which would skip the branch's own commits.
+# The pathspec `:/`, the whole tree, makes git skip a commit that changes no
+# file; comparing trees needs no file contents.
 merged_branches "${tmpdir}/pairs" "${tmpdir}/yielding-pairs"
 : > "${tmpdir}/merged" || die "cannot write ${tmpdir}/merged"
 while read -r branch base_commit base_tree; do
-  merge_bases="$(git merge-base --all "${base_commit}" "${branch}")"
-  case "$?" in
-    0) ;;
-    1) continue ;; # The branch has no history in common with this base.
-    *) die "git merge-base ${base_commit} ${branch} failed" ;;
-  esac
-  # The branch name is passed as its own argument, since it may contain any
-  # character that xargs or word splitting would mangle, such as a quote.
-  # The merge bases are hexadecimal, so word splitting is safe for them.
-  merge_base_trees=
-  for merge_base in ${merge_bases}; do
-    merge_base_trees="${merge_base_trees} ${merge_base}^{tree}"
-  done
-  # shellcheck disable=SC2086
-  trees="$(git rev-parse "${branch}^{tree}" ${merge_base_trees})" \
-    || die "git rev-parse ${branch} ${merge_bases} failed"
-  if printf '%s\n' "${trees}" | awk 'NR == 1 { tip = $0; next } $0 != tip { changed = 1 } END { exit !changed }'; then
+  if ! changing_commit="$(git_scratch rev-list -n 1 --no-merges --full-history \
+    "${branch}" "^${base_commit}" -- :/ 2> "${tmpdir}/git-errors")"; then
+    git_failed "git rev-list ${branch}"
+    continue
+  fi
+  if [ -n "${changing_commit}" ]; then
     echo "${branch}" >> "${tmpdir}/merged" || die "cannot write ${tmpdir}/merged"
   fi
 done < "${tmpdir}/yielding-pairs"

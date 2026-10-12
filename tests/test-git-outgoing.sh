@@ -116,6 +116,15 @@ if [ -z "$(git -C "${clone}" log --format=%s --branches --not --remotes)" ]; the
   fail 'test setup: git log --branches --not --remotes should show the squash-merged commits'
 fi
 expect_outgoing 'squash-merged branch' ''
+# Merging origin/HEAD into the squash-merged branch makes the branch's tree
+# match origin/HEAD and moves its merge base to the squash commit, but the
+# branch is still omitted.
+git -C "${clone}" branch -q remerged feature
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-remerged" remerged
+git -C "${testdir}/myrepo-branch-remerged" merge -q --no-edit origin/main
+expect_outgoing 'squash-merged branch, then merged with origin/HEAD' ''
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-remerged"
+git -C "${clone}" branch -q -D remerged
 # Naming the omitted branch does not show its commits.
 expect_outgoing 'squash-merged branch, named as a revision' '' refs/heads/feature
 # Two branches whose tip is the same squash-merged commit are both omitted.
@@ -170,8 +179,10 @@ git -C "${clone}" branch -q reverted origin/main
 git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-reverted" reverted
 commit_file "${testdir}/myrepo-branch-reverted" r.txt 'r' 'Reverted commit'
 git -C "${testdir}/myrepo-branch-reverted" revert --no-edit HEAD > /dev/null
-expect_outgoing 'branch whose last commit reverts the others' 'Reverted commit
-Revert "Reverted commit"'
+# A branch whose last commit reverts the others is omitted, like a branch
+# whose changes have landed:  telling them apart would require replaying the
+# branch's commits without its merges.
+expect_outgoing 'branch whose last commit reverts the others' ''
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-reverted"
 git -C "${clone}" branch -q -D reverted
 

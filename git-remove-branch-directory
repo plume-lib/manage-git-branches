@@ -53,8 +53,9 @@
 #    place in history, but not its changes.  The question is asked of the
 #    branch as a whole, so a commit that only a detached HEAD or the stash
 #    holds never counts as landed, and neither does any commit of a branch
-#    with later work that has not landed, nor of a branch that changes no
-#    file, such as one whose only commits are empty.
+#    with later work that has not landed, nor of a branch none of whose
+#    commits, other than merges, changes a file, such as one whose only
+#    commits are empty.
 #
 # `--force` waives both.  Each refusal names the check, says how much would be
 # lost, and quotes the flag that waives it; each waiver says on standard error
