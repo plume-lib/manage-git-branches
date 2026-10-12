@@ -256,17 +256,15 @@ count_unlanded() {
   count_unlanded_dir="$1"
   count_unlanded_landable="$2"
   shift 2
-  count_unlanded_count="$(git -C "${count_unlanded_dir}" rev-list --count \
-    "$@" 2> /dev/null)" || return 0
-  if [ "${count_unlanded_count}" -eq 0 ] || [ -z "${count_unlanded_landable}" ] \
+  count_unlanded_commits="$(git -C "${count_unlanded_dir}" rev-list "$@" \
+    2> /dev/null)" || return 0
+  if [ -z "${count_unlanded_commits}" ] || [ -z "${count_unlanded_landable}" ] \
     || [ "${outgoing_works}" -eq 0 ] \
     || ! git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
       refs/remotes 2> /dev/null | grep -q '/HEAD$'; then
-    echo "${count_unlanded_count}"
+    line_count "${count_unlanded_commits}"
     return 0
   fi
-  count_unlanded_commits="$(git -C "${count_unlanded_dir}" rev-list "$@" \
-    2> /dev/null)" || return 0
   if [ "${count_unlanded_landable}" = --all ]; then
     set -- --all
   else

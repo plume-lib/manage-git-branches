@@ -161,6 +161,11 @@ expect_outgoing '--only-branch=, both branches' 'Empty commit' \
   --only-branch=feature --only-branch=empty
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-empty"
 git -C "${clone}" branch -q -D empty
+# A branch name may contain quotes.
+quoted_commit="$(git -C "${clone}" commit-tree -p origin/main -m 'Quoted commit' 'origin/main^{tree}')"
+git -C "${clone}" branch -q "quote'\"d" "${quoted_commit}"
+expect_outgoing 'branch name with quotes' 'Quoted commit'
+git -C "${clone}" branch -q -D "quote'\"d"
 git -C "${clone}" branch -q reverted origin/main
 git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-reverted" reverted
 commit_file "${testdir}/myrepo-branch-reverted" r.txt 'r' 'Reverted commit'

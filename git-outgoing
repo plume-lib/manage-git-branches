@@ -251,11 +251,12 @@ merge_yields() {
 
 # Usage: merged_branches PAIRS MERGED
 # Creates MERGED such that each line is a line "BRANCH COMMIT TREE" of PAIRS
-# for which merging BRANCH into COMMIT yields TREE without conflicts.  One `git merge-tree --stdin` does many merges, which saves a
-# process for each merge.  But it stops at the first merge that fails, as for
-# unrelated histories or for file contents that a partial clone lacks.
-# merge_yields then redoes that merge alone, which tells those cases apart,
-# and the merges after it are batched again.
+# for which merging BRANCH into COMMIT yields TREE without conflicts.  One
+# `git merge-tree --stdin` does many merges, which saves a process for each
+# merge.  But it stops at the first merge that fails, as for unrelated
+# histories or for file contents that a partial clone lacks.  merge_yields
+# then redoes that merge alone, which tells those cases apart, and the merges
+# after it are batched again.
 merged_branches() {
   # Line N of ${tmpdir}/merge-results is "STATUS TREE" for line N of PAIRS:
   # STATUS is 1 if the merge is clean and 0 otherwise, and TREE is the result.
@@ -387,9 +388,15 @@ while read -r branch base_commit base_tree; do
     1) continue ;; # The branch has no history in common with this base.
     *) die "git merge-base ${base_commit} ${branch} failed" ;;
   esac
-  # The merge bases are hexadecimal, so word splitting is safe.
+  # The branch name is passed as its own argument, since it may contain any
+  # character that xargs or word splitting would mangle, such as a quote.
+  # The merge bases are hexadecimal, so word splitting is safe for them.
+  merge_base_trees=
+  for merge_base in ${merge_bases}; do
+    merge_base_trees="${merge_base_trees} ${merge_base}^{tree}"
+  done
   # shellcheck disable=SC2086
-  trees="$(printf '%s\n' "${branch}" ${merge_bases} | sed 's/$/^{tree}/' | xargs git rev-parse)" \
+  trees="$(git rev-parse "${branch}^{tree}" ${merge_base_trees})" \
     || die "git rev-parse ${branch} ${merge_bases} failed"
   if printf '%s\n' "${trees}" | awk 'NR == 1 { tip = $0; next } $0 != tip { changed = 1 } END { exit !changed }'; then
     echo "${branch}" >> "${tmpdir}/merged" || die "cannot write ${tmpdir}/merged"
@@ -554,12 +561,12 @@ done < "${tmpdir}/bases"
 
 # Create ${tmpdir}/squashed, which the step below reads, such that each line
 # is "BRANCH PARENT TREE" for a line of ${tmpdir}/squash-candidates that
-# shows BRANCH to be squash-merged:  merging it into PARENT yields TREE.  A commit in several
-# bases is a candidate only once.  One branch has many candidates when the
-# bases have many commits that change only its files, but one squash commit
-# suffices.  So the merges are done in two rounds:  first each branch's
-# likeliest candidate, and then the other candidates of the branches that the
-# first round did not find.  A squash-merge usually soon follows the branch's
+# shows BRANCH to be squash-merged:  merging it into PARENT yields TREE.  A
+# commit in several bases is a candidate only once.  One branch has many
+# candidates when the bases have many commits that change only its files, but
+# one squash commit suffices.  So the merges are done in two rounds:  first
+# each branch's likeliest candidate, and then the other candidates of the
+# branches that the first round did not find.  A squash-merge usually soon follows the branch's
 # last commit, so the candidates are sorted by TIER and then by DELAY:  the
 # likeliest is the earliest one committed at or after the branch's last
 # commit was authored, if any, and otherwise the latest one.
