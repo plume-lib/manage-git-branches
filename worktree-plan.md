@@ -2,9 +2,8 @@
 
 ## 1. Goals and what they buy
 
-Two goals: less disk space (§1.1), and fewer network accesses (§1.2) -- though
-most of the second goal turns out not to need worktrees at all, and is already
-implemented.
+The goal is less disk space (§1.1).  Fewer network accesses, once a second goal,
+needs no worktrees and is already implemented (§1.2).
 
 ### 1.1 Less disk space
 
@@ -41,46 +40,20 @@ default, because §4.1 requires that the default carry the current work forward.
 
 ### 1.2 Fewer network accesses
 
-**Most of this goal does not need worktrees, and is already implemented.**
-What lets two "does the remote still have this branch?" queries merge is not a shared
-repository but a shared remote **URL**, and every `REPO-branch-*` directory of
-one project is a clone of the same upstream -- so batching that query is
-available for the branch directories this package already creates.
-`remote_heads_key` and `remote_heads` in remote-functions.sh group the queries
-by resolved URL and SSH configuration and issue one `git ls-remote --heads` per
-group.  That is the larger half of the saving, because `git-orphaned-branches`
-scanning twenty directories is where the cost is concentrated.
+**Already implemented, without worktrees.**  What lets two "does the remote
+still have this branch?" queries merge is not a shared repository but a shared
+remote **URL**, and every `REPO-branch-*` directory of one project is a clone of
+the same upstream.  `remote_heads_key` and `remote_heads` in remote-functions.sh
+group the queries by resolved URL and SSH configuration and issue one
+`git ls-remote --heads` per group, so `git-orphaned-branches` over twenty
+branch directories makes one query, and a `git-push-to` chain makes one.
 
-What genuinely needs a shared object store is narrower, and stays here:
-
-* **One `git fetch` per group instead of one `git pull` per directory**, in
-  `git-push-to`.  Related worktrees share the remote-tracking refs, so one fetch
-  freshens the whole group, and each directory that has nothing of its own to
-  combine is then updated by a local fast-forward.  Saving 2 of §6.6.
-* **No fetch at all between two related worktrees.**  FROM's commits are already
-  in TO, so `git-push-to` can merge the commit that FROM's branch ref names
-  instead of fetching it from FROM's directory (§6.4).
-
-For scale, the command whose accounting motivates the rest: per adjacent pair,
-`git-push-to` brings each of the two directories up to date with its own
-`git pull` (git-push-to:391 and :411), then fetches FROM's branch into TO
-(`fetch_branch`, git-push-to:286-326), before the push.  The
-`check_branch_exists` queries no longer count: they go through `is_deleted_branch`
-in one process, so one `git ls-remote` answers for a whole chain of clones of one
-upstream (git-push-to:229-235).  A directory in the middle of a chain is in two
-pairs, so it is pulled twice.  For a chain of k related worktrees with one
-remote, 2(k-1) pulls become 1 fetch -- plus one `git pull` for each directory
-whose branch has diverged from its upstream -- plus the k-1 pushes, which are
-not batched and should not be (§6.6).
-
-Each access is a separate SSH connection and authentication, which on a slow or
-high-latency link costs far more than the data transferred.
-
-Relatedness has to be detectable, which is what sharing a repository provides:
-two directories are related when
-`git rev-parse --path-format=absolute --git-common-dir` gives the same answer in
-both (§6.6's `related_worktrees`).  Before this change, every branch directory
-was an independent clone, so there was no relatedness to exploit.
+Worktrees would allow two further savings in `git-push-to`, because related
+worktrees share refs: one `git fetch` per group instead of one `git pull` per
+directory, and no fetch from a sibling directory.  Both are deferred (§10.1
+item 8): together they save a connection or two per `git-push-to` run, and they
+would need a relatedness predicate, grouping, a fast-forward fast path with a
+`git pull` fallback, and a refspec check.
 
 ## 2. The core change
 
@@ -123,8 +96,8 @@ the `git checkout -b`, and the `mv`) with four steps:
 2. `git worktree add --no-checkout -q -b "${BRANCHNAME}" "${BRANCHDIR}"`.  With
    `--no-checkout` this creates `${BRANCHDIR}` containing nothing but the `.git`
    file, so it writes no tracked file that the copy would then overwrite.
-3. Move each top-level entry of `${BRANCH_TMPDIR}` into `${BRANCHDIR}` (renames
-   within one directory, so this is fast), then `rmdir "${BRANCH_TMPDIR}"`.
+3. Move the new `.git` file into `${BRANCH_TMPDIR}`, remove the now-empty
+   `${BRANCHDIR}`, and rename `${BRANCH_TMPDIR}` to `${BRANCHDIR}`.
 4. Install the index: copy the source's index file to the new worktree's index
    (§5.4), which reproduces the source's staged state exactly.
 
@@ -191,10 +164,7 @@ determine the design below.
    §2 must skip `.git`, and it is the forcing constraint of §6.1.
 10. Fetching from a sibling worktree of one repository, as `git-push-to`'s
     `fetch_branch` does, works normally, so `git-push-to` and `git-pull-from`
-    need no change to keep working.  That fetch is local and costs no network
-    access; the network accesses those commands make are one batched
-    `ls-remote` and the `git pull` that updates each directory from its
-    upstream, which is what §6.6 batches.
+    need no change to keep working.
 11. A branch name that begins with `-` (such as the `-n` that
     tests/test-branch-directory-name.sh uses) breaks `git worktree add -b -n`
     exactly as it breaks today's `git checkout -b -n`: `git branch` reads it as
@@ -220,7 +190,7 @@ determine the design below.
     correctly -- but the administrative directory keeps its original basename
     forever, so adding at `X-TMP` and moving to `X` leaves
     `.git/worktrees/REPO-branch-X-TMP` permanently.  This is why §2 adds the
-    worktree at the final path and moves only ordinary files into it.
+    worktree at the final path.
 16. **Submodules break.**  A submodule's `.git` file says
     `gitdir: ../.git/modules/sub`, which does not resolve in a linked worktree
     (whose `.git` is a file).  Copying it is fatal, and not just for the
@@ -241,26 +211,6 @@ determine the design below.
     because the administrative directory it would repair is gone.  The files and
     the branch ref survive, so no work is lost, but the working tree has to be
     recreated.  This is why no script here runs `prune` (§5.7, §7.2).
-18. **Merge messages.**  In one repository with two worktrees, `main` and
-    `feature`, integrating `feature` into `main`:
-    * `git pull -- ./../r-branch-feature` writes `Merge ./../r-branch-feature`
-      -- a path, naming no branch.  The cause is FETCH_HEAD, which for a
-      pathname with no refspec holds `<sha>\t\t./../r-branch-feature`.
-    * `git pull -- ./../r-branch-feature feature` makes FETCH_HEAD hold
-      `<sha>\t\tbranch 'feature' of ./../r-branch-feature` and the subject
-      `Merge branch 'feature' of ./../r-branch-feature`.
-    * `git-push-to` instead fetches the branch and hands `git fmt-merge-msg` the
-      line `<sha>\t\tbranch 'feature' of .`, which is what `git fetch` writes for
-      a branch of the local repository; the subject is `Merge branch 'feature'`,
-      plus "into BRANCH" off the default branch.  It then runs
-      `git merge -m` with that message.
-    * `git merge -- feature` writes `Merge branch 'feature'`, the same subject.
-    * `git merge refs/heads/feature` writes `Merge branch 'refs/heads/feature'`,
-      so the fully-qualified ref is the wrong thing to pass.
-    * `git merge -- -n`, for a branch named `-n` created with `update-ref`,
-      succeeds and writes `Merge branch '-n'`, so `--` gives dash-safety without
-      costing the clean message.
-    See §6.4.
 
 ## 4. Behavior changes
 
@@ -435,21 +385,28 @@ Keep the early `[ -e "${BRANCHDIR}" ]` test (git-new-branch:152-155): it runs
 before any network access and its message is better than git's.  Let
 `git worktree add` be the final authority (fact 5).
 
-Add the worktree at the final path, and move only ordinary files into it: adding
-at `${BRANCHDIR}-TMP` and running `git worktree move` would leave
-`.git/worktrees/REPO-branch-X-TMP` as the administrative name forever (fact 15),
-and a plain `mv` of a registered worktree is the trap of fact 3.
+Add the worktree at the final path: adding at `${BRANCHDIR}-TMP` and running
+`git worktree move` would leave `.git/worktrees/REPO-branch-X-TMP` as the
+administrative name forever (fact 15).
 
 ### 5.3 Populate the directory (step 3)
 
-Move each top-level entry of `${BRANCH_TMPDIR}` into `${BRANCHDIR}` with the same
-glob idiom as §5.1, then `rmdir -- "${BRANCH_TMPDIR}"`.  Both paths share a parent
-directory, so each move is a rename within one filesystem.
+```sh
+mv -- "${BRANCHDIR}/.git" "${BRANCH_TMPDIR}/.git"
+rmdir -- "${BRANCHDIR}"
+mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"
+```
 
-`${BRANCHDIR}` therefore exists in an incomplete state only for the duration of
-a few renames, rather than for the duration of the copy -- which preserves the
-property that today's `-TMP`-then-`mv` provides and that the comment at
-git-new-branch:245-250 explains.
+The worktree ends up at exactly the path it was registered under, with its
+`.git` file in place, so the registration stays valid; fact 3's hazard is a
+worktree that ends up somewhere *other* than its registered path.  Verified:
+afterward `git worktree list` marks nothing prunable, and, once the index is
+installed, `git status` in the new directory matches the source's.
+
+Both paths share a parent directory, so the renames are cheap, and
+`${BRANCHDIR}` exists in an incomplete state only between them -- which
+preserves the property that today's `-TMP`-then-`mv` provides and that the
+comment at git-new-branch:245-250 explains.
 
 ### 5.4 Install the index (step 4)
 
@@ -505,7 +462,7 @@ What each version buys:
 | 2.9 | `git worktree add --no-checkout` | §5.2 |
 | 2.17 | `git worktree remove` | the cleanup of §5.6 |
 | 2.30 | `git worktree repair` | the recovery documented in §4.2 and §8 |
-| 2.31 | `git rev-parse --path-format=absolute` | §5.4, §6.6, §7.2 |
+| 2.31 | `git rev-parse --path-format=absolute` | §5.4, §7.2 |
 
 Check once, before any work, with `git-outgoing`'s `require_git`, moved into
 remote-functions.sh so that every command shares it:
@@ -534,8 +491,9 @@ Document the requirement in the README (§8).
 The existing `cleanup` (git-new-branch:76-79) removes `${TMPDIR_TO_CLEAN}`.  It
 now has two things to undo, so give it two variables:
 
-* `TMPDIR_TO_CLEAN` -- `${BRANCH_TMPDIR}` while the plain copy of §5.1 exists;
-  `rm -rf` is still the right removal, since it is an ordinary directory.
+* `TMPDIR_TO_CLEAN` -- `${BRANCH_TMPDIR}` until the rename of step 3;
+  `rm -rf` is still the right removal, even after step 3 has moved the `.git`
+  file into it.
 * `WORKTREE_TO_CLEAN` -- `${BRANCHDIR}`, set immediately before
   `git worktree add` runs and cleared only after step 4 succeeds.
 * `WORKTREE_GITDIR_TO_CLEAN` -- the new worktree's administrative directory,
@@ -557,8 +515,10 @@ For `${WORKTREE_TO_CLEAN}`, `cleanup` should:
    (`--force` because git refuses to remove a worktree with modifications, and a
    half-built one has them by construction).
 2. If that fails -- the add may have failed partway, leaving a directory that
-   git will not remove -- `rm -rf -- "${WORKTREE_TO_CLEAN}"` and then
-   `rm -rf -- "${WORKTREE_GITDIR_TO_CLEAN}"`, if that variable was set.
+   git will not remove, or a signal may have arrived between the renames of step
+   3, when `${BRANCHDIR}` does not exist -- `rm -rf -- "${WORKTREE_TO_CLEAN}"`
+   and then `rm -rf -- "${WORKTREE_GITDIR_TO_CLEAN}"`, if that variable was
+   set.
    **Not `git worktree prune`**: prune removes every registration whose
    directory is missing, including that of a worktree the user moved with `mv`
    and has not repaired, and fact 17 shows that damage cannot be undone.
@@ -664,7 +624,7 @@ One command:
 git worktree add -q -b "${BRANCHNAME}" "${BRANCHDIR}"
 ```
 
-With checkout this time, and no `${BRANCH_TMPDIR}`, no move, and no index to
+With checkout this time, and no `${BRANCH_TMPDIR}`, no rename, and no index to
 install: git writes the tracked files from the shared object store and the index
 that matches them.
 
@@ -744,11 +704,10 @@ message must earn it -- name the main clone by path, say why (the repository has
 submodules and this directory is a linked worktree), and say that running the
 command there works.  A bare refusal here would be a dead end.
 
-The way out is real and now nearly free: `git clone --local` of the common dir,
-then the working-tree copy of §5.1 over it.  Step 3 adds exactly that helper for
-`git-checkout-branch`'s submodule fallback (§6.1), so after it lands this case is
-a few lines rather than a new subsystem.  Recorded as item 6 of §10.1, flagged
-there as the deferred item a user is most likely to hit.
+A way out exists -- `git clone --local` of the common dir, then the
+working-tree copy of §5.1 over it -- but it is a new code path.  Recorded as
+item 6 of §10.1, flagged there as the deferred item a user is most likely to
+hit.
 
 ### 5.13 Update the header comment
 
@@ -844,8 +803,9 @@ mode and `--clean` and keeps it for `--copy`.
 
 #### The conversion (step 3)
 
-**Decided: `git-checkout-branch` never carries the current working tree's local
-changes.**  Its new directory is always a fresh checkout of the branch: no copy
+**Decided: outside a submodule repository, `git-checkout-branch` never carries
+the current working tree's local changes.**  Its new directory is a fresh
+checkout of the branch: no copy
 step, no index to install, no temporary directory, and no `--clean`/`--copy`
 options.  One command replaces the copy and the checkout:
 
@@ -878,46 +838,31 @@ as a side effect of how it gets a cheap clone rather than by intent:
 Both belong in the commit message and in the README's `git-checkout-branch`
 bullet.
 
-**Submodules:** `git-checkout-branch` cannot use a worktree for a repository with
-submodules either (§4.3), but its fallback need not be `git-new-branch`'s
-`cp -Rp`, because it has nothing to carry over.  A genuinely fresh clone is both
-the simpler primitive and the better match for this command's meaning:
-
-```sh
-git clone --local -- "$(git rev-parse --path-format=absolute --git-common-dir)"
-\ "${BRANCHDIR}"
-```
-
-that is, `git clone --local` (which hardlinks objects by default where the
-filesystem allows, so the disk cost is close to a worktree's), then check out the
-branch, then `git submodule update --init --recursive`.  Clone from the
-*common dir* rather than from the current directory: in a linked worktree the
-`.git` file names the administrative directory, which holds a HEAD and an index
-but not the objects and refs, so it is not what one clones.  The clone has its
-own
-`.git/modules`, so the submodule sharing of fact 16 cannot arise, and cloning
-works from a linked worktree source as well as from a clone -- so
-`git-checkout-branch` has **no** equivalent of the `--copy`-from-a-worktree
-refusal of §5.12.  Note that this puts a `git clone --local` helper in the
-package, which §5.12 wanted and did not have; see §10.1 item 6.
+**Submodules:** in a repository with submodules (§4.3), `git-checkout-branch`
+keeps today's code unchanged -- `cp -Rp`, `git checkout`, and `mv` -- just as
+`git-new-branch` falls back to its `--copy` path.  A submodule repository's
+branch directories are full copies, so today's code works there as it always
+has.  The cost is that, in such a repository, the command still carries local
+changes along.  A fresh `git clone --local` would avoid that, but it would be a
+third way of creating a branch directory, used nowhere else; §10.1 item 6
+records it.
 
 Two new things to handle:
 
 * **"branch is already checked out in another worktree."**  The clone model
   permitted the same branch in two directories; the worktree model does not.
-  Detect it early with `git worktree list --porcelain` -- before the `git pull`
-  and the remote queries, so the refusal is cheap -- and name the directory that
-  already holds the branch, which is more useful than git's own message and
-  matches how §5.7 prefers an early, specific diagnosis.  This is a real
-  behavior change for a user who relied on two directories for one branch.
+  Let `git worktree add` refuse, and make sure its message, which names the
+  directory that holds the branch, reaches the user.  An earlier check would
+  only save the `git pull` and the remote queries in a rare case.  This is a
+  real behavior change for a user who relied on two directories for one
+  branch.
 * The `--force` escape hatch is deliberately *not* offered: two working trees of
   one branch is precisely the branch confusion this package exists to prevent.
 
 Also update the §5.5 version check for this command, so that `git-new-branch` and
 `git-checkout-branch` make the same demand with the same message, from the shared
-helper of step 1 of §10.  The submodule condition is shared too, but the two
-commands' fallbacks differ, as above: `git-new-branch` copies (§4.3) because it
-must carry local changes, and `git-checkout-branch` clones because it must not.
+helper of step 1 of §10.  The submodule condition is shared too: in a
+repository with submodules, both commands keep today's code.
 
 ### 6.2 `git-orphaned-branches`
 
@@ -967,7 +912,7 @@ out of the list, and the guardrail refuses it even when a user names it directly
 Nothing here.  The code works on a worktree unchanged (fact 2).  Its
 documentation already says "working tree" rather than "clone" for status 2, and
 its body is already the function `is_deleted_branch` in remote-functions.sh, with
-the command a thin wrapper; §6.6 builds on that.
+the command a thin wrapper.
 
 ### 6.4 `git-push-to` and `git-pull-from`
 
@@ -976,188 +921,9 @@ repository works (fact 10), and `check_upstream` is about configuration, not
 layout.  Add a test that pushes and pulls between two worktrees, to keep it that
 way.
 
-What is newly *possible* is the second goal (§1.2): when two or more of the
-arguments are related worktrees, the remote need not be asked once per
-directory.  See §6.6.  `git-pull-from` delegates to `git-push-to`, so it inherits
-whatever `git-push-to` saves.
-
-#### Merge a related worktree's branch without fetching it
-
-**Decided: between related worktrees, merge the commit that FROM's branch ref
-names, and skip the fetch from FROM's directory.**
-
-The merge message needs nothing from this change.  `git-push-to` already
-composes it with `git fmt-merge-msg`, as though FROM's branch were a branch of
-TO's own repository (git-push-to:421-443), so in both layouts the subject is the
-one a single-clone workflow produces:
-
-```text
-Merge branch 'feature' into main
-```
-
-(without "into main" on the default branch), with no path in it.  That is
-already exactly right for related worktrees, where FROM's branch *is* a branch
-of TO's repository.
-
-What related worktrees make unnecessary is `fetch_branch` (git-push-to:286-326),
-which fetches `refs/heads/FROM_BRANCH` from FROM's directory by relative path:
-the refs are shared, so the commit is already present in TO.  Details:
-
-* The condition is `related_worktrees "${from}" "${to}"` (§6.6).  When it is
-  true, set `merge_head` from `git rev-parse --verify --quiet
-  "refs/heads/${from_branch}^{commit}"` in TO instead of calling `fetch_branch`.
-  Use the fully-qualified ref, for the reason `fetch_branch`'s comment gives: a
-  bare name resolves a same-named tag first.
-* Everything after that is unchanged: the same `fmt-merge-msg` line, the same
-  `git merge --no-edit --no-log -m`.  `git-push-to` merges rather than pulls, so
-  `pull.rebase` does not apply to this step.
-* When it is false -- independent clones, `--copy` directories, and the §4.3
-  submodule fallback -- keep `fetch_branch`.  `relative-path` and the
-  `./`-prefix hack keep their full rationale there.
-* `check_upstream` already refuses a detached HEAD (git-push-to:203-208), so
-  `from_branch` is always a branch name by this point.
-
 ### 6.5 `compile-project`, `relative-path`
 
 Unaffected.
-
-### 6.6 Fewer network accesses among related worktrees (the second goal)
-
-#### The predicate
-
-Add to remote-functions.sh:
-
-```sh
-## Usage: related_worktrees DIR1 DIR2
-## Tests whether DIR1 and DIR2 are working trees of one repository -- the main
-## working tree and a linked worktree, or two linked worktrees -- so that they
-## share one object store, one set of refs, and one remote configuration.
-##
-## Two independent clones of the same upstream repository are *not* related in
-## this sense, however much history they have in common:  each has its own
-## object store and its own refs, so neither can see the other's commits and
-## every saving here is unavailable.
-related_worktrees() { ... }
-```
-
-It compares `git -C "$1" rev-parse --path-format=absolute --git-common-dir` with
-the same for `$2`.  `--path-format=absolute` is what makes the two answers
-comparable, and §5.5 requires the git that has it.  A directory that is not a
-working tree at all answers nothing, and must compare unequal to everything,
-including to another such directory.
-
-Group by that answer rather than by comparing every pair: the common dir is the
-group's key, so one pass over the directories builds the groups.
-
-#### Saving 1: one `ls-remote` per remote URL -- already implemented
-
-**Already implemented, and more general than this plan first proposed.**  Batching
-"does the remote still have this branch?" turns out not to need relatedness at
-all: what determines whether two such queries can merge is the resolved remote
-**URL** (plus the SSH configuration that `git_batch_ssh` takes from the
-directory), and two independent clones of one upstream share a URL just as two
-related worktrees do.  Grouping by URL therefore subsumes grouping by
-repository, and it works for the branch directories this package creates today.
-
-Consequently `related_worktrees` is **not** needed for this saving.  It is
-needed only for saving 2 below and for §6.4's merge-by-name, both of which
-require a shared object store.  `remote_heads_key` and `remote_heads` in
-remote-functions.sh implement it: one `git ls-remote --heads URL` per group,
-through `git_batch_ssh`, with a per-directory query for an upstream ref outside
-`refs/heads/`.
-
-#### Saving 2: one `git fetch` per group instead of one `git pull` per directory
-
-`git-push-to` brings each directory up to date with `git pull` (git-push-to:391
-and :411), and each of those fetches from the remote.  Related worktrees share
-the remote-tracking refs, so **one `git fetch REMOTE`** updates them for the
-whole group.
-
-**Decided: after the group fetch, update a directory locally only by a
-fast-forward, and run `git pull` as today in every other case.**  Take the fast
-path when both of these hold:
-
-* The branch has no commits that its upstream lacks:
-  `git merge-base --is-ancestor HEAD @{upstream}`.  The update is then a
-  fast-forward or nothing at all.
-* The effective mode is not "merge, with fast-forwarding disabled": that is,
-  not `pull.ff=false`, nor `merge.ff=false` with `pull.ff` unset, while the
-  branch's rebase setting (`branch.BRANCH.rebase`, then `pull.rebase`) is unset
-  or false.  In that mode `git pull` makes a merge commit even when it could
-  fast-forward.
-
-The fast path is then `git merge -q --ff-only @{upstream}`.
-
-The reason for so narrow a fast path: a fast-forward is the one update on which
-every pull mode agrees -- merge, rebase, and `pull.ff=only` all produce it.
-Reproducing `git pull` for a diverged branch would mean reimplementing every
-setting it reads: the "Need to specify how to reconcile divergent branches"
-refusal when no mode is configured, `pull.ff`, the `merges` and `interactive`
-rebase modes, the fork-point computation of `git pull --rebase`, autostash, the
-boolean spellings of each setting, and a merge message ("Merge branch 'main' of
-URL") that `git merge @{upstream}` does not write.  That is a permanent
-maintenance burden in a shell script, for a case that costs, with the
-fallback, only what it costs today.
-
-The fast path is also the common case in `git-push-to`'s chains: a directory
-that was just pushed, or a middle directory being updated for the second time,
-has nothing of its own to combine.
-
-Two more conditions send a directory to `git pull`:
-
-* **No upstream.**  The fast path has nothing to compare against.
-* **A narrowed fetch refspec.**  `git pull` fetches the branch's upstream by
-  name; one `git fetch REMOTE` fetches whatever `remote.REMOTE.fetch` maps.  In
-  a clone made with `--single-branch`, or with any narrowed refspec, the group
-  fetch may not update this branch's upstream ref at all, and the fast path
-  would then report "already up to date" for a branch that is behind -- a wrong
-  answer, not a slow one.  This package already reasons about that case
-  (git-checkout-branch's `find_branch` handles a branch that no refspec maps).
-  So check, per directory, that the refspecs of ${REMOTE} map the branch's
-  upstream ref -- `is_deleted_branch_tracking_refs` in remote-functions.sh
-  already computes exactly that mapping -- and fall back to `git pull` for any
-  directory they do not.
-
-The group's key is (repository, remote).  Two related worktrees whose branches
-have upstreams on different remotes are in different groups, and each group
-gets its own `fetch`.  (Saving 1's key is coarser -- URL and SSH configuration
--- and needs no change.)
-
-#### What is not batched
-
-* **The pushes.**  `git-push-to`'s contract is that each directory is pushed only
-  if its own compilation succeeded, so the pushes cannot be collected into one
-  `git push REMOTE A B ...` without changing what the command promises.  A user
-  who wants those to share one connection can set up SSH connection reuse
-  (`ControlMaster`), which is a property of their SSH configuration and not
-  something these scripts should impose.
-* **Unrelated clones.**  A group of one is the normal case for directories that
-  are not worktrees of one repository, and it must cost exactly what it costs
-  today -- no extra query to discover that there is nothing to batch.
-
-#### Ordering, and one consequence to accept
-
-Batching moves the queries and the fetch to the front, before any pair is
-processed.  That is an improvement in itself -- a chain now fails before anything
-is compiled rather than in the middle -- but it is a behavior change worth
-stating in the commit message.
-
-The up-front snapshot is taken before `git-push-to`'s own pushes, so it does not
-reflect them.  That is harmless for the question being asked: this command's
-pushes create and update branches, never delete them, so a branch that the
-snapshot showed as present cannot have been deleted by the run itself.
-
-#### Where the code lives
-
-**In remote-functions.sh**, which already holds `is_deleted_branch` (the body of
-`is-deleted-branch`, with the same exit statuses) and the grouped query that
-`git-orphaned-branches` and `git-push-to` call.  Saving 2 is a further function
-beside those, and `related_worktrees` (§6.6's predicate) belongs there too.
-
-What this plan adds to that file is therefore small: the predicate, the
-fast-path test of saving 2, and the worktree-aware helpers
-of §10 step 1 (`require_git`, `is_linked_worktree`, and the cleanup of
-§5.6).
 
 ## 7. The teardown story (the biggest gap)
 
@@ -1382,10 +1148,10 @@ In tests/test-git-checkout-branch.sh, for §6.1's conversion: the new directory
 holds a clean checkout -- `git status --porcelain --ignored` in it is empty
 although the source has an uncommitted modification, an untracked file, and an
 ignored file -- and the source directory is unchanged; a dirty source that would
-have made today's `git checkout` fail now succeeds; a submodule repository gets
-an independent clone whose submodule is populated and whose `.git/modules` is its
-own; and checking out a branch that another worktree already holds is refused
-with a message naming that directory.
+have made today's `git checkout` fail now succeeds; a submodule repository takes
+today's code path and gets an independent clone; and checking out a branch
+that another worktree already holds is refused with git's message, which names
+that directory.
 
 In tests/test-git-orphaned-branches.sh: `--remove` removes an orphaned linked
 worktree, deleting its branch ref, and leaves the worktree's host in place.
@@ -1520,40 +1286,14 @@ Add:
   on PATH that reports an old version for `git version` and passes everything
   else through.
 
-For the second goal (§6.6), where the assertion is about *how many* times a
-remote is asked, count the queries with a fake `git` on PATH that appends its
-subcommand to a log file and then execs the real git -- the same injection the
-interrupt test uses, and cheaper than a fake SSH, since the remote in these tests
-is a local pathname that never reaches SSH at all:
-
-* `git-orphaned-branches` over several worktrees of one repository issues exactly
-  one `ls-remote`, as it already does over several clones of one upstream.
-* `git-push-to` over a chain of related worktrees issues one `fetch` from the
-  remote, rather than one `git pull` per directory, and no fetch from a sibling
-  directory.
-* Unrelated clones cost exactly what they cost today, with no additional query
-  to discover that there is nothing to batch.
-* Saving 2 fast-forwards a directory that is behind its upstream, with no
-  `git pull`; and it runs `git pull` for a directory that has diverged -- with
-  `pull.rebase` unset, false, and true, so that the outcome is exactly
-  `git pull`'s, including the refusal when no mode is configured -- and for one
-  with `pull.ff=false`, which gets a merge commit rather than a fast-forward.
-* **The merge** (§6.4) between two related worktrees: the merge commit's
-  subject is the same as between two independent clones (`Merge branch
-  'FROM_BRANCH'`, plus "into TO_BRANCH" off the default branch), its second
-  parent is the commit FROM's branch names, and no `fetch` from FROM's directory
-  happened.  A tag with the same name as FROM's branch does not get merged in
-  its place.
-
 ## 10. Suggested commit sequence
 
 Each step is independently reviewable and leaves the tree working, which matches
 this repository's history of small PRs.
 
 1. **remote-functions.sh: the worktree-aware helpers.**
-   `require_git`, moved from `git-outgoing` (§5.5), `is_linked_worktree DIRECTORY`,
-   `related_worktrees DIR1 DIR2` (§6.6), and the cleanup helper of §5.6, with
-   tests in tests/test-remote-functions.sh.
+   `require_git`, moved from `git-outgoing` (§5.5), and the cleanup helper of
+   §5.6, with tests in tests/test-remote-functions.sh.
 2. **`git-new-branch`: create a worktree.**  §5 in full -- the default mode, the
    `--clean` and `--copy` options (§5.10-§5.12), the §4.3 submodule fallback that
    `--copy` also implements, and the §5.8 refusal -- plus the interim refusal in
@@ -1565,21 +1305,14 @@ this repository's history of small PRs.
    the worktree path handles badly.
 3. **`git-checkout-branch`: create a worktree.**  One `git worktree add` with
    checkout, no copy at all (§6.1); narrows the interim refusal; handles "already
-   checked out in another worktree"; adds the `git clone --local` submodule
-   fallback; documents the two behavior changes (no inherited build output, and
+   checked out in another worktree"; keeps today's code for a submodule
+   repository; documents the two behavior changes (no inherited build output, and
    no more "local changes would be overwritten" failure).
 4. **Removal: the worktree half.**  Teach `git-remove-branch-directory` to
    remove a linked worktree with `git worktree remove --force` instead of
    refusing it (while still refusing a submodule's working tree, §7.2), delete
    the branch ref, remove the one administrative directory rather than prune
    (§7.2), and handle the already-deleted case (§7.5).
-5. **Saving 2 and the fetch-free merge.**  Replace `git-push-to`'s
-   per-directory `git pull` with one `git fetch` per group plus a local
-   fast-forward where one suffices (§6.6), and merge a related worktree's
-   branch from the shared ref rather than fetching it from FROM's directory
-   (§6.4).  These can be one commit or two.  Needs step 1's
-   `related_worktrees`, and pays off only once the branch directories are
-   worktrees, so it comes last.
 
 Risk and rollback: steps 2 and 3 are self-contained, and branch directories
 created by the current version keep working, so old and new branch directories
@@ -1589,7 +1322,7 @@ coexist and a revert affects only directories created after it.
 
 **Decided: document these as future todos and implement none of them here.**  Each
 is a genuine improvement, none is needed for the change to be correct or
-complete, and each would enlarge a series that is already five steps.  Record them
+complete, and each would enlarge a series that is already four steps.  Record them
 where they will be found again -- an issue apiece, or a "Future work" list in the
 README -- when the series lands.
 
@@ -1616,20 +1349,22 @@ README -- when the series lands.
 4. **A shared bare repository** as the worktree host, instead of the existing
    clone's `.git` (§5.5's last paragraph, §11).  Deferred: it needs a migration
    and it redefines what the main working tree is.
-5. **Batched pushes and connection reuse** in `git-push-to` (§6.6, "What is not
-   batched").  Deferred as rejected-for-now rather than pending: batching the
-   pushes would break the command's compile-then-push contract, and connection
-   reuse belongs in the user's SSH configuration.
+5. **Batched pushes and connection reuse** in `git-push-to`.  Deferred as
+   rejected-for-now rather than pending: batching the pushes would break the
+   command's contract that each directory is pushed only if its own compilation
+   succeeded, and connection reuse (`ControlMaster`) belongs in the user's SSH
+   configuration.
 
 6. **`git-new-branch --copy` from a linked worktree**, which §5.12 refuses
    because `cp -Rp` of a worktree would alias it (fact 9).  The reachable case is
    a submodule repository whose branch directories are already worktrees, where
    the default mode's fallback then refuses from every branch directory and works
-   only from the main clone.  Once step 3 adds the `git clone --local` helper for
-   `git-checkout-branch`'s submodule fallback (§6.1), this becomes: clone the
-   common dir, overlay the non-`.git` entries with the copy of §5.1, create the
-   branch there.  Deferred because it is a new code path with its own failure
-   modes, and because the refusal names a directory that does work.
+   only from the main clone.  The fix is to clone the common dir with
+   `git clone --local`, overlay the non-`.git` entries with the copy of §5.1,
+   and create the branch there.  The same helper would let
+   `git-checkout-branch` give a submodule repository a fresh checkout instead
+   of today's copy (§6.1).  Deferred because it is a new code path with its own
+   failure modes, and because the refusal names a directory that does work.
 
 7. **`git worktree list` as an inventory** for `git-orphaned-branches` (§6.2).
    The command walks the filesystem for `*-branch-*` directories, descending
@@ -1641,9 +1376,22 @@ README -- when the series lands.
    it is an added fast path with its own consistency question (what to do when
    the two disagree), not a simplification.
 
+8. **Fewer fetches among related worktrees** in `git-push-to` (§1.2).  Related
+   worktrees share refs, so one `git fetch REMOTE` could update a whole group,
+   with each directory then updated by `git merge --ff-only @{upstream}` when
+   its branch has nothing its upstream lacks and `git pull` otherwise; and FROM's
+   branch could be merged from the shared ref instead of fetched from FROM's
+   directory.  Deferred because it saves a connection or two per run and needs a
+   `related_worktrees` predicate (comparing
+   `rev-parse --path-format=absolute --git-common-dir`), grouping by
+   (repository, remote), a check that the fetch refspecs map each branch's
+   upstream (`is_deleted_branch_tracking_refs`), and query-counting tests.
+   Reproducing `git pull` for a diverged branch is not an option: it would mean
+   reimplementing every setting `git pull` reads.
+
 Item 5 is recorded so that a later reader does not have to rediscover why it was
-not done; items 1, 2, 3, 4, 6, and 7 are the ones worth revisiting, and item 6 is
-the one a user is most likely to hit.
+not done; items 1, 2, 3, 4, 6, 7, and 8 are the ones worth revisiting, and
+item 6 is the one a user is most likely to hit.
 
 ## 11. Alternatives considered
 
@@ -1672,76 +1420,10 @@ the one a user is most likely to hit.
 * **Batching `git-push-to`'s pushes** into one `git push REMOTE A B ...`.  It
   would save further connections, but the command promises that each directory is
   pushed only if its own compilation succeeded, and one push cannot honor that.
-  Rejected; §6.6 says what a user can do instead.
+  Rejected; a user can set up SSH connection reuse (`ControlMaster`) instead.
 * **Caching remote answers on disk between runs**, so that a second `rmgob` in the
-  same minute asks nothing.  It saves more than §6.6 does, but a stale cache
+  same minute asks nothing.  It saves more than batching does, but a stale cache
   answers "the branch still exists" for a branch that was deleted, or the reverse,
   and this package's commands are the ones that decide whether a directory may be
-  deleted.  Rejected: the batching of §6.6 gets the same benefit within one run
+  deleted.  Rejected: the batching of §1.2 gets the same benefit within one run
   without ever answering from stale data.
-
-## 12. Decisions
-
-Settled:
-
-* §4.1 -- the new directory inherits uncommitted and untracked files.  Required.
-* §4.2 -- sharing config, hooks, and refs across branch directories is fine.
-* §4.3 -- a repository with submodules gets a full copy of the whole directory,
-  as today.  The worktree path is for repositories without submodules.
-* §7 -- `git-remove-branch-directory` removes linked worktrees too.
-* §5.5 -- require git 2.31; no fallback for anything older.  This also makes
-  `git worktree repair` (2.30) always available, so §4.2 and §8 can recommend it
-  without qualification.  The check is `git-outgoing`'s `require_git`, shared
-  through remote-functions.sh.
-* §6.1 -- `git-checkout-branch` gets the interim refusal in step 2 of §10 and the
-  conversion in step 3.
-* §5.4 -- install the new worktree's index by copying the source's index file.
-* §1.2 -- fewer network accesses among related worktrees is a goal of this
-  change, not merely a side effect.  Most of it is independent of worktrees and
-  is already implemented (one `ls-remote` per remote URL); what remains is
-  §6.6's saving 2 and §6.4's fetch-free merge, sequenced as step 5 of §10.
-* §2 -- `git-new-branch` supports `--clean` (a worktree with no local changes
-  carried over) and `--copy` (today's full copy of the clone, which is also the
-  submodule fallback).  The default carries local changes over, per §4.1.
-* §5.8 -- a repository with no commit is refused rather than supported.
-* §5.11 -- `--clean` is refused in a repository with submodules; `--copy` is the
-  mode that works there.  One rule: worktrees are not used for a submodule
-  repository, in any mode.
-* §5.12 -- `--copy` is permitted from a clone and refused from a linked worktree,
-  where copying `.git` would alias the source's HEAD and index.
-* §5.1 -- the copy skips `.git` rather than copying everything and deleting
-  `.git` afterward, which would need peak room for a full copy of the object
-  store.
-* §5.13/§8 -- `git-new-branch`'s documentation warns against deleting or moving
-  the directory it creates, in both the header comment and the README, scoped to
-  the worktree modes.
-* §7.2 -- `git-remove-branch-directory` uses `git worktree remove --force` for a
-  linked worktree and `rm -rf` for a clone or a non-repository, and still
-  refuses a submodule's working tree.
-* §6.4 -- between related worktrees, `git-push-to` merges the commit that
-  FROM's branch ref names, without fetching from FROM's directory.  The merge
-  message is unchanged: `git-push-to` already composes `Merge branch 'BRANCH'`
-  with `git fmt-merge-msg` in both layouts.  The relative-path machinery of
-  `fetch_branch` stays, for independent clones.
-* §6.6 -- the predicate is `related_worktrees`: two independent clones of one
-  upstream share history but share no object store and no refs, so none of these
-  savings applies to them.
-* §7.3 -- for a linked worktree, the unpushed-commits check asks about the one
-  branch ref that removal deletes.
-* §6.1 -- `git-checkout-branch` never carries local changes: its directory is
-  always a fresh checkout, with no copy step and no mode options.
-  `git-new-branch` is the only command that carries the working tree forward.
-  A submodule repository gets `git clone --local` plus
-  `git submodule update --init`, not a `cp -Rp`.
-
-* §7.5 -- `git-remove-branch-directory` also cleans up after a branch directory
-  that was already deleted by hand, taking `--repository DIR` (defaulting to the
-  current directory) to find the registration.
-* §10.1 -- the optional items are deferred: documented as future todos, none
-  implemented as part of this change.
-* §8 -- adopt git's term "working tree" instead of "working copy" throughout the
-  package's documentation, reserving "clone" for a directory that is one.
-
-Nothing is open.  The plan is ready to implement, in the five steps of §10, on
-top of the independent changes that are already implemented.  The deferred
-items are §10.1.
