@@ -243,10 +243,9 @@ line_count() {
 # A squash-merged pull request is the reason:  its commits are on no remote,
 # because the squash commit replaces them, and its remote branch is deleted,
 # but its changes are in the remote's default branch, so removing the only
-# copy of its commits loses nothing.  `git-outgoing` shows each commit that
-# is on no remote-tracking ref and on no branch whose changes have landed,
-# so a commit that `git rev-list` lists and `git-outgoing` does not show has
-# landed.  If `git-outgoing` fails, every commit counts.
+# copy of its commits loses nothing.  `git-outgoing --omitted` names the
+# branches whose changes have landed, and their commits are not counted.  If
+# `git-outgoing` fails, every commit counts.
 #
 # `git-outgoing` examines each branch that it is asked about, which is most
 # of its work, so LANDABLE should name no more branches than matter.  It is
@@ -257,34 +256,36 @@ count_unlanded() {
   count_unlanded_dir="$1"
   count_unlanded_landable="$2"
   shift 2
-  count_unlanded_commits="$(git -C "${count_unlanded_dir}" rev-list "$@" \
-    2> /dev/null)" || return 0
-  if [ -z "${count_unlanded_commits}" ] || [ -z "${count_unlanded_landable}" ] \
+  count_unlanded_count="$(git -C "${count_unlanded_dir}" rev-list --count \
+    "$@" 2> /dev/null)" || return 0
+  if [ "${count_unlanded_count}" -eq 0 ] || [ -z "${count_unlanded_landable}" ] \
     || [ "${outgoing_works}" -eq 0 ] \
     || ! git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
       refs/remotes 2> /dev/null | grep -q '/HEAD$'; then
-    line_count "${count_unlanded_commits}"
+    echo "${count_unlanded_count}"
     return 0
   fi
   if [ "${count_unlanded_landable}" = --all ]; then
-    set -- --all
+    count_unlanded_only=
   else
-    set -- --only-branch "${count_unlanded_landable}"
+    count_unlanded_only="--only-branch=${count_unlanded_landable}"
   fi
-  if ! count_unlanded_shown="$(cd -- "${count_unlanded_dir}" \
-    && "${SCRIPT_DIR}"/git-outgoing --format=%H "$@")"; then
+  if ! count_unlanded_omitted="$(cd -- "${count_unlanded_dir}" \
+    && "${SCRIPT_DIR}"/git-outgoing ${count_unlanded_only:+"${count_unlanded_only}"} --omitted)"; then
     echo "${SCRIPT_NAME}: cannot tell whether the changes of the commits in ${count_unlanded_dir} have landed, so counting them all" >&2
-    line_count "${count_unlanded_commits}"
+    echo "${count_unlanded_count}"
     return 0
   fi
-  # The shown commits, a blank line, and then the listed commits.
-  {
-    printf '%s\n\n' "${count_unlanded_shown}"
-    printf '%s\n' "${count_unlanded_commits}"
-  } | awk '
-      !listing { if ($0 == "") listing = 1; else shown[$0]; next }
-      $0 in shown { n++ }
-      END { print n + 0 }'
+  if [ -z "${count_unlanded_omitted}" ]; then
+    echo "${count_unlanded_count}"
+    return 0
+  fi
+  # A `--not` in REV-LIST-ARGS does not apply to the revisions that git reads
+  # from standard input, so each omitted branch is negated by its `^`.  The
+  # branches are passed that way rather than as arguments, which might exceed
+  # the limit on a command line's size.
+  printf '%s\n' "${count_unlanded_omitted}" | sed 's/^/^/' \
+    | git -C "${count_unlanded_dir}" rev-list --count --stdin "$@" 2> /dev/null
 }
 
 # Prints the number of live linked worktrees of the repository in directory

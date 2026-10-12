@@ -116,6 +116,14 @@ if [ -z "$(git -C "${clone}" log --format=%s --branches --not --remotes)" ]; the
   fail 'test setup: git log --branches --not --remotes should show the squash-merged commits'
 fi
 expect_outgoing 'squash-merged branch' ''
+# `--omitted` names the omitted branch, and takes no git log arguments.
+omitted="$(cd "${clone}" && "${GIT_OUTGOING}" --omitted 2> "${testdir}/errors")"
+if [ "${omitted}" != refs/heads/feature ] || [ -s "${testdir}/errors" ]; then
+  fail "--omitted: printed [${omitted}], expected [refs/heads/feature]: $(cat "${testdir}/errors")"
+fi
+if (cd "${clone}" && "${GIT_OUTGOING}" --omitted --oneline) > /dev/null 2>&1; then
+  fail '--omitted with a git log argument: expected a failure status'
+fi
 # Merging origin/HEAD into the squash-merged branch makes the branch's tree
 # match origin/HEAD and moves its merge base to the squash commit, but the
 # branch is still omitted.
@@ -185,6 +193,26 @@ git -C "${testdir}/myrepo-branch-reverted" revert --no-edit HEAD > /dev/null
 expect_outgoing 'branch whose last commit reverts the others' ''
 git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-reverted"
 git -C "${clone}" branch -q -D reverted
+
+# An empty commit on a squash-merged branch that is still on the remote is
+# outgoing:  the branch's commits that the remote branch holds are not its
+# own work.
+git -C "${clone}" branch -q kept origin/main
+git -C "${clone}" worktree add -q "${testdir}/myrepo-branch-kept" kept
+commit_file "${testdir}/myrepo-branch-kept" k.txt 'k' 'Kept commit'
+git -C "${clone}" push -q origin kept
+git -C "${upstream_work}" pull -q origin main
+git -C "${upstream_work}" fetch -q origin kept
+git -C "${upstream_work}" merge -q --squash FETCH_HEAD > /dev/null
+git -C "${upstream_work}" commit -q -m 'Squash-merged kept'
+git -C "${upstream_work}" push -q origin main
+git -C "${clone}" fetch -q origin
+git -C "${testdir}/myrepo-branch-kept" commit -q --allow-empty -m 'Empty commit on kept'
+expect_outgoing 'empty commit on a squash-merged branch still on the remote' \
+  'Empty commit on kept'
+git -C "${clone}" worktree remove --force "${testdir}/myrepo-branch-kept"
+git -C "${clone}" branch -q -D kept
+git -C "${clone}" push -q origin --delete kept
 
 # A squash-merged branch whose tip has a malformed author date, which git
 # reads as 0, or no author line at all, is not outgoing.
