@@ -141,7 +141,8 @@ determine the design below.
    marks the entry `prunable`, and `git worktree prune` (which `git gc` runs, per
    `gc.worktreePruneExpire`, three months by default) then deletes the
    administrative directory and kills the worktree.  `git worktree repair PATH`
-   fixes it.  **Consequence: no step of this plan may `mv` a registered worktree.**
+   fixes it.  **Consequence: no step of this plan may leave a worktree at a path
+   other than the one it is registered under** (§5.3 relies on the converse).
 4. `rm -rf` of a worktree directory leaves both a stale registration under
    `.git/worktrees/` **and** the branch ref (verified: `git branch --list` still
    showed the branch).  `git worktree remove` also leaves the branch ref.
@@ -498,13 +499,13 @@ now has two things to undo, so give it two variables:
   `git worktree add` runs and cleared only after step 4 succeeds.
 * `WORKTREE_GITDIR_TO_CLEAN` -- the new worktree's administrative directory,
   read with `git -C "${BRANCHDIR}" rev-parse --absolute-git-dir` as soon as the
-  add succeeds (step 4 needs it anyway, §5.4).  Capturing it is what lets the
+  add succeeds.  Capturing it is what lets the
   fallback below remove exactly one registration instead of pruning.
 
 One `cleanup` serves all three modes of §2, because each variable is empty in the
-modes that never set it: the default mode uses both, `--clean` sets only
-`WORKTREE_TO_CLEAN` (there is no temporary directory), and `--copy` sets only
-`TMPDIR_TO_CLEAN` (there is no worktree), which is exactly the cleanup the
+modes that never set it: the default mode uses all three, `--clean` sets only
+the two worktree variables (there is no temporary directory), and `--copy` sets
+only `TMPDIR_TO_CLEAN` (there is no worktree), which is exactly the cleanup the
 current script already has.  Keeping one `cleanup` rather than three is what
 makes the mode selection a matter of which steps run, not of which traps are
 installed.
@@ -782,6 +783,10 @@ lets the caller accept a linked worktree:
 * Under `--copy`, a linked worktree is still refused (§5.12).
 * A submodule's working tree is still refused, in every mode.
 
+The guard must therefore test the *effective* mode, after the `.gitmodules`
+test of §4.3: in a repository with submodules, the default mode takes the
+`--copy` path, and so refuses a linked worktree too.
+
 `git-checkout-branch`'s call is left alone until step 3, so it keeps refusing a
 linked worktree, with the existing message.
 
@@ -805,21 +810,29 @@ mode and `--clean` and keeps it for `--copy`.
 
 **Decided: outside a submodule repository, `git-checkout-branch` never carries
 the current working tree's local changes.**  Its new directory is a fresh
-checkout of the branch: no copy
-step, no index to install, no temporary directory, and no `--clean`/`--copy`
-options.  One command replaces the copy and the checkout:
+checkout of the branch: no copy step, no index to install, no temporary
+directory, and no `--clean`/`--copy` options.  One command replaces the copy
+and the checkout, in one of two forms, chosen as git-checkout-branch:354-358
+chooses between its two `git checkout` forms today:
 
 ```sh
-git worktree add -q "${BRANCHDIR}" "${CHECKOUT_START_POINT}"
+# The branch exists locally.
+git worktree add -q "${BRANCHDIR}" "${BRANCHNAME}"
+# The branch is created from ${CHECKOUT_START_POINT}.
+git worktree add -q -b "${BRANCHNAME}" "${BRANCHDIR}" "${CHECKOUT_START_POINT}"
 ```
 
-with checkout, and without a start point when the branch already exists locally,
-as git-checkout-branch:354-358 decides today.  Its `find_branch` logic, its
-upstream configuration (git-checkout-branch:373-380), and all of its diagnostics
-survive unchanged.  This is the shape of §5.11, which makes `git-new-branch` the
-only command in the package that carries local changes forward -- the command
-where §4.1 requires it, because a new branch continues the work in hand, whereas
-checking out an existing branch starts from what that branch contains.
+Neither operand may be dropped.  Without a commit-ish, `git worktree add DIR`
+creates a new branch named after the directory's basename (`REPO-branch-x`);
+without `-b`, a start point such as `origin/x` gives a detached HEAD.
+
+Its `find_branch` logic, its upstream configuration
+(git-checkout-branch:373-380), and all of its diagnostics survive unchanged.
+This is the shape of §5.11, which makes `git-new-branch` the only command in the
+package that carries local changes forward, apart from the submodule case below
+-- the command where §4.1 requires it, because a new branch continues the work
+in hand, whereas checking out an existing branch starts from what that branch
+contains.
 
 That is a **behavior change**, because today's code does carry local changes,
 as a side effect of how it gets a cheap clone rather than by intent:
@@ -898,8 +911,8 @@ to.
 worktrees needs it today.  Recorded here for the reason the conversion makes it
 essential: after this change the case is no longer exotic.  Run
 `git-new-branch` from `REPO-branch-feature` and the new worktree is registered
-inside `REPO-branch-feature/.git` (§5.5's last paragraph -- the host is the
-existing clone, not a separate bare repository); when `feature` is merged and
+inside `REPO-branch-feature/.git` -- the host is the existing clone, not a
+separate bare repository (§11); when `feature` is merged and
 deleted upstream, an unfiltered `--remove` would delete the repository that the
 sibling's `.git` file points into, taking out a working tree that may hold
 unpushed work and that the user never named.
@@ -916,7 +929,7 @@ the command a thin wrapper.
 
 ### 6.4 `git-push-to` and `git-pull-from`
 
-Nothing is needed for **correctness**: pulling between two worktrees of one
+Nothing is needed for **correctness**: fetching between two worktrees of one
 repository works (fact 10), and `check_upstream` is about configuration, not
 layout.  Add a test that pushes and pulls between two worktrees, to keep it that
 way.
@@ -1080,13 +1093,25 @@ as well.
   **clone**, the existing check stays as it is: `rm -rf` destroys every ref of
   the clone, so it asks whether any commit reachable from any ref is held by no
   remote-tracking ref and no tag.
-  For a **linked worktree**, removal deletes one ref, so ask about that ref
-  alone, in the repository that hosts the worktree:
-  `git -C HOST rev-list --count "refs/heads/${BRANCH}" --not
-  --exclude="refs/heads/${BRANCH}" --all` must be 0.  A remote-tracking ref
-  counts as holding the commits, which is right: those commits are on the
-  remote.  Verify the `--exclude`-before-`--all` behavior during
-  implementation.
+  For a **linked worktree**, removal deletes the worktree's HEAD and its branch
+  ref, so ask about those alone, in the repository that hosts the worktree:
+
+  ```sh
+  git -C HOST rev-list --count WORKTREE_HEAD "refs/heads/${BRANCH}" \
+    --not --exclude="${BRANCH}" --branches --tags --remotes
+  ```
+
+  must print 0, where WORKTREE_HEAD is `git -C DIRECTORY rev-parse HEAD`, and
+  `"refs/heads/${BRANCH}"` and the `--exclude` are omitted for a detached HEAD.
+  A remote-tracking ref counts as holding the commits, which is right: those
+  commits are on the remote.
+
+  Do not use `--all`.  In a repository with worktrees it includes every
+  worktree's HEAD -- among them the HEAD of the worktree being removed -- so the
+  count is always 0.  Verified: with an unpushed commit on the worktree's
+  branch, the `--all` form printed 0 and the form above printed 1.  Note also
+  that `--exclude` applies only to the next option, and that a pattern for
+  `--branches` omits `refs/heads/`.
 
   The messages should reflect a difference in severity: for a worktree the
   objects survive in the shared store until `gc`, so `git fsck --lost-found`
@@ -1177,9 +1202,7 @@ is an error.
   * "One branch per directory": rewrite the disk-usage disadvantage with the
     §1.1 numbers -- the objects are shared, the working tree and build output are
     not.  The "faster builds" advantage is unchanged, since untracked files are
-    inherited.  Add the second benefit (§1.2): because the branch directories of
-    one repository are related, `git-push-to` fetches from a remote once for the
-    whole group rather than pulling once per directory.
+    inherited.
   * A new subsection on the worktree layout: `.git` is a file, so a tool that
     tests `-d .git` no longer recognizes a branch directory (§4.4); config,
     hooks, and refs are shared; repositories with submodules get a full copy
@@ -1291,17 +1314,22 @@ Add:
 Each step is independently reviewable and leaves the tree working, which matches
 this repository's history of small PRs.
 
+Before step 1, land the terminology sweep of §8 as its own commit.  It is
+documentation only and does not depend on the conversion, so keeping it out of
+step 2 keeps that step's diff about behavior.
+
 1. **remote-functions.sh: the worktree-aware helpers.**
    `require_git`, moved from `git-outgoing` (§5.5), and the cleanup helper of
    §5.6, with tests in tests/test-remote-functions.sh.
 2. **`git-new-branch`: create a worktree.**  §5 in full -- the default mode, the
    `--clean` and `--copy` options (§5.10-§5.12), the §4.3 submodule fallback that
    `--copy` also implements, and the §5.8 refusal -- plus the interim refusal in
-   `git-checkout-branch` (§6.1), plus the README and header changes, plus the
-   tests of §9.  If this commit wants to be smaller, land the default mode and
-   `--copy` first (`--copy` is the existing code, so the two together are the
-   change that must not regress) and `--clean` immediately after; do not ship the
-   default mode without `--copy`, since `--copy` is the escape hatch for anything
+   `git-checkout-branch` (§6.1), plus the README and header changes other than
+   the terminology sweep, plus the tests of §9.  If this commit wants to be
+   smaller, land the default mode and `--copy` first (`--copy` is the existing
+   code, so the two together are the change that must not regress) and
+   `--clean` immediately after; do not ship the default mode without `--copy`,
+   since `--copy` is the escape hatch for anything
    the worktree path handles badly.
 3. **`git-checkout-branch`: create a worktree.**  One `git worktree add` with
    checkout, no copy at all (§6.1); narrows the interim refusal; handles "already
@@ -1347,7 +1375,7 @@ README -- when the series lands.
    pathname-safety problem this package takes seriously; the whole-entry copy
    costs no more than today's code does.
 4. **A shared bare repository** as the worktree host, instead of the existing
-   clone's `.git` (§5.5's last paragraph, §11).  Deferred: it needs a migration
+   clone's `.git` (§11).  Deferred: it needs a migration
    and it redefines what the main working tree is.
 5. **Batched pushes and connection reuse** in `git-push-to`.  Deferred as
    rejected-for-now rather than pending: batching the pushes would break the
