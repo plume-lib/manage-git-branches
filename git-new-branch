@@ -21,10 +21,10 @@
 #    directory, `.git` included, so it is an independent clone that shares
 #    nothing with the current repository.
 #
-# The default mode and `--copy` leave out a nested working tree whose git
-# directory lies outside the new directory, such as an ignored linked worktree
-# in `.claude/worktrees/`, because its copy would share that working tree's
-# HEAD and index; they say which ones they left out.
+# The default mode and `--copy` leave out a worktree of this repository that
+# is nested in the current directory, such as an ignored one in
+# `.claude/worktrees/`, because its copy would share that worktree's HEAD and
+# index; they say which ones they left out.
 #
 # A working tree that has submodules gets `--copy` automatically, because git
 # does not support a submodule in more than one worktree, and `--clean` is
@@ -471,7 +471,7 @@ case "${MODE}" in
         exit 1
       fi
     done
-    remove_borrowed_working_trees "${BRANCH_TMPDIR}"
+    remove_nested_worktrees . "${BRANCH_TMPDIR}"
 
     # 2. Create the worktree.  With `--no-checkout`, git creates ${BRANCHDIR}
     # holding nothing but the `.git` file, rather than writing tracked files

@@ -97,11 +97,12 @@ The commands are:
   `[--force] [--force-uncommitted] [--force-unpushed] [--repository DIR]
   DIRECTORY...`:
   Removes a branch directory, unless the removal would lose work.
-  It removes a worktree with `git worktree remove` and deletes its branch,
-  and it removes anything else with `rm -rf`.  Given a worktree whose
-  directory was already removed with `rm -rf`, it removes what that left
-  behind:  the worktree's registration and its branch, in the repository
-  that `--repository` names (by default, the current directory's).
+  It removes a worktree with `git worktree remove` and deletes its branch, if
+  `git-new-branch` or `git-checkout-branch` created that branch, and it
+  removes anything else with `rm -rf`.  Given a worktree whose directory was
+  already removed with `rm -rf`, it removes what that left behind:  the
+  worktree's registration and its branch, in the repository that
+  `--repository` names (by default, the current directory's).
 * [`git-outgoing`](git-outgoing) `[GIT-LOG-ARGS]`:
   Shows the commits on local branches that have not been pushed.
   Unlike `git log --branches --not --remotes`, it omits a branch whose

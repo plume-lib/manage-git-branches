@@ -162,7 +162,9 @@ branch_cleanup() {
 ## diagnostic, if the add fails; git's own message says why.
 ##
 ## It records, for the traps of `trap_branch_cleanup`, WORKTREE and, if it
-## creates BRANCH, BRANCH and the commit that START-POINT names.  BRANCH is
+## creates BRANCH, BRANCH and the commit that START-POINT names.  A BRANCH
+## that it creates gets `branch.BRANCH.createdForBranchDirectory`, so that
+## `git-remove-branch-directory` deletes it along with the worktree.  BRANCH is
 ## recorded only if it does not exist just before the add, so that the traps
 ## never delete a branch that this command did not create;
 ## `git worktree add -b` creates the branch before it tests the path, and
@@ -217,6 +219,12 @@ add_worktree() {
     echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${add_worktree_dir}" >&2
     exit 1
   fi
+  # `git-remove-branch-directory` deletes a branch only if this mark says
+  # that this package created it for its worktree.  Without the mark, the
+  # branch merely outlives its worktree.
+  if ! git config "branch.${add_worktree_branch}.createdForBranchDirectory" true; then
+    echo "${SCRIPT_NAME}: warning: cannot mark the branch ${add_worktree_branch}, so git-remove-branch-directory will keep it" >&2
+  fi
 }
 
 ## Usage: has_gitlinks [TREE-ISH]
@@ -254,56 +262,57 @@ copy_repository() {
     echo "${SCRIPT_NAME}: ERROR: cannot remove $1/.git/worktrees" >&2
     exit 1
   fi
-  remove_borrowed_working_trees "$1"
+  remove_nested_worktrees . "$1"
 }
 
-## Usage: remove_borrowed_working_trees DIRECTORY
-## Removes from DIRECTORY, a copy just made, each nested working tree whose
-## git directory lies outside DIRECTORY, and says on standard error which ones
-## it removed.  Exits on failure.
+## Usage: nested_worktrees DIRECTORY
+## Prints, one per line, the pathname relative to DIRECTORY of each registered
+## worktree of the repository that contains DIRECTORY, whether its directory
+## exists or not, that lies strictly within DIRECTORY.  DIRECTORY must be a
+## physical pathname, as `physical_path` prints, because git registers a
+## worktree under one.  Returns 1 if git cannot list the worktrees.
 ##
-## Such a working tree, typically an ignored linked worktree such as
-## `.claude/worktrees/NAME`, has a `.git` file, or a symbolic link, that the
-## copy keeps unchanged, so the copy names the *same* git directory as the
-## original:  a commit or a checkout in the copy would move the original's
-## HEAD and rewrite its index.  A nested working tree whose git directory
-## does lie inside DIRECTORY -- a submodule of a copied repository, or a
-## nested clone, whose `.git` is a directory -- is independent, and is kept.
-## A `.git` that names no usable git directory is removed too.  Git
-## disregards a `.git` symbolic link whose target is missing, and searches the
-## parent directories instead, so a git directory counts only if git also
-## reports the nested directory as the top level of its working tree.
+## Asking git, rather than searching DIRECTORY for nested `.git` files, costs
+## nothing in a directory full of build output.  It finds the worktrees of
+## this repository only, which is where a nested one comes from:  a tool such
+## as Claude Code adds a worktree in an ignored directory such as
+## `.claude/worktrees/NAME`.  A pathname that contains a newline cannot be
+## represented in `git worktree list --porcelain`, and one that does is
+## pathological.
+nested_worktrees() {
+  nested_worktrees_list="$(git -C "$1" worktree list --porcelain)" || return 1
+  printf '%s\n' "${nested_worktrees_list}" | sed -n 's/^worktree //p' \
+    | while IFS= read -r nested_worktrees_dir; do
+      case "${nested_worktrees_dir}" in
+        "$1"/*) printf '%s\n' "${nested_worktrees_dir#"$1"/}" ;;
+      esac
+    done
+}
+
+## Usage: remove_nested_worktrees SOURCE COPY
+## Removes from COPY, which was just copied from the top level of the working
+## tree SOURCE, the copy of each worktree of SOURCE's repository that is
+## nested in SOURCE, and says on standard error which ones it removed.  Exits
+## on failure.
 ##
-## The nested `.git` entries are all found before any is removed, so that
-## `find` does not traverse a directory that is being deleted.  `find`'s
-## output is one pathname per line, so a line is acted on only if it names an
-## existing `.git` entry within DIRECTORY; a pathname that contains a newline
-## splits into lines that are not, and is left alone.
-remove_borrowed_working_trees() {
-  if ! remove_borrowed_top="$(physical_path "$1")" \
-    || ! remove_borrowed_list="$(find "$1" -name .git -type d -prune \
-      -o -name .git -print)"; then
-    echo "${SCRIPT_NAME}: ERROR: cannot search $1 for nested working trees" >&2
+## A worktree's `.git` is a file that names its administrative directory, and
+## the copy keeps that file unchanged, so the copy of a nested worktree names
+## the *same* administrative directory as the original:  a commit or a
+## checkout in the copy would move the original's HEAD and rewrite its index.
+remove_nested_worktrees() {
+  if ! remove_nested_source="$(physical_path "$1")" \
+    || ! remove_nested_list="$(nested_worktrees "${remove_nested_source}")"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot list the worktrees of $1" >&2
     exit 1
   fi
-  printf '%s\n' "${remove_borrowed_list}" | while IFS= read -r remove_borrowed_git; do
-    case "${remove_borrowed_git}" in "$1"/*/.git) ;; *) continue ;; esac
-    if [ ! -e "${remove_borrowed_git}" ] && [ ! -L "${remove_borrowed_git}" ]; then
+  printf '%s\n' "${remove_nested_list}" | while IFS= read -r remove_nested_rel; do
+    if [ -z "${remove_nested_rel}" ] \
+      || { [ ! -e "$2/${remove_nested_rel}" ] && [ ! -L "$2/${remove_nested_rel}" ]; }; then
       continue
     fi
-    remove_borrowed_dir="${remove_borrowed_git%/.git}"
-    if remove_borrowed_gitdir="$(git -C "${remove_borrowed_dir}" rev-parse \
-      --absolute-git-dir 2> /dev/null)" \
-      && remove_borrowed_gitdir="$(physical_path "${remove_borrowed_gitdir}" 2> /dev/null)" \
-      && remove_borrowed_toplevel="$(git -C "${remove_borrowed_dir}" rev-parse \
-        --show-toplevel 2> /dev/null)" \
-      && [ "$(physical_path "${remove_borrowed_toplevel}" 2> /dev/null)" \
-        = "$(physical_path "${remove_borrowed_dir}" 2> /dev/null)" ]; then
-      case "${remove_borrowed_gitdir}/" in "${remove_borrowed_top}"/*) continue ;; esac
-    fi
-    echo "${SCRIPT_NAME}: not copying ${remove_borrowed_dir#"$1"/}, a working tree of a repository outside the copy" >&2
-    if ! rm -rf -- "${remove_borrowed_dir}"; then
-      echo "${SCRIPT_NAME}: ERROR: cannot remove ${remove_borrowed_dir}" >&2
+    echo "${SCRIPT_NAME}: not copying ${remove_nested_rel}, which is a worktree of its own" >&2
+    if ! rm -rf -- "${2:?}/${remove_nested_rel:?}"; then
+      echo "${SCRIPT_NAME}: ERROR: cannot remove $2/${remove_nested_rel}" >&2
       exit 1
     fi
   done || exit 1

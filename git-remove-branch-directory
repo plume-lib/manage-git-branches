@@ -15,7 +15,9 @@
 #  * A linked worktree, such as `git-new-branch` and `git-checkout-branch`
 #    make.  It is removed with `git worktree remove --force`, and its branch
 #    is deleted from the repository that it shares, so that the branch name
-#    can be used again.
+#    can be used again, if one of those commands created the branch and no
+#    other worktree has it checked out.  Any other branch is kept, and a note
+#    says so.
 #  * The top level of a clone, such as `git-new-branch --copy` makes.  It is
 #    removed with `rm -rf`, which destroys the clone's objects and refs along
 #    with its files, so nothing that `rm -rf` would lose is recoverable
@@ -66,6 +68,11 @@
 #  * a linked worktree that is locked, whether or not its directory exists,
 #    since `git worktree lock` is the user's own statement that it must not
 #    be removed;
+#  * a directory that contains another worktree of its repository, which must
+#    be removed first, by its own name, so that it is checked;
+#  * a copy of a linked worktree, made with `cp -R`, whose `.git` names the
+#    administrative directory of a worktree that still exists, since removing
+#    that administrative directory would break that worktree;
 #  * the current directory, or an ancestor of it; and
 #  * any other working tree whose `.git` is a file, such as a submodule's
 #    working tree, which is `git submodule deinit`'s to remove.
@@ -87,7 +94,8 @@
 #
 # The exit status is 0 if every DIRECTORY was removed and 1 if any was not; a
 # refusal for one DIRECTORY does not stop the others, since a caller passes a
-# whole list.  This command says nothing when it succeeds.
+# whole list.  This command says nothing when it succeeds, except to note a
+# branch that it kept.
 #
 # This command requires git 2.31 or later.
 #
@@ -203,15 +211,6 @@ fi
 # For `git rev-parse --path-format=absolute`.
 require_git 31
 
-# Prints the absolute pathname of directory $1, with symbolic links resolved.
-# `realpath` would be simpler, but POSIX added it only in 2024 and some
-# systems still lack it, whereas `cd` and `pwd -P` are portable.  `cd` writes
-# its own diagnostic on failure; discard it, because the callers below write a
-# better one.
-absolute_path() {
-  (CDPATH='' cd -- "$1" && pwd -P) 2> /dev/null
-}
-
 # Prints the number of lines of $1, which is 0 for the empty string.
 line_count() {
   printf '%s' "$1" | grep -c '' || true
@@ -254,38 +253,44 @@ live_linked_worktrees() {
     )
 }
 
+# Prints the absolute pathname of the `.git` that the administrative
+# directory $1 names in its `gitdir` file, which is the mapping that git
+# itself follows from an administrative directory to its worktree.  Returns 1
+# if $1 has no `gitdir` file, or if the name cannot be resolved.
+#
+# With `worktree.useRelativePaths`, that name is relative to the
+# administrative directory.  The worktree may be missing, so resolve its
+# parent, which may still exist; if that fails, there is no answer.
+worktree_admin_target() {
+  if [ ! -f "$1/gitdir" ]; then
+    return 1
+  fi
+  worktree_admin_target_name="$(cat -- "$1/gitdir")" || return 1
+  case "${worktree_admin_target_name}" in
+    /*) ;;
+    *)
+      worktree_admin_target_wt="$(dirname -- "${worktree_admin_target_name}")"
+      if ! worktree_admin_target_parent="$(physical_path \
+        "$1/$(dirname -- "${worktree_admin_target_wt}")" 2> /dev/null)" \
+        || [ -z "${worktree_admin_target_parent}" ]; then
+        return 1
+      fi
+      worktree_admin_target_name="${worktree_admin_target_parent%/}/$(basename -- "${worktree_admin_target_wt}")/.git"
+      ;;
+  esac
+  printf '%s\n' "${worktree_admin_target_name}"
+}
+
 # Prints the administrative directory of the worktree at the absolute
 # pathname $2, within the common git directory $1, or nothing if no
 # registration names that worktree.
 #
 # The administrative directory cannot be derived from the worktree's
 # basename, which differs from it after a `git worktree move`, and
-# `git worktree list` does not name it.  Each one holds a `gitdir` file that
-# names its worktree's `.git`, which is the mapping that git itself follows.
-#
-# With `worktree.useRelativePaths`, that name is relative to the
-# administrative directory.  The worktree is missing, so resolve its parent,
-# which may still exist; if that fails, the entry does not match.
+# `git worktree list` does not name it.
 worktree_admin_dir() {
-  for worktree_admin_gitdir in "$1"/worktrees/*/gitdir; do
-    if [ ! -f "${worktree_admin_gitdir}" ]; then
-      continue
-    fi
-    worktree_admin_entry="$(dirname -- "${worktree_admin_gitdir}")"
-    worktree_admin_target="$(cat -- "${worktree_admin_gitdir}")"
-    case "${worktree_admin_target}" in
-      /*) ;;
-      *)
-        worktree_admin_wt="$(dirname -- "${worktree_admin_target}")"
-        if ! worktree_admin_parent="$(absolute_path \
-          "${worktree_admin_entry}/$(dirname -- "${worktree_admin_wt}")")" \
-          || [ -z "${worktree_admin_parent}" ]; then
-          continue
-        fi
-        worktree_admin_target="${worktree_admin_parent%/}/$(basename -- "${worktree_admin_wt}")/.git"
-        ;;
-    esac
-    if [ "${worktree_admin_target}" = "$2/.git" ]; then
+  for worktree_admin_entry in "$1"/worktrees/*; do
+    if [ "$(worktree_admin_target "${worktree_admin_entry}")" = "$2/.git" ]; then
       printf '%s\n' "${worktree_admin_entry}"
       return 0
     fi
@@ -351,16 +356,72 @@ check_submodules_unpushed() {
     remove_refusals=1
     return
   fi
-  check_submodules_total="$(printf '%s\n' "${check_submodules_counts}" \
+  report_submodule_counts "$1" "${check_submodules_counts}"
+}
+
+# Asks each submodule repository under $1/modules, where $1 is the
+# administrative directory of the worktree $2, which no longer exists, the
+# question that `check_submodules_unpushed` asks.  Sets remove_refusals to 1
+# if the removal must not proceed.
+#
+# Those repositories are all that is left of the worktree's submodules, and
+# removing the administrative directory takes them.  A repository is a
+# directory that holds `HEAD` and `objects`; `logs/HEAD` is not one.  A
+# nested submodule's repository lies within its superproject's, so `find`
+# reaches it too.
+check_module_repositories() {
+  if [ ! -d "$1/modules" ]; then
+    return 0
+  fi
+  if ! check_modules_heads="$(find "$1/modules" -type f -name HEAD)"; then
+    echo "${SCRIPT_NAME}: refusing to clean up after $2: cannot tell whether its submodules hold commits that no other ref holds" >&2
+    remove_refusals=1
+    return
+  fi
+  # The loop runs in a subshell, so it reports a failure through its output,
+  # as a line "-", which no line of counts can be.
+  check_modules_counts="$(printf '%s\n' "${check_modules_heads}" \
+    | while IFS= read -r check_modules_head; do
+      check_modules_repo="$(dirname -- "${check_modules_head}")"
+      if [ -z "${check_modules_head}" ] || [ ! -d "${check_modules_repo}/objects" ]; then
+        continue
+      fi
+      # The repository's `core.worktree` names the submodule's working tree,
+      # which is gone, and git refuses to run where it cannot `cd` to that.
+      # `--work-tree` overrides it with a directory that exists; `rev-list`
+      # never reads a working tree.
+      if ! check_modules_count="$(git --git-dir="${check_modules_repo}" \
+        --work-tree="${check_modules_repo}" rev-list \
+        --count --all --not --remotes --tags 2> /dev/null)" \
+        || [ -z "${check_modules_count}" ]; then
+        echo '-'
+        exit
+      fi
+      printf '%s %s\n' "${check_modules_count}" "${check_modules_repo#"$1"/modules/}"
+    done)"
+  if printf '%s\n' "${check_modules_counts}" | grep -q -x -e '-'; then
+    echo "${SCRIPT_NAME}: refusing to clean up after $2: cannot tell whether its submodules hold commits that no other ref holds" >&2
+    remove_refusals=1
+    return
+  fi
+  report_submodule_counts "$2" "${check_modules_counts}"
+}
+
+# Reports the counts $2 of commits that no remote-tracking ref and no tag
+# holds, one line per submodule, a count and then the submodule's name, for
+# the directory $1.  Sets remove_refusals to 1 if the removal must not
+# proceed.
+report_submodule_counts() {
+  report_submodule_total="$(printf '%s\n' "$2" \
     | awk '{ n += $1 } END { print n + 0 }')"
-  check_submodules_paths="$(printf '%s\n' "${check_submodules_counts}" \
+  report_submodule_paths="$(printf '%s\n' "$2" \
     | awk '$1 > 0 { sub(/^[0-9]+ /, ""); printf "%s%s", sep, $0; sep = ", " }')"
-  if [ "${check_submodules_total}" -gt 0 ]; then
+  if [ "${report_submodule_total}" -gt 0 ]; then
     if [ "${force_unpushed}" -eq 0 ]; then
-      echo "${SCRIPT_NAME}: refusing to remove $1: ${check_submodules_total} commit(s) in submodule(s) ${check_submodules_paths} are on no remote-tracking ref or tag; re-run with --force-unpushed" >&2
+      echo "${SCRIPT_NAME}: refusing to remove $1: ${report_submodule_total} commit(s) in submodule(s) ${report_submodule_paths} are on no remote-tracking ref or tag; re-run with --force-unpushed" >&2
       remove_refusals=1
     else
-      echo "${SCRIPT_NAME}: $1: --force-unpushed: deleting ${check_submodules_total} commit(s) in submodule(s) ${check_submodules_paths} that are on no remote-tracking ref or tag" >&2
+      echo "${SCRIPT_NAME}: $1: --force-unpushed: deleting ${report_submodule_total} commit(s) in submodule(s) ${report_submodule_paths} that are on no remote-tracking ref or tag" >&2
     fi
   fi
 }
@@ -369,6 +430,14 @@ check_submodules_unpushed() {
 # the repository whose common git directory is $1, if the branch still names
 # the commit $3.  Prints a diagnostic and returns 1 if it cannot.
 #
+# Only a branch that `git-new-branch` or `git-checkout-branch` created for its
+# worktree, as `branch.$2.createdForBranchDirectory` records, is deleted.
+# Any other branch -- `main` in a worktree that the user added by hand, say --
+# predates the worktree and outlives it, with its configuration; so does a
+# branch that another worktree has checked out, which `update-ref`, unlike
+# `git branch --delete`, would not refuse to delete.  Either is kept, and a
+# note says so.
+#
 # `update-ref` rather than `git branch --delete`, because it takes a full
 # refname, so a branch name that begins with "-" cannot be read as an option.
 # Unlike `git branch --delete`, it leaves the branch's configuration, such as
@@ -376,6 +445,16 @@ check_submodules_unpushed() {
 # too.  The section is absent for a branch that has no configuration.
 delete_worktree_branch() {
   if [ -z "$2" ]; then
+    return 0
+  fi
+  if [ "$(git --git-dir="$1" config --bool \
+    "branch.$2.createdForBranchDirectory")" != 'true' ]; then
+    echo "${SCRIPT_NAME}: note: kept the branch $2, which git-new-branch and git-checkout-branch did not create" >&2
+    return 0
+  fi
+  if git --git-dir="$1" worktree list --porcelain \
+    | grep -q -x -F "branch refs/heads/$2"; then
+    echo "${SCRIPT_NAME}: note: kept the branch $2, which another worktree has checked out" >&2
     return 0
   fi
   if ! git --git-dir="$1" update-ref -d "refs/heads/$2" "$3"; then
@@ -405,7 +484,7 @@ remove_missing_worktree() {
   # so make $1 one.  Its parent may still exist even though $1 does not.
   missing_parent="$(dirname -- "$1")"
   missing_base="$(basename -- "$1")"
-  if missing_parent_real="$(absolute_path "${missing_parent}")" \
+  if missing_parent_real="$(physical_path "${missing_parent}" 2> /dev/null)" \
     && [ -n "${missing_parent_real}" ]; then
     missing_dir="${missing_parent_real%/}/${missing_base}"
   else
@@ -459,6 +538,7 @@ remove_missing_worktree() {
   fi
   check_worktree_unpushed "${missing_common}" "${missing_head}" \
     "${missing_branch}" "${missing_dir}"
+  check_module_repositories "${missing_admin}" "${missing_dir}"
   if [ "${remove_refusals}" -ne 0 ]; then
     return 1
   fi
@@ -484,7 +564,7 @@ remove_branch_directory() {
     echo "${SCRIPT_NAME}: not a directory: $1" >&2
     return 1
   fi
-  if ! remove_dir="$(absolute_path "$1")"; then
+  if ! remove_dir="$(physical_path "$1" 2> /dev/null)"; then
     echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
     return 1
   fi
@@ -510,7 +590,7 @@ remove_branch_directory() {
   # files with it.
   remove_toplevel="$(git -C "${remove_dir}" rev-parse --show-toplevel 2> /dev/null)"
   if [ -n "${remove_toplevel}" ]; then
-    remove_toplevel="$(absolute_path "${remove_toplevel}")"
+    remove_toplevel="$(physical_path "${remove_toplevel}" 2> /dev/null)"
   fi
   if [ "${remove_toplevel}" = "${remove_dir}" ]; then
     remove_kind='working-tree'
@@ -603,6 +683,48 @@ remove_branch_directory() {
     if [ -f "${remove_gitdir}/locked" ]; then
       remove_lock_reason="$(cat -- "${remove_gitdir}/locked" 2> /dev/null)"
       echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: it is locked${remove_lock_reason:+ (${remove_lock_reason})}; run \`git worktree unlock\` first" >&2
+      return 1
+    fi
+    # The administrative directory that the `.git` file names belongs to the
+    # worktree that its `gitdir` file names.  When that is some other
+    # directory, this one is either a worktree that was moved with `mv` and
+    # not repaired, whose old directory is gone, or a copy of a worktree, made
+    # with `cp -R`, whose original still exists.  Removing a copy's
+    # administrative directory and branch would break the original, so a copy
+    # is refused; a moved worktree's administrative directory is its own.
+    remove_registered="$(worktree_admin_target "${remove_gitdir}")"
+    remove_moved=0
+    if [ -z "${remove_registered}" ]; then
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot tell which worktree its administrative directory, ${remove_gitdir}, belongs to" >&2
+      return 1
+    elif [ "${remove_registered}" != "${remove_dir}/.git" ]; then
+      if [ -e "${remove_registered}" ] || [ -L "${remove_registered}" ]; then
+        echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: its .git names the administrative directory of the worktree ${remove_registered%/.git}, so it is a copy of that worktree, which removing it would break; inspect it and remove it with \`rm -rf\`" >&2
+        return 1
+      fi
+      remove_moved=1
+    fi
+  fi
+
+  if [ "${remove_kind}" = 'linked-worktree' ] \
+    || [ "${remove_kind}" = 'within-working-tree' ]; then
+    # A worktree nested in this directory, such as one that a tool added in
+    # `.claude/worktrees/NAME`, would go with it unchecked, leaving its
+    # registration and its branch behind.  It is removed by its own name,
+    # which checks it.  This refusal cannot be waived.  The main working tree
+    # is not asked, because the refusal below covers every linked worktree.
+    if ! remove_nested="$(nested_worktrees "${remove_dir}")"; then
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot tell whether it contains other worktrees" >&2
+      return 1
+    fi
+    remove_nested_live="$(printf '%s\n' "${remove_nested}" \
+      | while IFS= read -r remove_nested_rel; do
+        if [ -n "${remove_nested_rel}" ] && [ -d "${remove_dir}/${remove_nested_rel}" ]; then
+          printf '%s\n' "${remove_dir}/${remove_nested_rel}"
+        fi
+      done)"
+    if [ -n "${remove_nested_live}" ]; then
+      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: it contains the worktree(s) $(printf '%s\n' "${remove_nested_live}" | awk '{ printf "%s%s", sep, $0; sep = ", " }'), which must be removed first" >&2
       return 1
     fi
   fi
@@ -709,21 +831,28 @@ remove_branch_directory() {
   fi
 
   if [ "${remove_kind}" = 'linked-worktree' ]; then
+    # Git cannot remove a worktree that was moved, whose registration names
+    # its old path, nor one that holds submodules, which git never removes.
+    # Remove those directly:  the directory, and the one administrative
+    # directory that is its own, rather than pruning.  That administrative
+    # directory holds the submodules' repositories, which
+    # `check_submodules_unpushed` has asked about.  Every other worktree is
+    # removed by git, and a failure is reported rather than overridden.
+    #
     # `--force`, because git refuses to remove a worktree that holds any
     # modification, including the ignored build output that these
     # directories are full of; the checks above have decided what is safe.
-    # If git cannot remove it -- its registration names some other path,
-    # say, because it was moved with `mv`, or it holds submodules, which git
-    # never removes -- remove the directory and the one administrative
-    # directory that is its own, rather than pruning.  That administrative
-    # directory holds the submodules' repositories, which
-    # `check_submodules_unpushed` has asked about.
-    if ! git --git-dir="${remove_common}" worktree remove --force \
-      "${remove_dir}" > /dev/null 2>&1; then
+    # shellcheck disable=SC2119 # has_gitlinks asks about the index.
+    if [ "${remove_moved}" -eq 1 ] || [ -d "${remove_gitdir}/modules" ] \
+      || (cd -- "${remove_dir}" && has_gitlinks); then
       if ! rm -rf -- "${remove_dir}" || ! rm -rf -- "${remove_gitdir}"; then
         echo "${SCRIPT_NAME}: cannot remove: ${remove_dir}" >&2
         return 1
       fi
+    elif ! git --git-dir="${remove_common}" worktree remove --force \
+      "${remove_dir}" > /dev/null; then
+      echo "${SCRIPT_NAME}: cannot remove: ${remove_dir}" >&2
+      return 1
     fi
     delete_worktree_branch "${remove_common}" "${remove_branch}" "${remove_head}"
     return

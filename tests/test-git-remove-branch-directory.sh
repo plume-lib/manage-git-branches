@@ -381,6 +381,13 @@ fi
 ## Linked worktrees.
 ###########################################################################
 
+## Usage: mark_created BRANCH
+## Marks BRANCH in ${wthost}'s repository as `add_worktree` marks a branch that
+## it creates, so that `git-remove-branch-directory` deletes it.
+mark_created() {
+  git -C "${wthost}" config "branch.$1.createdForBranchDirectory" true
+}
+
 ## Usage: check_unregistered DESCRIPTION HOST DIRECTORY BRANCH
 ## Checks that the repository of the working tree HOST registers no worktree
 ## at DIRECTORY, keeps no administrative directory for it, and has no branch
@@ -415,6 +422,7 @@ check_unregistered() {
 # which `git worktree remove` would refuse without git's own `--force`.
 wthost="$(make_clone wthost)"
 git -C "${wthost}" worktree add -q -b wtgone "${work}/myrepo-branch-wtgone"
+mark_created wtgone
 git -C "${wthost}" config branch.wtgone.remote origin
 git -C "${wthost}" config branch.wtgone.merge refs/heads/wtgone
 echo 'build output' > "${work}/myrepo-branch-wtgone/output.o"
@@ -430,10 +438,12 @@ fi
 # It refuses for an unpushed commit on that branch, and not for one on another
 # branch of the repository, which the removal does not touch.
 git -C "${wthost}" worktree add -q -b wtmine "${work}/myrepo-branch-wtmine"
+mark_created wtmine
 echo 'mine' > "${work}/myrepo-branch-wtmine/mine.txt"
 git -C "${work}/myrepo-branch-wtmine" add mine.txt
 git -C "${work}/myrepo-branch-wtmine" commit -q -m 'An unpushed commit on wtmine'
 git -C "${wthost}" worktree add -q -b wtother "${work}/myrepo-branch-wtother"
+mark_created wtother
 add_unpushed_commit "${wthost}"
 run_command 'a linked worktree with an unpushed commit' 1 \
   "${work}/myrepo-branch-wtmine"
@@ -458,6 +468,7 @@ fi
 
 # Uncommitted changes in a linked worktree are refused, as in a clone.
 git -C "${wthost}" worktree add -q -b wtdirty "${work}/myrepo-branch-wtdirty"
+mark_created wtdirty
 echo 'modified' >> "${work}/myrepo-branch-wtdirty/file.txt"
 run_command 'a linked worktree with uncommitted changes' 1 \
   "${work}/myrepo-branch-wtdirty"
@@ -473,6 +484,7 @@ check_gone 'a linked worktree with uncommitted changes, waived' \
 # reason is reported.  `git worktree remove --force` refuses it too, and the
 # fallback must not then remove it anyway.
 git -C "${wthost}" worktree add -q -b wtlocked "${work}/myrepo-branch-wtlocked"
+mark_created wtlocked
 git -C "${wthost}" worktree lock --reason 'on a USB drive' \
   "${work}/myrepo-branch-wtlocked"
 run_command 'a locked linked worktree' 1 --force "${work}/myrepo-branch-wtlocked"
@@ -490,6 +502,7 @@ check_unregistered 'an unlocked linked worktree' "${wthost}" \
 # where its registration says.  `git worktree remove` cannot remove it, so the
 # directory and its own administrative directory are removed instead.
 git -C "${wthost}" worktree add -q -b wtmoved "${work}/myrepo-branch-wtmoved"
+mark_created wtmoved
 mv "${work}/myrepo-branch-wtmoved" "${work}/myrepo-branch-wtmoved-elsewhere"
 run_command 'a moved linked worktree' 0 "${work}/myrepo-branch-wtmoved-elsewhere"
 check_gone 'a moved linked worktree' "${work}/myrepo-branch-wtmoved-elsewhere"
@@ -503,6 +516,7 @@ check_unregistered 'a moved linked worktree' "${wthost}" \
 # therefore refused, and the refusal is waived by --force-unpushed.
 wtsub="${work}/myrepo-branch-wtsub"
 git -C "${wthost}" worktree add -q -b wtsub "${wtsub}"
+mark_created wtsub
 git -C "${wtsub}" -c protocol.file.allow=always submodule add -q "${remote}" sub
 git -C "${wtsub}" commit -q -m 'Add a submodule'
 git -C "${wtsub}" push -q origin wtsub
@@ -520,6 +534,7 @@ check_unregistered 'a submodule with an unpushed commit, forced' "${wthost}" \
 # A submodule that holds nothing at risk does not prevent the removal.
 wtsubclean="${work}/myrepo-branch-wtsubclean"
 git -C "${wthost}" worktree add -q -b wtsubclean "${wtsubclean}"
+mark_created wtsubclean
 git -C "${wtsubclean}" -c protocol.file.allow=always submodule add -q \
   "${remote}" sub
 git -C "${wtsubclean}" commit -q -m 'Add a submodule'
@@ -529,16 +544,105 @@ check_gone 'a submodule with nothing at risk' "${wtsubclean}"
 check_unregistered 'a submodule with nothing at risk' "${wthost}" \
   "${wtsubclean}" wtsubclean
 
+# A copy of a linked worktree, made with `cp -Rp`, has a `.git` that names the
+# original's administrative directory.  Removing that administrative
+# directory and the branch would break the original, so the copy is refused,
+# and the original keeps working.
+git -C "${wthost}" worktree add -q -b wtoriginal "${work}/myrepo-branch-wtoriginal"
+mark_created wtoriginal
+cp -Rp "${work}/myrepo-branch-wtoriginal" "${work}/myrepo-branch-wtcopy"
+run_command 'a copy of a linked worktree' 1 --force "${work}/myrepo-branch-wtcopy"
+check_present 'a copy of a linked worktree' "${work}/myrepo-branch-wtcopy"
+check_message 'a copy of a linked worktree' "is a copy of that worktree"
+if [ "$(git -C "${work}/myrepo-branch-wtoriginal" symbolic-ref HEAD 2> /dev/null)" \
+  != 'refs/heads/wtoriginal' ]; then
+  fail "a copy of a linked worktree: the original no longer works"
+fi
+
+# A linked worktree that contains another worktree, as a tool that adds
+# worktrees in `.claude/worktrees` makes, is refused, even with --force, so
+# that the nested one is not destroyed unchecked.  Once that is removed by
+# its own name, the outer one can be removed.
+git -C "${wthost}" worktree add -q -b wtouter "${work}/myrepo-branch-wtouter"
+mark_created wtouter
+git -C "${wthost}" worktree add -q -b wtinner \
+  "${work}/myrepo-branch-wtouter/.claude/worktrees/inner"
+mark_created wtinner
+run_command 'a linked worktree that contains a worktree' 1 --force \
+  "${work}/myrepo-branch-wtouter"
+check_present 'a linked worktree that contains a worktree' \
+  "${work}/myrepo-branch-wtouter/.claude/worktrees/inner"
+check_message 'a linked worktree that contains a worktree' \
+  "it contains the worktree(s) ${work}/myrepo-branch-wtouter/.claude/worktrees/inner"
+run_command 'a nested worktree' 0 \
+  "${work}/myrepo-branch-wtouter/.claude/worktrees/inner"
+run_command 'a linked worktree whose nested worktree is gone' 0 \
+  "${work}/myrepo-branch-wtouter"
+check_gone 'a linked worktree whose nested worktree is gone' \
+  "${work}/myrepo-branch-wtouter"
+
+# A branch that git-new-branch and git-checkout-branch did not create, such
+# as `main` in a worktree that the user added by hand, outlives the worktree,
+# with its configuration, and a note says so.
+git -C "${wthost}" worktree add -q -b wtunmarked "${work}/myrepo-branch-wtunmarked"
+git -C "${wthost}" config branch.wtunmarked.remote origin
+run_command 'a branch that this package did not create' 0 \
+  "${work}/myrepo-branch-wtunmarked"
+check_gone 'a branch that this package did not create' \
+  "${work}/myrepo-branch-wtunmarked"
+check_message 'a branch that this package did not create' \
+  "kept the branch wtunmarked"
+if ! git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtunmarked > /dev/null \
+  || [ "$(git -C "${wthost}" config branch.wtunmarked.remote)" != 'origin' ]; then
+  fail "a branch that this package did not create: the branch or its configuration is gone"
+fi
+
+# A branch that another worktree also has checked out, which only
+# `git worktree add --force` allows, is kept, because deleting it would leave
+# that worktree on a branch that does not exist.
+git -C "${wthost}" worktree add -q -b wtshared "${work}/myrepo-branch-wtshared1"
+mark_created wtshared
+git -C "${wthost}" worktree add -q --force "${work}/myrepo-branch-wtshared2" wtshared
+run_command 'a branch that another worktree has checked out' 0 \
+  "${work}/myrepo-branch-wtshared1"
+check_message 'a branch that another worktree has checked out' \
+  "kept the branch wtshared, which another worktree has checked out"
+if ! git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtshared > /dev/null; then
+  fail "a branch that another worktree has checked out: the branch is gone"
+fi
+
+# A worktree with a submodule, removed with `rm -rf`, leaves the submodule's
+# repository in its administrative directory, and the cleanup would take it,
+# so a commit that only the submodule holds is refused there too.
+wtsubgone="${work}/myrepo-branch-wtsubgone"
+git -C "${wthost}" worktree add -q -b wtsubgone "${wtsubgone}"
+mark_created wtsubgone
+git -C "${wtsubgone}" -c protocol.file.allow=always submodule add -q "${remote}" sub
+git -C "${wtsubgone}" commit -q -m 'Add a submodule'
+git -C "${wtsubgone}" push -q origin wtsubgone
+add_unpushed_commit "${wtsubgone}/sub"
+rm -rf "${wtsubgone}"
+run_command 'a removed worktree whose submodule has an unpushed commit' 1 \
+  --repository "${wthost}" "${wtsubgone}"
+check_message 'a removed worktree whose submodule has an unpushed commit' \
+  "1 commit(s) in submodule(s) sub are on no remote-tracking ref or tag"
+run_command 'a removed worktree whose submodule has an unpushed commit, forced' 0 \
+  --force-unpushed --repository "${wthost}" "${wtsubgone}"
+check_unregistered 'a removed worktree whose submodule has an unpushed commit, forced' \
+  "${wthost}" "${wtsubgone}" wtsubgone
+
 # A linked worktree that is already gone, removed with `rm -rf`, leaves its
 # registration and its branch, which are cleaned up given the repository.  A
 # worktree elsewhere in the repository that was moved with `mv`, and not
 # repaired, is left alone, which is what distinguishes this from
 # `git worktree prune`.
 git -C "${wthost}" worktree add -q -b wtrmrf "${work}/myrepo-branch-wtrmrf"
+mark_created wtrmrf
 git -C "${wthost}" config branch.wtrmrf.remote origin
 git -C "${wthost}" config branch.wtrmrf.merge refs/heads/wtrmrf
 rm -rf "${work}/myrepo-branch-wtrmrf"
 git -C "${wthost}" worktree add -q -b wtbystander "${work}/myrepo-branch-wtbystander"
+mark_created wtbystander
 mv "${work}/myrepo-branch-wtbystander" "${work}/myrepo-branch-wtbystander-moved"
 run_command 'a removed linked worktree, from the repository' 0 \
   --repository "${wthost}" "${work}/myrepo-branch-wtrmrf"
@@ -565,6 +669,7 @@ fi
 # directory.  `--relative-paths` needs git 2.48, so skip this test otherwise.
 if git -C "${wthost}" worktree add -q --relative-paths -b wtrelative \
   "${work}/myrepo-branch-wtrelative" 2> /dev/null; then
+  mark_created wtrelative
   case "$(cat -- "$(git -C "${work}/myrepo-branch-wtrelative" rev-parse \
     --absolute-git-dir)/gitdir")" in
     /*) fail "a removed linked worktree with relative paths: its gitdir file is absolute" ;;
@@ -580,6 +685,7 @@ fi
 # registration, which awk's `-v` would not do, because it reads a backslash
 # as an escape.
 git -C "${wthost}" worktree add -q -b wtbackslash "${work}/myrepo-branch-wt\\back"
+mark_created wtbackslash
 rm -rf "${work}/myrepo-branch-wt\\back"
 run_command 'a removed linked worktree with a backslash' 0 \
   --repository "${wthost}" "${work}/myrepo-branch-wt\\back"
@@ -589,6 +695,7 @@ check_unregistered 'a removed linked worktree with a backslash' \
 # A worktree whose administrative directory is gone is refused, even with
 # --force, because git can no longer say what the directory holds.
 git -C "${wthost}" worktree add -q -b wtnoadmin "${work}/myrepo-branch-wtnoadmin"
+mark_created wtnoadmin
 rm -rf "$(git -C "${work}/myrepo-branch-wtnoadmin" rev-parse --absolute-git-dir)"
 run_command 'a worktree without its administrative directory' 1 --force \
   "${work}/myrepo-branch-wtnoadmin"
@@ -600,6 +707,7 @@ check_message 'a worktree without its administrative directory' \
 # A worktree on a branch that has no commit yet is refused, with a message
 # that names the branch.
 git -C "${wthost}" worktree add -q -b wtunborn "${work}/myrepo-branch-wtunborn"
+mark_created wtunborn
 git -C "${work}/myrepo-branch-wtunborn" checkout -q --orphan wtorphan
 run_command 'a worktree on an unborn branch' 1 --force \
   "${work}/myrepo-branch-wtunborn"
@@ -610,6 +718,7 @@ check_message 'a worktree on an unborn branch' \
 # The repository defaults to the current directory, when that is a working
 # tree.
 git -C "${wthost}" worktree add -q -b wtrmrf2 "${work}/myrepo-branch-wtrmrf2"
+mark_created wtrmrf2
 rm -rf "${work}/myrepo-branch-wtrmrf2"
 out="$(cd "${wthost}" && "${COMMAND}" "${work}/myrepo-branch-wtrmrf2" 2>&1)" \
   || fail "a removed linked worktree, from the current directory: ${out}"
@@ -620,6 +729,7 @@ fi
 # A removed linked worktree whose branch holds unpushed work is refused, so
 # that the branch survives.
 git -C "${wthost}" worktree add -q -b wtrmrfwork "${work}/myrepo-branch-wtrmrfwork"
+mark_created wtrmrfwork
 git -C "${work}/myrepo-branch-wtrmrfwork" commit -q --allow-empty -m 'Unpushed'
 rm -rf "${work}/myrepo-branch-wtrmrfwork"
 run_command 'a removed linked worktree with an unpushed commit' 1 \
@@ -633,6 +743,7 @@ fi
 # A locked linked worktree whose directory is gone may be on removable media
 # that is not mounted, so it is refused, even with `--force`.
 git -C "${wthost}" worktree add -q -b wtrmrflocked "${work}/myrepo-branch-wtrmrflocked"
+mark_created wtrmrflocked
 git -C "${wthost}" worktree lock --reason 'on a USB drive' \
   "${work}/myrepo-branch-wtrmrflocked"
 mv "${work}/myrepo-branch-wtrmrflocked" "${work}/myrepo-branch-wtrmrflocked-unmounted"
