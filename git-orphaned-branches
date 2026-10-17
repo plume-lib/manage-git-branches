@@ -5,6 +5,9 @@
 # below the current directory are considered.  Newly created branches are not
 # listed, only branches that have been deleted in the remote (for example,
 # because a pull request has been merged).
+# A directory whose branch still exists in the remote, but whose GitHub pull
+# requests are all closed or merged, is not listed; instead, a warning about
+# it is printed on standard error.  (This needs the `gh` command.)
 # Also lists directories that hold nothing but Eclipse `.project` files,
 # which is what a branch directory leaves behind when its working tree is gone.
 #
@@ -248,6 +251,75 @@ live_superproject() {
   fi
 }
 
+# Prints OWNER/REPO for the GitHub URL $1, or nothing if $1 is not the URL of
+# a GitHub repository.
+github_slug() {
+  printf '%s\n' "$1" | sed -e 's|/*$||' | sed -n \
+    -e 's|^git@github\.com:\([^/]*/[^/]*\)$|\1|p' \
+    -e 's|^ssh://git@github\.com/\([^/]*/[^/]*\)$|\1|p' \
+    -e 's|^https://\([^@/]*@\)\{0,1\}github\.com/\([^/]*/[^/]*\)$|\2|p' \
+    | sed -e 's|\.git$||'
+}
+
+# Warns, on standard error, if the branch of directory $1, which still exists
+# in its remote, has pull requests and all of them are closed or merged.  Such
+# a directory is very likely obsolete, but it is not reported:  the branch is
+# still in the remote, so its removal is a decision for the user, who may
+# want to reopen the pull request or to delete the remote branch first.
+#
+# The pull requests are those whose base is the parent of the repository that
+# `git push` uses, if that repository is a fork, and is that repository itself
+# otherwise; and whose head is a branch of the same name, either in the
+# repository that `git push` uses or in the base repository.  It says nothing if `gh` is not
+# installed, if the remote is not on GitHub, or if a query fails, because
+# then nothing is known about the pull requests; the scan's other answers do
+# not depend on GitHub.
+warn_if_prs_closed() {
+  command -v gh > /dev/null 2>&1 || return 0
+  prs_branch="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
+  prs_branch="${prs_branch#refs/heads/}"
+  prs_remote="$(push_remote "$1" "${prs_branch}")"
+  [ -n "${prs_remote}" ] || return 0
+  prs_url="$(git -C "$1" remote get-url --push "${prs_remote}" 2> /dev/null)" || return 0
+  prs_head_repo="$(github_slug "${prs_url}")"
+  # `git remote get-url` applies `url.BASE.insteadOf`, which may map a GitHub
+  # URL to a mirror or a local copy; the configured URL still names GitHub.
+  if [ -z "${prs_head_repo}" ]; then
+    prs_head_repo="$(github_slug "$(git -C "$1" config --get "remote.${prs_remote}.url")")"
+  fi
+  [ -n "${prs_head_repo}" ] || return 0
+  prs_owner="${prs_head_repo%%/*}"
+  # Every branch directory of a project asks about the same repository, so
+  # remember each answer.  Each line of ${base_repo_cache} is "HEAD BASE".
+  prs_base_repo="$(printf '%s\n' "${base_repo_cache}" \
+    | sed -n "s|^${prs_head_repo} ||p")"
+  if [ -z "${prs_base_repo}" ]; then
+    prs_base_repo="$(gh repo view "${prs_head_repo}" --json parent \
+      --jq '.parent | if . then "\(.owner.login)/\(.name)" else "" end' 2> /dev/null)" \
+      || return 0
+    [ -n "${prs_base_repo}" ] || prs_base_repo="${prs_head_repo}"
+    base_repo_cache="${base_repo_cache}
+${prs_head_repo} ${prs_base_repo}"
+  fi
+  prs_base_owner="${prs_base_repo%%/*}"
+  # Each line is "STATE NUMBER" for one pull request from this branch.
+  prs_states="$(gh pr list -R "${prs_base_repo}" --head "${prs_branch}" \
+    --state all --limit 100 --json number,state,headRepositoryOwner \
+    --jq ".[] | select(.headRepositoryOwner.login == \"${prs_owner}\" or .headRepositoryOwner.login == \"${prs_base_owner}\") | \"\(.state) \(.number)\"" \
+    2> /dev/null)" || return 0
+  [ -n "${prs_states}" ] || return 0
+  if printf '%s\n' "${prs_states}" | grep -q '^OPEN '; then
+    return 0
+  fi
+  prs_numbers="$(printf '%s\n' "${prs_states}" | sed -e 's/^\([A-Z]*\) \(.*\)/#\2 (\1)/' \
+    | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')"
+  prs_dir="$(absolute_path "$1")" || prs_dir="$1"
+  echo "${SCRIPT_NAME}: warning: not listing ${prs_dir}:  every pull request for branch ${prs_branch} of ${prs_head_repo} is closed or merged (${prs_base_repo} ${prs_numbers% }), but the branch still exists in the remote" >&2
+}
+
+# The answers of `gh repo view` that `warn_if_prs_closed` has received.
+base_repo_cache=''
+
 # Reports directory $1, whose name matches `*-branch-*`, if its branch was
 # deleted in the remote or if it holds nothing but Eclipse `.project` files.
 #
@@ -305,7 +377,8 @@ check_directory() {
         fi
       fi
       ;;
-    1 | 2 | 3) ;;
+    1) warn_if_prs_closed "$dir" < /dev/null ;;
+    2 | 3) ;;
     *)
       echo "${SCRIPT_NAME}: is_deleted_branch returned status ${is_deleted_status} on: $dir" >&2
       status=1

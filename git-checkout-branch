@@ -6,6 +6,11 @@
 # Usage:
 #   git-checkout-branch BRANCHNAME
 #
+# If the current repository is a branch directory's, REPONAME-branch-OTHER/,
+# and a sibling REPONAME/ is a clone of the same project, this command acts as
+# if it were run in REPONAME/, so that the new worktree does not prevent the
+# removal of REPONAME-branch-OTHER/.
+#
 # The new directory is a linked worktree of the current repository, made by
 # `git worktree add`, so that it shares the repository's object store.  It
 # holds a fresh checkout of the branch:  none of the current directory's
@@ -116,6 +121,27 @@ fi
 # check out is known only later.
 if ! check_git_dir_is_directory "${TOPLEVEL}" 'linked-worktree'; then
   exit 1
+fi
+
+# When this repository is a branch directory's, work in the project's main
+# clone instead, so that the new worktree is registered there; see
+# `main_clone_for`.  The new worktree is a fresh checkout of the branch, so
+# nothing of this working tree is lost by doing so.  A branch that exists
+# only in this repository, though, can be checked out only from here.
+CHECKOUT_HOST="$(main_clone_for "${TOPLEVEL}")"
+if [ -n "${CHECKOUT_HOST}" ] \
+  && git rev-parse --verify --quiet "refs/heads/$1" > /dev/null \
+  && ! git -C "${CHECKOUT_HOST}" rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
+  echo "${SCRIPT_NAME}: branch $1 exists in ${TOPLEVEL} but not in ${CHECKOUT_HOST}, so the new worktree is registered in ${TOPLEVEL}" >&2
+  CHECKOUT_HOST=''
+fi
+if [ -n "${CHECKOUT_HOST}" ]; then
+  echo "${SCRIPT_NAME}: registering the new worktree in ${CHECKOUT_HOST}, the main clone, rather than in ${TOPLEVEL}, so that ${TOPLEVEL} can be removed independently" >&2
+  TOPLEVEL="${CHECKOUT_HOST}"
+  if ! cd "${TOPLEVEL}"; then
+    echo "${SCRIPT_NAME}: Cannot cd to top-level directory: ${TOPLEVEL}" >&2
+    exit 1
+  fi
 fi
 
 REPO=$(basename "$(pwd)")

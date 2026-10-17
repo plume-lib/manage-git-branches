@@ -132,7 +132,9 @@ undo_worktree_add() {
 ##  * WORKTREE_GITDIR_TO_CLEAN, the new worktree's administrative directory,
 ##    which the command records as soon as the add succeeds, if it learns it.
 ## The command must also set TOPLEVEL, the top level of its working tree,
-## before it sets WORKTREE_TO_CLEAN.
+## before it sets WORKTREE_TO_CLEAN.  If the command sets WORKTREE_HOST, the
+## worktree was added in that repository rather than in TOPLEVEL's; see
+## `add_worktree`.
 ##
 ## A POSIX shell such as dash does not run an EXIT trap when the shell is
 ## killed by a signal, so trap the signals too.  Each signal handler restores
@@ -145,6 +147,7 @@ trap_branch_cleanup() {
   WORKTREE_GITDIR_TO_CLEAN=""
   BRANCH_TO_CLEAN=""
   BRANCH_COMMIT_TO_CLEAN=""
+  WORKTREE_HOST=""
   trap branch_cleanup EXIT
   trap 'branch_cleanup; trap - HUP EXIT; kill -s HUP "$$"' HUP
   trap 'branch_cleanup; trap - INT EXIT; kill -s INT "$$"' INT
@@ -159,14 +162,16 @@ branch_cleanup() {
   # The starting directory may no longer resolve, so name the repository
   # explicitly.
   if [ -n "${WORKTREE_TO_CLEAN}" ]; then
-    undo_worktree_add "${TOPLEVEL}" "${WORKTREE_TO_CLEAN}" \
+    undo_worktree_add "${WORKTREE_HOST:-${TOPLEVEL}}" "${WORKTREE_TO_CLEAN}" \
       "${WORKTREE_GITDIR_TO_CLEAN}" "${BRANCH_TO_CLEAN}" \
       "${BRANCH_COMMIT_TO_CLEAN}"
   fi
 }
 
 ## Usage: add_worktree WORKTREE BRANCH [START-POINT [OPTION...]]
-## Runs `git worktree add` in the current repository, with the OPTIONs, to make
+## Runs `git worktree add` in the current repository, or in the repository of
+## the working tree WORKTREE_HOST if that variable is non-empty, with the
+## OPTIONs, to make
 ## a new worktree at the absolute pathname WORKTREE.  With START-POINT, it
 ## creates the branch BRANCH there; without, it checks out the existing BRANCH.
 ## START-POINT is passed to git as given, so that git sets up an upstream for
@@ -201,6 +206,7 @@ branch_cleanup() {
 ## directory, which this command did not create.
 add_worktree() {
   add_worktree_dir="$1"
+  add_worktree_repo="${WORKTREE_HOST:-.}"
   add_worktree_branch="$2"
   if [ -e "${add_worktree_dir}" ] || [ -L "${add_worktree_dir}" ]; then
     echo "${SCRIPT_NAME}: ERROR: directory exists: ${add_worktree_dir}" >&2
@@ -209,7 +215,7 @@ add_worktree() {
   if [ "$#" -lt 3 ]; then
     WORKTREE_TO_CLEAN="${add_worktree_dir}"
     # WORKTREE is absolute, so it cannot be mistaken for an option.
-    if ! git worktree add -q "${add_worktree_dir}" "${add_worktree_branch}"; then
+    if ! git -C "${add_worktree_repo}" worktree add -q "${add_worktree_dir}" "${add_worktree_branch}"; then
       echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${add_worktree_dir}" >&2
       exit 1
     fi
@@ -217,16 +223,16 @@ add_worktree() {
   fi
   add_worktree_start="$3"
   shift 3
-  if ! BRANCH_COMMIT_TO_CLEAN="$(git rev-parse --verify \
+  if ! BRANCH_COMMIT_TO_CLEAN="$(git -C "${add_worktree_repo}" rev-parse --verify \
     "${add_worktree_start}^{commit}")"; then
     echo "${SCRIPT_NAME}: ERROR: cannot resolve ${add_worktree_start}" >&2
     exit 1
   fi
-  if ! git rev-parse --verify --quiet "refs/heads/${add_worktree_branch}" > /dev/null; then
+  if ! git -C "${add_worktree_repo}" rev-parse --verify --quiet "refs/heads/${add_worktree_branch}" > /dev/null; then
     BRANCH_TO_CLEAN="${add_worktree_branch}"
   fi
   WORKTREE_TO_CLEAN="${add_worktree_dir}"
-  if ! git worktree add "$@" -q -b "${add_worktree_branch}" \
+  if ! git -C "${add_worktree_repo}" worktree add "$@" -q -b "${add_worktree_branch}" \
     "${add_worktree_dir}" "${add_worktree_start}"; then
     echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${add_worktree_dir}" >&2
     exit 1
@@ -234,7 +240,7 @@ add_worktree() {
   # `git-remove-branch-directory` deletes a branch only if this mark says
   # that this package created it for its worktree.  Without the mark, the
   # branch merely outlives its worktree.
-  if ! git config "branch.${add_worktree_branch}.createdForBranchDirectory" true; then
+  if ! git -C "${add_worktree_repo}" config "branch.${add_worktree_branch}.createdForBranchDirectory" true; then
     echo "${SCRIPT_NAME}: warning: cannot mark the branch ${add_worktree_branch}, so git-remove-branch-directory will keep it" >&2
   fi
 }
@@ -864,6 +870,96 @@ git_batch_ssh() {
 ## cannot change what a shared function does.
 physical_path() {
   (CDPATH='' cd -- "$1" && pwd -P)
+}
+
+## Usage: main_clone_for DIRECTORY
+## DIRECTORY is the top level of a working tree.  Prints the main working tree
+## in which a new worktree of DIRECTORY's repository should be registered, if
+## that is not the one that `git worktree add` in DIRECTORY would register it
+## in; prints nothing otherwise.
+##
+## `git worktree add` registers a new worktree in the repository of the main
+## working tree, which holds the `.git` directory.  When that main working
+## tree is itself a branch directory -- REPONAME-branch-OTHER, a clone made
+## with `--copy` or before branch directories were worktrees -- the new
+## worktree depends on it, and that branch directory cannot be removed while
+## the new worktree exists, even after OTHER's pull request lands.  So a
+## sibling named REPONAME, which conventionally holds the clone that branch
+## directories are made from, is a better home, if it is a main working tree
+## of the same project:  if it and DIRECTORY's repository have a remote URL in
+## common.
+##
+## The variables are prefixed with an abbreviation of this function's name,
+## so that they cannot collide with a sourcing script's variables.
+main_clone_for() {
+  mcf_common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" \
+    || return 0
+  # A bare repository, or a git directory outside its working tree, has no
+  # main working tree that this naming convention could describe.
+  case "${mcf_common}" in
+    */.git) ;;
+    *) return 0 ;;
+  esac
+  mcf_host="${mcf_common%/.git}"
+  mcf_name="$(basename -- "${mcf_host}")"
+  case "${mcf_name}" in
+    *-branch-*) ;;
+    *) return 0 ;;
+  esac
+  mcf_main="$(dirname -- "${mcf_host}")/${mcf_name%%-branch-*}"
+  # A symbolic link, such as REPONAME -> REPONAME-branch-master, may lead back
+  # to a branch directory, so it does not count.
+  if [ -L "${mcf_main}" ] || [ ! -d "${mcf_main}/.git" ] || [ -L "${mcf_main}/.git" ]; then
+    return 0
+  fi
+  mcf_main="$(physical_path "${mcf_main}")" || return 0
+  mcf_host="$(physical_path "${mcf_host}")" || return 0
+  if [ "${mcf_main}" = "${mcf_host}" ]; then
+    return 0
+  fi
+  mcf_urls="$(git -C "${mcf_host}" config --get-regexp '^remote\..*\.url$' \
+    | awk '{ print $2 }' | sort -u)"
+  if [ -z "${mcf_urls}" ]; then
+    return 0
+  fi
+  if git -C "${mcf_main}" config --get-regexp '^remote\..*\.url$' \
+    | awk '{ print $2 }' | grep -q -x -F -- "${mcf_urls}"; then
+    printf '%s\n' "${mcf_main}"
+  fi
+}
+
+## Usage: copy_objects_to REPOSITORY [INDEX]
+## Copies into the repository of the working tree REPOSITORY the objects that
+## a worktree there needs in order to hold the current commit of the current
+## working tree, and, with INDEX, the blobs that the current working tree's
+## index names.  Exits with status 1, after printing a diagnostic, on failure.
+##
+## The current commit is fetched, which brings its history along.  A staged
+## blob that no commit holds is copied with `git hash-object -w`; it is then
+## an unreachable object in REPOSITORY, which `git gc` nonetheless keeps,
+## because the new worktree's index names it.  A gitlink names a commit in a
+## submodule rather than an object of this repository, so it is skipped.
+copy_objects_to() {
+  if ! git -C "$1" fetch -q --no-tags --no-write-fetch-head "${PWD}" HEAD < /dev/null; then
+    echo "${SCRIPT_NAME}: ERROR: cannot fetch the current commit of ${PWD} into $1" >&2
+    exit 1
+  fi
+  if [ "$#" -lt 2 ]; then
+    return 0
+  fi
+  if ! cot_missing="$(git ls-files --stage | awk '$1 != "160000" { print $2 }' | sort -u \
+    | git -C "$1" cat-file --batch-check | awk '$2 == "missing" { print $1 }')"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot determine which staged blobs $1 lacks" >&2
+    exit 1
+  fi
+  for cot_blob in ${cot_missing}; do
+    if ! cot_copied="$(git cat-file blob "${cot_blob}" \
+      | git -C "$1" hash-object -w --no-filters --stdin)" \
+      || [ "${cot_copied}" != "${cot_blob}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: cannot copy the staged blob ${cot_blob} into $1" >&2
+      exit 1
+    fi
+  done
 }
 
 ## Usage: is_deleted_branch_tracking_refs DIRECTORY REMOTE REF
