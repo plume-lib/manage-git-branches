@@ -103,8 +103,8 @@ INNER
 
 ## Creates a `git` command that stands in for a `git worktree add` that the
 ## user interrupts just after it finishes:  it runs the real git, and then, if
-## the command was `git worktree add`, sends SIGINT to the script that invoked
-## it.
+## the command was `git worktree add` (possibly after `-C DIR`), sends SIGINT
+## to the script that invoked it.
 create_interrupting_git() {
   mkdir -p "${FAKE_GIT_BIN}"
   real_git="$(command -v git)"
@@ -112,6 +112,7 @@ create_interrupting_git() {
 #!/bin/sh
 "${real_git}" "\$@"
 git_status="\$?"
+if [ "\$1" = -C ]; then shift 2; fi
 if [ "\$1" = worktree ] && [ "\$2" = add ]; then
   kill -s INT "\${PPID}"
 fi

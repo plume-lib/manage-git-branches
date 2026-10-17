@@ -92,6 +92,9 @@ The commands are:
   working trees for branches that were deleted in the remote repository, or
   that hold nothing but Eclipse `.project` files.
   With `--remove`, removes each of them instead of printing them.
+  A directory whose branch still exists in the remote, but whose GitHub pull
+  requests are all closed or merged, is neither listed nor removed; a warning
+  about it is printed instead.  (This needs the `gh` command.)
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
   alias below).
 * [`git-remove-branch-directory`](git-remove-branch-directory)
@@ -215,7 +218,10 @@ main branch.
 
 `git-new-branch` and `git-checkout-branch` make each branch directory a
 linked worktree of the repository that you ran them in, made by
-`git worktree add`.  All the branch
+`git worktree add`.  There is one exception:  if that repository is a branch
+directory's own clone, `REPONAME-branch-OTHER`, and a sibling `REPONAME` is a
+clone of the same project, the new worktree belongs to `REPONAME` instead, so
+that `REPONAME-branch-OTHER` can still be removed once OTHER is done.  All the branch
 directories of one repository share one object store, so the repository is
 not copied.  This has some consequences:
 
