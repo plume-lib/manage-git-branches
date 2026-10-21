@@ -9,21 +9,22 @@
 #   git-pull-upstream [--nocompile]
 #
 # The upstream repository is the remote named `upstream` if there is one, as
-# in a fork, and `origin` otherwise.  Its default branch is `REMOTE/HEAD`,
-# such as `upstream/master`.
+# in a fork, then `origin`, then the clone's only remote if it has exactly
+# one.  Its default branch is `REMOTE/HEAD`, such as `upstream/master`.
 #
 # This script does the following:
 #  * pull the current branch from its upstream branch,
-#  * fetch the upstream repository, and update `REMOTE/HEAD` with
-#    `git remote set-head REMOTE --auto`, in case the remote has renamed its
-#    default branch,
+#  * fetch the upstream repository, and update `REMOTE/HEAD` to name its
+#    default branch, in case the remote has renamed it,
 #  * merge its default branch into the current branch,
 #  * build using `compile-project` (see its documentation),
 #  * push the current branch if the build succeeds.
 # If the current branch already contains the upstream repository's default
 # branch, it skips the merge, and it stops there if the current branch has no
 # commits that are not pushed.  Otherwise, as after a run whose build failed,
-# it builds and pushes.
+# it builds and pushes.  It fails, without merging or pushing, if the current
+# branch pushes to the upstream repository's default branch, as a fork's
+# `master` that tracks `upstream/master` does.
 #
 # Unlike `git-pull-from`, this command needs no working tree for the upstream
 # repository's default branch, and it does not build that branch.
@@ -109,6 +110,17 @@ fi
 if git merge-base --is-ancestor "${upstream_ref}" HEAD \
   && [ "$(git rev-parse HEAD)" = "$(git rev-parse '@{upstream}')" ]; then
   exit 0
+fi
+
+# Refuse to push to the branch that this command merges from, as when a fork's
+# `master` tracks `upstream/master`:  such a push would publish the current
+# branch's own commits to the upstream repository.  Merging that branch into
+# itself does nothing, so the only effect of the run would be that push.  If
+# the current branch has no push destination, `@{push}` fails, and the push
+# below reports the problem.
+if [ "$(git rev-parse --symbolic-full-name '@{push}' 2> /dev/null)" = "${upstream_ref}" ]; then
+  echo "${SCRIPT_NAME}: the current branch pushes to ${upstream_ref#refs/remotes/}, so this command does not push it; if you mean to, run \`git push\`" >&2
+  exit 1
 fi
 
 # Merge the commit, rather than `upstream/master`, so that a tag or a local

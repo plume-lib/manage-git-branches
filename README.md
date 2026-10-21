@@ -84,8 +84,8 @@ The commands are:
   working tree and must each have an upstream branch.
 * [`git-pull-upstream`](git-pull-upstream) `[--nocompile]`:
   Merges the default branch of the remote `upstream` (or `origin`, if there
-  is no `upstream`) into the current branch, compiles, then pushes the
-  current branch if compilation succeeds.
+  is no `upstream`, or the only remote, if there is neither) into the current
+  branch, compiles, then pushes the current branch if compilation succeeds.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
@@ -118,10 +118,10 @@ The commands are:
   Unlike `git log --branches --not --remotes`, it omits a branch whose
   changes are already in a remote's default branch, as after a squash-merge.
 * [`git-diff-upstream`](git-diff-upstream) `[--no-fetch] [GIT-DIFF-ARGS]`:
-  Fetches the remote `upstream` (or `origin`, if there is no `upstream`), then
-  shows the differences between its default branch and the working tree,
-  ignoring changes in the amount of whitespace and using the patience diff
-  algorithm.
+  Fetches the remote `upstream` (or `origin`, if there is no `upstream`, or
+  the only remote, if there is neither), then shows the differences between
+  its default branch and the working tree, ignoring changes in the amount of
+  whitespace and using the patience diff algorithm.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.

@@ -7,14 +7,14 @@
 #   git-diff-upstream [--no-fetch] [GIT-DIFF-ARGS]
 #
 # The upstream repository is the remote named `upstream` if there is one, as
-# in a fork, and `origin` otherwise.  Its default branch is `REMOTE/HEAD`,
-# such as `upstream/master`.
+# in a fork, then `origin`, then the clone's only remote if it has exactly
+# one.  Its default branch is `REMOTE/HEAD`, such as `upstream/master`.
 #
-# This command first fetches the remote and then updates `REMOTE/HEAD` with
-# `git remote set-head REMOTE --auto`, in case the remote has renamed its
-# default branch.  With `--no-fetch`, it does neither, except that it creates
-# `REMOTE/HEAD` that way if `REMOTE/HEAD` does not exist or names a branch
-# that does not exist.
+# This command first fetches the remote and updates `REMOTE/HEAD` to name the
+# remote's default branch, in case the remote has renamed it.  With
+# `--no-fetch`, it does neither, except that it creates `REMOTE/HEAD` with
+# `git remote set-head REMOTE --auto` if `REMOTE/HEAD` does not exist or names
+# a branch that does not exist.
 #
 # It runs `git diff -b --patience REMOTE/HEAD GIT-DIFF-ARGS`.  GIT-DIFF-ARGS,
 # such as `--stat` or `-- PATH`, are passed to `git diff`.  Like any

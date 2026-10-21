@@ -112,9 +112,20 @@ git -C "${canonical}" branch -m main stable
 commit_file "${canonical_work}" d.txt 'd1'
 git -C "${canonical_work}" push -q origin HEAD:stable
 git -C "${fork}" config fetch.prune false
+# Git 2.48 and later update `upstream/HEAD` during the fetch, so this command
+# needs no `git remote set-head`, which would connect to the remote again.
+make_counting_git "${testdir}/counting-git" "${testdir}/git-commands"
+saved_path="${PATH}"
+PATH="${testdir}/counting-git:${PATH}"
 expect_files 'renamed default branch without --prune' 'a.txt
 c.txt
 d.txt' --name-only
+PATH="${saved_path}"
+git_minor="$(git version | sed -n 's/^git version 2\.\([0-9]*\).*/\1/p')"
+if [ -n "${git_minor}" ] && [ "${git_minor}" -ge 48 ] \
+  && grep -q '^remote set-head' "${testdir}/git-commands"; then
+  fail 'renamed default branch without --prune: ran git remote set-head'
+fi
 
 if [ "${failures}" -ne 0 ]; then
   echo "${SCRIPT_NAME}: ${failures} failure(s)" >&2

@@ -656,9 +656,9 @@ is_remote_name() {
 }
 
 ## Usage: remote_consider NAME
-## A helper for `push_remote` and `fetch_remote`:  sets ${remote_result} to
-## NAME if ${remote_result} is not set yet and NAME is a remote that the clone
-## in ${remote_dir} can contact.
+## A helper for `push_remote`, `fetch_remote`, and `upstream_default_branch`:
+## sets ${remote_result} to NAME if ${remote_result} is not set yet and NAME is
+## a remote that the clone in ${remote_dir} can contact.
 remote_consider() {
   if [ -z "${remote_result}" ] \
     && remote_is_usable "${remote_dir}" "${remote_remotes}" "$1"; then
@@ -667,12 +667,12 @@ remote_consider() {
 }
 
 ## Usage: remote_consider_sole
-## A helper for `push_remote` and `fetch_remote`:  sets ${remote_result} to
-## the sole remote of the clone in ${remote_dir}, if ${remote_result} is not
-## set yet and that clone has exactly one remote.  Such a clone has no remote
-## named "origin", because `remote_consider origin` would have accepted it,
-## but its one remote is the only remote that any branch of it could come
-## from or go to.
+## A helper for `push_remote`, `fetch_remote`, and `upstream_default_branch`:
+## sets ${remote_result} to the sole remote of the clone in ${remote_dir}, if
+## ${remote_result} is not set yet and that clone has exactly one remote.
+## Such a clone has no remote named "origin", because
+## `remote_consider origin` would have accepted it, but its one remote is the
+## only remote that any branch of it could come from or go to.
 remote_consider_sole() {
   if [ -z "${remote_result}" ] \
     && [ "$(printf '%s\n' "${remote_remotes}" | grep -c '.')" -eq 1 ]; then
@@ -750,25 +750,24 @@ fetch_remote() {
 ## Prints the full name of the remote-tracking branch for the default branch of
 ## the upstream repository, such as `refs/remotes/upstream/master`.  The
 ## upstream repository is the remote named "upstream" if the current clone has
-## one, as a fork does, and "origin" otherwise.  If FETCH is 1, fetches that
-## remote first and then sets `REMOTE/HEAD` with
-## `git remote set-head REMOTE --auto`.  Otherwise, sets `REMOTE/HEAD` that way
-## only if it does not exist or names a branch that does not exist.  Returns 1,
-## after printing a diagnostic, on failure.
+## one, as a fork does, then "origin", then the clone's only remote if it has
+## exactly one.  If FETCH is 1, fetches that remote first and updates
+## `REMOTE/HEAD` to name the remote's default branch.  Otherwise, sets
+## `REMOTE/HEAD` with `git remote set-head REMOTE --auto` only if it does not
+## exist or names a branch that does not exist.  Returns 1, after printing a
+## diagnostic, on failure.
 upstream_default_branch() {
-  if ! upstream_remotes="$(git remote)"; then
+  remote_dir='.'
+  if ! remote_remotes="$(git remote)"; then
     return 1
   fi
-  if printf '%s\n' "${upstream_remotes}" | grep -q -x -F upstream; then
-    upstream_remote=upstream
-  elif printf '%s\n' "${upstream_remotes}" | grep -q -x -F origin; then
-    upstream_remote=origin
-  else
-    echo "${SCRIPT_NAME}: no remote named \"upstream\" or \"origin\"" >&2
-    return 1
-  fi
-  if [ "$1" -eq 1 ] && ! git fetch --quiet "${upstream_remote}"; then
-    echo "${SCRIPT_NAME}: problem fetching ${upstream_remote}" >&2
+  remote_result=''
+  remote_consider 'upstream'
+  remote_consider 'origin'
+  remote_consider_sole
+  upstream_default_branch_remote="${remote_result}"
+  if [ -z "${upstream_default_branch_remote}" ]; then
+    echo "${SCRIPT_NAME}: no remote named \"upstream\" or \"origin\", and not exactly one remote" >&2
     return 1
   fi
   # `REMOTE/HEAD` does not exist after `git remote add`.  After the remote
@@ -777,17 +776,33 @@ upstream_default_branch() {
   # last commit, so only asking the remote reveals the rename.  A fetch with
   # `--prune` deletes it, so that `REMOTE/HEAD` names a branch that does not
   # exist.
-  upstream_head="refs/remotes/${upstream_remote}/HEAD"
-  if [ "$1" -eq 1 ] \
-    || ! upstream_branch="$(git symbolic-ref --quiet "${upstream_head}")" \
-    || ! git rev-parse --verify --quiet "${upstream_branch}" > /dev/null; then
-    if ! git remote set-head "${upstream_remote}" --auto > /dev/null \
-      || ! upstream_branch="$(git symbolic-ref --quiet "${upstream_head}")"; then
-      echo "${SCRIPT_NAME}: cannot determine the default branch of ${upstream_remote}" >&2
+  #
+  # With `remote.REMOTE.followRemoteHEAD` set to "always", git 2.48 and later
+  # update `REMOTE/HEAD` during the fetch, over the same connection.  An
+  # earlier git ignores that setting, so after fetching it needs
+  # `git remote set-head --auto`, which connects to the remote again.
+  upstream_default_branch_head="refs/remotes/${upstream_default_branch_remote}/HEAD"
+  upstream_default_branch_ask=0
+  if [ "$1" -eq 1 ]; then
+    if ! git -c "remote.${upstream_default_branch_remote}.followRemoteHEAD=always" \
+      fetch --quiet "${upstream_default_branch_remote}"; then
+      echo "${SCRIPT_NAME}: problem fetching ${upstream_default_branch_remote}" >&2
+      return 1
+    fi
+    if ! git_at_least 48; then
+      upstream_default_branch_ask=1
+    fi
+  fi
+  if [ "${upstream_default_branch_ask}" -eq 1 ] \
+    || ! upstream_default_branch_branch="$(git symbolic-ref --quiet "${upstream_default_branch_head}")" \
+    || ! git rev-parse --verify --quiet "${upstream_default_branch_branch}" > /dev/null; then
+    if ! git remote set-head "${upstream_default_branch_remote}" --auto > /dev/null \
+      || ! upstream_default_branch_branch="$(git symbolic-ref --quiet "${upstream_default_branch_head}")"; then
+      echo "${SCRIPT_NAME}: cannot determine the default branch of ${upstream_default_branch_remote}" >&2
       return 1
     fi
   fi
-  printf '%s\n' "${upstream_branch}"
+  printf '%s\n' "${upstream_default_branch_branch}"
 }
 
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE

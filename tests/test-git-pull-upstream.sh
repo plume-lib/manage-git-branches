@@ -151,11 +151,52 @@ elif [ "$(pushed_head)" != "${pushed_before}" ]; then
 fi
 git -C "${fork}" merge --abort
 
+# Usage: expect_merge DESCRIPTION REMOTE FILE
+# Commits FILE to the default branch of ${fork_remote}, runs this command in
+# ${fork}, and checks that it merges REMOTE's default branch and pushes.
+expect_merge() {
+  git -C "${other}" fetch -q origin
+  git -C "${other}" switch -q trunk
+  git -C "${other}" merge -q --ff-only origin/trunk
+  commit_file "${other}" "$3" "$3"
+  git -C "${other}" push -q origin trunk
+  if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+    fail "$1: failed: $(cat "${testdir}/errors")"
+    return
+  fi
+  expect_merge_subject="$(git -C "${fork}" log -1 --format=%s)"
+  if [ "${expect_merge_subject}" != "Merge remote-tracking branch '$2/trunk' into feature" ]; then
+    fail "$1: wrong merge message: ${expect_merge_subject}"
+  elif [ ! -e "${fork}/$3" ]; then
+    fail "$1: did not merge $3"
+  elif [ "$(pushed_head)" != "$(git -C "${fork}" rev-parse HEAD)" ]; then
+    fail "$1: did not push"
+  fi
+}
+
 # Without an `upstream` remote, `origin` is the upstream repository.
 git -C "${fork}" remote remove upstream
-if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
-  fail "origin: failed: $(cat "${testdir}/errors")"
+expect_merge 'origin' origin d.txt
+
+# Without `upstream` or `origin`, the clone's only remote is the upstream
+# repository.
+git -C "${fork}" remote rename origin github
+expect_merge 'sole remote' github e.txt
+
+# A branch that pushes to the upstream repository's default branch is not
+# pushed, even when it has commits that are not pushed.
+git -C "${fork}" switch -q trunk
+git -C "${fork}" merge -q --ff-only github/trunk
+commit_file "${fork}" f.txt 'f'
+trunk_before="$(git -C "${fork_remote}" rev-parse refs/heads/trunk)"
+if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  fail "push to upstream default branch: succeeded"
+elif [ "$(git -C "${fork_remote}" rev-parse refs/heads/trunk)" != "${trunk_before}" ]; then
+  fail "push to upstream default branch: pushed"
+elif ! grep -q 'does not push it' "${testdir}/errors"; then
+  fail "push to upstream default branch: wrong message: $(cat "${testdir}/errors")"
 fi
+git -C "${fork}" switch -q feature
 
 # An extra argument is rejected.
 if pull_upstream "${fork}" extra; then

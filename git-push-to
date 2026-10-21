@@ -430,7 +430,7 @@ git_push_to() {
   # `merge_build_push` describes the commit as a branch of this repository.
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
-    "${from_absolute}" "${nocompile}"; then
+    "${from_branch} of ${from_absolute}" "${nocompile}"; then
     return 1
   fi
 
