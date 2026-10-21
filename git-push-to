@@ -427,42 +427,10 @@ git_push_to() {
   # `git pull PATH BRANCH` would instead write "Merge branch 'feature' of
   # ../myrepo-branch-feature into main", and would head the commit summaries
   # that `merge.log` turns on with "* 'feature' of ../myrepo-branch-feature:".
-  # `fmt-merge-msg` appends " of SOURCE" for every source except ".", the local
-  # repository, and `git fetch` records the pathname that this script fetched
-  # from as the source.  So hand `fmt-merge-msg` the line that `git fetch`
-  # would have written for a branch of this repository.  Git still composes
-  # the message:  the "into BRANCH" suffix, which it omits on the default
-  # branch, and the commit summaries, which `merge.log` governs.
-  #
-  # Composing the message by hand would fabricate it rather than letting git
-  # describe what it merged, and would discard those commit summaries.
-  if ! merge_message="$(printf "%s\t\tbranch '%s' of .\n" \
-    "${merge_head}" "${from_branch}" | git fmt-merge-msg)"; then
-    echo "${SCRIPT_NAME}: cannot compose a merge message for ${from_branch} of ${from_absolute}" >&2
-    return 1
-  fi
-
-  # Merge rather than `git pull`, which rebases if `pull.rebase` is set.  A
-  # rebase would rewrite the branch that this script is about to push.
-  # `--no-edit` keeps a chain of directories from stopping at an editor.
-  # `--no-log` prevents a second copy of the commit summaries:  `git merge`
-  # appends them to a message given with `-m` when `merge.log` is set, and
-  # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
-  if ! git merge -q --no-edit --no-log -m "${merge_message}" "${merge_head}"; then
-    # Note: pwd=to_absolute
-    echo "${SCRIPT_NAME}: problem merging ${from_absolute} into $(pwd)" >&2
-    return 1
-  fi
-
-  if [ "$nocompile" -eq 0 ] && [ -z "$MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT" ]; then
-    if ! "${SCRIPT_DIR}"/compile-project; then
-      echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
-      return 1
-    fi
-  fi
-
-  if ! git push --quiet; then
-    echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
+  # `merge_build_push` describes the commit as a branch of this repository.
+  # Note: pwd=to_absolute
+  if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
+    "${from_absolute}" "${nocompile}"; then
     return 1
   fi
 

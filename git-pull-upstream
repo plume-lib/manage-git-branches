@@ -1,0 +1,124 @@
+#!/bin/sh
+
+# Merges the default branch of the upstream repository into the current
+# branch.  Fails if the resulting merge does not compile.  (Skips the
+# compilation step if the --nocompile argument is given or if environment
+# variable MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set.)
+#
+# Usage:
+#   git-pull-upstream [--nocompile]
+#
+# The upstream repository is the remote named `upstream` if there is one, as
+# in a fork, and `origin` otherwise.  Its default branch is `REMOTE/HEAD`,
+# such as `upstream/master`; if `REMOTE/HEAD` does not exist, this command
+# creates it with `git remote set-head REMOTE --auto`.
+#
+# This script does the following:
+#  * pull the current branch from its upstream branch,
+#  * fetch the upstream repository,
+#  * merge its default branch into the current branch,
+#  * build using `compile-project` (see its documentation),
+#  * push the current branch if the build succeeds.
+# If the current branch already contains the upstream repository's default
+# branch, it skips the merge, and it stops there if the current branch has no
+# commits that are not pushed.  Otherwise, as after a run whose build failed,
+# it builds and pushes.
+#
+# Unlike `git-pull-from`, this command needs no working tree for the upstream
+# repository's default branch, and it does not build that branch.
+
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
+if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=remote-functions.sh
+. "${SCRIPT_DIR}/remote-functions.sh"
+
+nocompile=0
+if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
+  nocompile=1
+  shift
+fi
+
+if [ "$#" -ne 0 ]; then
+  echo "Usage: ${SCRIPT_NAME} [--nocompile]" >&2
+  exit 1
+fi
+
+if ! git pull -q; then
+  echo "${SCRIPT_NAME}: problem pulling in $(pwd)" >&2
+  exit 1
+fi
+
+if ! upstream_ref="$(upstream_default_branch 1)"; then
+  exit 1
+fi
+
+# Stop if there is nothing to merge and nothing to push.  If there is nothing
+# to merge, still build and push if the branch has commits that are not
+# pushed, as after a run of this command whose build failed.
+# This compares with the branch that the current branch pulls from, which is
+# where it pushes unless `branch.BRANCH.pushRemote` or `remote.pushDefault`
+# says otherwise.  In such a triangular workflow, this test is wrong:  it can
+# skip a needed push, or build and push needlessly.  Comparing with `@{push}`
+# instead would handle that workflow.
+if git merge-base --is-ancestor "${upstream_ref}" HEAD \
+  && [ "$(git rev-parse HEAD)" = "$(git rev-parse '@{upstream}')" ]; then
+  exit 0
+fi
+
+# Merge the commit, rather than `upstream/master`, so that a tag or a local
+# branch of that name cannot be merged in its place.  The merge message is the
+# one that `git merge upstream/master` would write:
+#
+#   Merge remote-tracking branch 'upstream/master' into feature
+#
+# If the current branch already contains the commit, the merge does nothing.
+if ! upstream_head="$(git rev-parse --verify --quiet "${upstream_ref}")"; then
+  echo "${SCRIPT_NAME}: cannot read ${upstream_ref}" >&2
+  exit 1
+fi
+if ! merge_build_push "${upstream_head}" \
+  "remote-tracking branch '${upstream_ref#refs/remotes/}'" "${upstream_ref}" \
+  "${nocompile}"; then
+  exit 1
+fi

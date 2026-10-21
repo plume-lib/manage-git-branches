@@ -746,6 +746,88 @@ fetch_remote() {
   printf '%s\n' "${remote_result}"
 }
 
+## Usage: upstream_default_branch FETCH
+## Prints the full name of the remote-tracking branch for the default branch of
+## the upstream repository, such as `refs/remotes/upstream/master`.  The
+## upstream repository is the remote named "upstream" if the current clone has
+## one, as a fork does, and "origin" otherwise.  If FETCH is 1, fetches that
+## remote first.  Sets `REMOTE/HEAD` with `git remote set-head REMOTE --auto`
+## if it does not exist or names a branch that does not exist.  Returns 1,
+## after printing a diagnostic, on failure.
+upstream_default_branch() {
+  if ! upstream_remotes="$(git remote)"; then
+    return 1
+  fi
+  if printf '%s\n' "${upstream_remotes}" | grep -q -x -F upstream; then
+    upstream_remote=upstream
+  elif printf '%s\n' "${upstream_remotes}" | grep -q -x -F origin; then
+    upstream_remote=origin
+  else
+    echo "${SCRIPT_NAME}: no remote named \"upstream\" or \"origin\"" >&2
+    return 1
+  fi
+  if [ "$1" -eq 1 ] && ! git fetch --quiet "${upstream_remote}"; then
+    echo "${SCRIPT_NAME}: problem fetching ${upstream_remote}" >&2
+    return 1
+  fi
+  # `REMOTE/HEAD` does not exist after `git remote add`.  It names a branch
+  # that does not exist after the remote renames its default branch and a
+  # fetch with `--prune` deletes the old one.
+  upstream_head="refs/remotes/${upstream_remote}/HEAD"
+  if ! upstream_branch="$(git symbolic-ref --quiet "${upstream_head}")" \
+    || ! git rev-parse --verify --quiet "${upstream_branch}" > /dev/null; then
+    if ! git remote set-head "${upstream_remote}" --auto > /dev/null \
+      || ! upstream_branch="$(git symbolic-ref --quiet "${upstream_head}")"; then
+      echo "${SCRIPT_NAME}: cannot determine the default branch of ${upstream_remote}" >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "${upstream_branch}"
+}
+
+## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE
+## Merges COMMIT into the current branch, builds with `compile-project` unless
+## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
+## pushes the current branch if the build succeeds.  DESCRIPTION is what
+## `git fmt-merge-msg` says that COMMIT is, such as "branch 'feature'" or
+## "remote-tracking branch 'upstream/master'".  SOURCE names COMMIT in
+## diagnostics.  Returns 1, after printing a diagnostic, on failure.
+## ${SCRIPT_DIR} must be set; see the top of this file.
+merge_build_push() {
+  # Let git compose the message, as it does for `git merge`, rather than
+  # composing it by hand.  Git then writes the "into BRANCH" suffix, which it
+  # omits on the default branch, and the commit summaries that `merge.log`
+  # turns on.  Saying that COMMIT came from ".", the local repository, keeps
+  # git from appending " of SOURCE" to the message.
+  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" | git fmt-merge-msg)"; then
+    echo "${SCRIPT_NAME}: cannot compose a merge message for $3" >&2
+    return 1
+  fi
+
+  # Merge rather than `git pull`, which rebases if `pull.rebase` is set.  A
+  # rebase would rewrite the branch that this function is about to push.
+  # `--no-edit` keeps a chain of merges from stopping at an editor.
+  # `--no-log` prevents a second copy of the commit summaries:  `git merge`
+  # appends them to a message given with `-m` when `merge.log` is set, and
+  # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
+  if ! git merge -q --no-edit --no-log -m "${merge_message}" "$1"; then
+    echo "${SCRIPT_NAME}: problem merging $3 into $(pwd)" >&2
+    return 1
+  fi
+
+  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+    if ! "${SCRIPT_DIR}"/compile-project; then
+      echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
+      return 1
+    fi
+  fi
+
+  if ! git push --quiet; then
+    echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
+    return 1
+  fi
+}
+
 ## Usage: ssh_variant_of PROGRAM
 ## Prints the SSH variant that the command name PROGRAM denotes, or nothing if
 ## PROGRAM is not a command name that this file recognizes.
