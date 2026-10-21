@@ -8,10 +8,13 @@
 #
 # The upstream repository is the remote named `upstream` if there is one, as
 # in a fork, and `origin` otherwise.  Its default branch is `REMOTE/HEAD`,
-# such as `upstream/master`; if `REMOTE/HEAD` does not exist, this command
-# creates it with `git remote set-head REMOTE --auto`.
+# such as `upstream/master`.
 #
-# This command first fetches the remote, unless `--no-fetch` is given.
+# This command first fetches the remote and then updates `REMOTE/HEAD` with
+# `git remote set-head REMOTE --auto`, in case the remote has renamed its
+# default branch.  With `--no-fetch`, it does neither, except that it creates
+# `REMOTE/HEAD` that way if `REMOTE/HEAD` does not exist or names a branch
+# that does not exist.
 #
 # It runs `git diff -b --patience REMOTE/HEAD GIT-DIFF-ARGS`.  GIT-DIFF-ARGS,
 # such as `--stat` or `-- PATH`, are passed to `git diff`.  Like any
@@ -57,12 +60,12 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
-  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
   exit 1
 fi
-# shellcheck source=remote-functions.sh
-. "${SCRIPT_DIR}/remote-functions.sh"
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
 
 fetch=1
 if [ "$#" -ge 1 ] && [ "$1" = "--no-fetch" ]; then

@@ -15,6 +15,8 @@ COMMANDS_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)" || exit 1
 GIT_DIFF_UPSTREAM="${COMMANDS_DIR}/git-diff-upstream"
 
 . "${SCRIPT_DIR}/lib-git-test-env.sh"
+# shellcheck source=common-test-functions.sh
+. "${SCRIPT_DIR}/common-test-functions.sh"
 
 failures=0
 
@@ -38,14 +40,6 @@ expect_files() {
   elif [ "${actual}" != "${expected}" ]; then
     fail "${description}: printed [${actual}], expected [${expected}]"
   fi
-}
-
-# Usage: commit_file DIRECTORY FILE CONTENT
-# Writes CONTENT to FILE in the working tree DIRECTORY, and commits it.
-commit_file() {
-  printf '%s\n' "$3" > "$1/$2"
-  git -C "$1" add -- "$2"
-  git -C "$1" commit -q -m "Change $2"
 }
 
 testdir="$(mktemp -d)"
@@ -110,6 +104,17 @@ if git -C "${fork}" rev-parse --verify --quiet upstream/HEAD > /dev/null 2>&1; t
 fi
 expect_files 'renamed default branch' 'a.txt
 c.txt' --no-fetch --name-only
+
+# After `upstream` renames its default branch again, a fetch without `--prune`
+# keeps the old remote-tracking branch, so `upstream/HEAD` still resolves, to
+# a commit that lacks the renamed branch's new commits.
+git -C "${canonical}" branch -m main stable
+commit_file "${canonical_work}" d.txt 'd1'
+git -C "${canonical_work}" push -q origin HEAD:stable
+git -C "${fork}" config fetch.prune false
+expect_files 'renamed default branch without --prune' 'a.txt
+c.txt
+d.txt' --name-only
 
 if [ "${failures}" -ne 0 ]; then
   echo "${SCRIPT_NAME}: ${failures} failure(s)" >&2

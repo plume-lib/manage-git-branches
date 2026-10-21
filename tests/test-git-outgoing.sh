@@ -15,8 +15,8 @@ COMMANDS_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)" || exit 1
 GIT_OUTGOING="${COMMANDS_DIR}/git-outgoing"
 
 . "${SCRIPT_DIR}/lib-git-test-env.sh"
-# shellcheck source=common-functions.sh
-. "${SCRIPT_DIR}/common-functions.sh"
+# shellcheck source=common-test-functions.sh
+. "${SCRIPT_DIR}/common-test-functions.sh"
 
 failures=0
 
@@ -44,14 +44,6 @@ expect_outgoing() {
   elif [ -s "${testdir}/errors" ]; then
     fail "${description}: printed to standard error: $(cat "${testdir}/errors")"
   fi
-}
-
-# Usage: commit_file DIRECTORY FILE CONTENT SUBJECT
-# Writes CONTENT to FILE in the working tree DIRECTORY, and commits it.
-commit_file() {
-  printf '%s\n' "$3" > "$1/$2"
-  git -C "$1" add -- "$2"
-  git -C "$1" commit -q -m "$4"
 }
 
 # Usage: squash_merge BRANCH

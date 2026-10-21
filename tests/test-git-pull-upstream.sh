@@ -15,6 +15,8 @@ COMMANDS_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)" || exit 1
 GIT_PULL_UPSTREAM="${COMMANDS_DIR}/git-pull-upstream"
 
 . "${SCRIPT_DIR}/lib-git-test-env.sh"
+# shellcheck source=common-test-functions.sh
+. "${SCRIPT_DIR}/common-test-functions.sh"
 
 failures=0
 
@@ -29,14 +31,6 @@ fail() {
 # ${testdir}/errors.
 pull_upstream() {
   (cd "$1" && shift && "${GIT_PULL_UPSTREAM}" "$@") > /dev/null 2> "${testdir}/errors"
-}
-
-# Usage: commit_file DIRECTORY FILE CONTENT
-# Writes CONTENT to FILE in the working tree DIRECTORY, and commits it.
-commit_file() {
-  printf '%s\n' "$3" > "$1/$2"
-  git -C "$1" add -- "$2"
-  git -C "$1" commit -q -m "Change $2"
 }
 
 # Usage: pushed_head
@@ -123,11 +117,26 @@ if pull_upstream "${fork}"; then
 elif [ "$(pushed_head)" != "${pushed_before}" ]; then
   fail "build failure: pushed"
 fi
-if ! pull_upstream "${fork}" --nocompile; then
+
+# The merge that was not pushed survives the pull of a new commit on the
+# branch, even when `pull.rebase` is set, and the pull's own merge does not
+# stop at an editor.  `GIT_MERGE_AUTOEDIT` makes git start the editor even
+# though no terminal is attached, and the editor `false` makes the merge fail.
+unpushed_merge="$(git -C "${fork}" rev-parse HEAD)"
+git -C "${other}" pull -q --no-rebase
+commit_file "${other}" c.txt 'c2'
+git -C "${other}" push -q origin feature
+git -C "${fork}" config pull.rebase true
+if ! GIT_MERGE_AUTOEDIT=yes GIT_EDITOR=false pull_upstream "${fork}" --nocompile; then
   fail "--nocompile: failed: $(cat "${testdir}/errors")"
 elif [ "$(pushed_head)" != "$(git -C "${fork}" rev-parse HEAD)" ]; then
   fail "--nocompile: did not push"
+elif ! git -C "${fork}" merge-base --is-ancestor "${unpushed_merge}" HEAD; then
+  fail "--nocompile: lost the merge that was not pushed"
+elif [ "$(cat "${fork}/c.txt")" != 'c2' ]; then
+  fail "--nocompile: did not pull c.txt"
 fi
+git -C "${fork}" config --unset pull.rebase
 
 # A conflicting merge fails and is not pushed.
 commit_file "${fork}" a.txt 'fork'

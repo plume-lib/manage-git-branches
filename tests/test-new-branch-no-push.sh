@@ -19,8 +19,8 @@ TESTS_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 COMMANDS_DIR="$(CDPATH='' cd -- "${TESTS_DIR}/.." && pwd -P)" || exit 1
 
 . "${TESTS_DIR}/lib-git-test-env.sh"
-# shellcheck source=common-functions.sh
-. "${TESTS_DIR}/common-functions.sh"
+# shellcheck source=common-test-functions.sh
+. "${TESTS_DIR}/common-test-functions.sh"
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
 # The signal handlers re-raise the signal with the handler removed, so that

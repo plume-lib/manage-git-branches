@@ -751,8 +751,9 @@ fetch_remote() {
 ## the upstream repository, such as `refs/remotes/upstream/master`.  The
 ## upstream repository is the remote named "upstream" if the current clone has
 ## one, as a fork does, and "origin" otherwise.  If FETCH is 1, fetches that
-## remote first.  Sets `REMOTE/HEAD` with `git remote set-head REMOTE --auto`
-## if it does not exist or names a branch that does not exist.  Returns 1,
+## remote first and then sets `REMOTE/HEAD` with
+## `git remote set-head REMOTE --auto`.  Otherwise, sets `REMOTE/HEAD` that way
+## only if it does not exist or names a branch that does not exist.  Returns 1,
 ## after printing a diagnostic, on failure.
 upstream_default_branch() {
   if ! upstream_remotes="$(git remote)"; then
@@ -770,11 +771,15 @@ upstream_default_branch() {
     echo "${SCRIPT_NAME}: problem fetching ${upstream_remote}" >&2
     return 1
   fi
-  # `REMOTE/HEAD` does not exist after `git remote add`.  It names a branch
-  # that does not exist after the remote renames its default branch and a
-  # fetch with `--prune` deletes the old one.
+  # `REMOTE/HEAD` does not exist after `git remote add`.  After the remote
+  # renames its default branch, `REMOTE/HEAD` still names the old branch.  A
+  # fetch without `--prune` keeps that remote-tracking branch, frozen at its
+  # last commit, so only asking the remote reveals the rename.  A fetch with
+  # `--prune` deletes it, so that `REMOTE/HEAD` names a branch that does not
+  # exist.
   upstream_head="refs/remotes/${upstream_remote}/HEAD"
-  if ! upstream_branch="$(git symbolic-ref --quiet "${upstream_head}")" \
+  if [ "$1" -eq 1 ] \
+    || ! upstream_branch="$(git symbolic-ref --quiet "${upstream_head}")" \
     || ! git rev-parse --verify --quiet "${upstream_branch}" > /dev/null; then
     if ! git remote set-head "${upstream_remote}" --auto > /dev/null \
       || ! upstream_branch="$(git symbolic-ref --quiet "${upstream_head}")"; then

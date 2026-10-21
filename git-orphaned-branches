@@ -76,12 +76,12 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
-  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
   exit 1
 fi
-# shellcheck source=remote-functions.sh
-. "${SCRIPT_DIR}/remote-functions.sh"
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
 
 # Without this, every question below would answer for whatever repository the
 # caller happened to be working in, rather than for the directory being
@@ -265,7 +265,7 @@ check_directory() {
   # would mean that it could not answer at all, which must not be silently
   # reported as "there is nothing to delete".
   #
-  # Call the function of remote-functions.sh rather than running the
+  # Call the function of common-functions.sh rather than running the
   # `is-deleted-branch` command, which is a wrapper around it.  One process
   # for the whole scan is what lets one `git ls-remote` answer for every
   # directory that asks the same remote the same way:  what the function

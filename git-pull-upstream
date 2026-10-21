@@ -10,12 +10,13 @@
 #
 # The upstream repository is the remote named `upstream` if there is one, as
 # in a fork, and `origin` otherwise.  Its default branch is `REMOTE/HEAD`,
-# such as `upstream/master`; if `REMOTE/HEAD` does not exist, this command
-# creates it with `git remote set-head REMOTE --auto`.
+# such as `upstream/master`.
 #
 # This script does the following:
 #  * pull the current branch from its upstream branch,
-#  * fetch the upstream repository,
+#  * fetch the upstream repository, and update `REMOTE/HEAD` with
+#    `git remote set-head REMOTE --auto`, in case the remote has renamed its
+#    default branch,
 #  * merge its default branch into the current branch,
 #  * build using `compile-project` (see its documentation),
 #  * push the current branch if the build succeeds.
@@ -66,12 +67,12 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
-  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
   exit 1
 fi
-# shellcheck source=remote-functions.sh
-. "${SCRIPT_DIR}/remote-functions.sh"
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
 
 nocompile=0
 if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
@@ -84,7 +85,11 @@ if [ "$#" -ne 0 ]; then
   exit 1
 fi
 
-if ! git pull -q; then
+# `--no-rebase` because a rebase would drop a merge from `upstream` that an
+# earlier run of this command made but did not push, as when its build
+# failed, and would copy that merge's commits onto the current branch.
+# `--no-edit` keeps the merge from stopping at an editor.
+if ! git pull -q --no-rebase --no-edit; then
   echo "${SCRIPT_NAME}: problem pulling in $(pwd)" >&2
   exit 1
 fi
