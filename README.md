@@ -234,7 +234,10 @@ linked worktree of the repository that you ran them in, made by
 `git worktree add`.  There is one exception:  if that repository is a branch
 directory's own clone, `REPONAME-branch-OTHER`, and a sibling `REPONAME` is a
 clone of the same project, the new worktree belongs to `REPONAME` instead, so
-that `REPONAME-branch-OTHER` can still be removed once OTHER is done.  All the branch
+that `REPONAME-branch-OTHER` can still be removed once OTHER is done.  (The
+commands fall back to the repository that you ran them in when `REPONAME`
+cannot host the worktree without a difference, such as when either repository
+is a sparse checkout.)  All the branch
 directories of one repository share one object store, so the repository is
 not copied.  This has some consequences:
 

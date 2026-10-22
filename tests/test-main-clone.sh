@@ -103,7 +103,13 @@ if out="$(cd "${other}" && "${GIT_NEW_BRANCH}" --clean taken 2>&1)"; then
 fi
 [ ! -e "${work}/proj-branch-taken" ] || fail "proj-branch-taken was created"
 
-# git-checkout-branch of a branch that the remote has.
+# git-checkout-branch of a branch that the remote has.  It pulls in the
+# directory that it is run in, not in the main clone.
+echo "newer" > "${work}/seed/newer.txt"
+git -C "${work}/seed" add newer.txt
+git -C "${work}/seed" commit -q -m "Newer commit"
+git -C "${work}/seed" push -q origin main
+proj_head="$(git -C "${work}/proj" rev-parse HEAD)"
 if ! out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" remote-only 2>&1)"; then
   fail "git-checkout-branch remote-only failed: ${out}"
 fi
@@ -119,6 +125,114 @@ fi
 if [ "$(host_of "${work}/proj-branch-local-only")" != "${other}" ]; then
   fail "local-only is registered in $(host_of "${work}/proj-branch-local-only"), not in ${other}"
 fi
+
+if [ "$(git -C "${work}/proj" rev-parse HEAD)" != "${proj_head}" ]; then
+  fail "git-checkout-branch remote-only pulled in ${work}/proj"
+fi
+
+# git-checkout-branch of a local branch that the main clone has at another
+# commit uses the branch directory's branch, and at the same commit uses the
+# main clone's.
+git -C "${other}" branch differs
+git -C "${work}/proj" branch differs main
+if ! out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" differs 2>&1)"; then
+  fail "git-checkout-branch differs failed: ${out}"
+fi
+if [ "$(host_of "${work}/proj-branch-differs")" != "${other}" ]; then
+  fail "differs is registered in $(host_of "${work}/proj-branch-differs"), not in ${other}"
+fi
+if [ "$(git -C "${work}/proj-branch-differs" rev-parse HEAD)" != "$(git -C "${other}" rev-parse differs)" ]; then
+  fail "proj-branch-differs is not at the commit of ${other}'s branch differs"
+fi
+git -C "${other}" branch same "$(git -C "${work}/proj" rev-parse main)"
+git -C "${work}/proj" branch same main
+if ! out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" same 2>&1)"; then
+  fail "git-checkout-branch same failed: ${out}"
+fi
+if [ "$(host_of "${work}/proj-branch-same")" != "${work}/proj" ]; then
+  fail "same is registered in $(host_of "${work}/proj-branch-same"), not in ${work}/proj"
+fi
+
+# A remote that only the branch directory has fetched, which the main clone
+# knows by another name.  The branch's upstream is the main clone's name for
+# the remote.
+git init -q --bare -b main "${work}/fork.git"
+git -C "${work}/seed" push -q "${work}/fork.git" main:refs/heads/fork-only main:refs/heads/fork-taken
+git -C "${other}" remote add fork "${work}/fork.git"
+git -C "${other}" fetch -q fork
+git -C "${work}/proj" remote add mine "${work}/fork.git"
+if ! out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" fork-only 2>&1)"; then
+  fail "git-checkout-branch fork-only failed: ${out}"
+fi
+if [ "$(host_of "${work}/proj-branch-fork-only")" != "${work}/proj" ]; then
+  fail "fork-only is registered in $(host_of "${work}/proj-branch-fork-only"), not in ${work}/proj"
+fi
+if [ "$(git -C "${work}/proj" config --get branch.fork-only.remote)" != 'mine' ]; then
+  fail "fork-only's upstream remote is [$(git -C "${work}/proj" config --get branch.fork-only.remote)], not mine"
+fi
+
+# A remote that the main clone lacks.
+git init -q --bare -b main "${work}/solo.git"
+git -C "${work}/seed" push -q "${work}/solo.git" main:refs/heads/solo-only
+git -C "${other}" remote add solo "${work}/solo.git"
+git -C "${other}" fetch -q solo
+if ! out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" solo-only 2>&1)"; then
+  fail "git-checkout-branch solo-only failed: ${out}"
+fi
+if [ "$(host_of "${work}/proj-branch-solo-only")" != "${other}" ]; then
+  fail "solo-only is registered in $(host_of "${work}/proj-branch-solo-only"), not in ${other}"
+fi
+
+# git-new-branch asks the remote that the main clone would push the new
+# branch to.
+git -C "${work}/proj" config remote.pushDefault mine
+if out="$(cd "${other}" && "${GIT_NEW_BRANCH}" --clean fork-taken 2>&1)"; then
+  fail "git-new-branch fork-taken succeeded, though ${work}/proj pushes to mine, which has it"
+fi
+[ ! -e "${work}/proj-branch-fork-taken" ] || fail "proj-branch-fork-taken was created"
+git -C "${work}/proj" config --unset remote.pushDefault
+
+# A sparse main clone is not used.
+git -C "${work}/proj" config core.sparseCheckout true
+if ! out="$(cd "${other}" && "${GIT_NEW_BRANCH}" --clean sparse 2>&1)"; then
+  fail "git-new-branch --clean sparse failed: ${out}"
+fi
+if [ "$(host_of "${work}/proj-branch-sparse")" != "${other}" ]; then
+  fail "sparse is registered in $(host_of "${work}/proj-branch-sparse"), not in ${other}"
+fi
+git -C "${work}/proj" config --unset core.sparseCheckout
+
+# A shallow branch directory, whose commit the main clone cannot fetch, falls
+# back to registering the worktree in itself.  The branch directory's commit
+# is the second of two new commits, so the main clone lacks the parent of the
+# commit at the shallow boundary.  A local clone ignores --depth, so this one
+# is made through a file: URL, and then given the URL that the main clone
+# has.
+for newest in newest1 newest2; do
+  echo "${newest}" > "${work}/seed/${newest}.txt"
+  git -C "${work}/seed" add "${newest}.txt"
+  git -C "${work}/seed" commit -q -m "Commit ${newest}"
+done
+git -C "${work}/seed" push -q origin main:refs/heads/shallow
+git clone -q --depth 1 -b shallow "file://${work}/remote.git" "${work}/proj-branch-shallow"
+git -C "${work}/proj-branch-shallow" config remote.origin.url "${work}/remote.git"
+if ! out="$(cd "${work}/proj-branch-shallow" && "${GIT_NEW_BRANCH}" --clean from-shallow 2>&1)"; then
+  fail "git-new-branch --clean from-shallow failed: ${out}"
+fi
+if [ "$(host_of "${work}/proj-branch-from-shallow")" != "${work}/proj-branch-shallow" ]; then
+  fail "from-shallow is registered in $(host_of "${work}/proj-branch-from-shallow"), not in ${work}/proj-branch-shallow"
+fi
+
+# Run in a linked worktree of the branch directory, the message names the
+# branch directory that is freed.
+git -C "${other}" worktree add -q -b linked "${work}/proj-branch-linked"
+if ! out="$(cd "${work}/proj-branch-linked" && "${GIT_NEW_BRANCH}" --clean from-linked 2>&1)"; then
+  fail "git-new-branch --clean from-linked failed: ${out}"
+fi
+case "${out}" in
+  *"rather than in ${other}, so that ${other} can be removed independently"*) ;;
+  *) fail "git-new-branch from-linked named the wrong directory: ${out}" ;;
+esac
 
 # A main clone of a different project is not used.
 git init -q -b main "${work}/unrelated"

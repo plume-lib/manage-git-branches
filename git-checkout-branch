@@ -6,13 +6,13 @@
 # Usage:
 #   git-checkout-branch BRANCHNAME
 #
-# If the current repository is a branch directory's, REPONAME-branch-OTHER/,
-# and a sibling REPONAME/ is a clone of the same project, this command acts as
-# if it were run in REPONAME/, so that the new worktree does not prevent the
-# removal of REPONAME-branch-OTHER/.
-#
 # The new directory is a linked worktree of the current repository, made by
-# `git worktree add`, so that it shares the repository's object store.  It
+# `git worktree add`, so that it shares the repository's object store.  (If
+# the current repository is a branch directory's, REPONAME-branch-OTHER/, and
+# a sibling REPONAME/ is a clone of the same project, the new worktree is
+# registered in REPONAME/ instead when REPONAME/ can check out the same
+# branch, so that it does not prevent the removal of REPONAME-branch-OTHER/;
+# see `choose_worktree_host` below.)  It
 # holds a fresh checkout of the branch:  none of the current directory's
 # uncommitted changes, untracked files, or ignored files such as build output
 # are carried into it, because checking out an existing branch starts from
@@ -121,27 +121,6 @@ fi
 # check out is known only later.
 if ! check_git_dir_is_directory "${TOPLEVEL}" 'linked-worktree'; then
   exit 1
-fi
-
-# When this repository is a branch directory's, work in the project's main
-# clone instead, so that the new worktree is registered there; see
-# `main_clone_for`.  The new worktree is a fresh checkout of the branch, so
-# nothing of this working tree is lost by doing so.  A branch that exists
-# only in this repository, though, can be checked out only from here.
-CHECKOUT_HOST="$(main_clone_for "${TOPLEVEL}")"
-if [ -n "${CHECKOUT_HOST}" ] \
-  && git rev-parse --verify --quiet "refs/heads/$1" > /dev/null \
-  && ! git -C "${CHECKOUT_HOST}" rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
-  echo "${SCRIPT_NAME}: branch $1 exists in ${TOPLEVEL} but not in ${CHECKOUT_HOST}, so the new worktree is registered in ${TOPLEVEL}" >&2
-  CHECKOUT_HOST=''
-fi
-if [ -n "${CHECKOUT_HOST}" ]; then
-  echo "${SCRIPT_NAME}: registering the new worktree in ${CHECKOUT_HOST}, the main clone, rather than in ${TOPLEVEL}, so that ${TOPLEVEL} can be removed independently" >&2
-  TOPLEVEL="${CHECKOUT_HOST}"
-  if ! cd "${TOPLEVEL}"; then
-    echo "${SCRIPT_NAME}: Cannot cd to top-level directory: ${TOPLEVEL}" >&2
-    exit 1
-  fi
 fi
 
 REPO=$(basename "$(pwd)")
@@ -341,6 +320,73 @@ find_branch() {
   return 0
 }
 
+# Usage: choose_worktree_host
+# Sets ${WORKTREE_HOST}, which `add_worktree` registers the new worktree in, to
+# the project's main clone if this repository is a branch directory's (see
+# `main_clone_for`) and the main clone can check out the same branch that
+# `find_branch` chose here.  Otherwise, it leaves ${WORKTREE_HOST} empty, and
+# says why, so that the new worktree is registered in this repository.
+#
+# Everything else happens here:  the branch is looked for among this clone's
+# branches and remotes, and this working tree is the one pulled.  Only the
+# registration moves, and so it moves only when it changes nothing else.
+#  * A local branch moves if the main clone has a local branch of that name at
+#    the same commit, which the new worktree then checks out.
+#  * A remote-tracking branch moves if the main clone has no local branch of
+#    that name, has a remote with the same URL, and can fetch the
+#    remote-tracking branch from here into that remote's namespace as a
+#    fast-forward.  The new worktree then starts from the main clone's
+#    remote-tracking branch, which is the same commit, and its upstream is the
+#    main clone's remote.
+#  * A branch that was fetched from a URL or a pathname, not from a named
+#    remote, does not move, because it is recorded only in this clone's
+#    FETCH_HEAD.
+choose_worktree_host() {
+  WORKTREE_HOST="$(main_clone_for "${TOPLEVEL}")"
+  if [ -z "${WORKTREE_HOST}" ]; then
+    return 0
+  fi
+  choose_worktree_host_reason=''
+  if [ -z "${CHECKOUT_START_POINT}" ]; then
+    if [ "$(git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}")" \
+      != "$(git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}")" ]; then
+      choose_worktree_host_reason="${WORKTREE_HOST} has no branch ${BRANCHNAME} at the same commit as ${TOPLEVEL}"
+    fi
+  elif git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
+    choose_worktree_host_reason="${WORKTREE_HOST} has its own branch ${BRANCHNAME}"
+  elif ! is_remote_name . "${CHECKOUT_REMOTE}"; then
+    choose_worktree_host_reason="${BRANCHNAME} was fetched from ${CHECKOUT_REMOTE}, which is not a named remote"
+  else
+    choose_worktree_host_url="$(git config --get "remote.${CHECKOUT_REMOTE}.url")"
+    choose_worktree_host_remote=''
+    set -f
+    for choose_worktree_host_candidate in $(git -C "${WORKTREE_HOST}" remote); do
+      if [ -n "${choose_worktree_host_url}" ] \
+        && [ "$(git -C "${WORKTREE_HOST}" config --get "remote.${choose_worktree_host_candidate}.url")" \
+          = "${choose_worktree_host_url}" ]; then
+        choose_worktree_host_remote="${choose_worktree_host_candidate}"
+        break
+      fi
+    done
+    set +f
+    if [ -z "${choose_worktree_host_remote}" ]; then
+      choose_worktree_host_reason="${WORKTREE_HOST} has no remote whose URL is that of ${CHECKOUT_REMOTE}"
+    elif ! copy_objects_to "${WORKTREE_HOST}" \
+      "refs/remotes/${CHECKOUT_START_POINT}:refs/remotes/${choose_worktree_host_remote}/${BRANCHNAME}"; then
+      choose_worktree_host_reason="${WORKTREE_HOST} cannot get the remote-tracking branch ${CHECKOUT_START_POINT}"
+    else
+      CHECKOUT_START_POINT="${choose_worktree_host_remote}/${BRANCHNAME}"
+      CHECKOUT_REMOTE="${choose_worktree_host_remote}"
+    fi
+  fi
+  if [ -n "${choose_worktree_host_reason}" ]; then
+    echo "${SCRIPT_NAME}: ${choose_worktree_host_reason}, so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
+    WORKTREE_HOST=''
+  else
+    note_worktree_host
+  fi
+}
+
 # This test precedes the creation of the new directory, so that a branch that
 # cannot be checked out does not cost the user a full copy of the repository,
 # where the new directory is one.
@@ -428,6 +474,7 @@ else
   # of one branch are the branch confusion that this package exists to
   # prevent.
   NEWDIR="${BRANCHDIR}"
+  choose_worktree_host
   if [ -z "${CHECKOUT_START_POINT}" ]; then
     add_worktree "${BRANCHDIR}" "${BRANCHNAME}"
   else

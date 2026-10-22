@@ -261,20 +261,18 @@ github_slug() {
     | sed -e 's|\.git$||'
 }
 
-# Warns, on standard error, if the branch of directory $1, which still exists
-# in its remote, has pull requests and all of them are closed or merged.  Such
-# a directory is very likely obsolete, but it is not reported:  the branch is
-# still in the remote, so its removal is a decision for the user, who may
-# want to reopen the pull request or to delete the remote branch first.
+# Records directory $1, whose branch still exists in its remote, so that
+# `warn_about_closed_prs` asks about its pull requests after the scan.
 #
 # The pull requests are those whose base is the parent of the repository that
 # `git push` uses, if that repository is a fork, and is that repository itself
 # otherwise; and whose head is a branch of the same name, either in the
-# repository that `git push` uses or in the base repository.  It says nothing if `gh` is not
-# installed, if the remote is not on GitHub, or if a query fails, because
-# then nothing is known about the pull requests; the scan's other answers do
-# not depend on GitHub.
-warn_if_prs_closed() {
+# repository that `git push` uses or in the base repository.  Nothing is
+# recorded if `gh` is not installed, if the remote is not on GitHub, or if a
+# query fails, because then nothing is known about the pull requests; the
+# scan's other answers do not depend on GitHub.  Nor is a directory whose
+# pathname contains a newline, which ${pr_candidates} cannot represent.
+note_pr_candidate() {
   command -v gh > /dev/null 2>&1 || return 0
   prs_branch="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
   prs_branch="${prs_branch#refs/heads/}"
@@ -288,7 +286,6 @@ warn_if_prs_closed() {
     prs_head_repo="$(github_slug "$(git -C "$1" config --get "remote.${prs_remote}.url")")"
   fi
   [ -n "${prs_head_repo}" ] || return 0
-  prs_owner="${prs_head_repo%%/*}"
   # Every branch directory of a project asks about the same repository, so
   # remember each answer.  Each line of ${base_repo_cache} is "HEAD BASE".
   prs_base_repo="$(printf '%s\n' "${base_repo_cache}" \
@@ -301,24 +298,145 @@ warn_if_prs_closed() {
     base_repo_cache="${base_repo_cache}
 ${prs_head_repo} ${prs_base_repo}"
   fi
-  prs_base_owner="${prs_base_repo%%/*}"
-  # Each line is "STATE NUMBER" for one pull request from this branch.
-  prs_states="$(gh pr list -R "${prs_base_repo}" --head "${prs_branch}" \
-    --state all --limit 100 --json number,state,headRepositoryOwner \
-    --jq ".[] | select(.headRepositoryOwner.login == \"${prs_owner}\" or .headRepositoryOwner.login == \"${prs_base_owner}\") | \"\(.state) \(.number)\"" \
-    2> /dev/null)" || return 0
-  [ -n "${prs_states}" ] || return 0
-  if printf '%s\n' "${prs_states}" | grep -q '^OPEN '; then
-    return 0
-  fi
-  prs_numbers="$(printf '%s\n' "${prs_states}" | sed -e 's/^\([A-Z]*\) \(.*\)/#\2 (\1)/' \
-    | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')"
   prs_dir="$(absolute_path "$1")" || prs_dir="$1"
-  echo "${SCRIPT_NAME}: warning: not listing ${prs_dir}:  every pull request for branch ${prs_branch} of ${prs_head_repo} is closed or merged (${prs_base_repo} ${prs_numbers% }), but the branch still exists in the remote" >&2
+  case "${prs_dir}" in
+    *'
+'*) return 0 ;;
+  esac
+  pr_candidates="${pr_candidates}${prs_base_repo}	${prs_head_repo}	${prs_branch}	${prs_dir}
+"
 }
 
-# The answers of `gh repo view` that `warn_if_prs_closed` has received.
+# The answers of `gh repo view` that `note_pr_candidate` has received.
 base_repo_cache=''
+
+# The directories that `note_pr_candidate` has recorded, one per line, each
+# line "BASE<TAB>HEAD<TAB>BRANCH<TAB>DIRECTORY".  A branch name contains no
+# control character, and neither does the name of a GitHub repository.
+pr_candidates=''
+
+# Warns, on standard error, about each directory that `note_pr_candidate`
+# recorded whose branch has pull requests and all of them are closed or
+# merged.  Such a directory is very likely obsolete, but it is not reported:
+# the branch is still in the remote, so its removal is a decision for the
+# user, who may want to reopen the pull request or to delete the remote branch
+# first.
+#
+# One GraphQL query asks about up to 50 branches of one base repository, so
+# that a scan of many branch directories costs a few round trips rather than
+# one per directory.  GraphQL filters pull requests by the name of their head
+# branch but not by the owner of their head repository, so the owners are
+# filtered here.  Only the REST API filters by owner, and it answers about one
+# branch at a time, so it is asked only about a branch name that has more
+# than the 100 pull requests that one GraphQL answer holds, such as
+# `patch-1`:  among those beyond the first 100 may be an open one of the
+# user's.
+warn_about_closed_prs() {
+  [ -n "${pr_candidates}" ] || return 0
+  for wacp_base in $(printf '%s' "${pr_candidates}" | cut -f 1 | sort -u); do
+    wacp_entries="$(printf '%s' "${pr_candidates}" | awk -F '\t' -v base="${wacp_base}" '$1 == base')"
+    while [ -n "${wacp_entries}" ]; do
+      warn_about_closed_prs_in "${wacp_base}" "$(printf '%s\n' "${wacp_entries}" | sed -n -e '1,50p')"
+      wacp_entries="$(printf '%s\n' "${wacp_entries}" | sed -e '1,50d')"
+    done
+  done
+}
+
+# Usage: warn_about_closed_prs_in BASE ENTRIES
+# Does the work of `warn_about_closed_prs` for ENTRIES, at most 50 lines of
+# ${pr_candidates} whose base repository is BASE.
+warn_about_closed_prs_in() {
+  wacpi_base="$1"
+  wacpi_entries="$2"
+  # shellcheck disable=SC2016 # GraphQL variables, not shell ones.
+  wacpi_decl='$owner: String!, $name: String!'
+  wacpi_fields=''
+  set -- -f "owner=${wacpi_base%%/*}" -f "name=${wacpi_base#*/}"
+  wacpi_index=0
+  wacpi_rest="${wacpi_entries}
+"
+  while [ -n "${wacpi_rest}" ]; do
+    next_pr_candidate
+    wacpi_decl="${wacpi_decl}, \$b${wacpi_index}: String!"
+    wacpi_fields="${wacpi_fields} b${wacpi_index}: pullRequests(headRefName: \$b${wacpi_index}, first: 100) { pageInfo { hasNextPage } nodes { number state headRepositoryOwner { login } } }"
+    set -- "$@" -f "b${wacpi_index}=${wacpi_branch}"
+    wacpi_index=$((wacpi_index + 1))
+  done
+  # Each line is "ALIAS MORE STATE NUMBER OWNER" for one pull request, or
+  # "ALIAS MORE END" after an alias's last one, so that every alias says
+  # whether it has more.  A pull request whose head repository was deleted
+  # has no owner, which is "-" here.
+  # shellcheck disable=SC2016 # jq variables, not shell ones.
+  wacpi_results="$(gh api graphql \
+    -f query="query(${wacpi_decl}) { repository(owner: \$owner, name: \$name) {${wacpi_fields} } }" \
+    "$@" --jq '.data.repository | to_entries[] | .key as $k | .value.pageInfo.hasNextPage as $more
+      | ((.value.nodes[] | "\($k) \($more) \(.state) \(.number) \(.headRepositoryOwner.login // "-")"),
+         "\($k) \($more) END")' \
+    < /dev/null 2> /dev/null)" || return 0
+  wacpi_base_owner="${wacpi_base%%/*}"
+  wacpi_index=0
+  wacpi_rest="${wacpi_entries}
+"
+  while [ -n "${wacpi_rest}" ]; do
+    next_pr_candidate
+    wacpi_owner="${wacpi_head_repo%%/*}"
+    wacpi_lines="$(printf '%s\n' "${wacpi_results}" | awk -v alias="b${wacpi_index}" '$1 == alias')"
+    wacpi_index=$((wacpi_index + 1))
+    # Each line is "STATE NUMBER" for one pull request from this branch.
+    case "${wacpi_lines}" in
+      *' true END'*)
+        if ! wacpi_states="$(rest_pr_states "${wacpi_base}" "${wacpi_owner}" "${wacpi_branch}")"; then
+          continue
+        fi
+        if [ "${wacpi_base_owner}" != "${wacpi_owner}" ]; then
+          if ! wacpi_more_states="$(rest_pr_states "${wacpi_base}" "${wacpi_base_owner}" "${wacpi_branch}")"; then
+            continue
+          fi
+          wacpi_states="$(printf '%s\n%s\n' "${wacpi_states}" "${wacpi_more_states}" | grep '.')"
+        fi
+        ;;
+      *)
+        wacpi_states="$(printf '%s\n' "${wacpi_lines}" \
+          | awk -v owner="${wacpi_owner}" -v base_owner="${wacpi_base_owner}" \
+            '$3 != "END" && ($5 == owner || $5 == base_owner) { print $3 " " $4 }')"
+        ;;
+    esac
+    [ -n "${wacpi_states}" ] || continue
+    if printf '%s\n' "${wacpi_states}" | grep -q '^OPEN '; then
+      continue
+    fi
+    wacpi_numbers="$(printf '%s\n' "${wacpi_states}" | sed -e 's/^\([A-Z]*\) \(.*\)/#\2 (\1)/' \
+      | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')"
+    echo "${SCRIPT_NAME}: warning: not listing ${wacpi_dir}:  every pull request for branch ${wacpi_branch} of ${wacpi_head_repo} is closed or merged (${wacpi_base} ${wacpi_numbers% }), but the branch still exists in the remote" >&2
+  done
+}
+
+# Usage: next_pr_candidate
+# A helper for `warn_about_closed_prs_in`:  removes the first line from
+# ${wacpi_rest}, which holds lines of ${pr_candidates}, each followed by a
+# newline, and sets ${wacpi_head_repo}, ${wacpi_branch}, and ${wacpi_dir} to
+# its fields.
+next_pr_candidate() {
+  npc_line="${wacpi_rest%%
+*}"
+  wacpi_rest="${wacpi_rest#*
+}"
+  npc_line="${npc_line#*	}"
+  wacpi_head_repo="${npc_line%%	*}"
+  npc_line="${npc_line#*	}"
+  wacpi_branch="${npc_line%%	*}"
+  wacpi_dir="${npc_line#*	}"
+}
+
+# Usage: rest_pr_states BASE OWNER BRANCH
+# Prints "STATE NUMBER", one per line, for each pull request to the GitHub
+# repository BASE whose head is the branch BRANCH of OWNER's repository.
+# Fails if the query does.
+rest_pr_states() {
+  gh api -X GET "repos/$1/pulls" -f "head=$2:$3" -f state=all -f per_page=100 \
+    --paginate --jq '.[] | "\(if .state == "open" then "OPEN" elif .merged_at then "MERGED" else "CLOSED" end) \(.number)"' \
+    < /dev/null 2> /dev/null
+}
 
 # Reports directory $1, whose name matches `*-branch-*`, if its branch was
 # deleted in the remote or if it holds nothing but Eclipse `.project` files.
@@ -377,7 +495,7 @@ check_directory() {
         fi
       fi
       ;;
-    1) warn_if_prs_closed "$dir" < /dev/null ;;
+    1) note_pr_candidate "$dir" < /dev/null ;;
     2 | 3) ;;
     *)
       echo "${SCRIPT_NAME}: is_deleted_branch returned status ${is_deleted_status} on: $dir" >&2
@@ -431,6 +549,7 @@ examine_directory() {
 }
 
 examine_directory .
+warn_about_closed_prs
 
 # Prints the pathname collected as $1, followed by an `x`.  The caller strips
 # the `x`:  a command substitution removes trailing newlines, and this is what

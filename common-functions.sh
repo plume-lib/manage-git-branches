@@ -1029,6 +1029,14 @@ physical_path() {
 ## of the same project:  if it and DIRECTORY's repository have a remote URL in
 ## common.
 ##
+## A sparse checkout and per-worktree configuration are exceptions.
+## `git worktree add` gives the new worktree the sparse-checkout patterns and
+## per-worktree configuration of the worktree that it runs in, and without
+## per-worktree configuration, `core.sparseCheckout` and the patterns apply to
+## every worktree of a repository.  So if either repository has either one,
+## moving the new worktree to the main clone would change how it is checked
+## out, and this function prints nothing.
+##
 ## The variables are prefixed with an abbreviation of this function's name,
 ## so that they cannot collide with a sourcing script's variables.
 main_clone_for() {
@@ -1057,6 +1065,12 @@ main_clone_for() {
   if [ "${mcf_main}" = "${mcf_host}" ]; then
     return 0
   fi
+  for mcf_dir in "$1" "${mcf_main}"; do
+    if [ "$(git -C "${mcf_dir}" config --bool core.sparseCheckout)" = 'true' ] \
+      || [ "$(git -C "${mcf_dir}" config --bool extensions.worktreeConfig)" = 'true' ]; then
+      return 0
+    fi
+  done
   mcf_urls="$(git -C "${mcf_host}" config --get-regexp '^remote\..*\.url$' \
     | awk '{ print $2 }' | sort -u)"
   if [ -z "${mcf_urls}" ]; then
@@ -1068,38 +1082,66 @@ main_clone_for() {
   fi
 }
 
-## Usage: copy_objects_to REPOSITORY [INDEX]
-## Copies into the repository of the working tree REPOSITORY the objects that
-## a worktree there needs in order to hold the current commit of the current
-## working tree, and, with INDEX, the blobs that the current working tree's
-## index names.  Exits with status 1, after printing a diagnostic, on failure.
+## Usage: note_worktree_host
+## Says, on standard error, that the new worktree is registered in
+## ${WORKTREE_HOST}, and names the branch directory that this frees:  the main
+## working tree of the current repository, which is not the current working
+## tree if that is a linked worktree.
+note_worktree_host() {
+  nwh_main="$(git rev-parse --path-format=absolute --git-common-dir)"
+  nwh_main="${nwh_main%/.git}"
+  echo "${SCRIPT_NAME}: registering the new worktree in ${WORKTREE_HOST}, the main clone, rather than in ${nwh_main}, so that ${nwh_main} can be removed independently" >&2
+}
+
+## Usage: copy_objects_to REPOSITORY REFSPEC [INDEX]
+## Fetches REFSPEC from the current repository into the repository of the
+## working tree REPOSITORY, which brings along the history of the commit that
+## REFSPEC names; with INDEX, also copies the blobs that the current working
+## tree's index names.  These are the objects that a worktree registered in
+## REPOSITORY needs in order to hold that commit and that index.  On failure,
+## prints a warning and returns 1.  A failure is not unusual:  git refuses,
+## for example, to update a ref that REFSPEC names unless the update is a
+## fast-forward.  A caller then registers the worktree in the current
+## repository instead.
 ##
-## The current commit is fetched, which brings its history along.  A staged
-## blob that no commit holds is copied with `git hash-object -w`; it is then
-## an unreachable object in REPOSITORY, which `git gc` nonetheless keeps,
-## because the new worktree's index names it.  A gitlink names a commit in a
-## submodule rather than an object of this repository, so it is skipped.
+## A shallow current repository is refused before anything is fetched.  A
+## fetch from it into a complete repository warns that it "rejected" the ref,
+## exits with status 0 all the same, and leaves the commit in REPOSITORY
+## without its parents, which a worktree there would then be based on.
+##
+## A staged blob that no commit holds is copied in one pack; it is then an
+## unreachable object in REPOSITORY, which `git gc` nonetheless keeps, because
+## the new worktree's index names it.  A gitlink names a commit in a submodule
+## rather than an object of this repository, so it is skipped.
 copy_objects_to() {
-  if ! git -C "$1" fetch -q --no-tags --no-write-fetch-head "${PWD}" HEAD < /dev/null; then
-    echo "${SCRIPT_NAME}: ERROR: cannot fetch the current commit of ${PWD} into $1" >&2
-    exit 1
+  if [ "$(git rev-parse --is-shallow-repository)" != 'false' ]; then
+    echo "${SCRIPT_NAME}: warning: ${PWD} is a shallow clone, so $1 cannot fetch history from it" >&2
+    return 1
   fi
-  if [ "$#" -lt 2 ]; then
+  if ! git -C "$1" fetch -q --no-tags --no-write-fetch-head "${PWD}" "$2" < /dev/null; then
+    echo "${SCRIPT_NAME}: warning: cannot fetch $2 from ${PWD} into $1" >&2
+    return 1
+  fi
+  if [ "$#" -lt 3 ]; then
     return 0
   fi
   if ! cot_missing="$(git ls-files --stage | awk '$1 != "160000" { print $2 }' | sort -u \
     | git -C "$1" cat-file --batch-check | awk '$2 == "missing" { print $1 }')"; then
-    echo "${SCRIPT_NAME}: ERROR: cannot determine which staged blobs $1 lacks" >&2
-    exit 1
+    echo "${SCRIPT_NAME}: warning: cannot determine which staged blobs $1 lacks" >&2
+    return 1
   fi
-  for cot_blob in ${cot_missing}; do
-    if ! cot_copied="$(git cat-file blob "${cot_blob}" \
-      | git -C "$1" hash-object -w --no-filters --stdin)" \
-      || [ "${cot_copied}" != "${cot_blob}" ]; then
-      echo "${SCRIPT_NAME}: ERROR: cannot copy the staged blob ${cot_blob} into $1" >&2
-      exit 1
-    fi
-  done
+  if [ -z "${cot_missing}" ]; then
+    return 0
+  fi
+  # A pipeline's status is that of its last command, so whether every blob
+  # arrived is tested afterward.
+  printf '%s\n' "${cot_missing}" | git pack-objects -q --stdout \
+    | git -C "$1" index-pack --stdin > /dev/null
+  if printf '%s\n' "${cot_missing}" | git -C "$1" cat-file --batch-check \
+    | grep -q ' missing$'; then
+    echo "${SCRIPT_NAME}: warning: cannot copy the staged blobs into $1" >&2
+    return 1
+  fi
 }
 
 ## Usage: is_deleted_branch_tracking_refs DIRECTORY REMOTE REF
