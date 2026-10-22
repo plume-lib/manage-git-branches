@@ -21,16 +21,19 @@
 #  * build using `compile-project` (see its documentation),
 #  * push the current branch if the build succeeds.
 # If the current branch already contains the upstream repository's default
-# branch, it skips the merge, and it stops there if the current branch has no
-# commits that are not pushed.  Otherwise, as after a run whose build failed,
-# it builds and pushes.
+# branch, it skips the merge, and it stops there if the current branch matches
+# the branch that it pushes to (which differs from the branch that it pulls
+# from when `branch.BRANCH.pushRemote` or `remote.pushDefault` is set).
+# Otherwise, as after a run whose build failed, it builds and pushes.
 #
 # It fails, without pulling, merging, or pushing, if the current branch
 # pushes to the upstream repository's default branch, as a fork's `master`
 # that tracks `upstream/master` does, or if it is in a fork and pushes to any
-# branch of the remote `upstream`.  It fails after pulling, but without
-# merging, if `git push --dry-run` shows that the current branch cannot be
-# pushed.
+# branch of the remote `upstream`, or if `git push` might push other branches
+# too, because `push.default` is "matching" or `remote.REMOTE.mirror` or
+# `remote.REMOTE.push` is set.
+# It fails after pulling, but without merging, if `git push --dry-run` shows
+# that the current branch cannot be pushed.
 #
 # Unlike `git-pull-from`, this command needs no working tree for the upstream
 # repository's default branch, and it does not build that branch.
@@ -134,6 +137,22 @@ if [ "${push_ref}" = "${upstream_ref}" ]; then
   echo "${SCRIPT_NAME}: the current branch pushes to ${upstream_ref#refs/remotes/}, the branch that this command merges from, so this command does not push it; if you mean to, run \`git push\`" >&2
   exit 1
 fi
+# The checks above are about the current branch, so refuse a `git push` that
+# would push other branches too:  "matching" pushes every branch that the
+# remote also has, `remote.REMOTE.mirror` pushes every ref, and refspecs in
+# `remote.REMOTE.push` replace the current branch with whatever they name.
+if [ "$(git config --get push.default)" = matching ]; then
+  echo "${SCRIPT_NAME}: push.default is \"matching\", so \`git push\` would push other branches too; this command does not push" >&2
+  exit 1
+fi
+if [ "$(git config --bool --get "remote.${push_remote_name}.mirror")" = true ]; then
+  echo "${SCRIPT_NAME}: remote.${push_remote_name}.mirror is set, so \`git push\` would push every ref; this command does not push" >&2
+  exit 1
+fi
+if [ -n "$(git config --get-all "remote.${push_remote_name}.push")" ]; then
+  echo "${SCRIPT_NAME}: remote.${push_remote_name}.push is set, so \`git push\` might push other branches too; this command does not push" >&2
+  exit 1
+fi
 
 # `--no-rebase` because a rebase would drop a merge from `upstream` that an
 # earlier run of this command made but did not push, as when its build
@@ -147,13 +166,13 @@ fi
 # Stop if there is nothing to merge and nothing to push.  If there is nothing
 # to merge, still build and push if the branch has commits that are not
 # pushed, as after a run of this command whose build failed.
-# This compares with the branch that the current branch pulls from, which is
-# where it pushes unless `branch.BRANCH.pushRemote` or `remote.pushDefault`
-# says otherwise.  In such a triangular workflow, this test is wrong:  it can
-# skip a needed push, or build and push needlessly.  Comparing with `@{push}`
-# instead would handle that workflow.
+# This compares with ${push_ref}, where the current branch pushes, rather than
+# with `@{upstream}`, where it pulls from:  the two differ when
+# `branch.BRANCH.pushRemote` or `remote.pushDefault` is set.  If ${push_ref}
+# is empty or does not exist, as before the first push, do not stop.
 if git merge-base --is-ancestor "${upstream_ref}" HEAD \
-  && [ "$(git rev-parse HEAD)" = "$(git rev-parse '@{upstream}')" ]; then
+  && push_head="$(git rev-parse --verify --quiet "${push_ref}")" \
+  && [ "$(git rev-parse HEAD)" = "${push_head}" ]; then
   exit 0
 fi
 

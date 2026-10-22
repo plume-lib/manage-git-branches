@@ -255,6 +255,68 @@ fi
 git -C "${fork}" config --unset push.default
 git -C "${fork}" switch -q feature
 
+# A `git push` that might push other branches too is refused, before the pull.
+# The current branch's upstream branch has a new commit, which must not be
+# pulled.
+git -C "${other}" switch -q feature
+git -C "${other}" pull -q --no-rebase
+commit_file "${other}" j.txt 'j'
+git -C "${other}" push -q origin feature
+before="$(git -C "${fork}" rev-parse HEAD)"
+git -C "${fork}" config push.default matching
+if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  fail "push.default=matching: succeeded"
+elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
+  fail "push.default=matching: pulled"
+elif ! grep -q 'push.default is "matching"' "${testdir}/errors"; then
+  fail "push.default=matching: wrong message: $(cat "${testdir}/errors")"
+fi
+git -C "${fork}" config --unset push.default
+git -C "${fork}" config remote.github.mirror true
+if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  fail "remote.github.mirror: succeeded"
+elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
+  fail "remote.github.mirror: pulled"
+elif ! grep -q 'remote.github.mirror is set' "${testdir}/errors"; then
+  fail "remote.github.mirror: wrong message: $(cat "${testdir}/errors")"
+fi
+git -C "${fork}" config --unset remote.github.mirror
+git -C "${fork}" config remote.github.push 'refs/heads/*:refs/heads/*'
+if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  fail "remote.github.push: succeeded"
+elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
+  fail "remote.github.push: pulled"
+elif ! grep -q 'remote.github.push is set' "${testdir}/errors"; then
+  fail "remote.github.push: wrong message: $(cat "${testdir}/errors")"
+fi
+git -C "${fork}" config --unset remote.github.push
+
+# In a triangular workflow, a branch that matches the branch it pulls from but
+# not the branch it pushes to is pushed, even though there is nothing to merge.
+# The branch pulls from `github/feature` and pushes to `push/feature`, which
+# lacks the branch's latest commit.
+git -C "${fork}" pull -q --no-rebase --no-edit
+git -C "${fork}" fetch -q upstream
+# `-X ours` resolves the conflict in a.txt that an earlier test made.
+git -C "${fork}" merge -q --no-edit -X ours upstream/trunk > /dev/null
+push_remote="${testdir}/push.git"
+git clone -q --bare "${fork_remote}" "${push_remote}"
+git -C "${fork}" remote add push "${push_remote}"
+git -C "${fork}" config branch.feature.pushRemote push
+git -C "${fork}" config push.default current
+git -C "${fork}" fetch -q push
+commit_file "${fork}" k.txt 'k'
+git -C "${fork}" push -q github feature
+git -C "${fork}" fetch -q github
+if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  fail "triangular: failed: $(cat "${testdir}/errors")"
+elif [ "$(git -C "${push_remote}" rev-parse refs/heads/feature)" != "$(git -C "${fork}" rev-parse HEAD)" ]; then
+  fail "triangular: did not push"
+fi
+git -C "${fork}" config --unset push.default
+git -C "${fork}" config --unset branch.feature.pushRemote
+git -C "${fork}" remote remove push
+
 # A branch that has no upstream branch fails with a diagnostic that says so.
 git -C "${fork}" switch -q -c no-upstream
 if pull_upstream "${fork}"; then
