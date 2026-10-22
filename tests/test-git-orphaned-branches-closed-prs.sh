@@ -97,22 +97,31 @@ prs() {
 # POSIX mode, which is /bin/sh on macOS, keep such assignments after a
 # function returns.
 scan() {
-  out="$(
-    cd "${work}/scan" || exit 1
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        FAKE_GH_*=*)
-          # shellcheck disable=SC2163 # $1 is NAME=VALUE, not a name.
-          export "$1"
-          shift
-          ;;
-        *) break ;;
-      esac
-    done
-    "${GIT_ORPHANED_BRANCHES}" "$@" 2> "${work}/err"
-  )"
+  out="$(scan_run "$@")"
   scan_status=$?
   err="$(cat "${work}/err")"
+}
+
+# Usage: scan_run [FAKE_GH_NAME=VALUE]... [ARGUMENT]...
+# A helper for `scan`, which runs it in a subshell, so that the variables that
+# it exports do not outlive the scan:  does the work of `scan`, except that it
+# prints the standard output, and writes the standard error to ${work}/err.
+# This is a function, rather than code in the command substitution of `scan`,
+# because bash 3.2, which is /bin/sh on macOS, ends a command substitution at
+# the ")" of a `case` pattern within it.
+scan_run() {
+  cd "${work}/scan" || return 1
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      FAKE_GH_*=*)
+        # shellcheck disable=SC2163 # $1 is NAME=VALUE, not a name.
+        export "$1"
+        shift
+        ;;
+      *) break ;;
+    esac
+  done
+  "${GIT_ORPHANED_BRANCHES}" "$@" 2> "${work}/err"
 }
 
 # Every pull request is closed or merged:  a warning, and nothing listed.
@@ -238,9 +247,11 @@ esac
 rm -rf "${dir2}"
 
 # gh fails:  no warning.
+: > "${work}/gh.log"
 scan FAKE_GH_FAIL=1 FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
 [ "${scan_status}" -eq 0 ] || fail "status ${scan_status} when gh fails"
 [ -z "${err}" ] || fail "warned when gh fails: [${err}]"
+[ -s "${work}/gh.log" ] || fail "did not ask gh, so its failure was not tested"
 
 # A remote that is not on GitHub:  gh is not asked.
 : > "${work}/gh.log"
