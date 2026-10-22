@@ -233,20 +233,35 @@ fi
 git -C "${fork}" switch -q feature
 
 # In a fork, a branch that pushes to the remote "upstream" is not pushed, even
-# to a branch other than the default branch.
+# to a branch other than the default branch.  The refusal comes before the
+# pull, so the branch's upstream branch's new commit is not pulled.
 git -C "${fork}" remote add upstream "${canonical}"
 git -C "${fork}" fetch -q upstream
 git -C "${fork}" switch -q -c topic upstream/trunk
 git -C "${fork}" config push.default current
 commit_file "${fork}" topic.txt 't'
+commit_file "${canonical_work}" i.txt 'i'
+git -C "${canonical_work}" push -q origin trunk
+before="$(git -C "${fork}" rev-parse HEAD)"
 if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
   fail "push to upstream: succeeded"
 elif git -C "${canonical}" rev-parse --verify --quiet refs/heads/topic > /dev/null; then
   fail "push to upstream: pushed"
+elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
+  fail "push to upstream: pulled"
 elif ! grep -q 'does not push it' "${testdir}/errors"; then
   fail "push to upstream: wrong message: $(cat "${testdir}/errors")"
 fi
 git -C "${fork}" config --unset push.default
+git -C "${fork}" switch -q feature
+
+# A branch that has no upstream branch fails with a diagnostic that says so.
+git -C "${fork}" switch -q -c no-upstream
+if pull_upstream "${fork}"; then
+  fail "no upstream branch: succeeded"
+elif ! grep -q 'has no upstream branch' "${testdir}/errors"; then
+  fail "no upstream branch: wrong message: $(cat "${testdir}/errors")"
+fi
 git -C "${fork}" switch -q feature
 
 # An extra argument is rejected.

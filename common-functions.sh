@@ -746,6 +746,37 @@ fetch_remote() {
   printf '%s\n' "${remote_result}"
 }
 
+## Usage: check_upstream DIRECTORY
+## Tests whether the working tree DIRECTORY has an upstream branch, which
+## `git pull` and `git push` require.  If it does not, prints an explanation
+## and returns 1.
+##
+## Also sets ${checked_out_branch} to the name of the branch that the
+## directory has checked out, or to the empty string if HEAD is detached or
+## the directory is not a working tree.  It is the local branch, not the
+## upstream branch that this function is named for; the two can differ.  A
+## caller that fetches into or merges into that branch, as `git-push-to` does,
+## can use this name rather than determine it again.
+check_upstream() {
+  checked_out_branch=''
+  # If the directory is not a working tree, or HEAD is detached, let a
+  # subsequent command diagnose that, as `check_branch_exists` in
+  # `git-push-to` does accurately.  `git rev-parse --abbrev-ref HEAD`, by
+  # contrast, prints "HEAD" for a detached HEAD, which this function would
+  # then report as a branch name.
+  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
+  # "heads/BRANCH" when a tag and the branch have the same name.
+  check_upstream_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
+  checked_out_branch="${check_upstream_ref#refs/heads/}"
+  check_upstream_remote="$(git -C "$1" config --get "branch.${checked_out_branch}.remote")"
+  check_upstream_merge="$(git -C "$1" config --get-all "branch.${checked_out_branch}.merge")"
+  if [ -n "${check_upstream_remote}" ] && [ -n "${check_upstream_merge}" ]; then
+    return 0
+  fi
+  echo "${SCRIPT_NAME}: branch ${checked_out_branch} in $1 has no upstream branch, so it cannot be pulled or pushed" >&2
+  return 1
+}
+
 ## Usage: upstream_remote
 ## Prints the name of the remote of the current clone that is the upstream
 ## repository:  the remote named "upstream" if the clone has one, as a fork
