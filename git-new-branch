@@ -39,8 +39,9 @@
 # There is one exception.  If the current repository is a branch directory's,
 # REPONAME-branch-OTHER/, and a sibling REPONAME/ is a clone of the same
 # project, the branch and the worktree are created in REPONAME/ instead, after
-# the commit and staged files that they need are copied there, if they can be;
-# otherwise, the new worktree would prevent the removal of
+# the commit and staged files that they need are copied there, if they can be
+# and if REPONAME/ has no branch of that name; otherwise, the new worktree would
+# prevent the removal of
 # REPONAME-branch-OTHER/.  Then the test for a branch of the same name on a
 # remote consults REPONAME/'s remotes, because REPONAME/'s configuration says
 # where the new branch would be pushed.
@@ -321,8 +322,8 @@ if [ "${MODE}" != 'copy' ]; then
 fi
 if [ -n "${WORKTREE_HOST}" ] \
   && git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists in ${WORKTREE_HOST}, where the new worktree would be registered." >&2
-  exit 1
+  echo "${SCRIPT_NAME}: ${WORKTREE_HOST} has its own branch ${BRANCHNAME}, so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
+  WORKTREE_HOST=''
 fi
 
 # Bring this working tree up to date, so that the branch is based on the most
@@ -370,9 +371,7 @@ if [ -n "${WORKTREE_HOST}" ]; then
   else
     COPY_INDEX=''
   fi
-  if copy_objects_to "${WORKTREE_HOST}" HEAD ${COPY_INDEX:+"${COPY_INDEX}"}; then
-    note_worktree_host
-  else
+  if ! copy_objects_to "${WORKTREE_HOST}" HEAD ${COPY_INDEX:+"${COPY_INDEX}"}; then
     echo "${SCRIPT_NAME}: so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
     WORKTREE_HOST=''
   fi
@@ -455,6 +454,12 @@ if [ -n "${REMOTE}" ] \
     "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${REMOTE}, which was asked directly." >&2
   exit 1
+fi
+
+# Say where the new worktree is registered only now that no test can refuse
+# the branch.
+if [ -n "${WORKTREE_HOST}" ]; then
+  note_worktree_host
 fi
 
 # Usage: make_tmpdir

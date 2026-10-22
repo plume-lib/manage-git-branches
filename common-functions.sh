@@ -1021,7 +1021,7 @@ physical_path() {
 ## `git worktree add` registers a new worktree in the repository of the main
 ## working tree, which holds the `.git` directory.  When that main working
 ## tree is itself a branch directory -- REPONAME-branch-OTHER, a clone made
-## with `--copy` or before branch directories were worktrees -- the new
+## with `--copy` or by other means -- the new
 ## worktree depends on it, and that branch directory cannot be removed while
 ## the new worktree exists, even after OTHER's pull request lands.  So a
 ## sibling named REPONAME, which conventionally holds the clone that branch

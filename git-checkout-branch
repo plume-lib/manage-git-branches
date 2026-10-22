@@ -331,7 +331,14 @@ find_branch() {
 # branches and remotes, and this working tree is the one pulled.  Only the
 # registration moves, and so it moves only when it changes nothing else.
 #  * A local branch moves if the main clone has a local branch of that name at
-#    the same commit, which the new worktree then checks out.
+#    the same commit, which the new worktree then checks out, and no worktree
+#    of either repository has the branch checked out.  In the main clone, git
+#    would refuse a branch that one of the main clone's worktrees has checked
+#    out, and it would accept one that only a worktree of this repository has
+#    checked out, because it does not know about this repository's worktrees.
+#    Registered here instead, the new worktree gets what it would get without
+#    a main clone:  git accepts the first branch and refuses the second,
+#    naming the worktree that has it checked out.
 #  * A remote-tracking branch moves if the main clone has no local branch of
 #    that name, has a remote with the same URL, and can fetch the
 #    remote-tracking branch from here into that remote's namespace as a
@@ -352,6 +359,13 @@ choose_worktree_host() {
       != "$(git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}")" ]; then
       choose_worktree_host_reason="${WORKTREE_HOST} has no branch ${BRANCHNAME} at the same commit as ${TOPLEVEL}"
     fi
+    for choose_worktree_host_repo in "${WORKTREE_HOST}" "${TOPLEVEL}"; do
+      if [ -z "${choose_worktree_host_reason}" ] \
+        && git -C "${choose_worktree_host_repo}" worktree list --porcelain \
+          | grep -q -x -F -- "branch refs/heads/${BRANCHNAME}"; then
+        choose_worktree_host_reason="a worktree of ${choose_worktree_host_repo} has ${BRANCHNAME} checked out"
+      fi
+    done
   elif git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
     choose_worktree_host_reason="${WORKTREE_HOST} has its own branch ${BRANCHNAME}"
   elif ! is_remote_name . "${CHECKOUT_REMOTE}"; then

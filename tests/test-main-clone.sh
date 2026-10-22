@@ -96,12 +96,15 @@ if [ -n "$(git -C "${new2}" status --porcelain)" ]; then
   fail "new2 is not clean: $(git -C "${new2}" status --porcelain)"
 fi
 
-# A branch name that the main clone already uses is refused.
+# A branch name that the main clone already uses is created in the branch
+# directory instead.
 git -C "${work}/proj" branch taken
-if out="$(cd "${other}" && "${GIT_NEW_BRANCH}" --clean taken 2>&1)"; then
-  fail "git-new-branch taken succeeded, though ${work}/proj has a branch taken"
+if ! out="$(cd "${other}" && "${GIT_NEW_BRANCH}" --clean taken 2>&1)"; then
+  fail "git-new-branch --clean taken failed: ${out}"
 fi
-[ ! -e "${work}/proj-branch-taken" ] || fail "proj-branch-taken was created"
+if [ "$(host_of "${work}/proj-branch-taken")" != "${other}" ]; then
+  fail "taken is registered in $(host_of "${work}/proj-branch-taken"), not in ${other}"
+fi
 
 # git-checkout-branch of a branch that the remote has.  It pulls in the
 # directory that it is run in, not in the main clone.
@@ -153,6 +156,28 @@ if [ "$(host_of "${work}/proj-branch-same")" != "${work}/proj" ]; then
   fail "same is registered in $(host_of "${work}/proj-branch-same"), not in ${work}/proj"
 fi
 
+# A local branch that the main clone has at the same commit, but that a
+# worktree of the main clone has checked out, uses the branch directory's
+# branch.
+git -C "${other}" branch main "$(git -C "${work}/proj" rev-parse main)"
+if ! out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" main 2>&1)"; then
+  fail "git-checkout-branch main failed: ${out}"
+fi
+if [ "$(host_of "${work}/proj-branch-main")" != "${other}" ]; then
+  fail "main is registered in $(host_of "${work}/proj-branch-main"), not in ${other}"
+fi
+
+# A local branch that a worktree of the branch directory has checked out is
+# refused, as it is without a main clone, rather than checked out a second
+# time in the main clone.
+git -C "${other}" branch both "$(git -C "${work}/proj" rev-parse main)"
+git -C "${work}/proj" branch both main
+git -C "${other}" worktree add -q "${work}/elsewhere" both
+if out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" both 2>&1)"; then
+  fail "git-checkout-branch both succeeded, though ${work}/elsewhere has it checked out"
+fi
+[ ! -e "${work}/proj-branch-both" ] || fail "proj-branch-both was created"
+
 # A remote that only the branch directory has fetched, which the main clone
 # knows by another name.  The branch's upstream is the main clone's name for
 # the remote.
@@ -189,6 +214,9 @@ git -C "${work}/proj" config remote.pushDefault mine
 if out="$(cd "${other}" && "${GIT_NEW_BRANCH}" --clean fork-taken 2>&1)"; then
   fail "git-new-branch fork-taken succeeded, though ${work}/proj pushes to mine, which has it"
 fi
+case "${out}" in
+  *"registering the new worktree"*) fail "git-new-branch fork-taken said that it registered a worktree: ${out}" ;;
+esac
 [ ! -e "${work}/proj-branch-fork-taken" ] || fail "proj-branch-fork-taken was created"
 git -C "${work}/proj" config --unset remote.pushDefault
 

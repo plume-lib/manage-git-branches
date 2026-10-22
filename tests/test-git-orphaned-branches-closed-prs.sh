@@ -100,12 +100,17 @@ FAKE_GH_PARENT='upstream/proj' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone' 'M
 [ "${scan_status}" -eq 0 ] || fail "status ${scan_status} with closed pull requests"
 [ -z "${out}" ] || fail "listed [${out}] with closed pull requests"
 case "${err}" in
-  *"warning: not listing ${dir}:  every pull request for branch feature of someone/proj is closed or merged (upstream/proj #7 (closed) #9 (merged))"*) ;;
+  *"warning: not listing ${dir}:  every pull request for branch feature of someone/proj is closed or merged (upstream/proj #7 (closed))"*) ;;
   *) fail "unexpected warning with closed pull requests: [${err}]" ;;
 esac
 if ! grep -q -F -- 'owner=upstream -f name=proj -f b0=feature' "${work}/gh.log"; then
   fail "gh api graphql did not ask the parent repository: $(cat "${work}/gh.log")"
 fi
+
+# A pull request from a branch of the same name in the base repository is
+# someone else's, so it does not count.
+FAKE_GH_PARENT='upstream/proj' FAKE_GH_PRS="$(prs b0 false 'MERGED 9 upstream')" scan
+[ -z "${err}" ] || fail "warned about a pull request from the base repository: [${err}]"
 
 # --remove keeps the directory.
 FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'MERGED 9 someone')" scan --remove
@@ -144,6 +149,20 @@ esac
 # No pull request:  no warning.
 FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false)" scan
 [ -z "${err}" ] || fail "warned with no pull request: [${err}]"
+
+# A branch whose upstream has another name:  the pull requests asked about
+# are those of the upstream.
+git -C "${dir}" config branch.feature.merge refs/heads/feature2
+: > "${work}/gh.log"
+FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone')" scan
+if ! grep -q -F -- '-f b0=feature2' "${work}/gh.log"; then
+  fail "gh api graphql did not ask about the upstream feature2: $(cat "${work}/gh.log")"
+fi
+case "${err}" in
+  *"warning: not listing ${dir}:  every pull request for branch feature2 of someone/proj is closed or merged"*) ;;
+  *) fail "unexpected warning for an upstream of another name: [${err}]" ;;
+esac
+git -C "${dir}" config branch.feature.merge refs/heads/feature
 
 # Two directories of one project:  one query asks about both.
 dir2="${work}/scan/proj-branch-feature2"

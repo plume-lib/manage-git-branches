@@ -266,8 +266,9 @@ github_slug() {
 #
 # The pull requests are those whose base is the parent of the repository that
 # `git push` uses, if that repository is a fork, and is that repository itself
-# otherwise; and whose head is a branch of the same name, either in the
-# repository that `git push` uses or in the base repository.  Nothing is
+# otherwise; and whose head is the remote branch in the repository that
+# `git push` uses.  A pull request from a branch of the same name in another
+# repository, even the base repository, is someone else's.  Nothing is
 # recorded if `gh` is not installed, if the remote is not on GitHub, or if a
 # query fails, because then nothing is known about the pull requests; the
 # scan's other answers do not depend on GitHub.  Nor is a directory whose
@@ -278,6 +279,21 @@ note_pr_candidate() {
   prs_branch="${prs_branch#refs/heads/}"
   prs_remote="$(push_remote "$1" "${prs_branch}")"
   [ -n "${prs_remote}" ] || return 0
+  # The remote branch is the one that `is_deleted_branch` found:  the one that
+  # `branch.BRANCH.merge` names, if `branch.BRANCH.remote` is ${prs_remote},
+  # and the branch of the same name otherwise.  A pull request's head is a
+  # branch, so a ref outside refs/heads/ has none, and several refs have no
+  # one answer.
+  prs_merge="$(git -C "$1" config --get-all "branch.${prs_branch}.merge")"
+  if [ -n "${prs_merge}" ] \
+    && [ "$(git -C "$1" config --get "branch.${prs_branch}.remote")" = "${prs_remote}" ]; then
+    case "${prs_merge}" in
+      *'
+'*) return 0 ;;
+      refs/heads/?*) prs_branch="${prs_merge#refs/heads/}" ;;
+      *) return 0 ;;
+    esac
+  fi
   prs_url="$(git -C "$1" remote get-url --push "${prs_remote}" 2> /dev/null)" || return 0
   prs_head_repo="$(github_slug "${prs_url}")"
   # `git remote get-url` applies `url.BASE.insteadOf`, which may map a GitHub
@@ -289,7 +305,7 @@ note_pr_candidate() {
   # Every branch directory of a project asks about the same repository, so
   # remember each answer.  Each line of ${base_repo_cache} is "HEAD BASE".
   prs_base_repo="$(printf '%s\n' "${base_repo_cache}" \
-    | sed -n "s|^${prs_head_repo} ||p")"
+    | awk -v head="${prs_head_repo}" '$1 == head { print $2; exit }')"
   if [ -z "${prs_base_repo}" ]; then
     prs_base_repo="$(gh repo view "${prs_head_repo}" --json parent \
       --jq '.parent | if . then "\(.owner.login)/\(.name)" else "" end' 2> /dev/null)" \
@@ -311,7 +327,8 @@ ${prs_head_repo} ${prs_base_repo}"
 base_repo_cache=''
 
 # The directories that `note_pr_candidate` has recorded, one per line, each
-# line "BASE<TAB>HEAD<TAB>BRANCH<TAB>DIRECTORY".  A branch name contains no
+# line "BASE<TAB>HEAD<TAB>BRANCH<TAB>DIRECTORY", where BRANCH is the branch in
+# the remote, which is the head of the pull requests.  A branch name contains no
 # control character, and neither does the name of a GitHub repository.
 pr_candidates=''
 
@@ -373,7 +390,6 @@ warn_about_closed_prs_in() {
       | ((.value.nodes[] | "\($k) \($more) \(.state) \(.number) \(.headRepositoryOwner.login // "-")"),
          "\($k) \($more) END")' \
     < /dev/null 2> /dev/null)" || return 0
-  wacpi_base_owner="${wacpi_base%%/*}"
   wacpi_index=0
   wacpi_rest="${wacpi_entries}
 "
@@ -388,17 +404,10 @@ warn_about_closed_prs_in() {
         if ! wacpi_states="$(rest_pr_states "${wacpi_base}" "${wacpi_owner}" "${wacpi_branch}")"; then
           continue
         fi
-        if [ "${wacpi_base_owner}" != "${wacpi_owner}" ]; then
-          if ! wacpi_more_states="$(rest_pr_states "${wacpi_base}" "${wacpi_base_owner}" "${wacpi_branch}")"; then
-            continue
-          fi
-          wacpi_states="$(printf '%s\n%s\n' "${wacpi_states}" "${wacpi_more_states}" | grep '.')"
-        fi
         ;;
       *)
         wacpi_states="$(printf '%s\n' "${wacpi_lines}" \
-          | awk -v owner="${wacpi_owner}" -v base_owner="${wacpi_base_owner}" \
-            '$3 != "END" && ($5 == owner || $5 == base_owner) { print $3 " " $4 }')"
+          | awk -v owner="${wacpi_owner}" '$3 != "END" && $5 == owner { print $3 " " $4 }')"
         ;;
     esac
     [ -n "${wacpi_states}" ] || continue
