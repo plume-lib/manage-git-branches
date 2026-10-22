@@ -36,6 +36,15 @@
 #
 # In the worktree modes, this script writes into the current repository:  it
 # creates the new branch there and registers the new worktree in its `.git`.
+# There is one exception.  If the current repository is a branch directory's,
+# REPONAME-branch-OTHER/, and a sibling REPONAME/ is a clone of the same
+# project, the branch and the worktree are created in REPONAME/ instead, after
+# the commit and staged files that they need are copied there, if they can be
+# and if REPONAME/ has no branch of that name; otherwise, the new worktree would
+# prevent the removal of
+# REPONAME-branch-OTHER/.  Then the test for a branch of the same name on a
+# remote consults REPONAME/'s remotes, because REPONAME/'s configuration says
+# where the new branch would be pushed.
 # Every effect of this script is local, all the same:  it never contacts a
 # remote except to read from it, and in particular it does not push the new
 # branch.  Therefore, the new branch has no upstream branch, which
@@ -305,6 +314,18 @@ if [ -e "${BRANCHDIR}" ]; then
   exit 1
 fi
 
+# In the worktree modes, register the new worktree in the project's main clone
+# rather than in a branch directory, when this repository is a branch
+# directory's; see `main_clone_for`.
+if [ "${MODE}" != 'copy' ]; then
+  WORKTREE_HOST="$(main_clone_for "${TOPLEVEL}")"
+fi
+if [ -n "${WORKTREE_HOST}" ] \
+  && git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
+  echo "${SCRIPT_NAME}: ${WORKTREE_HOST} has its own branch ${BRANCHNAME}, so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
+  WORKTREE_HOST=''
+fi
+
 # Bring this working tree up to date, so that the branch is based on the most
 # recent commit and the remote-tracking branches that the next test consults
 # are as current as this clone can make them.  A failed pull is not fatal,
@@ -336,6 +357,25 @@ choose_mode_for_submodules
 if [ "${MODE}" != "${PRE_PULL_MODE}" ]; then
   check_git_dir_for_mode
 fi
+if [ "${MODE}" = 'copy' ]; then
+  WORKTREE_HOST=''
+fi
+
+# Copy into ${WORKTREE_HOST} the objects that the new worktree needs, now that
+# the pull has settled the current commit.  This precedes the tests for a
+# collision, because they depend on where the branch is created, which a
+# failure to copy changes.
+if [ -n "${WORKTREE_HOST}" ]; then
+  if [ "${MODE}" = 'worktree' ]; then
+    COPY_INDEX='index'
+  else
+    COPY_INDEX=''
+  fi
+  if ! copy_objects_to "${WORKTREE_HOST}" HEAD ${COPY_INDEX:+"${COPY_INDEX}"}; then
+    echo "${SCRIPT_NAME}: so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
+    WORKTREE_HOST=''
+  fi
+fi
 
 # Determine which remote the new branch would collide with:  the remote that
 # `git push` would use for the current branch, as `push_remote` in
@@ -345,10 +385,24 @@ fi
 # `git checkout -b` creates any -- so this branch's configuration is what says
 # which remote the new branch would eventually be pushed to.
 #
+# When the new branch is created in ${WORKTREE_HOST}, though, its pushes are
+# governed by that repository's configuration, which may name other remotes,
+# and this branch's configuration does not apply to it.  Then the tests below
+# consult ${WORKTREE_HOST}'s remotes, and the remote is the one that
+# ${WORKTREE_HOST} would push a branch with no configuration to.
+#
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
 # asked, and only the local tests apply.
-BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
-REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
+if [ -n "${WORKTREE_HOST}" ]; then
+  COLLISION_REPO="${WORKTREE_HOST}"
+  COLLISION_CLONE="${WORKTREE_HOST}"
+  REMOTE="$(push_remote "${WORKTREE_HOST}" '')"
+else
+  COLLISION_REPO='.'
+  COLLISION_CLONE='this clone'
+  BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
+  REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
+fi
 
 # A remote-tracking branch is evidence that a remote has the branch, and it
 # costs no network access.  When a remote can be determined, only ${REMOTE}'s
@@ -375,12 +429,12 @@ REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 if [ -n "${REMOTE}" ]; then
   TRACKING_REMOTES="${REMOTE}"
 else
-  TRACKING_REMOTES="$(git remote)"
+  TRACKING_REMOTES="$(git -C "${COLLISION_REPO}" remote)"
 fi
 for tracking_remote in ${TRACKING_REMOTES}; do
-  if git rev-parse --verify --quiet \
+  if git -C "${COLLISION_REPO}" rev-parse --verify --quiet \
     "refs/remotes/${tracking_remote}/${BRANCHNAME}" > /dev/null; then
-    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${tracking_remote}, according to the remote-tracking branch ${tracking_remote}/${BRANCHNAME} in this clone." >&2
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${tracking_remote}, according to the remote-tracking branch ${tracking_remote}/${BRANCHNAME} in ${COLLISION_CLONE}." >&2
     exit 1
   fi
 done
@@ -396,10 +450,16 @@ done
 # as `is-deleted-branch` does for its own queries.
 # A remote that this script cannot ask is not an error; the branch is created.
 if [ -n "${REMOTE}" ] \
-  && git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
+  && git_batch_ssh "${COLLISION_REPO}" ls-remote --exit-code "${REMOTE}" \
     "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${REMOTE}, which was asked directly." >&2
   exit 1
+fi
+
+# Say where the new worktree is registered only now that no test can refuse
+# the branch.
+if [ -n "${WORKTREE_HOST}" ]; then
+  note_worktree_host
 fi
 
 # Usage: make_tmpdir

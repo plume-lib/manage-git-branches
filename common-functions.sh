@@ -132,7 +132,9 @@ undo_worktree_add() {
 ##  * WORKTREE_GITDIR_TO_CLEAN, the new worktree's administrative directory,
 ##    which the command records as soon as the add succeeds, if it learns it.
 ## The command must also set TOPLEVEL, the top level of its working tree,
-## before it sets WORKTREE_TO_CLEAN.
+## before it sets WORKTREE_TO_CLEAN.  If the command sets WORKTREE_HOST, the
+## worktree was added in that repository rather than in TOPLEVEL's; see
+## `add_worktree`.
 ##
 ## A POSIX shell such as dash does not run an EXIT trap when the shell is
 ## killed by a signal, so trap the signals too.  Each signal handler restores
@@ -145,6 +147,7 @@ trap_branch_cleanup() {
   WORKTREE_GITDIR_TO_CLEAN=""
   BRANCH_TO_CLEAN=""
   BRANCH_COMMIT_TO_CLEAN=""
+  WORKTREE_HOST=""
   trap branch_cleanup EXIT
   trap 'branch_cleanup; trap - HUP EXIT; kill -s HUP "$$"' HUP
   trap 'branch_cleanup; trap - INT EXIT; kill -s INT "$$"' INT
@@ -159,14 +162,16 @@ branch_cleanup() {
   # The starting directory may no longer resolve, so name the repository
   # explicitly.
   if [ -n "${WORKTREE_TO_CLEAN}" ]; then
-    undo_worktree_add "${TOPLEVEL}" "${WORKTREE_TO_CLEAN}" \
+    undo_worktree_add "${WORKTREE_HOST:-${TOPLEVEL}}" "${WORKTREE_TO_CLEAN}" \
       "${WORKTREE_GITDIR_TO_CLEAN}" "${BRANCH_TO_CLEAN}" \
       "${BRANCH_COMMIT_TO_CLEAN}"
   fi
 }
 
 ## Usage: add_worktree WORKTREE BRANCH [START-POINT [OPTION...]]
-## Runs `git worktree add` in the current repository, with the OPTIONs, to make
+## Runs `git worktree add` in the current repository, or in the repository of
+## the working tree WORKTREE_HOST if that variable is non-empty, with the
+## OPTIONs, to make
 ## a new worktree at the absolute pathname WORKTREE.  With START-POINT, it
 ## creates the branch BRANCH there; without, it checks out the existing BRANCH.
 ## START-POINT is passed to git as given, so that git sets up an upstream for
@@ -201,6 +206,7 @@ branch_cleanup() {
 ## directory, which this command did not create.
 add_worktree() {
   add_worktree_dir="$1"
+  add_worktree_repo="${WORKTREE_HOST:-.}"
   add_worktree_branch="$2"
   if [ -e "${add_worktree_dir}" ] || [ -L "${add_worktree_dir}" ]; then
     echo "${SCRIPT_NAME}: ERROR: directory exists: ${add_worktree_dir}" >&2
@@ -209,7 +215,7 @@ add_worktree() {
   if [ "$#" -lt 3 ]; then
     WORKTREE_TO_CLEAN="${add_worktree_dir}"
     # WORKTREE is absolute, so it cannot be mistaken for an option.
-    if ! git worktree add -q "${add_worktree_dir}" "${add_worktree_branch}"; then
+    if ! git -C "${add_worktree_repo}" worktree add -q "${add_worktree_dir}" "${add_worktree_branch}"; then
       echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${add_worktree_dir}" >&2
       exit 1
     fi
@@ -217,16 +223,16 @@ add_worktree() {
   fi
   add_worktree_start="$3"
   shift 3
-  if ! BRANCH_COMMIT_TO_CLEAN="$(git rev-parse --verify \
+  if ! BRANCH_COMMIT_TO_CLEAN="$(git -C "${add_worktree_repo}" rev-parse --verify \
     "${add_worktree_start}^{commit}")"; then
     echo "${SCRIPT_NAME}: ERROR: cannot resolve ${add_worktree_start}" >&2
     exit 1
   fi
-  if ! git rev-parse --verify --quiet "refs/heads/${add_worktree_branch}" > /dev/null; then
+  if ! git -C "${add_worktree_repo}" rev-parse --verify --quiet "refs/heads/${add_worktree_branch}" > /dev/null; then
     BRANCH_TO_CLEAN="${add_worktree_branch}"
   fi
   WORKTREE_TO_CLEAN="${add_worktree_dir}"
-  if ! git worktree add "$@" -q -b "${add_worktree_branch}" \
+  if ! git -C "${add_worktree_repo}" worktree add "$@" -q -b "${add_worktree_branch}" \
     "${add_worktree_dir}" "${add_worktree_start}"; then
     echo "${SCRIPT_NAME}: ERROR: cannot create the worktree ${add_worktree_dir}" >&2
     exit 1
@@ -234,7 +240,7 @@ add_worktree() {
   # `git-remove-branch-directory` deletes a branch only if this mark says
   # that this package created it for its worktree.  Without the mark, the
   # branch merely outlives its worktree.
-  if ! git config "branch.${add_worktree_branch}.createdForBranchDirectory" true; then
+  if ! git -C "${add_worktree_repo}" config "branch.${add_worktree_branch}.createdForBranchDirectory" true; then
     echo "${SCRIPT_NAME}: warning: cannot mark the branch ${add_worktree_branch}, so git-remove-branch-directory will keep it" >&2
   fi
 }
@@ -1004,6 +1010,155 @@ git_batch_ssh() {
 ## cannot change what a shared function does.
 physical_path() {
   (CDPATH='' cd -- "$1" && pwd -P)
+}
+
+## Usage: main_clone_for DIRECTORY
+## DIRECTORY is the top level of a working tree.  Prints the main working tree
+## in which a new worktree of DIRECTORY's repository should be registered, if
+## that is not the one that `git worktree add` in DIRECTORY would register it
+## in; prints nothing otherwise.
+##
+## `git worktree add` registers a new worktree in the repository of the main
+## working tree, which holds the `.git` directory.  When that main working
+## tree is itself a branch directory -- REPONAME-branch-OTHER, a clone made
+## with `--copy` or by other means -- the new
+## worktree depends on it, and that branch directory cannot be removed while
+## the new worktree exists, even after OTHER's pull request lands.  So a
+## sibling named REPONAME, which conventionally holds the clone that branch
+## directories are made from, is a better home, if it is a main working tree
+## of the same project:  if it and DIRECTORY's repository have a remote URL in
+## common.
+##
+## A sparse checkout and per-worktree configuration are exceptions.
+## `git worktree add` gives the new worktree the sparse-checkout patterns and
+## per-worktree configuration of the worktree that it runs in, and without
+## per-worktree configuration, `core.sparseCheckout` and the patterns apply to
+## every worktree of a repository.  So if either repository has either one,
+## moving the new worktree to the main clone would change how it is checked
+## out, and this function prints nothing.
+##
+## The variables are prefixed with an abbreviation of this function's name,
+## so that they cannot collide with a sourcing script's variables.
+main_clone_for() {
+  mcf_common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" \
+    || return 0
+  # A bare repository, or a git directory outside its working tree, has no
+  # main working tree that this naming convention could describe.
+  case "${mcf_common}" in
+    */.git) ;;
+    *) return 0 ;;
+  esac
+  mcf_host="${mcf_common%/.git}"
+  mcf_name="$(basename -- "${mcf_host}")"
+  case "${mcf_name}" in
+    *-branch-*) ;;
+    *) return 0 ;;
+  esac
+  mcf_main="$(dirname -- "${mcf_host}")/${mcf_name%%-branch-*}"
+  # A symbolic link, such as REPONAME -> REPONAME-branch-master, may lead back
+  # to a branch directory, so it does not count.
+  if [ -L "${mcf_main}" ] || [ ! -d "${mcf_main}/.git" ] || [ -L "${mcf_main}/.git" ]; then
+    return 0
+  fi
+  mcf_main="$(physical_path "${mcf_main}")" || return 0
+  mcf_host="$(physical_path "${mcf_host}")" || return 0
+  if [ "${mcf_main}" = "${mcf_host}" ]; then
+    return 0
+  fi
+  for mcf_dir in "$1" "${mcf_main}"; do
+    if [ "$(git -C "${mcf_dir}" config --bool core.sparseCheckout)" = 'true' ] \
+      || [ "$(git -C "${mcf_dir}" config --bool extensions.worktreeConfig)" = 'true' ]; then
+      return 0
+    fi
+  done
+  # Each line is "KEY VALUE", and a URL or a pathname may contain a space.
+  mcf_urls="$(git -C "${mcf_host}" config --get-regexp '^remote\..*\.url$' \
+    | sed -e 's/^[^ ]* //' | sort -u)"
+  if [ -z "${mcf_urls}" ]; then
+    return 0
+  fi
+  if git -C "${mcf_main}" config --get-regexp '^remote\..*\.url$' \
+    | sed -e 's/^[^ ]* //' | grep -q -x -F -- "${mcf_urls}"; then
+    printf '%s\n' "${mcf_main}"
+  fi
+}
+
+## Usage: note_worktree_host
+## Says, on standard error, that the new worktree is registered in
+## ${WORKTREE_HOST}, and names the branch directory that this frees:  the main
+## working tree of the current repository, which is not the current working
+## tree if that is a linked worktree.
+note_worktree_host() {
+  nwh_main="$(git rev-parse --path-format=absolute --git-common-dir)"
+  nwh_main="${nwh_main%/.git}"
+  echo "${SCRIPT_NAME}: registering the new worktree in ${WORKTREE_HOST}, the main clone, rather than in ${nwh_main}, so that ${nwh_main} can be removed independently" >&2
+}
+
+## Usage: copy_objects_to REPOSITORY REFSPEC [INDEX]
+## Fetches REFSPEC from the current repository into the repository of the
+## working tree REPOSITORY, which brings along the history of the commit that
+## REFSPEC names; with INDEX, also copies the blobs that the current working
+## tree's index names, and REFSPEC must then be HEAD.  These are the objects
+## that a worktree registered in
+## REPOSITORY needs in order to hold that commit and that index.  On failure,
+## prints a warning and returns 1.  A failure is not unusual:  git refuses,
+## for example, to update a ref that REFSPEC names unless the update is a
+## fast-forward.  A caller then registers the worktree in the current
+## repository instead.
+##
+## A shallow current repository is refused before anything is fetched.  A
+## fetch from it into a complete repository warns that it "rejected" the ref,
+## exits with status 0 all the same, and leaves the commit in REPOSITORY
+## without its parents, which a worktree there would then be based on.
+##
+## The fetch of HEAD brings every blob of HEAD's tree, so only an index entry
+## that differs from HEAD, or a stage of a conflict, which `git diff-index`
+## does not name, can be missing.  Asking about every index entry would cost
+## one lookup per file of the repository.
+##
+## A staged blob that no commit holds is copied in one pack; it is then an
+## unreachable object in REPOSITORY, which `git gc` nonetheless keeps, because
+## the new worktree's index names it.  A gitlink names a commit in a submodule
+## rather than an object of this repository, so it is skipped.
+copy_objects_to() {
+  if [ "$(git rev-parse --is-shallow-repository)" != 'false' ]; then
+    echo "${SCRIPT_NAME}: warning: ${PWD} is a shallow clone, so $1 cannot fetch history from it" >&2
+    return 1
+  fi
+  if ! git -C "$1" fetch -q --no-tags --no-write-fetch-head "${PWD}" "$2" < /dev/null; then
+    echo "${SCRIPT_NAME}: warning: cannot fetch $2 from ${PWD} into $1" >&2
+    return 1
+  fi
+  if [ "$#" -lt 3 ]; then
+    return 0
+  fi
+  # Each line of `git diff-index` is ":OLD-MODE NEW-MODE OLD NEW STATUS\tPATH",
+  # and NEW is all zeros for a deleted or unmerged path.
+  if ! cot_changed="$(git diff-index --cached --no-renames HEAD)" \
+    || ! cot_unmerged="$(git ls-files --unmerged)"; then
+    echo "${SCRIPT_NAME}: warning: cannot determine which staged blobs $1 lacks" >&2
+    return 1
+  fi
+  if ! cot_missing="$( {
+    printf '%s\n' "${cot_changed}" | awk '$2 != "160000" && $4 !~ /^0+$/ { print $4 }'
+    printf '%s\n' "${cot_unmerged}" | awk '$1 != "160000" { print $2 }'
+  } | grep '.' | sort -u \
+    | git -C "$1" cat-file --batch-check | awk '$2 == "missing" { print $1 }')"; then
+    echo "${SCRIPT_NAME}: warning: cannot determine which staged blobs $1 lacks" >&2
+    return 1
+  fi
+  if [ -z "${cot_missing}" ]; then
+    return 0
+  fi
+  # A pipeline's status is that of its last command, so whether every blob
+  # arrived is tested afterward.
+  printf '%s\n' "${cot_missing}" | git pack-objects -q --stdout \
+    | git -C "$1" index-pack --stdin > /dev/null
+  if printf '%s\n' "${cot_missing}" | git -C "$1" cat-file --batch-check \
+    | grep -q ' missing$'; then
+    echo "${SCRIPT_NAME}: warning: cannot copy the staged blobs into $1" >&2
+    return 1
+  fi
 }
 
 ## Usage: is_deleted_branch_tracking_refs DIRECTORY REMOTE REF
