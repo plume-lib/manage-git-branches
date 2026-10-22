@@ -16,6 +16,10 @@
 # `git remote set-head REMOTE --auto` if `REMOTE/HEAD` does not exist or names
 # a branch that does not exist.
 #
+# So, unless `--no-fetch` is given, this command replaces a `REMOTE/HEAD` that
+# was set by hand with `git remote set-head REMOTE BRANCH`.  To compare with
+# such a BRANCH, run `git diff -b --patience REMOTE/BRANCH` instead.
+#
 # It runs `git diff -b --patience REMOTE/HEAD GIT-DIFF-ARGS`.  GIT-DIFF-ARGS,
 # such as `--stat` or `-- PATH`, are passed to `git diff`.  Like any
 # `git diff` against a commit, it compares only tracked files:  a new file
@@ -73,7 +77,8 @@ if [ "$#" -ge 1 ] && [ "$1" = "--no-fetch" ]; then
   shift
 fi
 
-if ! upstream_ref="$(upstream_default_branch "${fetch}")"; then
+if ! remote="$(upstream_remote)" \
+  || ! upstream_ref="$(upstream_default_branch "${remote}" "${fetch}")"; then
   exit 1
 fi
 

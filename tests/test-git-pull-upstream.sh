@@ -198,6 +198,57 @@ elif ! grep -q 'does not push it' "${testdir}/errors"; then
 fi
 git -C "${fork}" switch -q feature
 
+# A clone that has no remote named "upstream" or "origin", and more than one
+# remote, fails before the pull changes the current branch.
+git -C "${fork}" remote add mirror "${fork_remote}"
+git -C "${other}" switch -q feature
+git -C "${other}" pull -q --no-rebase
+commit_file "${other}" g.txt 'g'
+git -C "${other}" push -q origin feature
+before="$(git -C "${fork}" rev-parse HEAD)"
+if pull_upstream "${fork}"; then
+  fail "two remotes: succeeded"
+elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
+  fail "two remotes: changed HEAD"
+fi
+git -C "${fork}" remote remove mirror
+
+# A branch that cannot be pushed is not merged.  When `push.default` is
+# "simple", a branch whose name differs from its upstream branch's cannot be
+# pushed to that remote.
+git -C "${other}" switch -q trunk
+git -C "${other}" pull -q --no-rebase
+commit_file "${other}" h.txt 'h'
+git -C "${other}" push -q origin trunk
+git -C "${fork}" switch -q -c renamed --track github/feature
+git -C "${fork}" config push.default simple
+commit_file "${fork}" renamed.txt 'r'
+if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  fail "cannot push: succeeded"
+elif [ -e "${fork}/h.txt" ]; then
+  fail "cannot push: merged"
+elif ! grep -q 'cannot be pushed' "${testdir}/errors"; then
+  fail "cannot push: wrong message: $(cat "${testdir}/errors")"
+fi
+git -C "${fork}" switch -q feature
+
+# In a fork, a branch that pushes to the remote "upstream" is not pushed, even
+# to a branch other than the default branch.
+git -C "${fork}" remote add upstream "${canonical}"
+git -C "${fork}" fetch -q upstream
+git -C "${fork}" switch -q -c topic upstream/trunk
+git -C "${fork}" config push.default current
+commit_file "${fork}" topic.txt 't'
+if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  fail "push to upstream: succeeded"
+elif git -C "${canonical}" rev-parse --verify --quiet refs/heads/topic > /dev/null; then
+  fail "push to upstream: pushed"
+elif ! grep -q 'does not push it' "${testdir}/errors"; then
+  fail "push to upstream: wrong message: $(cat "${testdir}/errors")"
+fi
+git -C "${fork}" config --unset push.default
+git -C "${fork}" switch -q feature
+
 # An extra argument is rejected.
 if pull_upstream "${fork}" extra; then
   fail "extra argument: succeeded"

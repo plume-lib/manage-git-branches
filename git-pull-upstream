@@ -15,16 +15,22 @@
 # This script does the following:
 #  * pull the current branch from its upstream branch,
 #  * fetch the upstream repository, and update `REMOTE/HEAD` to name its
-#    default branch, in case the remote has renamed it,
+#    default branch, in case the remote has renamed it (this replaces a
+#    `REMOTE/HEAD` that was set by hand with `git remote set-head`),
 #  * merge its default branch into the current branch,
 #  * build using `compile-project` (see its documentation),
 #  * push the current branch if the build succeeds.
 # If the current branch already contains the upstream repository's default
 # branch, it skips the merge, and it stops there if the current branch has no
 # commits that are not pushed.  Otherwise, as after a run whose build failed,
-# it builds and pushes.  It fails, without merging or pushing, if the current
-# branch pushes to the upstream repository's default branch, as a fork's
-# `master` that tracks `upstream/master` does.
+# it builds and pushes.
+#
+# When it would merge or push, it fails instead, without merging or pushing,
+# if the current branch pushes to the upstream repository's default branch,
+# as a fork's `master` that tracks `upstream/master` does, or if it is in a
+# fork and pushes to any branch of the remote `upstream`.  It also fails
+# without merging if `git push --dry-run` shows that the current branch cannot
+# be pushed.
 #
 # Unlike `git-pull-from`, this command needs no working tree for the upstream
 # repository's default branch, and it does not build that branch.
@@ -90,12 +96,18 @@ fi
 # earlier run of this command made but did not push, as when its build
 # failed, and would copy that merge's commits onto the current branch.
 # `--no-edit` keeps the merge from stopping at an editor.
+# Choose the upstream remote first, so that a clone that has none fails before
+# the pull changes the current branch.
+if ! remote="$(upstream_remote)"; then
+  exit 1
+fi
+
 if ! git pull -q --no-rebase --no-edit; then
   echo "${SCRIPT_NAME}: problem pulling in $(pwd)" >&2
   exit 1
 fi
 
-if ! upstream_ref="$(upstream_default_branch 1)"; then
+if ! upstream_ref="$(upstream_default_branch "${remote}" 1)"; then
   exit 1
 fi
 
@@ -112,14 +124,38 @@ if git merge-base --is-ancestor "${upstream_ref}" HEAD \
   exit 0
 fi
 
-# Refuse to push to the branch that this command merges from, as when a fork's
-# `master` tracks `upstream/master`:  such a push would publish the current
-# branch's own commits to the upstream repository.  Merging that branch into
-# itself does nothing, so the only effect of the run would be that push.  If
-# the current branch has no push destination, `@{push}` fails, and the push
-# below reports the problem.
-if [ "$(git rev-parse --symbolic-full-name '@{push}' 2> /dev/null)" = "${upstream_ref}" ]; then
-  echo "${SCRIPT_NAME}: the current branch pushes to ${upstream_ref#refs/remotes/}, so this command does not push it; if you mean to, run \`git push\`" >&2
+# Refuse a push that would publish the current branch in the upstream
+# repository by mistake:
+#  * In a fork, whose upstream remote is named "upstream", any push to that
+#    remote, as for a branch created from `upstream/master` when
+#    `push.default` is "current".  The fork is where its branches belong.
+#  * In any clone, a push to the branch that this command merges from, as when
+#    a fork's `master` tracks `upstream/master`.  Merging that branch into
+#    itself does nothing, so the only effect of the run would be to publish
+#    the current branch's own commits there.
+# `%(push)` and `%(push:remotename)`, unlike `@{push}`, do not require the
+# remote-tracking branch for the destination to exist, as it does not before
+# the first push.
+branch_ref="$(git symbolic-ref --quiet HEAD)"
+push_remote_name="$(git for-each-ref --format='%(push:remotename)' "${branch_ref}")"
+push_ref="$(git for-each-ref --format='%(push)' "${branch_ref}")"
+if [ "${remote}" = upstream ] && [ "${push_remote_name}" = upstream ]; then
+  echo "${SCRIPT_NAME}: the current branch pushes to the remote \"upstream\" rather than to the fork, so this command does not push it; if you mean to, run \`git push\`" >&2
+  exit 1
+fi
+if [ "${push_ref}" = "${upstream_ref}" ]; then
+  echo "${SCRIPT_NAME}: the current branch pushes to ${upstream_ref#refs/remotes/}, the branch that this command merges from, so this command does not push it; if you mean to, run \`git push\`" >&2
+  exit 1
+fi
+
+# Find out now, rather than after the merge and the build, whether the push
+# can succeed.  `%(push)` is empty when git cannot name the destination
+# locally.  The push may fail then, as when `push.default` is "simple" and the
+# current branch's name differs from its upstream branch's, or it may succeed,
+# as when that branch pushes to a remote other than the one it pulls from.
+# Only the remote can tell.
+if [ -z "${push_ref}" ] && ! git push --dry-run --quiet; then
+  echo "${SCRIPT_NAME}: the current branch cannot be pushed, so this command does not merge it" >&2
   exit 1
 fi
 

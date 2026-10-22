@@ -86,6 +86,9 @@ The commands are:
   Merges the default branch of the remote `upstream` (or `origin`, if there
   is no `upstream`, or the only remote, if there is neither) into the current
   branch, compiles, then pushes the current branch if compilation succeeds.
+  It first pulls the current branch, which must have an upstream branch.
+  It does not push a branch whose push destination is the default branch of
+  the upstream repository, nor, in a fork, any branch of `upstream`.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
