@@ -33,8 +33,8 @@ trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 # shellcheck source=lib-git-test-env.sh
 . "${TESTS_DIR}/lib-git-test-env.sh"
 sanitize_git_env "${WORK_DIR}"
-# shellcheck source=common-functions.sh
-. "${TESTS_DIR}/common-functions.sh"
+# shellcheck source=common-test-functions.sh
+. "${TESTS_DIR}/common-test-functions.sh"
 
 # The test repository contains no build file, so skip compilation.
 MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1

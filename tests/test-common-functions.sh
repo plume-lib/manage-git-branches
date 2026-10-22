@@ -1,9 +1,9 @@
 #!/bin/sh
 
-# Tests the functions in remote-functions.sh.
+# Tests the functions in common-functions.sh.
 #
 # Usage:
-#   tests/test-remote-functions.sh
+#   tests/test-common-functions.sh
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -31,13 +31,13 @@ trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 
 sanitize_git_env "${WORK_DIR}"
 
-# `remote-functions.sh` expects ${SCRIPT_DIR} to be the directory that holds
+# `common-functions.sh` expects ${SCRIPT_DIR} to be the directory that holds
 # this package's files.  The functions that this test calls do not use it, but
 # set it anyway, so that the file is sourced the way its comment requires.
 # shellcheck disable=SC2034
 SCRIPT_DIR="${COMMANDS_DIR}"
-# shellcheck source=../remote-functions.sh
-. "${COMMANDS_DIR}/remote-functions.sh"
+# shellcheck source=../common-functions.sh
+. "${COMMANDS_DIR}/common-functions.sh"
 
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $*" >&2
@@ -339,7 +339,7 @@ set -e
 SCRIPT_NAME='errexit-caller.sh'
 SCRIPT_DIR="$2"
 # shellcheck source=/dev/null
-. "$2/remote-functions.sh"
+. "$2/common-functions.sh"
 is_deleted_branch "$1"
 echo 'survived'
 EOF
@@ -365,7 +365,7 @@ case "${require_git_output}" in
 esac
 # A git that reports an old version, or one that cannot be parsed.  The
 # subshells change PATH for `require_git` alone, which is the point.
-. "${TESTS_DIR}/common-functions.sh"
+. "${TESTS_DIR}/common-test-functions.sh"
 make_fake_git "${WORK_DIR}/oldgit" version 0 'git version 2.30.9'
 # shellcheck disable=SC2030
 if require_git_output="$( (PATH="${WORK_DIR}/oldgit:${PATH}" && require_git 31) 2>&1)"; then

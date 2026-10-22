@@ -308,8 +308,8 @@ fi
 # the query fails and the branch is reported as nonexistent; what this checks
 # is the option that the query passed.  `sanitize_git_env` has already unset
 # the variables that would otherwise select some other SSH command.
-# shellcheck source=common-functions.sh
-. "${SCRIPT_DIR}/common-functions.sh"
+# shellcheck source=common-test-functions.sh
+. "${SCRIPT_DIR}/common-test-functions.sh"
 sshclone="${tmpdir}/sshclone-branch-main"
 git clone -q "${repo}" "${sshclone}"
 use_fake_ssh "${sshclone}" "${tmpdir}/ssh-arguments"

@@ -94,12 +94,12 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
-  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
   exit 1
 fi
-# shellcheck source=remote-functions.sh
-. "${SCRIPT_DIR}/remote-functions.sh"
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
 
 # Prints an error message and exits with a failure status.
 die() {

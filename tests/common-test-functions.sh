@@ -4,6 +4,16 @@
 # than running it as a command, so it has no shebang line and is not
 # executable.
 
+## Usage: commit_file DIRECTORY FILE CONTENT [MESSAGE]
+## Writes CONTENT to FILE in the working tree DIRECTORY, and commits it with
+## the message MESSAGE, or "Change FILE" if MESSAGE is not given.  The
+## directory that is to contain FILE must already exist.
+commit_file() {
+  printf '%s\n' "$3" > "$1/$2" || return 1
+  git -C "$1" add -- "$2" || return 1
+  git -C "$1" commit -q -m "${4:-Change $2}"
+}
+
 ## Usage: use_fake_ssh CLONE ARGUMENTS_FILE
 ## Makes the remote "origin" of the clone CLONE reachable only over SSH, and
 ## makes that SSH a fake one that appends its arguments to ARGUMENTS_FILE, one

@@ -29,6 +29,8 @@ trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 # shellcheck source=lib-git-test-env.sh
 . "${TESTS_DIR}/lib-git-test-env.sh"
 sanitize_git_env "${WORK_DIR}"
+# shellcheck source=common-test-functions.sh
+. "${TESTS_DIR}/common-test-functions.sh"
 
 # The test repository contains no build file, so skip compilation.
 MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1
@@ -45,12 +47,10 @@ make_clone() {
   git -C "$3" config pull.rebase false
 }
 
-## Usage: commit_file DIRECTORY FILE CONTENT MESSAGE
+## Usage: commit_and_push_file DIRECTORY FILE CONTENT MESSAGE
 ## Writes CONTENT to FILE in DIRECTORY, commits it, and pushes it.
-commit_file() {
-  printf '%s\n' "$3" > "$1/$2"
-  git -C "$1" add -- "$2"
-  git -C "$1" commit -q -m "$4"
+commit_and_push_file() {
+  commit_file "$@"
   git -C "$1" push -q
 }
 
@@ -112,12 +112,12 @@ make_clone "${REMOTE}" part2 "${PART2}"
 
 ## A stack:  part2 builds on part1, which builds on main.  part2 was made
 ## from part1 by merging.
-commit_file "${PART1}" part1.txt "part1 a" "part1 commit a"
-commit_file "${PART1}" part1.txt "part1 b" "part1 commit b"
+commit_and_push_file "${PART1}" part1.txt "part1 a" "part1 commit a"
+commit_and_push_file "${PART1}" part1.txt "part1 b" "part1 commit b"
 "${COMMANDS_DIR}/git-push-to" "${PART1}" "${PART2}"
-commit_file "${PART2}" part2.txt "part2 a" "part2 commit a"
+commit_and_push_file "${PART2}" part2.txt "part2 a" "part2 commit a"
 ## main moves ahead.
-commit_file "${MAIN}" main.txt "main a" "main commit a"
+commit_and_push_file "${MAIN}" main.txt "main a" "main commit a"
 
 "${COMMANDS_DIR}/git-rebase-to" "${MAIN}" "${PART1}" "${PART2}"
 
@@ -150,7 +150,7 @@ fi
 ## part1 is rewritten while part2 still contains part1's old commits, as when
 ## a run force-pushes part1 and then fails on part2.  The next run does not
 ## replay part1's old commits into part2.
-commit_file "${MAIN}" main.txt "main a2" "main commit a2"
+commit_and_push_file "${MAIN}" main.txt "main a2" "main commit a2"
 "${COMMANDS_DIR}/git-rebase-to" "${MAIN}" "${PART1}"
 "${COMMANDS_DIR}/git-rebase-to" "${MAIN}" "${PART1}" "${PART2}"
 check_linear "${PART1}" "${MAIN}"
@@ -202,7 +202,7 @@ fi
 ## accepting part1's force-push.  part2
 ## goes back to its head before the rebase, so that the next run's `git pull`
 ## does not merge the remote's old history into the rebased history.
-commit_file "${MAIN}" main.txt "main b2" "main commit b2"
+commit_and_push_file "${MAIN}" main.txt "main b2" "main commit b2"
 part2_subjects_before="$(subjects "${PART2}" "${PART1}")"
 cat > "${REMOTE}/hooks/pre-receive" << 'EOF'
 #!/bin/sh
@@ -234,7 +234,7 @@ if [ "${part2_subjects}" != "${part2_subjects_before}" ]; then
 fi
 
 ## With "--squash", each branch becomes one commit, with the same content.
-commit_file "${MAIN}" main.txt "main c" "main commit c"
+commit_and_push_file "${MAIN}" main.txt "main c" "main commit c"
 part2_tree_before="$(git -C "${PART2}" rev-parse 'HEAD^{tree}')"
 "${COMMANDS_DIR}/git-rebase-to" --squash "${MAIN}" "${PART1}" "${PART2}"
 check_linear "${PART1}" "${MAIN}"
@@ -274,7 +274,7 @@ grep -q "^git-rebase-to: not enough arguments" "${WORK_DIR}/err.txt" \
 ## An option after the directories is rejected before anything is pushed.
 part1_head="$(git -C "${PART1}" rev-parse HEAD)"
 git -C "${MAIN}" pull -q
-commit_file "${MAIN}" main.txt "main d" "main commit d"
+commit_and_push_file "${MAIN}" main.txt "main d" "main commit d"
 if "${COMMANDS_DIR}/git-rebase-to" "${MAIN}" "${PART1}" --squash 2> "${WORK_DIR}/err.txt"; then
   fail "git-rebase-to accepted an option after the directories"
 fi

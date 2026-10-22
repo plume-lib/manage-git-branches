@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# `git_batch_ssh`, in remote-functions.sh, runs this script as GIT_SSH when the
+# `git_batch_ssh`, in common-functions.sh, runs this script as GIT_SSH when the
 # user's GIT_SSH names an SSH program that accepts an option that disables
 # interactive prompts.  GIT_SSH is an executable path rather than a shell
 # command, so it cannot carry the option; this wrapper adds it.

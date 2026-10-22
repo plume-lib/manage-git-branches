@@ -183,42 +183,12 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
-  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
   exit 1
 fi
-# shellcheck source=remote-functions.sh
-. "${SCRIPT_DIR}/remote-functions.sh"
-
-## Tests whether the working tree in the given directory has an upstream
-## branch, which `git pull` and `git push` require.  If it does not, prints an
-## explanation and returns 1.
-##
-## Also sets ${checked_out_branch} to the name of the branch that the
-## directory has checked out, or to the empty string if HEAD is detached or
-## the directory is not a working tree.  It is the local branch, not the
-## upstream branch that this function is named for; the two can differ.  The
-## `git fetch` and `git merge` below act on that branch, and this is where its
-## name is determined.
-check_upstream() {
-  checked_out_branch=''
-  # If the directory is not a working tree, or HEAD is detached, let a
-  # subsequent command diagnose that:  `check_branch_exists` does so
-  # accurately, whereas `git rev-parse --abbrev-ref HEAD` prints "HEAD" for a
-  # detached HEAD, which this function would then report as a branch name.
-  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
-  # "heads/BRANCH" when a tag and the branch have the same name.
-  branch_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
-  branch="${branch_ref#refs/heads/}"
-  checked_out_branch="${branch}"
-  remote="$(git -C "$1" config --get "branch.${branch}.remote")"
-  merge_refs="$(git -C "$1" config --get-all "branch.${branch}.merge")"
-  if [ -n "${remote}" ] && [ -n "${merge_refs}" ]; then
-    return 0
-  fi
-  echo "${SCRIPT_NAME}: branch ${branch} in $1 has no upstream branch, so it cannot be pulled or pushed" >&2
-  return 1
-}
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
 
 ## Returns 0 if the given directory is the top level of a working tree whose
 ## branch still exists in its remote.  Otherwise, prints a diagnostic and
@@ -226,7 +196,7 @@ check_upstream() {
 ## exists"; any other status is a reason not to proceed, because treating it
 ## as success would silently disable this check.
 ##
-## Call the function of remote-functions.sh rather than running the
+## Call the function of common-functions.sh rather than running the
 ## `is-deleted-branch` command, which is a wrapper around it.  One process for
 ## the whole run is what keeps this check from asking a remote the same
 ## question twice.  In a chain of directories, each middle directory is the
@@ -427,42 +397,10 @@ git_push_to() {
   # `git pull PATH BRANCH` would instead write "Merge branch 'feature' of
   # ../myrepo-branch-feature into main", and would head the commit summaries
   # that `merge.log` turns on with "* 'feature' of ../myrepo-branch-feature:".
-  # `fmt-merge-msg` appends " of SOURCE" for every source except ".", the local
-  # repository, and `git fetch` records the pathname that this script fetched
-  # from as the source.  So hand `fmt-merge-msg` the line that `git fetch`
-  # would have written for a branch of this repository.  Git still composes
-  # the message:  the "into BRANCH" suffix, which it omits on the default
-  # branch, and the commit summaries, which `merge.log` governs.
-  #
-  # Composing the message by hand would fabricate it rather than letting git
-  # describe what it merged, and would discard those commit summaries.
-  if ! merge_message="$(printf "%s\t\tbranch '%s' of .\n" \
-    "${merge_head}" "${from_branch}" | git fmt-merge-msg)"; then
-    echo "${SCRIPT_NAME}: cannot compose a merge message for ${from_branch} of ${from_absolute}" >&2
-    return 1
-  fi
-
-  # Merge rather than `git pull`, which rebases if `pull.rebase` is set.  A
-  # rebase would rewrite the branch that this script is about to push.
-  # `--no-edit` keeps a chain of directories from stopping at an editor.
-  # `--no-log` prevents a second copy of the commit summaries:  `git merge`
-  # appends them to a message given with `-m` when `merge.log` is set, and
-  # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
-  if ! git merge -q --no-edit --no-log -m "${merge_message}" "${merge_head}"; then
-    # Note: pwd=to_absolute
-    echo "${SCRIPT_NAME}: problem merging ${from_absolute} into $(pwd)" >&2
-    return 1
-  fi
-
-  if [ "$nocompile" -eq 0 ] && [ -z "$MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT" ]; then
-    if ! "${SCRIPT_DIR}"/compile-project; then
-      echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
-      return 1
-    fi
-  fi
-
-  if ! git push --quiet; then
-    echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
+  # `merge_build_push` describes the commit as a branch of this repository.
+  # Note: pwd=to_absolute
+  if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
+    "${from_branch} of ${from_absolute}" "${nocompile}"; then
     return 1
   fi
 

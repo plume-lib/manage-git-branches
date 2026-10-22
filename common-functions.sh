@@ -656,9 +656,9 @@ is_remote_name() {
 }
 
 ## Usage: remote_consider NAME
-## A helper for `push_remote` and `fetch_remote`:  sets ${remote_result} to
-## NAME if ${remote_result} is not set yet and NAME is a remote that the clone
-## in ${remote_dir} can contact.
+## A helper for `push_remote`, `fetch_remote`, and `upstream_remote`:
+## sets ${remote_result} to NAME if ${remote_result} is not set yet and NAME is
+## a remote that the clone in ${remote_dir} can contact.
 remote_consider() {
   if [ -z "${remote_result}" ] \
     && remote_is_usable "${remote_dir}" "${remote_remotes}" "$1"; then
@@ -667,12 +667,12 @@ remote_consider() {
 }
 
 ## Usage: remote_consider_sole
-## A helper for `push_remote` and `fetch_remote`:  sets ${remote_result} to
-## the sole remote of the clone in ${remote_dir}, if ${remote_result} is not
-## set yet and that clone has exactly one remote.  Such a clone has no remote
-## named "origin", because `remote_consider origin` would have accepted it,
-## but its one remote is the only remote that any branch of it could come
-## from or go to.
+## A helper for `push_remote`, `fetch_remote`, and `upstream_remote`:
+## sets ${remote_result} to the sole remote of the clone in ${remote_dir}, if
+## ${remote_result} is not set yet and that clone has exactly one remote.
+## Such a clone has no remote named "origin", because
+## `remote_consider origin` would have accepted it, but its one remote is the
+## only remote that any branch of it could come from or go to.
 remote_consider_sole() {
   if [ -z "${remote_result}" ] \
     && [ "$(printf '%s\n' "${remote_remotes}" | grep -c '.')" -eq 1 ]; then
@@ -744,6 +744,146 @@ fetch_remote() {
   remote_consider 'origin'
   remote_consider_sole
   printf '%s\n' "${remote_result}"
+}
+
+## Usage: check_upstream DIRECTORY
+## Tests whether the working tree DIRECTORY has an upstream branch, which
+## `git pull` and `git push` require.  If it does not, prints an explanation
+## and returns 1.
+##
+## Also sets ${checked_out_branch} to the name of the branch that the
+## directory has checked out, or to the empty string if HEAD is detached or
+## the directory is not a working tree.  It is the local branch, not the
+## upstream branch that this function is named for; the two can differ.  A
+## caller that fetches into or merges into that branch, as `git-push-to` does,
+## can use this name rather than determine it again.
+check_upstream() {
+  checked_out_branch=''
+  # If the directory is not a working tree, or HEAD is detached, let a
+  # subsequent command diagnose that, as `check_branch_exists` in
+  # `git-push-to` does accurately.  `git rev-parse --abbrev-ref HEAD`, by
+  # contrast, prints "HEAD" for a detached HEAD, which this function would
+  # then report as a branch name.
+  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
+  # "heads/BRANCH" when a tag and the branch have the same name.
+  check_upstream_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
+  checked_out_branch="${check_upstream_ref#refs/heads/}"
+  check_upstream_remote="$(git -C "$1" config --get "branch.${checked_out_branch}.remote")"
+  check_upstream_merge="$(git -C "$1" config --get-all "branch.${checked_out_branch}.merge")"
+  if [ -n "${check_upstream_remote}" ] && [ -n "${check_upstream_merge}" ]; then
+    return 0
+  fi
+  echo "${SCRIPT_NAME}: branch ${checked_out_branch} in $1 has no upstream branch, so it cannot be pulled or pushed" >&2
+  return 1
+}
+
+## Usage: upstream_remote
+## Prints the name of the remote of the current clone that is the upstream
+## repository:  the remote named "upstream" if the clone has one, as a fork
+## does, then "origin", then the clone's only remote if it has exactly one.
+## Returns 1, after printing a diagnostic, if there is no such remote.
+upstream_remote() {
+  remote_dir='.'
+  if ! remote_remotes="$(git remote)"; then
+    return 1
+  fi
+  remote_result=''
+  remote_consider 'upstream'
+  remote_consider 'origin'
+  remote_consider_sole
+  if [ -z "${remote_result}" ]; then
+    echo "${SCRIPT_NAME}: no remote named \"upstream\" or \"origin\", and not exactly one remote" >&2
+    return 1
+  fi
+  printf '%s\n' "${remote_result}"
+}
+
+## Usage: upstream_default_branch REMOTE FETCH
+## Prints the full name of the remote-tracking branch for the default branch of
+## the remote REMOTE, such as `refs/remotes/upstream/master`.  If FETCH is 1,
+## fetches REMOTE first and updates `REMOTE/HEAD` to name the remote's default
+## branch, which replaces a `REMOTE/HEAD` that was set by hand.  Otherwise,
+## sets `REMOTE/HEAD` with `git remote set-head REMOTE --auto` only if it does
+## not exist or names a branch that does not exist.  Returns 1, after printing
+## a diagnostic, on failure.
+upstream_default_branch() {
+  upstream_default_branch_remote="$1"
+  # `REMOTE/HEAD` does not exist after `git remote add`.  After the remote
+  # renames its default branch, `REMOTE/HEAD` still names the old branch.  A
+  # fetch without `--prune` keeps that remote-tracking branch, frozen at its
+  # last commit, so only asking the remote reveals the rename.  A fetch with
+  # `--prune` deletes it, so that `REMOTE/HEAD` names a branch that does not
+  # exist.
+  #
+  # With `remote.REMOTE.followRemoteHEAD` set to "always", git 2.48 and later
+  # update `REMOTE/HEAD` during the fetch, over the same connection.  An
+  # earlier git ignores that setting, so after fetching it needs
+  # `git remote set-head --auto`, which connects to the remote again.
+  upstream_default_branch_head="refs/remotes/${upstream_default_branch_remote}/HEAD"
+  upstream_default_branch_ask=0
+  if [ "$2" -eq 1 ]; then
+    if ! git -c "remote.${upstream_default_branch_remote}.followRemoteHEAD=always" \
+      fetch --quiet "${upstream_default_branch_remote}"; then
+      echo "${SCRIPT_NAME}: problem fetching ${upstream_default_branch_remote}" >&2
+      return 1
+    fi
+    if ! git_at_least 48; then
+      upstream_default_branch_ask=1
+    fi
+  fi
+  if [ "${upstream_default_branch_ask}" -eq 1 ] \
+    || ! upstream_default_branch_branch="$(git symbolic-ref --quiet "${upstream_default_branch_head}")" \
+    || ! git rev-parse --verify --quiet "${upstream_default_branch_branch}" > /dev/null; then
+    if ! git remote set-head "${upstream_default_branch_remote}" --auto > /dev/null \
+      || ! upstream_default_branch_branch="$(git symbolic-ref --quiet "${upstream_default_branch_head}")"; then
+      echo "${SCRIPT_NAME}: cannot determine the default branch of ${upstream_default_branch_remote}" >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "${upstream_default_branch_branch}"
+}
+
+## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE
+## Merges COMMIT into the current branch, builds with `compile-project` unless
+## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
+## pushes the current branch if the build succeeds.  DESCRIPTION is what
+## `git fmt-merge-msg` says that COMMIT is, such as "branch 'feature'" or
+## "remote-tracking branch 'upstream/master'".  SOURCE names COMMIT in
+## diagnostics.  Returns 1, after printing a diagnostic, on failure.
+## ${SCRIPT_DIR} must be set; see the top of this file.
+merge_build_push() {
+  # Let git compose the message, as it does for `git merge`, rather than
+  # composing it by hand.  Git then writes the "into BRANCH" suffix, which it
+  # omits on the default branch, and the commit summaries that `merge.log`
+  # turns on.  Saying that COMMIT came from ".", the local repository, keeps
+  # git from appending " of SOURCE" to the message.
+  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" | git fmt-merge-msg)"; then
+    echo "${SCRIPT_NAME}: cannot compose a merge message for $3" >&2
+    return 1
+  fi
+
+  # Merge rather than `git pull`, which rebases if `pull.rebase` is set.  A
+  # rebase would rewrite the branch that this function is about to push.
+  # `--no-edit` keeps a chain of merges from stopping at an editor.
+  # `--no-log` prevents a second copy of the commit summaries:  `git merge`
+  # appends them to a message given with `-m` when `merge.log` is set, and
+  # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
+  if ! git merge -q --no-edit --no-log -m "${merge_message}" "$1"; then
+    echo "${SCRIPT_NAME}: problem merging $3 into $(pwd)" >&2
+    return 1
+  fi
+
+  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+    if ! "${SCRIPT_DIR}"/compile-project; then
+      echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
+      return 1
+    fi
+  fi
+
+  if ! git push --quiet; then
+    echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
+    return 1
+  fi
 }
 
 ## Usage: ssh_variant_of PROGRAM
