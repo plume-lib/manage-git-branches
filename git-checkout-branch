@@ -320,6 +320,26 @@ find_branch() {
   return 0
 }
 
+# Usage: branch_settings DIRECTORY
+# Prints the configuration of the branch ${BRANCHNAME} in the repository of
+# the working tree DIRECTORY, sorted, followed by the URL of each remote that
+# `branch.BRANCHNAME.remote` and `branch.BRANCHNAME.pushRemote` name, so that
+# the branch behaves the same in two repositories if they print the same.  A
+# remote's name says nothing by itself, because two clones can give one name
+# to different remotes.  A branch name contains no backslash, which `awk -v`
+# would interpret.
+branch_settings() {
+  git -C "$1" config --list \
+    | awk -v prefix="branch.${BRANCHNAME}." 'index($0, prefix) == 1' | sort
+  for branch_settings_key in remote pushRemote; do
+    branch_settings_remote="$(git -C "$1" config --get "branch.${BRANCHNAME}.${branch_settings_key}")"
+    if [ -n "${branch_settings_remote}" ]; then
+      printf '%s url %s\n' "${branch_settings_key}" \
+        "$(git -C "$1" config --get "remote.${branch_settings_remote}.url")"
+    fi
+  done
+}
+
 # Usage: choose_worktree_host
 # Sets ${WORKTREE_HOST}, which `add_worktree` registers the new worktree in, to
 # the project's main clone if this repository is a branch directory's (see
@@ -331,8 +351,11 @@ find_branch() {
 # branches and remotes, and this working tree is the one pulled.  Only the
 # registration moves, and so it moves only when it changes nothing else.
 #  * A local branch moves if the main clone has a local branch of that name at
-#    the same commit, which the new worktree then checks out, and no worktree
-#    of either repository has the branch checked out.  In the main clone, git
+#    the same commit and with the same configuration (see `branch_settings`),
+#    which the new worktree then checks out, and no worktree of either
+#    repository has the branch checked out.  The configuration includes the
+#    branch's upstream, which `git-push-to` and `git-pull-from` require and
+#    which nothing below sets for a local branch.  In the main clone, git
 #    would refuse a branch that one of the main clone's worktrees has checked
 #    out, and it would accept one that only a worktree of this repository has
 #    checked out, because it does not know about this repository's worktrees.
@@ -358,6 +381,8 @@ choose_worktree_host() {
     if [ "$(git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}")" \
       != "$(git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}")" ]; then
       choose_worktree_host_reason="${WORKTREE_HOST} has no branch ${BRANCHNAME} at the same commit as ${TOPLEVEL}"
+    elif [ "$(branch_settings "${WORKTREE_HOST}")" != "$(branch_settings "${TOPLEVEL}")" ]; then
+      choose_worktree_host_reason="${WORKTREE_HOST} configures its branch ${BRANCHNAME} differently than ${TOPLEVEL} does"
     fi
     for choose_worktree_host_repo in "${WORKTREE_HOST}" "${TOPLEVEL}"; do
       if [ -z "${choose_worktree_host_reason}" ] \

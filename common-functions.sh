@@ -1071,13 +1071,14 @@ main_clone_for() {
       return 0
     fi
   done
+  # Each line is "KEY VALUE", and a URL or a pathname may contain a space.
   mcf_urls="$(git -C "${mcf_host}" config --get-regexp '^remote\..*\.url$' \
-    | awk '{ print $2 }' | sort -u)"
+    | sed -e 's/^[^ ]* //' | sort -u)"
   if [ -z "${mcf_urls}" ]; then
     return 0
   fi
   if git -C "${mcf_main}" config --get-regexp '^remote\..*\.url$' \
-    | awk '{ print $2 }' | grep -q -x -F -- "${mcf_urls}"; then
+    | sed -e 's/^[^ ]* //' | grep -q -x -F -- "${mcf_urls}"; then
     printf '%s\n' "${mcf_main}"
   fi
 }
@@ -1097,7 +1098,8 @@ note_worktree_host() {
 ## Fetches REFSPEC from the current repository into the repository of the
 ## working tree REPOSITORY, which brings along the history of the commit that
 ## REFSPEC names; with INDEX, also copies the blobs that the current working
-## tree's index names.  These are the objects that a worktree registered in
+## tree's index names, and REFSPEC must then be HEAD.  These are the objects
+## that a worktree registered in
 ## REPOSITORY needs in order to hold that commit and that index.  On failure,
 ## prints a warning and returns 1.  A failure is not unusual:  git refuses,
 ## for example, to update a ref that REFSPEC names unless the update is a
@@ -1108,6 +1110,11 @@ note_worktree_host() {
 ## fetch from it into a complete repository warns that it "rejected" the ref,
 ## exits with status 0 all the same, and leaves the commit in REPOSITORY
 ## without its parents, which a worktree there would then be based on.
+##
+## The fetch of HEAD brings every blob of HEAD's tree, so only an index entry
+## that differs from HEAD, or a stage of a conflict, which `git diff-index`
+## does not name, can be missing.  Asking about every index entry would cost
+## one lookup per file of the repository.
 ##
 ## A staged blob that no commit holds is copied in one pack; it is then an
 ## unreachable object in REPOSITORY, which `git gc` nonetheless keeps, because
@@ -1125,7 +1132,17 @@ copy_objects_to() {
   if [ "$#" -lt 3 ]; then
     return 0
   fi
-  if ! cot_missing="$(git ls-files --stage | awk '$1 != "160000" { print $2 }' | sort -u \
+  # Each line of `git diff-index` is ":OLD-MODE NEW-MODE OLD NEW STATUS\tPATH",
+  # and NEW is all zeros for a deleted or unmerged path.
+  if ! cot_changed="$(git diff-index --cached --no-renames HEAD)" \
+    || ! cot_unmerged="$(git ls-files --unmerged)"; then
+    echo "${SCRIPT_NAME}: warning: cannot determine which staged blobs $1 lacks" >&2
+    return 1
+  fi
+  if ! cot_missing="$( {
+    printf '%s\n' "${cot_changed}" | awk '$2 != "160000" && $4 !~ /^0+$/ { print $4 }'
+    printf '%s\n' "${cot_unmerged}" | awk '$1 != "160000" { print $2 }'
+  } | grep '.' | sort -u \
     | git -C "$1" cat-file --batch-check | awk '$2 == "missing" { print $1 }')"; then
     echo "${SCRIPT_NAME}: warning: cannot determine which staged blobs $1 lacks" >&2
     return 1

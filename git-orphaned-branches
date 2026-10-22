@@ -269,7 +269,11 @@ github_slug() {
 # otherwise; and whose head is the remote branch in the repository that
 # `git push` uses.  A pull request from a branch of the same name in another
 # repository, even the base repository, is someone else's.  Nothing is
-# recorded if `gh` is not installed, if the remote is not on GitHub, or if a
+# recorded for the default branch of the repository that `git push` uses:  a
+# pull request from it, such as one that merges a release from `main` into a
+# stable branch, says nothing about whether a directory of the branch is
+# obsolete, because the branch outlives every such pull request.  Nor is
+# anything recorded if `gh` is not installed, if the remote is not on GitHub, or if a
 # query fails, because then nothing is known about the pull requests; the
 # scan's other answers do not depend on GitHub.  Nor is a directory whose
 # pathname contains a newline, which ${pr_candidates} cannot represent.
@@ -303,16 +307,27 @@ note_pr_candidate() {
   fi
   [ -n "${prs_head_repo}" ] || return 0
   # Every branch directory of a project asks about the same repository, so
-  # remember each answer.  Each line of ${base_repo_cache} is "HEAD BASE".
-  prs_base_repo="$(printf '%s\n' "${base_repo_cache}" \
-    | awk -v head="${prs_head_repo}" '$1 == head { print $2; exit }')"
-  if [ -z "${prs_base_repo}" ]; then
-    prs_base_repo="$(gh repo view "${prs_head_repo}" --json parent \
-      --jq '.parent | if . then "\(.owner.login)/\(.name)" else "" end' 2> /dev/null)" \
-      || return 0
-    [ -n "${prs_base_repo}" ] || prs_base_repo="${prs_head_repo}"
+  # remember each answer.  Each line of ${base_repo_cache} is
+  # "HEAD BASE DEFAULT", where DEFAULT is HEAD's default branch, or "-" if it
+  # has none.  The repository is named with its host, so that `gh` does not
+  # ask the host that ${GH_HOST} may name instead.
+  prs_answer="$(printf '%s\n' "${base_repo_cache}" \
+    | awk -v head="${prs_head_repo}" '$1 == head { print $2 " " $3; exit }')"
+  if [ -z "${prs_answer}" ]; then
+    prs_answer="$(gh repo view "github.com/${prs_head_repo}" \
+      --json owner,name,parent,defaultBranchRef \
+      --jq '"\(if .parent then "\(.parent.owner.login)/\(.parent.name)" else "\(.owner.login)/\(.name)" end) \(.defaultBranchRef.name // "-")"' \
+      2> /dev/null)" || return 0
+    case "${prs_answer}" in
+      ?*' '?*) ;;
+      *) return 0 ;;
+    esac
     base_repo_cache="${base_repo_cache}
-${prs_head_repo} ${prs_base_repo}"
+${prs_head_repo} ${prs_answer}"
+  fi
+  prs_base_repo="${prs_answer%% *}"
+  if [ "${prs_branch}" = "${prs_answer#* }" ]; then
+    return 0
   fi
   prs_dir="$(absolute_path "$1")" || prs_dir="$1"
   case "${prs_dir}" in
@@ -347,7 +362,9 @@ pr_candidates=''
 # branch at a time, so it is asked only about a branch name that has more
 # than the 100 pull requests that one GraphQL answer holds, such as
 # `patch-1`:  among those beyond the first 100 may be an open one of the
-# user's.
+# user's.  Every query names github.com, the host of every repository that
+# `note_pr_candidate` records, so that `gh` does not ask the host that
+# ${GH_HOST} may name instead.
 warn_about_closed_prs() {
   [ -n "${pr_candidates}" ] || return 0
   for wacp_base in $(printf '%s' "${pr_candidates}" | cut -f 1 | sort -u); do
@@ -386,7 +403,7 @@ warn_about_closed_prs_in() {
   # shellcheck disable=SC2016 # jq variables, not shell ones.
   wacpi_results="$(gh api graphql \
     -f query="query(${wacpi_decl}) { repository(owner: \$owner, name: \$name) {${wacpi_fields} } }" \
-    "$@" --jq '.data.repository | to_entries[] | .key as $k | .value.pageInfo.hasNextPage as $more
+    "$@" --hostname github.com --jq '.data.repository | to_entries[] | .key as $k | .value.pageInfo.hasNextPage as $more
       | ((.value.nodes[] | "\($k) \($more) \(.state) \(.number) \(.headRepositoryOwner.login // "-")"),
          "\($k) \($more) END")' \
     < /dev/null 2> /dev/null)" || return 0
@@ -406,8 +423,10 @@ warn_about_closed_prs_in() {
         fi
         ;;
       *)
+        # GitHub ignores the case of a login, so a remote URL may spell the
+        # owner differently than GitHub's answer does.
         wacpi_states="$(printf '%s\n' "${wacpi_lines}" \
-          | awk -v owner="${wacpi_owner}" '$3 != "END" && $5 == owner { print $3 " " $4 }')"
+          | awk -v owner="${wacpi_owner}" '$3 != "END" && tolower($5) == tolower(owner) { print $3 " " $4 }')"
         ;;
     esac
     [ -n "${wacpi_states}" ] || continue
@@ -443,7 +462,7 @@ next_pr_candidate() {
 # Fails if the query does.
 rest_pr_states() {
   gh api -X GET "repos/$1/pulls" -f "head=$2:$3" -f state=all -f per_page=100 \
-    --paginate --jq '.[] | "\(if .state == "open" then "OPEN" elif .merged_at then "MERGED" else "CLOSED" end) \(.number)"' \
+    --hostname github.com --paginate --jq '.[] | "\(if .state == "open" then "OPEN" elif .merged_at then "MERGED" else "CLOSED" end) \(.number)"' \
     < /dev/null 2> /dev/null
 }
 

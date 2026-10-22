@@ -156,10 +156,28 @@ if [ "$(host_of "${work}/proj-branch-same")" != "${work}/proj" ]; then
   fail "same is registered in $(host_of "${work}/proj-branch-same"), not in ${work}/proj"
 fi
 
+# A local branch that the main clone has at the same commit, but with another
+# upstream, uses the branch directory's branch, and so its upstream.
+git -C "${other}" branch configured "$(git -C "${work}/proj" rev-parse main)"
+git -C "${other}" config branch.configured.remote origin
+git -C "${other}" config branch.configured.merge refs/heads/configured
+git -C "${work}/proj" branch configured main
+if ! out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" configured 2>&1)"; then
+  fail "git-checkout-branch configured failed: ${out}"
+fi
+if [ "$(host_of "${work}/proj-branch-configured")" != "${other}" ]; then
+  fail "configured is registered in $(host_of "${work}/proj-branch-configured"), not in ${other}"
+fi
+if [ "$(git -C "${work}/proj-branch-configured" config --get branch.configured.remote)" != 'origin' ]; then
+  fail "proj-branch-configured has no upstream"
+fi
+
 # A local branch that the main clone has at the same commit, but that a
 # worktree of the main clone has checked out, uses the branch directory's
 # branch.
 git -C "${other}" branch main "$(git -C "${work}/proj" rev-parse main)"
+git -C "${other}" config branch.main.remote origin
+git -C "${other}" config branch.main.merge refs/heads/main
 if ! out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" main 2>&1)"; then
   fail "git-checkout-branch main failed: ${out}"
 fi
@@ -270,6 +288,22 @@ if ! out="$(cd "${work}/unrelated-branch-other" && "${GIT_NEW_BRANCH}" --clean n
 fi
 if [ "$(host_of "${work}/unrelated-branch-new3")" != "${work}/unrelated-branch-other" ]; then
   fail "new3 is registered in $(host_of "${work}/unrelated-branch-new3"), not in ${work}/unrelated-branch-other"
+fi
+
+# A main clone whose remote's URL differs from the branch directory's only
+# after a space is a clone of a different project.
+mkdir "${work}/My Repos"
+for spaced in a b; do
+  git init -q --bare -b main "${work}/My Repos/${spaced}.git"
+  git -C "${work}/seed" push -q "${work}/My Repos/${spaced}.git" main
+done
+git clone -q "${work}/My Repos/b.git" "${work}/spaced"
+git clone -q "${work}/My Repos/a.git" "${work}/spaced-branch-main"
+if ! out="$(cd "${work}/spaced-branch-main" && "${GIT_NEW_BRANCH}" --clean new5 2>&1)"; then
+  fail "git-new-branch --clean new5 failed: ${out}"
+fi
+if [ "$(host_of "${work}/spaced-branch-new5")" != "${work}/spaced-branch-main" ]; then
+  fail "new5 is registered in $(host_of "${work}/spaced-branch-new5"), not in ${work}/spaced-branch-main"
 fi
 
 # A main clone that is a symbolic link to a branch directory is not used.

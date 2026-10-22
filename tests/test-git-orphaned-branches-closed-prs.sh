@@ -36,8 +36,10 @@ work="$(CDPATH='' cd -- "${work}" && pwd -P)"
 
 sanitize_git_env "${work}"
 
-# The fake `gh`.  `gh repo view` prints ${FAKE_GH_PARENT}, which is empty for
-# a repository that is not a fork; `gh api graphql` prints ${FAKE_GH_PRS}, and
+# The fake `gh`.  `gh repo view` prints the base repository, which is
+# ${FAKE_GH_PARENT} or, if that is empty, the repository itself, and the
+# default branch, ${FAKE_GH_DEFAULT} or "main"; `gh api graphql` prints
+# ${FAKE_GH_PRS}, and
 # any other `gh api` prints ${FAKE_GH_REST}, the lines that the real `gh`
 # would print after applying the `--jq` filter.  All fail if ${FAKE_GH_FAIL}
 # is non-empty.  Each call's arguments are appended to ${work}/gh.log.  The
@@ -49,7 +51,7 @@ cat > "${work}/bin/gh" << EOF
 printf '%s\n' "\$*" >> "${work}/gh.log"
 if [ -n "\${FAKE_GH_FAIL}" ]; then exit 1; fi
 case "\$1 \$2" in
-  'repo view') printf '%s\n' "\${FAKE_GH_PARENT}" ;;
+  'repo view') printf '%s %s\n' "\${FAKE_GH_PARENT:-someone/proj}" "\${FAKE_GH_DEFAULT:-main}" ;;
   'api graphql') if [ -n "\${FAKE_GH_PRS}" ]; then printf '%s\n' "\${FAKE_GH_PRS}"; fi ;;
   'api -X') if [ -n "\${FAKE_GH_REST}" ]; then printf '%s\n' "\${FAKE_GH_REST}"; fi ;;
   *) exit 1 ;;
@@ -106,6 +108,11 @@ esac
 if ! grep -q -F -- 'owner=upstream -f name=proj -f b0=feature' "${work}/gh.log"; then
   fail "gh api graphql did not ask the parent repository: $(cat "${work}/gh.log")"
 fi
+# Every query names github.com, whatever ${GH_HOST} says.
+if ! grep -q -F -- 'repo view github.com/someone/proj ' "${work}/gh.log" \
+  || ! grep '^api graphql' "${work}/gh.log" | grep -q -F -- '--hostname github.com'; then
+  fail "gh was not told the host github.com: $(cat "${work}/gh.log")"
+fi
 
 # A pull request from a branch of the same name in the base repository is
 # someone else's, so it does not count.
@@ -132,6 +139,15 @@ case "${err}" in
   *) fail "unexpected warning with another owner's open pull request: [${err}]" ;;
 esac
 
+# GitHub's spelling of the owner may differ in case from the remote URL's.
+FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 SomeOne')" scan
+case "${err}" in
+  *"warning: not listing ${dir}:  every pull request for branch feature of someone/proj is closed or merged (someone/proj #7 (closed))"*) ;;
+  *) fail "unexpected warning with the owner in another case: [${err}]" ;;
+esac
+FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone' 'OPEN 8 SomeOne')" scan
+[ -z "${err}" ] || fail "warned though the owner in another case has an open pull request: [${err}]"
+
 # More pull requests than one GraphQL answer holds:  the REST API, which
 # filters by owner, is asked instead, and it finds an open one.
 : > "${work}/gh.log"
@@ -140,11 +156,22 @@ FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 true 'CLOSED 7 someone')" FAKE_GH_REST='
 if ! grep -q -F -- 'api -X GET repos/someone/proj/pulls -f head=someone:feature' "${work}/gh.log"; then
   fail "the REST API was not asked about someone:feature: $(cat "${work}/gh.log")"
 fi
+if ! grep '^api -X GET' "${work}/gh.log" | grep -q -F -- '--hostname github.com'; then
+  fail "the REST API was not told the host github.com: $(cat "${work}/gh.log")"
+fi
 FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 true 'OPEN 8 other')" FAKE_GH_REST='MERGED 9' scan
 case "${err}" in
   *"warning: not listing ${dir}:  every pull request for branch feature of someone/proj is closed or merged (someone/proj #9 (merged))"*) ;;
   *) fail "unexpected warning from the REST API's answer: [${err}]" ;;
 esac
+
+# The default branch of the repository is not asked about.
+: > "${work}/gh.log"
+FAKE_GH_PARENT='' FAKE_GH_DEFAULT='feature' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone')" scan
+[ -z "${err}" ] || fail "warned about the default branch: [${err}]"
+if grep -q '^api graphql' "${work}/gh.log"; then
+  fail "asked about the pull requests of the default branch: $(cat "${work}/gh.log")"
+fi
 
 # No pull request:  no warning.
 FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false)" scan
