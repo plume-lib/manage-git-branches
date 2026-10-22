@@ -172,6 +172,37 @@ if [ "$(git -C "${work}/proj-branch-configured" config --get branch.configured.r
   fail "proj-branch-configured has no upstream"
 fi
 
+# A local branch that the main clone has at the same commit and with the same
+# upstream, but that the main clone pushes elsewhere, uses the branch
+# directory's branch:  first because of `remote.pushDefault`, then because of
+# a `pushurl`.
+for pushed in pushdefault pushurl; do
+  git -C "${other}" branch "${pushed}" "$(git -C "${work}/proj" rev-parse main)"
+  git -C "${work}/proj" branch "${pushed}" main
+  for repo in "${other}" "${work}/proj"; do
+    git -C "${repo}" config "branch.${pushed}.remote" origin
+    git -C "${repo}" config "branch.${pushed}.merge" "refs/heads/${pushed}"
+  done
+done
+git -C "${work}/proj" remote add elsewhere "${work}/remote.git"
+git -C "${work}/proj" remote set-url --push elsewhere "${work}/elsewhere.git"
+git -C "${work}/proj" config remote.pushDefault elsewhere
+if ! out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" pushdefault 2>&1)"; then
+  fail "git-checkout-branch pushdefault failed: ${out}"
+fi
+git -C "${work}/proj" config --unset remote.pushDefault
+git -C "${work}/proj" remote remove elsewhere
+git -C "${work}/proj" remote set-url --push origin "${work}/elsewhere.git"
+if ! out="$(cd "${other}" && "${GIT_CHECKOUT_BRANCH}" pushurl 2>&1)"; then
+  fail "git-checkout-branch pushurl failed: ${out}"
+fi
+git -C "${work}/proj" config --unset remote.origin.pushurl
+for pushed in pushdefault pushurl; do
+  if [ "$(host_of "${work}/proj-branch-${pushed}")" != "${other}" ]; then
+    fail "${pushed} is registered in $(host_of "${work}/proj-branch-${pushed}"), not in ${other}"
+  fi
+done
+
 # A local branch that the main clone has at the same commit, but that a
 # worktree of the main clone has checked out, uses the branch directory's
 # branch.
@@ -212,6 +243,9 @@ if [ "$(host_of "${work}/proj-branch-fork-only")" != "${work}/proj" ]; then
 fi
 if [ "$(git -C "${work}/proj" config --get branch.fork-only.remote)" != 'mine' ]; then
   fail "fork-only's upstream remote is [$(git -C "${work}/proj" config --get branch.fork-only.remote)], not mine"
+fi
+if [ "$(git -C "${work}/proj" config --get branch.fork-only.merge)" != 'refs/heads/fork-only' ]; then
+  fail "fork-only's upstream branch is [$(git -C "${work}/proj" config --get branch.fork-only.merge)], not refs/heads/fork-only"
 fi
 
 # A remote that the main clone lacks.

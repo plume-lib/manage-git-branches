@@ -77,7 +77,7 @@ if [ "$(git -C "${dir}" config --get remote.origin.url)" != 'https://github.com/
 fi
 
 # Prints the lines of ${FAKE_GH_PRS} for the branch whose GraphQL alias is
-# $1:  one "ALIAS MORE STATE NUMBER OWNER" for each "STATE NUMBER OWNER"
+# $1:  one "ALIAS MORE STATE NUMBER HEAD" for each "STATE NUMBER HEAD"
 # argument after $2, followed by "ALIAS MORE END", where MORE is $2.
 prs() {
   prs_alias="$1"
@@ -89,16 +89,34 @@ prs() {
   printf '%s %s END\n' "${prs_alias}" "${prs_more}"
 }
 
-# Runs git-orphaned-branches in ${work}/scan with the arguments, putting its
-# standard output in ${out} and its standard error in ${err}.
+# Usage: scan [FAKE_GH_NAME=VALUE]... [ARGUMENT]...
+# Runs git-orphaned-branches in ${work}/scan with the ARGUMENTs and with the
+# environment variables FAKE_GH_NAME set, putting its standard output in
+# ${out} and its standard error in ${err}.  The variables are arguments,
+# not assignments that precede the call, because some shells, such as bash in
+# POSIX mode, which is /bin/sh on macOS, keep such assignments after a
+# function returns.
 scan() {
-  out="$(cd "${work}/scan" && "${GIT_ORPHANED_BRANCHES}" "$@" 2> "${work}/err")"
+  out="$(
+    cd "${work}/scan" || exit 1
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        FAKE_GH_*=*)
+          # shellcheck disable=SC2163 # $1 is NAME=VALUE, not a name.
+          export "$1"
+          shift
+          ;;
+        *) break ;;
+      esac
+    done
+    "${GIT_ORPHANED_BRANCHES}" "$@" 2> "${work}/err"
+  )"
   scan_status=$?
   err="$(cat "${work}/err")"
 }
 
 # Every pull request is closed or merged:  a warning, and nothing listed.
-FAKE_GH_PARENT='upstream/proj' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone' 'MERGED 9 upstream')" scan
+scan FAKE_GH_PARENT='upstream/proj' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj' 'MERGED 9 upstream/proj')"
 [ "${scan_status}" -eq 0 ] || fail "status ${scan_status} with closed pull requests"
 [ -z "${out}" ] || fail "listed [${out}] with closed pull requests"
 case "${err}" in
@@ -116,11 +134,11 @@ fi
 
 # A pull request from a branch of the same name in the base repository is
 # someone else's, so it does not count.
-FAKE_GH_PARENT='upstream/proj' FAKE_GH_PRS="$(prs b0 false 'MERGED 9 upstream')" scan
+scan FAKE_GH_PARENT='upstream/proj' FAKE_GH_PRS="$(prs b0 false 'MERGED 9 upstream/proj')"
 [ -z "${err}" ] || fail "warned about a pull request from the base repository: [${err}]"
 
 # --remove keeps the directory.
-FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'MERGED 9 someone')" scan --remove
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'MERGED 9 someone/proj')" --remove
 [ -d "${dir}" ] || fail "--remove removed ${dir}"
 case "${err}" in
   *"warning: not listing ${dir}:"*) ;;
@@ -128,30 +146,42 @@ case "${err}" in
 esac
 
 # An open pull request:  no warning.
-FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone' 'OPEN 8 someone')" scan
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj' 'OPEN 8 someone/proj')"
 [ -z "${err}" ] || fail "warned with an open pull request: [${err}]"
 
 # An open pull request from a branch of the same name in another owner's
 # repository does not count.
-FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone' 'OPEN 8 other' 'OPEN 10 -')" scan
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj' 'OPEN 8 other/proj' 'OPEN 10 -')"
 case "${err}" in
   *"warning: not listing ${dir}:  every pull request for branch feature of someone/proj is closed or merged (someone/proj #7 (closed))"*) ;;
   *) fail "unexpected warning with another owner's open pull request: [${err}]" ;;
 esac
 
-# GitHub's spelling of the owner may differ in case from the remote URL's.
-FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 SomeOne')" scan
+# GitHub's spelling of the repository may differ in case from the remote
+# URL's.
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 SomeOne/Proj')"
 case "${err}" in
   *"warning: not listing ${dir}:  every pull request for branch feature of someone/proj is closed or merged (someone/proj #7 (closed))"*) ;;
-  *) fail "unexpected warning with the owner in another case: [${err}]" ;;
+  *) fail "unexpected warning with the repository in another case: [${err}]" ;;
 esac
-FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone' 'OPEN 8 SomeOne')" scan
-[ -z "${err}" ] || fail "warned though the owner in another case has an open pull request: [${err}]"
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj' 'OPEN 8 SomeOne/Proj')"
+[ -z "${err}" ] || fail "warned though the repository in another case has an open pull request: [${err}]"
+
+# A pull request from a branch of the same name in another repository of the
+# same owner, such as the base repository of a fork in one organization, does
+# not count.
+scan FAKE_GH_PARENT='someone/upstream' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj' 'OPEN 8 someone/upstream')"
+case "${err}" in
+  *"warning: not listing ${dir}:  every pull request for branch feature of someone/proj is closed or merged (someone/upstream #7 (closed))"*) ;;
+  *) fail "unexpected warning with the same owner's open pull request: [${err}]" ;;
+esac
+scan FAKE_GH_PARENT='someone/upstream' FAKE_GH_PRS="$(prs b0 false 'CLOSED 8 someone/upstream')"
+[ -z "${err}" ] || fail "warned about a pull request from the same owner's base repository: [${err}]"
 
 # More pull requests than one GraphQL answer holds:  the REST API, which
 # filters by owner, is asked instead, and it finds an open one.
 : > "${work}/gh.log"
-FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 true 'CLOSED 7 someone')" FAKE_GH_REST='OPEN 12' scan
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 true 'CLOSED 7 someone/proj')" FAKE_GH_REST='- - OPEN 12 someone/proj'
 [ -z "${err}" ] || fail "warned though the REST API found an open pull request: [${err}]"
 if ! grep -q -F -- 'api -X GET repos/someone/proj/pulls -f head=someone:feature' "${work}/gh.log"; then
   fail "the REST API was not asked about someone:feature: $(cat "${work}/gh.log")"
@@ -159,7 +189,9 @@ fi
 if ! grep '^api -X GET' "${work}/gh.log" | grep -q -F -- '--hostname github.com'; then
   fail "the REST API was not told the host github.com: $(cat "${work}/gh.log")"
 fi
-FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 true 'OPEN 8 other')" FAKE_GH_REST='MERGED 9' scan
+# The REST API's answer, too, is filtered by head repository.
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 true 'OPEN 8 other/proj')" \
+  FAKE_GH_REST="$(printf '%s\n' '- - MERGED 9 someone/proj' '- - OPEN 12 someone/other' '- - OPEN 13 -')"
 case "${err}" in
   *"warning: not listing ${dir}:  every pull request for branch feature of someone/proj is closed or merged (someone/proj #9 (merged))"*) ;;
   *) fail "unexpected warning from the REST API's answer: [${err}]" ;;
@@ -167,21 +199,21 @@ esac
 
 # The default branch of the repository is not asked about.
 : > "${work}/gh.log"
-FAKE_GH_PARENT='' FAKE_GH_DEFAULT='feature' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone')" scan
+scan FAKE_GH_PARENT='' FAKE_GH_DEFAULT='feature' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
 [ -z "${err}" ] || fail "warned about the default branch: [${err}]"
 if grep -q '^api graphql' "${work}/gh.log"; then
   fail "asked about the pull requests of the default branch: $(cat "${work}/gh.log")"
 fi
 
 # No pull request:  no warning.
-FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false)" scan
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false)"
 [ -z "${err}" ] || fail "warned with no pull request: [${err}]"
 
 # A branch whose upstream has another name:  the pull requests asked about
 # are those of the upstream.
 git -C "${dir}" config branch.feature.merge refs/heads/feature2
 : > "${work}/gh.log"
-FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone')" scan
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
 if ! grep -q -F -- '-f b0=feature2' "${work}/gh.log"; then
   fail "gh api graphql did not ask about the upstream feature2: $(cat "${work}/gh.log")"
 fi
@@ -195,7 +227,7 @@ git -C "${dir}" config branch.feature.merge refs/heads/feature
 dir2="${work}/scan/proj-branch-feature2"
 git clone -q -b feature2 'https://github.com/someone/proj' "${dir2}"
 : > "${work}/gh.log"
-FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone'; prs b1 false 'MERGED 9 someone')" scan
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj'; prs b1 false 'MERGED 9 someone/proj')"
 if [ "$(grep -c '^api graphql' "${work}/gh.log")" -ne 1 ]; then
   fail "not one GraphQL query for two directories: $(cat "${work}/gh.log")"
 fi
@@ -206,14 +238,14 @@ esac
 rm -rf "${dir2}"
 
 # gh fails:  no warning.
-FAKE_GH_FAIL=1 FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone')" scan
+scan FAKE_GH_FAIL=1 FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
 [ "${scan_status}" -eq 0 ] || fail "status ${scan_status} when gh fails"
 [ -z "${err}" ] || fail "warned when gh fails: [${err}]"
 
 # A remote that is not on GitHub:  gh is not asked.
 : > "${work}/gh.log"
 git -C "${dir}" config remote.origin.url "${work}/remote.git"
-FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone')" scan
+scan FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
 [ -z "${err}" ] || fail "warned for a remote that is not on GitHub: [${err}]"
 [ ! -s "${work}/gh.log" ] || fail "asked gh about a remote that is not on GitHub: $(cat "${work}/gh.log")"
 

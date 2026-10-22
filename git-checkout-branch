@@ -322,22 +322,40 @@ find_branch() {
 
 # Usage: branch_settings DIRECTORY
 # Prints the configuration of the branch ${BRANCHNAME} in the repository of
-# the working tree DIRECTORY, sorted, followed by the URL of each remote that
-# `branch.BRANCHNAME.remote` and `branch.BRANCHNAME.pushRemote` name, so that
-# the branch behaves the same in two repositories if they print the same.  A
-# remote's name says nothing by itself, because two clones can give one name
-# to different remotes.  A branch name contains no backslash, which `awk -v`
-# would interpret.
+# the working tree DIRECTORY, sorted, followed by the URLs that the branch is
+# fetched from and pushed to, so that the branch behaves the same in two
+# repositories if they print the same.  A remote's name says nothing by
+# itself, because two clones can give one name to different remotes, and the
+# URLs that a push uses depend also on `remote.pushDefault` and on a remote's
+# `pushurl`, which are not the branch's configuration.  The remote that a push
+# uses is the one that `git push` chooses and also the one that `push_remote`
+# chooses, which `git-new-branch` uses.  A branch name contains no backslash,
+# which `awk -v` would interpret.
 branch_settings() {
   git -C "$1" config --list \
     | awk -v prefix="branch.${BRANCHNAME}." 'index($0, prefix) == 1' | sort
-  for branch_settings_key in remote pushRemote; do
-    branch_settings_remote="$(git -C "$1" config --get "branch.${BRANCHNAME}.${branch_settings_key}")"
-    if [ -n "${branch_settings_remote}" ]; then
-      printf '%s url %s\n' "${branch_settings_key}" \
-        "$(git -C "$1" config --get "remote.${branch_settings_remote}.url")"
-    fi
-  done
+  branch_settings_upstream="$(git -C "$1" config --get "branch.${BRANCHNAME}.remote")"
+  # `git push` uses the first of these that is set.
+  branch_settings_push="$(git -C "$1" config --get "branch.${BRANCHNAME}.pushRemote" \
+    || git -C "$1" config --get remote.pushDefault \
+    || printf '%s\n' "${branch_settings_upstream:-origin}")"
+  printf 'fetch %s\n' "$(remote_urls "$1" "${branch_settings_upstream}")"
+  printf 'push %s\n' "$(remote_urls "$1" "${branch_settings_push}" --push)"
+  printf 'push_remote %s\n' \
+    "$(remote_urls "$1" "$(push_remote "$1" "${BRANCHNAME}")" --push)"
+}
+
+# Usage: remote_urls DIRECTORY REMOTE [--push]
+# Prints the URLs, one per line, that the repository of the working tree
+# DIRECTORY fetches from, or with --push pushes to, for REMOTE, which is the
+# name of a remote, a URL, a pathname, or empty.  A URL or a pathname is its
+# own URL.
+remote_urls() {
+  if is_remote_name "$1" "$2"; then
+    git -C "$1" remote get-url ${3:+"$3"} --all "$2"
+  elif [ -n "$2" ]; then
+    printf '%s\n' "$2"
+  fi
 }
 
 # Usage: choose_worktree_host

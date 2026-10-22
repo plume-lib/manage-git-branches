@@ -357,12 +357,14 @@ pr_candidates=''
 # One GraphQL query asks about up to 50 branches of one base repository, so
 # that a scan of many branch directories costs a few round trips rather than
 # one per directory.  GraphQL filters pull requests by the name of their head
-# branch but not by the owner of their head repository, so the owners are
-# filtered here.  Only the REST API filters by owner, and it answers about one
-# branch at a time, so it is asked only about a branch name that has more
-# than the 100 pull requests that one GraphQL answer holds, such as
-# `patch-1`:  among those beyond the first 100 may be an open one of the
-# user's.  Every query names github.com, the host of every repository that
+# branch but not by their head repository, so the head repositories are
+# filtered here.  Only the REST API filters by the owner of the head
+# repository, and it answers about one branch at a time, so it is asked only
+# about a branch name that has more than the 100 pull requests that one
+# GraphQL answer holds, such as `patch-1`:  among those beyond the first 100
+# may be an open one of the user's.  Its answer, too, is filtered by head
+# repository, because one owner may have both the base repository and a fork
+# of it.  Every query names github.com, the host of every repository that
 # `note_pr_candidate` records, so that `gh` does not ask the host that
 # ${GH_HOST} may name instead.
 warn_about_closed_prs() {
@@ -392,19 +394,19 @@ warn_about_closed_prs_in() {
   while [ -n "${wacpi_rest}" ]; do
     next_pr_candidate
     wacpi_decl="${wacpi_decl}, \$b${wacpi_index}: String!"
-    wacpi_fields="${wacpi_fields} b${wacpi_index}: pullRequests(headRefName: \$b${wacpi_index}, first: 100) { pageInfo { hasNextPage } nodes { number state headRepositoryOwner { login } } }"
+    wacpi_fields="${wacpi_fields} b${wacpi_index}: pullRequests(headRefName: \$b${wacpi_index}, first: 100) { pageInfo { hasNextPage } nodes { number state headRepository { nameWithOwner } } }"
     set -- "$@" -f "b${wacpi_index}=${wacpi_branch}"
     wacpi_index=$((wacpi_index + 1))
   done
-  # Each line is "ALIAS MORE STATE NUMBER OWNER" for one pull request, or
+  # Each line is "ALIAS MORE STATE NUMBER HEAD" for one pull request, or
   # "ALIAS MORE END" after an alias's last one, so that every alias says
-  # whether it has more.  A pull request whose head repository was deleted
-  # has no owner, which is "-" here.
+  # whether it has more.  HEAD is the head repository, which is "-" for a
+  # pull request whose head repository was deleted.
   # shellcheck disable=SC2016 # jq variables, not shell ones.
   wacpi_results="$(gh api graphql \
     -f query="query(${wacpi_decl}) { repository(owner: \$owner, name: \$name) {${wacpi_fields} } }" \
     "$@" --hostname github.com --jq '.data.repository | to_entries[] | .key as $k | .value.pageInfo.hasNextPage as $more
-      | ((.value.nodes[] | "\($k) \($more) \(.state) \(.number) \(.headRepositoryOwner.login // "-")"),
+      | ((.value.nodes[] | "\($k) \($more) \(.state) \(.number) \(.headRepository.nameWithOwner // "-")"),
          "\($k) \($more) END")' \
     < /dev/null 2> /dev/null)" || return 0
   wacpi_index=0
@@ -412,23 +414,20 @@ warn_about_closed_prs_in() {
 "
   while [ -n "${wacpi_rest}" ]; do
     next_pr_candidate
-    wacpi_owner="${wacpi_head_repo%%/*}"
     wacpi_lines="$(printf '%s\n' "${wacpi_results}" | awk -v alias="b${wacpi_index}" '$1 == alias')"
     wacpi_index=$((wacpi_index + 1))
-    # Each line is "STATE NUMBER" for one pull request from this branch.
     case "${wacpi_lines}" in
       *' true END'*)
-        if ! wacpi_states="$(rest_pr_states "${wacpi_base}" "${wacpi_owner}" "${wacpi_branch}")"; then
+        if ! wacpi_lines="$(rest_pr_states "${wacpi_base}" "${wacpi_head_repo}" "${wacpi_branch}")"; then
           continue
         fi
         ;;
-      *)
-        # GitHub ignores the case of a login, so a remote URL may spell the
-        # owner differently than GitHub's answer does.
-        wacpi_states="$(printf '%s\n' "${wacpi_lines}" \
-          | awk -v owner="${wacpi_owner}" '$3 != "END" && tolower($5) == tolower(owner) { print $3 " " $4 }')"
-        ;;
     esac
+    # Each line is "STATE NUMBER" for one pull request from this branch.
+    # GitHub ignores the case of a repository's name, so a remote URL may
+    # spell it differently than GitHub's answer does.
+    wacpi_states="$(printf '%s\n' "${wacpi_lines}" \
+      | awk -v head="${wacpi_head_repo}" '$3 != "END" && tolower($5) == tolower(head) { print $3 " " $4 }')"
     [ -n "${wacpi_states}" ] || continue
     if printf '%s\n' "${wacpi_states}" | grep -q '^OPEN '; then
       continue
@@ -456,13 +455,16 @@ next_pr_candidate() {
   wacpi_dir="${npc_line#*	}"
 }
 
-# Usage: rest_pr_states BASE OWNER BRANCH
-# Prints "STATE NUMBER", one per line, for each pull request to the GitHub
-# repository BASE whose head is the branch BRANCH of OWNER's repository.
-# Fails if the query does.
+# Usage: rest_pr_states BASE HEAD BRANCH
+# Prints "- - STATE NUMBER REPOSITORY", one per line, for each pull request to
+# the GitHub repository BASE whose head is the branch BRANCH of a repository
+# of the owner of the GitHub repository HEAD.  REPOSITORY is the head
+# repository, or "-" if it was deleted.  The first two fields stand for the
+# ALIAS and MORE of a line of the GraphQL answer in `warn_about_closed_prs_in`,
+# so that one filter reads both.  Fails if the query does.
 rest_pr_states() {
-  gh api -X GET "repos/$1/pulls" -f "head=$2:$3" -f state=all -f per_page=100 \
-    --hostname github.com --paginate --jq '.[] | "\(if .state == "open" then "OPEN" elif .merged_at then "MERGED" else "CLOSED" end) \(.number)"' \
+  gh api -X GET "repos/$1/pulls" -f "head=${2%%/*}:$3" -f state=all -f per_page=100 \
+    --hostname github.com --paginate --jq '.[] | "- - \(if .state == "open" then "OPEN" elif .merged_at then "MERGED" else "CLOSED" end) \(.number) \(.head.repo.full_name // "-")"' \
     < /dev/null 2> /dev/null
 }
 
