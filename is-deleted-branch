@@ -108,19 +108,19 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
-  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
   exit 3
 fi
-# shellcheck source=remote-functions.sh
-. "${SCRIPT_DIR}/remote-functions.sh"
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} DIRECTORY" >&2
   exit 64
 fi
 
-# The body of this command is `is_deleted_branch` in remote-functions.sh, so
+# The body of this command is `is_deleted_branch` in common-functions.sh, so
 # that the other commands of this package can ask the same question without
 # running a subprocess for each directory they ask about.  This command is a
 # wrapper around that function, and its exit status is the function's.

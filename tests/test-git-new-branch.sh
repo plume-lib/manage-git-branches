@@ -179,8 +179,8 @@ done
 # `ssh` records the arguments of each invocation and then fails, so both
 # operations fail; neither failure is fatal, and what this checks is the
 # options they passed.
-# shellcheck source=common-functions.sh
-. "${SCRIPT_DIR}/common-functions.sh"
+# shellcheck source=common-test-functions.sh
+. "${SCRIPT_DIR}/common-test-functions.sh"
 sshclone="${tmpdir}/sshclone-branch-main"
 git clone -q "${repo}" "${sshclone}"
 use_fake_ssh "${sshclone}" "${tmpdir}/ssh-arguments"

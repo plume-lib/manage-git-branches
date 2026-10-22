@@ -82,6 +82,14 @@ The commands are:
   succeeds.
   OTHER-REPO-DIR and the current directory must both be the top level of a
   working tree and must each have an upstream branch.
+* [`git-pull-upstream`](git-pull-upstream) `[--nocompile]`:
+  Merges the default branch of the remote `upstream` (or `origin`, if there
+  is no `upstream`, or the only remote, if there is neither) into the current
+  branch, compiles, then pushes the current branch if compilation succeeds.
+  It first pulls the current branch, which must have an upstream branch.
+  It does not push a branch whose push destination is the default branch of
+  the upstream repository, nor, in a fork, any branch of `upstream`.
+  Unlike `git-pull-from`, it needs no working tree for the default branch.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but Eclipse `.project`
@@ -115,6 +123,11 @@ The commands are:
   Shows the commits on local branches that have not been pushed.
   Unlike `git log --branches --not --remotes`, it omits a branch whose
   changes are already in a remote's default branch, as after a squash-merge.
+* [`git-diff-upstream`](git-diff-upstream) `[--no-fetch] [GIT-DIFF-ARGS]`:
+  Fetches the remote `upstream` (or `origin`, if there is no `upstream`, or
+  the only remote, if there is neither), then shows the differences between
+  its default branch and the working tree, ignoring changes in the amount of
+  whitespace and using the patience diff algorithm.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
@@ -140,8 +153,8 @@ takes effect when it is set to a non-empty value.
 * `ERR_IF_NO_BUILDFILE`: `compile-project` fails if it finds no buildfile.
   Otherwise, `compile-project` succeeds when it finds no buildfile.
 * `MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT`: `git-push-to`,
-  `git-pull-from`, and `git-rebase-to` skip the compilation step, and push
-  whenever the merge succeeds.
+  `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` skip the
+  compilation step, and push whenever the merge succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,

@@ -102,12 +102,12 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
-  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
   exit 1
 fi
-# shellcheck source=remote-functions.sh
-. "${SCRIPT_DIR}/remote-functions.sh"
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
 
 # Without this, git commands that this script runs in the new directory would
 # act on the current repository instead.  For example, `git worktree add` would
@@ -360,7 +360,7 @@ fi
 
 # Determine which remote the new branch would collide with:  the remote that
 # `git push` would use for the current branch, as `push_remote` in
-# remote-functions.sh determines it, which is also the remote that
+# common-functions.sh determines it, which is also the remote that
 # `is-deleted-branch` and `git-push-to` use.  The new branch has no
 # configuration of its own yet -- neither `git worktree add -b` nor
 # `git checkout -b` creates any -- so this branch's configuration is what says

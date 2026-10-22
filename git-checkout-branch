@@ -78,12 +78,12 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-if [ ! -r "${SCRIPT_DIR}/remote-functions.sh" ]; then
-  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/remote-functions.sh" >&2
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
   exit 1
 fi
-# shellcheck source=remote-functions.sh
-. "${SCRIPT_DIR}/remote-functions.sh"
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
 
 # Without this, git commands that this script runs in the new directory would
 # act on the current repository instead.  For example, `git worktree add` would
@@ -172,7 +172,7 @@ if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
 fi
 
 # Determine which remote to ask about the branch:  the remote that `git fetch`
-# would use for the current branch, as `fetch_remote` in remote-functions.sh
+# would use for the current branch, as `fetch_remote` in common-functions.sh
 # determines it.  Checking out a branch reads from a remote, so this is not
 # the remote that `git-new-branch`, `is-deleted-branch`, and `git-push-to`
 # use, which is the one that `git push` would use; in the fork workflow the

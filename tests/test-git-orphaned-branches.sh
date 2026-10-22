@@ -414,8 +414,8 @@ fi
 # Count the queries with a git wrapper on PATH that logs its arguments and then
 # runs the real git.  These tests' remotes are local pathnames that never
 # reach SSH, so counting SSH invocations would count nothing.
-# shellcheck source=common-functions.sh
-. "${TESTS_DIR}/common-functions.sh"
+# shellcheck source=common-test-functions.sh
+. "${TESTS_DIR}/common-test-functions.sh"
 make_counting_git "${work}/test-bin" "${work}/git-commands.log"
 
 # Usage: scan_with_counted_queries DIRECTORY
