@@ -36,7 +36,7 @@ The commands are:
   submodules gets a copy of the whole directory instead, which is an
   independent clone.
   Below is a definition for an alias `gcb`.
-* [`git-new-branch`](git-new-branch) `[--clean | --copy] BRANCHNAME`:
+* [`git-new-branch`](git-new-branch) `[--clean | --copy] [--allow-upstream] BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
@@ -48,6 +48,9 @@ The commands are:
   checkout and nothing else.  With `--copy`, it is a copy of the whole
   directory, `.git` included, and so an independent clone; a working tree
   that has submodules always gets this.
+  In a clone of an upstream repository whose fork is in a sibling directory
+  `PROJECT-fork-ORG`, the command refuses, because a branch for a pull
+  request belongs in the fork; `--allow-upstream` overrides the refusal.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:

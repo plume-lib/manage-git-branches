@@ -4,7 +4,7 @@
 # in a sibling directory named REPONAME-branch-NEWBRANCHNAME/.
 #
 # Usage:
-#   git-new-branch [--clean | --copy] NEWBRANCHNAME
+#   git-new-branch [--clean | --copy] [--allow-upstream] NEWBRANCHNAME
 #
 # The new branch starts at the current commit.  There are three modes:
 #
@@ -33,6 +33,14 @@
 # `--clean` is refused while a merge, cherry-pick, revert, or rebase is in
 # progress, because the new directory would get the operation's staged
 # changes without the operation itself.
+#
+# A clone of an upstream repository, for which the user has a fork, is
+# refused unless `--allow-upstream` is given, because a branch for a pull
+# request belongs in the fork.  The clone is such a clone if a sibling
+# directory PROJECT-fork-ORG... (where the current directory is PROJECT or
+# PROJECT-branch-OTHER) has a remote named "upstream" that is the repository
+# that the new branch would be pushed to.  The refusal names the fork's
+# directory, in which to run this command instead.
 #
 # In the worktree modes, this script writes into the current repository:  it
 # creates the new branch there and registers the new worktree in its `.git`.
@@ -120,15 +128,17 @@ fi
 unset_git_location_variables
 
 usage() {
-  echo "Usage: ${SCRIPT_NAME} [--clean | --copy] NEWBRANCHNAME" >&2
+  echo "Usage: ${SCRIPT_NAME} [--clean | --copy] [--allow-upstream] NEWBRANCHNAME" >&2
 }
 
 # The mode:  "worktree" (the default), "clean", or "copy".  Selected on once,
 # where the three implementations diverge, so that every check before that
 # point is common to all three.
 MODE='worktree'
+ALLOW_UPSTREAM=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --allow-upstream) ALLOW_UPSTREAM=1 ;;
     --clean | --copy)
       # The two ask for opposite things, so there is no sensible resolution.
       if [ "${MODE}" != 'worktree' ] && [ "${MODE}" != "${1#--}" ]; then
@@ -312,6 +322,96 @@ fi
 if [ -e "${BRANCHDIR}" ]; then
   echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
   exit 1
+fi
+
+# Usage: repository_key DIRECTORY REMOTE
+# Prints a key for the repository that REMOTE names:  a remote of the clone in
+# DIRECTORY, or a URL or a pathname, which git accepts in place of a remote's
+# name.  Two spellings of one repository's URL, such as
+# `git@github.com:org/proj.git` and `https://github.com/org/proj`, have the
+# same key:  the host and the path, in lower case, without a user, a port, or a
+# trailing "/" or ".git".  The key of a pathname is the physical path of the
+# directory that it names, resolved in DIRECTORY as git resolves it.
+# Prints nothing if git cannot resolve REMOTE.
+repository_key() {
+  if ! repository_key_url="$(git -C "$1" ls-remote --get-url "$2" 2> /dev/null)"; then
+    return 0
+  fi
+  # As git does, take a string with a ":" before its first "/" to be a URL.
+  case "${repository_key_url%%/*}" in
+    *:*)
+      printf '%s\n' "${repository_key_url}" \
+        | sed -e 's#^[A-Za-z][A-Za-z0-9+.-]*://##' -e 's#^[^@/]*@##' \
+          -e 's#^\([^/:]*\):[0-9]*/#\1/#' -e 's#^\([^/:]*\):#\1/#' \
+          -e 's#/*$##' -e 's#\.git$##' \
+        | tr '[:upper:]' '[:lower:]'
+      ;;
+    *)
+      case "${repository_key_url}" in
+        /*) repository_key_path="${repository_key_url}" ;;
+        *) repository_key_path="$1/${repository_key_url}" ;;
+      esac
+      physical_path "${repository_key_path}" 2> /dev/null \
+        || printf '%s\n' "${repository_key_path}"
+      ;;
+  esac
+}
+
+# Usage: check_not_upstream_clone
+# Exits with an explanation if this clone is the clone of an upstream
+# repository whose fork the user has in a sibling directory; see the comment at
+# the top of this file.  The new branch has no configuration of its own, so
+# the repository that it would be pushed to is the one that a branch with no
+# configuration is pushed to.
+#
+# Only the fork's main working tree is named, not each of its branch
+# directories, which share its configuration and so would each match too.
+check_not_upstream_clone() {
+  cnuc_remote="$(push_remote . '')"
+  if [ -z "${cnuc_remote}" ]; then
+    return 0
+  fi
+  cnuc_key="$(repository_key . "${cnuc_remote}")"
+  if [ -z "${cnuc_key}" ]; then
+    return 0
+  fi
+  cnuc_project="${REPO%%-branch-*}"
+  cnuc_project="${cnuc_project%%-fork-*}"
+  cnuc_self="$(physical_path .)"
+  cnuc_forks=''
+  cnuc_first=''
+  for cnuc_sibling in "${PARENTDIR}/${cnuc_project}"-fork-*; do
+    # This also skips the pattern itself, when it matches nothing.  Testing for
+    # `.git` keeps `git -C` from finding a repository that contains
+    # ${PARENTDIR}.
+    if [ ! -e "${cnuc_sibling}/.git" ] \
+      || [ "$(physical_path "${cnuc_sibling}")" = "${cnuc_self}" ] \
+      || ! git -C "${cnuc_sibling}" config --get remote.upstream.url > /dev/null \
+      || [ "$(repository_key "${cnuc_sibling}" upstream)" != "${cnuc_key}" ]; then
+      continue
+    fi
+    cnuc_first="${cnuc_first:-${cnuc_sibling}}"
+    case "$(basename -- "${cnuc_sibling}")" in
+      *-branch-*) ;;
+      *) cnuc_forks="${cnuc_forks}  ${cnuc_sibling}
+" ;;
+    esac
+  done
+  if [ -z "${cnuc_forks}" ] && [ -n "${cnuc_first}" ]; then
+    cnuc_forks="  ${cnuc_first}
+"
+  fi
+  if [ -z "${cnuc_forks}" ]; then
+    return 0
+  fi
+  echo "${SCRIPT_NAME}: ERROR: the new branch would be pushed to ${cnuc_remote} ($(git ls-remote --get-url "${cnuc_remote}")), which is the upstream repository of the fork in each of these directories:" >&2
+  printf '%s' "${cnuc_forks}" >&2
+  echo "${SCRIPT_NAME}: A branch for a pull request belongs in your fork, so run ${SCRIPT_NAME} there.  To create the branch here anyway, pass --allow-upstream." >&2
+  exit 1
+}
+
+if [ "${ALLOW_UPSTREAM}" = 0 ]; then
+  check_not_upstream_clone
 fi
 
 # In the worktree modes, register the new worktree in the project's main clone

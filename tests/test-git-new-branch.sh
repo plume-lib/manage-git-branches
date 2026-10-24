@@ -886,6 +886,75 @@ for mode in '' --copy; do
   fi
 done
 
+# A clone of an upstream repository is refused when a sibling directory holds a
+# fork of it:  a clone whose remote "upstream" is the repository that the new
+# branch would be pushed to.  The fork's "upstream" is a relative pathname,
+# which is resolved in the fork.
+fork_parent="${tmpdir}/forks"
+mkdir "${fork_parent}"
+git clone -q --bare "${repo}" "${tmpdir}/proj.git"
+git clone -q --bare "${repo}" "${tmpdir}/proj-fork.git"
+git clone -q "${tmpdir}/proj.git" "${fork_parent}/proj"
+git clone -q "${tmpdir}/proj.git" "${fork_parent}/proj-branch-other"
+git clone -q "${tmpdir}/proj-fork.git" "${fork_parent}/proj-fork-me"
+git -C "${fork_parent}/proj-fork-me" remote add upstream ../../proj.git
+for upstream_clone in proj proj-branch-other; do
+  if out="$(cd "${fork_parent}/${upstream_clone}" && "${GIT_NEW_BRANCH}" --clean inupstream 2>&1)"; then
+    fail "${upstream_clone}: zero exit status in a clone of an upstream repository"
+  fi
+  case "${out}" in
+    *"git-new-branch: ERROR: the new branch would be pushed to origin"*"
+  ${fork_parent}/proj-fork-me
+"*"pass --allow-upstream"*) ;;
+    *) fail "${upstream_clone}: unexpected message in a clone of an upstream repository: ${out}" ;;
+  esac
+  if [ -e "${fork_parent}/proj-branch-inupstream" ] \
+    || git -C "${fork_parent}/${upstream_clone}" rev-parse --verify --quiet refs/heads/inupstream > /dev/null; then
+    fail "${upstream_clone}: a branch was created in a clone of an upstream repository"
+  fi
+done
+
+# `--allow-upstream` creates the branch in the clone of the upstream repository.
+if ! out="$(cd "${fork_parent}/proj" && "${GIT_NEW_BRANCH}" --clean --allow-upstream allowed 2>&1)"; then
+  fail "nonzero exit status with --allow-upstream: ${out}"
+fi
+if [ ! -d "${fork_parent}/proj-branch-allowed" ]; then
+  fail "--allow-upstream did not create ${fork_parent}/proj-branch-allowed"
+fi
+
+# The fork itself is not refused:  it pushes to the fork, not to its upstream.
+if ! out="$(cd "${fork_parent}/proj-fork-me" && "${GIT_NEW_BRANCH}" --clean infork 2>&1)"; then
+  fail "nonzero exit status in a fork: ${out}"
+fi
+if [ ! -d "${fork_parent}/proj-fork-me-branch-infork" ]; then
+  fail "the branch was not created in the fork"
+fi
+
+# A sibling fork that has no remote "upstream" says nothing about this clone.
+nofork_parent="${tmpdir}/noforks"
+mkdir "${nofork_parent}"
+git clone -q "${tmpdir}/proj.git" "${nofork_parent}/proj"
+git clone -q "${tmpdir}/proj-fork.git" "${nofork_parent}/proj-fork-me"
+if ! out="$(cd "${nofork_parent}/proj" && "${GIT_NEW_BRANCH}" --clean nofork 2>&1)"; then
+  fail "nonzero exit status beside a fork that has no remote upstream: ${out}"
+fi
+
+# Two spellings of one repository's URL are the same repository.  The refusal
+# precedes every query to a remote, so these URLs are never contacted.
+url_parent="${tmpdir}/urls"
+mkdir "${url_parent}"
+git clone -q "${tmpdir}/proj.git" "${url_parent}/proj"
+git -C "${url_parent}/proj" remote set-url origin git@github.com:Some-Org/proj.git
+git clone -q "${tmpdir}/proj-fork.git" "${url_parent}/proj-fork-me"
+git -C "${url_parent}/proj-fork-me" remote add upstream https://github.com/some-org/proj/
+if out="$(cd "${url_parent}/proj" && "${GIT_NEW_BRANCH}" --clean spelled 2>&1)"; then
+  fail "zero exit status for an upstream repository spelled differently by the fork"
+fi
+case "${out}" in
+  *"git-new-branch: ERROR: the new branch would be pushed to origin (git@github.com:Some-Org/proj.git)"*) ;;
+  *) fail "unexpected message for an upstream repository spelled differently by the fork: ${out}" ;;
+esac
+
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then
   fail "zero exit status when given no argument"
