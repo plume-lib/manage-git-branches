@@ -128,6 +128,8 @@ The commands are:
   the only remote, if there is neither), then shows the differences between
   its default branch and the working tree, ignoring changes in the amount of
   whitespace and using the patience diff algorithm.
+  Like a GitHub pull request, it diffs from the merge base, so upstream
+  changes that have not been merged into the current branch do not appear.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.

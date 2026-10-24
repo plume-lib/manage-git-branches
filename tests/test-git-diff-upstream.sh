@@ -69,6 +69,15 @@ commit_file "${fork}" a.txt 'a2'
 # With no `upstream` remote, the diff is against `origin`.
 expect_files 'origin only' 'a.txt' --name-only
 
+# Usage: merge_from_canonical BRANCH
+# Merges the canonical repository's BRANCH into ${fork}'s current branch,
+# without updating the remote-tracking branches of ${fork}, so that the merge
+# base changes only once this command fetches.
+merge_from_canonical() {
+  git -C "${fork}" fetch -q "${canonical}" "$1" \
+    && git -C "${fork}" merge -q --no-edit FETCH_HEAD
+}
+
 # `git remote add` does not create `upstream/HEAD`.
 git -C "${fork}" remote add upstream "${canonical}"
 commit_file "${canonical_work}" b.txt 'b2'
@@ -77,22 +86,24 @@ git -C "${canonical_work}" push -q origin trunk
 # `--no-fetch` does not see the new commit in `upstream`, but this command
 # still creates `upstream/HEAD`, which requires `upstream/trunk` to exist.
 git -C "${fork}" fetch -q upstream
+# A change in `upstream` that `feature` has not merged does not appear.
+expect_files 'unmerged upstream change' 'a.txt' --no-fetch --name-only
+
 commit_file "${canonical_work}" c.txt 'c1'
 git -C "${canonical_work}" push -q origin trunk
+merge_from_canonical trunk
 expect_files '--no-fetch' 'a.txt
-b.txt' --no-fetch --name-only
+c.txt' --no-fetch --name-only
 
-# Fetching sees the new commit.
-expect_files 'fetch' 'a.txt
-b.txt
-c.txt' --name-only
+# Fetching moves the merge base to the new commit.
+expect_files 'fetch' 'a.txt' --name-only
 
-printf 'b2\n' > "${fork}/b.txt"
+printf 'b3\n' > "${fork}/b.txt"
 expect_files 'working tree' 'a.txt
-c.txt' --name-only
+b.txt' --name-only
 
 # GIT-DIFF-ARGS may name paths.
-expect_files 'path' 'c.txt' --name-only -- c.txt
+expect_files 'path' 'b.txt' --name-only -- b.txt
 
 # After `upstream` renames its default branch and a fetch with `--prune`
 # deletes the old one, `upstream/HEAD` names a branch that does not exist.
@@ -103,14 +114,16 @@ if git -C "${fork}" rev-parse --verify --quiet upstream/HEAD > /dev/null 2>&1; t
   fail 'renamed default branch: upstream/HEAD still resolves, so this test checks nothing'
 fi
 expect_files 'renamed default branch' 'a.txt
-c.txt' --no-fetch --name-only
+b.txt' --no-fetch --name-only
 
 # After `upstream` renames its default branch again, a fetch without `--prune`
 # keeps the old remote-tracking branch, so `upstream/HEAD` still resolves, to
-# a commit that lacks the renamed branch's new commits.
+# a commit that lacks the renamed branch's new commits.  `feature` merges
+# those commits, so the diff from the old branch would show them.
 git -C "${canonical}" branch -m main stable
 commit_file "${canonical_work}" d.txt 'd1'
 git -C "${canonical_work}" push -q origin HEAD:stable
+merge_from_canonical stable
 git -C "${fork}" config fetch.prune false
 # Git 2.48 and later update `upstream/HEAD` during the fetch, so this command
 # needs no `git remote set-head`, which would connect to the remote again.
@@ -118,8 +131,7 @@ make_counting_git "${testdir}/counting-git" "${testdir}/git-commands"
 saved_path="${PATH}"
 PATH="${testdir}/counting-git:${PATH}"
 expect_files 'renamed default branch without --prune' 'a.txt
-c.txt
-d.txt' --name-only
+b.txt' --name-only
 PATH="${saved_path}"
 git_minor="$(git version | sed -n 's/^git version 2\.\([0-9]*\).*/\1/p')"
 if [ -n "${git_minor}" ] && [ "${git_minor}" -ge 48 ] \
