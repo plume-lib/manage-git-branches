@@ -11,7 +11,7 @@ It replaces mechanisms such as `git stash`.
 Its key principles are:
 
 1. Do not run git commands in the main branch, except `git pull`.  (Or,
-   use [`mvc pull`](https://github.com/mernst/multi-version-control).)
+   use [`mvc pull`](https://github.com/plume-lib/multi-version-control).)
 2. Do not change branches in any working copy.
    That is, never run `git checkout`, and never run `git stash`.
 3. To create a new branch, run command `gnb` or `git-new-branch`.  It
