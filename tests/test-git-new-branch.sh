@@ -893,7 +893,7 @@ done
 # contains the source's pathname, such as a build output that refers to the
 # source's files; `--clean` copies no such file.  A file that names a sibling
 # directory whose name begins with the source's name does not contain the
-# source's pathname.
+# source's pathname.  A symbolic link to a FIFO does not make the scan block.
 stale_parent="${tmpdir}/stale"
 mkdir -p "${stale_parent}" || exit 1
 stale_parent="$(CDPATH='' cd -- "${stale_parent}" && pwd -P)" || exit 1
@@ -906,6 +906,8 @@ stale_top="$(git -C "${stale}" rev-parse --show-toplevel)"
 mkdir "${stale}/build"
 printf 'launcher\000%s/inst/libexec\000' "${stale_top}" > "${stale}/build/launcher"
 printf '%s-other/file\n' "${stale_top}" > "${stale}/sibling.txt"
+mkfifo "${stale}/build/fifo" || exit 1
+ln -s fifo "${stale}/build/fifo-link" || exit 1
 for mode in '' --copy; do
   branch="stale${mode#--}"
   if ! out="$(cd "${stale}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then

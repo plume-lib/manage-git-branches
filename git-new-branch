@@ -615,10 +615,12 @@ warn_about_old_pathname() {
   # The trailing "/" keeps a sibling directory whose name begins with the
   # same characters, such as ${BRANCHDIR} itself, from matching.  xargs runs
   # grep with its standard input from /dev/null or not at all, so if there is
-  # no file to examine, grep does not wait for input.
+  # no file to examine, grep does not wait for input.  `git ls-files` lists a
+  # symbolic link to a FIFO or device, and `-D skip` keeps grep from blocking
+  # on, or reading endlessly from, its target.
   warn_old_files="$(cd -- "${BRANCHDIR}" \
     && git ls-files -z --others \
-    | xargs -0 grep -l -F -e "${TOPLEVEL}/" -- 2> /dev/null)"
+    | xargs -0 grep -D skip -l -F -e "${TOPLEVEL}/" -- 2> /dev/null)"
   if [ -z "${warn_old_files}" ]; then
     return
   fi
