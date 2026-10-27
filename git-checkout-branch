@@ -5,64 +5,568 @@
 #
 # Usage:
 #   git-checkout-branch BRANCHNAME
+#
+# The new directory is a linked worktree of the current repository, made by
+# `git worktree add`, so that it shares the repository's object store.  (If
+# the current repository is a branch directory's, REPONAME-branch-OTHER/, and
+# a sibling REPONAME/ is a clone of the same project, the new worktree is
+# registered in REPONAME/ instead when REPONAME/ can check out the same
+# branch, so that it does not prevent the removal of REPONAME-branch-OTHER/;
+# see `choose_worktree_host` below.)  It
+# holds a fresh checkout of the branch:  none of the current directory's
+# uncommitted changes, untracked files, or ignored files such as build output
+# are carried into it, because checking out an existing branch starts from
+# what that branch contains.  (`git-new-branch`, which continues the work in
+# hand, does carry them.)  So the first build in the new directory is a full
+# one.
+#
+# A branch can be checked out in only one worktree at a time.  If another
+# directory already has the branch checked out, git refuses, naming that
+# directory.
+#
+# A branch that has submodules is an exception, because git does not
+# support a submodule in more than one worktree.  There, the new directory is
+# a copy of the whole current directory, `.git` included, in which the branch
+# is then checked out:  an independent clone, which carries along the current
+# directory's untracked files and those of its uncommitted changes that the
+# checkout does not conflict with.
+#
+# The warnings of `git-new-branch` about removing and moving a worktree apply
+# to the new directory too:  remove it with `git-remove-branch-directory`, and
+# move it with `git worktree move`.
+#
+# This command requires git 2.31 or later.
 
-# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.  Do this
+# before the `cd` below, because a relative pathname in $0 is relative to the
+# directory that the caller ran this script from.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
+
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+
+# Without this, git commands that this script runs in the new directory would
+# act on the current repository instead.  For example, `git worktree add` would
+# write the new worktree's index over the file that $GIT_INDEX_FILE names,
+# discarding the changes that are staged there.
+unset_git_location_variables
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} BRANCHNAME" >&2
   exit 1
 fi
 
-STARTDIR="${PWD}"
-# Set to the temporary directory once we have created it, so that the EXIT
-# trap removes it if the script fails partway through.  Left empty otherwise,
-# so the trap never removes a pre-existing directory that we did not create.
-TMPDIR_TO_CLEAN=""
-trap 'cd "${STARTDIR}" 2> /dev/null || true; if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf "${TMPDIR_TO_CLEAN}"; fi' EXIT
+# The same demand, with the same message, as `git-new-branch`.
+require_git 31
 
-if ! cd "$(git rev-parse --show-toplevel 2> /dev/null)"; then
+trap_branch_cleanup
+
+# Capture the top level first: under a POSIX `sh` (e.g., dash), `cd ""` succeeds
+# as a no-op, so testing `cd "$(...)"` directly would not catch an empty result.
+if ! TOPLEVEL="$(git rev-parse --show-toplevel 2> /dev/null)" || [ -z "${TOPLEVEL}" ]; then
   echo "${SCRIPT_NAME}: Cannot determine top-level directory of git repository" >&2
   git rev-parse --show-toplevel >&2
+  exit 1
+fi
+if ! cd "${TOPLEVEL}"; then
+  echo "${SCRIPT_NAME}: Cannot cd to top-level directory: ${TOPLEVEL}" >&2
+  exit 1
+fi
+
+# Refuse a working tree that does not hold its own `.git` directory, before
+# anything expensive happens:  before the `git pull` and before any query to a
+# remote.  `check_git_dir_is_directory` explains why.  `git worktree add`
+# copies nothing, so a linked worktree is accepted here; the copy that a
+# branch with submodules gets, below, refuses one too, but which branch to
+# check out is known only later.
+if ! check_git_dir_is_directory "${TOPLEVEL}" 'linked-worktree'; then
   exit 1
 fi
 
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
-BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
-BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
-BRANCH_TMPDIR="${BRANCHDIR}-TMP"
-
-git pull -q > /dev/null 2>&1 || true
-
-if ! git ls-remote --exit-code origin "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist." >&2
+BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
+# Canonicalize the parent directory, because ${BRANCHDIR} does not exist yet.
+if ! PARENTDIR="$(realpath ..)" || [ -z "${PARENTDIR}" ]; then
+  echo "${SCRIPT_NAME}: Cannot canonicalize the parent directory of $(pwd)" >&2
   exit 1
 fi
+BRANCHDIR="${PARENTDIR%/}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
+BRANCH_TMPDIR="${BRANCHDIR}-TMP"
+
+# Bring this working tree up to date, so that the branch is based on the most
+# recent commit.  A failed pull is not fatal, because the repository might have
+# no remote or the current branch might have no upstream, but it is reported:
+# the branch will be based on a possibly stale commit.
+if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
+  echo "${SCRIPT_NAME}: warning: \`git pull\` failed in ${TOPLEVEL}:" >&2
+  if [ -n "${PULL_OUTPUT}" ]; then
+    echo "${PULL_OUTPUT}" >&2
+  fi
+  if [ -n "$(git ls-files --unmerged)" ]; then
+    echo "${SCRIPT_NAME}: ERROR: the failed pull left conflicts in ${TOPLEVEL}." >&2
+    exit 1
+  fi
+  echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
+fi
+
+# Determine which remote to ask about the branch:  the remote that `git fetch`
+# would use for the current branch, as `fetch_remote` in common-functions.sh
+# determines it.  Checking out a branch reads from a remote, so this is not
+# the remote that `git-new-branch`, `is-deleted-branch`, and `git-push-to`
+# use, which is the one that `git push` would use; in the fork workflow the
+# two differ, and a branch of the project exists on this one.
+#
+# ${REMOTE} is empty if no remote can be determined; then no remote can be
+# asked, and only the local tests in `find_branch` apply.
+BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
+REMOTE="$(fetch_remote . "${BRANCH_REF#refs/heads/}")"
+
+# How the `git checkout` below creates the branch, set by `find_branch`:
+# ${CHECKOUT_START_POINT} is the ref or commit to create it from, or empty to
+# check out a local branch of that name that this clone already has, and
+# ${CHECKOUT_REMOTE} is the remote that the branch comes from, which becomes
+# the new branch's upstream.
+CHECKOUT_START_POINT=''
+CHECKOUT_REMOTE=''
+
+# What the remote said when `find_branch` could not ask it about the branch,
+# empty if it said nothing.
+REMOTE_QUERY_ERROR=''
+
+## Usage: contains_line LINES LINE
+## Succeeds if LINE is one of the lines of LINES.  A LINE that is empty is
+## never one of them, because it names nothing.
+contains_line() {
+  if [ -z "$2" ]; then
+    return 1
+  fi
+  printf '%s\n' "$1" | grep -q -x -F -- "$2"
+}
+
+## Usage: remotes_with_branch BRANCH
+## Prints the name of each remote of this clone that has the remote-tracking
+## branch REMOTE/BRANCH here, one per line.
+##
+## "HEAD" is excluded:  a clone has a symbolic ref `refs/remotes/REMOTE/HEAD`
+## that names the remote's default branch, so that ref resolves, but "HEAD" is
+## not the name of a branch.
+remotes_with_branch() {
+  if [ "$1" = 'HEAD' ]; then
+    return 0
+  fi
+  # Ask about each remote separately, rather than matching a pattern against
+  # every remote-tracking ref:  both a remote's name and a branch's name may
+  # contain "/", so the name of such a ref does not by itself say where the
+  # remote's name ends and the branch's name begins.  A remote's name contains
+  # no whitespace, so the shell's word splitting separates the names here.
+  # Pathname expansion is disabled around the loop, because a remote's name is
+  # a name rather than a pattern.
+  set -f
+  for remotes_with_branch_remote in $(git remote); do
+    if git rev-parse --verify --quiet \
+      "refs/remotes/${remotes_with_branch_remote}/$1" > /dev/null; then
+      printf '%s\n' "${remotes_with_branch_remote}"
+    fi
+  done
+  set +f
+}
+
+# Usage: find_branch BRANCH
+# Looks for BRANCH: locally, as a remote-tracking branch of any remote, or on
+# ${REMOTE}.  On success it sets ${CHECKOUT_START_POINT} and
+# ${CHECKOUT_REMOTE} to say how the checkout below creates the branch.  The
+# local tests come first because they need no network access, and they succeed
+# in a repository that has no remote.
+#
+# The exit status distinguishes the ways of not finding it, because the three
+# are different news for the user:  0 if the branch was found, 1 if no such
+# branch exists, 2 if ${REMOTE} could not be asked about it, and 3 if
+# ${REMOTE} has the branch but it could not be fetched.  Reporting an
+# unreachable remote as "no such branch" would assert something that was
+# never checked.  On status 2 it also sets ${REMOTE_QUERY_ERROR} to what the
+# remote said, so that the caller can report why the remote could not be
+# asked.
+#
+# Every remote is consulted for a remote-tracking branch, not just ${REMOTE},
+# because git creates the new local branch from a remote-tracking branch of
+# any remote.  Which remote's branch it is created from is decided
+# here rather than left to `git worktree add` or `git checkout`, whose own
+# search for a branch named BRANCHNAME fails outright when several remotes
+# have a remote-tracking branch of that name ("matched multiple ... remote
+# tracking branches").  Among several,
+# `checkout.defaultRemote` picks one, as it does for git's own search, and
+# otherwise ${REMOTE} does, being the remote that this clone fetches the
+# current branch from.  If neither picks one, the name is ambiguous, and
+# saying so is more use than either guessing or letting the checkout fail
+# after the new directory has been made.
+#
+# A branch that only ${REMOTE} has is fetched, not merely queried with
+# `ls-remote`.  A successful query does not make the checkout succeed:  the
+# checkout needs a ref in this clone, and there is none, or the
+# remote-tracking test above would have found it.  A clone made with
+# `--single-branch`, or with any other narrowed `remote.REMOTE.fetch`, is in
+# that state for every branch but the ones it fetches.
+#
+# `git_batch_ssh` disables the interactive prompts that would otherwise block
+# the query to the remote forever when this script is run from another script
+# or a CI job, as `git-new-branch` and `is-deleted-branch` do for their
+# queries.
+find_branch() {
+  if git rev-parse --verify --quiet "refs/heads/$1" > /dev/null; then
+    CHECKOUT_START_POINT=''
+    CHECKOUT_REMOTE=''
+    return 0
+  fi
+  find_branch_remotes="$(remotes_with_branch "$1")"
+  if [ -n "${find_branch_remotes}" ]; then
+    find_branch_chosen=''
+    find_branch_default="$(git config --get checkout.defaultRemote)"
+    if contains_line "${find_branch_remotes}" "${find_branch_default}"; then
+      find_branch_chosen="${find_branch_default}"
+    elif contains_line "${find_branch_remotes}" "${REMOTE}"; then
+      find_branch_chosen="${REMOTE}"
+    elif [ "$(printf '%s\n' "${find_branch_remotes}" | grep -c '.')" -eq 1 ]; then
+      find_branch_chosen="${find_branch_remotes}"
+    else
+      echo "${SCRIPT_NAME}: ERROR: branch $1 exists on several remotes of this clone, so which one to check out is ambiguous:" >&2
+      printf '%s\n' "${find_branch_remotes}" | sed "s/^/${SCRIPT_NAME}:   /" >&2
+      exit 1
+    fi
+    CHECKOUT_START_POINT="${find_branch_chosen}/$1"
+    CHECKOUT_REMOTE="${find_branch_chosen}"
+    return 0
+  fi
+  if [ -z "${REMOTE}" ]; then
+    return 1
+  fi
+  # `git ls-remote --exit-code` exits with status 2 if the remote has no such
+  # branch, and with some other nonzero status if the remote could not be
+  # asked at all, which is not the same thing.
+  #
+  # Keep the query's standard error, which says why the remote could not be
+  # asked:  the diagnostic for that case reports only that it could not, and
+  # the reason is what the user acts on.  A key that needs a passphrase, for
+  # instance, works for the interactive `git pull` above and then fails this
+  # query with "Permission denied (publickey)", because the query disables the
+  # prompts.  The query's standard output is the matching refs, which the exit
+  # status already reports, so discard it.
+  REMOTE_QUERY_ERROR="$(git_batch_ssh . ls-remote --exit-code "${REMOTE}" \
+    "refs/heads/$1" 2>&1 > /dev/null)"
+  case "$?" in
+    0) ;;
+    2) return 1 ;;
+    *) return 2 ;;
+  esac
+  if is_remote_name . "${REMOTE}"; then
+    # A named remote has a remote-tracking namespace, so fetch the branch into
+    # it, leaving this clone in the state that a clone which had already
+    # fetched the branch is in.
+    if ! git_batch_ssh . fetch -q "${REMOTE}" \
+      "refs/heads/$1:refs/remotes/${REMOTE}/$1"; then
+      return 3
+    fi
+    CHECKOUT_START_POINT="${REMOTE}/$1"
+  else
+    # ${REMOTE} is a URL or a pathname, which `branch.BRANCH.remote` and
+    # `remote.pushDefault` also accept.  Such a remote has no remote-tracking
+    # namespace, so a fetch from it records the branch only in FETCH_HEAD.
+    if ! git_batch_ssh . fetch -q "${REMOTE}" "refs/heads/$1"; then
+      return 3
+    fi
+    CHECKOUT_START_POINT='FETCH_HEAD'
+  fi
+  CHECKOUT_REMOTE="${REMOTE}"
+  return 0
+}
+
+# Usage: branch_settings DIRECTORY
+# Prints the configuration of the branch ${BRANCHNAME} in the repository of
+# the working tree DIRECTORY, sorted, followed by the URLs that the branch is
+# fetched from and pushed to, so that the branch behaves the same in two
+# repositories if they print the same.  A remote's name says nothing by
+# itself, because two clones can give one name to different remotes, and the
+# URLs that a push uses depend also on `remote.pushDefault` and on a remote's
+# `pushurl`, which are not the branch's configuration.  The remote that a push
+# uses is the one that `git push` chooses and also the one that `push_remote`
+# chooses, which `git-new-branch` uses.  A branch name contains no backslash,
+# which `awk -v` would interpret.
+branch_settings() {
+  git -C "$1" config --list \
+    | awk -v prefix="branch.${BRANCHNAME}." 'index($0, prefix) == 1' | sort
+  branch_settings_upstream="$(git -C "$1" config --get "branch.${BRANCHNAME}.remote")"
+  # `git push` uses the first of these that is set.
+  branch_settings_push="$(git -C "$1" config --get "branch.${BRANCHNAME}.pushRemote" \
+    || git -C "$1" config --get remote.pushDefault \
+    || printf '%s\n' "${branch_settings_upstream:-origin}")"
+  printf 'fetch %s\n' "$(remote_urls "$1" "${branch_settings_upstream}")"
+  printf 'push %s\n' "$(remote_urls "$1" "${branch_settings_push}" --push)"
+  printf 'push_remote %s\n' \
+    "$(remote_urls "$1" "$(push_remote "$1" "${BRANCHNAME}")" --push)"
+}
+
+# Usage: remote_urls DIRECTORY REMOTE [--push]
+# Prints the URLs, one per line, that the repository of the working tree
+# DIRECTORY fetches from, or with --push pushes to, for REMOTE, which is the
+# name of a remote, a URL, a pathname, or empty.  A URL or a pathname is its
+# own URL.
+remote_urls() {
+  if is_remote_name "$1" "$2"; then
+    git -C "$1" remote get-url ${3:+"$3"} --all "$2"
+  elif [ -n "$2" ]; then
+    printf '%s\n' "$2"
+  fi
+}
+
+# Usage: choose_worktree_host
+# Sets ${WORKTREE_HOST}, which `add_worktree` registers the new worktree in, to
+# the project's main clone if this repository is a branch directory's (see
+# `main_clone_for`) and the main clone can check out the same branch that
+# `find_branch` chose here.  Otherwise, it leaves ${WORKTREE_HOST} empty, and
+# says why, so that the new worktree is registered in this repository.
+#
+# Everything else happens here:  the branch is looked for among this clone's
+# branches and remotes, and this working tree is the one pulled.  Only the
+# registration moves, and so it moves only when it changes nothing else.
+#  * A local branch moves if the main clone has a local branch of that name at
+#    the same commit and with the same configuration (see `branch_settings`),
+#    which the new worktree then checks out, and no worktree of either
+#    repository has the branch checked out.  The configuration includes the
+#    branch's upstream, which `git-push-to` and `git-pull-from` require and
+#    which nothing below sets for a local branch.  In the main clone, git
+#    would refuse a branch that one of the main clone's worktrees has checked
+#    out, and it would accept one that only a worktree of this repository has
+#    checked out, because it does not know about this repository's worktrees.
+#    Registered here instead, the new worktree gets what it would get without
+#    a main clone:  git accepts the first branch and refuses the second,
+#    naming the worktree that has it checked out.
+#  * A remote-tracking branch moves if the main clone has no local branch of
+#    that name, has a remote with the same URL, and can fetch the
+#    remote-tracking branch from here into that remote's namespace as a
+#    fast-forward.  The new worktree then starts from the main clone's
+#    remote-tracking branch, which is the same commit, and its upstream is the
+#    main clone's remote.
+#  * A branch that was fetched from a URL or a pathname, not from a named
+#    remote, does not move, because it is recorded only in this clone's
+#    FETCH_HEAD.
+choose_worktree_host() {
+  WORKTREE_HOST="$(main_clone_for "${TOPLEVEL}")"
+  if [ -z "${WORKTREE_HOST}" ]; then
+    return 0
+  fi
+  choose_worktree_host_reason=''
+  if [ -z "${CHECKOUT_START_POINT}" ]; then
+    if [ "$(git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}")" \
+      != "$(git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}")" ]; then
+      choose_worktree_host_reason="${WORKTREE_HOST} has no branch ${BRANCHNAME} at the same commit as ${TOPLEVEL}"
+    elif [ "$(branch_settings "${WORKTREE_HOST}")" != "$(branch_settings "${TOPLEVEL}")" ]; then
+      choose_worktree_host_reason="${WORKTREE_HOST} configures its branch ${BRANCHNAME} differently than ${TOPLEVEL} does"
+    fi
+    for choose_worktree_host_repo in "${WORKTREE_HOST}" "${TOPLEVEL}"; do
+      if [ -z "${choose_worktree_host_reason}" ] \
+        && git -C "${choose_worktree_host_repo}" worktree list --porcelain \
+          | grep -q -x -F -- "branch refs/heads/${BRANCHNAME}"; then
+        choose_worktree_host_reason="a worktree of ${choose_worktree_host_repo} has ${BRANCHNAME} checked out"
+      fi
+    done
+  elif git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
+    choose_worktree_host_reason="${WORKTREE_HOST} has its own branch ${BRANCHNAME}"
+  elif ! is_remote_name . "${CHECKOUT_REMOTE}"; then
+    choose_worktree_host_reason="${BRANCHNAME} was fetched from ${CHECKOUT_REMOTE}, which is not a named remote"
+  else
+    choose_worktree_host_url="$(git config --get "remote.${CHECKOUT_REMOTE}.url")"
+    choose_worktree_host_remote=''
+    set -f
+    for choose_worktree_host_candidate in $(git -C "${WORKTREE_HOST}" remote); do
+      if [ -n "${choose_worktree_host_url}" ] \
+        && [ "$(git -C "${WORKTREE_HOST}" config --get "remote.${choose_worktree_host_candidate}.url")" \
+          = "${choose_worktree_host_url}" ]; then
+        choose_worktree_host_remote="${choose_worktree_host_candidate}"
+        break
+      fi
+    done
+    set +f
+    if [ -z "${choose_worktree_host_remote}" ]; then
+      choose_worktree_host_reason="${WORKTREE_HOST} has no remote whose URL is that of ${CHECKOUT_REMOTE}"
+    elif ! copy_objects_to "${WORKTREE_HOST}" \
+      "refs/remotes/${CHECKOUT_START_POINT}:refs/remotes/${choose_worktree_host_remote}/${BRANCHNAME}"; then
+      choose_worktree_host_reason="${WORKTREE_HOST} cannot get the remote-tracking branch ${CHECKOUT_START_POINT}"
+    else
+      CHECKOUT_START_POINT="${choose_worktree_host_remote}/${BRANCHNAME}"
+      CHECKOUT_REMOTE="${choose_worktree_host_remote}"
+    fi
+  fi
+  if [ -n "${choose_worktree_host_reason}" ]; then
+    echo "${SCRIPT_NAME}: ${choose_worktree_host_reason}, so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
+    WORKTREE_HOST=''
+  else
+    note_worktree_host
+  fi
+}
+
+# This test precedes the creation of the new directory, so that a branch that
+# cannot be checked out does not cost the user a full copy of the repository,
+# where the new directory is one.
+find_branch "${BRANCHNAME}"
+case "$?" in
+  0) ;;
+  2)
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, and remote ${REMOTE} could not be asked about it." >&2
+    if [ -n "${REMOTE_QUERY_ERROR}" ]; then
+      echo "${REMOTE_QUERY_ERROR}" >&2
+    fi
+    exit 1
+    ;;
+  3)
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} exists on remote ${REMOTE}, but it could not be fetched into this clone." >&2
+    exit 1
+    ;;
+  *)
+    if [ -n "${REMOTE}" ]; then
+      # Name the remote that was asked.  A clone can have other remotes, whose
+      # branches this script did not ask about, so a bare "does not exist"
+      # would claim more than was checked.
+      echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist, locally or on remote ${REMOTE}." >&2
+    else
+      echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} does not exist in this clone, which determines no remote to ask about it." >&2
+    fi
+    exit 1
+    ;;
+esac
 
 if [ -e "${BRANCHDIR}" ]; then
   echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
   exit 1
 fi
-if [ -e "${BRANCH_TMPDIR}" ]; then
-  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
-  exit 1
+
+# A branch with submodules gets a copy of this directory rather than a
+# worktree, because git does not support a submodule in more than one
+# worktree.  `git-new-branch` explains the problem.  A copy includes `.git`,
+# so `check_git_dir_is_directory` now refuses a linked worktree too.  This
+# second test cannot be merged with the first, which runs before the `git
+# pull`, because whether the branch has submodules is known only now.
+if has_gitlinks "${CHECKOUT_START_POINT:-refs/heads/${BRANCHNAME}}"; then
+  note_copy_for_submodules "branch ${BRANCHNAME}"
+  if ! check_git_dir_is_directory "${TOPLEVEL}"; then
+    exit 1
+  fi
+  COPY=1
+else
+  COPY=0
 fi
 
-if ! \cp -Rp . "${BRANCH_TMPDIR}"; then
-  echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
-  exit 1
-fi
-TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
-if ! (cd "${BRANCH_TMPDIR}" && git checkout "${BRANCHNAME}" -q); then
-  echo "${SCRIPT_NAME}: ERROR in: (cd \"${BRANCH_TMPDIR}\" && git checkout \"${BRANCHNAME}\" -q)" >&2
-  exit 1
+# Create the branch from the start point that `find_branch` chose, rather than
+# letting git search for one:  git's search fails when several remotes have a
+# remote-tracking branch of that name, and it finds nothing at all in a clone
+# whose narrowed fetch refspec keeps the branch out of the remote-tracking
+# namespace.
+if [ "${COPY}" -eq 1 ]; then
+  if [ -e "${BRANCH_TMPDIR}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
+    exit 1
+  fi
+  # We just checked that ${BRANCH_TMPDIR} does not exist, so whatever the copy
+  # leaves at that location was created by this script and the traps may
+  # remove it, even if the copy is interrupted before it finishes.
+  TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
+  NEWDIR="${BRANCH_TMPDIR}"
+  copy_repository "${BRANCH_TMPDIR}" "${BRANCHNAME}"
+  if [ -z "${CHECKOUT_START_POINT}" ]; then
+    set -- checkout -q "${BRANCHNAME}"
+  else
+    set -- checkout -q -b "${BRANCHNAME}" "${CHECKOUT_START_POINT}"
+  fi
+  if ! (cd -- "${BRANCH_TMPDIR}" && git "$@"); then
+    echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git $*)" >&2
+    exit 1
+  fi
+else
+  # Neither operand may be dropped.  Without a commit-ish, `git worktree add`
+  # creates a branch named after the directory, and without `-b`, a
+  # remote-tracking start point gives a detached HEAD.  ${BRANCHDIR} is
+  # absolute, so it cannot be mistaken for an option.
+  #
+  # When the branch is checked out in another worktree, git refuses and names
+  # that worktree.  `--force` is deliberately not offered:  two working trees
+  # of one branch are the branch confusion that this package exists to
+  # prevent.
+  NEWDIR="${BRANCHDIR}"
+  choose_worktree_host
+  if [ -z "${CHECKOUT_START_POINT}" ]; then
+    add_worktree "${BRANCHDIR}" "${BRANCHNAME}"
+  else
+    add_worktree "${BRANCHDIR}" "${BRANCHNAME}" "${CHECKOUT_START_POINT}"
+  fi
 fi
 
-if ! mv "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
-  echo "${SCRIPT_NAME}: ERROR in: mv \"${BRANCH_TMPDIR}\" \"${BRANCHDIR}\"" >&2
-  exit 1
+# Give the new branch an upstream, which `git-push-to` and `git-pull-from`
+# require, if the checkout did not.  Creating a branch from a remote-tracking
+# start point sets one up, honoring `branch.autoSetupMerge` and
+# `branch.autoSetupRebase` as git does elsewhere, but git can find no remote
+# for a start point that no fetch refspec maps -- FETCH_HEAD, or a
+# remote-tracking branch in a clone made with `--single-branch` -- and then it
+# says nothing and sets nothing.  These are the two settings that it would
+# have written; git accepts a URL or a pathname in the first of them, as
+# `git push --set-upstream ../other.git BRANCH` writes there.
+if [ -n "${CHECKOUT_REMOTE}" ] \
+  && [ -z "$(git -C "${NEWDIR}" config --get "branch.${BRANCHNAME}.remote")" ]; then
+  if ! git -C "${NEWDIR}" config "branch.${BRANCHNAME}.remote" "${CHECKOUT_REMOTE}" \
+    || ! git -C "${NEWDIR}" config "branch.${BRANCHNAME}.merge" "refs/heads/${BRANCHNAME}"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot configure ${CHECKOUT_REMOTE} as the upstream of ${BRANCHNAME} in ${NEWDIR}" >&2
+    exit 1
+  fi
 fi
-TMPDIR_TO_CLEAN=""
+
+if [ "${COPY}" -eq 1 ]; then
+  # The copy is an independent clone, not a registered worktree, so moving it
+  # with `mv` is safe.
+  if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
+    echo "${SCRIPT_NAME}: ERROR in: mv -- \"${BRANCH_TMPDIR}\" \"${BRANCHDIR}\"" >&2
+    exit 1
+  fi
+  TMPDIR_TO_CLEAN=""
+fi
+WORKTREE_TO_CLEAN=""
+BRANCH_TO_CLEAN=""
 
 echo "Success: checked out to ${BRANCHDIR}"

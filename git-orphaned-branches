@@ -1,58 +1,653 @@
 #!/bin/sh
 
-# This command lists directories named *-branch-* that are git clones of
+# This command lists directories named *-branch-* that are working trees of
 # branches that have been deleted in the remote repository.  Only directories
 # below the current directory are considered.  Newly created branches are not
 # listed, only branches that have been deleted in the remote (for example,
 # because a pull request has been merged).
-# Also lists directories containing nothing but a `.project` file.
+# A directory whose branch still exists in the remote, but whose GitHub pull
+# requests are all closed or merged, is not listed; instead, a warning about
+# it is printed on standard error.  (This needs the `gh` command.)
+# Also lists directories that hold nothing but Eclipse `.project` files,
+# which is what a branch directory leaves behind when its working tree is gone.
 #
-# Typical usage is:  rm -rf $(git-orphaned-branches)
+# A directory that another live working tree depends on -- one that hosts a
+# linked worktree, or one that is a submodule of a superproject -- is never
+# listed, even when its own branch was deleted:  deleting it would damage a
+# working tree that the user never named.  Such a directory is reported on
+# standard error instead.
+#
+# Usage:
+#   git-orphaned-branches [--print0] [--remove]
+#
+# With --print0 (or -0), the directories are separated by a NUL character
+# rather than by a newline, which is safe for directory names that contain
+# whitespace, a newline, or a glob metacharacter.  Without it, a directory
+# name that contains a newline is indistinguishable from two directory names.
+# --print0 has no effect together with --remove, which prints no directory.
+#
+# With --remove, each directory that this command would list is removed, by
+# running `git-remove-branch-directory` on it, and nothing is printed on
+# standard output.  `git-remove-branch-directory` can leave a directory
+# behind; if so, this script says why, on standard error, and the exit
+# status is then 1.  None of that script's `--force` flags is passed
+# through.  A directory that contains another reported directory is removed
+# after the one it contains, and only if that one was removed.
+#
+# Usually, a remote branch disappears because its PR was merged.  It
+# is conceivable that the branch has local commits that were never
+# pushed, in which case deleting the branch could lose work.
 
 # DEBUG=1
 
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other scripts even when this script
+# is invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+
+# Without this, every question below would answer for whatever repository the
+# caller happened to be working in, rather than for the directory being
+# examined.  `git-remove-branch-directory` does this itself, so `--remove` is
+# covered twice over; do it here as well, because a scan asks its own
+# questions before it removes anything.
+unset_git_location_variables
+
+# If variable `print0` is non-empty, separate the output directories by NUL rather than by newline.
+print0=""
+# If variable `remove` is non-empty, this script removes directories instead of listing them.
+remove=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --print0 | -0) print0="$1" ;;
+    --remove) remove="$1" ;;
+    *) break ;;
+  esac
+  shift
+done
+
+status=0
+
 if [ "$#" -ne 0 ]; then
-  echo "Usage: ${SCRIPT_NAME}" >&2
+  echo "Usage: ${SCRIPT_NAME} [--print0] [--remove]" >&2
   exit 1
 fi
 
-dirs_file=$(mktemp /tmp/git-orphaned-branches.XXXXXX)
-trap 'rm -f "${dirs_file}"' EXIT INT TERM
-find . -name '*-branch-*' -type d > "${dirs_file}"
+# For the `locked` line of `git worktree list --porcelain`, which
+# `live_dependent_worktree` reads; without it, a locked worktree whose
+# directory is missing would not protect its repository.
+require_git 31
 
-while IFS= read -r dir; do
-  if [ ! -d "$dir" ]; then continue; fi
-  if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
-  if [ -d "$dir/.git" ]; then
-    # There is a .git subdirectory.
-    if ! git -C "$dir" ls-remote -h "$(git -C "$dir" config --get remote.origin.url)" > /dev/null 2>&1; then
-      if [ -n "$DEBUG" ]; then
-        echo "Did not find remote repository for $dir; this command failed: git -C \"$dir\" config --get remote.origin.url"
-      fi
-    else
-      # The remote repository exists
-      if [ -n "$DEBUG" ]; then echo "remote repository exists: $dir"; fi
-      # Don't match on "There is no tracking information for the current branch.", which is output
-      # for both a new branch and a deleted branch where the repository has been pruned.
-
-      # If grep matches `git pull` output, print directory name.
-      # `grep -q` means no output, just status code.
-      if "${SCRIPT_DIR}"/is-deleted-branch "$dir"; then
-        realpath "$dir"
-      fi
-      # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
-      # git -C "$dir" remote prune origin 2>&1 > /dev/null
-    fi
-  else
-    # There is no .git subdirectory.
-    if [ -f "$dir/.project" ]; then
-      if [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
-        # It has only one `.project` file and no other content
-        realpath "$dir"
-      fi
-    fi
+# Where the directories to remove are collected, one per file, named by
+# position.  The removal happens after the scan rather than during it, so
+# that the walk does not descend into a directory that was just deleted, and
+# so that the whole list is known before anything is destroyed.  A shell list
+# cannot hold a pathname that contains a newline -- which is why --print0
+# exists -- so each pathname gets a file of its own.
+collect_dir=""
+collected=0
+if [ -n "${remove}" ]; then
+  if ! collect_dir="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" \
+    || [ -z "${collect_dir}" ]; then
+    echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
+    exit 1
   fi
-done < "${dirs_file}"
+  # The signal handlers re-raise the signal with the handler removed, so that
+  # this script dies of the signal rather than resuming where it was
+  # interrupted, and so that the caller sees that it was killed by a signal.
+  trap 'rm -rf -- "${collect_dir}"' EXIT
+  trap 'rm -rf -- "${collect_dir}"; trap - INT; kill -s INT "$$"' INT
+  trap 'rm -rf -- "${collect_dir}"; trap - TERM; kill -s TERM "$$"' TERM
+fi
+
+# Prints its argument, followed by a NUL character if --print0 was given and by
+# a newline otherwise.
+print_dir() {
+  if [ -n "$print0" ]; then
+    printf '%s\0' "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+# Reports directory $1:  prints it, or, with --remove, records it for the
+# removal phase that follows the scan.
+report_dir() {
+  if [ -z "${remove}" ]; then
+    print_dir "$1"
+    return 0
+  fi
+  collected=$((collected + 1))
+  # Write the pathname with no terminator, so that the reader gets back
+  # exactly these bytes even for a name that ends in a newline.
+  printf '%s' "$1" > "${collect_dir}/${collected}"
+}
+
+# Prints the absolute path of directory $1, with symbolic links resolved.
+# `realpath` would be simpler, but POSIX added it only in 2024 and some systems
+# still lack it, whereas `cd` and `pwd -P` are portable.
+absolute_path() {
+  (CDPATH='' cd -- "$1" && pwd -P)
+}
+
+# Prints the pathname of one linked worktree that depends on the repository in
+# directory $1, or nothing if none does.
+#
+# A linked worktree's `.git` is a file that points into the repository of the
+# main working tree, so removing that main working tree breaks every linked
+# worktree of it -- a working tree that the user never named, and that may
+# hold unpushed work.  This command's output is fed to `rm -rf`, so such a
+# directory must not appear in it however orphaned its own branch is.
+#
+# `git worktree list --porcelain` prints the main working tree first and each
+# linked worktree after it, in entries separated by blank lines, each
+# beginning with a `worktree PATH` line.  awk reduces each entry to one line,
+# the path preceded by "L " if the entry has a `locked` line and by "- "
+# otherwise.  A pathname that contains a newline cannot be represented in that
+# format; git offers `-z` for that, which needs git 2.36, and a newline in the
+# pathname of a repository is pathological.
+#
+# A registration whose directory is gone protects nothing, because removing $1
+# cannot break a working tree that does not exist -- unless it is locked:  its
+# directory may be missing only for now, on removable media that is not
+# mounted, and the lock is what says so.
+live_dependent_worktree() {
+  live_dependent_worktree_dir="$(absolute_path "$1")" || return 0
+  git -C "$1" worktree list --porcelain 2> /dev/null \
+    | awk '
+        /^worktree / { if (n++) print flag " " dir; dir = substr($0, 10); flag = "-" }
+        $1 == "locked" { flag = "L" }
+        END { if (n) print flag " " dir }' \
+    | (
+      # Only the main working tree holds the repository that the others
+      # depend on, so a linked worktree is at no risk of taking one down.
+      IFS= read -r live_dependent_worktree_main || exit 0
+      live_dependent_worktree_main_absolute="$(absolute_path "${live_dependent_worktree_main#? }")" \
+        || exit 0
+      if [ "${live_dependent_worktree_main_absolute}" != "${live_dependent_worktree_dir}" ]; then
+        exit 0
+      fi
+      while IFS= read -r live_dependent_worktree_entry; do
+        if [ "${live_dependent_worktree_entry%% *}" = 'L' ] \
+          || [ -d "${live_dependent_worktree_entry#? }" ]; then
+          printf '%s\n' "${live_dependent_worktree_entry#? }"
+          exit 0
+        fi
+      done
+      exit 0
+    )
+}
+
+# Prints the pathname of the superproject working tree that contains directory
+# $1 as a submodule, or nothing if $1 is not a submodule's working tree.
+#
+# A submodule's working tree is part of its superproject's working tree, so
+# removing it leaves the superproject with a deleted directory that the user
+# never asked to change and a `.gitmodules` that still names it.  As with a
+# linked worktree, this command's output is fed to a removal, so such a
+# directory must not appear in it however orphaned the submodule's own branch
+# is.
+#
+# `live_dependent_worktree` does not cover this case.  Run inside a submodule,
+# `git worktree list` names the submodule's own working tree as the main one,
+# so that function sees no linked worktree and reports nothing.
+#
+# This needs no liveness test of the kind that `live_dependent_worktree`
+# applies to a worktree registration, whose directory can be gone.  A
+# superproject working tree contains its submodule's working tree, so it is
+# present whenever $1 is.
+live_superproject() {
+  live_superproject_top="$(git -C "$1" rev-parse --show-superproject-working-tree 2> /dev/null)" \
+    || return 0
+  # Git before 2.13 does not know this option, and `rev-parse` echoes an
+  # option it does not recognize and exits 0.  Without this, every directory
+  # would look like a submodule of a working tree whose name is the option,
+  # and this command would list nothing at all.
+  case "${live_superproject_top}" in
+    --show-superproject-working-tree) live_superproject_top= ;;
+  esac
+  if [ -n "${live_superproject_top}" ]; then
+    printf '%s\n' "${live_superproject_top}"
+  fi
+}
+
+# Prints OWNER/REPO for the GitHub URL $1, or nothing if $1 is not the URL of
+# a GitHub repository.
+github_slug() {
+  printf '%s\n' "$1" | sed -e 's|/*$||' | sed -n \
+    -e 's|^git@github\.com:\([^/]*/[^/]*\)$|\1|p' \
+    -e 's|^ssh://git@github\.com/\([^/]*/[^/]*\)$|\1|p' \
+    -e 's|^https://\([^@/]*@\)\{0,1\}github\.com/\([^/]*/[^/]*\)$|\2|p' \
+    | sed -e 's|\.git$||'
+}
+
+# Records directory $1, whose branch still exists in its remote, so that
+# `warn_about_closed_prs` asks about its pull requests after the scan.
+#
+# The pull requests are those whose base is the parent of the repository that
+# `git push` uses, if that repository is a fork, and is that repository itself
+# otherwise; and whose head is the remote branch in the repository that
+# `git push` uses.  A pull request from a branch of the same name in another
+# repository, even the base repository, is someone else's.  Nothing is
+# recorded for the default branch of the repository that `git push` uses:  a
+# pull request from it, such as one that merges a release from `main` into a
+# stable branch, says nothing about whether a directory of the branch is
+# obsolete, because the branch outlives every such pull request.  Nor is
+# anything recorded if `gh` is not installed, if the remote is not on GitHub, or if a
+# query fails, because then nothing is known about the pull requests; the
+# scan's other answers do not depend on GitHub.  Nor is a directory whose
+# pathname contains a newline, which ${pr_candidates} cannot represent.
+note_pr_candidate() {
+  command -v gh > /dev/null 2>&1 || return 0
+  prs_branch="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
+  prs_branch="${prs_branch#refs/heads/}"
+  prs_remote="$(push_remote "$1" "${prs_branch}")"
+  [ -n "${prs_remote}" ] || return 0
+  # The remote branch is the one that `is_deleted_branch` found:  the one that
+  # `branch.BRANCH.merge` names, if `branch.BRANCH.remote` is ${prs_remote},
+  # and the branch of the same name otherwise.  A pull request's head is a
+  # branch, so a ref outside refs/heads/ has none, and several refs have no
+  # one answer.
+  prs_merge="$(git -C "$1" config --get-all "branch.${prs_branch}.merge")"
+  if [ -n "${prs_merge}" ] \
+    && [ "$(git -C "$1" config --get "branch.${prs_branch}.remote")" = "${prs_remote}" ]; then
+    case "${prs_merge}" in
+      *'
+'*) return 0 ;;
+      refs/heads/?*) prs_branch="${prs_merge#refs/heads/}" ;;
+      *) return 0 ;;
+    esac
+  fi
+  prs_url="$(git -C "$1" remote get-url --push "${prs_remote}" 2> /dev/null)" || return 0
+  prs_head_repo="$(github_slug "${prs_url}")"
+  # `git remote get-url` applies `url.BASE.insteadOf`, which may map a GitHub
+  # URL to a mirror or a local copy; the configured URL still names GitHub.
+  if [ -z "${prs_head_repo}" ]; then
+    prs_head_repo="$(github_slug "$(git -C "$1" config --get "remote.${prs_remote}.url")")"
+  fi
+  [ -n "${prs_head_repo}" ] || return 0
+  # Every branch directory of a project asks about the same repository, so
+  # remember each answer.  Each line of ${base_repo_cache} is
+  # "HEAD BASE DEFAULT", where DEFAULT is HEAD's default branch, or "-" if it
+  # has none.  The repository is named with its host, so that `gh` does not
+  # ask the host that ${GH_HOST} may name instead.
+  prs_answer="$(printf '%s\n' "${base_repo_cache}" \
+    | awk -v head="${prs_head_repo}" '$1 == head { print $2 " " $3; exit }')"
+  if [ -z "${prs_answer}" ]; then
+    prs_answer="$(gh repo view "github.com/${prs_head_repo}" \
+      --json owner,name,parent,defaultBranchRef \
+      --jq '"\(if .parent then "\(.parent.owner.login)/\(.parent.name)" else "\(.owner.login)/\(.name)" end) \(.defaultBranchRef.name // "-")"' \
+      2> /dev/null)" || return 0
+    case "${prs_answer}" in
+      ?*' '?*) ;;
+      *) return 0 ;;
+    esac
+    base_repo_cache="${base_repo_cache}
+${prs_head_repo} ${prs_answer}"
+  fi
+  prs_base_repo="${prs_answer%% *}"
+  if [ "${prs_branch}" = "${prs_answer#* }" ]; then
+    return 0
+  fi
+  prs_dir="$(absolute_path "$1")" || prs_dir="$1"
+  case "${prs_dir}" in
+    *'
+'*) return 0 ;;
+  esac
+  pr_candidates="${pr_candidates}${prs_base_repo}	${prs_head_repo}	${prs_branch}	${prs_dir}
+"
+}
+
+# The answers of `gh repo view` that `note_pr_candidate` has received.
+base_repo_cache=''
+
+# The directories that `note_pr_candidate` has recorded, one per line, each
+# line "BASE<TAB>HEAD<TAB>BRANCH<TAB>DIRECTORY", where BRANCH is the branch in
+# the remote, which is the head of the pull requests.  A branch name contains no
+# control character, and neither does the name of a GitHub repository.
+pr_candidates=''
+
+# Warns, on standard error, about each directory that `note_pr_candidate`
+# recorded whose branch has pull requests and all of them are closed or
+# merged.  Such a directory is very likely obsolete, but it is not reported:
+# the branch is still in the remote, so its removal is a decision for the
+# user, who may want to reopen the pull request or to delete the remote branch
+# first.
+#
+# One GraphQL query asks about up to 50 branches of one base repository, so
+# that a scan of many branch directories costs a few round trips rather than
+# one per directory.  GraphQL filters pull requests by the name of their head
+# branch but not by their head repository, so the head repositories are
+# filtered here.  Only the REST API filters by the owner of the head
+# repository, and it answers about one branch at a time, so it is asked only
+# about a branch name that has more than the 100 pull requests that one
+# GraphQL answer holds, such as `patch-1`:  among those beyond the first 100
+# may be an open one of the user's.  Its answer, too, is filtered by head
+# repository, because one owner may have both the base repository and a fork
+# of it.  Every query names github.com, the host of every repository that
+# `note_pr_candidate` records, so that `gh` does not ask the host that
+# ${GH_HOST} may name instead.
+warn_about_closed_prs() {
+  [ -n "${pr_candidates}" ] || return 0
+  for wacp_base in $(printf '%s' "${pr_candidates}" | cut -f 1 | sort -u); do
+    wacp_entries="$(printf '%s' "${pr_candidates}" | awk -F '\t' -v base="${wacp_base}" '$1 == base')"
+    while [ -n "${wacp_entries}" ]; do
+      warn_about_closed_prs_in "${wacp_base}" "$(printf '%s\n' "${wacp_entries}" | sed -n -e '1,50p')"
+      wacp_entries="$(printf '%s\n' "${wacp_entries}" | sed -e '1,50d')"
+    done
+  done
+}
+
+# Usage: warn_about_closed_prs_in BASE ENTRIES
+# Does the work of `warn_about_closed_prs` for ENTRIES, at most 50 lines of
+# ${pr_candidates} whose base repository is BASE.
+warn_about_closed_prs_in() {
+  wacpi_base="$1"
+  wacpi_entries="$2"
+  # shellcheck disable=SC2016 # GraphQL variables, not shell ones.
+  wacpi_decl='$owner: String!, $name: String!'
+  wacpi_fields=''
+  set -- -f "owner=${wacpi_base%%/*}" -f "name=${wacpi_base#*/}"
+  wacpi_index=0
+  wacpi_rest="${wacpi_entries}
+"
+  while [ -n "${wacpi_rest}" ]; do
+    next_pr_candidate
+    wacpi_decl="${wacpi_decl}, \$b${wacpi_index}: String!"
+    wacpi_fields="${wacpi_fields} b${wacpi_index}: pullRequests(headRefName: \$b${wacpi_index}, first: 100) { pageInfo { hasNextPage } nodes { number state headRepository { nameWithOwner } } }"
+    set -- "$@" -f "b${wacpi_index}=${wacpi_branch}"
+    wacpi_index=$((wacpi_index + 1))
+  done
+  # Each line is "ALIAS MORE STATE NUMBER HEAD" for one pull request, or
+  # "ALIAS MORE END" after an alias's last one, so that every alias says
+  # whether it has more.  HEAD is the head repository, which is "-" for a
+  # pull request whose head repository was deleted.
+  # shellcheck disable=SC2016 # jq variables, not shell ones.
+  wacpi_results="$(gh api graphql \
+    -f query="query(${wacpi_decl}) { repository(owner: \$owner, name: \$name) {${wacpi_fields} } }" \
+    "$@" --hostname github.com --jq '.data.repository | to_entries[] | .key as $k | .value.pageInfo.hasNextPage as $more
+      | ((.value.nodes[] | "\($k) \($more) \(.state) \(.number) \(.headRepository.nameWithOwner // "-")"),
+         "\($k) \($more) END")' \
+    < /dev/null 2> /dev/null)" || return 0
+  wacpi_index=0
+  wacpi_rest="${wacpi_entries}
+"
+  while [ -n "${wacpi_rest}" ]; do
+    next_pr_candidate
+    wacpi_lines="$(printf '%s\n' "${wacpi_results}" | awk -v alias="b${wacpi_index}" '$1 == alias')"
+    wacpi_index=$((wacpi_index + 1))
+    case "${wacpi_lines}" in
+      *' true END'*)
+        if ! wacpi_lines="$(rest_pr_states "${wacpi_base}" "${wacpi_head_repo}" "${wacpi_branch}")"; then
+          continue
+        fi
+        ;;
+    esac
+    # Each line is "STATE NUMBER" for one pull request from this branch.
+    # GitHub ignores the case of a repository's name, so a remote URL may
+    # spell it differently than GitHub's answer does.
+    wacpi_states="$(printf '%s\n' "${wacpi_lines}" \
+      | awk -v head="${wacpi_head_repo}" '$3 != "END" && tolower($5) == tolower(head) { print $3 " " $4 }')"
+    [ -n "${wacpi_states}" ] || continue
+    if printf '%s\n' "${wacpi_states}" | grep -q '^OPEN '; then
+      continue
+    fi
+    wacpi_numbers="$(printf '%s\n' "${wacpi_states}" | sed -e 's/^\([A-Z]*\) \(.*\)/#\2 (\1)/' \
+      | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')"
+    echo "${SCRIPT_NAME}: warning: not listing ${wacpi_dir}:  every pull request for branch ${wacpi_branch} of ${wacpi_head_repo} is closed or merged (${wacpi_base} ${wacpi_numbers% }), but the branch still exists in the remote" >&2
+  done
+}
+
+# Usage: next_pr_candidate
+# A helper for `warn_about_closed_prs_in`:  removes the first line from
+# ${wacpi_rest}, which holds lines of ${pr_candidates}, each followed by a
+# newline, and sets ${wacpi_head_repo}, ${wacpi_branch}, and ${wacpi_dir} to
+# its fields.
+next_pr_candidate() {
+  npc_line="${wacpi_rest%%
+*}"
+  wacpi_rest="${wacpi_rest#*
+}"
+  npc_line="${npc_line#*	}"
+  wacpi_head_repo="${npc_line%%	*}"
+  npc_line="${npc_line#*	}"
+  wacpi_branch="${npc_line%%	*}"
+  wacpi_dir="${npc_line#*	}"
+}
+
+# Usage: rest_pr_states BASE HEAD BRANCH
+# Prints "- - STATE NUMBER REPOSITORY", one per line, for each pull request to
+# the GitHub repository BASE whose head is the branch BRANCH of a repository
+# of the owner of the GitHub repository HEAD.  REPOSITORY is the head
+# repository, or "-" if it was deleted.  The first two fields stand for the
+# ALIAS and MORE of a line of the GraphQL answer in `warn_about_closed_prs_in`,
+# so that one filter reads both.  Fails if the query does.
+rest_pr_states() {
+  gh api -X GET "repos/$1/pulls" -f "head=${2%%/*}:$3" -f state=all -f per_page=100 \
+    --hostname github.com --paginate --jq '.[] | "- - \(if .state == "open" then "OPEN" elif .merged_at then "MERGED" else "CLOSED" end) \(.number) \(.head.repo.full_name // "-")"' \
+    < /dev/null 2> /dev/null
+}
+
+# Reports directory $1, whose name matches `*-branch-*`, if its branch was
+# deleted in the remote or if it holds nothing but Eclipse `.project` files.
+#
+# `is_deleted_branch` answers about both:  it reports a directory that holds
+# nothing but `.project` files as deleted (status 0), which is why this
+# function need not test for one itself, and for that matter cannot, since
+# such a directory is no working tree and is on no branch.
+check_directory() {
+  dir="$1"
+  if [ -n "$DEBUG" ]; then echo "checking: $dir"; fi
+
+  # Only status 0 from `is_deleted_branch` means "the branch was deleted".
+  # Statuses 1, 2, and 3 are answers of "no" or "cannot tell", each of which
+  # it has already explained if it is worth explaining.  Any other status
+  # would mean that it could not answer at all, which must not be silently
+  # reported as "there is nothing to delete".
+  #
+  # Call the function of common-functions.sh rather than running the
+  # `is-deleted-branch` command, which is a wrapper around it.  One process
+  # for the whole scan is what lets one `git ls-remote` answer for every
+  # directory that asks the same remote the same way:  what the function
+  # remembers, a subprocess per directory would throw away.
+  #
+  # Redirect stdin from /dev/null, because the function runs `git`, which
+  # runs `ssh`, and this script must not stop to await input.
+  is_deleted_branch "$dir" < /dev/null
+  is_deleted_status=$?
+  case "${is_deleted_status}" in
+    # `cd` prints its own diagnostic on failure.
+    0)
+      if ! dir_absolute="$(absolute_path "$dir")"; then
+        status=1
+      else
+        # A directory that holds nothing but `.project` files is no
+        # repository, so these two queries find nothing in one and cost two
+        # `git` invocations that answer "no".  That is a scan of the leftovers
+        # of deleted branches, not of every directory examined, and asking
+        # unconditionally is what keeps the guard from depending on how the
+        # directory came to be reported.
+        dependent_worktree="$(live_dependent_worktree "$dir")"
+        dependent_superproject="$(live_superproject "$dir")"
+        # In each of these two cases, say why rather than saying nothing:
+        # the branch really was deleted, and the user is entitled to know
+        # why this command is not offering the directory for deletion.
+        if [ -n "${dependent_worktree}" ]; then
+          # Removing this directory would remove the repository that the
+          # other worktree's `.git` file points into.
+          echo "${SCRIPT_NAME}: not listing ${dir_absolute}, which hosts the worktree ${dependent_worktree}" >&2
+        elif [ -n "${dependent_superproject}" ]; then
+          # Removing this directory would delete part of the superproject's
+          # working tree.
+          echo "${SCRIPT_NAME}: not listing ${dir_absolute}, which is a submodule of the working tree ${dependent_superproject}" >&2
+        else
+          report_dir "${dir_absolute}"
+        fi
+      fi
+      ;;
+    1) note_pr_candidate "$dir" < /dev/null ;;
+    2 | 3) ;;
+    *)
+      echo "${SCRIPT_NAME}: is_deleted_branch returned status ${is_deleted_status} on: $dir" >&2
+      status=1
+      ;;
+  esac
+  # Do not prune.  Doing so makes it impossible to distinguish new from deleted branches.
+  # git -C "$dir" remote prune origin 2>&1 > /dev/null
+}
+
+# Examines directory $1 and every directory below it.
+#
+# The entries that remain to be examined are held in the positional
+# parameters, which a shell makes local to a function call:  the recursive call
+# below gets positional parameters of its own, and this call's are intact when
+# it returns, so the recursion needs no variable that it could clobber.  `find`
+# would be simpler, but `find` communicates through newline-separated text,
+# which cannot represent a file name that contains a newline, whereas the
+# positional parameters can hold any file name.
+#
+# A single worklist in the positional parameters of the main shell, in place of
+# this recursion, would cost more:  pushing a directory's entries onto the
+# worklist rewrites the whole worklist, which costs O(n) for each of the n
+# entries of one directory and so is quadratic in a large one -- seconds rather
+# than milliseconds for a directory of a few thousand entries, such as a
+# `node_modules` or a package cache anywhere below the current directory.
+examine_directory() {
+  set -- "$1"/* "$1"/.*
+  while [ "$#" -gt 0 ]; do
+    case "${1##*/}" in
+      '.' | '..')
+        shift
+        continue
+        ;;
+    esac
+    # A pattern that matched nothing, which the shell leaves unexpanded, names
+    # no directory, so this test skips it as well.  A symbolic link is not
+    # followed, which is what `find` does by default and which prevents an
+    # endless descent through a link to an ancestor.
+    if [ -d "$1" ] && [ ! -L "$1" ]; then
+      case "${1##*/}" in
+        *-branch-*) check_directory "$1" ;;
+      esac
+      # Examine every directory's entries, even those of a directory that is
+      # itself named `*-branch-*`, because such a directory may contain
+      # another.
+      examine_directory "$1"
+    fi
+    shift
+  done
+}
+
+examine_directory .
+warn_about_closed_prs
+
+# Prints the pathname collected as $1, followed by an `x`.  The caller strips
+# the `x`:  a command substitution removes trailing newlines, and this is what
+# lets a pathname that ends in one survive being read back.
+collected_dir() {
+  cat -- "${collect_dir}/$1"
+  printf 'x'
+}
+
+# Records that the directory $1 was not removed.
+kept=0
+keep_dir() {
+  kept=$((kept + 1))
+  printf '%s' "$1" > "${collect_dir}/kept.${kept}"
+}
+
+# Returns 0 (true) if a directory that was not removed is $1 or is below it.
+# Both pathnames come from `absolute_path`, so comparing them as text is
+# comparing the directories.  Each pattern is quoted, so a glob metacharacter
+# in a pathname matches itself.
+holds_kept_dir() {
+  holds_kept_index=0
+  while [ "${holds_kept_index}" -lt "${kept}" ]; do
+    holds_kept_index=$((holds_kept_index + 1))
+    holds_kept_path="$(collected_dir "kept.${holds_kept_index}")"
+    holds_kept_path="${holds_kept_path%x}"
+    case "${holds_kept_path}" in
+      "$1" | "${1%/}"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# The removal phase.  Each directory goes through
+# `git-remove-branch-directory`, which refuses to remove one that holds
+# uncommitted changes or commits that the removal would lose, and says why.
+# Nothing is printed on standard output; the only report of a directory is the
+# diagnostic about one that was kept.
+#
+# The order is the reverse of the order of discovery, which means innermost
+# first:  the scan descends into a directory that it reported, because such a
+# directory may contain another, and it reports the outer one first.  Removing
+# the outer one first would `rm -rf` the inner clone without ever asking
+# whether it holds work, and would then fail on an inner directory that no
+# longer exists.  Taking the inner one first puts it through its own checks,
+# and the outer one is removed only if they passed:  a directory that holds
+# one that was kept is kept as well, since removing it would destroy what
+# those checks just refused to destroy.
+if [ -n "${remove}" ]; then
+  removed_index=$((collected + 1))
+  while [ "${removed_index}" -gt 1 ]; do
+    removed_index=$((removed_index - 1))
+    removed_dir="$(collected_dir "${removed_index}")"
+    removed_dir="${removed_dir%x}"
+    if holds_kept_dir "${removed_dir}"; then
+      echo "${SCRIPT_NAME}: not removing ${removed_dir}, which contains a directory that was not removed" >&2
+      keep_dir "${removed_dir}"
+      status=1
+      continue
+    fi
+    # Redirect stdin from /dev/null, because this script must not stop to
+    # await input.
+    if ! "${SCRIPT_DIR}"/git-remove-branch-directory -- "${removed_dir}" \
+      < /dev/null; then
+      keep_dir "${removed_dir}"
+      status=1
+    fi
+  done
+fi
+
+exit "${status}"

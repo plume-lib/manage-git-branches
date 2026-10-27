@@ -1,0 +1,87 @@
+#!/bin/sh
+
+# Tests that `git-new-branch` derives the branch directory name from the branch
+# name literally, rather than letting a shell's `echo` interpret the branch name
+# as an option or as backslash escapes.
+#
+# Usage:
+#   tests/test-branch-directory-name
+
+set -e
+
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+REPO_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+
+. "${SCRIPT_DIR}/lib-git-test-env.sh"
+
+fail() {
+  printf '%s: FAILURE: %s\n' "${SCRIPT_NAME}" "$1" >&2
+  exit 1
+}
+
+# Runs `git-new-branch ${branchname}` under ${shell}, in a repository where the
+# directory that ${branchname} should map to already exists.  `git-new-branch`
+# refuses to overwrite an existing directory, and its error message contains the
+# directory name it computed, which is what this test checks.  `--` ends the
+# options, so that a branch name that begins with "-" is not taken for one.
+#
+# Arguments: the branch name, and the directory suffix it should map to.
+check_branch_directory() {
+  branchname="$1"
+  expected="${workdir}/repo-branch-$2"
+  mkdir -- "${expected}"
+  if output="$(cd "${workdir}/repo" && "${shell}" "${REPO_DIR}/git-new-branch" -- "${branchname}" 2>&1)"; then
+    fail "${shell} git-new-branch '${branchname}' unexpectedly succeeded: ${output}"
+  fi
+  case "${output}" in
+    *"ERROR: directory exists: ${expected}") ;;
+    *) fail "${shell} git-new-branch '${branchname}' did not use directory ${expected}: ${output}" ;;
+  esac
+  rmdir -- "${expected}"
+}
+
+# The handlers are installed before the temporary directory is created, so
+# that a signal cannot leave it behind.
+# shellcheck disable=SC2329 # Is called from traps.
+cleanup() {
+  if [ -n "${workdir}" ]; then
+    rm -rf "${workdir}"
+  fi
+}
+workdir=''
+# The signal handlers re-raise the signal with the handler removed, so that
+# the script dies of the signal rather than resuming where it was
+# interrupted, and so that the caller sees that it was killed by a signal.
+trap 'cleanup' EXIT
+trap 'cleanup; trap - INT; kill -s INT "$$"' INT
+trap 'cleanup; trap - TERM; kill -s TERM "$$"' TERM
+workdir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
+if ! resolved="$(CDPATH='' cd -- "${workdir}" && pwd -P)" || [ -z "${resolved}" ]; then
+  fail "cannot resolve the temporary directory: ${workdir}"
+fi
+workdir="${resolved}"
+
+sanitize_git_env "${workdir}"
+
+remote="${workdir}/remote.git"
+git init -q --bare -b main "${remote}"
+git clone -q "${remote}" "${workdir}/repo" 2> /dev/null
+date > "${workdir}/repo/change.txt"
+git -C "${workdir}/repo" add change.txt
+git -C "${workdir}/repo" commit -q -m "initial commit"
+git -C "${workdir}/repo" push -q -u origin main
+
+# `git-new-branch` is a `#!/bin/sh` script, so run it under every POSIX shell
+# that is installed; `echo` differs among them.
+for shellname in sh dash bash ksh; do
+  shell="$(command -v "${shellname}")" || continue
+  # A branch name that every shell's `echo` treats as an option rather than as
+  # data.  (A branch name containing a backslash would likewise be mangled by
+  # some shells' `echo`, but git's refname rules exclude backslashes.)
+  check_branch_directory '-n' '-n'
+  # A branch name containing a slash, which becomes a dash.
+  check_branch_directory 'feature/one' 'feature-one'
+done
+
+echo "${SCRIPT_NAME}: OK"

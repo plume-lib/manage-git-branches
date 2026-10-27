@@ -4,39 +4,308 @@
 # in a sibling directory named REPONAME-branch-NEWBRANCHNAME/.
 #
 # Usage:
-#   git-new-branch NEWBRANCHNAME
+#   git-new-branch [--clean | --copy] NEWBRANCHNAME
+#
+# The new branch starts at the current commit.  There are three modes:
+#
+#  * By default, the new directory is a linked worktree of the current
+#    repository, made by `git worktree add`, so that it shares the
+#    repository's object store rather than holding a copy of it.  Its
+#    contents are the same as the current directory's, including uncommitted
+#    changes, staged changes, untracked files, and ignored files such as build
+#    output.
+#  * With `--clean`, the new directory is a linked worktree that holds a clean
+#    checkout of the current commit and nothing else.  It is the cheapest
+#    mode, in both time and disk space.
+#  * With `--copy`, the new directory is a copy of the whole current
+#    directory, `.git` included, so it is an independent clone that shares
+#    nothing with the current repository.
+#
+# The default mode and `--copy` leave out a worktree of this repository that
+# is nested in the current directory, such as an ignored one in
+# `.claude/worktrees/`, because its copy would share that worktree's HEAD and
+# index; they say which ones they left out.
+#
+# A working tree that has submodules gets `--copy` automatically, because git
+# does not support a submodule in more than one worktree, and `--clean` is
+# refused when the current commit has submodules.  A repository that has no
+# commit is refused, because there is nothing to branch from.  Every mode but
+# `--clean` is refused while a merge, cherry-pick, revert, or rebase is in
+# progress, because the new directory would get the operation's staged
+# changes without the operation itself.
+#
+# In the worktree modes, this script writes into the current repository:  it
+# creates the new branch there and registers the new worktree in its `.git`.
+# There is one exception.  If the current repository is a branch directory's,
+# REPONAME-branch-OTHER/, and a sibling REPONAME/ is a clone of the same
+# project, the branch and the worktree are created in REPONAME/ instead, after
+# the commit and staged files that they need are copied there, if they can be
+# and if REPONAME/ has no branch of that name; otherwise, the new worktree would
+# prevent the removal of
+# REPONAME-branch-OTHER/.  Then the test for a branch of the same name on a
+# remote consults REPONAME/'s remotes, because REPONAME/'s configuration says
+# where the new branch would be pushed.
+# Every effect of this script is local, all the same:  it never contacts a
+# remote except to read from it, and in particular it does not push the new
+# branch.  Therefore, the new branch has no upstream branch, which
+# `git-push-to` and `git-pull-from` require.
+#
+# Do not remove or move a worktree that this script created with file-system
+# commands.  This applies to the default mode and `--clean`, not to `--copy`,
+# whose directory is an independent clone.
+#  * Do not `rm -rf` it.  That leaves the branch, so the branch name stays
+#    taken, and a stale registration in the repository.  Use
+#    `git-remove-branch-directory` instead.
+#  * Do not `mv` it.  It keeps working, so nothing looks wrong, but its
+#    registration still names the old path, and the `git worktree prune` that
+#    `git gc` eventually runs then deletes the registration, after which the
+#    directory is no longer a working tree.  Use `git worktree move` instead,
+#    or run `git worktree repair` in a directory that was already moved.
+#
+# This command requires git 2.31 or later, and its default mode requires git
+# 2.36 or later in a sparse checkout or with per-worktree configuration.
 
-# SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.  Do this
+# before the `cd` below, because a relative pathname in $0 is relative to the
+# directory that the caller ran this script from.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+
+# Without this, git commands that this script runs in the new directory would
+# act on the current repository instead.  For example, `git worktree add` would
+# write the new worktree's index over the file that $GIT_INDEX_FILE names,
+# discarding the changes that are staged there.
+unset_git_location_variables
+
+usage() {
+  echo "Usage: ${SCRIPT_NAME} [--clean | --copy] NEWBRANCHNAME" >&2
+}
+
+# The mode:  "worktree" (the default), "clean", or "copy".  Selected on once,
+# where the three implementations diverge, so that every check before that
+# point is common to all three.
+MODE='worktree'
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --clean | --copy)
+      # The two ask for opposite things, so there is no sensible resolution.
+      if [ "${MODE}" != 'worktree' ] && [ "${MODE}" != "${1#--}" ]; then
+        echo "${SCRIPT_NAME}: --clean and --copy cannot be used together" >&2
+        usage
+        exit 1
+      fi
+      MODE="${1#--}"
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -?*)
+      # A typo such as `--cleann` must not silently create a branch of that
+      # name.
+      echo "${SCRIPT_NAME}: unrecognized option: $1" >&2
+      usage
+      exit 1
+      ;;
+    *) break ;;
+  esac
+  shift
+done
 if [ "$#" -ne 1 ]; then
-  echo "Usage: ${SCRIPT_NAME} NEWBRANCHNAME" >&2
+  usage
   exit 1
 fi
 
-STARTDIR="${PWD}"
-# Set to the temporary directory once we have created it, so that the EXIT
-# trap removes it if the script fails partway through.  Left empty otherwise,
-# so the trap never removes a pre-existing directory that we did not create.
-TMPDIR_TO_CLEAN=""
-trap 'cd "${STARTDIR}" 2> /dev/null || true; if [ -n "${TMPDIR_TO_CLEAN}" ]; then rm -rf "${TMPDIR_TO_CLEAN}"; fi' EXIT
+# This command needs nothing that git 2.31 added, but the worktrees that it
+# makes are safely removed only by `git-remove-branch-directory`, which needs
+# git 2.31.  Making a worktree that cannot be removed safely would be worse
+# than refusing to make it.
+require_git 31
 
-if ! cd "$(git rev-parse --show-toplevel 2> /dev/null)"; then
+trap_branch_cleanup
+
+# Capture the top level first: under a POSIX `sh` (e.g., dash), `cd ""` succeeds
+# as a no-op, so testing `cd "$(...)"` directly would not catch an empty result.
+if ! TOPLEVEL="$(git rev-parse --show-toplevel 2> /dev/null)" || [ -z "${TOPLEVEL}" ]; then
   echo "${SCRIPT_NAME}: Cannot determine top-level directory of git repository" >&2
   git rev-parse --show-toplevel >&2
   exit 1
 fi
+if ! cd "${TOPLEVEL}"; then
+  echo "${SCRIPT_NAME}: Cannot cd to top-level directory: ${TOPLEVEL}" >&2
+  exit 1
+fi
+
+# Git does not support a submodule in more than one worktree:  a copied
+# submodule's `.git` file does not resolve from a linked worktree, which makes
+# every git command there fail, and the repair would give both worktrees one
+# submodule checkout, with one HEAD and one index.  So a working tree with
+# submodules gets the full copy that `--copy` makes, which is an independent
+# clone.  `--clean` is refused rather than given a worktree whose submodules
+# are empty, because the only way to populate them leads to that shared
+# checkout.
+#
+# The question is whether the new worktree would hold a submodule:  the
+# default mode reproduces this working tree's index, and `--clean` checks out
+# the current commit.  The `git pull` below can change both, so the question
+# is asked again after it; asking it now as well reports a refusal before the
+# pull, and lets the tests that depend on the mode precede the pull too.
+choose_mode_for_submodules() {
+  case "${MODE}" in
+    clean)
+      if has_gitlinks HEAD; then
+        echo "${SCRIPT_NAME}: ERROR: --clean makes a worktree, and the current commit has submodules, which a worktree cannot hold." >&2
+        echo "${SCRIPT_NAME}: --copy works here, but it copies this whole directory, including .git." >&2
+        exit 1
+      fi
+      ;;
+    worktree)
+      if has_gitlinks; then
+        note_copy_for_submodules 'this working tree'
+        MODE='copy'
+      fi
+      ;;
+  esac
+}
+choose_mode_for_submodules
+
+# The default mode copies this working tree's index, whose skip-worktree bits
+# a sparse checkout sets according to its patterns, which lie in this working
+# tree's own git directory, as does its per-worktree configuration.  Git 2.36
+# and later give the new worktree both, in `git worktree add`; with an older
+# git, the new worktree would have the index without the patterns that it
+# depends on.
+if [ "${MODE}" = 'worktree' ] \
+  && { [ "$(git config --bool core.sparseCheckout)" = 'true' ] \
+    || [ "$(git config --bool extensions.worktreeConfig)" = 'true' ]; }; then
+  require_git 36 'for a sparse checkout or per-worktree configuration, unless given --clean or --copy'
+fi
+
+# Refuse a working tree that does not hold its own `.git` directory, before
+# anything expensive happens:  before the `git pull`, before any query to a
+# remote, and before the copy.  `check_git_dir_is_directory` explains why.  The
+# worktree modes do not copy `.git`, so they accept a linked worktree.  The
+# test is of the mode that will actually run, which in a working tree with
+# submodules is the copy.
+check_git_dir_for_mode() {
+  if [ "${MODE}" = 'copy' ]; then
+    check_git_dir_accept=''
+  else
+    check_git_dir_accept='linked-worktree'
+  fi
+  if ! check_git_dir_is_directory "${TOPLEVEL}" "${check_git_dir_accept}"; then
+    exit 1
+  fi
+}
+check_git_dir_for_mode
+
+# The default mode and `--copy` carry this working tree's index into the new
+# directory, but not the state of an operation in progress:  the default mode
+# does not copy this working tree's git directory, where that state lies, and
+# the `git checkout -b` of `--copy` deletes it.  An index that holds a merge's
+# resolved result would arrive without the merge, so a commit in the new
+# directory would be an ordinary commit that silently includes the other
+# side's changes.  `--clean` carries neither.
+if [ "${MODE}" != 'clean' ]; then
+  for state_file in MERGE_HEAD:merge CHERRY_PICK_HEAD:cherry-pick \
+    REVERT_HEAD:revert rebase-merge:rebase rebase-apply:rebase; do
+    if ! state_path="$(git rev-parse --git-path "${state_file%%:*}")" \
+      || [ -z "${state_path}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: cannot determine the git directory of ${TOPLEVEL}" >&2
+      exit 1
+    fi
+    if [ -e "${state_path}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: a ${state_file#*:} is in progress in ${TOPLEVEL}, and the new worktree would get its staged changes without the ${state_file#*:} itself." >&2
+      echo "${SCRIPT_NAME}: Conclude or abort the ${state_file#*:} first, or use --clean, which carries no changes." >&2
+      exit 1
+    fi
+  done
+fi
 
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
-BRANCHNOSLASH=$(echo "${BRANCHNAME}" | sed -e "s:/:-:g")
-BRANCHDIR=$(realpath "../${REPO%%-branch-*}-branch-${BRANCHNOSLASH}")
+BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
+# Canonicalize the parent directory, because ${BRANCHDIR} does not exist yet.
+if ! PARENTDIR="$(realpath ..)" || [ -z "${PARENTDIR}" ]; then
+  echo "${SCRIPT_NAME}: Cannot canonicalize the parent directory of $(pwd)" >&2
+  exit 1
+fi
+BRANCHDIR="${PARENTDIR%/}/${REPO%%-branch-*}-branch-${BRANCHNOSLASH}"
 BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 
-git pull -q > /dev/null 2>&1 || true
+# The tests below precede the copy of the working tree, so that a name
+# collision does not cost the user a full copy of the repository.  Among them,
+# every test that needs no network access comes first -- including the test for
+# ${BRANCHDIR} and the `git pull` that follows them -- so that a purely local
+# failure is reported without waiting for a remote, which may take as long as a
+# connection attempt takes to time out.
 
-if git ls-remote --exit-code origin "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists." >&2
+# "HEAD" is not the name of a branch, though it looks like one to a user and a
+# clone even has a symbolic ref `refs/remotes/REMOTE/HEAD` that resolves.
+# Creating the branch below rejects it, but only after the remote has been
+# asked and the working tree has been copied, and its message names this
+# script's own command line rather than the problem.  `git-checkout-branch`
+# rejects the name too.
+if [ "${BRANCHNAME}" = 'HEAD' ]; then
+  echo "${SCRIPT_NAME}: ERROR: HEAD is not the name of a branch." >&2
+  exit 1
+fi
+
+# A repository with no commit has nothing to branch from.  Refusing it in every
+# mode gives one behavior on every supported git:  `git worktree add -b` on an
+# unborn HEAD fails in versions of git before 2.42.
+if ! git rev-parse --verify --quiet HEAD > /dev/null; then
+  echo "${SCRIPT_NAME}: ERROR: this repository has no commit, so there is nothing to branch from.  Commit something first." >&2
+  exit 1
+fi
+
+# A local branch has to be detected here rather than left to the creation of
+# the branch below, which fails on one even when no remote has a branch of
+# that name.
+if git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists in this clone." >&2
   exit 1
 fi
 
@@ -44,25 +313,285 @@ if [ -e "${BRANCHDIR}" ]; then
   echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
   exit 1
 fi
-if [ -e "${BRANCH_TMPDIR}" ]; then
-  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
+
+# In the worktree modes, register the new worktree in the project's main clone
+# rather than in a branch directory, when this repository is a branch
+# directory's; see `main_clone_for`.
+if [ "${MODE}" != 'copy' ]; then
+  WORKTREE_HOST="$(main_clone_for "${TOPLEVEL}")"
+fi
+if [ -n "${WORKTREE_HOST}" ] \
+  && git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
+  echo "${SCRIPT_NAME}: ${WORKTREE_HOST} has its own branch ${BRANCHNAME}, so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
+  WORKTREE_HOST=''
+fi
+
+# Bring this working tree up to date, so that the branch is based on the most
+# recent commit and the remote-tracking branches that the next test consults
+# are as current as this clone can make them.  A failed pull is not fatal,
+# because the repository might have no remote or the current branch might have
+# no upstream, but it is reported: the branch will be based on a possibly stale
+# commit.
+#
+# `git_batch_ssh` disables the interactive prompts that git and SSH would
+# otherwise issue, as it does for the query below.  This pull's output is
+# captured rather than shown, so a prompt would be invisible and would block
+# this script forever; a failure that says why is better than a silent hang.
+if ! PULL_OUTPUT="$(git_batch_ssh . pull -q 2>&1)"; then
+  echo "${SCRIPT_NAME}: warning: \`git pull\` failed in ${TOPLEVEL}:" >&2
+  if [ -n "${PULL_OUTPUT}" ]; then
+    echo "${PULL_OUTPUT}" >&2
+  fi
+  if [ -n "$(git ls-files --unmerged)" ]; then
+    echo "${SCRIPT_NAME}: ERROR: the failed pull left conflicts in ${TOPLEVEL}." >&2
+    exit 1
+  fi
+  echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
+fi
+
+# The pull may have brought in a submodule.  If it switched the mode to the
+# copy, the copy's own test of `.git` applies.  The sparse-checkout test above
+# matters only to the default mode, which this cannot switch to.
+PRE_PULL_MODE="${MODE}"
+choose_mode_for_submodules
+if [ "${MODE}" != "${PRE_PULL_MODE}" ]; then
+  check_git_dir_for_mode
+fi
+if [ "${MODE}" = 'copy' ]; then
+  WORKTREE_HOST=''
+fi
+
+# Copy into ${WORKTREE_HOST} the objects that the new worktree needs, now that
+# the pull has settled the current commit.  This precedes the tests for a
+# collision, because they depend on where the branch is created, which a
+# failure to copy changes.
+if [ -n "${WORKTREE_HOST}" ]; then
+  if [ "${MODE}" = 'worktree' ]; then
+    COPY_INDEX='index'
+  else
+    COPY_INDEX=''
+  fi
+  if ! copy_objects_to "${WORKTREE_HOST}" HEAD ${COPY_INDEX:+"${COPY_INDEX}"}; then
+    echo "${SCRIPT_NAME}: so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
+    WORKTREE_HOST=''
+  fi
+fi
+
+# Determine which remote the new branch would collide with:  the remote that
+# `git push` would use for the current branch, as `push_remote` in
+# common-functions.sh determines it, which is also the remote that
+# `is-deleted-branch` and `git-push-to` use.  The new branch has no
+# configuration of its own yet -- neither `git worktree add -b` nor
+# `git checkout -b` creates any -- so this branch's configuration is what says
+# which remote the new branch would eventually be pushed to.
+#
+# When the new branch is created in ${WORKTREE_HOST}, though, its pushes are
+# governed by that repository's configuration, which may name other remotes,
+# and this branch's configuration does not apply to it.  Then the tests below
+# consult ${WORKTREE_HOST}'s remotes, and the remote is the one that
+# ${WORKTREE_HOST} would push a branch with no configuration to.
+#
+# ${REMOTE} is empty if no remote can be determined; then no remote can be
+# asked, and only the local tests apply.
+if [ -n "${WORKTREE_HOST}" ]; then
+  COLLISION_REPO="${WORKTREE_HOST}"
+  COLLISION_CLONE="${WORKTREE_HOST}"
+  REMOTE="$(push_remote "${WORKTREE_HOST}" '')"
+else
+  COLLISION_REPO='.'
+  COLLISION_CLONE='this clone'
+  BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
+  REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
+fi
+
+# A remote-tracking branch is evidence that a remote has the branch, and it
+# costs no network access.  When a remote can be determined, only ${REMOTE}'s
+# refs are consulted:  a branch of the same name in another remote --
+# "upstream" in a fork workflow, say -- is a branch that neither
+# `git checkout -b` nor a later push to ${REMOTE} would collide with, so
+# refusing on account of one would refuse a name that the user can in fact use.
+#
+# When no remote can be determined, every remote is consulted.  Any remote of
+# this clone could be the one that the new branch is eventually pushed to --
+# that is just what having determined none means -- so a remote-tracking branch
+# is the only evidence available.  Skipping it would abandon the collision
+# check in exactly the working tree that this script itself creates, since it
+# writes no `branch.BRANCH.remote` for the new branch.
+#
+# The evidence is not conclusive:  a remote-tracking branch outlives the branch
+# it tracks, because `git fetch` does not delete one unless it is asked to
+# prune.  So the message says what the evidence is, rather than asserting that
+# the remote has the branch, and it differs from the message for the query
+# below, which asks the remote itself.
+#
+# "HEAD" needs no exclusion here, even though a clone has a symbolic ref
+# `refs/remotes/REMOTE/HEAD` that resolves:  the name was rejected above.
+if [ -n "${REMOTE}" ]; then
+  TRACKING_REMOTES="${REMOTE}"
+else
+  TRACKING_REMOTES="$(git -C "${COLLISION_REPO}" remote)"
+fi
+for tracking_remote in ${TRACKING_REMOTES}; do
+  if git -C "${COLLISION_REPO}" rev-parse --verify --quiet \
+    "refs/remotes/${tracking_remote}/${BRANCHNAME}" > /dev/null; then
+    echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${tracking_remote}, according to the remote-tracking branch ${tracking_remote}/${BRANCHNAME} in ${COLLISION_CLONE}." >&2
+    exit 1
+  fi
+done
+
+# This clone shows no such branch, so ask the remote itself:  the clone may
+# never have fetched the branch, or may not fetch it at all.
+#
+# Asking the remote does not change it.  In particular, this script does not
+# push the new branch.
+#
+# `git_batch_ssh` disables the interactive prompts that would otherwise block
+# this query forever when this script is run from another script or a CI job,
+# as `is-deleted-branch` does for its own queries.
+# A remote that this script cannot ask is not an error; the branch is created.
+if [ -n "${REMOTE}" ] \
+  && git_batch_ssh "${COLLISION_REPO}" ls-remote --exit-code "${REMOTE}" \
+    "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${REMOTE}, which was asked directly." >&2
   exit 1
 fi
 
-if ! \cp -Rp . "${BRANCH_TMPDIR}"; then
-  echo "${SCRIPT_NAME}: ERROR: cannot copy $(pwd) to ${BRANCH_TMPDIR}" >&2
-  exit 1
-fi
-TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
-if ! (cd "${BRANCH_TMPDIR}" && git checkout -b "${BRANCHNAME}" -q); then
-  echo "${SCRIPT_NAME}: ERROR in: (cd \"${BRANCH_TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)" >&2
-  exit 1
+# Say where the new worktree is registered only now that no test can refuse
+# the branch.
+if [ -n "${WORKTREE_HOST}" ]; then
+  note_worktree_host
 fi
 
-if ! mv "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
-  echo "${SCRIPT_NAME}: ERROR in: mv \"${BRANCH_TMPDIR}\" \"${BRANCHDIR}\"" >&2
-  exit 1
-fi
-TMPDIR_TO_CLEAN=""
+# Usage: make_tmpdir
+# Tests for ${BRANCH_TMPDIR}, and arranges for the traps to remove whatever is
+# then created there.
+#
+# Test for ${BRANCH_TMPDIR} here rather than with the test for ${BRANCHDIR}
+# above, so that nothing -- in particular no remote query, which can take as
+# long as a connection attempt takes to time out -- runs between the test and
+# the assignment below.  Whatever the copy then leaves at that location was
+# created by this script and the traps may remove it, even if the copy is
+# interrupted before it finishes.
+make_tmpdir() {
+  if [ -e "${BRANCH_TMPDIR}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
+    exit 1
+  fi
+  TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
+}
+
+# Usage: add_worktree_here GIT-WORKTREE-ADD-OPTION...
+# Creates the branch ${BRANCHNAME} at the current commit in a new worktree at
+# ${BRANCHDIR}.  The current commit is passed to git as a commit, not as HEAD,
+# so that git sets up no upstream for the new branch even under
+# `branch.autoSetupMerge=always`.
+add_worktree_here() {
+  if ! add_worktree_here_commit="$(git rev-parse --verify HEAD)"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot determine the current commit" >&2
+    exit 1
+  fi
+  add_worktree "${BRANCHDIR}" "${BRANCHNAME}" "${add_worktree_here_commit}" "$@"
+}
+
+case "${MODE}" in
+  copy)
+    # Copy the whole directory, `.git` included, so that the new directory is
+    # an independent clone.  It is not a registered worktree, so moving it
+    # with `mv` is safe.
+    make_tmpdir
+    copy_repository "${BRANCH_TMPDIR}"
+    if ! (cd -- "${BRANCH_TMPDIR}" && git checkout -b "${BRANCHNAME}" -q); then
+      echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)" >&2
+      exit 1
+    fi
+    if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
+      echo "${SCRIPT_NAME}: ERROR in: mv -- \"${BRANCH_TMPDIR}\" \"${BRANCHDIR}\"" >&2
+      exit 1
+    fi
+    TMPDIR_TO_CLEAN=""
+    ;;
+
+  clean)
+    # Git writes the tracked files, and the index that matches them, from the
+    # shared object store.  This is the one mode that creates the worktree
+    # directly at its final name with nothing to follow, which is acceptable
+    # because `git worktree add` is one fast command; the default mode, whose
+    # copy is slow, does its work under a temporary name instead.
+    add_worktree_here
+    ;;
+
+  worktree)
+    # 1. Copy every top-level entry except `.git` into a temporary directory.
+    # This is the slow step, so it happens under the temporary name.
+    #
+    # `.git` must be skipped, not copied.  Copying a `.git` directory would
+    # duplicate the object store, which is what this mode exists to avoid, and
+    # copying the `.git` file of a linked worktree would give the copy the
+    # *same* git directory as this worktree, with one HEAD and one index.
+    make_tmpdir
+    if ! mkdir -- "${BRANCH_TMPDIR}"; then
+      echo "${SCRIPT_NAME}: ERROR: cannot create ${BRANCH_TMPDIR}" >&2
+      exit 1
+    fi
+    copy_working_tree "${BRANCH_TMPDIR}" .git
+
+    # 2. Create the worktree.  With `--no-checkout`, git creates ${BRANCHDIR}
+    # holding nothing but the `.git` file, rather than writing tracked files
+    # that the copy would replace.
+    add_worktree_here --no-checkout
+    if ! WORKTREE_GITDIR_TO_CLEAN="$(git -C "${BRANCHDIR}" rev-parse \
+      --absolute-git-dir)" || [ -z "${WORKTREE_GITDIR_TO_CLEAN}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: cannot determine the git directory of ${BRANCHDIR}" >&2
+      exit 1
+    fi
+
+    # 3. Move the `.git` file into the copy, and the copy into place.  The
+    # worktree ends up at exactly the path that it is registered under, and
+    # ${BRANCHDIR} is incomplete only between the two renames.
+    if ! mv -- "${BRANCHDIR}/.git" "${BRANCH_TMPDIR}/.git" \
+      || ! rmdir -- "${BRANCHDIR}" \
+      || ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
+      echo "${SCRIPT_NAME}: ERROR: cannot move ${BRANCH_TMPDIR} to ${BRANCHDIR}" >&2
+      exit 1
+    fi
+    TMPDIR_TO_CLEAN=""
+
+    # 4. Install the index.  `--no-checkout` leaves the new worktree's index
+    # empty, so that git would report every tracked file as deleted.  A copy
+    # of this working tree's index reproduces its staged state exactly:  the
+    # index records paths relative to the top level, `cp -p` preserves the
+    # modification times that its stat data refers to, and every blob that it
+    # names is in the shared object store, including one that only `git add`
+    # created.  Git re-hashes the copied files on the first `git status` in
+    # the new directory, because they have new inode numbers, and then
+    # rewrites the index.
+    #
+    # The index lies in this working tree's own git directory, which is
+    # `.git/worktrees/NAME` in a linked worktree.  Under `core.splitIndex`, the
+    # index holds only recent changes and names a `sharedindex.SHA` file, in
+    # the same git directory, that holds the rest; without that file, every
+    # git command in the new worktree fails.  Every shared index file is
+    # copied, rather than only the one that the index names, which is
+    # recorded in binary; git deletes the others once they expire.
+    if ! SRC_GITDIR="$(git rev-parse --absolute-git-dir)" \
+      || [ -z "${SRC_GITDIR}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: cannot determine the git directory of ${TOPLEVEL}" >&2
+      exit 1
+    fi
+    # A working tree that has no index at all has staged nothing, and the new
+    # worktree's empty index says the same.  A pattern that matches nothing
+    # is left unexpanded, and names no file.
+    for index_file in "${SRC_GITDIR}/index" "${SRC_GITDIR}"/sharedindex.*; do
+      if [ -e "${index_file}" ] \
+        && ! \cp -p -- "${index_file}" "${WORKTREE_GITDIR_TO_CLEAN}/"; then
+        echo "${SCRIPT_NAME}: ERROR: cannot copy ${index_file} to ${WORKTREE_GITDIR_TO_CLEAN}" >&2
+        exit 1
+      fi
+    done
+    ;;
+esac
+WORKTREE_TO_CLEAN=""
+WORKTREE_GITDIR_TO_CLEAN=""
+BRANCH_TO_CLEAN=""
 
 echo "Success: created ${BRANCHDIR}"

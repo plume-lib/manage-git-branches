@@ -3,21 +3,21 @@
 This package provides scripts to support managing multiple branches of a
 git repository.
 
-The scripts support a work style in which you have a separate working copy
-(a.k.a. "clone") for each branch that you work on.  You never switch
-branches within a working copy.  I find that this reduces branch confusion.
-It replaces mechanisms such as `git stash`.
+The scripts support a work style in which you have a separate working tree
+for each branch that you work on.  You never switch branches within a
+working tree.  I find that this reduces branch confusion.
+This work style replaces mechanisms such as `git stash`.
 
-Its key principles are:
+The key principles of this work style are:
 
 1. Do not run git commands in the main branch, except `git pull`.  (Or,
    use [`mvc pull`](https://github.com/plume-lib/multi-version-control).)
-2. Do not change branches in any working copy.
+2. Do not change branches in any working tree.
    That is, never run `git checkout`, and never run `git stash`.
-3. To create a new branch, run command `gnb` or `git-new-branch`.  It
+3. To create a new branch, run the command `gnb` or `git-new-branch`.  It
    creates a new directory holding a new branch that starts as a copy of
    the branch from which you ran `gnb`.
-4. To clone/checkout an existing branch, run `gcb` or `git-checkout-branch`.
+4. To check out an existing branch, run `gcb` or `git-checkout-branch`.
    It creates a new directory and checks out the branch there.
 
 ## Commands
@@ -25,36 +25,148 @@ Its key principles are:
 The commands are:
 
 * [`git-checkout-branch`](git-checkout-branch) `BRANCHNAME`:
-  Checks out the given branch of the repository in a new working copy
-  directory.  Run this command from within a working copy; the new
-  directory is a sibling of it.  Below is a definition for an alias `gcb`.
-* [`git-new-branch`](git-new-branch) `BRANCHNAME`:
-  Creates and checks out the given branch of the repository in a new
-  working copy directory.  Run this command from within a working copy; the
-  new directory is a sibling of it.  Below is a definition for an alias
-  `gnb`.
-* [`git-push-to`](git-push-to) `FROMDIR TODIR ...`:
-  Pull from FROMDIR into TODIR, compile it, then push TODIR to its remote
-  if compilation succeeded.
-  The two directories should be working copies (that is, git clones).
+  Checks out the given branch of the repository in a new working tree
+  directory.  Run this command from within a working tree; the new directory
+  is a sibling of the working tree.  The new directory is a worktree (see
+  [below](#worktrees)) that holds a fresh checkout of the branch:  it does
+  not inherit the current directory's uncommitted changes, untracked files,
+  or build output, so the first build there is a full one.  A branch can be
+  checked out in only one worktree of a repository at a time, though
+  separate clones can each check it out.  A branch that has
+  submodules gets a copy of the whole directory instead, which is an
+  independent clone.
+  Below is a definition for an alias `gcb`.
+* [`git-new-branch`](git-new-branch) `[--clean | --copy] BRANCHNAME`:
+  Creates and checks out the given branch of the repository in a new working
+  tree directory.  Run this command from within a working tree; the new
+  directory is a sibling of the working tree.  This command does not push the
+  new branch.
+  By default, the new directory is a worktree (see
+  [below](#worktrees)) that shares the repository, and its contents are the
+  same as the current directory's, including uncommitted changes and
+  untracked files.  With `--clean`, it is a worktree that holds a clean
+  checkout and nothing else.  With `--copy`, it is a copy of the whole
+  directory, `.git` included, and so an independent clone; a working tree
+  that has submodules always gets this.
+  Below is a definition for an alias `gnb`.
+* [`git-push-to`](git-push-to)
+  `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
+  Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
+  its remote if compilation succeeds.
+  Each directory must be the top level of a working tree and must have an
+  upstream branch.
   You may also pass a list of directories: each is pushed into the subsequent one.
-* [`git-pull-from`](git-pull-from) `FROMDIR`:
-  Pull from FROMDIR into the current directory, compile it, then push it to its
-  remote if compilation succeeded.
-  The two directories should be working copies (that is, git clones).
-* [`is-deleted-branch`](is-deleted-branch):
-  Given a directory name, tests whether it is on a deleted branch.
-* [`git-orphaned-branches`](git-orphaned-branches):
-  Lists directories named `*-branch-*` that are a working copy for a branch
-  that was deleted in the remote.  Typical usage is `rm -rf
-  $(git-orphaned-branches)` or `rmgob` (see alias below).
-* [`compile-project`](compile-project):
-  Runs a Gradle or Maven command to compile the project that contains the
-  current directory.
-  The command-line arguments for the compilation can be customized.
+  Instead of directories, you may pass slugs of the form `ORG:BRANCH`, such as
+  `git-push-to upstream:main myname:feature`.  Each slug names the
+  directory `PROJECT-fork-ORG-branch-BRANCH` (or `PROJECT-fork-ORG`, if it has
+  BRANCH checked out) in the current directory.  Each PROJECT that has
+  directories for two or more of the slugs gets its own chain.
+  A slug may also be just `BRANCH`, as in `git-push-to main feature`.
+  It matches every ORG; each PROJECT and ORG gets its own chain.
+  It also matches `PROJECT-branch-BRANCH`, as created by `git-new-branch`
+  from a clone `PROJECT`, and it matches the clone `PROJECT` itself if that
+  has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
+  directories form one more chain per PROJECT.
+  With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
+* [`git-rebase-to`](git-rebase-to)
+  `[--nocompile] [--squash] FROM_DIR TO_DIR ...`:
+  Runs `git-push-to` on the arguments, then rebases each branch onto the
+  previous branch, to eliminate merge commits, and force-pushes each
+  branch.  This is useful for maintaining a stack of GitHub pull requests,
+  each of whose base is the previous one.  With `--squash`, each branch
+  becomes a single commit on top of the previous branch.
+  The arguments may be slugs, as for `git-push-to`.
+* [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
+  Pulls from OTHER-REPO-DIR into the current directory, compiles the current
+  directory, then pushes the current directory to its remote if compilation
+  succeeds.
+  OTHER-REPO-DIR and the current directory must both be the top level of a
+  working tree and must each have an upstream branch.
+* [`git-pull-upstream`](git-pull-upstream) `[--nocompile]`:
+  Merges the default branch of the remote `upstream` (or `origin`, if there
+  is no `upstream`, or the only remote, if there is neither) into the current
+  branch, compiles, then pushes the current branch if compilation succeeds.
+  It first pulls the current branch, which must have an upstream branch.
+  It does not push a branch whose push destination is the default branch of
+  the upstream repository, nor, in a fork, any branch of `upstream`.
+  Unlike `git-pull-from`, it needs no working tree for the default branch.
+* [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
+  Tests whether the given directory is the top level of a deleted branch.
+  It is also true of a directory that holds nothing but Eclipse `.project`
+  files, which a branch directory may leave behind when its working tree
+  is gone.
+* [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
+  Lists directories named `*-branch-*`, below the current directory, that are
+  working trees for branches that were deleted in the remote repository, or
+  that hold nothing but Eclipse `.project` files.
+  With `--remove`, removes each of them instead of printing them.
+  A directory whose branch still exists in the remote, but whose GitHub pull
+  requests are all closed or merged, is neither listed nor removed; a warning
+  about it is printed instead.  (This needs the `gh` command.)
+  Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
+  alias below).
+* [`git-remove-branch-directory`](git-remove-branch-directory)
+  `[--force] [--force-uncommitted] [--force-unpushed] [--repository DIR]
+  DIRECTORY...`:
+  Removes a branch directory, unless the removal would lose work.
+  Commits on a branch whose changes have landed in a remote's default branch,
+  as after a squash-merge, do not count as work that would be lost.
+  It removes a worktree with `git worktree remove` and deletes its branch, if
+  `git-new-branch` or `git-checkout-branch` created that branch and no other
+  worktree has it checked out, and it removes anything else with `rm -rf`.
+  Given a worktree whose directory was already removed with `rm -rf`, it
+  removes what that left behind:  the worktree's registration and, under the
+  same conditions, its branch, in the repository that `--repository` names
+  (by default, the current directory's).
+* [`git-outgoing`](git-outgoing)
+  `[--only-branch BRANCH]... [--omitted | GIT-LOG-ARGS]`:
+  Shows the commits on local branches that have not been pushed.
+  Unlike `git log --branches --not --remotes`, it omits a branch whose
+  changes are already in a remote's default branch, as after a squash-merge.
+* [`git-diff-upstream`](git-diff-upstream) `[--no-fetch] [GIT-DIFF-ARGS]`:
+  Fetches the remote `upstream` (or `origin`, if there is no `upstream`, or
+  the only remote, if there is neither), then shows the differences between
+  its default branch and the working tree, ignoring changes in the amount of
+  whitespace and using the patience diff algorithm.
+  Like a GitHub pull request, it diffs from the merge base, so upstream
+  changes that have not been merged into the current branch do not appear.
+* [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
+  Runs a Gradle, Maven, or Make command to compile the project that contains
+  the given directory, which defaults to the current directory.
+  The command-line arguments for the compilation can be customized, using the
+  environment variables described below.
+* [`relative-path`](relative-path) `BASE TARGET`:
+  Prints the pathname of TARGET, relative to BASE.  This is a portable
+  replacement for GNU `realpath --relative-to=BASE TARGET`.
 
 More documentation of each script appears at the top of the script.
 Click the command names above to see that documentation.
+
+## Environment variables
+
+These environment variables customize the behavior of the commands.  Each one
+takes effect when it is set to a non-empty value.
+
+* `GRADLE_ASSEMBLE_FLAGS`: `compile-project` passes this to `gradlew assemble`
+  or `gradle assemble`.
+* `MVN_COMPILE_FLAGS`: `compile-project` passes this to `mvnw compile` or
+  `mvn compile`.
+* `MAKE_FLAGS`: `compile-project` passes this to `make`.
+* `ERR_IF_NO_BUILDFILE`: `compile-project` fails if it finds no buildfile.
+  Otherwise, `compile-project` succeeds when it finds no buildfile.
+* `MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT`: `git-push-to`,
+  `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` skip the
+  compilation step, and push whenever the merge succeeds.
+* `DEBUG`: `git-orphaned-branches` prints a message about each directory that
+  it examines.
+* `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
+  `git-orphaned-branches`, `git-new-branch`, `git-checkout-branch`, and
+  `git-push-to` use these standard Git variables to select the SSH command
+  when they query a remote repository.
+* `GIT_SSH_VARIANT`: `is-deleted-branch`, `git-orphaned-branches`,
+  `git-new-branch`, `git-checkout-branch`, and `git-push-to` use this standard
+  Git variable to determine whether the selected SSH command accepts OpenSSH
+  options.
 
 ## Installation
 
@@ -71,13 +183,18 @@ such as `~/.profile`.
 export PATH="/path/to/manage-git-branches:${PATH}"
 alias gcb=git-checkout-branch
 alias gnb=git-new-branch
-alias rmgob='rm -rf $(git-orphaned-branches)'
+alias rmgob='git-orphaned-branches --remove'
 ```
+
+## Testing
+
+To run the tests, run `tests/run-tests.sh`.  Each test creates its
+repositories under a temporary directory and removes them afterward.
 
 ## One branch per directory
 
 If you use `git-checkout-branch` and `git-new-branch`, then you will never
-switch the branch for a working copy.  That is, you will never run `git checkout
+switch the branch for a working tree.  That is, you will never run `git checkout
 BRANCHNAME`.  Instead, you will have a separate working directory for each
 branch that you work on.  The directory's name will be
 `REPONAME-branch-BRANCHNAME`.
@@ -97,19 +214,80 @@ This convention enables you to easily work on multiple branches at a time:
 * Easier non-git operations:  comparing branches using your favorite tool,
   searching multiple branches, reconciling branches, copying text between
   them, etc.
-* Greater disk usage than if you have a single clone and you switch
-  branches within that clone.  Usually, disk space is plentiful and the
-  foregoing advantages are worthwhile.  If you have very large repositories
-  and limited disk space, however, this approach may be undesirable.
+* A disadvantage is greater disk usage than if you have a single clone and
+  you switch branches within that clone.  The branch directories share one
+  repository, but each has its own working tree and build output, which is
+  usually most of a directory's size:  sharing the repository saves 10-30%
+  of each branch directory.  (`git-new-branch --clean` saves more, because
+  the new directory holds no build output.)  Usually, disk space is
+  plentiful and the foregoing advantages are worthwhile.  If you have very
+  large repositories and limited disk space, however, this approach may be
+  undesirable.
 
 If other programs need a specific name for your repository, then you may wish to
 make the directory `REPONAME` be a symbolic link to whichever branch you are
 working on at the time, such as `REPONAME-branch-main` when you want to use the
 main branch.
 
-## Programs for managing multiple Git clones
+## Worktrees
+
+`git-new-branch` and `git-checkout-branch` make each branch directory a
+linked worktree of the repository that you ran them in, made by
+`git worktree add`.  There is one exception:  if that repository is a branch
+directory's own clone, `REPONAME-branch-OTHER`, and a sibling `REPONAME` is a
+clone of the same project, the new worktree belongs to `REPONAME` instead, so
+that `REPONAME-branch-OTHER` can still be removed once OTHER is done.  (The
+commands fall back to the repository that you ran them in when `REPONAME`
+cannot host the worktree without a difference, such as when either repository
+is a sparse checkout.)  All the branch
+directories of one repository share one object store, so the repository is
+not copied.  This has some consequences:
+
+* A branch directory's `.git` is a file, not a directory.  A tool that tests
+  for a `.git` directory to recognize a working tree does not recognize a
+  branch directory; such a tool should ask git, with
+  `git rev-parse --show-toplevel`.
+* The branch directories share their configuration, hooks, and branches:
+  `git config` in one affects all of them.
+* A branch that has submodules is an exception.  Git does not support a
+  submodule in more than one worktree, so `git-new-branch` and
+  `git-checkout-branch` make a full copy instead, which is an independent
+  clone.  The copy includes `.git`, so it can be made only from a directory
+  whose `.git` is a directory, such as a clone:  run in a linked worktree,
+  whose `.git` is a file, the commands refuse, and say to run them in the
+  main working tree instead.
+
+Do not remove or move a worktree with file-system commands:
+
+* Do not `rm -rf` it.  That leaves its branch, so the branch name stays
+  taken, and a stale registration in the repository.  Use
+  `git-remove-branch-directory` instead.
+* Do not `mv` it.  It keeps working, so nothing looks wrong, but its
+  registration still names the old path, and the `git worktree prune` that
+  `git gc` eventually runs then deletes the registration, after which the
+  directory is no longer a working tree.  Use `git worktree move` instead,
+  or run `git worktree repair` in a directory that was already moved.
+* Do not remove or move the main working tree -- the clone that the
+  worktrees were made from -- while worktrees depend on it.  Removing it
+  removes the repository that all of them use, and moving it breaks them
+  until you run `git worktree repair` in it.
+
+None of this applies to a directory made by `git-new-branch --copy`:  each of
+those is an independent clone, which you may remove or move like any other
+directory.
+
+`git-new-branch`, `git-checkout-branch`, `git-remove-branch-directory`, and
+`git-orphaned-branches` require git 2.31 or later.  The default mode of
+`git-new-branch` requires git 2.36 or later in a sparse checkout or with
+per-worktree configuration.
+
+## Programs for managing multiple git clones
 
 The
 [multi-version-control](https://github.com/plume-lib/multi-version-control)
-program manages multiple clones, much as this repository manages multiple
-branches.
+program manages multiple clones, much as the scripts in this repository
+manage multiple branches.
+
+## License
+
+This package is distributed under the [MIT License](LICENSE).

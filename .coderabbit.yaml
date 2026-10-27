@@ -1,4 +1,7 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# This file is shared across multiple repositories.  Not all settings are
+# necessarily relevant to the repository where you are reading this comment.
 
 language: "en-US"
 
@@ -15,6 +18,7 @@ reviews:
   path_filters:
     - "!**/.gradle/**"
     - "!**/.idea/**"
+    - "!**/__init__.py"
     - "!**/build/**"
     - "!**/node_modules/**"
     - "!**/out/**"
@@ -24,6 +28,7 @@ reviews:
       - "wip"
       - "draft"
     ignore_usernames:
+      - "app/renovate"
       - "dependabot"
       - "dependabot[bot]"
       - "mend"

@@ -1,19 +1,53 @@
 #!/bin/sh
 
-# Push one git repository into another, from local clones.  Fails if the
+# Pushes one git repository into another, from local clones.  Fails if the
 # resulting merge does not compile.  If more than two repositories are given,
 # each is pushed into the next in turn.
 #
 # Usage:
-#   git-push-to [--nocompile] FROM_DIR TO_DIR ...
+#   git-push-to [--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...
+#   git-push-to [--nocompile] [--rebase | --squash] [ORG:]BRANCH [ORG:]BRANCH ...
 #
-# The arguments are directory names for working copies (that is, clones).
-# They may be absolute directory names or relative to the current directory.
-# The first argument may be "--nocompile" to skip the compilation step.
+# Each argument names the top level of a working tree.
+# Each may be absolute directory names or relative to the current directory.
+# The "--nocompile" option skips the compilation step.
+# The "--rebase" option rebases each branch onto the previous one after
+# pushing, and the "--squash" option makes each branch a single commit on top
+# of the previous one; see "Rebasing" below.  `git-rebase-to` is a shorthand
+# for "--rebase".
+#
+# Alternately, each argument may be a slug of the form ORG:BRANCH, which names
+# a directory in the current directory:  PROJECT-fork-ORG-branch-BRANCH, or
+# PROJECT-fork-ORG if that directory has BRANCH checked out and the former
+# does not exist.  A "/" in BRANCH is written as "-" in the directory name, as
+# `git-new-branch` does.  Every PROJECT that has a directory for any of the
+# slugs gets its own chain, made of the slugs' directories that exist for that
+# PROJECT.  For example,
+# `git-push-to typetools:master mernst:feature` is equivalent to
+#   git-push-to checker-framework-fork-typetools-branch-master \
+#               checker-framework-fork-mernst-branch-feature
+# and, if stubparser-fork-mernst-branch-feature exists but no stubparser
+# directory for typetools:master does, a PROJECT with a single directory has
+# nothing to push and is skipped.  Slugs and directories cannot be mixed.
+#
+# A slug may also be just BRANCH, which matches every ORG.  Then each PROJECT
+# and ORG gets its own chain, so a chain never goes from one ORG's BRANCH to
+# another ORG's BRANCH.  A slug BRANCH also names PROJECT-branch-BRANCH, a
+# directory whose name has no ORG, as `git-new-branch` creates from a clone
+# PROJECT, or the clone PROJECT itself if it has BRANCH checked out and the
+# former does not exist; those directories form one more chain for each
+# PROJECT.  For example, `git-push-to main feature` pushes
+# PROJECT-fork-ORG-branch-main into PROJECT-fork-ORG-branch-feature for each
+# PROJECT and ORG.  A slug ORG:BRANCH in the same command belongs to every
+# chain of its PROJECT:  `git-push-to typetools:master master feature` pushes
+# typetools's master into each ORG's master, then that into ORG's feature.
+# An argument without ":" that is not a directory is a slug BRANCH only if
+# some directory in the current directory matches it; otherwise it is
+# reported as a missing directory.
 #
 # This script does the following:
 #  * pull FROM_DIR and TO_DIR from their remotes,
-#  * pull FROM_DIR into TO_DIR,
+#  * merge FROM_DIR's branch into TO_DIR,
 #  * build TO_DIR using `compile-project` (see its documentation),
 #    (Skips the compilation step if environment variable
 #    MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set.)
@@ -21,6 +55,33 @@
 #
 # If more than two directories are supplied, the procedure is performed on each
 # pair of adjacent directories in turn.
+
+# Rebasing
+#
+# With "--rebase", after every pair has been pushed, each directory's branch
+# except the first is rebased onto the previous directory's branch, in order,
+# and is force-pushed if the rebase changed it.  This is useful for a stack of
+# pull requests, each of whose base is the previous one:  the branches'
+# histories become linear, so each pull request shows only its own commits.
+#
+# The rebase replays only the branch's own commits:  those that are not in the
+# previous branch as it was when the branch was merged from it, nor in any
+# former head of the previous branch that its reflog records.  So when a
+# branch is rebased onto a previous branch that was itself rebased, in this run
+# or earlier, the previous branch's old commits are not replayed a second
+# time.  Merge commits are dropped.
+#
+# The rebase resolves every conflict in favor of the commit being replayed.
+# This loses no information:  the pushes above already merged the previous
+# branch into this one, so the branch's content before the rebase is the
+# content that it should have afterward.  If the replayed commits do not
+# reproduce that content exactly -- for example, because a conflict resolution
+# in a merge commit was dropped -- the rebase adds one more commit that
+# restores it.  Thus the rebase never changes the content of any branch.
+#
+# With "--squash", each branch becomes a single commit on top of the previous
+# branch, with the same content as before.  Its message consists of the
+# messages of the branch's own commits.
 
 # Here is an example of use.
 #
@@ -39,9 +100,9 @@
 # This helps to ensure that you will resolve each merge conflict just once.
 #
 # The history of the branches will contain many merges (most of which will be
-# clean merges that do not require your attention).  If you are using the
-# standard squash-and-merge handling of pull requests, the branch history will
-# not be reflected in your final repository.
+# clean merges that do not require your attention).  If you squash-and-merge
+# your pull requests, the branch history will not be reflected in your final
+# repository.
 
 # Here is a more complex example of use.
 #
@@ -80,37 +141,220 @@
 #     MYDIR/myrepo-branch-allchanges
 
 nocompile=0
+rebase=0
+squash=0
 
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other scripts even when this script
+# is invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
+
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+
+## Returns 0 if the given directory is the top level of a working tree whose
+## branch still exists in its remote.  Otherwise, prints a diagnostic and
+## returns 1.  Only status 1 from `is_deleted_branch` means "the branch still
+## exists"; any other status is a reason not to proceed, because treating it
+## as success would silently disable this check.
+##
+## Call the function of common-functions.sh rather than running the
+## `is-deleted-branch` command, which is a wrapper around it.  One process for
+## the whole run is what keeps this check from asking a remote the same
+## question twice.  In a chain of directories, each middle directory is the
+## TO_DIR of one call and the FROM_DIR of the next, so it is checked twice;
+## and in this package's workflow every directory of the chain is a clone of
+## one upstream, so one `git ls-remote` answers for the whole chain.
+check_branch_exists() {
+  is_deleted_branch "$1"
+  is_deleted_status=$?
+  case "${is_deleted_status}" in
+    0)
+      echo "${SCRIPT_NAME}: is a deleted branch: $1" >&2
+      return 1
+      ;;
+    1) ;;
+    2)
+      # Status 2 also means a bare repository or a subdirectory of a working
+      # tree, so do not say merely "not a git working tree", which would send
+      # a user who is in such a directory looking for the wrong problem.
+      echo "${SCRIPT_NAME}: not the top level of a git working tree: $1" >&2
+      return 1
+      ;;
+    3)
+      # HEAD is detached, no remote can be determined for the branch, the
+      # branch has no upstream configuration and nothing shows that it was
+      # ever pushed, or the remote could not be contacted.
+      # Whether the branch still exists is unknown.
+      echo "${SCRIPT_NAME}: cannot tell whether the branch still exists in its remote: $1" >&2
+      return 1
+      ;;
+    *)
+      # `is_deleted_branch` answers only 0, 1, 2, or 3.  Any other status
+      # means it could not answer at all, which must not be treated as "the
+      # branch still exists".
+      echo "${SCRIPT_NAME}: is_deleted_branch returned status ${is_deleted_status} on: $1" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+## Prints the absolute pathname of the given directory, with symbolic links
+## resolved.  Prints nothing and returns nonzero if the directory cannot be
+## canonicalized, which the callers below diagnose.
+## `realpath` would be simpler, but POSIX added it only in 2024 and some systems
+## still lack it, whereas `cd` and `pwd -P` are portable.  `cd` writes its own
+## diagnostic when it fails; discard it, because the callers below write a
+## better one.
+absolute_path() {
+  (CDPATH='' cd -- "$1" && pwd -P) 2> /dev/null
+}
+
+## Fetches the given branch of the given directory into the current directory,
+## which is the top level of a working tree, and sets ${fetched_head} to the
+## commit that it fetched.  The directory is an absolute pathname.  Returns 1,
+## after printing a diagnostic, on failure.
+fetch_branch() {
+  fetch_from_absolute="$1"
+  fetch_from_branch="$2"
+
+  # Fetch from a relative pathname, so that the pathname that `git fetch`
+  # records in FETCH_HEAD does not embed this machine's directory layout.
+  # `relative-path` is a portable version of `realpath --relative-to`, whose
+  # `--relative-to` option the BSD and macOS versions of `realpath` lack.
+  if ! fetch_from_relative="$("${SCRIPT_DIR}"/relative-path "$(pwd)" "${fetch_from_absolute}")"; then
+    echo "${SCRIPT_NAME}: cannot express ${fetch_from_absolute} relative to $(pwd)" >&2
+    return 1
+  fi
+  # `git fetch` parses a colon in a bare pathname as an scp-style URL.
+  case "${fetch_from_relative}" in
+    ./* | ../* | .) ;;
+    *) fetch_from_relative="./${fetch_from_relative}" ;;
+  esac
+
+  # Name the branch as well as the repository, rather than fetching the
+  # pathname alone.  `git fetch PATH` brings over whatever FROM_DIR's HEAD
+  # points at, whereas `git fetch PATH BRANCH` brings over the branch that
+  # `check_upstream` determined and `check_branch_exists` validated.  If
+  # FROM_DIR's HEAD moved in between, the one-operand form merges or rebases
+  # onto something that this script never checked.
+  #
+  # Spell the branch as `refs/heads/BRANCH` rather than as a bare name.
+  # `git fetch` resolves a bare name by trying `refs/BRANCH` and
+  # `refs/tags/BRANCH` before `refs/heads/BRANCH` -- the same collision that
+  # `check_upstream` contends with above, where a tag and the branch share a
+  # name.  Given a bare name, such a tag is fetched in place of the branch:
+  # silently, and with exit status 0, because merging the tag is a perfectly
+  # good merge as far as git is concerned.  The full refname admits no such
+  # ambiguity.
+  #
+  # ${fetch_from_branch} is not empty:  `check_upstream` leaves it empty for a
+  # detached HEAD and for a directory that is not a working tree, and
+  # `check_branch_exists` refuses both before this function is called.
+  if ! git fetch -q -- "${fetch_from_relative}" "refs/heads/${fetch_from_branch}"; then
+    echo "${SCRIPT_NAME}: problem fetching ${fetch_from_absolute} into $(pwd)" >&2
+    return 1
+  fi
+  if ! fetched_head="$(git rev-parse --verify --quiet FETCH_HEAD)"; then
+    echo "${SCRIPT_NAME}: cannot read FETCH_HEAD after fetching ${fetch_from_absolute} into $(pwd)" >&2
+    return 1
+  fi
+  return 0
+}
 
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
   from="$1"
-  from_absolute="$(realpath "$from")"
   to="$2"
-  to_absolute="$(realpath "$to")"
+
+  # A failure here is not yet an error, and it leaves the variable empty:  a
+  # nonexistent directory fails here, and the tests just below diagnose that
+  # better.
+  from_absolute="$(absolute_path "${from}")"
+  to_absolute="$(absolute_path "${to}")"
 
   if [ ! -d "${from}" ]; then
-    if [ "${from}" = "${from_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: $from" >&2
-    else
+    if [ -n "${from_absolute}" ] && [ "${from}" != "${from_absolute}" ]; then
       echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}" >&2
+    else
+      echo "${SCRIPT_NAME}: no such directory: ${from}" >&2
     fi
     return 1
   fi
-  if [ ! -d "$to" ]; then
-    if [ "${to}" = "${to_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: $to" >&2
-    else
+  if [ ! -d "${to}" ]; then
+    if [ -n "${to_absolute}" ] && [ "${to}" != "${to_absolute}" ]; then
       echo "${SCRIPT_NAME}: no such directory: ${to} = ${to_absolute}" >&2
+    else
+      echo "${SCRIPT_NAME}: no such directory: ${to}" >&2
     fi
+    return 1
+  fi
+  if [ -z "${from_absolute}" ]; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: ${from}" >&2
+    return 1
+  fi
+  if [ -z "${to_absolute}" ]; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: ${to}" >&2
     return 1
   fi
 
-  if "${SCRIPT_DIR}"/is-deleted-branch "from_absolute"; then
-    echo "${SCRIPT_NAME}: is a deleted branch: ${to_absolute}" >&2
+  if [ "${from_absolute}" = "${to_absolute}" ]; then
+    echo "${SCRIPT_NAME}: FROM_DIR and TO_DIR are the same directory: ${from_absolute}" >&2
+    return 1
+  fi
+
+  # Check the upstream before asking whether the branch was deleted:
+  # `is_deleted_branch` cannot tell, and answers status 3, when the branch
+  # has no upstream, and its diagnostic is less specific than this one.
+  if ! check_upstream "${from_absolute}"; then
+    return 1
+  fi
+  # The branch that the `git fetch` below brings over.  Read it now:  the
+  # call to `check_upstream` for ${to_absolute} overwrites it with TO_DIR's
+  # branch.
+  from_branch="${checked_out_branch}"
+
+  if ! check_branch_exists "${from_absolute}"; then
     return 1
   fi
 
@@ -126,8 +370,11 @@ git_push_to() {
     return 1
   fi
 
-  if is-deleted-branch "to_absolute"; then
-    echo "${SCRIPT_NAME}: is a deleted branch: ${to_absolute}" >&2
+  if ! check_upstream "${to_absolute}"; then
+    return 1
+  fi
+
+  if ! check_branch_exists "${to_absolute}"; then
     return 1
   fi
 
@@ -136,23 +383,24 @@ git_push_to() {
     return 1
   fi
 
-  from_relative="$(realpath --relative-to="$to_absolute" "$from_absolute")"
-
-  if ! git pull -q "${from_relative}"; then
-    # Note: pwd=to_absolute
-    echo "${SCRIPT_NAME}: problem pulling ${from_absolute} into $(pwd)" >&2
+  # Note: pwd=to_absolute
+  if ! fetch_branch "${from_absolute}" "${from_branch}"; then
     return 1
   fi
+  merge_head="${fetched_head}"
 
-  if [ "$nocompile" -eq 0 ] && [ -z "$MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT" ]; then
-    if ! compile-project; then
-      echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
-      return 1
-    fi
-  fi
-
-  if ! git push --quiet; then
-    echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
+  # FROM_DIR and TO_DIR are clones of one project, so the merge should read
+  # the way it does when two branches of one clone are merged:
+  #
+  #   Merge branch 'feature' into main
+  #
+  # `git pull PATH BRANCH` would instead write "Merge branch 'feature' of
+  # ../myrepo-branch-feature into main", and would head the commit summaries
+  # that `merge.log` turns on with "* 'feature' of ../myrepo-branch-feature:".
+  # `merge_build_push` describes the commit as a branch of this repository.
+  # Note: pwd=to_absolute
+  if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
+    "${from_branch} of ${from_absolute}" "${nocompile}"; then
     return 1
   fi
 
@@ -164,25 +412,597 @@ git_push_to() {
   return 0
 }
 
+## Returns 0 if a rebase is in progress in the current directory.
+rebase_in_progress() {
+  [ -d "$(git rev-parse --git-path rebase-merge)" ] \
+    || [ -d "$(git rev-parse --git-path rebase-apply)" ]
+}
+
+## Resolves every conflict of the stopped rebase in the current directory in
+## favor of the commit being replayed, REBASE_HEAD:  each unmerged path gets
+## that commit's version, or is removed if that commit does not have it.
+resolve_conflicts_as_theirs() {
+  # `xargs -0` passes pathnames that contain whitespace or newlines intact.
+  # GIT_LITERAL_PATHSPECS keeps git from interpreting glob characters in them.
+  # shellcheck disable=SC2016 # The inner shell expands ${path}.
+  git diff --name-only --diff-filter=U -z \
+    | GIT_LITERAL_PATHSPECS=1 xargs -0 sh -c '
+        for path; do
+          if git cat-file -e "REBASE_HEAD:${path}" 2> /dev/null; then
+            git checkout -q REBASE_HEAD -- "${path}" || exit 1
+          else
+            git rm -q -f -- "${path}" || exit 1
+          fi
+        done' sh
+}
+
+## Rebases the branch in the current directory, which is the top level of a
+## clone, replaying the commits that are not reachable from the first argument
+## onto the second argument.  Merge commits are dropped, and every conflict is
+## resolved in favor of the commit being replayed.  Returns 1, after printing a
+## diagnostic and aborting the rebase, on failure.
+rebase_as_theirs() {
+  rebase_upstream="$1"
+  rebase_onto="$2"
+  # Override configuration variables that would change what the rebase does:
+  # `rebase.autoSquash` would reorder commits, `rebase.autoStash` would hide a
+  # dirty working tree, `rebase.rebaseMerges` would keep the merge commits
+  # that this rebase eliminates, and `rebase.updateRefs` would move other
+  # branches.  `--empty=drop` drops a commit whose changes are already in the
+  # new base.
+  # Git's output about conflicts is not of interest, because they are
+  # resolved below; show its output only if the rebase could not start.
+  if rebase_output="$(git rebase -q -X theirs --empty=drop --no-autosquash \
+    --no-autostash --no-rebase-merges --no-update-refs \
+    --onto "${rebase_onto}" "${rebase_upstream}" 2>&1)"; then
+    return 0
+  fi
+  if ! rebase_in_progress; then
+    printf '%s\n' "${rebase_output}" >&2
+    echo "${SCRIPT_NAME}: problem rebasing in $(pwd)" >&2
+    return 1
+  fi
+  while rebase_in_progress; do
+    if ! stopped_at="$(git rev-parse --verify --quiet REBASE_HEAD)"; then
+      echo "${SCRIPT_NAME}: rebase stopped without a commit to replay in $(pwd)" >&2
+      git rebase --abort
+      return 1
+    fi
+    if ! resolve_conflicts_as_theirs; then
+      echo "${SCRIPT_NAME}: cannot resolve conflicts in replaying ${stopped_at} in $(pwd)" >&2
+      git rebase --abort
+      return 1
+    fi
+    if [ -n "$(git ls-files -u)" ]; then
+      echo "${SCRIPT_NAME}: conflicts remain in replaying ${stopped_at} in $(pwd)" >&2
+      git rebase --abort
+      return 1
+    fi
+    # A commit whose changes are all in the new base leaves nothing to commit,
+    # and `git rebase --continue` refuses to proceed.
+    if git diff --cached --quiet; then
+      git rebase --skip > /dev/null 2>&1
+    else
+      GIT_EDITOR=true git rebase --continue > /dev/null 2>&1
+    fi
+    if rebase_in_progress \
+      && [ "$(git rev-parse --verify --quiet REBASE_HEAD)" = "${stopped_at}" ]; then
+      echo "${SCRIPT_NAME}: rebase is stuck at ${stopped_at} in $(pwd)" >&2
+      git rebase --abort
+      return 1
+    fi
+  done
+  return 0
+}
+
+## Sets ${replay_base} to a commit such that the commits of the current
+## directory's branch that are not reachable from it are the branch's own
+## commits.  The first argument is the directory of the previous branch, the
+## second is that branch's ref, and the third is the commit of that branch
+## that was merged into the current branch, which is an ancestor of HEAD.
+##
+## The current branch may also contain commits that the previous branch
+## contained before it was rewritten -- for example, by an earlier run that
+## force-pushed the previous branch and then failed on the current one.  The
+## previous branch's reflog records its former heads.  If HEAD contains any of
+## them, ${replay_base} is a new merge commit whose parents are the third
+## argument and those former heads; otherwise, it is the third argument.
+## Returns 1, after printing a diagnostic, on failure.
+compute_replay_base() {
+  # A missing reflog, for example because `core.logAllRefUpdates` is false,
+  # leaves only the third argument.
+  former_heads="$(git -C "$1" reflog show --format=%H "$2" -- 2> /dev/null | sort -u)"
+  set -- "$3"
+  for former_head in ${former_heads}; do
+    # `git merge-base --is-ancestor` fails for a commit that is not in this
+    # clone, which therefore is not in HEAD.
+    if git merge-base --is-ancestor "${former_head}" HEAD 2> /dev/null \
+      && ! git merge-base --is-ancestor "${former_head}" "$1"; then
+      set -- "$@" "${former_head}"
+    fi
+  done
+  if [ "$#" -eq 1 ]; then
+    replay_base="$1"
+    return 0
+  fi
+  first_parent="$1"
+  for parent; do
+    shift
+    set -- "$@" -p "${parent}"
+  done
+  # The merge commit's tree is irrelevant, because it is used only to limit
+  # which commits are replayed.
+  if ! replay_base="$(git commit-tree "${first_parent}^{tree}" "$@" \
+    -m "Former heads of the previous branch")"; then
+    echo "${SCRIPT_NAME}: cannot create a commit that merges the former heads of the previous branch in $(pwd)" >&2
+    return 1
+  fi
+  return 0
+}
+
+## Resets the current directory's branch to ${orig_head}, its head before
+## `git_rebase_onto` rewrote it, after a failure.  If the branch stayed
+## rewritten, the next `git pull` would merge the remote's history into it,
+## and the next rebase would replay every commit twice.  `--keep` refuses to
+## discard local changes; then this tells the user how to reset.
+reset_to_orig_head() {
+  if [ "$(git rev-parse --verify HEAD)" = "${orig_head}" ]; then
+    return 0
+  fi
+  if git reset -q --keep "${orig_head}"; then
+    echo "${SCRIPT_NAME}: reset ${to_branch} to ${orig_head}, its head before rebasing" >&2
+  else
+    echo "${SCRIPT_NAME}: cannot reset ${to_branch}; run \`git reset --keep ${orig_head}\` in $(pwd)" >&2
+  fi
+}
+
+## Rebases the branch in the second directory onto the branch in the first,
+## then pushes it if that changed it.  The third argument is the commit that
+## the first directory's branch pointed to when it was last merged into the
+## second's; the commits reachable from it are not replayed.  If ${squash} is
+## 1, the result is a single commit.  Whether or not ${squash} is 1, the
+## content of the second directory's branch does not change.  Both
+## directories have already been checked by `git_push_to`.
+git_rebase_onto() {
+  from_absolute="$(absolute_path "$1")"
+  to_absolute="$(absolute_path "$2")"
+  old_from_head="$3"
+
+  from_branch_ref="$(git -C "${from_absolute}" symbolic-ref --quiet HEAD)" || return 1
+  from_branch="${from_branch_ref#refs/heads/}"
+  to_branch_ref="$(git -C "${to_absolute}" symbolic-ref --quiet HEAD)" || return 1
+  to_branch="${to_branch_ref#refs/heads/}"
+
+  orig_dir=$(pwd)
+
+  if ! cd "$to_absolute"; then
+    echo "${SCRIPT_NAME}: cannot cd to ${to_absolute}" >&2
+    return 1
+  fi
+
+  if ! fetch_branch "${from_absolute}" "${from_branch}"; then
+    return 1
+  fi
+  new_from_head="${fetched_head}"
+
+  orig_head="$(git rev-parse --verify HEAD)" || return 1
+  orig_tree="$(git rev-parse --verify "HEAD^{tree}")" || return 1
+
+  # `git_push_to` merged ${old_from_head} into this branch, so it is an
+  # ancestor.  If it is not, then the branch changed in the meantime, and the
+  # rebase would replay commits that do not belong to this branch.
+  if ! git merge-base --is-ancestor "${old_from_head}" HEAD; then
+    echo "${SCRIPT_NAME}: ${from_branch} at ${old_from_head} is not an ancestor of ${to_branch} in $(pwd)" >&2
+    return 1
+  fi
+  if ! compute_replay_base "${from_absolute}" "${from_branch_ref}" "${old_from_head}"; then
+    return 1
+  fi
+
+  if [ "${squash}" -eq 1 ]; then
+    # The message lists the messages of the branch's own commits, oldest
+    # first, as `git merge --squash` does.
+    if ! squash_message="$(git log --reverse --no-merges --format='%B' \
+      "${replay_base}..HEAD")"; then
+      echo "${SCRIPT_NAME}: cannot read the commit messages of ${to_branch} in $(pwd)" >&2
+      return 1
+    fi
+    if [ -z "${squash_message}" ]; then
+      squash_message="Changes in ${to_branch}"
+    fi
+    if [ "$(git rev-parse "${new_from_head}^{tree}")" = "${orig_tree}" ]; then
+      new_head="${new_from_head}"
+    elif [ "$(git rev-parse --verify --quiet HEAD^2)" = "" ] \
+      && [ "$(git rev-parse --verify --quiet HEAD^1)" = "${new_from_head}" ]; then
+      # The branch is already a single commit on top of ${from_branch}.
+      new_head="${orig_head}"
+    elif ! new_head="$(printf '%s\n' "${squash_message}" \
+      | git commit-tree "${orig_tree}" -p "${new_from_head}")"; then
+      echo "${SCRIPT_NAME}: cannot create the squashed commit in $(pwd)" >&2
+      return 1
+    fi
+    if ! git merge -q --ff-only "${new_head}" 2> /dev/null \
+      && ! git reset -q --keep "${new_head}"; then
+      echo "${SCRIPT_NAME}: cannot move ${to_branch} to ${new_head} in $(pwd)" >&2
+      reset_to_orig_head
+      return 1
+    fi
+  else
+    if ! rebase_as_theirs "${replay_base}" "${new_from_head}"; then
+      return 1
+    fi
+    # The replayed commits may not reproduce the branch's content, for example
+    # because a conflict resolution in a dropped merge commit is lost.  Restore
+    # the content with one more commit.
+    if [ "$(git rev-parse --verify "HEAD^{tree}")" != "${orig_tree}" ]; then
+      if ! restore_commit="$(git commit-tree "${orig_tree}" -p HEAD \
+        -m "Restore the content of ${to_branch} from before rebasing onto ${from_branch}")"; then
+        echo "${SCRIPT_NAME}: cannot create a commit to restore ${to_branch} in $(pwd)" >&2
+        reset_to_orig_head
+        return 1
+      fi
+      if ! git merge -q --ff-only "${restore_commit}"; then
+        echo "${SCRIPT_NAME}: cannot restore the content of ${to_branch} in $(pwd)" >&2
+        reset_to_orig_head
+        return 1
+      fi
+    fi
+  fi
+
+  if [ "$(git rev-parse --verify HEAD)" != "${orig_head}" ]; then
+    # The rebase rewrote the branch, so a plain push would be refused.
+    # `--force-with-lease` refuses to overwrite commits that someone else
+    # pushed since `git_push_to` last pulled.
+    if ! git push --quiet --force-with-lease; then
+      echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
+      reset_to_orig_head
+      return 1
+    fi
+  fi
+
+  if ! cd "${orig_dir}"; then
+    echo "${SCRIPT_NAME}: cannot cd back to ${orig_dir}" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+## Pushes each given directory into the next one.  Then, if ${rebase} is 1,
+## rebases each directory's branch, except the first, onto the previous one.
+## Returns 1 at the first failure.
+push_chain() {
+  prev=''
+  for arg; do
+    if [ -n "$prev" ]; then
+      if ! git_push_to "$prev" "$arg"; then
+        return 1
+      fi
+    fi
+    prev="$arg"
+  done
+  if [ "${rebase}" -eq 0 ]; then
+    return 0
+  fi
+  prev=''
+  # The previous directory's head before it was rebased, which is what the
+  # current directory merged from it.
+  old_prev_head=''
+  for arg; do
+    if ! arg_head="$(git -C "$arg" rev-parse --verify HEAD)"; then
+      echo "${SCRIPT_NAME}: cannot read HEAD in $arg" >&2
+      return 1
+    fi
+    if [ -n "$prev" ]; then
+      if ! git_rebase_onto "$prev" "$arg" "${old_prev_head}"; then
+        return 1
+      fi
+    fi
+    prev="$arg"
+    old_prev_head="${arg_head}"
+  done
+  return 0
+}
+
+## Returns 0 if the argument is a slug, ORG:BRANCH or BRANCH, rather than a
+## directory.  Git forbids a branch name that starts with "/" or ".", or whose
+## component starts with ".".  An argument BRANCH that names no directory in
+## the current directory is not a slug, so that a misspelled directory name
+## is reported as a missing directory.
+is_slug() {
+  if [ -d "$1" ]; then
+    return 1
+  fi
+  case "$1" in
+    '' | */*:* | :* | *: | /* | .* | */.*) return 1 ;;
+    *:*) return 0 ;;
+  esac
+  # slug_matches fails only if it finds a directory for the slug.
+  is_slug_matches="$(slug_matches "$1" 2> /dev/null)" || return 0
+  [ -n "${is_slug_matches}" ]
+}
+
+## Sets ${slug_org}, ${slug_branch}, and ${slug_branch_dir} from the slug
+## ORG:BRANCH or BRANCH.  ${slug_org} is empty if the slug has no ORG.
+## ${slug_branch_dir} is BRANCH as it appears in a directory name.
+parse_slug() {
+  case "$1" in
+    *:*)
+      slug_org="${1%%:*}"
+      slug_branch="${1#*:}"
+      ;;
+    *)
+      slug_org=''
+      slug_branch="$1"
+      ;;
+  esac
+  slug_branch_dir="$(printf '%s\n' "${slug_branch}" | sed -e "s:/:-:g")"
+}
+
+## Returns 0 if the given directory has the given branch checked out.
+has_branch_checked_out() {
+  has_branch_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 1
+  [ "${has_branch_ref}" = "refs/heads/$2" ]
+}
+
+## Prints the directory that the slug ORG:BRANCH names for the given project,
+## or prints nothing and returns 1 if there is none.  ORG "-" stands for a
+## directory whose name has no ORG:  PROJECT-branch-BRANCH, or PROJECT if it
+## has BRANCH checked out and the former does not exist.
+slug_dir() {
+  parse_slug "$2"
+  if [ "${slug_org}" = "-" ]; then
+    if [ -d "$1-branch-${slug_branch_dir}" ] \
+      && has_branch_checked_out "$1-branch-${slug_branch_dir}" "${slug_branch}"; then
+      printf '%s\n' "$1-branch-${slug_branch_dir}"
+      return 0
+    fi
+    if [ ! -d "$1-branch-${slug_branch_dir}" ] && [ -e "$1/.git" ] \
+      && has_branch_checked_out "$1" "${slug_branch}"; then
+      printf '%s\n' "$1"
+      return 0
+    fi
+    return 1
+  fi
+  if [ -d "$1-fork-${slug_org}-branch-${slug_branch_dir}" ]; then
+    if has_branch_checked_out "$1-fork-${slug_org}-branch-${slug_branch_dir}" "${slug_branch}"; then
+      printf '%s\n' "$1-fork-${slug_org}-branch-${slug_branch_dir}"
+      return 0
+    fi
+    return 1
+  fi
+  if [ -d "$1-fork-${slug_org}" ] \
+    && has_branch_checked_out "$1-fork-${slug_org}" "${slug_branch}"; then
+    printf '%s\n' "$1-fork-${slug_org}"
+    return 0
+  fi
+  return 1
+}
+
+## Returns 0 if the given directory has ${slug_branch} checked out.  Otherwise,
+## prints an error message and returns 1.
+check_branch_dir() {
+  if has_branch_checked_out "$1" "${slug_branch}"; then
+    return 0
+  fi
+  check_actual="$(git -C "$1" symbolic-ref --quiet --short HEAD 2> /dev/null)" \
+    || check_actual="a detached HEAD"
+  echo "${SCRIPT_NAME}: ${1#./} has ${check_actual} checked out, not ${slug_branch}" >&2
+  return 1
+}
+
+## Prints, one per line, PROJECT:ORG for each directory in the current
+## directory that the slug names.  If the slug has no ORG, every ORG matches,
+## and so do PROJECT-branch-BRANCH and a clone PROJECT that has BRANCH
+## checked out, for which ORG is "-".
+## Returns 1, after printing an error message, if a directory
+## PROJECT[-fork-ORG]-branch-BRANCH that the slug names has some other branch
+## checked out, because merging into that directory would merge into the wrong
+## branch.
+slug_matches() {
+  parse_slug "$1"
+  match_status=0
+  for dir in ./*-fork-*-branch-"${slug_branch_dir}"; do
+    if [ ! -d "${dir}" ]; then continue; fi
+    name="${dir#./}"
+    name="${name%-branch-"${slug_branch_dir}"}"
+    project="${name%-fork-*}"
+    org="${name##*-fork-}"
+    # For example, "p-fork-o-branch-x-branch-main" is not a directory for
+    # branch "main".
+    case "${org}" in *-branch-*) continue ;; esac
+    if [ -n "${slug_org}" ] && [ "${org}" != "${slug_org}" ]; then continue; fi
+    if ! check_branch_dir "${dir}"; then
+      match_status=1
+      continue
+    fi
+    printf '%s:%s\n' "${project}" "${org}"
+  done
+  if [ -z "${slug_org}" ]; then
+    for dir in ./*-branch-"${slug_branch_dir}"; do
+      if [ ! -d "${dir}" ]; then continue; fi
+      name="${dir#./}"
+      project="${name%-branch-"${slug_branch_dir}"}"
+      case "${project}" in *-fork-* | *-branch-*) continue ;; esac
+      if ! check_branch_dir "${dir}"; then
+        match_status=1
+        continue
+      fi
+      printf '%s:-\n' "${project}"
+    done
+    for dir in ./*; do
+      if [ ! -e "${dir}/.git" ]; then continue; fi
+      name="${dir#./}"
+      case "${name}" in *-fork-* | *-branch-*) continue ;; esac
+      # A PROJECT-branch-BRANCH directory takes precedence.
+      if [ -d "${name}-branch-${slug_branch_dir}" ]; then continue; fi
+      if has_branch_checked_out "${dir}" "${slug_branch}"; then
+        printf '%s:-\n' "${name}"
+      fi
+    done
+  fi
+  for dir in ./*-fork-*; do
+    if [ ! -d "${dir}" ]; then continue; fi
+    name="${dir#./}"
+    project="${name%-fork-*}"
+    org="${name##*-fork-}"
+    case "${org}" in *-branch-*) continue ;; esac
+    if [ -n "${slug_org}" ] && [ "${org}" != "${slug_org}" ]; then continue; fi
+    # A PROJECT-fork-ORG-branch-BRANCH directory takes precedence.
+    if [ -d "${name}-branch-${slug_branch_dir}" ]; then continue; fi
+    if has_branch_checked_out "${dir}" "${slug_branch}"; then
+      printf '%s:%s\n' "${project}" "${org}"
+    fi
+  done
+  return "${match_status}"
+}
+
 ## Main program starts here.
 
-if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
-  nocompile=1
+while [ "$#" -ge 1 ]; do
+  case "$1" in
+    --nocompile) nocompile=1 ;;
+    --rebase) rebase=1 ;;
+    --squash)
+      rebase=1
+      squash=1
+      ;;
+    *) break ;;
+  esac
   shift
-fi
+done
 
 if [ "$#" -lt 2 ]; then
   echo "${SCRIPT_NAME}: not enough arguments" >&2
-  echo "Usage: ${SCRIPT_NAME} [--nocompile] FROM_DIR TO_DIR ..." >&2
+  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ..." >&2
+  echo "   or: ${SCRIPT_NAME} [--nocompile] [--rebase | --squash] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
   exit 1
 fi
 
-prev=''
+num_slugs=0
 for arg; do
-  if [ -n "$prev" ]; then
-    if ! git_push_to "$prev" "$arg"; then
+  if is_slug "$arg"; then
+    num_slugs=$((num_slugs + 1))
+  fi
+done
+
+if [ "${num_slugs}" -eq 0 ]; then
+  push_chain "$@"
+  exit
+fi
+
+if [ "${num_slugs}" -ne "$#" ]; then
+  for arg; do
+    if [ ! -d "$arg" ] && ! is_slug "$arg"; then
+      echo "${SCRIPT_NAME}: no such directory: $arg" >&2
+      echo "${SCRIPT_NAME}: and, as a slug, $arg names no directory in $(pwd)" >&2
       exit 1
     fi
+  done
+  echo "${SCRIPT_NAME}: cannot mix slugs with directories: $*" >&2
+  exit 1
+fi
+
+newline='
+'
+
+# Resolve every slug before pushing anything, so that a misspelled slug does
+# not leave the work half done.
+#
+# Each chain is identified by a key PROJECT:ORG.  A slug BRANCH, which has no
+# ORG, contributes to the chain for each PROJECT and ORG that has a directory
+# for it, so each chain stays within one ORG.  A slug ORG:BRANCH contributes
+# to every chain for its PROJECT.  A PROJECT with directories only for slugs
+# ORG:BRANCH gets a single chain whose key has an empty ORG.  The key
+# PROJECT:- is the chain of directories PROJECT-branch-BRANCH.
+keys=''
+explicit_projects=''
+for arg; do
+  if ! arg_matches="$(slug_matches "$arg")"; then
+    exit 1
   fi
-  prev="$arg"
+  parse_slug "$arg"
+  if [ -z "${arg_matches}" ]; then
+    if [ -n "${slug_org}" ]; then
+      echo "${SCRIPT_NAME}: no directory *-fork-${slug_org}-branch-${slug_branch_dir} (or *-fork-${slug_org} on branch ${slug_branch}) in $(pwd) for $arg" >&2
+    else
+      echo "${SCRIPT_NAME}: no directory *-branch-${slug_branch_dir} (or *-fork-* or a clone on branch ${slug_branch}) in $(pwd) for $arg" >&2
+    fi
+    exit 1
+  fi
+  if [ -n "${slug_org}" ]; then
+    explicit_projects="${explicit_projects}${newline}$(printf '%s\n' "${arg_matches}" | sed -e 's/:.*//')"
+  else
+    keys="${keys}${newline}${arg_matches}"
+  fi
 done
+saved_ifs="${IFS}"
+IFS="${newline}"
+for project in ${explicit_projects}; do
+  case "${keys}${newline}" in
+    *"${newline}${project}:"*) ;;
+    *) keys="${keys}${newline}${project}:" ;;
+  esac
+done
+IFS="${saved_ifs}"
+keys="$(printf '%s\n' "${keys}" | sed -e '/^$/d' | sort -u)"
+
+# Git forbids whitespace and glob characters in branch names, so the slugs can
+# be kept in a whitespace-separated string.
+slugs="$*"
+
+status=0
+num_chains=0
+IFS="${newline}"
+for key in ${keys}; do
+  IFS="${saved_ifs}"
+  project="${key%%:*}"
+  org="${key#*:}"
+  chain=''
+  chain_length=0
+  last_dir=''
+  for slug in ${slugs}; do
+    parse_slug "${slug}"
+    if [ -z "${slug_org}" ]; then
+      if [ -z "${org}" ]; then continue; fi
+      slug="${org}:${slug}"
+    fi
+    # For ORG, the slugs ORG:BRANCH and BRANCH name the same directory, which
+    # must not be pushed into itself.
+    if dir="$(slug_dir "${project}" "${slug}")" && [ "${dir}" != "${last_dir}" ]; then
+      last_dir="${dir}"
+      chain="${chain}${dir}${newline}"
+      chain_length=$((chain_length + 1))
+    fi
+  done
+  # A project with fewer than two of the directories is silently skipped,
+  # because reporting every such project would be too verbose.
+  if [ "${chain_length}" -lt 2 ]; then
+    IFS="${newline}"
+    continue
+  fi
+  num_chains=$((num_chains + 1))
+  # Run the chain in a subshell, because `git_push_to` changes the working
+  # directory and does not change it back when it fails.  Continue with the
+  # other chains after a failure, because they are independent of it.
+  if ! (
+    set -f
+    IFS="${newline}"
+    # shellcheck disable=SC2086 # Split ${chain} on newlines.
+    set -- ${chain}
+    IFS="${saved_ifs}"
+    set +f
+    push_chain "$@"
+  ); then
+    status=1
+  fi
+  IFS="${newline}"
+done
+IFS="${saved_ifs}"
+
+if [ "${num_chains}" -eq 0 ]; then
+  echo "${SCRIPT_NAME}: no project has directories for two or more of: ${slugs}" >&2
+  exit 1
+fi
+
+exit "${status}"

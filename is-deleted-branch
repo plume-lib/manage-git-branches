@@ -1,14 +1,127 @@
 #!/bin/sh
 
 # Tests whether a directory is on a deleted branch.
-# Status code is 0 (true) if on a deleted branch OR a non-clone, 1 (false) if not.
+#
+# Usage:
+#   is-deleted-branch DIRECTORY
+#
+# The status code is:
+#  * 0 (true) if the directory is on a branch that was deleted in its remote,
+#    or if the directory is the leftover of such a branch's directory:  it
+#    holds nothing but Eclipse `.project` files (see below),
+#  * 1 (false) if the directory is on a branch that still exists in its remote,
+#  * 2 (false) if the directory is not the top level of a working tree, so
+#    the question does not apply,
+#  * 3 (false) if the question cannot be answered: HEAD is detached, no
+#    remote can be determined for the branch, the branch has no upstream
+#    configuration and nothing shows that it was ever pushed, the remote
+#    could not be contacted, or this script could not resolve the location of
+#    its own helper scripts,
+#  * 64 if this command was invoked incorrectly.
+#
+# A caller must not treat every nonzero status as "the branch still exists";
+# only status 1 means that.
+#
+# A directory that holds nothing but Eclipse `.project` files is status 0,
+# even though it is no working tree and is on no branch at all.  What remains
+# after a branch directory's working tree is gone is Eclipse metadata:  a
+# `.project` file for each Eclipse project that the branch held, and the
+# directories that hold them, which are otherwise empty.  Nothing of the
+# branch survives in such a directory, so it is as removable as a working tree
+# whose branch was deleted in its remote, which is the question that callers
+# ask this command.
+#
+# The criterion applies to the whole tree below the directory:  every entry is
+# either a `.project` file or a directory that itself holds nothing but
+# `.project` files.  An empty directory counts as nothing, which is what lets
+# the empty `bin` that Eclipse leaves behind qualify.  Anything else -- a
+# regular file that is not named `.project`, a symbolic link, or a directory
+# that holds either -- is content, and the directory is then judged as a
+# working tree or not, like any other.  At least one `.project` file must
+# appear somewhere in the tree, though not necessarily in the directory
+# itself:  a tree of nothing but empty directories is the leftover of
+# nothing, whereas a branch whose Eclipse projects were all below its top
+# level leaves its `.project` files there and none at the top.
+#
+# Status 2 is about a working tree, not about a clone.  A submodule's working
+# tree and a linked worktree are working trees like any other -- what
+# distinguishes them is that their `.git` is a file that names a git directory
+# elsewhere -- and this command accepts them and answers about them.  What is
+# status 2 is a path that is not the top level of any working tree:  a
+# subdirectory of one, a bare repository, which has no working tree at all, or
+# a path that is no part of a repository.
+#
+# Status 0 says that the branch was deleted in its remote, not that the
+# working tree holds nothing of value:  the branch can hold commits that were
+# never pushed, and deleting the directory would lose them.
+#
+# A branch that has no upstream configuration is reported as deleted only if
+# this clone still holds a record that the branch was pushed:  a
+# remote-tracking ref for it, or a reflog entry for such a ref.  Either record
+# can disappear.  Pruning (`git fetch --prune`, `git remote prune`, or the
+# `fetch.prune` and `remote.NAME.prune` configuration variables) deletes the
+# ref, and its reflog, along with the remote branch.  Reflog expiry deletes
+# reflog entries that are older than `gc.reflogExpire` (90 days by default)
+# even when the ref survives, because Git runs `git gc --auto` from commands
+# such as `git commit` and `git fetch`.  Git then keeps no record of the push,
+# so such a branch is "cannot tell" (status 3) rather than "deleted".
 
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other scripts even when this script
+# is invoked through a symbolic link from elsewhere, such as ~/bin.
+# Exit with status 3 on failure, not 1:  status 1 means "the branch still
+# exists in its remote", and a caller that saw it would proceed as if this
+# script had answered the question.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 3
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 3
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 3
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
+
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 3
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: ${SCRIPT_NAME} DIRECTORY" >&2
-  exit 1
+  exit 64
 fi
 
-# Exit status is 0 if a line is selected.
-git -C "$1" pull 2>&1 | grep -q '\(no such ref was fetched\|fatal: not a git repository\)'
+# The body of this command is `is_deleted_branch` in common-functions.sh, so
+# that the other commands of this package can ask the same question without
+# running a subprocess for each directory they ask about.  This command is a
+# wrapper around that function, and its exit status is the function's.
+is_deleted_branch "$1"
