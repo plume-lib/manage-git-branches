@@ -48,6 +48,11 @@ The commands are:
   checkout and nothing else.  With `--copy`, it is a copy of the whole
   directory, `.git` included, and so an independent clone; a working tree
   that has submodules always gets this.
+  Build output that the default mode or `--copy` copies may still refer to
+  the current directory's files by their absolute pathnames, and a build in
+  the new directory may not recompile it; this command warns about each file
+  that git does not track and that contains the current directory's
+  pathname or is a symbolic link into the current directory.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:

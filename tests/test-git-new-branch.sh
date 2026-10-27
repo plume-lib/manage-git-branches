@@ -475,6 +475,9 @@ modes_common="$(git -C "${modes}" rev-parse --path-format=absolute --git-common-
 if ! out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" inherit 2>&1)"; then
   fail "nonzero exit status for the default mode: ${out}"
 fi
+case "${out}" in
+  *"contain the pathname"*) fail "the default mode warned about files that do not contain the source's pathname: ${out}" ;;
+esac
 inherit="${modes_parent}/modes-branch-inherit"
 if [ "$(git -C "${inherit}" symbolic-ref HEAD)" != 'refs/heads/inherit' ]; then
   fail "the default mode did not check out the branch inherit"
@@ -885,6 +888,70 @@ for mode in '' --copy; do
     fail "nested worktree, mode '${mode}': the nested worktree's HEAD or index changed"
   fi
 done
+
+# The default mode and `--copy` warn about each untracked or ignored file that
+# contains the source's pathname, such as a build output that refers to the
+# source's files, or that is a symbolic link into the source; `--clean`
+# copies no such file.  The pathname may end at a "/", a quotation mark, or a
+# NUL, and may be the logical pathname through a symbolic link as well as the
+# physical one.  A file that names a sibling directory whose name begins with
+# the source's name does not contain the source's pathname.  A symbolic link
+# to a FIFO does not make the scan block.  A file whose name says that its
+# contents are compressed is not examined; this one is not compressed, so
+# that examining it would name it.
+stale_parent="${tmpdir}/stale"
+mkdir -p "${stale_parent}" || exit 1
+stale_parent="$(CDPATH='' cd -- "${stale_parent}" && pwd -P)" || exit 1
+stale_link="${tmpdir}/stale-link"
+ln -s "${stale_parent}" "${stale_link}" || exit 1
+stale="${stale_parent}/stale-branch-main"
+stale_logical="${stale_link}/stale-branch-main"
+make_repo "${stale}" || exit 1
+printf 'build/\n' > "${stale}/.gitignore"
+git -C "${stale}" add .gitignore
+git -C "${stale}" commit -q -m 'Ignore build output'
+stale_top="$(git -C "${stale}" rev-parse --show-toplevel)"
+mkdir "${stale}/build"
+printf 'launcher\000%s/inst/libexec\000' "${stale_top}" > "${stale}/build/launcher"
+printf 'prefix\000%s\000' "${stale_top}" > "${stale}/build/prefix.bin"
+printf '#define PREFIX "%s"\n' "${stale_top}" > "${stale}/build/config.h"
+printf 'SRCDIR = %s/src\n' "${stale_logical}" > "${stale}/build/Makefile"
+ln -s "${stale_top}/build" "${stale}/build/current" || exit 1
+printf '%s-other/file %s.bak/file\n' "${stale_top}" "${stale_top}" > "${stale}/sibling.txt"
+printf '%s/lib\n' "${stale_top}" > "${stale}/build/library.jar"
+mkfifo "${stale}/build/fifo" || exit 1
+ln -s fifo "${stale}/build/fifo-link" || exit 1
+for mode in '' --copy; do
+  branch="stale${mode#--}"
+  if ! out="$(cd "${stale_logical}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+    fail "nonzero exit status for ${mode:-the default mode} with build output: ${out}"
+  fi
+  case "${out}" in
+    *"warning: these files in ${stale_parent}/stale-branch-${branch}, which git does not track, contain the pathname of ${stale_logical} (also ${stale_top}) or are symbolic links into it:"*) ;;
+    *) fail "${mode:-the default mode} did not warn about build output that contains the source's pathname: ${out}" ;;
+  esac
+  for stale_file in build/launcher build/prefix.bin build/config.h build/Makefile build/current; do
+    case "${out}" in
+      *"  ${stale_file}
+"*) ;;
+      *) fail "${mode:-the default mode} did not name ${stale_file}: ${out}" ;;
+    esac
+  done
+  case "${out}" in
+    *"sibling.txt"* | *"fifo"*) fail "${mode:-the default mode} named a file that does not refer to the source: ${out}" ;;
+    *"library.jar"*) fail "${mode:-the default mode} examined a file whose name says that it is compressed: ${out}" ;;
+  esac
+  case "${out}" in
+    *"Or remove ${stale_parent}/stale-branch-${branch} with git-remove-branch-directory, and run \`git-new-branch --clean ${branch}\`"*) ;;
+    *) fail "${mode:-the default mode} did not suggest --clean: ${out}" ;;
+  esac
+done
+if ! out="$(cd "${stale}" && "${GIT_NEW_BRANCH}" --clean staleclean 2>&1)"; then
+  fail "nonzero exit status for --clean with build output: ${out}"
+fi
+case "${out}" in
+  *"contain the pathname"*) fail "--clean warned about build output that it does not copy: ${out}" ;;
+esac
 
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then
