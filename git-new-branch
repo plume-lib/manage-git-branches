@@ -22,12 +22,14 @@
 #    nothing with the current repository.
 #
 # The default mode and `--copy` copy build output, which may contain the
-# current directory's pathname and so still refer to the current directory's
-# files.  For example, a program into which the build compiled the pathname of
-# its installation directory runs the files installed in the current
-# directory, and a build in the new directory may not recompile it, even after
-# a reconfiguration.  These modes warn about each file that git does not track
-# and that contains the current directory's pathname.
+# current directory's pathname, or be a symbolic link into the current
+# directory, and so still refer to the current directory's files.  For
+# example, a program into which the build compiled the pathname of its
+# installation directory runs the files installed in the current directory,
+# and a build in the new directory may not recompile it, even after a
+# reconfiguration.  These modes warn about each file that git does not track
+# and that contains the current directory's pathname or is a symbolic link
+# into the current directory.
 #
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
@@ -180,6 +182,17 @@ if ! TOPLEVEL="$(git rev-parse --show-toplevel 2> /dev/null)" || [ -z "${TOPLEVE
   echo "${SCRIPT_NAME}: Cannot determine top-level directory of git repository" >&2
   git rev-parse --show-toplevel >&2
   exit 1
+fi
+# ${TOPLEVEL} has every symbolic link resolved.  ${LOGICAL_TOPLEVEL} is the
+# top level's pathname through the symbolic links in the current directory's
+# logical pathname, which is the pathname that a build usually records.  It is
+# ${TOPLEVEL} when the two do not name the same directory, as when the
+# current directory was reached through a symbolic link inside the working
+# tree.
+LOGICAL_TOPLEVEL="$(cd -- "./$(git rev-parse --show-cdup)" && pwd)" || LOGICAL_TOPLEVEL=''
+if [ -z "${LOGICAL_TOPLEVEL}" ] \
+  || [ "$(cd -- "${LOGICAL_TOPLEVEL}" && pwd -P)" != "${TOPLEVEL}" ]; then
+  LOGICAL_TOPLEVEL="${TOPLEVEL}"
 fi
 if ! cd "${TOPLEVEL}"; then
   echo "${SCRIPT_NAME}: Cannot cd to top-level directory: ${TOPLEVEL}" >&2
@@ -604,33 +617,80 @@ BRANCH_TO_CLEAN=""
 
 # Usage: warn_about_old_pathname
 # Warns about each file in ${BRANCHDIR} that git does not track and that
-# contains the pathname of ${TOPLEVEL}.  Such a file is usually build output
-# that still refers to the files in ${TOPLEVEL} rather than to their copies,
-# such as a program into which the build compiled the pathname of its
-# installation directory.  A build in ${BRANCHDIR} may not recompile it, even
-# after a reconfiguration, because build tools rarely notice a changed
-# pathname.  Tracked files are not examined, because they are not build
-# output.
+# contains the pathname of ${TOPLEVEL}, or is a symbolic link to it or into
+# it.  The pathname is sought both as ${LOGICAL_TOPLEVEL} and as ${TOPLEVEL}.
+# Such a file is usually build output that still refers to the files in
+# ${TOPLEVEL} rather than to their copies, such as a program into which the
+# build compiled the pathname of its installation directory.  A build in
+# ${BRANCHDIR} may not recompile it, even after a reconfiguration, because
+# build tools rarely notice a changed pathname.  Tracked files are not
+# examined, because they are not build output.
 warn_about_old_pathname() {
-  # The trailing "/" keeps a sibling directory whose name begins with the
-  # same characters, such as ${BRANCHDIR} itself, from matching.  xargs runs
-  # grep with its standard input from /dev/null or not at all, so if there is
-  # no file to examine, grep does not wait for input.  `git ls-files` lists a
-  # symbolic link to a FIFO or device, and `-D skip` keeps grep from blocking
-  # on, or reading endlessly from, its target.
+  # The pattern matches the pathname where it ends, or where it continues
+  # with a character other than a letter, digit, "-", "_", or ".", such as
+  # "/", a quotation mark, or a NUL.  So a sibling directory whose name
+  # begins with the same characters, such as ${BRANCHDIR} itself, does not
+  # match.
+  warn_old_pattern="$(printf '%s\n' "${TOPLEVEL}" | sed 's/[][\\.*^$+?(){}|]/\\&/g')"
+  if [ "${LOGICAL_TOPLEVEL}" != "${TOPLEVEL}" ]; then
+    warn_old_pattern="${warn_old_pattern}|$(printf '%s\n' "${LOGICAL_TOPLEVEL}" | sed 's/[][\\.*^$+?(){}|]/\\&/g')"
+  fi
+  warn_old_pattern="(${warn_old_pattern})([^-_.A-Za-z0-9]|\$)"
+  # A symbolic link is examined by its target's pathname.  grep would follow
+  # it instead, and read the target, which may be a file in ${TOPLEVEL}, a
+  # directory, or a FIFO that blocks grep.  A file whose name says that its
+  # contents are compressed, such as an archive or an image, is not examined,
+  # because compressed contents do not hold the pathname as plain text, and
+  # such files are often the largest that the copy made.  The loop moves each
+  # file to examine to the end of the arguments, and shifts off every
+  # original argument.  xargs runs the shell with its standard input from
+  # /dev/null or not at all, so if there is no file to examine, grep does not
+  # wait for input.  `-a` makes grep search a binary file, rather than treat
+  # its NULs as line ends.
+  # shellcheck disable=SC2016 # The shell that xargs runs expands the script.
   warn_old_files="$(cd -- "${BRANCHDIR}" \
     && git ls-files -z --others \
-    | xargs -0 grep -D skip -l -F -e "${TOPLEVEL}/" -- 2> /dev/null)"
+    | LC_ALL=C xargs -0 sh -c '
+      pattern="$1"
+      shift
+      for file; do
+        shift
+        if [ -L "${file}" ]; then
+          if readlink -- "${file}" | grep -q -E -e "${pattern}"; then
+            printf "%s\n" "${file}"
+          fi
+        else
+          case "${file}" in
+            *.7z | *.aar | *.br | *.bz2 | *.ear | *.gif | *.gz | *.jar | *.jpeg \
+              | *.jpg | *.lz | *.lzma | *.mkv | *.mov | *.mp3 | *.mp4 | *.png \
+              | *.rar | *.tbz2 | *.tgz | *.txz | *.war | *.webm | *.webp \
+              | *.whl | *.xz | *.zip | *.zst) ;;
+            *) set -- "$@" "${file}" ;;
+          esac
+        fi
+      done
+      if [ "$#" -gt 0 ]; then
+        grep -a -l -E -e "${pattern}" -- "$@"
+      fi' sh "${warn_old_pattern}" 2> /dev/null)"
   if [ -z "${warn_old_files}" ]; then
     return
   fi
-  echo "${SCRIPT_NAME}: warning: these files in ${BRANCHDIR}, which git does not track, contain the pathname of ${TOPLEVEL}:" >&2
+  if [ "${LOGICAL_TOPLEVEL}" = "${TOPLEVEL}" ]; then
+    warn_old_names="${TOPLEVEL}"
+  else
+    warn_old_names="${LOGICAL_TOPLEVEL} (also ${TOPLEVEL})"
+  fi
+  echo "${SCRIPT_NAME}: warning: these files in ${BRANCHDIR}, which git does not track, contain the pathname of ${warn_old_names} or are symbolic links into it:" >&2
   printf '%s\n' "${warn_old_files}" | head -n 5 | sed 's/^/  /' >&2
   warn_old_count="$(printf '%s\n' "${warn_old_files}" | wc -l | tr -d ' ')"
   if [ "${warn_old_count}" -gt 5 ]; then
     echo "  and $((warn_old_count - 5)) more" >&2
   fi
-  echo "${SCRIPT_NAME}: They are probably build output that still refers to the files in ${TOPLEVEL}, and a build may not recompile them, even after a reconfiguration.  Delete the build output and rebuild, or create the branch directory with --clean." >&2
+  echo "${SCRIPT_NAME}: They are probably build output that still refers to the files in ${TOPLEVEL}, and a build may not recompile them, even after a reconfiguration.  Delete the build output and rebuild." >&2
+  # `--clean` is refused when the current commit has submodules.
+  if ! has_gitlinks HEAD; then
+    echo "${SCRIPT_NAME}: Or remove ${BRANCHDIR} with git-remove-branch-directory, and run \`${SCRIPT_NAME} --clean ${BRANCHNAME}\`, which copies no untracked file and no uncommitted change." >&2
+  fi
 }
 if [ "${MODE}" != 'clean' ]; then
   warn_about_old_pathname

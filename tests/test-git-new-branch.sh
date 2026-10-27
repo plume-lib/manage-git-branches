@@ -891,13 +891,21 @@ done
 
 # The default mode and `--copy` warn about each untracked or ignored file that
 # contains the source's pathname, such as a build output that refers to the
-# source's files; `--clean` copies no such file.  A file that names a sibling
-# directory whose name begins with the source's name does not contain the
-# source's pathname.  A symbolic link to a FIFO does not make the scan block.
+# source's files, or that is a symbolic link into the source; `--clean`
+# copies no such file.  The pathname may end at a "/", a quotation mark, or a
+# NUL, and may be the logical pathname through a symbolic link as well as the
+# physical one.  A file that names a sibling directory whose name begins with
+# the source's name does not contain the source's pathname.  A symbolic link
+# to a FIFO does not make the scan block.  A file whose name says that its
+# contents are compressed is not examined; this one is not compressed, so
+# that examining it would name it.
 stale_parent="${tmpdir}/stale"
 mkdir -p "${stale_parent}" || exit 1
 stale_parent="$(CDPATH='' cd -- "${stale_parent}" && pwd -P)" || exit 1
+stale_link="${tmpdir}/stale-link"
+ln -s "${stale_parent}" "${stale_link}" || exit 1
 stale="${stale_parent}/stale-branch-main"
+stale_logical="${stale_link}/stale-branch-main"
 make_repo "${stale}" || exit 1
 printf 'build/\n' > "${stale}/.gitignore"
 git -C "${stale}" add .gitignore
@@ -905,24 +913,37 @@ git -C "${stale}" commit -q -m 'Ignore build output'
 stale_top="$(git -C "${stale}" rev-parse --show-toplevel)"
 mkdir "${stale}/build"
 printf 'launcher\000%s/inst/libexec\000' "${stale_top}" > "${stale}/build/launcher"
-printf '%s-other/file\n' "${stale_top}" > "${stale}/sibling.txt"
+printf 'prefix\000%s\000' "${stale_top}" > "${stale}/build/prefix.bin"
+printf '#define PREFIX "%s"\n' "${stale_top}" > "${stale}/build/config.h"
+printf 'SRCDIR = %s/src\n' "${stale_logical}" > "${stale}/build/Makefile"
+ln -s "${stale_top}/build" "${stale}/build/current" || exit 1
+printf '%s-other/file %s.bak/file\n' "${stale_top}" "${stale_top}" > "${stale}/sibling.txt"
+printf '%s/lib\n' "${stale_top}" > "${stale}/build/library.jar"
 mkfifo "${stale}/build/fifo" || exit 1
 ln -s fifo "${stale}/build/fifo-link" || exit 1
 for mode in '' --copy; do
   branch="stale${mode#--}"
-  if ! out="$(cd "${stale}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+  if ! out="$(cd "${stale_logical}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
     fail "nonzero exit status for ${mode:-the default mode} with build output: ${out}"
   fi
   case "${out}" in
-    *"warning: these files in ${stale_parent}/stale-branch-${branch}, which git does not track, contain the pathname of ${stale_top}:"*) ;;
+    *"warning: these files in ${stale_parent}/stale-branch-${branch}, which git does not track, contain the pathname of ${stale_logical} (also ${stale_top}) or are symbolic links into it:"*) ;;
     *) fail "${mode:-the default mode} did not warn about build output that contains the source's pathname: ${out}" ;;
   esac
+  for stale_file in build/launcher build/prefix.bin build/config.h build/Makefile build/current; do
+    case "${out}" in
+      *"  ${stale_file}
+"*) ;;
+      *) fail "${mode:-the default mode} did not name ${stale_file}: ${out}" ;;
+    esac
+  done
   case "${out}" in
-    *"  build/launcher"*) ;;
-    *) fail "${mode:-the default mode} did not name build/launcher: ${out}" ;;
+    *"sibling.txt"* | *"fifo"*) fail "${mode:-the default mode} named a file that does not refer to the source: ${out}" ;;
+    *"library.jar"*) fail "${mode:-the default mode} examined a file whose name says that it is compressed: ${out}" ;;
   esac
   case "${out}" in
-    *"sibling.txt"*) fail "${mode:-the default mode} named a file that contains only a sibling's pathname: ${out}" ;;
+    *"Or remove ${stale_parent}/stale-branch-${branch} with git-remove-branch-directory, and run \`git-new-branch --clean ${branch}\`"*) ;;
+    *) fail "${mode:-the default mode} did not suggest --clean: ${out}" ;;
   esac
 done
 if ! out="$(cd "${stale}" && "${GIT_NEW_BRANCH}" --clean staleclean 2>&1)"; then

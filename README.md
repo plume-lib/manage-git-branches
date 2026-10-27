@@ -52,7 +52,7 @@ The commands are:
   the current directory's files by their absolute pathnames, and a build in
   the new directory may not recompile it; this command warns about each file
   that git does not track and that contains the current directory's
-  pathname.
+  pathname or is a symbolic link into the current directory.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
