@@ -630,48 +630,50 @@ warn_about_old_pathname() {
   # with a character other than a letter, digit, "-", "_", or ".", such as
   # "/", a quotation mark, or a NUL.  So a sibling directory whose name
   # begins with the same characters, such as ${BRANCHDIR} itself, does not
-  # match.
-  warn_old_pattern="$(printf '%s\n' "${TOPLEVEL}" | sed 's/[][\\.*^$+?(){}|]/\\&/g')"
-  if [ "${LOGICAL_TOPLEVEL}" != "${TOPLEVEL}" ]; then
-    warn_old_pattern="${warn_old_pattern}|$(printf '%s\n' "${LOGICAL_TOPLEVEL}" | sed 's/[][\\.*^$+?(){}|]/\\&/g')"
-  fi
+  # match.  When ${LOGICAL_TOPLEVEL} is ${TOPLEVEL}, the pattern names the
+  # same pathname twice, which is harmless.
+  warn_old_pattern=''
+  for warn_old_top in "${TOPLEVEL}" "${LOGICAL_TOPLEVEL}"; do
+    warn_old_pattern="${warn_old_pattern:+${warn_old_pattern}|}$(printf '%s\n' "${warn_old_top}" | sed 's/[][\\.*^$+?(){}|]/\\&/g')"
+  done
   warn_old_pattern="(${warn_old_pattern})([^-_.A-Za-z0-9]|\$)"
-  # A symbolic link is examined by its target's pathname.  grep would follow
-  # it instead, and read the target, which may be a file in ${TOPLEVEL}, a
-  # directory, or a FIFO that blocks grep.  A file whose name says that its
-  # contents are compressed, such as an archive or an image, is not examined,
-  # because compressed contents do not hold the pathname as plain text, and
-  # such files are often the largest that the copy made.  The loop moves each
-  # file to examine to the end of the arguments, and shifts off every
-  # original argument.  xargs runs the shell with its standard input from
-  # /dev/null or not at all, so if there is no file to examine, grep does not
-  # wait for input.  `-a` makes grep search a binary file, rather than treat
-  # its NULs as line ends.
-  # shellcheck disable=SC2016 # The shell that xargs runs expands the script.
-  warn_old_files="$(cd -- "${BRANCHDIR}" \
-    && git ls-files -z --others \
-    | LC_ALL=C xargs -0 sh -c '
-      pattern="$1"
-      shift
-      for file; do
+  # The first pass examines each symbolic link by its target's pathname.
+  # grep would follow it instead, and read the target, which may be a file in
+  # ${TOPLEVEL}, a directory, or a FIFO that blocks grep.  The second pass
+  # examines the contents of every other file, except one whose name says
+  # that its contents are compressed, such as an archive or an image:
+  # compressed contents do not hold the pathname as plain text, and such files
+  # are often the largest that the copy made.  xargs runs grep with its
+  # standard input from /dev/null or not at all, so if there is no file to
+  # examine, grep does not wait for input.
+  # shellcheck disable=SC2016 # The shells that xargs runs expand the scripts.
+  warn_old_files="$(
+    exec 2> /dev/null
+    cd -- "${BRANCHDIR}" || exit
+    git ls-files -z --others \
+      | LC_ALL=C xargs -0 sh -c '
+        pattern="$1"
         shift
-        if [ -L "${file}" ]; then
-          if readlink -- "${file}" | grep -q -E -e "${pattern}"; then
+        for file; do
+          if [ -L "${file}" ] && readlink -- "${file}" | grep -q -E -e "${pattern}"; then
             printf "%s\n" "${file}"
           fi
-        else
-          case "${file}" in
-            *.7z | *.aar | *.br | *.bz2 | *.ear | *.gif | *.gz | *.jar | *.jpeg \
-              | *.jpg | *.lz | *.lzma | *.mkv | *.mov | *.mp3 | *.mp4 | *.png \
-              | *.rar | *.tbz2 | *.tgz | *.txz | *.war | *.webm | *.webp \
-              | *.whl | *.xz | *.zip | *.zst) ;;
-            *) set -- "$@" "${file}" ;;
-          esac
-        fi
-      done
-      if [ "$#" -gt 0 ]; then
-        grep -a -l -E -e "${pattern}" -- "$@"
-      fi' sh "${warn_old_pattern}" 2> /dev/null)"
+        done' sh "${warn_old_pattern}"
+    git ls-files -z --others \
+      | xargs -0 sh -c '
+        for file; do
+          if [ ! -L "${file}" ]; then
+            case "${file}" in
+              *.7z | *.aar | *.br | *.bz2 | *.ear | *.gif | *.gz | *.jar | *.jpeg \
+                | *.jpg | *.lz | *.lzma | *.mkv | *.mov | *.mp3 | *.mp4 | *.png \
+                | *.rar | *.tbz2 | *.tgz | *.txz | *.war | *.webm | *.webp \
+                | *.whl | *.xz | *.zip | *.zst) ;;
+              *) printf "%s\000" "${file}" ;;
+            esac
+          fi
+        done' sh \
+      | LC_ALL=C xargs -0 grep -l -E -e "${warn_old_pattern}" --
+  )"
   if [ -z "${warn_old_files}" ]; then
     return
   fi
