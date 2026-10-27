@@ -21,6 +21,14 @@
 #    directory, `.git` included, so it is an independent clone that shares
 #    nothing with the current repository.
 #
+# The default mode and `--copy` copy build output, which may contain the
+# current directory's pathname and so still refer to the current directory's
+# files.  For example, a program into which the build compiled the pathname of
+# its installation directory runs the files installed in the current
+# directory, and a build in the new directory may not recompile it, even after
+# a reconfiguration.  These modes warn about each file that git does not track
+# and that contains the current directory's pathname.
+#
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
 # `.claude/worktrees/`, because its copy would share that worktree's HEAD and
@@ -593,5 +601,37 @@ esac
 WORKTREE_TO_CLEAN=""
 WORKTREE_GITDIR_TO_CLEAN=""
 BRANCH_TO_CLEAN=""
+
+# Usage: warn_about_old_pathname
+# Warns about each file in ${BRANCHDIR} that git does not track and that
+# contains the pathname of ${TOPLEVEL}.  Such a file is usually build output
+# that still refers to the files in ${TOPLEVEL} rather than to their copies,
+# such as a program into which the build compiled the pathname of its
+# installation directory.  A build in ${BRANCHDIR} may not recompile it, even
+# after a reconfiguration, because build tools rarely notice a changed
+# pathname.  Tracked files are not examined, because they are not build
+# output.
+warn_about_old_pathname() {
+  # The trailing "/" keeps a sibling directory whose name begins with the
+  # same characters, such as ${BRANCHDIR} itself, from matching.  xargs runs
+  # grep with its standard input from /dev/null or not at all, so if there is
+  # no file to examine, grep does not wait for input.
+  warn_old_files="$(cd -- "${BRANCHDIR}" \
+    && git ls-files -z --others \
+    | xargs -0 grep -l -F -e "${TOPLEVEL}/" -- 2> /dev/null)"
+  if [ -z "${warn_old_files}" ]; then
+    return
+  fi
+  echo "${SCRIPT_NAME}: warning: these files in ${BRANCHDIR}, which git does not track, contain the pathname of ${TOPLEVEL}:" >&2
+  printf '%s\n' "${warn_old_files}" | head -n 5 | sed 's/^/  /' >&2
+  warn_old_count="$(printf '%s\n' "${warn_old_files}" | wc -l | tr -d ' ')"
+  if [ "${warn_old_count}" -gt 5 ]; then
+    echo "  and $((warn_old_count - 5)) more" >&2
+  fi
+  echo "${SCRIPT_NAME}: They are probably build output that still refers to the files in ${TOPLEVEL}, and a build may not recompile them, even after a reconfiguration.  Delete the build output and rebuild, or create the branch directory with --clean." >&2
+}
+if [ "${MODE}" != 'clean' ]; then
+  warn_about_old_pathname
+fi
 
 echo "Success: created ${BRANCHDIR}"
