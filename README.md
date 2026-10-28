@@ -16,7 +16,8 @@ The key principles of this work style are:
    That is, never run `git checkout`, and never run `git stash`.
 3. To create a new branch, run the command `gnb` or `git-new-branch`.  It
    creates a new directory holding a new branch that starts as a copy of
-   the branch from which you ran `gnb`.
+   the branch from which you ran `gnb`, with the upstream repository's
+   latest default branch merged in if that merge has no conflicts.
 4. To check out an existing branch, run `gcb` or `git-checkout-branch`.
    It creates a new directory and checks out the branch there.
 
@@ -40,7 +41,13 @@ The commands are:
   Creates and checks out the given branch of the repository in a new working
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
-  new branch.
+  new branch, and it does not build.
+  The new branch starts at the current commit, after a `git pull`.  This
+  command also fetches the upstream repository, chosen as `git-pull-upstream`
+  chooses it, and merges its default branch into the new branch if that merge
+  has no conflicts and does not touch the uncommitted changes that the new
+  directory carries; otherwise, it warns, and the new branch stays at the
+  current commit.  The current branch is not changed, beyond the `git pull`.
   By default, the new directory is a worktree (see
   [below](#worktrees)) that shares the repository, and its contents are the
   same as the current directory's, including uncommitted changes and
@@ -53,6 +60,7 @@ The commands are:
   the new directory may not recompile it; this command warns about each file
   that git does not track and that contains the current directory's
   pathname or is a symbolic link into the current directory.
+  `git-new-branch --help` prints a synopsis.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:

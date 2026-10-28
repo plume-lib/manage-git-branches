@@ -448,6 +448,26 @@ case "${out}" in
   *"unrecognized option"*) fail "-- did not end the options: ${out}" ;;
 esac
 check_nothing_left "${modes}" -dash "a branch name that begins with -"
+# `--help` and `-h` print the synopsis at the top of the script, to standard
+# output, and exit 0, even with a branch name; they create nothing.  The
+# synopsis ends before the details, with no blank line.
+for help_option in --help -h; do
+  if ! out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" "${help_option}" helped 2> /dev/null)"; then
+    fail "nonzero exit status for ${help_option}"
+  fi
+  case "${out}" in
+    "Creates a new branch of the current repository"*"git-new-branch [--clean | --copy] NEWBRANCHNAME"*"does not build.") ;;
+    *) fail "unexpected output for ${help_option}: ${out}" ;;
+  esac
+  case "${out}" in
+    *"#"* | *"Details:"*) fail "the output of ${help_option} is not just the synopsis: ${out}" ;;
+  esac
+  # Command substitution drops trailing newlines, so ask for the last line.
+  if [ -z "$(cd "${modes}" && "${GIT_NEW_BRANCH}" "${help_option}" | tail -n 1)" ]; then
+    fail "the output of ${help_option} ends with a blank line"
+  fi
+  check_nothing_left "${modes}" helped "${help_option}"
+done
 
 # A source that holds every kind of local change:  a staged change, an
 # unstaged change, an uncommitted deletion of a tracked file, an untracked
