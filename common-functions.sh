@@ -868,21 +868,6 @@ upstream_default_branch_git() {
   fi
 }
 
-## Usage: compose_merge_message DIRECTORY COMMIT DESCRIPTION
-## Prints the message that `git merge` in the working tree DIRECTORY would
-## write for a merge of COMMIT into the branch that DIRECTORY has checked out.
-## DESCRIPTION is what `git fmt-merge-msg` says that COMMIT is, such as
-## "branch 'feature'" or "remote-tracking branch 'upstream/master'".
-##
-## Git composes the message, as it does for `git merge`, rather than this
-## function composing it by hand.  Git then writes the "into BRANCH" suffix,
-## which it omits on the default branch, and the commit summaries that
-## `merge.log` turns on.  Saying that COMMIT came from ".", the local
-## repository, keeps git from appending " of SOURCE" to the message.
-compose_merge_message() {
-  printf '%s\t\t%s of .\n' "$2" "$3" | git -C "$1" fmt-merge-msg
-}
-
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
@@ -892,7 +877,16 @@ compose_merge_message() {
 ## diagnostics.  Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
-  if ! merge_message="$(compose_merge_message . "$1" "$2")"; then
+  # Let git compose the message, as it does for `git merge`, rather than
+  # composing it by hand.  Git then writes the "into BRANCH" suffix, which it
+  # omits on the default branch, and the commit summaries that `merge.log`
+  # turns on.  Saying that COMMIT came from ".", the local repository, keeps
+  # git from appending " of SOURCE" to the message.  `git fmt-merge-msg` also
+  # writes comment lines, such as "# By AUTHOR", that `git merge` keeps in a
+  # message given with `-m`, so they are removed.
+  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" | git fmt-merge-msg)" \
+    || ! merge_message="$(printf '%s\n' "${merge_message}" \
+      | git stripspace --strip-comments)"; then
     echo "${SCRIPT_NAME}: cannot compose a merge message for $3" >&2
     return 1
   fi

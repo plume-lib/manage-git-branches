@@ -95,6 +95,30 @@ else
   fi
 fi
 
+# With `merge.log` set, the merge message has the commit summaries that
+# `git merge` writes, but not the comment lines, such as "# By AUTHOR", that
+# `git fmt-merge-msg` adds when someone other than the user wrote a commit.
+printf 'a3\n' > "${canonical_work}/a.txt"
+git -C "${canonical_work}" add a.txt
+git -C "${canonical_work}" commit -q -m 'Change a.txt again' \
+  --author='Another Author <another@example.com>'
+git -C "${canonical_work}" push -q origin trunk
+git -C "${fork}" config merge.log true
+if ! pull_upstream "${fork}"; then
+  fail "merge.log: failed: $(cat "${testdir}/errors")"
+else
+  message="$(git -C "${fork}" log -1 --format=%B)"
+  case "${message}" in
+    *'
+#'*) fail "merge.log: the merge message has comment lines: ${message}" ;;
+  esac
+  case "${message}" in
+    *"* upstream/trunk:"*) ;;
+    *) fail "merge.log: the merge message lacks the commit summaries: ${message}" ;;
+  esac
+fi
+git -C "${fork}" config --unset merge.log
+
 # The current branch is pulled from its own upstream branch first.
 other="${testdir}/other"
 git clone -q -b feature "${fork_remote}" "${other}"

@@ -8,10 +8,12 @@
 #   git-new-branch --help
 #
 # The new branch starts at the current commit, after a `git pull` of the
-# current branch.  The upstream repository's default branch, such as
-# `upstream/master`, is then merged into the new branch if that merge has no
-# conflicts; otherwise, the new branch stays at the current commit, with a
-# warning.  The current branch is not changed, beyond the `git pull`.
+# current branch.  If the current branch has the name of the upstream
+# repository's default branch, and that default branch is a fast-forward of
+# the current commit, as for a fork's `master` that lags behind
+# `upstream/master`, then the new branch starts at the default branch's latest
+# commit instead.  The new branch is never a merge.  The current branch is not
+# changed, beyond the `git pull`.
 #
 # The new directory is:
 #   (default)  a worktree with the current directory's contents, including
@@ -40,15 +42,18 @@
 # The upstream repository is the remote that `git-pull-upstream` merges from:
 # the remote named `upstream` if there is one, as in a fork, then `origin`,
 # then the clone's only remote if it has exactly one.  This command fetches it
-# and updates `REMOTE/HEAD`, which names its default branch.  A clone that
-# cannot fetch it, as without network access, gets a warning, and the new
-# branch stays at the current commit.  The merge is made in the new directory
-# only, and only after `git merge-tree` has shown that it has no conflicts,
-# which requires git 2.38 or later unless the merge is a fast-forward.  The
-# uncommitted changes that the default mode and `--copy` carry into the new
-# directory are kept:  if the merge would change a file that has such a
-# change, or would overwrite an untracked file, the merge is not made, with a
-# warning.  As `git merge` does, the merge overwrites an ignored file that the
+# and updates `REMOTE/HEAD`, which names its default branch, unless
+# `REMOTE/HEAD` already names a branch of another name than the current
+# branch.  A clone that cannot fetch it, as without network access, gets a
+# warning, and the new branch starts at the current commit.  A current branch
+# of another name, such as a release branch or a pull request's branch, or
+# one with commits that the default branch lacks, as in a downstream fork,
+# leaves the new branch at the current commit, with no message.  The
+# fast-forward is made in the new directory only.  The uncommitted changes
+# that the default mode and `--copy` carry into the new directory are kept:
+# if the fast-forward would change a file that has such a change, or would
+# overwrite an untracked file, it is not made, with a warning.  As
+# `git merge` does, the fast-forward overwrites an ignored file that the
 # upstream repository has started to track; the current directory still holds
 # the original.
 #
@@ -428,41 +433,60 @@ if ! PULL_OUTPUT="$(git_batch_ssh . pull -q 2>&1)"; then
   echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
 fi
 
-# Fetch the upstream repository and update `REMOTE/HEAD`, which names its
-# default branch, so that the new branch can include that branch's latest
-# commits.  The upstream repository is chosen, and fetched, as
-# `git-pull-upstream` does.  The merge itself waits until the new directory
-# exists; see `merge_upstream` below.  Nothing here changes this working tree
-# or its branch.
+# Usage: find_upstream_commit
+# Sets ${UPSTREAM_COMMIT} to the commit at which the new branch starts instead
+# of the current commit, or to the empty string if there is none.  That
+# commit is the latest commit of the upstream repository's default branch,
+# if the current branch has the same name as that default branch and that
+# commit is a fast-forward of the current commit, as for a fork's `master`
+# that lags behind `upstream/master`.  Also sets ${UPSTREAM_REF} and
+# ${UPSTREAM_NAME} to the remote-tracking branch, such as
+# `refs/remotes/upstream/master` and "upstream/master".
 #
-# ${UPSTREAM_COMMIT} is the commit to merge into the new branch, or empty if
-# there is none:  if this clone has no remote, if the fetch fails, or if the
-# current commit already contains the default branch, as it does whenever the
-# current branch is that default branch and the pull succeeded.  A clone with
-# no remote has no upstream repository to report on, and its failed pull has
-# already been reported.  Any other failure is not fatal either, for the same
-# reasons that a failed pull is not, but it is reported:  the new branch will
-# lack upstream commits that it might have had.
+# This fetches the upstream repository and updates `REMOTE/HEAD`, which names
+# its default branch.  The upstream repository is chosen, and fetched, as
+# `git-pull-upstream` does.  A `REMOTE/HEAD` that names a branch of another
+# name than the current branch, as for a release branch or a pull request's
+# branch, makes the fetch unnecessary.  Nothing here changes this working
+# tree or its branch.
+#
+# A clone with no remote has no upstream repository to report on, and its
+# failed pull has already been reported.  Any other failure is not fatal
+# either, for the same reasons that a failed pull is not, but it is reported:
+# the new branch will lack upstream commits that it might have had.
 #
 # `git_batch_ssh` disables the interactive prompts, as for the pull above.
 # The upstream repository may be another remote than the one that the pull
 # contacted, so a prompt here is possible even if the pull issued none.
-UPSTREAM_COMMIT=''
-if [ -n "$(git remote)" ]; then
-  if UPSTREAM_REMOTE="$(upstream_remote)" \
-    && UPSTREAM_REF="$(upstream_default_branch "${UPSTREAM_REMOTE}" 1 1)" \
-    && UPSTREAM_COMMIT="$(git rev-parse --verify --quiet "${UPSTREAM_REF}^{commit}")"; then
-    # The name that `git merge` would give the default branch in its message,
-    # such as "upstream/master".
-    UPSTREAM_NAME="${UPSTREAM_REF#refs/remotes/}"
-    if git merge-base --is-ancestor "${UPSTREAM_COMMIT}" HEAD; then
-      UPSTREAM_COMMIT=''
-    fi
-  else
-    UPSTREAM_COMMIT=''
-    echo "${SCRIPT_NAME}: warning: cannot fetch the upstream repository's default branch, so the new branch will not include its latest commits; continuing." >&2
+find_upstream_commit() {
+  UPSTREAM_COMMIT=''
+  if ! fuc_branch="$(git symbolic-ref --quiet --short HEAD)" \
+    || [ -z "$(git remote)" ]; then
+    return
   fi
-fi
+  fuc_warning="${SCRIPT_NAME}: warning: cannot fetch the upstream repository's default branch, so the new branch cannot start at its latest commit; continuing."
+  if ! UPSTREAM_REMOTE="$(upstream_remote)"; then
+    echo "${fuc_warning}" >&2
+    return
+  fi
+  fuc_same_name="refs/remotes/${UPSTREAM_REMOTE}/${fuc_branch}"
+  fuc_known="$(git symbolic-ref --quiet "refs/remotes/${UPSTREAM_REMOTE}/HEAD")"
+  if [ -n "${fuc_known}" ] && [ "${fuc_known}" != "${fuc_same_name}" ]; then
+    return
+  fi
+  if ! UPSTREAM_REF="$(upstream_default_branch "${UPSTREAM_REMOTE}" 1 1)" \
+    || ! fuc_commit="$(git rev-parse --verify --quiet "${UPSTREAM_REF}^{commit}")"; then
+    echo "${fuc_warning}" >&2
+    return
+  fi
+  if [ "${UPSTREAM_REF}" = "${fuc_same_name}" ] \
+    && [ "${fuc_commit}" != "$(git rev-parse HEAD)" ] \
+    && git merge-base --is-ancestor HEAD "${fuc_commit}"; then
+    UPSTREAM_COMMIT="${fuc_commit}"
+    UPSTREAM_NAME="${UPSTREAM_REF#refs/remotes/}"
+  fi
+}
+find_upstream_commit
 
 # The pull may have brought in a submodule.  If it switched the mode to the
 # copy, the copy's own test of `.git` applies.  The sparse-checkout test above
@@ -491,14 +515,14 @@ if [ -n "${WORKTREE_HOST}" ]; then
     WORKTREE_HOST=''
   fi
 fi
-# The merge into the new branch happens in the new worktree, so it needs the
-# upstream commit in ${WORKTREE_HOST} as well.  The fetch above updated only
-# this repository's remote-tracking branches, so ${WORKTREE_HOST} may lack the
-# commit even if it has a remote of the same name.  A failure to copy it costs
-# only the merge, not the choice of ${WORKTREE_HOST}.
+# The fast-forward of the new branch happens in the new worktree, so it needs
+# the upstream commit in ${WORKTREE_HOST} as well.  The fetch above updated
+# only this repository's remote-tracking branches, so ${WORKTREE_HOST} may lack
+# the commit even if it has a remote of the same name.  A failure to copy it
+# costs only the fast-forward, not the choice of ${WORKTREE_HOST}.
 if [ -n "${WORKTREE_HOST}" ] && [ -n "${UPSTREAM_COMMIT}" ] \
   && ! copy_objects_to "${WORKTREE_HOST}" "${UPSTREAM_REF}"; then
-  echo "${SCRIPT_NAME}: so the new branch will not include ${UPSTREAM_NAME}" >&2
+  echo "${SCRIPT_NAME}: so the new branch will not start at ${UPSTREAM_NAME}" >&2
   UPSTREAM_COMMIT=''
 fi
 
@@ -719,91 +743,52 @@ WORKTREE_TO_CLEAN=""
 WORKTREE_GITDIR_TO_CLEAN=""
 BRANCH_TO_CLEAN=""
 
-# Usage: merge_upstream
-# Merges ${UPSTREAM_COMMIT}, the upstream repository's default branch, into
-# the new branch in ${BRANCHDIR}, if the merge has no conflicts and leaves the
-# new directory's uncommitted changes intact.  Otherwise, prints a warning and
-# leaves the new branch at the current commit.  Every failure is reported but
-# not fatal, because the new branch is usable without the merge.
+# Usage: fast_forward_upstream
+# Moves the new branch in ${BRANCHDIR} from the current commit to
+# ${UPSTREAM_COMMIT}, the upstream repository's default branch, if that leaves
+# the new directory's uncommitted changes intact.  Otherwise, prints a warning
+# and leaves the new branch at the current commit.  Every failure is reported
+# but not fatal, because the new branch is usable at the current commit.
 #
-# The merge is decided before any working tree is touched.  `git merge-tree`
-# computes the merged tree without a working tree or an index, and says
-# whether the merge has conflicts; the merge commit is then made from that
-# tree, as `git merge` would make it.  A merge whose result is the upstream
-# commit itself, because the new branch has no commits that upstream lacks, is
-# a fast-forward, as `git merge` would make it, and needs neither.
-#
-# The new branch is then moved to the merge commit by `git read-tree -m -u`,
-# which is what a fast-forward or `git checkout` does to the index and the
-# working tree:  it carries every local change forward, and it refuses, before
-# changing anything, if the merge changes a file that has a staged or an
-# unstaged change, or if it would overwrite an untracked file.  `git merge`
-# is not used, because it refuses whenever the index differs from HEAD, even
-# for a staged change that the merge does not touch, and because
+# `git read-tree -m -u` does to the index and the working tree what a
+# fast-forward or `git checkout` does:  it carries every local change
+# forward, and it refuses, before changing anything, if the fast-forward
+# changes a file that has a staged or an unstaged change, or if it would
+# overwrite an untracked file.  `git merge --ff-only` is not used, because
 # configuration can change what it does:  `merge.autoStash` would stash the
 # changes on the stash stack that every worktree shares and reapply them with
-# possible conflicts, and a failing `pre-merge-commit` hook would leave the
-# merge's result uncommitted among the carried changes.  Plumbing commands
-# heed no such configuration.
-merge_upstream() {
-  if ! mu_head="$(git -C "${BRANCHDIR}" rev-parse --verify HEAD)"; then
-    echo "${SCRIPT_NAME}: warning: cannot determine the commit of ${BRANCHDIR}, so ${UPSTREAM_NAME} was not merged into it." >&2
+# possible conflicts.  Plumbing commands heed no such configuration.
+fast_forward_upstream() {
+  if ! ffu_head="$(git -C "${BRANCHDIR}" rev-parse --verify HEAD)"; then
+    echo "${SCRIPT_NAME}: warning: cannot determine the commit of ${BRANCHDIR}, so it was not fast-forwarded to ${UPSTREAM_NAME}." >&2
     return
   fi
-  mu_skipped="${SCRIPT_NAME}: warning: the new branch is based on the current commit of ${TOPLEVEL}; ${UPSTREAM_NAME}, the upstream repository's default branch, was not merged into it"
-  if git -C "${BRANCHDIR}" merge-base --is-ancestor "${mu_head}" "${UPSTREAM_COMMIT}"; then
-    mu_new="${UPSTREAM_COMMIT}"
-  else
-    if ! git_at_least 38; then
-      echo "${mu_skipped}, because testing a merge for conflicts requires git 2.38 or later." >&2
-      return
-    fi
-    # `--no-messages` limits the output to the merged tree, which is all that
-    # a merge with no conflicts prints anyway; for a merge with conflicts,
-    # which exits with status 1, the tree is not wanted.
-    mu_tree="$(git -C "${BRANCHDIR}" merge-tree --write-tree --no-messages \
-      "${mu_head}" "${UPSTREAM_COMMIT}")"
-    mu_status=$?
-    if [ "${mu_status}" -eq 1 ]; then
-      echo "${mu_skipped}, because the merge would have conflicts." >&2
-      return
-    fi
-    if [ "${mu_status}" -ne 0 ] || [ -z "${mu_tree}" ]; then
-      echo "${mu_skipped}, because \`git merge-tree\` failed." >&2
-      return
-    fi
-    # `git commit-tree` heeds no `commit.gpgSign` and runs no hooks, so it
-    # cannot prompt or stop.
-    if ! mu_message="$(compose_merge_message "${BRANCHDIR}" "${UPSTREAM_COMMIT}" \
-      "remote-tracking branch '${UPSTREAM_NAME}'")" \
-      || ! mu_new="$(printf '%s\n' "${mu_message}" \
-        | git -C "${BRANCHDIR}" commit-tree "${mu_tree}" -p "${mu_head}" \
-          -p "${UPSTREAM_COMMIT}" -F -)"; then
-      echo "${mu_skipped}, because the merge commit could not be made." >&2
-      return
-    fi
-  fi
+  ffu_skipped="${SCRIPT_NAME}: warning: the new branch starts at the current commit of ${TOPLEVEL}, not at ${UPSTREAM_NAME}, the upstream repository's default branch"
   # The default mode and `--copy` copied the index, whose recorded file
   # metadata does not match the copied files, if only in their inode numbers.
   # `git read-tree` would take every such file for one with an unstaged
-  # change, so refresh the index first, as `git status` would.
-  git -C "${BRANCHDIR}" update-index -q --refresh > /dev/null
-  if ! git -C "${BRANCHDIR}" read-tree -m -u "${mu_head}" "${mu_new}"; then
-    echo "${mu_skipped}, because the merge would change files that have uncommitted changes in ${BRANCHDIR}, or would overwrite untracked files there." >&2
+  # change, so refresh the index first, as `git status` would.  With `-q`, a
+  # file with an unstaged change is no failure, but a locked index is.
+  if ! git -C "${BRANCHDIR}" update-index -q --refresh > /dev/null; then
+    echo "${ffu_skipped}, because the index of ${BRANCHDIR} could not be refreshed." >&2
     return
   fi
-  if ! git -C "${BRANCHDIR}" update-ref -m "${SCRIPT_NAME}: merge ${UPSTREAM_NAME}" \
-    HEAD "${mu_new}" "${mu_head}"; then
+  if ! git -C "${BRANCHDIR}" read-tree -m -u "${ffu_head}" "${UPSTREAM_COMMIT}"; then
+    echo "${ffu_skipped}, because the fast-forward would change files that have uncommitted changes in ${BRANCHDIR}, or would overwrite untracked files there." >&2
+    return
+  fi
+  if ! git -C "${BRANCHDIR}" update-ref -m "${SCRIPT_NAME}: fast-forward to ${UPSTREAM_NAME}" \
+    HEAD "${UPSTREAM_COMMIT}" "${ffu_head}"; then
     # Undo the change to the index and the working tree, which would
-    # otherwise look like uncommitted changes that revert the merge.
-    git -C "${BRANCHDIR}" read-tree -m -u "${mu_new}" "${mu_head}"
-    echo "${mu_skipped}, because its branch could not be updated." >&2
+    # otherwise look like uncommitted changes that revert the fast-forward.
+    git -C "${BRANCHDIR}" read-tree -m -u "${UPSTREAM_COMMIT}" "${ffu_head}"
+    echo "${ffu_skipped}, because its branch could not be updated." >&2
     return
   fi
-  echo "${SCRIPT_NAME}: merged ${UPSTREAM_NAME}, the upstream repository's default branch, into the new branch." >&2
+  echo "${SCRIPT_NAME}: fast-forwarded the new branch to ${UPSTREAM_NAME}, the upstream repository's default branch." >&2
 }
 if [ -n "${UPSTREAM_COMMIT}" ]; then
-  merge_upstream
+  fast_forward_upstream
 fi
 
 # Usage: warn_about_old_pathname
