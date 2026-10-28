@@ -325,36 +325,38 @@ if [ -e "${BRANCHDIR}" ]; then
 fi
 
 # Usage: repository_key DIRECTORY REMOTE
-# Prints a key for the repository that REMOTE names:  a remote of the clone in
-# DIRECTORY, or a URL or a pathname, which git accepts in place of a remote's
-# name.  Two spellings of one repository's URL, such as
-# `git@github.com:org/proj.git` and `https://github.com/org/proj`, have the
-# same key:  the host and the path, in lower case, without a user, a port, or a
-# trailing "/" or ".git".  The key of a pathname is the physical path of the
-# directory that it names, resolved in DIRECTORY as git resolves it.
-# Prints nothing if git cannot resolve REMOTE.
+# Prints a key for the repository that REMOTE names in DIRECTORY, which is its
+# location (see `remote_location`) with each URL put in one form.  Two
+# spellings of one repository's URL, such as `git@github.com:org/proj.git` and
+# `https://github.com/org/proj`, have the same key:  the host and the path, in
+# lower case, without a user, a port, or a trailing "/" or ".git".  Prints
+# nothing if REMOTE has no location.
 repository_key() {
-  if ! repository_key_url="$(git -C "$1" ls-remote --get-url "$2" 2> /dev/null)"; then
-    return 0
-  fi
-  # As git does, take a string with a ":" before its first "/" to be a URL.
-  case "${repository_key_url%%/*}" in
-    *:*)
-      printf '%s\n' "${repository_key_url}" \
+  repository_key_location="$(remote_location "$1" "$2")"
+  case "${repository_key_location}" in
+    '') ;;
+    # A physical path, or a pathname that is not relative to a directory.
+    /* | '~'*) printf '%s\n' "${repository_key_location}" ;;
+    *)
+      printf '%s\n' "${repository_key_location}" \
         | sed -e 's#^[A-Za-z][A-Za-z0-9+.-]*://##' -e 's#^[^@/]*@##' \
           -e 's#^\([^/:]*\):[0-9]*/#\1/#' -e 's#^\([^/:]*\):#\1/#' \
           -e 's#/*$##' -e 's#\.git$##' \
         | tr '[:upper:]' '[:lower:]'
       ;;
-    *)
-      case "${repository_key_url}" in
-        /*) repository_key_path="${repository_key_url}" ;;
-        *) repository_key_path="$1/${repository_key_url}" ;;
-      esac
-      physical_path "${repository_key_path}" 2> /dev/null \
-        || printf '%s\n' "${repository_key_path}"
-      ;;
   esac
+}
+
+# Usage: is_fork_sibling DIRECTORY KEY SELF
+# Succeeds if DIRECTORY is a clone, other than the one whose physical path is
+# SELF, whose remote "upstream" has the repository key KEY.
+is_fork_sibling() {
+  # Testing for `.git` also rejects a glob pattern that matched nothing, and it
+  # keeps `git -C` from finding a repository that contains DIRECTORY.
+  [ -e "$1/.git" ] \
+    && [ "$(physical_path "$1")" != "$3" ] \
+    && git -C "$1" config --get remote.upstream.url > /dev/null 2>&1 \
+    && [ "$(repository_key "$1" upstream)" = "$2" ]
 }
 
 # Usage: check_not_upstream_clone
@@ -362,10 +364,12 @@ repository_key() {
 # repository whose fork the user has in a sibling directory; see the comment at
 # the top of this file.  The new branch has no configuration of its own, so
 # the repository that it would be pushed to is the one that a branch with no
-# configuration is pushed to.
+# configuration is pushed to.  That repository is judged by the remote's URL,
+# not by a `pushurl` or `pushInsteadOf` setting.
 #
 # Only the fork's main working tree is named, not each of its branch
-# directories, which share its configuration and so would each match too.
+# directories, which share its configuration and so would each match too.  A
+# branch directory is examined only if its fork has no main working tree here.
 check_not_upstream_clone() {
   cnuc_remote="$(push_remote . '')"
   if [ -z "${cnuc_remote}" ]; then
@@ -379,27 +383,25 @@ check_not_upstream_clone() {
   cnuc_project="${cnuc_project%%-fork-*}"
   cnuc_self="$(physical_path .)"
   cnuc_forks=''
-  cnuc_first=''
   for cnuc_sibling in "${PARENTDIR}/${cnuc_project}"-fork-*; do
-    # This also skips the pattern itself, when it matches nothing.  Testing for
-    # `.git` keeps `git -C` from finding a repository that contains
-    # ${PARENTDIR}.
-    if [ ! -e "${cnuc_sibling}/.git" ] \
-      || [ "$(physical_path "${cnuc_sibling}")" = "${cnuc_self}" ] \
-      || ! git -C "${cnuc_sibling}" config --get remote.upstream.url > /dev/null \
-      || [ "$(repository_key "${cnuc_sibling}" upstream)" != "${cnuc_key}" ]; then
-      continue
-    fi
-    cnuc_first="${cnuc_first:-${cnuc_sibling}}"
-    case "$(basename -- "${cnuc_sibling}")" in
-      *-branch-*) ;;
-      *) cnuc_forks="${cnuc_forks}  ${cnuc_sibling}
-" ;;
+    case "${cnuc_sibling##*/}" in
+      *-branch-*) continue ;;
     esac
-  done
-  if [ -z "${cnuc_forks}" ] && [ -n "${cnuc_first}" ]; then
-    cnuc_forks="  ${cnuc_first}
+    if is_fork_sibling "${cnuc_sibling}" "${cnuc_key}" "${cnuc_self}"; then
+      cnuc_forks="${cnuc_forks}  ${cnuc_sibling}
 "
+    fi
+  done
+  if [ -z "${cnuc_forks}" ]; then
+    for cnuc_sibling in "${PARENTDIR}/${cnuc_project}"-fork-*-branch-*; do
+      cnuc_name="${cnuc_sibling##*/}"
+      if [ ! -e "${PARENTDIR}/${cnuc_name%%-branch-*}/.git" ] \
+        && is_fork_sibling "${cnuc_sibling}" "${cnuc_key}" "${cnuc_self}"; then
+        cnuc_forks="  ${cnuc_sibling}
+"
+        break
+      fi
+    done
   fi
   if [ -z "${cnuc_forks}" ]; then
     return 0

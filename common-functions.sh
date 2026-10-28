@@ -1257,6 +1257,56 @@ is_deleted_branch_was_pushed() {
   return "${is_deleted_branch_was_pushed_result}"
 }
 
+## Usage: remote_location DIRECTORY REMOTE
+## Prints the location of the repository that REMOTE names in DIRECTORY.
+## REMOTE is a remote of the clone in DIRECTORY, or a URL or a pathname, which
+## git accepts in place of a remote's name.  The location is the URL that
+## REMOTE resolves to or, for a pathname, the physical path of the directory
+## that it names.  `git ls-remote --get-url` resolves REMOTE, applying
+## `url.*.insteadOf` rewriting as a query would.
+##
+## A pathname is resolved in DIRECTORY, as git resolves it, so two directories
+## that both say "../upstream.git" do not name one repository.  A pathname
+## that begins with "~" is not relative to DIRECTORY, and its location is the
+## pathname itself.
+##
+## Prints nothing if git cannot resolve REMOTE, or if REMOTE resolves to a
+## pathname that names no directory.  Git takes a name that is not a remote's to be a pathname, so this includes
+## a misspelled remote name, unless DIRECTORY contains a directory of that
+## name.
+remote_location() {
+  remote_location_url="$(git -C "$1" ls-remote --get-url "$2" 2> /dev/null)" \
+    || return 0
+  # Git reads a string as a URL if it has a scheme, and as an scp-style URL if
+  # a colon precedes the first slash.  Anything else is a pathname.
+  case "${remote_location_url}" in
+    '') return 0 ;;
+    *://* | '~'*)
+      printf '%s\n' "${remote_location_url}"
+      return 0
+      ;;
+    *:*)
+      case "${remote_location_url%%:*}" in
+        */*) ;;
+        *)
+          printf '%s\n' "${remote_location_url}"
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+  case "${remote_location_url}" in
+    /*) remote_location_path="${remote_location_url}" ;;
+    *) remote_location_path="$1/${remote_location_url}" ;;
+  esac
+  # Unlike the `physical_path` calls in `is_deleted_branch`, which explain the
+  # failure that they let through, this one is expected to fail:  a remote that
+  # names a pathname that no longer exists is an ordinary reason to have no
+  # location.  Discard `cd`'s diagnostic, which would name the pathname with no
+  # hint of what asked about it.
+  physical_path "${remote_location_path}" 2> /dev/null || true
+}
+
 ## The answers that remotes have already given this file, so that one
 ## `git ls-remote --heads` answers for every directory that asks the same
 ## remote the same way.  In this package's workflow, every `REPO-branch-*`
@@ -1279,11 +1329,10 @@ remote_heads_answers=0
 ## can answer for both of them.  Prints nothing if no such key applies, in
 ## which case the caller must ask its own question.
 ##
-## Four things decide it.  One is the URL that REMOTE resolves to, which is
-## what determines whether two queries ask the same repository -- not whether
-## the directories share a repository, and not what they call the remote.
-## `git ls-remote --get-url` resolves it, applying `url.*.insteadOf` rewriting
-## as the query itself would.
+## Four things decide it.  One is the location that REMOTE resolves to (see
+## `remote_location`), which is what determines whether two queries ask the
+## same repository -- not whether the directories share a repository, and not
+## what they call the remote.
 ##
 ## Another is the SSH configuration, because `git_batch_ssh` takes
 ## `core.sshCommand` and `ssh.variant` from the directory it is given:  two
@@ -1310,44 +1359,13 @@ remote_heads_answers=0
 ## values that can repeat, so take the `http.*`, `credential.*` and
 ## `core.gitProxy` configuration whole rather than by name.
 ##
-## A remote given as a pathname is resolved in the directory that names it, so
-## two directories that both say "../upstream.git" do not name one repository.
-## Canonicalize such a pathname.  A pathname that cannot be canonicalized, or
-## a key that contains a newline (which the list of keys could not hold),
-## yields no key at all:  a query that is not shared is always correct, merely
-## slower.
+## A REMOTE that has no location, or a key that contains a newline (which the
+## list of keys could not hold), yields no key at all:  a query that is not
+## shared is always correct, merely slower.
 remote_heads_key() {
-  remote_heads_key_url="$(git -C "$1" ls-remote --get-url "$2" 2> /dev/null)" \
-    || return 0
-  if [ -z "${remote_heads_key_url}" ]; then
-    return 0
-  fi
-  # Git reads a string as a URL if it has a scheme, and as an scp-style URL if
-  # a colon precedes the first slash.  Anything else is a pathname, and "~"
-  # begins one that is not relative to DIRECTORY.  An empty location below
-  # means "a pathname", which the next block canonicalizes.
-  case "${remote_heads_key_url}" in
-    *://* | '~'*) remote_heads_key_location="${remote_heads_key_url}" ;;
-    *:*)
-      case "${remote_heads_key_url%%:*}" in
-        */*) remote_heads_key_location='' ;;
-        *) remote_heads_key_location="${remote_heads_key_url}" ;;
-      esac
-      ;;
-    *) remote_heads_key_location='' ;;
-  esac
+  remote_heads_key_location="$(remote_location "$1" "$2")"
   if [ -z "${remote_heads_key_location}" ]; then
-    case "${remote_heads_key_url}" in
-      /*) remote_heads_key_path="${remote_heads_key_url}" ;;
-      *) remote_heads_key_path="$1/${remote_heads_key_url}" ;;
-    esac
-    # Unlike the `physical_path` calls in `is_deleted_branch`, which explain
-    # the failure that they let through, this one is expected to fail:  a
-    # remote that names a pathname that no longer exists is an ordinary
-    # reason to have no key.  Discard `cd`'s diagnostic, which would name the
-    # pathname with no hint of what asked about it.
-    remote_heads_key_location="$(physical_path "${remote_heads_key_path}" \
-      2> /dev/null)" || return 0
+    return 0
   fi
   remote_heads_key_command="${GIT_SSH_COMMAND:-$(git -C "$1" config --get core.sshCommand || true)}"
   remote_heads_key_variant="${GIT_SSH_VARIANT:-$(git -C "$1" config --get ssh.variant || true)}"

@@ -930,29 +930,52 @@ if [ ! -d "${fork_parent}/proj-fork-me-branch-infork" ]; then
   fail "the branch was not created in the fork"
 fi
 
-# A sibling fork that has no remote "upstream" says nothing about this clone.
+# A sibling fork that has no remote "upstream" says nothing about this clone,
+# and neither does a sibling whose repository git cannot find.
 nofork_parent="${tmpdir}/noforks"
 mkdir "${nofork_parent}"
 git clone -q "${tmpdir}/proj.git" "${nofork_parent}/proj"
 git clone -q "${tmpdir}/proj-fork.git" "${nofork_parent}/proj-fork-me"
+mkdir "${nofork_parent}/proj-fork-me-branch-stale"
+echo "gitdir: ${tmpdir}/no-such-gitdir" > "${nofork_parent}/proj-fork-me-branch-stale/.git"
 if ! out="$(cd "${nofork_parent}/proj" && "${GIT_NEW_BRANCH}" --clean nofork 2>&1)"; then
   fail "nonzero exit status beside a fork that has no remote upstream: ${out}"
 fi
+case "${out}" in
+  *fatal:*) fail "diagnostic about a sibling whose repository git cannot find: ${out}" ;;
+esac
 
 # Two spellings of one repository's URL are the same repository.  The refusal
 # precedes every query to a remote, so these URLs are never contacted.
 url_parent="${tmpdir}/urls"
 mkdir "${url_parent}"
 git clone -q "${tmpdir}/proj.git" "${url_parent}/proj"
-git -C "${url_parent}/proj" remote set-url origin git@github.com:Some-Org/proj.git
+git -C "${url_parent}/proj" remote set-url origin git@example.invalid:Some-Org/proj.git
 git clone -q "${tmpdir}/proj-fork.git" "${url_parent}/proj-fork-me"
-git -C "${url_parent}/proj-fork-me" remote add upstream https://github.com/some-org/proj/
+git -C "${url_parent}/proj-fork-me" remote add upstream https://example.invalid/some-org/proj/
 if out="$(cd "${url_parent}/proj" && "${GIT_NEW_BRANCH}" --clean spelled 2>&1)"; then
   fail "zero exit status for an upstream repository spelled differently by the fork"
 fi
 case "${out}" in
-  *"git-new-branch: ERROR: the new branch would be pushed to origin (git@github.com:Some-Org/proj.git)"*) ;;
+  *"git-new-branch: ERROR: the new branch would be pushed to origin (git@example.invalid:Some-Org/proj.git)"*) ;;
   *) fail "unexpected message for an upstream repository spelled differently by the fork: ${out}" ;;
+esac
+
+# A pathname that begins with "~" names one repository in every directory.
+tilde_parent="${tmpdir}/tilde"
+mkdir "${tilde_parent}"
+git clone -q "${tmpdir}/proj.git" "${tilde_parent}/proj"
+# shellcheck disable=SC2088 # Git, not the shell, interprets the "~".
+git -C "${tilde_parent}/proj" remote set-url origin '~/no-such-dir/proj.git'
+git clone -q "${tmpdir}/proj-fork.git" "${tilde_parent}/proj-fork-me"
+# shellcheck disable=SC2088 # Git, not the shell, interprets the "~".
+git -C "${tilde_parent}/proj-fork-me" remote add upstream '~/no-such-dir/proj.git'
+if out="$(cd "${tilde_parent}/proj" && "${GIT_NEW_BRANCH}" --clean tilde 2>&1)"; then
+  fail "zero exit status for an upstream repository named by a pathname that begins with ~"
+fi
+case "${out}" in
+  *"git-new-branch: ERROR: the new branch would be pushed to origin (~/no-such-dir/proj.git)"*) ;;
+  *) fail "unexpected message for an upstream repository named by a pathname that begins with ~: ${out}" ;;
 esac
 
 # The wrong number of arguments is an error.
