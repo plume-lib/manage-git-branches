@@ -30,11 +30,11 @@
 # reconfiguration.  These modes warn about each file that git does not track,
 # including such a file in a submodule, and that contains the current
 # directory's pathname or is a symbolic link into the current directory.  They
-# delete such a file instead if git ignores it and it is in a `build/`
-# directory or in Gradle's `.gradle/` directory, at any depth, unless git also
+# delete such a file instead if it is in a `build/` directory or in Gradle's
+# `.gradle/` directory, at any depth, that git ignores, unless git also
 # ignores the directory that contains that `build/` or `.gradle/` directory,
-# such as a dependency's directory in `node_modules/`, and they say how many
-# files they deleted.
+# such as a dependency's directory in `node_modules/`, or that directory is a
+# submodule, and they say how many files they deleted.
 #
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
@@ -634,13 +634,16 @@ check_ignore() {
 
 # Usage: delete_stale_build_output OLD_NAMES
 # Reads pathnames relative to ${BRANCHDIR}, one per line, from standard input.
-# Deletes each file that git ignores and that is in a `build/` directory or in
-# Gradle's `.gradle/` directory, whether at the top level, in a subproject,
-# or in a submodule.  A build of the project recreates such a file.  The file
-# is not deleted if git also ignores the directory that contains the `build/`
-# or `.gradle/` directory, such as a dependency's directory in
-# `node_modules/`, because no build of the project recreates it.  Prints each
-# other pathname, and each one that cannot be deleted.  Says on standard error
+# Deletes each file in a `build/` directory or in Gradle's `.gradle/`
+# directory that git ignores, whether at the top level, in a subproject, or in
+# a submodule.  A build of the project recreates such a file.  No file is
+# deleted from such a directory that git does not ignore, because the
+# directory may hold hand-written files, such as local configuration; nor
+# from one in a directory that git also ignores, such as a dependency's
+# directory in `node_modules/`, because no build of the project recreates
+# it; nor from one that is a submodule, whose files are not in a `build/` or
+# `.gradle/` directory of their own repository.  Prints each other pathname,
+# and each one that cannot be deleted.  Says on standard error
 # how many files it deleted, which contained the pathname OLD_NAMES or were
 # symbolic links into it.
 # This is a function, rather than code in the command substitution of
@@ -673,28 +676,26 @@ delete_stale_build_output() {
         continue
         ;;
     esac
-    # The files in a directory arrive together, so the directory's status is
-    # computed once for them.  ${stale_delete} is "all" if every file in
-    # ${stale_dir} is deleted, "ignored" if each one that git ignores is, and
-    # "none" if none is.  Git ignores every file in a directory that it
-    # ignores, so only a file in a directory that git does not ignore is
-    # checked on its own.
+    # The files in a directory usually arrive one after another, so the
+    # directory's status is computed only when it differs from the previous
+    # file's.  ${stale_delete} is "yes" if the files in ${stale_dir} are
+    # deleted and "no" if they are not.
     if [ "${stale_dir}" != "${stale_last_dir}" ]; then
       stale_last_dir="${stale_dir}"
-      if [ -n "${stale_owner}" ] && {
+      if [ -e "${BRANCHDIR}/${stale_dir}/.git" ]; then
+        stale_delete=no
+      elif [ -n "${stale_owner}" ] && {
         check_ignore "${stale_owner}"
         [ $? -ne 1 ]
       }; then
-        stale_delete=none
+        stale_delete=no
       elif check_ignore "${stale_dir}"; then
-        stale_delete=all
+        stale_delete=yes
       else
-        stale_delete=ignored
+        stale_delete=no
       fi
     fi
-    if { [ "${stale_delete}" = all ] || {
-      [ "${stale_delete}" = ignored ] && check_ignore "${stale_file}"
-    }; } \
+    if [ "${stale_delete}" = yes ] \
       && rm -f -- "${BRANCHDIR}/${stale_file}" 2> /dev/null; then
       stale_count=$((stale_count + 1))
       if [ "${stale_dir##*/}" = build ]; then

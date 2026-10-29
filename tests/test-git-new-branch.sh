@@ -956,12 +956,14 @@ esac
 # Such a file that git ignores in a `build/` directory or in Gradle's
 # `.gradle/` directory, at the top level or below it, is deleted from the new
 # directory rather than named.  A file outside `build/` and `.gradle/`, a file
-# in a `build/` directory that git does not ignore, and a file in a `build/`
-# directory within an ignored directory is named, and a file in `build/` that
-# does not contain the source's pathname is kept.
+# in a `build/` directory that git does not ignore, whether or not git ignores
+# the file, and a file in a `build/` directory within an ignored directory is
+# named, and a file in `build/` that does not contain the source's pathname is
+# kept.
 deleted="${stale_parent}/deleted-branch-main"
 make_repo "${deleted}" || exit 1
-printf 'build/\n!tools/build/\n.gradle/\nout/\nnode_modules/\n' > "${deleted}/.gitignore"
+printf 'build/\n!tools/build/\nlocal.properties\n.gradle/\nout/\nnode_modules/\n' \
+  > "${deleted}/.gitignore"
 git -C "${deleted}" add .gitignore
 git -C "${deleted}" commit -q -m 'Ignore build output'
 deleted_top="$(git -C "${deleted}" rev-parse --show-toplevel)"
@@ -970,6 +972,7 @@ mkdir -p "${deleted}/build/classes" "${deleted}/sub/build" "${deleted}/out" \
   "${deleted}/sub/.gradle/8.14/executionHistory" "${deleted}/tools/build" \
   "${deleted}/node_modules/addon/build" || exit 1
 printf '%s/src\n' "${deleted_top}" > "${deleted}/tools/build/deploy.conf"
+printf 'sdk.dir=%s/sdk\n' "${deleted_top}" > "${deleted}/tools/build/local.properties"
 printf '%s/src\n' "${deleted_top}" > "${deleted}/node_modules/addon/build/config.gypi"
 printf '%s/src\n' "${deleted_top}" > "${deleted}/build/classes/Main.class"
 ln -s "${deleted_top}/build" "${deleted}/build/current" || exit 1
@@ -993,7 +996,8 @@ for mode in '' --copy; do
     *) fail "${mode:-the default mode} did not say that it deleted 6 files: ${out}" ;;
   esac
   for deleted_file in out/output.txt \
-    tools/build/deploy.conf node_modules/addon/build/config.gypi; do
+    tools/build/deploy.conf tools/build/local.properties \
+    node_modules/addon/build/config.gypi; do
     case "${out}" in
       *"  ${deleted_file}
 "*) ;;
@@ -1024,13 +1028,23 @@ for mode in '' --copy; do
 done
 
 # Files in a submodule are examined too, and the submodule's `build/` and
-# `.gradle/` directories are treated like the superproject's.
+# `.gradle/` directories are treated like the superproject's.  A submodule at
+# `build/` is not a `build/` directory, so a file in it that the submodule
+# ignores is named.
 subdeleted_parent="${tmpdir}/subdeleted"
 mkdir -p "${subdeleted_parent}" || exit 1
 subdeleted_parent="$(CDPATH='' cd -- "${subdeleted_parent}" && pwd -P)" || exit 1
 make_submodule_superproject "${subdeleted_parent}" || exit 1
 subdeleted="${subdeleted_parent}/super-branch-main"
+(
+  cd "${subdeleted}" || exit 1
+  git -c protocol.file.allow=always submodule add -q ../submodule-origin build || exit 1
+  git commit -q -m 'Add a submodule at build'
+) || exit 1
 printf 'build/\n.gradle/\n' > "${subdeleted}/sub/.gitignore"
+printf 'out/\n' > "${subdeleted}/build/.gitignore"
+mkdir -p "${subdeleted}/build/out" || exit 1
+printf '%s/src\n' "${subdeleted}" > "${subdeleted}/build/out/tool.txt"
 mkdir -p "${subdeleted}/sub/build/classes" \
   "${subdeleted}/sub/.gradle/8.14/executionHistory" || exit 1
 printf '%s/src\n' "${subdeleted}" > "${subdeleted}/sub/build/classes/Main.class"
@@ -1047,11 +1061,16 @@ for mode in '' --copy; do
     *": 2 files in \`build/\` and \`.gradle/\`."*) ;;
     *) fail "${mode:-the default mode} did not say that it deleted 2 files in a submodule: ${out}" ;;
   esac
-  case "${out}" in
-    *"  sub/notes.txt
+  for named_file in sub/notes.txt build/out/tool.txt; do
+    case "${out}" in
+      *"  ${named_file}
 "*) ;;
-    *) fail "${mode:-the default mode} did not name sub/notes.txt: ${out}" ;;
-  esac
+      *) fail "${mode:-the default mode} did not name ${named_file}: ${out}" ;;
+    esac
+    if [ ! -f "${subdeleted_new}/${named_file}" ]; then
+      fail "${mode:-the default mode} deleted ${named_file}"
+    fi
+  done
   for deleted_file in sub/build/classes/Main.class \
     sub/.gradle/8.14/executionHistory/executionHistory.bin; do
     case "${out}" in
