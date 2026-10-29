@@ -834,7 +834,7 @@ upstream_default_branch() {
   upstream_default_branch_head="refs/remotes/${upstream_default_branch_remote}/HEAD"
   upstream_default_branch_ask=0
   if [ "$2" -eq 1 ]; then
-    if ! upstream_default_branch_git \
+    if ! upstream_default_branch_git "${upstream_default_branch_batch}" \
       -c "remote.${upstream_default_branch_remote}.followRemoteHEAD=always" \
       fetch --quiet "${upstream_default_branch_remote}"; then
       echo "${SCRIPT_NAME}: problem fetching ${upstream_default_branch_remote}" >&2
@@ -847,7 +847,7 @@ upstream_default_branch() {
   if [ "${upstream_default_branch_ask}" -eq 1 ] \
     || ! upstream_default_branch_branch="$(git symbolic-ref --quiet "${upstream_default_branch_head}")" \
     || ! git rev-parse --verify --quiet "${upstream_default_branch_branch}" > /dev/null; then
-    if ! upstream_default_branch_git remote set-head "${upstream_default_branch_remote}" --auto > /dev/null \
+    if ! upstream_default_branch_git "${upstream_default_branch_batch}" remote set-head "${upstream_default_branch_remote}" --auto > /dev/null \
       || ! upstream_default_branch_branch="$(git symbolic-ref --quiet "${upstream_default_branch_head}")"; then
       echo "${SCRIPT_NAME}: cannot determine the default branch of ${upstream_default_branch_remote}" >&2
       return 1
@@ -856,12 +856,13 @@ upstream_default_branch() {
   printf '%s\n' "${upstream_default_branch_branch}"
 }
 
-## Usage: upstream_default_branch_git GIT-ARGUMENT...
+## Usage: upstream_default_branch_git BATCH GIT-ARGUMENT...
 ## A helper for `upstream_default_branch`:  runs `git GIT-ARGUMENT...` in the
-## current directory, under `git_batch_ssh` if ${upstream_default_branch_batch}
-## is 1.
+## current directory, under `git_batch_ssh` if BATCH is 1.
 upstream_default_branch_git() {
-  if [ "${upstream_default_branch_batch}" -eq 1 ]; then
+  upstream_default_branch_git_batch="$1"
+  shift
+  if [ "${upstream_default_branch_git_batch}" -eq 1 ]; then
     git_batch_ssh . "$@"
   else
     git "$@"

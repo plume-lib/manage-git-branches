@@ -462,10 +462,11 @@ fi
 # `master` after the remote renamed it to `main`, could hide the remote's
 # default branch.  Nothing here changes this working tree or its branch.
 #
-# A clone with no remote has no upstream repository to report on, and its
-# failed pull has already been reported.  Any other failure is not fatal
-# either, for the same reasons that a failed pull is not, but it is reported:
-# the new branch will lack upstream commits that it might have had.
+# A clone with no remote that `git-pull-upstream` would choose, such as one
+# with no remote at all, has no upstream repository, and nothing is said about
+# it.  Any other failure is not fatal either, for the same reasons that a
+# failed pull is not, but it is reported:  the new branch will lack upstream
+# commits that it might have had.
 #
 # `git_batch_ssh` disables the interactive prompts, as for the pull above.
 # The upstream repository may be another remote than the one that the pull
@@ -474,15 +475,10 @@ find_upstream_commit() {
   UPSTREAM_COMMIT=''
   # `git symbolic-ref --short` would print "heads/main" if a tag "main" exists.
   if ! fuc_ref="$(git symbolic-ref --quiet HEAD)" \
-    || [ -z "$(git remote)" ]; then
+    || ! UPSTREAM_REMOTE="$(upstream_remote 2> /dev/null)"; then
     return
   fi
   fuc_branch="${fuc_ref#refs/heads/}"
-  fuc_warning="${SCRIPT_NAME}: warning: cannot fetch the upstream repository's default branch, so the new branch cannot start at its latest commit; continuing."
-  if ! UPSTREAM_REMOTE="$(upstream_remote)"; then
-    echo "${fuc_warning}" >&2
-    return
-  fi
   if [ "${PULL_SUCCEEDED}" -eq 1 ] \
     && [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ]; then
     return
@@ -496,7 +492,7 @@ find_upstream_commit() {
   fi
   if ! UPSTREAM_REF="$(upstream_default_branch "${UPSTREAM_REMOTE}" 1 1)" \
     || ! fuc_commit="$(git rev-parse --verify --quiet "${UPSTREAM_REF}^{commit}")"; then
-    echo "${fuc_warning}" >&2
+    echo "${SCRIPT_NAME}: warning: cannot fetch the upstream repository's default branch, so the new branch cannot start at its latest commit; continuing." >&2
     return
   fi
   if [ "${UPSTREAM_REF}" = "${fuc_same_name}" ] \
@@ -514,7 +510,6 @@ find_upstream_commit() {
     UPSTREAM_COMMIT="${fuc_commit}"
   fi
 }
-find_upstream_commit
 
 # The pull may have brought in a submodule.  If it switched the mode to the
 # copy, the copy's own test of `.git` applies.  The sparse-checkout test above
@@ -542,16 +537,6 @@ if [ -n "${WORKTREE_HOST}" ]; then
     echo "${SCRIPT_NAME}: so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
     WORKTREE_HOST=''
   fi
-fi
-# The fast-forward of the new branch happens in the new worktree, so it needs
-# the upstream commit in ${WORKTREE_HOST} as well.  The fetch above updated
-# only this repository's remote-tracking branches, so ${WORKTREE_HOST} may lack
-# the commit even if it has a remote of the same name.  A failure to copy it
-# costs only the fast-forward, not the choice of ${WORKTREE_HOST}.
-if [ -n "${WORKTREE_HOST}" ] && [ -n "${UPSTREAM_COMMIT}" ] \
-  && ! copy_objects_to "${WORKTREE_HOST}" "${UPSTREAM_REF}"; then
-  echo "${SCRIPT_NAME}: so the new branch will not start at ${UPSTREAM_NAME}" >&2
-  UPSTREAM_COMMIT=''
 fi
 
 # Determine which remote the new branch would collide with:  the remote that
@@ -631,6 +616,20 @@ if [ -n "${REMOTE}" ] \
     "refs/heads/${BRANCHNAME}" > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists on remote ${REMOTE}, which was asked directly." >&2
   exit 1
+fi
+
+# Fetch the upstream repository only now that no test can refuse the branch,
+# so that a refused name does not wait on it.
+find_upstream_commit
+# The fast-forward of the new branch happens in the new worktree, so it needs
+# the upstream commit in ${WORKTREE_HOST} as well.  The fetch above updated
+# only this repository's remote-tracking branches, so ${WORKTREE_HOST} may lack
+# the commit even if it has a remote of the same name.  A failure to copy it
+# costs only the fast-forward, not the choice of ${WORKTREE_HOST}.
+if [ -n "${WORKTREE_HOST}" ] && [ -n "${UPSTREAM_COMMIT}" ] \
+  && ! copy_objects_to "${WORKTREE_HOST}" "${UPSTREAM_REF}"; then
+  echo "${SCRIPT_NAME}: so the new branch will not start at ${UPSTREAM_NAME}" >&2
+  UPSTREAM_COMMIT=''
 fi
 
 # Say where the new worktree is registered only now that no test can refuse
@@ -819,14 +818,8 @@ fast_forward_upstream() {
   fi
   if ! git -C "${BRANCHDIR}" update-ref -m "${SCRIPT_NAME}: fast-forward to ${UPSTREAM_NAME}" \
     HEAD "${UPSTREAM_COMMIT}" "${ffu_head}"; then
-    # Undo the change to the index and the working tree, which would
-    # otherwise look like uncommitted changes that revert the fast-forward.
-    if ! git -C "${BRANCHDIR}" read-tree -m -u "${UPSTREAM_COMMIT}" "${ffu_head}"; then
-      echo "${SCRIPT_NAME}: warning: the new branch in ${BRANCHDIR} could not be fast-forwarded to ${UPSTREAM_NAME}, but its index and working tree were, so they differ from its commit.  To finish the fast-forward, run:" >&2
-      echo "  git -C '${BRANCHDIR}' update-ref HEAD ${UPSTREAM_COMMIT} ${ffu_head}" >&2
-      return
-    fi
-    echo "${ffu_skipped}, because its branch could not be updated." >&2
+    echo "${SCRIPT_NAME}: warning: the new branch in ${BRANCHDIR} could not be fast-forwarded to ${UPSTREAM_NAME}, but its index and working tree were, so they differ from its commit.  To finish the fast-forward, run:" >&2
+    echo "  git -C '${BRANCHDIR}' update-ref HEAD ${UPSTREAM_COMMIT} ${ffu_head}" >&2
     return
   fi
   echo "${ffu_done}" >&2

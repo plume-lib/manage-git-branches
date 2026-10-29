@@ -314,6 +314,29 @@ if git -C "${clone15}" symbolic-ref --quiet refs/remotes/origin/HEAD > /dev/null
   fail "git-new-branch fetched origin again after the pull"
 fi
 
+# A clone with two remotes, neither named "upstream" nor "origin", has no
+# upstream repository, and nothing is said about one.
+clone16="${work}/proj16"
+git clone -q -o gh "${upstream}" "${clone16}"
+git -C "${clone16}" remote add gl "${upstream}"
+run_new_branch "${clone16}" --clean tworemotes
+case "${out}" in
+  *upstream* | *warning*) fail "a message about the upstream repository of a clone with two other remotes: ${out}" ;;
+esac
+
+# A name that the fork already has is refused before the upstream repository
+# is fetched.
+clone17="${work}/proj17"
+make_fork_clone "${clone17}"
+git -C "${clone17}" push -q origin main:taken
+git -C "${clone17}" fetch -q origin
+if out="$(cd -- "${clone17}" && "${GIT_NEW_BRANCH}" --clean taken 2>&1)"; then
+  fail "git-new-branch accepted a name that the fork has: ${out}"
+fi
+if git -C "${clone17}" rev-parse --verify --quiet refs/remotes/upstream/main > /dev/null; then
+  fail "git-new-branch fetched the upstream repository before refusing a name"
+fi
+
 # git-new-branch neither builds nor pushes.  A copy of the commands whose
 # `compile-project` records each call checks the first; a fake on the PATH
 # checks it too.  Neither the fork nor the upstream repository changes.
