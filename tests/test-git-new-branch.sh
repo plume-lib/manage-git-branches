@@ -988,6 +988,10 @@ for mode in '' --copy; do
   if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete: ${out}"
   fi
+  case "${out}" in
+    *"deleted 5 files of build output"*) ;;
+    *) fail "${mode:-the default mode} did not say that it deleted 5 files: ${out}" ;;
+  esac
   for deleted_file in .gradle/8.14/other.bin out/output.txt \
     tools/build/deploy.conf node_modules/addon/build/config.gypi; do
     case "${out}" in
@@ -1038,6 +1042,10 @@ for mode in '' --copy; do
   if ! out="$(cd "${subdeleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete in a submodule: ${out}"
   fi
+  case "${out}" in
+    *"deleted 2 files of build output"*) ;;
+    *) fail "${mode:-the default mode} did not say that it deleted 2 files in a submodule: ${out}" ;;
+  esac
   case "${out}" in
     *"  sub/notes.txt
 "*) ;;

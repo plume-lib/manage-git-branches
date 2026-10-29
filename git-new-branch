@@ -34,7 +34,7 @@
 # directory or is Gradle's `executionHistory.bin` under a `.gradle/`
 # directory, at any depth, unless git also ignores the directory that contains
 # that `build/` or `.gradle/` directory, such as a dependency's directory in
-# `node_modules/`.
+# `node_modules/`, and they say how many files they deleted.
 #
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
@@ -638,11 +638,12 @@ check_ignore() {
 # directory that contains the `build/` or `.gradle/` directory, such as a
 # dependency's directory in `node_modules/`, because no build of the project
 # recreates it.  Prints each other pathname, and each one that cannot be
-# deleted.
+# deleted, and says on standard error how many files it deleted.
 # This is a function, rather than code in the command substitution of
 # `delete_or_warn_about_old_pathname`, because bash 3.2, which is /bin/sh on
 # macOS, ends a command substitution at the ")" of a `case` pattern within it.
 delete_stale_build_output() {
+  stale_count=0
   while IFS= read -r stale_file; do
     # ${stale_owner} is the directory that contains the `build/` or `.gradle/`
     # directory, or is empty for ${BRANCHDIR}, which git never ignores.
@@ -662,10 +663,19 @@ delete_stale_build_output() {
         [ $? -eq 1 ]
       }; } \
       && rm -f -- "${BRANCHDIR}/${stale_file}" 2> /dev/null; then
+      stale_count=$((stale_count + 1))
       continue
     fi
     printf '%s\n' "${stale_file}"
   done
+  if [ "${stale_count}" -gt 0 ]; then
+    if [ "${stale_count}" -eq 1 ]; then
+      stale_files='file'
+    else
+      stale_files='files'
+    fi
+    echo "${SCRIPT_NAME}: deleted ${stale_count} ${stale_files} of build output in \`build/\` and \`.gradle/\` directories of ${BRANCHDIR} that referred to ${TOPLEVEL}.  A build recreates them, but a build directory that a tool such as CMake or autotools configured may need to be reconfigured." >&2
+  fi
 }
 
 # Usage: delete_or_warn_about_old_pathname
