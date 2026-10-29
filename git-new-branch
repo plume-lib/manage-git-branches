@@ -29,7 +29,9 @@
 # and a build in the new directory may not recompile it, even after a
 # reconfiguration.  These modes warn about each file that git does not track
 # and that contains the current directory's pathname or is a symbolic link
-# into the current directory.
+# into the current directory.  They delete such a file instead if it is in the
+# top-level `build/` directory or is Gradle's `executionHistory.bin` under the
+# top-level `.gradle/` directory.
 #
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
@@ -624,7 +626,8 @@ BRANCH_TO_CLEAN=""
 # build compiled the pathname of its installation directory.  A build in
 # ${BRANCHDIR} may not recompile it, even after a reconfiguration, because
 # build tools rarely notice a changed pathname.  Tracked files are not
-# examined, because they are not build output.
+# examined, because they are not build output.  Such a file in `build/`, and
+# Gradle's `executionHistory.bin` under `.gradle/`, is deleted instead.
 warn_about_old_pathname() {
   # The pattern matches the pathname where it ends, or where it continues
   # with a character other than a letter, digit, "-", "_", or ".", such as
@@ -673,6 +676,20 @@ warn_about_old_pathname() {
           fi
         done' sh \
       | LC_ALL=C xargs -0 grep -l -E -e "${warn_old_pattern}" --
+  )"
+  # Delete, rather than warn about, such a file in the top-level `build/`
+  # directory and Gradle's execution history under `.gradle/`.  A build
+  # recreates them.  A file that cannot be deleted is warned about.
+  warn_old_files="$(
+    printf '%s\n' "${warn_old_files}" | while IFS= read -r warn_old_file; do
+      case "${warn_old_file}" in
+        build/* | .gradle/executionHistory.bin | .gradle/*/executionHistory.bin)
+          rm -f -- "${BRANCHDIR}/${warn_old_file}" 2> /dev/null \
+            || printf '%s\n' "${warn_old_file}"
+          ;;
+        ?*) printf '%s\n' "${warn_old_file}" ;;
+      esac
+    done
   )"
   if [ -z "${warn_old_files}" ]; then
     return

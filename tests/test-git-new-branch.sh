@@ -907,20 +907,20 @@ ln -s "${stale_parent}" "${stale_link}" || exit 1
 stale="${stale_parent}/stale-branch-main"
 stale_logical="${stale_link}/stale-branch-main"
 make_repo "${stale}" || exit 1
-printf 'build/\n' > "${stale}/.gitignore"
+printf 'out/\n' > "${stale}/.gitignore"
 git -C "${stale}" add .gitignore
 git -C "${stale}" commit -q -m 'Ignore build output'
 stale_top="$(git -C "${stale}" rev-parse --show-toplevel)"
-mkdir "${stale}/build"
-printf 'launcher\000%s/inst/libexec\000' "${stale_top}" > "${stale}/build/launcher"
-printf 'prefix\000%s\000' "${stale_top}" > "${stale}/build/prefix.bin"
-printf '#define PREFIX "%s"\n' "${stale_top}" > "${stale}/build/config.h"
-printf 'SRCDIR = %s/src\n' "${stale_logical}" > "${stale}/build/Makefile"
-ln -s "${stale_top}/build" "${stale}/build/current" || exit 1
+mkdir "${stale}/out"
+printf 'launcher\000%s/inst/libexec\000' "${stale_top}" > "${stale}/out/launcher"
+printf 'prefix\000%s\000' "${stale_top}" > "${stale}/out/prefix.bin"
+printf '#define PREFIX "%s"\n' "${stale_top}" > "${stale}/out/config.h"
+printf 'SRCDIR = %s/src\n' "${stale_logical}" > "${stale}/out/Makefile"
+ln -s "${stale_top}/out" "${stale}/out/current" || exit 1
 printf '%s-other/file %s.bak/file\n' "${stale_top}" "${stale_top}" > "${stale}/sibling.txt"
-printf '%s/lib\n' "${stale_top}" > "${stale}/build/library.jar"
-mkfifo "${stale}/build/fifo" || exit 1
-ln -s fifo "${stale}/build/fifo-link" || exit 1
+printf '%s/lib\n' "${stale_top}" > "${stale}/out/library.jar"
+mkfifo "${stale}/out/fifo" || exit 1
+ln -s fifo "${stale}/out/fifo-link" || exit 1
 for mode in '' --copy; do
   branch="stale${mode#--}"
   if ! out="$(cd "${stale_logical}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
@@ -930,7 +930,7 @@ for mode in '' --copy; do
     *"warning: these files in ${stale_parent}/stale-branch-${branch}, which git does not track, contain the pathname of ${stale_logical} (also ${stale_top}) or are symbolic links into it:"*) ;;
     *) fail "${mode:-the default mode} did not warn about build output that contains the source's pathname: ${out}" ;;
   esac
-  for stale_file in build/launcher build/prefix.bin build/config.h build/Makefile build/current; do
+  for stale_file in out/launcher out/prefix.bin out/config.h out/Makefile out/current; do
     case "${out}" in
       *"  ${stale_file}
 "*) ;;
@@ -952,6 +952,57 @@ fi
 case "${out}" in
   *"contain the pathname"*) fail "--clean warned about build output that it does not copy: ${out}" ;;
 esac
+
+# Such a file in the top-level `build/` directory, and Gradle's
+# `executionHistory.bin` under the top-level `.gradle/` directory, is deleted
+# from the new directory rather than named.  A file in another `build/`
+# directory or another file under `.gradle/` is named, and a file in `build/`
+# that does not contain the source's pathname is kept.
+deleted="${stale_parent}/deleted-branch-main"
+make_repo "${deleted}" || exit 1
+printf 'build/\n.gradle/\n' > "${deleted}/.gitignore"
+git -C "${deleted}" add .gitignore
+git -C "${deleted}" commit -q -m 'Ignore build output'
+deleted_top="$(git -C "${deleted}" rev-parse --show-toplevel)"
+mkdir -p "${deleted}/build/classes" "${deleted}/sub/build" \
+  "${deleted}/.gradle/8.14/executionHistory" || exit 1
+printf '%s/src\n' "${deleted_top}" > "${deleted}/build/classes/Main.class"
+ln -s "${deleted_top}/build" "${deleted}/build/current" || exit 1
+printf 'no pathname\n' > "${deleted}/build/unrelated.txt"
+printf 'history\000%s/src\000' "${deleted_top}" \
+  > "${deleted}/.gradle/8.14/executionHistory/executionHistory.bin"
+printf 'other\000%s/src\000' "${deleted_top}" > "${deleted}/.gradle/8.14/other.bin"
+printf '%s/src\n' "${deleted_top}" > "${deleted}/sub/build/output.txt"
+for mode in '' --copy; do
+  branch="deleted${mode#--}"
+  deleted_new="${stale_parent}/deleted-branch-${branch}"
+  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+    fail "nonzero exit status for ${mode:-the default mode} with build output to delete: ${out}"
+  fi
+  for deleted_file in .gradle/8.14/other.bin sub/build/output.txt; do
+    case "${out}" in
+      *"  ${deleted_file}
+"*) ;;
+      *) fail "${mode:-the default mode} did not name ${deleted_file}: ${out}" ;;
+    esac
+  done
+  for deleted_file in build/classes/Main.class build/current \
+    .gradle/8.14/executionHistory/executionHistory.bin; do
+    case "${out}" in
+      *"  ${deleted_file}
+"*) fail "${mode:-the default mode} named ${deleted_file} rather than deleting it: ${out}" ;;
+    esac
+    if [ -e "${deleted_new}/${deleted_file}" ] || [ -L "${deleted_new}/${deleted_file}" ]; then
+      fail "${mode:-the default mode} did not delete ${deleted_file}"
+    fi
+    if [ ! -e "${deleted}/${deleted_file}" ] && [ ! -L "${deleted}/${deleted_file}" ]; then
+      fail "${mode:-the default mode} deleted ${deleted_file} from the source"
+    fi
+  done
+  if [ ! -f "${deleted_new}/build/unrelated.txt" ]; then
+    fail "${mode:-the default mode} deleted a file in build/ that does not contain the source's pathname"
+  fi
+done
 
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then
