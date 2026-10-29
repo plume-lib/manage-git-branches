@@ -953,13 +953,12 @@ case "${out}" in
   *"contain the pathname"*) fail "--clean warned about build output that it does not copy: ${out}" ;;
 esac
 
-# Such a file that git ignores in a `build/` directory, and Gradle's
-# `executionHistory.bin` under a `.gradle/` directory, at the top level or
-# below it, is deleted from the new directory rather than named.  A file
-# outside `build/`, another file under `.gradle/`, a file in a `build/`
-# directory that git does not ignore, and a file in a `build/` directory
-# within an ignored directory is named, and a file in `build/` that does not
-# contain the source's pathname is kept.
+# Such a file that git ignores in a `build/` directory or in Gradle's
+# `.gradle/` directory, at the top level or below it, is deleted from the new
+# directory rather than named.  A file outside `build/` and `.gradle/`, a file
+# in a `build/` directory that git does not ignore, and a file in a `build/`
+# directory within an ignored directory is named, and a file in `build/` that
+# does not contain the source's pathname is kept.
 deleted="${stale_parent}/deleted-branch-main"
 make_repo "${deleted}" || exit 1
 printf 'build/\n!tools/build/\n.gradle/\nout/\nnode_modules/\n' > "${deleted}/.gitignore"
@@ -967,7 +966,7 @@ git -C "${deleted}" add .gitignore
 git -C "${deleted}" commit -q -m 'Ignore build output'
 deleted_top="$(git -C "${deleted}" rev-parse --show-toplevel)"
 mkdir -p "${deleted}/build/classes" "${deleted}/sub/build" "${deleted}/out" \
-  "${deleted}/.gradle/8.14/executionHistory" \
+  "${deleted}/.gradle/8.14/executionHistory" "${deleted}/.gradle/buildOutputCleanup" \
   "${deleted}/sub/.gradle/8.14/executionHistory" "${deleted}/tools/build" \
   "${deleted}/node_modules/addon/build" || exit 1
 printf '%s/src\n' "${deleted_top}" > "${deleted}/tools/build/deploy.conf"
@@ -977,7 +976,8 @@ ln -s "${deleted_top}/build" "${deleted}/build/current" || exit 1
 printf 'no pathname\n' > "${deleted}/build/unrelated.txt"
 printf 'history\000%s/src\000' "${deleted_top}" \
   > "${deleted}/.gradle/8.14/executionHistory/executionHistory.bin"
-printf 'other\000%s/src\000' "${deleted_top}" > "${deleted}/.gradle/8.14/other.bin"
+printf 'outputs\000%s/build\000' "${deleted_top}" \
+  > "${deleted}/.gradle/buildOutputCleanup/outputFiles.bin"
 printf '%s/src\n' "${deleted_top}" > "${deleted}/sub/build/output.txt"
 printf 'history\000%s/src\000' "${deleted_top}" \
   > "${deleted}/sub/.gradle/8.14/executionHistory/executionHistory.bin"
@@ -989,10 +989,10 @@ for mode in '' --copy; do
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete: ${out}"
   fi
   case "${out}" in
-    *"deleted 5 files of build output"*) ;;
-    *) fail "${mode:-the default mode} did not say that it deleted 5 files: ${out}" ;;
+    *": 6 files in \`build/\` and \`.gradle/\`."*) ;;
+    *) fail "${mode:-the default mode} did not say that it deleted 6 files: ${out}" ;;
   esac
-  for deleted_file in .gradle/8.14/other.bin out/output.txt \
+  for deleted_file in out/output.txt \
     tools/build/deploy.conf node_modules/addon/build/config.gypi; do
     case "${out}" in
       *"  ${deleted_file}
@@ -1004,7 +1004,8 @@ for mode in '' --copy; do
     fi
   done
   for deleted_file in build/classes/Main.class build/current \
-    .gradle/8.14/executionHistory/executionHistory.bin sub/build/output.txt \
+    .gradle/8.14/executionHistory/executionHistory.bin \
+    .gradle/buildOutputCleanup/outputFiles.bin sub/build/output.txt \
     sub/.gradle/8.14/executionHistory/executionHistory.bin; do
     case "${out}" in
       *"  ${deleted_file}
@@ -1043,7 +1044,7 @@ for mode in '' --copy; do
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete in a submodule: ${out}"
   fi
   case "${out}" in
-    *"deleted 2 files of build output"*) ;;
+    *": 2 files in \`build/\` and \`.gradle/\`."*) ;;
     *) fail "${mode:-the default mode} did not say that it deleted 2 files in a submodule: ${out}" ;;
   esac
   case "${out}" in

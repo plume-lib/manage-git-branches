@@ -31,10 +31,10 @@
 # including such a file in a submodule, and that contains the current
 # directory's pathname or is a symbolic link into the current directory.  They
 # delete such a file instead if git ignores it and it is in a `build/`
-# directory or is Gradle's `executionHistory.bin` under a `.gradle/`
-# directory, at any depth, unless git also ignores the directory that contains
-# that `build/` or `.gradle/` directory, such as a dependency's directory in
-# `node_modules/`, and they say how many files they deleted.
+# directory or in Gradle's `.gradle/` directory, at any depth, unless git also
+# ignores the directory that contains that `build/` or `.gradle/` directory,
+# such as a dependency's directory in `node_modules/`, and they say how many
+# files they deleted.
 #
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
@@ -626,55 +626,100 @@ BRANCH_TO_CLEAN=""
 # submodule's.  Returns 0 if git ignores PATHNAME, 1 if it does not, and 128
 # on an error.
 check_ignore() {
-  git -C "${BRANCHDIR}/$(dirname -- "$1")" check-ignore -q -- "$(basename -- "$1")" 2> /dev/null
+  case "$1" in
+    */*) git -C "${BRANCHDIR}/${1%/*}" check-ignore -q -- "${1##*/}" 2> /dev/null ;;
+    *) git -C "${BRANCHDIR}" check-ignore -q -- "$1" 2> /dev/null ;;
+  esac
 }
 
-# Usage: delete_stale_build_output
+# Usage: delete_stale_build_output OLD_NAMES
 # Reads pathnames relative to ${BRANCHDIR}, one per line, from standard input.
-# Deletes each file that git ignores and that is in a `build/` directory or is
-# Gradle's execution history under a `.gradle/` directory, whether at the top
-# level, in a subproject, or in a submodule.  A build of the project
-# recreates such a file.  The file is not deleted if git also ignores the
-# directory that contains the `build/` or `.gradle/` directory, such as a
-# dependency's directory in `node_modules/`, because no build of the project
-# recreates it.  Prints each other pathname, and each one that cannot be
-# deleted, and says on standard error how many files it deleted.
+# Deletes each file that git ignores and that is in a `build/` directory or in
+# Gradle's `.gradle/` directory, whether at the top level, in a subproject,
+# or in a submodule.  A build of the project recreates such a file.  The file
+# is not deleted if git also ignores the directory that contains the `build/`
+# or `.gradle/` directory, such as a dependency's directory in
+# `node_modules/`, because no build of the project recreates it.  Prints each
+# other pathname, and each one that cannot be deleted.  Says on standard error
+# how many files it deleted, which contained the pathname OLD_NAMES or were
+# symbolic links into it.
 # This is a function, rather than code in the command substitution of
 # `delete_or_warn_about_old_pathname`, because bash 3.2, which is /bin/sh on
 # macOS, ends a command substitution at the ")" of a `case` pattern within it.
 delete_stale_build_output() {
   stale_count=0
+  stale_in_build=''
+  stale_in_gradle=''
+  stale_last_dir=''
   while IFS= read -r stale_file; do
-    # ${stale_owner} is the directory that contains the `build/` or `.gradle/`
-    # directory, or is empty for ${BRANCHDIR}, which git never ignores.
+    # ${stale_dir} is the outermost `build/` or `.gradle/` directory that
+    # contains the file, and ${stale_owner} is the directory that contains
+    # ${stale_dir}, or is empty for ${BRANCHDIR}, which git never ignores.
     case "${stale_file}" in
       '') continue ;;
-      build/* | .gradle/*/executionHistory.bin) stale_owner='' ;;
-      */build/*) stale_owner="${stale_file%%/build/*}" ;;
-      */.gradle/*/executionHistory.bin) stale_owner="${stale_file%%/.gradle/*}" ;;
+      build/*) stale_owner='' stale_dir=build ;;
+      .gradle/*) stale_owner='' stale_dir=.gradle ;;
+      */build/* | */.gradle/*)
+        stale_owner="${stale_file%%/build/*}"
+        stale_dir="${stale_owner}/build"
+        stale_gradle_owner="${stale_file%%/.gradle/*}"
+        if [ "${#stale_gradle_owner}" -lt "${#stale_owner}" ]; then
+          stale_owner="${stale_gradle_owner}"
+          stale_dir="${stale_owner}/.gradle"
+        fi
+        ;;
       *)
         printf '%s\n' "${stale_file}"
         continue
         ;;
     esac
-    if check_ignore "${stale_file}" \
-      && { [ -z "${stale_owner}" ] || {
+    # The files in a directory arrive together, so the directory's status is
+    # computed once for them.  ${stale_delete} is "all" if every file in
+    # ${stale_dir} is deleted, "ignored" if each one that git ignores is, and
+    # "none" if none is.  Git ignores every file in a directory that it
+    # ignores, so only a file in a directory that git does not ignore is
+    # checked on its own.
+    if [ "${stale_dir}" != "${stale_last_dir}" ]; then
+      stale_last_dir="${stale_dir}"
+      if [ -n "${stale_owner}" ] && {
         check_ignore "${stale_owner}"
-        [ $? -eq 1 ]
-      }; } \
+        [ $? -ne 1 ]
+      }; then
+        stale_delete=none
+      elif check_ignore "${stale_dir}"; then
+        stale_delete=all
+      else
+        stale_delete=ignored
+      fi
+    fi
+    if { [ "${stale_delete}" = all ] || {
+      [ "${stale_delete}" = ignored ] && check_ignore "${stale_file}"
+    }; } \
       && rm -f -- "${BRANCHDIR}/${stale_file}" 2> /dev/null; then
       stale_count=$((stale_count + 1))
+      if [ "${stale_dir##*/}" = build ]; then
+        stale_in_build=yes
+      else
+        stale_in_gradle=yes
+      fi
       continue
     fi
     printf '%s\n' "${stale_file}"
   done
   if [ "${stale_count}" -gt 0 ]; then
     if [ "${stale_count}" -eq 1 ]; then
-      stale_files='file'
+      stale_files='1 file'
     else
-      stale_files='files'
+      stale_files="${stale_count} files"
     fi
-    echo "${SCRIPT_NAME}: deleted ${stale_count} ${stale_files} of build output in \`build/\` and \`.gradle/\` directories of ${BRANCHDIR} that referred to ${TOPLEVEL}.  A build recreates them, but a build directory that a tool such as CMake or autotools configured may need to be reconfigured." >&2
+    if [ -z "${stale_in_gradle}" ]; then
+      stale_dirs="\`build/\`"
+    elif [ -z "${stale_in_build}" ]; then
+      stale_dirs="\`.gradle/\`"
+    else
+      stale_dirs="\`build/\` and \`.gradle/\`"
+    fi
+    echo "${SCRIPT_NAME}: deleted build output in ${BRANCHDIR} that contained the pathname of $1 or was a symbolic link into it: ${stale_files} in ${stale_dirs}.  A build recreates build output, but a build directory that a tool such as CMake or autotools configured may need to be reconfigured." >&2
   fi
 }
 
@@ -749,14 +794,14 @@ delete_or_warn_about_old_pathname() {
         done' sh \
       | LC_ALL=C xargs -0 grep -l -E -e "${warn_old_pattern}" --
   )"
-  warn_old_files="$(printf '%s\n' "${warn_old_files}" | delete_stale_build_output)"
-  if [ -z "${warn_old_files}" ]; then
-    return
-  fi
   if [ "${LOGICAL_TOPLEVEL}" = "${TOPLEVEL}" ]; then
     warn_old_names="${TOPLEVEL}"
   else
     warn_old_names="${LOGICAL_TOPLEVEL} (also ${TOPLEVEL})"
+  fi
+  warn_old_files="$(printf '%s\n' "${warn_old_files}" | delete_stale_build_output "${warn_old_names}")"
+  if [ -z "${warn_old_files}" ]; then
+    return
   fi
   echo "${SCRIPT_NAME}: warning: these files in ${BRANCHDIR}, which git does not track, contain the pathname of ${warn_old_names} or are symbolic links into it:" >&2
   printf '%s\n' "${warn_old_files}" | head -n 5 | sed 's/^/  /' >&2
