@@ -277,6 +277,43 @@ if [ "$(git -C "${hosted}" rev-parse HEAD)" != "${upstream_head}" ]; then
   fail "the worktree registered in the main clone is not at upstream/main"
 fi
 
+# A stale `upstream/HEAD`, which names a branch "master" that the upstream
+# repository no longer has, does not hide its default branch "main".
+clone13="${work}/proj13"
+make_fork_clone "${clone13}"
+git -C "${clone13}" fetch -q upstream
+git -C "${clone13}" update-ref refs/remotes/upstream/master HEAD
+git -C "${clone13}" symbolic-ref refs/remotes/upstream/HEAD refs/remotes/upstream/master
+advance_upstream ninth.txt 'upstream work after a rename'
+run_new_branch "${clone13}" --clean renamed
+if [ "$(git -C "${work}/proj13-branch-renamed" rev-parse HEAD)" != "$(git -C "${upstream}" rev-parse main)" ]; then
+  fail "a stale upstream/HEAD kept the new branch from upstream/main: ${out}"
+fi
+
+# A tag "main" in the fork, which makes the short name of the current branch
+# "heads/main", does not keep the new branch from upstream/main.
+clone14="${work}/proj14"
+make_fork_clone "${clone14}"
+git -C "${clone14}" tag main
+advance_upstream tenth.txt 'upstream work beside a tag'
+run_new_branch "${clone14}" --clean tagged
+if [ "$(git -C "${work}/proj14-branch-tagged" rev-parse HEAD)" != "$(git -C "${upstream}" rev-parse main)" ]; then
+  fail "a tag main kept the new branch from upstream/main: ${out}"
+fi
+
+# A clone whose upstream repository is the remote that `git pull` fetched
+# does not fetch it again.  A missing `origin/HEAD`, which its fetch would
+# create, shows whether it did.  `followRemoteHEAD` keeps the pull from
+# creating it; the fetch of the upstream repository overrides that setting.
+clone15="${work}/proj15"
+git clone -q "${upstream}" "${clone15}"
+git -C "${clone15}" remote set-head origin -d
+git -C "${clone15}" config remote.origin.followRemoteHEAD never
+run_new_branch "${clone15}" --clean onefetch
+if git -C "${clone15}" symbolic-ref --quiet refs/remotes/origin/HEAD > /dev/null; then
+  fail "git-new-branch fetched origin again after the pull"
+fi
+
 # git-new-branch neither builds nor pushes.  A copy of the commands whose
 # `compile-project` records each call checks the first; a fake on the PATH
 # checks it too.  Neither the fork nor the upstream repository changes.
@@ -310,5 +347,56 @@ fi
 if [ "$(git -C "${upstream}" for-each-ref refs/heads; git -C "${clone10}.git" for-each-ref refs/heads)" != "${refs_before}" ]; then
   fail "git-new-branch pushed to the fork or the upstream repository"
 fi
+
+# An upstream commit that adds a submodule:  the new branch is at the current
+# commit, with a warning, in a worktree as in a clean checkout.  This test is
+# last, because every later fork would have the submodule.
+clone11="${work}/proj11"
+make_fork_clone "${clone11}"
+git init -q -b main "${work}/sub"
+commit_file "${work}/sub" sub.txt 'submodule content'
+# git 2.38.1 and later refuse the "file" transport for a submodule unless
+# allowed.
+git -C "${seed}" -c protocol.file.allow=always submodule add -q \
+  "${work}/sub" sub 2> /dev/null || exit 1
+git -C "${seed}" commit -q -m "Add a submodule" || exit 1
+git -C "${seed}" push -q origin main || exit 1
+for mode in default clean; do
+  if [ "${mode}" = default ]; then
+    run_new_branch "${clone11}" "sub-${mode}"
+  else
+    run_new_branch "${clone11}" "--${mode}" "sub-${mode}"
+  fi
+  newdir="${work}/proj11-branch-sub-${mode}"
+  if [ "$(git -C "${newdir}" rev-parse HEAD)" != "$(git -C "${clone11}" rev-parse HEAD)" ]; then
+    fail "mode ${mode}: the new branch is not at the current commit when upstream/main adds a submodule"
+  fi
+  if [ -e "${newdir}/sub" ] || [ -n "$(git -C "${newdir}" status --porcelain)" ]; then
+    fail "mode ${mode}: ${newdir} has the submodule or changes: $(git -C "${newdir}" status --porcelain)"
+  fi
+  case "${out}" in
+    *"warning: the new branch starts at the current commit of ${clone11}, not at upstream/main, the upstream repository's default branch, because the fast-forward would add, remove, or update a submodule."*) ;;
+    *) fail "mode ${mode}: no warning about the submodule that upstream/main adds: ${out}" ;;
+  esac
+done
+
+# An upstream commit that updates a submodule, in a fork that has it:  the new
+# directory is a copy, because of the submodule, and its branch is at the
+# current commit, with a warning.
+clone12="${work}/proj12"
+make_fork_clone "${clone12}"
+commit_file "${work}/sub" sub.txt 'newer submodule content'
+git -C "${seed}/sub" pull -q || exit 1
+git -C "${seed}" commit -q -a -m "Update the submodule" || exit 1
+git -C "${seed}" push -q origin main || exit 1
+run_new_branch "${clone12}" sub-update
+newdir="${work}/proj12-branch-sub-update"
+if [ "$(git -C "${newdir}" rev-parse HEAD)" != "$(git -C "${clone12}" rev-parse HEAD)" ]; then
+  fail "the new branch is not at the current commit when upstream/main updates a submodule"
+fi
+case "${out}" in
+  *"because the fast-forward would add, remove, or update a submodule."*) ;;
+  *) fail "no warning about the submodule that upstream/main updates: ${out}" ;;
+esac
 
 exit "${status}"

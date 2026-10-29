@@ -49,7 +49,8 @@ The commands are:
   that default branch is a fast-forward of the current commit, as for a
   fork's `master` that lags behind `upstream/master`, then the new branch
   starts at the default branch's latest commit instead, unless that would
-  touch the uncommitted changes that the new directory carries.  The new
+  touch the uncommitted changes that the new directory carries or would add,
+  remove, or update a submodule.  The new
   branch is never a merge.  The current branch is not changed, beyond the
   `git pull`.
   By default, the new directory is a worktree (see

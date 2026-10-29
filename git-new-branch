@@ -42,9 +42,11 @@
 # The upstream repository is the remote that `git-pull-upstream` merges from:
 # the remote named `upstream` if there is one, as in a fork, then `origin`,
 # then the clone's only remote if it has exactly one.  This command fetches it
-# and updates `REMOTE/HEAD`, which names its default branch, unless
-# `REMOTE/HEAD` already names a branch of another name than the current
-# branch.  A clone that cannot fetch it, as without network access, gets a
+# and updates `REMOTE/HEAD`, which names its default branch, unless the
+# `git pull` already fetched it, or `REMOTE/HEAD` already names an existing
+# branch of another name than the current branch and the upstream repository
+# has no branch of the current branch's name.  A clone that cannot fetch it,
+# as without network access, gets a
 # warning, and the new branch starts at the current commit.  A current branch
 # of another name, such as a release branch or a pull request's branch, or
 # one with commits that the default branch lacks, as in a downstream fork,
@@ -52,7 +54,8 @@
 # fast-forward is made in the new directory only.  The uncommitted changes
 # that the default mode and `--copy` carry into the new directory are kept:
 # if the fast-forward would change a file that has such a change, or would
-# overwrite an untracked file, it is not made, with a warning.  As
+# overwrite an untracked file, it is not made, with a warning.  Nor is it
+# made, with a warning, if it would add, remove, or update a submodule.  As
 # `git merge` does, the fast-forward overwrites an ignored file that the
 # upstream repository has started to track; the current directory still holds
 # the original.
@@ -421,7 +424,9 @@ fi
 # otherwise issue, as it does for the query below.  This pull's output is
 # captured rather than shown, so a prompt would be invisible and would block
 # this script forever; a failure that says why is better than a silent hang.
+PULL_SUCCEEDED=1
 if ! PULL_OUTPUT="$(git_batch_ssh . pull -q 2>&1)"; then
+  PULL_SUCCEEDED=0
   echo "${SCRIPT_NAME}: warning: \`git pull\` failed in ${TOPLEVEL}:" >&2
   if [ -n "${PULL_OUTPUT}" ]; then
     echo "${PULL_OUTPUT}" >&2
@@ -439,16 +444,23 @@ fi
 # commit is the latest commit of the upstream repository's default branch,
 # if the current branch has the same name as that default branch and that
 # commit is a fast-forward of the current commit, as for a fork's `master`
-# that lags behind `upstream/master`.  Also sets ${UPSTREAM_REF} and
-# ${UPSTREAM_NAME} to the remote-tracking branch, such as
-# `refs/remotes/upstream/master` and "upstream/master".
+# that lags behind `upstream/master`, and that commit changes no submodule.
+# A fast-forward that adds a submodule would leave it uninitialized, and in
+# a worktree it could not be initialized.  A fast-forward that updates or
+# removes a submodule would leave the submodule's checkout as it was.  Also
+# sets ${UPSTREAM_REF} and ${UPSTREAM_NAME} to the remote-tracking branch,
+# such as `refs/remotes/upstream/master` and "upstream/master".
 #
 # This fetches the upstream repository and updates `REMOTE/HEAD`, which names
 # its default branch.  The upstream repository is chosen, and fetched, as
-# `git-pull-upstream` does.  A `REMOTE/HEAD` that names a branch of another
-# name than the current branch, as for a release branch or a pull request's
-# branch, makes the fetch unnecessary.  Nothing here changes this working
-# tree or its branch.
+# `git-pull-upstream` does.  The fetch is unnecessary if the pull above
+# succeeded and fetched the same remote, which brought the current branch up
+# to date with it.  It is also unnecessary if `REMOTE/HEAD` names an existing
+# branch of another name than the current branch and the remote has no
+# branch of the current branch's name, as for a pull request's branch in a
+# fork.  Otherwise, a stale `REMOTE/HEAD`, such as one that still names
+# `master` after the remote renamed it to `main`, could hide the remote's
+# default branch.  Nothing here changes this working tree or its branch.
 #
 # A clone with no remote has no upstream repository to report on, and its
 # failed pull has already been reported.  Any other failure is not fatal
@@ -460,18 +472,26 @@ fi
 # contacted, so a prompt here is possible even if the pull issued none.
 find_upstream_commit() {
   UPSTREAM_COMMIT=''
-  if ! fuc_branch="$(git symbolic-ref --quiet --short HEAD)" \
+  # `git symbolic-ref --short` would print "heads/main" if a tag "main" exists.
+  if ! fuc_ref="$(git symbolic-ref --quiet HEAD)" \
     || [ -z "$(git remote)" ]; then
     return
   fi
+  fuc_branch="${fuc_ref#refs/heads/}"
   fuc_warning="${SCRIPT_NAME}: warning: cannot fetch the upstream repository's default branch, so the new branch cannot start at its latest commit; continuing."
   if ! UPSTREAM_REMOTE="$(upstream_remote)"; then
     echo "${fuc_warning}" >&2
     return
   fi
+  if [ "${PULL_SUCCEEDED}" -eq 1 ] \
+    && [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ]; then
+    return
+  fi
   fuc_same_name="refs/remotes/${UPSTREAM_REMOTE}/${fuc_branch}"
-  fuc_known="$(git symbolic-ref --quiet "refs/remotes/${UPSTREAM_REMOTE}/HEAD")"
-  if [ -n "${fuc_known}" ] && [ "${fuc_known}" != "${fuc_same_name}" ]; then
+  if fuc_known="$(git symbolic-ref --quiet "refs/remotes/${UPSTREAM_REMOTE}/HEAD")" \
+    && [ "${fuc_known}" != "${fuc_same_name}" ] \
+    && git rev-parse --verify --quiet "${fuc_known}" > /dev/null \
+    && ! git rev-parse --verify --quiet "${fuc_same_name}" > /dev/null; then
     return
   fi
   if ! UPSTREAM_REF="$(upstream_default_branch "${UPSTREAM_REMOTE}" 1 1)" \
@@ -482,8 +502,16 @@ find_upstream_commit() {
   if [ "${UPSTREAM_REF}" = "${fuc_same_name}" ] \
     && [ "${fuc_commit}" != "$(git rev-parse HEAD)" ] \
     && git merge-base --is-ancestor HEAD "${fuc_commit}"; then
-    UPSTREAM_COMMIT="${fuc_commit}"
     UPSTREAM_NAME="${UPSTREAM_REF#refs/remotes/}"
+    # A submodule's mode is 160000.  `--ignore-submodules=none` overrides a
+    # `submodule.<name>.ignore` setting, which would otherwise hide the
+    # submodule from the comparison.
+    if git diff-tree -r --no-renames --ignore-submodules=none HEAD "${fuc_commit}" \
+      | awk '$1 == ":160000" || $2 == "160000" { found = 1 } END { exit !found }'; then
+      echo "${SCRIPT_NAME}: warning: the new branch starts at the current commit of ${TOPLEVEL}, not at ${UPSTREAM_NAME}, the upstream repository's default branch, because the fast-forward would add, remove, or update a submodule." >&2
+      return
+    fi
+    UPSTREAM_COMMIT="${fuc_commit}"
   fi
 }
 find_upstream_commit
@@ -665,8 +693,14 @@ case "${MODE}" in
     # shared object store.  This is the one mode that creates the worktree
     # directly at its final name with nothing to follow, which is acceptable
     # because `git worktree add` is one fast command; the default mode, whose
-    # copy is slow, does its work under a temporary name instead.
-    add_worktree_here
+    # copy is slow, does its work under a temporary name instead.  A clean
+    # checkout has no uncommitted changes to carry over a fast-forward, so it
+    # is made at ${UPSTREAM_COMMIT} directly, if there is one.
+    if [ -n "${UPSTREAM_COMMIT}" ]; then
+      add_worktree "${BRANCHDIR}" "${BRANCHNAME}" "${UPSTREAM_COMMIT}"
+    else
+      add_worktree_here
+    fi
     ;;
 
   worktree)
@@ -763,6 +797,12 @@ fast_forward_upstream() {
     echo "${SCRIPT_NAME}: warning: cannot determine the commit of ${BRANCHDIR}, so it was not fast-forwarded to ${UPSTREAM_NAME}." >&2
     return
   fi
+  ffu_done="${SCRIPT_NAME}: fast-forwarded the new branch to ${UPSTREAM_NAME}, the upstream repository's default branch."
+  # `--clean` created the new branch at ${UPSTREAM_COMMIT}.
+  if [ "${ffu_head}" = "${UPSTREAM_COMMIT}" ]; then
+    echo "${ffu_done}" >&2
+    return
+  fi
   ffu_skipped="${SCRIPT_NAME}: warning: the new branch starts at the current commit of ${TOPLEVEL}, not at ${UPSTREAM_NAME}, the upstream repository's default branch"
   # The default mode and `--copy` copied the index, whose recorded file
   # metadata does not match the copied files, if only in their inode numbers.
@@ -781,11 +821,15 @@ fast_forward_upstream() {
     HEAD "${UPSTREAM_COMMIT}" "${ffu_head}"; then
     # Undo the change to the index and the working tree, which would
     # otherwise look like uncommitted changes that revert the fast-forward.
-    git -C "${BRANCHDIR}" read-tree -m -u "${UPSTREAM_COMMIT}" "${ffu_head}"
+    if ! git -C "${BRANCHDIR}" read-tree -m -u "${UPSTREAM_COMMIT}" "${ffu_head}"; then
+      echo "${SCRIPT_NAME}: warning: the new branch in ${BRANCHDIR} could not be fast-forwarded to ${UPSTREAM_NAME}, but its index and working tree were, so they differ from its commit.  To finish the fast-forward, run:" >&2
+      echo "  git -C '${BRANCHDIR}' update-ref HEAD ${UPSTREAM_COMMIT} ${ffu_head}" >&2
+      return
+    fi
     echo "${ffu_skipped}, because its branch could not be updated." >&2
     return
   fi
-  echo "${SCRIPT_NAME}: fast-forwarded the new branch to ${UPSTREAM_NAME}, the upstream repository's default branch." >&2
+  echo "${ffu_done}" >&2
 }
 if [ -n "${UPSTREAM_COMMIT}" ]; then
   fast_forward_upstream

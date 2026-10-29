@@ -883,10 +883,13 @@ merge_build_push() {
   # turns on.  Saying that COMMIT came from ".", the local repository, keeps
   # git from appending " of SOURCE" to the message.  `git fmt-merge-msg` also
   # writes comment lines, such as "# By AUTHOR", that `git merge` keeps in a
-  # message given with `-m`, so they are removed.
-  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" | git fmt-merge-msg)" \
+  # message given with `-m`, so they are removed.  The comment character is
+  # set to "#" for both commands, because the summaries that `merge.log`
+  # turns on begin with "* ", which `core.commentChar` might be.
+  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" \
+    | git -c core.commentChar='#' fmt-merge-msg)" \
     || ! merge_message="$(printf '%s\n' "${merge_message}" \
-      | git stripspace --strip-comments)"; then
+      | git -c core.commentChar='#' stripspace --strip-comments)"; then
     echo "${SCRIPT_NAME}: cannot compose a merge message for $3" >&2
     return 1
   fi
