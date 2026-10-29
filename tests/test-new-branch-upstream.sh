@@ -337,6 +337,25 @@ if git -C "${clone17}" rev-parse --verify --quiet refs/remotes/upstream/main > /
   fail "git-new-branch fetched the upstream repository before refusing a name"
 fi
 
+# An unstaged deletion of a file that the fast-forward would change:  the
+# fast-forward is not made, with a warning, and the file stays deleted.
+clone18="${work}/proj18"
+make_fork_clone "${clone18}"
+rm -- "${clone18}/file.txt"
+advance_upstream file.txt 'upstream change to a file that a clone deleted'
+run_new_branch "${clone18}" deleted
+deleted="${work}/proj18-branch-deleted"
+if [ "$(git -C "${deleted}" rev-parse HEAD)" != "$(git -C "${clone18}" rev-parse HEAD)" ]; then
+  fail "the new branch is not at the current commit when the fast-forward would change a deleted file"
+fi
+if [ -e "${deleted}/file.txt" ]; then
+  fail "the fast-forward restored a file that ${clone18} deleted"
+fi
+case "${out}" in
+  *"because the fast-forward would change files that have uncommitted changes in ${deleted}"*) ;;
+  *) fail "no warning about the deleted file that the fast-forward would change: ${out}" ;;
+esac
+
 # git-new-branch neither builds nor pushes.  A copy of the commands whose
 # `compile-project` records each call checks the first; a fake on the PATH
 # checks it too.  Neither the fork nor the upstream repository changes.

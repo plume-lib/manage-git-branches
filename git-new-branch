@@ -501,8 +501,12 @@ find_upstream_commit() {
     UPSTREAM_NAME="${UPSTREAM_REF#refs/remotes/}"
     # A submodule's mode is 160000.  `--ignore-submodules=none` overrides a
     # `submodule.<name>.ignore` setting, which would otherwise hide the
-    # submodule from the comparison.
-    if git diff-tree -r --no-renames --ignore-submodules=none HEAD "${fuc_commit}" \
+    # submodule from the comparison.  A commit with no `.gitmodules` has no
+    # submodule, as `has_gitlinks` also assumes, so in the usual repository
+    # the comparison, which lists every changed path, is unnecessary.
+    if { git cat-file -e "HEAD:.gitmodules" 2> /dev/null \
+      || git cat-file -e "${fuc_commit}:.gitmodules" 2> /dev/null; } \
+      && git diff-tree -r --no-renames --ignore-submodules=none HEAD "${fuc_commit}" \
       | awk '$1 == ":160000" || $2 == "160000" { found = 1 } END { exit !found }'; then
       echo "${SCRIPT_NAME}: warning: the new branch starts at the current commit of ${TOPLEVEL}, not at ${UPSTREAM_NAME}, the upstream repository's default branch, because the fast-forward would add, remove, or update a submodule." >&2
       return
@@ -779,28 +783,27 @@ BRANCH_TO_CLEAN=""
 # Usage: fast_forward_upstream
 # Moves the new branch in ${BRANCHDIR} from the current commit to
 # ${UPSTREAM_COMMIT}, the upstream repository's default branch, if that leaves
-# the new directory's uncommitted changes intact.  Otherwise, prints a warning
-# and leaves the new branch at the current commit.  Every failure is reported
-# but not fatal, because the new branch is usable at the current commit.
+# the new directory's uncommitted changes intact.  Otherwise, prints a warning,
+# leaves the new branch at the current commit, and returns 1.  Every failure
+# is reported but not fatal, because the new branch is usable at the current
+# commit.
 #
 # `git read-tree -m -u` does to the index and the working tree what a
 # fast-forward or `git checkout` does:  it carries every local change
 # forward, and it refuses, before changing anything, if the fast-forward
-# changes a file that has a staged or an unstaged change, or if it would
-# overwrite an untracked file.  `git merge --ff-only` is not used, because
-# configuration can change what it does:  `merge.autoStash` would stash the
-# changes on the stash stack that every worktree shares and reapply them with
-# possible conflicts.  Plumbing commands heed no such configuration.
+# changes a file that has a staged change or an unstaged modification, or if
+# it would overwrite an untracked file.  It does not refuse for an unstaged
+# deletion:  it writes the upstream version of the file, which undoes the
+# deletion, so that case is tested first.  `git merge --ff-only` is not used,
+# because configuration can change what it does:  `merge.autoStash` would
+# stash the changes on the stash stack that every worktree shares and reapply
+# them with possible conflicts.  Plumbing commands heed no such
+# configuration.  Nor is `git reset --keep` used, which would unstage the
+# staged changes.
 fast_forward_upstream() {
   if ! ffu_head="$(git -C "${BRANCHDIR}" rev-parse --verify HEAD)"; then
     echo "${SCRIPT_NAME}: warning: cannot determine the commit of ${BRANCHDIR}, so it was not fast-forwarded to ${UPSTREAM_NAME}." >&2
-    return
-  fi
-  ffu_done="${SCRIPT_NAME}: fast-forwarded the new branch to ${UPSTREAM_NAME}, the upstream repository's default branch."
-  # `--clean` created the new branch at ${UPSTREAM_COMMIT}.
-  if [ "${ffu_head}" = "${UPSTREAM_COMMIT}" ]; then
-    echo "${ffu_done}" >&2
-    return
+    return 1
   fi
   ffu_skipped="${SCRIPT_NAME}: warning: the new branch starts at the current commit of ${TOPLEVEL}, not at ${UPSTREAM_NAME}, the upstream repository's default branch"
   # The default mode and `--copy` copied the index, whose recorded file
@@ -808,24 +811,43 @@ fast_forward_upstream() {
   # `git read-tree` would take every such file for one with an unstaged
   # change, so refresh the index first, as `git status` would.  With `-q`, a
   # file with an unstaged change is no failure, but a locked index is.
-  if ! git -C "${BRANCHDIR}" update-index -q --refresh > /dev/null; then
-    echo "${ffu_skipped}, because the index of ${BRANCHDIR} could not be refreshed." >&2
-    return
+  if ! git -C "${BRANCHDIR}" update-index -q --refresh > /dev/null \
+    || ! ffu_deleted="$(git -C "${BRANCHDIR}" diff-files --name-only --diff-filter=D)" \
+    || ! ffu_changed="$(git -C "${BRANCHDIR}" diff-tree -r --name-only --no-renames \
+      "${ffu_head}" "${UPSTREAM_COMMIT}")"; then
+    echo "${ffu_skipped}, because the state of ${BRANCHDIR} could not be determined." >&2
+    return 1
   fi
+  # Ignore HUP, INT, and TERM between the update of the index and working tree
+  # and the update of the branch, so that no interruption leaves the files at
+  # ${UPSTREAM_COMMIT} and the branch at ${ffu_head}.  The git commands inherit
+  # the disposition.  The traps are not reinstated afterward:  they clean up
+  # the new directory only until it is complete, which it is by now.
+  ffu_overlap="${ffu_skipped}, because the fast-forward would change files that have uncommitted changes in ${BRANCHDIR}, or would overwrite untracked files there."
+  if [ -n "${ffu_deleted}" ] \
+    && printf '%s\n' "${ffu_changed}" | grep -q -x -F -e "${ffu_deleted}"; then
+    echo "${ffu_overlap}" >&2
+    return 1
+  fi
+  trap '' HUP INT TERM
   if ! git -C "${BRANCHDIR}" read-tree -m -u "${ffu_head}" "${UPSTREAM_COMMIT}"; then
-    echo "${ffu_skipped}, because the fast-forward would change files that have uncommitted changes in ${BRANCHDIR}, or would overwrite untracked files there." >&2
-    return
+    trap - HUP INT TERM
+    echo "${ffu_overlap}" >&2
+    return 1
   fi
   if ! git -C "${BRANCHDIR}" update-ref -m "${SCRIPT_NAME}: fast-forward to ${UPSTREAM_NAME}" \
     HEAD "${UPSTREAM_COMMIT}" "${ffu_head}"; then
+    trap - HUP INT TERM
     echo "${SCRIPT_NAME}: warning: the new branch in ${BRANCHDIR} could not be fast-forwarded to ${UPSTREAM_NAME}, but its index and working tree were, so they differ from its commit.  To finish the fast-forward, run:" >&2
     echo "  git -C '${BRANCHDIR}' update-ref HEAD ${UPSTREAM_COMMIT} ${ffu_head}" >&2
-    return
+    return 1
   fi
-  echo "${ffu_done}" >&2
+  trap - HUP INT TERM
 }
-if [ -n "${UPSTREAM_COMMIT}" ]; then
-  fast_forward_upstream
+# `--clean` created the new branch at ${UPSTREAM_COMMIT}.
+if [ -n "${UPSTREAM_COMMIT}" ] \
+  && { [ "${MODE}" = 'clean' ] || fast_forward_upstream; }; then
+  echo "${SCRIPT_NAME}: fast-forwarded the new branch to ${UPSTREAM_NAME}, the upstream repository's default branch." >&2
 fi
 
 # Usage: warn_about_old_pathname
