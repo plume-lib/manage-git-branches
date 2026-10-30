@@ -814,9 +814,7 @@ upstream_remote() {
 ## a diagnostic, on failure.
 ##
 ## If BATCH is 1, the git commands that contact REMOTE run under
-## `git_batch_ssh`, so that they fail rather than prompt.  A caller that runs
-## other commands that may prompt, such as a `git push`, omits it, so that a
-## user who must type a passphrase can do so for every one of them.
+## `git_batch_ssh`, so that they fail rather than prompt.
 upstream_default_branch() {
   upstream_default_branch_remote="$1"
   upstream_default_branch_batch="${3:-0}"

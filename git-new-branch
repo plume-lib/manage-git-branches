@@ -12,8 +12,10 @@
 # repository's default branch, and that default branch is a fast-forward of
 # the current commit (as for a fork's `master` that lags behind
 # `upstream/master`) then the current branch is fast-forwarded to the default
-# branch's latest commit, and the new branch starts there instead.  The new
-# branch's most recent commit is never a newly-created merge.
+# branch's latest commit, and the new branch starts there instead.  With
+# `--clean`, the new branch starts there even if the current branch's
+# uncommitted changes prevent the fast-forward.  This command creates no merge
+# commit, though the `git pull` can.
 #
 # The new directory is:
 #   (default)  a linked worktree of the current repository, made by
@@ -22,8 +24,8 @@
 #              same as the current directory's, including uncommitted
 #              changes, staged changes, untracked files, and ignored files
 #              such as build output.
-#   --clean    a linked worktree that holds a clean checkout of the current
-#              commit and nothing else.  It is the cheapest mode, in both
+#   --clean    a linked worktree that holds a clean checkout of the new
+#              branch and nothing else.  It is the cheapest mode, in both
 #              time and disk space, for starting fresh work.
 #   --copy     a copy of the whole current directory, `.git` included, so it
 #              is an independent clone that shares nothing with the current
@@ -395,7 +397,7 @@ if ! PULL_OUTPUT="$(git_batch_ssh . pull -q 2>&1)"; then
     echo "${SCRIPT_NAME}: ERROR: the failed pull left conflicts in ${TOPLEVEL}." >&2
     exit 1
   fi
-  echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
+  echo "${SCRIPT_NAME}: continuing without the pull." >&2
 fi
 
 # Usage: find_upstream_commit
@@ -419,7 +421,11 @@ fi
 # `git-pull-upstream` merges from.  This fetches it and updates `REMOTE/HEAD`,
 # which names its default branch, as `git-pull-upstream` does.  The fetch is
 # unnecessary if the pull above succeeded and fetched the same remote, which
-# brought the current branch up to date with it.  It is also unnecessary if
+# brought the current branch up to date with it.  If the pull failed but
+# contacted the same remote, the remote is not fetched again, because a second
+# attempt would most likely fail the same way, after the same wait; the
+# remote-tracking branches that this clone already has are used instead.  The
+# fetch is also unnecessary if
 # `REMOTE/HEAD` names an existing branch of another name than the current
 # branch and the remote has no branch of the current branch's name, as for a
 # pull request's branch in a fork.  Otherwise, a stale `REMOTE/HEAD`, such as
@@ -445,9 +451,12 @@ find_upstream_commit() {
     return
   fi
   fuc_branch="${fuc_ref#refs/heads/}"
-  if [ "${PULL_SUCCEEDED}" -eq 1 ] \
-    && [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ]; then
-    return
+  fuc_fetch=1
+  if [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ]; then
+    if [ "${PULL_SUCCEEDED}" -eq 1 ]; then
+      return
+    fi
+    fuc_fetch=0
   fi
   fuc_same_name="refs/remotes/${UPSTREAM_REMOTE}/${fuc_branch}"
   if fuc_known="$(git symbolic-ref --quiet "refs/remotes/${UPSTREAM_REMOTE}/HEAD")" \
@@ -456,7 +465,7 @@ find_upstream_commit() {
     && ! git rev-parse --verify --quiet "${fuc_same_name}" > /dev/null; then
     return
   fi
-  if ! UPSTREAM_REF="$(upstream_default_branch "${UPSTREAM_REMOTE}" 1 1)" \
+  if ! UPSTREAM_REF="$(upstream_default_branch "${UPSTREAM_REMOTE}" "${fuc_fetch}" 1)" \
     || ! fuc_commit="$(git rev-parse --verify --quiet "${UPSTREAM_REF}^{commit}")"; then
     echo "${SCRIPT_NAME}: warning: cannot fetch the upstream repository's default branch, so the new branch cannot start at its latest commit; continuing." >&2
     return
@@ -607,6 +616,36 @@ if [ -n "${WORKTREE_HOST}" ]; then
   note_worktree_host
 fi
 
+# Usage: make_tmpdir
+# Tests for ${BRANCH_TMPDIR}, and arranges for the traps to remove whatever is
+# then created there.
+#
+# The test comes after every remote query rather than with the first test for
+# ${BRANCHDIR}, so that no remote query, which can take as long as a
+# connection attempt takes to time out, runs between the test and the
+# assignment below.  Whatever the copy then leaves at that location was
+# created by this script and the traps can safely remove it, even if the copy
+# is interrupted before it finishes.
+make_tmpdir() {
+  if [ -e "${BRANCH_TMPDIR}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
+    exit 1
+  fi
+  TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
+}
+
+# Test that the new directory's locations are free before the fast-forward,
+# which changes ${TOPLEVEL}, so that a refused command leaves ${TOPLEVEL} as
+# it was.  ${BRANCHDIR} is tested again, because the queries and the fetch
+# above can take long.
+if [ -e "${BRANCHDIR}" ]; then
+  echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCHDIR}" >&2
+  exit 1
+fi
+if [ "${MODE}" != 'clean' ]; then
+  make_tmpdir
+fi
+
 # Usage: fast_forward_upstream
 # Fast-forwards the current branch, its index, and its working tree in
 # ${TOPLEVEL} from the current commit to ${UPSTREAM_COMMIT}, the upstream
@@ -614,8 +653,9 @@ fi
 # The fast-forward is not made if it would change a file that has a staged
 # change, an unstaged modification, or an unstaged deletion, or if it would
 # overwrite an untracked file; then this prints a warning, changes nothing,
-# and returns 1.  Such a failure is not fatal, because the current commit is
-# usable.  As `git merge` does, the fast-forward overwrites an ignored file
+# and returns 1.  So does any other failure to update the index and the
+# working tree, such as a locked index.  Such a failure is not fatal, because
+# the current commit is usable.  As `git merge` does, the fast-forward overwrites an ignored file
 # that the upstream repository has started to track.  If the index and the
 # working tree were fast-forwarded but the branch could not be, this exits,
 # after saying how to finish the fast-forward.
@@ -642,17 +682,19 @@ fast_forward_upstream() {
   # only in its modification time, for one with an unstaged change, so refresh
   # the index first, as `git status` would.  With `-q`, a file with an
   # unstaged change is no failure, but a locked index is.
+  # The files that the fast-forward changes are listed only if there is an
+  # unstaged deletion, because the list can be long.
   if ! git -C "${TOPLEVEL}" update-index -q --refresh > /dev/null \
     || ! ffu_deleted="$(git -C "${TOPLEVEL}" diff-files --name-only --diff-filter=D)" \
-    || ! ffu_changed="$(git -C "${TOPLEVEL}" diff-tree -r --name-only --no-renames \
-      "${ffu_head}" "${UPSTREAM_COMMIT}")"; then
+    || { [ -n "${ffu_deleted}" ] \
+      && ! ffu_changed="$(git -C "${TOPLEVEL}" diff-tree -r --name-only --no-renames \
+        "${ffu_head}" "${UPSTREAM_COMMIT}")"; }; then
     echo "${ffu_skipped}, because its state could not be determined." >&2
     return 1
   fi
-  ffu_overlap="${ffu_skipped}, because the fast-forward would change files that have uncommitted changes there, or would overwrite untracked files there."
   if [ -n "${ffu_deleted}" ] \
     && printf '%s\n' "${ffu_changed}" | grep -q -x -F -e "${ffu_deleted}"; then
-    echo "${ffu_overlap}" >&2
+    echo "${ffu_skipped}, because the fast-forward would change files that are deleted there." >&2
     return 1
   fi
   # Ignore HUP, INT, and TERM between the update of the index and working tree
@@ -671,7 +713,7 @@ fast_forward_upstream() {
   case "${ffu_status}" in
     0) ;;
     1)
-      echo "${ffu_overlap}" >&2
+      echo "${ffu_skipped}, because \`git read-tree\` failed, for the reason that it gives above, such as a file that has uncommitted changes there or an untracked file that the fast-forward would overwrite." >&2
       return 1
       ;;
     *)
@@ -692,24 +734,6 @@ if [ -n "${UPSTREAM_COMMIT}" ]; then
   fi
 fi
 
-# Usage: make_tmpdir
-# Tests for ${BRANCH_TMPDIR}, and arranges for the traps to remove whatever is
-# then created there.
-#
-# Test for ${BRANCH_TMPDIR} here rather than with the test for ${BRANCHDIR}
-# above, so that nothing -- in particular no remote query, which can take as
-# long as a connection attempt takes to time out -- runs between the test and
-# the assignment below.  Whatever the copy then leaves at that location was
-# created by this script and the traps can safely remove it, even if the copy
-# is interrupted before it finishes.
-make_tmpdir() {
-  if [ -e "${BRANCH_TMPDIR}" ]; then
-    echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
-    exit 1
-  fi
-  TMPDIR_TO_CLEAN="${BRANCH_TMPDIR}"
-}
-
 # Usage: add_worktree_here GIT-WORKTREE-ADD-OPTION...
 # Creates the branch ${BRANCHNAME} at the current commit in a new worktree at
 # ${BRANCHDIR}.  The current commit is passed to git as a commit, not as HEAD,
@@ -728,7 +752,6 @@ case "${MODE}" in
     # Copy the whole directory, `.git` included, so that the new directory is
     # an independent clone.  It is not a registered worktree, so moving it
     # with `mv` is safe.
-    make_tmpdir
     copy_repository "${BRANCH_TMPDIR}"
     if ! (cd -- "${BRANCH_TMPDIR}" && git checkout -b "${BRANCHNAME}" -q); then
       echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)" >&2
@@ -766,7 +789,6 @@ case "${MODE}" in
     # duplicate the object store, which is what this mode exists to avoid, and
     # copying the `.git` file of a linked worktree would give the copy the
     # *same* git directory as this worktree, with one HEAD and one index.
-    make_tmpdir
     if ! mkdir -- "${BRANCH_TMPDIR}"; then
       echo "${SCRIPT_NAME}: ERROR: cannot create ${BRANCH_TMPDIR}" >&2
       exit 1

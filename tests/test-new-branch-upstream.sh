@@ -254,7 +254,7 @@ if [ "$(git -C "${overlap}" rev-parse HEAD)" != "${current_head}" ] \
   fail "a branch moved when the fast-forward overlaps uncommitted changes"
 fi
 case "${out}" in
-  *"warning: ${clone8} was not fast-forwarded to upstream/main, the upstream repository's default branch, because the fast-forward would change files that have uncommitted changes there, or would overwrite untracked files there."*"so the new branch starts at the current commit of ${clone8}."*) ;;
+  *"warning: ${clone8} was not fast-forwarded to upstream/main, the upstream repository's default branch, because \`git read-tree\` failed, for the reason that it gives above"*"so the new branch starts at the current commit of ${clone8}."*) ;;
   *) fail "no warning about the uncommitted changes that the fast-forward overlaps: ${out}" ;;
 esac
 if [ "$(git -C "${overlap}" status --porcelain)" != "${status_before}" ] \
@@ -376,9 +376,27 @@ if [ -e "${clone18}/file.txt" ]; then
   fail "the fast-forward restored a file that ${clone18} deleted, in ${clone18}"
 fi
 case "${out}" in
-  *"warning: ${clone18} was not fast-forwarded"*"because the fast-forward would change files that have uncommitted changes there"*) ;;
+  *"warning: ${clone18} was not fast-forwarded"*"because the fast-forward would change files that are deleted there."*) ;;
   *) fail "no warning about the deleted file that the fast-forward would change: ${out}" ;;
 esac
+
+# A leftover temporary directory refuses the command before the
+# fast-forward, so the current branch does not move.
+clone19="${work}/proj19"
+make_fork_clone "${clone19}"
+advance_upstream eleventh.txt 'upstream work before a refusal'
+head_before="$(git -C "${clone19}" rev-parse HEAD)"
+mkdir "${work}/proj19-branch-leftover-TMP"
+if out="$(cd -- "${clone19}" && "${GIT_NEW_BRANCH}" leftover 2>&1)"; then
+  fail "git-new-branch succeeded despite a leftover temporary directory: ${out}"
+fi
+case "${out}" in
+  *"ERROR: directory exists: ${work}/proj19-branch-leftover-TMP"*) ;;
+  *) fail "no error about the leftover temporary directory: ${out}" ;;
+esac
+if [ "$(git -C "${clone19}" rev-parse HEAD)" != "${head_before}" ]; then
+  fail "a refused git-new-branch fast-forwarded ${clone19}"
+fi
 
 # git-new-branch neither builds nor pushes.  A copy of the commands whose
 # `compile-project` records each call checks the first; a fake on the PATH
