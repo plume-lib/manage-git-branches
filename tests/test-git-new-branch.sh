@@ -953,16 +953,21 @@ case "${out}" in
   *"contain the pathname"*) fail "--clean warned about build output that it does not copy: ${out}" ;;
 esac
 
-# Such a file that git ignores in a `build/` directory or in Gradle's
-# `.gradle/` directory, at the top level or below it, is deleted from the new
-# directory rather than named.  A file outside `build/` and `.gradle/`, a file
-# in a `build/` directory that git does not ignore, whether or not git ignores
-# the file, and a file in a `build/` directory within an ignored directory is
-# named, and a file in `build/` that does not contain the source's pathname is
-# kept.
+# A stale file (one that contains the source's pathname) is deleted from the
+# new directory rather than named if it is in a `build/` directory, Gradle's
+# `.gradle/` directory, or a cache directory (one that contains a
+# `CACHEDIR.TAG` file), at the top level or below it, that git ignores.  A
+# cache directory also qualifies if only its contents are ignored, as by the
+# `.gitignore` file that Ruff writes into `.ruff_cache/`.  These stale files
+# are named:  one outside those directories, in a directory whose
+# `CACHEDIR.TAG` file lacks the signature; one in a `build/` directory that
+# git does not ignore, whether or not git ignores the file; one in a cache
+# directory whose contents git does not ignore; and one in a `build/`
+# directory within an ignored directory.  A file in `build/` that does not contain the
+# source's pathname is kept.
 deleted="${stale_parent}/deleted-branch-main"
 make_repo "${deleted}" || exit 1
-printf 'build/\n!tools/build/\nlocal.properties\n.gradle/\nout/\nnode_modules/\n' \
+printf 'build/\n!tools/build/\nlocal.properties\n.gradle/\nout/\nnode_modules/\ntarget/\n' \
   > "${deleted}/.gitignore"
 git -C "${deleted}" add .gitignore
 git -C "${deleted}" commit -q -m 'Ignore build output'
@@ -970,7 +975,9 @@ deleted_top="$(git -C "${deleted}" rev-parse --show-toplevel)"
 mkdir -p "${deleted}/build/classes" "${deleted}/sub/build" "${deleted}/out" \
   "${deleted}/.gradle/8.14/executionHistory" "${deleted}/.gradle/buildOutputCleanup" \
   "${deleted}/sub/.gradle/8.14/executionHistory" "${deleted}/tools/build" \
-  "${deleted}/node_modules/addon/build" || exit 1
+  "${deleted}/node_modules/addon/build" "${deleted}/.ruff_cache/0.14.7" \
+  "${deleted}/tools/.ruff_cache/0.14.6" "${deleted}/sub/target/debug" \
+  "${deleted}/out/cache" || exit 1
 printf '%s/src\n' "${deleted_top}" > "${deleted}/tools/build/deploy.conf"
 printf 'sdk.dir=%s/sdk\n' "${deleted_top}" > "${deleted}/tools/build/local.properties"
 printf '%s/src\n' "${deleted_top}" > "${deleted}/node_modules/addon/build/config.gypi"
@@ -984,7 +991,20 @@ printf 'outputs\000%s/build\000' "${deleted_top}" \
 printf '%s/src\n' "${deleted_top}" > "${deleted}/sub/build/output.txt"
 printf 'history\000%s/src\000' "${deleted_top}" \
   > "${deleted}/sub/.gradle/8.14/executionHistory/executionHistory.bin"
-printf '%s/src\n' "${deleted_top}" > "${deleted}/out/output.txt"
+printf '# Automatically created by ruff.\n*\n' > "${deleted}/.ruff_cache/.gitignore"
+printf 'Signature: 8a477f597d28d172789f06886806bc55\n' \
+  > "${deleted}/.ruff_cache/CACHEDIR.TAG"
+printf 'cache\000%s/src/main.py\000' "${deleted_top}" \
+  > "${deleted}/.ruff_cache/0.14.7/14439530856958427592"
+printf 'cache\000%s/tools/main.py\000' "${deleted_top}" \
+  > "${deleted}/tools/.ruff_cache/0.14.6/1942947381310501558"
+printf 'Signature: 8a477f597d28d172789f06886806bc55\n' \
+  > "${deleted}/tools/.ruff_cache/CACHEDIR.TAG"
+printf 'Signature: 8a477f597d28d172789f06886806bc55' \
+  > "${deleted}/sub/target/CACHEDIR.TAG"
+printf '%s/src\n' "${deleted_top}" > "${deleted}/sub/target/debug/main.d"
+printf 'Not a signature\n' > "${deleted}/out/cache/CACHEDIR.TAG"
+printf '%s/src\n' "${deleted_top}" > "${deleted}/out/cache/entry"
 for mode in '' --copy; do
   branch="deleted${mode#--}"
   deleted_new="${stale_parent}/deleted-branch-${branch}"
@@ -992,12 +1012,13 @@ for mode in '' --copy; do
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete: ${out}"
   fi
   case "${out}" in
-    *": 6 files in \`build/\` and \`.gradle/\`."*) ;;
-    *) fail "${mode:-the default mode} did not say that it deleted 6 files: ${out}" ;;
+    *": 8 files in \`.gradle/\`, \`.ruff_cache/\`, \`build/\`, and \`target/\`."*) ;;
+    *) fail "${mode:-the default mode} did not say that it deleted 8 files: ${out}" ;;
   esac
-  for deleted_file in out/output.txt \
+  for deleted_file in out/cache/entry \
     tools/build/deploy.conf tools/build/local.properties \
-    node_modules/addon/build/config.gypi; do
+    node_modules/addon/build/config.gypi \
+    tools/.ruff_cache/0.14.6/1942947381310501558; do
     case "${out}" in
       *"  ${deleted_file}
 "*) ;;
@@ -1010,7 +1031,8 @@ for mode in '' --copy; do
   for deleted_file in build/classes/Main.class build/current \
     .gradle/8.14/executionHistory/executionHistory.bin \
     .gradle/buildOutputCleanup/outputFiles.bin sub/build/output.txt \
-    sub/.gradle/8.14/executionHistory/executionHistory.bin; do
+    sub/.gradle/8.14/executionHistory/executionHistory.bin \
+    .ruff_cache/0.14.7/14439530856958427592 sub/target/debug/main.d; do
     case "${out}" in
       *"  ${deleted_file}
 "*) fail "${mode:-the default mode} named ${deleted_file} rather than deleting it: ${out}" ;;
@@ -1058,7 +1080,7 @@ for mode in '' --copy; do
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete in a submodule: ${out}"
   fi
   case "${out}" in
-    *": 2 files in \`build/\` and \`.gradle/\`."*) ;;
+    *": 2 files in \`.gradle/\` and \`build/\`."*) ;;
     *) fail "${mode:-the default mode} did not say that it deleted 2 files in a submodule: ${out}" ;;
   esac
   for named_file in sub/notes.txt build/out/tool.txt; do

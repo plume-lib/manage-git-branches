@@ -21,20 +21,29 @@
 #    directory, `.git` included, so it is an independent clone that shares
 #    nothing with the current repository.
 #
-# The default mode and `--copy` copy build output, which may contain the
-# current directory's pathname, or be a symbolic link into the current
-# directory, and so still refer to the current directory's files.  For
-# example, a program into which the build compiled the pathname of its
-# installation directory runs the files installed in the current directory,
-# and a build in the new directory may not recompile it, even after a
-# reconfiguration.  These modes warn about each file that git does not track,
-# including such a file in a submodule, and that contains the current
-# directory's pathname or is a symbolic link into the current directory.  They
-# delete such a file instead if it is in a `build/` directory or in Gradle's
-# `.gradle/` directory, at any depth, that git ignores, unless git also
-# ignores the directory that contains that `build/` or `.gradle/` directory,
-# such as a dependency's directory in `node_modules/`, or that directory is a
-# submodule, and they say how many files they deleted.
+# The default mode and `--copy` copy build output, which can still refer to
+# the current directory's files:  it can contain the current directory's
+# pathname, or be a symbolic link into the current directory.  For example, a
+# program into which the build compiled the pathname of its installation
+# directory runs the files installed in the current directory, and a build in
+# the new directory might not recompile it, even after a reconfiguration.
+# These modes find the "stale files":  the files in the new directory and in
+# its submodules that git does not track and that contain the current
+# directory's pathname or are symbolic links into the current directory.
+#
+# These modes delete each stale file that a tool presumably regenerates, and
+# say how many files they deleted.  This script cannot know which files a tool
+# regenerates, so it judges by the directory that contains the stale file.  It
+# deletes a stale file that is within a `build/` directory, Gradle's
+# `.gradle/` directory, or a cache directory, at any depth, if git ignores
+# that directory.  A cache directory, such as Ruff's `.ruff_cache/` or
+# Cargo's `target/`, is one that contains a `CACHEDIR.TAG` file, as the Cache
+# Directory Tagging Specification (https://bford.info/cachedir/) defines; it
+# also qualifies if git ignores its `CACHEDIR.TAG` file rather than the
+# directory itself.  But this script does not delete the stale file if git
+# also ignores the directory that contains that `build/`, `.gradle/`, or cache
+# directory, such as a dependency's directory in `node_modules/`, or if that
+# directory is a submodule.  These modes warn about each other stale file.
 #
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
@@ -632,50 +641,88 @@ check_ignore() {
   esac
 }
 
+# Usage: is_cache_dir DIRECTORY
+# Returns 0 if DIRECTORY is a cache directory, and 1 otherwise.  A cache
+# directory contains a `CACHEDIR.TAG` file that begins with the signature that
+# the Cache Directory Tagging Specification (https://bford.info/cachedir/)
+# defines.  The tool that wrote it regenerates its contents.
+is_cache_dir() {
+  [ -f "$1/CACHEDIR.TAG" ] || return 1
+  cache_tag_line=''
+  IFS= read -r cache_tag_line < "$1/CACHEDIR.TAG" 2> /dev/null
+  case "${cache_tag_line}" in
+    'Signature: 8a477f597d28d172789f06886806bc55'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Usage: delete_stale_build_output OLD_NAMES
-# Reads pathnames relative to ${BRANCHDIR}, one per line, from standard input.
-# Deletes each file in a `build/` directory or in Gradle's `.gradle/`
-# directory that git ignores, whether at the top level, in a subproject, or in
-# a submodule.  A build of the project recreates such a file.  No file is
-# deleted from such a directory that git does not ignore, because the
-# directory may hold hand-written files, such as local configuration; nor
-# from one in a directory that git also ignores, such as a dependency's
-# directory in `node_modules/`, because no build of the project recreates
-# it; nor from one that is a submodule, whose files are not in a `build/` or
-# `.gradle/` directory of their own repository.  Prints each other pathname,
-# and each one that cannot be deleted.  Says on standard error
-# how many files it deleted, which contained the pathname OLD_NAMES or were
-# symbolic links into it.
+# Reads the pathnames of stale files, relative to ${BRANCHDIR}, one per line,
+# from standard input.  Deletes each stale file that a tool presumably
+# regenerates, and prints the pathname of each other stale file, including
+# each one that cannot be deleted.  Says on standard error how many files it
+# deleted; OLD_NAMES is the pathname that they contained or were symbolic
+# links into.
+#
+# Whether a tool regenerates a file is not knowable, so it is judged by the
+# directory that contains the file.  A tool presumably regenerates the files
+# in a `build/` directory, in Gradle's `.gradle/` directory, and in a cache
+# directory, as `is_cache_dir` defines it, such as Ruff's `.ruff_cache/` or
+# Cargo's `target/`, whether at the top level, in a subproject, or in a
+# submodule, if git ignores that directory.  Some tools write into a cache
+# directory a `.gitignore` file that ignores the directory's contents but not
+# the directory itself, so a cache directory also qualifies if git ignores
+# its `CACHEDIR.TAG` file.  No file is deleted from a directory that:
+#  * git does not ignore, because the directory might hold hand-written files,
+#    such as local configuration;
+#  * is within another directory that git ignores, such as a dependency's
+#    directory in `node_modules/`, because no build of the project
+#    regenerates the dependency's files; or
+#  * is a submodule, because the submodule's files are not in a `build/`,
+#    `.gradle/`, or cache directory of the submodule's own repository.
 # This is a function, rather than code in the command substitution of
 # `delete_or_warn_about_old_pathname`, because bash 3.2, which is /bin/sh on
 # macOS, ends a command substitution at the ")" of a `case` pattern within it.
 delete_stale_build_output() {
   stale_count=0
-  stale_in_build=''
-  stale_in_gradle=''
+  # ${stale_names} lists the names of the directories that files were
+  # deleted from, each followed by a newline.
+  stale_names=''
   stale_last_dir=''
   while IFS= read -r stale_file; do
-    # ${stale_dir} is the outermost `build/` or `.gradle/` directory that
-    # contains the file, and ${stale_owner} is the directory that contains
-    # ${stale_dir}, or is empty for ${BRANCHDIR}, which git never ignores.
-    case "${stale_file}" in
-      '') continue ;;
-      build/*) stale_owner='' stale_dir=build ;;
-      .gradle/*) stale_owner='' stale_dir=.gradle ;;
-      */build/* | */.gradle/*)
-        stale_owner="${stale_file%%/build/*}"
-        stale_dir="${stale_owner}/build"
-        stale_gradle_owner="${stale_file%%/.gradle/*}"
-        if [ "${#stale_gradle_owner}" -lt "${#stale_owner}" ]; then
-          stale_owner="${stale_gradle_owner}"
-          stale_dir="${stale_owner}/.gradle"
-        fi
-        ;;
-      *)
-        printf '%s\n' "${stale_file}"
-        continue
-        ;;
-    esac
+    if [ -z "${stale_file}" ]; then
+      continue
+    fi
+    # ${stale_dir} is the outermost `build/`, `.gradle/`, or cache directory
+    # that contains the file, or is empty if there is none, and
+    # ${stale_owner} is the directory that contains ${stale_dir}, or is empty
+    # for ${BRANCHDIR}, which git never ignores.
+    stale_dir=''
+    stale_owner=''
+    stale_rest="${stale_file}"
+    while [ -z "${stale_dir}" ]; do
+      case "${stale_rest}" in
+        */*) ;;
+        *) break ;;
+      esac
+      stale_component="${stale_rest%%/*}"
+      stale_rest="${stale_rest#*/}"
+      stale_candidate="${stale_owner:+${stale_owner}/}${stale_component}"
+      case "${stale_component}" in
+        build | .gradle) stale_dir="${stale_candidate}" ;;
+        *)
+          if is_cache_dir "${BRANCHDIR}/${stale_candidate}"; then
+            stale_dir="${stale_candidate}"
+          else
+            stale_owner="${stale_candidate}"
+          fi
+          ;;
+      esac
+    done
+    if [ -z "${stale_dir}" ]; then
+      printf '%s\n' "${stale_file}"
+      continue
+    fi
     # The files in a directory usually arrive one after another, so the
     # directory's status is computed only when it differs from the previous
     # file's.  ${stale_delete} is "yes" if the files in ${stale_dir} are
@@ -691,6 +738,9 @@ delete_stale_build_output() {
         stale_delete=no
       elif check_ignore "${stale_dir}"; then
         stale_delete=yes
+      elif is_cache_dir "${BRANCHDIR}/${stale_dir}" \
+        && check_ignore "${stale_dir}/CACHEDIR.TAG"; then
+        stale_delete=yes
       else
         stale_delete=no
       fi
@@ -698,11 +748,8 @@ delete_stale_build_output() {
     if [ "${stale_delete}" = yes ] \
       && rm -f -- "${BRANCHDIR}/${stale_file}" 2> /dev/null; then
       stale_count=$((stale_count + 1))
-      if [ "${stale_dir##*/}" = build ]; then
-        stale_in_build=yes
-      else
-        stale_in_gradle=yes
-      fi
+      stale_names="${stale_names}${stale_dir##*/}
+"
       continue
     fi
     printf '%s\n' "${stale_file}"
@@ -713,30 +760,45 @@ delete_stale_build_output() {
     else
       stale_files="${stale_count} files"
     fi
-    if [ -z "${stale_in_gradle}" ]; then
-      stale_dirs="\`build/\`"
-    elif [ -z "${stale_in_build}" ]; then
-      stale_dirs="\`.gradle/\`"
-    else
-      stale_dirs="\`build/\` and \`.gradle/\`"
-    fi
-    echo "${SCRIPT_NAME}: deleted build output in ${BRANCHDIR} that contained the pathname of $1 or was a symbolic link into it: ${stale_files} in ${stale_dirs}.  A build recreates build output, but a build directory that a tool such as CMake or autotools configured may need to be reconfigured." >&2
+    # ${stale_dirs} is an English list of the distinct names in
+    # ${stale_names}, in sorted order.
+    stale_dirs=''
+    stale_last_name=''
+    stale_name_count=0
+    while IFS= read -r stale_name; do
+      stale_name_count=$((stale_name_count + 1))
+      if [ -n "${stale_last_name}" ]; then
+        stale_dirs="${stale_dirs:+${stale_dirs}, }${stale_last_name}"
+      fi
+      stale_last_name="\`${stale_name}/\`"
+    done << EOF
+$(printf '%s' "${stale_names}" | LC_ALL=C sort -u)
+EOF
+    case "${stale_name_count}" in
+      1) stale_dirs="${stale_last_name}" ;;
+      2) stale_dirs="${stale_dirs} and ${stale_last_name}" ;;
+      *) stale_dirs="${stale_dirs}, and ${stale_last_name}" ;;
+    esac
+    echo "${SCRIPT_NAME}: deleted generated files in ${BRANCHDIR} that contained the pathname of $1 or were symbolic links into it: ${stale_files} in ${stale_dirs}.  The tools that generated them regenerate them, but a build directory that a tool such as CMake or autotools configured might need to be reconfigured." >&2
   fi
 }
 
 # Usage: delete_or_warn_about_old_pathname
-# Deletes or warns about each file in ${BRANCHDIR} that git does not track
-# and that contains the pathname of ${TOPLEVEL}, or is a symbolic link to it
-# or into it.  The pathname is sought both as ${LOGICAL_TOPLEVEL} and as
-# ${TOPLEVEL}.  Such a file is usually build output that still refers to the
-# files in ${TOPLEVEL} rather than to their copies, such as a program into
-# which the build compiled the pathname of its installation directory.  A
-# build in ${BRANCHDIR} may not recompile it, even after a reconfiguration,
-# because build tools rarely notice a changed pathname.  Tracked files are not
-# examined, because they are not build output.  Files in submodules are
-# examined too.  Such a file that a build of the project recreates is
-# deleted, as `delete_stale_build_output` describes; each other one is warned
-# about.
+# Finds the stale files in ${BRANCHDIR}:  the files in ${BRANCHDIR} and in its
+# submodules that git does not track and that contain the pathname of
+# ${TOPLEVEL} or are symbolic links to it or into it.  The pathname is sought
+# both as ${LOGICAL_TOPLEVEL} and as ${TOPLEVEL}.  Tracked files are not
+# examined, because they are not build output.
+#
+# A stale file is usually build output that still refers to the files in
+# ${TOPLEVEL} rather than to their copies, such as a program into which the
+# build compiled the pathname of its installation directory.  A build in
+# ${BRANCHDIR} might not recompile it, even after a reconfiguration, because
+# build tools rarely notice a changed pathname.
+#
+# Deletes each stale file that a tool presumably regenerates, as
+# `delete_stale_build_output` describes, and warns about each other stale
+# file.
 delete_or_warn_about_old_pathname() {
   # The pattern matches the pathname where it ends, or where it continues
   # with a character other than a letter, digit, "-", "_", or ".", such as
