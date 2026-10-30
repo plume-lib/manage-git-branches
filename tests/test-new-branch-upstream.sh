@@ -4,8 +4,9 @@
 # the upstream repository's default branch when the current branch has that
 # branch's name and the upstream commit is a fast-forward of the current
 # commit, and that it otherwise starts the new branch at the current commit.
-# The new branch is never a merge.  In every case, the current directory's
-# branch and working tree are left alone, and nothing is built or pushed.
+# The new branch is never a merge.  When the new branch starts at the upstream
+# commit, the current directory's branch is fast-forwarded there too, carrying
+# its uncommitted changes forward.  Nothing is built or pushed.
 #
 # Usage:
 #   tests/test-new-branch-upstream.sh
@@ -91,20 +92,22 @@ expect_current_commit() {
 }
 
 # A fork whose "main" lags behind the upstream repository's:  every mode
-# starts the new branch at the upstream commit, with no merge commit.  The
-# current directory's branch and working tree do not change.
-clone1="${work}/proj1"
-make_fork_clone "${clone1}"
+# fast-forwards the current branch to the upstream commit and starts the new
+# branch there, with no merge commit.  Each mode gets a fork of its own,
+# because after the first fast-forward there is nothing to do.
+for mode in default clean copy; do
+  make_fork_clone "${work}/proj1${mode}"
+done
 advance_upstream other.txt 'upstream work'
 upstream_head="$(git -C "${upstream}" rev-parse main)"
-state_before="$(working_tree_state "${clone1}")"
 for mode in default clean copy; do
+  clone1="${work}/proj1${mode}"
   if [ "${mode}" = default ]; then
     run_new_branch "${clone1}" "new-${mode}"
   else
     run_new_branch "${clone1}" "--${mode}" "new-${mode}"
   fi
-  newdir="${work}/proj1-branch-new-${mode}"
+  newdir="${work}/proj1${mode}-branch-new-${mode}"
   if [ "$(git -C "${newdir}" rev-parse HEAD)" != "${upstream_head}" ]; then
     fail "mode ${mode}: the new branch is not at upstream/main: $(git -C "${newdir}" log --oneline --graph)"
   fi
@@ -118,17 +121,18 @@ for mode in default clean copy; do
     fail "mode ${mode}: the working tree of ${newdir} lacks the upstream change"
   fi
   case "${out}" in
-    *"fast-forwarded the new branch to upstream/main, the upstream repository's default branch."*) ;;
+    *"fast-forwarded ${clone1} to upstream/main, the upstream repository's default branch, where the new branch starts."*) ;;
     *) fail "mode ${mode}: git-new-branch did not say that it fast-forwarded: ${out}" ;;
   esac
   case "${out}" in
     *warning*) fail "mode ${mode}: unexpected warning: ${out}" ;;
   esac
+  if [ "$(git -C "${clone1}" rev-parse HEAD)" != "${upstream_head}" ] \
+    || [ "$(git -C "${clone1}" symbolic-ref HEAD)" != refs/heads/main ] \
+    || [ -n "$(git -C "${clone1}" status --porcelain)" ]; then
+    fail "mode ${mode}: ${clone1} was not fast-forwarded to upstream/main: $(git -C "${clone1}" status --porcelain)"
+  fi
 done
-if [ "$(working_tree_state "${clone1}")" != "${state_before}" ] \
-  || [ "$(git -C "${clone1}" rev-parse HEAD)" != "$(git -C "${clone1}.git" rev-parse main)" ]; then
-  fail "git-new-branch changed the branch or the index of ${clone1}"
-fi
 
 # A pull request's branch in a fork, where `upstream/HEAD` already names
 # "main":  the new branch is at the current commit, the upstream repository is
@@ -209,7 +213,7 @@ esac
 
 # Uncommitted changes in the default mode:  a staged change, an unstaged
 # change, and an untracked file, none of which the fast-forward touches, are
-# carried into the new directory, and the fast-forward is made.
+# carried over the fast-forward and into the new directory.
 clone8="${work}/proj8"
 make_fork_clone "${clone8}"
 advance_upstream sixth.txt 'upstream work beside local changes'
@@ -219,7 +223,6 @@ git -C "${clone8}" add staged.txt
 echo 'unstaged change' >> "${clone8}/file.txt"
 echo 'untracked' > "${clone8}/untracked.txt"
 status_before="$(git -C "${clone8}" status --porcelain)"
-state_before="$(working_tree_state "${clone8}")"
 run_new_branch "${clone8}" dirty
 dirty="${work}/proj8-branch-dirty"
 if [ "$(git -C "${dirty}" rev-parse HEAD)" != "${upstream_head}" ]; then
@@ -233,22 +236,25 @@ if [ "$(git -C "${dirty}" show :staged.txt)" != 'staged change' ] \
   || [ "$(cat "${dirty}/sixth.txt")" != 'upstream work beside local changes' ]; then
   fail "the new directory lacks an uncommitted change or the upstream change"
 fi
-if [ "$(working_tree_state "${clone8}")" != "${state_before}" ] \
-  || [ "$(git -C "${clone8}" status --porcelain)" != "${status_before}" ]; then
-  fail "git-new-branch changed ${clone8}, which has uncommitted changes"
+if [ "$(git -C "${clone8}" rev-parse HEAD)" != "${upstream_head}" ] \
+  || [ "$(git -C "${clone8}" status --porcelain)" != "${status_before}" ] \
+  || [ "$(cat "${clone8}/sixth.txt")" != 'upstream work beside local changes' ]; then
+  fail "${clone8} was not fast-forwarded with its uncommitted changes intact: [$(git -C "${clone8}" status --porcelain)]"
 fi
 
 # An uncommitted change to a file that the fast-forward would change:  the
 # fast-forward is not made, with a warning, and the change is carried over
 # intact.
 advance_upstream file.txt 'upstream change to the file with an unstaged change'
+current_head="$(git -C "${clone8}" rev-parse HEAD)"
 run_new_branch "${clone8}" overlap
 overlap="${work}/proj8-branch-overlap"
-if [ "$(git -C "${overlap}" rev-parse HEAD)" != "$(git -C "${clone8}" rev-parse HEAD)" ]; then
-  fail "the new branch is not at the current commit when the fast-forward overlaps uncommitted changes"
+if [ "$(git -C "${overlap}" rev-parse HEAD)" != "${current_head}" ] \
+  || [ "$(git -C "${clone8}" rev-parse HEAD)" != "${current_head}" ]; then
+  fail "a branch moved when the fast-forward overlaps uncommitted changes"
 fi
 case "${out}" in
-  *"warning: the new branch starts at the current commit of ${clone8}, not at upstream/main, the upstream repository's default branch, because the fast-forward would change files that have uncommitted changes in ${overlap}, or would overwrite untracked files there."*) ;;
+  *"warning: ${clone8} was not fast-forwarded to upstream/main, the upstream repository's default branch, because the fast-forward would change files that have uncommitted changes there, or would overwrite untracked files there."*"so the new branch starts at the current commit of ${clone8}."*) ;;
   *) fail "no warning about the uncommitted changes that the fast-forward overlaps: ${out}" ;;
 esac
 if [ "$(git -C "${overlap}" status --porcelain)" != "${status_before}" ] \
@@ -256,10 +262,25 @@ if [ "$(git -C "${overlap}" status --porcelain)" != "${status_before}" ] \
   || [ "$(tail -n 1 "${overlap}/file.txt")" != 'unstaged change' ]; then
   fail "the uncommitted changes were not carried over intact: [$(git -C "${overlap}" status --porcelain)]"
 fi
+if [ "$(git -C "${clone8}" status --porcelain)" != "${status_before}" ]; then
+  fail "the uncommitted changes in ${clone8} were not left intact: [$(git -C "${clone8}" status --porcelain)]"
+fi
+
+# The same, in a clean checkout:  the current branch is not fast-forwarded,
+# but the new branch starts at the upstream commit all the same.
+run_new_branch "${clone8}" --clean cleanoverlap
+if [ "$(git -C "${work}/proj8-branch-cleanoverlap" rev-parse HEAD)" != "$(git -C "${upstream}" rev-parse main)" ] \
+  || [ "$(git -C "${clone8}" rev-parse HEAD)" != "${current_head}" ]; then
+  fail "--clean: the new branch is not at upstream/main, or ${clone8} moved"
+fi
+case "${out}" in
+  *"warning: ${clone8} was not fast-forwarded"*"the new branch starts at upstream/main all the same, because it is a clean checkout."*) ;;
+  *) fail "--clean: no message about the fast-forward that was not made: ${out}" ;;
+esac
 
 # A branch directory that is a clone of its own registers the new worktree in
-# the main clone, which has not fetched the upstream commit.  The
-# fast-forward needs that commit, and it is copied there.
+# the main clone, which has not fetched the upstream commit.  The new branch
+# needs that commit, and it is copied there.
 main_clone="${work}/proj9"
 make_fork_clone "${main_clone}"
 other="${work}/proj9-branch-other"
@@ -351,8 +372,11 @@ fi
 if [ -e "${deleted}/file.txt" ]; then
   fail "the fast-forward restored a file that ${clone18} deleted"
 fi
+if [ -e "${clone18}/file.txt" ]; then
+  fail "the fast-forward restored a file that ${clone18} deleted, in ${clone18}"
+fi
 case "${out}" in
-  *"because the fast-forward would change files that have uncommitted changes in ${deleted}"*) ;;
+  *"warning: ${clone18} was not fast-forwarded"*"because the fast-forward would change files that have uncommitted changes there"*) ;;
   *) fail "no warning about the deleted file that the fast-forward would change: ${out}" ;;
 esac
 
@@ -380,7 +404,7 @@ if ! out="$(cd -- "${clone10}" && PATH="${fake_commands}/bin:${PATH}" "${fake_co
   fail "git-new-branch nobuild failed: ${out}"
 fi
 case "${out}" in
-  *"fast-forwarded the new branch to upstream/main"*) ;;
+  *"fast-forwarded ${clone10} to upstream/main"*) ;;
   *) fail "git-new-branch nobuild did not fast-forward: ${out}" ;;
 esac
 if [ -e "${compile_log}" ]; then

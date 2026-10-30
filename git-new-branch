@@ -11,10 +11,9 @@
 # current branch.  If the current branch has the name of the upstream
 # repository's default branch, and that default branch is a fast-forward of
 # the current commit (as for a fork's `master` that lags behind
-# `upstream/master`) then the new branch starts at the default branch's
-# latest commit instead.  The new branch's most recent commit is never a
-# newly-created merge.  The current branch is not changed, beyond the `git
-# pull`.
+# `upstream/master`) then the current branch is fast-forwarded to the default
+# branch's latest commit, and the new branch starts there instead.  The new
+# branch's most recent commit is never a newly-created merge.
 #
 # The new directory is:
 #   (default)  a linked worktree of the current repository, made by
@@ -30,30 +29,17 @@
 #              is an independent clone that shares nothing with the current
 #              repository.
 #
-# Every effect is local:  this command never pushes the new branch, and it
-# does not build.
+# Every effect is local:  this command never contacts a remote except to
+# read from it, and in particular it does not push the new branch.
+# Therefore, the new branch has no upstream branch, which `git-push-to` and
+# `git-pull-from` require.  Nor does this command build.
 #
 # Details:
 #
-# The upstream repository is the remote that `git-pull-upstream` merges from:
-# the remote named `upstream` if there is one, as in a fork, then `origin`,
-# then the clone's only remote if it has exactly one.  This command fetches it
-# and updates `REMOTE/HEAD`, which names its default branch, unless the `git
-# pull` already fetched it, or `REMOTE/HEAD` already names an existing branch
-# of another name than the current branch and the upstream repository has no
-# branch of the current branch's name.  A clone that cannot fetch it, as
-# without network access, gets a warning, and the new branch starts at the
-# current commit.  A current branch of another name, such as a release branch
-# or a pull request's branch, or one with commits that the default branch
-# lacks, as in a downstream fork, leaves the new branch at the current commit,
-# with no message.  The fast-forward is made in the new directory only.  The
-# uncommitted changes that the default mode and `--copy` carry into the new
-# directory are kept:  if the fast-forward would change a file that has such a
-# change, or would overwrite an untracked file, it is not made, with a warning.
-# Nor is it made, with a warning, if it would add, remove, or update a
-# submodule.  As `git merge` does, the fast-forward overwrites an ignored file
-# that the upstream repository has started to track; the current directory
-# still holds the original.
+# `find_upstream_commit` says what the upstream repository is, when it is
+# fetched, and when the new branch starts at its default branch.
+# `fast_forward_upstream` says how the current branch is fast-forwarded, and
+# when it is not.
 #
 # The default mode and `--copy` copy build output, which might still refer to
 # the current directory's files.  These modes warn about such files; see
@@ -64,9 +50,9 @@
 # `.claude/worktrees/`, because its copy would share that worktree's HEAD and
 # index; they say which ones they left out.
 #
-# A working tree that has submodules gets `--copy` automatically, because git
-# does not support a submodule in more than one worktree, and `--clean` is
-# refused when the current commit has submodules.  A repository that has no
+# A working tree that has submodules gets `--copy` automatically, and
+# `--clean` is refused when the current commit has submodules;
+# `choose_mode_for_submodules` says why.  A repository that has no
 # commit is refused, because there is nothing to branch from.  Every mode but
 # `--clean` is refused while a merge, cherry-pick, revert, or rebase is in
 # progress, because the new directory would get the operation's staged
@@ -74,31 +60,16 @@
 #
 # In the worktree modes, this script writes into the current repository:  it
 # creates the new branch there and registers the new worktree in its `.git`.
-# There is one exception.  If the current repository is a branch directory's,
-# REPONAME-branch-OTHER/, and a sibling REPONAME/ is a clone of the same
-# project, the branch and the worktree are created in REPONAME/ instead, after
-# the commit and staged files that they need are copied there, if they can be
-# and if REPONAME/ has no branch of that name; otherwise, the new worktree would
-# prevent the removal of
-# REPONAME-branch-OTHER/.  Then the test for a branch of the same name on a
-# remote consults REPONAME/'s remotes, because REPONAME/'s configuration says
-# where the new branch would be pushed.
-# Every effect of this script is local, all the same:  it never contacts a
-# remote except to read from it, and in particular it does not push the new
-# branch.  Therefore, the new branch has no upstream branch, which
-# `git-push-to` and `git-pull-from` require.
+# If the current repository is a branch directory's, REPONAME-branch-OTHER/,
+# they are created instead in the sibling REPONAME/ that `main_clone_for`
+# chooses, if there is one, so that the new worktree does not prevent the
+# removal of REPONAME-branch-OTHER/.
 #
-# Do not remove or move a worktree that this script created with file-system
-# commands.  This applies to the default mode and `--clean`, not to `--copy`,
-# whose directory is an independent clone.
-#  * Do not `rm -rf` it.  That leaves the branch, so the branch name stays
-#    taken, and a stale registration in the repository.  Use
-#    `git-remove-branch-directory` instead.
-#  * Do not `mv` it.  It keeps working, so nothing looks wrong, but its
-#    registration still names the old path, and the `git worktree prune` that
-#    `git gc` eventually runs then deletes the registration, after which the
-#    directory is no longer a working tree.  Use `git worktree move` instead,
-#    or run `git worktree repair` in a directory that was already moved.
+# Remove a worktree that this script created with
+# `git-remove-branch-directory`, and move it with `git worktree move`, never
+# with file-system commands; the "Worktrees" section of README.md says why.
+# This applies to the default mode and `--clean`, not to `--copy`, whose
+# directory is an independent clone.
 #
 # This command requires git 2.31 or later, and its default mode requires git
 # 2.36 or later in a sparse checkout or with per-worktree configuration.
@@ -392,7 +363,8 @@ fi
 
 # In the worktree modes, register the new worktree in the project's main clone
 # rather than in a branch directory, when this repository is a branch
-# directory's; see `main_clone_for`.
+# directory's; see `main_clone_for`.  A main clone that has its own branch of
+# the new branch's name cannot host it.
 if [ "${MODE}" != 'copy' ]; then
   WORKTREE_HOST="$(main_clone_for "${TOPLEVEL}")"
 fi
@@ -409,10 +381,9 @@ fi
 # no upstream, but it is reported: the branch will be based on a possibly stale
 # commit.
 #
-# `git_batch_ssh` disables the interactive prompts that git and SSH would
-# otherwise issue, as it does for the query below.  This pull's output is
-# captured rather than shown, so a prompt would be invisible and would block
-# this script forever; a failure that says why is better than a silent hang.
+# The pull runs under `git_batch_ssh`, because its output is captured rather
+# than shown, so a prompt would be invisible and would block this script
+# forever; a failure that says why is better than a silent hang.
 PULL_SUCCEEDED=1
 if ! PULL_OUTPUT="$(git_batch_ssh . pull -q 2>&1)"; then
   PULL_SUCCEEDED=0
@@ -434,32 +405,38 @@ fi
 # if the current branch has the same name as that default branch and that
 # commit is a fast-forward of the current commit (as for a fork's `master`
 # that lags behind `upstream/master`) and that commit changes no submodule.
-# A fast-forward that adds a submodule would leave it uninitialized, and in
-# a worktree it could not be initialized.  A fast-forward that updates or
-# removes a submodule would leave the submodule's checkout as it was.  Also
-# sets ${UPSTREAM_REF} and ${UPSTREAM_NAME} to the remote-tracking branch,
-# such as `refs/remotes/upstream/master` and "upstream/master".
+# A current branch of another name, such as a release branch or a pull
+# request's branch, or one with commits that the default branch lacks, as in
+# a downstream fork, gets none, with no message.  A commit that adds, removes,
+# or updates a submodule gets none, with a warning.  A fast-forward that adds
+# a submodule would leave it uninitialized, and in a worktree it could not be
+# initialized.  A fast-forward that updates or removes a submodule would leave
+# the submodule's checkout as it was.  Also sets ${UPSTREAM_REF} and
+# ${UPSTREAM_NAME} to the remote-tracking branch, such as
+# `refs/remotes/upstream/master` and "upstream/master".
 #
-# This fetches the upstream repository and updates `REMOTE/HEAD`, which names
-# its default branch.  The upstream repository is chosen, and fetched, as
-# `git-pull-upstream` does.  The fetch is unnecessary if the pull above
-# succeeded and fetched the same remote, which brought the current branch up
-# to date with it.  It is also unnecessary if `REMOTE/HEAD` names an existing
-# branch of another name than the current branch and the remote has no
-# branch of the current branch's name, as for a pull request's branch in a
-# fork.  Otherwise, a stale `REMOTE/HEAD`, such as one that still names
-# `master` after the remote renamed it to `main`, could hide the remote's
-# default branch.  Nothing here changes this working tree or its branch.
+# The upstream repository is the remote that `upstream_remote` chooses, which
+# `git-pull-upstream` merges from.  This fetches it and updates `REMOTE/HEAD`,
+# which names its default branch, as `git-pull-upstream` does.  The fetch is
+# unnecessary if the pull above succeeded and fetched the same remote, which
+# brought the current branch up to date with it.  It is also unnecessary if
+# `REMOTE/HEAD` names an existing branch of another name than the current
+# branch and the remote has no branch of the current branch's name, as for a
+# pull request's branch in a fork.  Otherwise, a stale `REMOTE/HEAD`, such as
+# one that still names `master` after the remote renamed it to `main`, could
+# hide the remote's default branch.  Nothing here changes this working tree or
+# its branch; `fast_forward_upstream` does that.
 #
-# A clone with no remote that `git-pull-upstream` would choose, such as one
-# with no remote at all, has no upstream repository, and nothing is said about
-# it.  Any other failure is not fatal either, for the same reasons that a
-# failed pull is not, but it is reported:  the new branch will lack upstream
-# commits that it might have had.
+# A clone with no remote that `upstream_remote` chooses, such as one with no
+# remote at all, has no upstream repository, and nothing is said about it.
+# Any other failure, such as a fetch without network access, is not fatal
+# either, for the same reasons that a failed pull is not, but it is reported:
+# the new branch starts at the current commit, and lacks upstream commits
+# that it might have had.
 #
-# `git_batch_ssh` disables the interactive prompts, as for the pull above.
-# The upstream repository may be another remote than the one that the pull
-# contacted, so a prompt here is possible even if the pull issued none.
+# The fetch runs under `git_batch_ssh`, as the pull above does.  The upstream
+# repository might be another remote than the one that the pull contacted, so
+# a prompt here is possible even if the pull issued none.
 find_upstream_commit() {
   UPSTREAM_COMMIT=''
   # `git symbolic-ref --short` would print "heads/main" if a tag "main" exists.
@@ -600,9 +577,8 @@ done
 # Asking the remote does not change it.  In particular, this script does not
 # push the new branch.
 #
-# `git_batch_ssh` disables the interactive prompts that would otherwise block
-# this query forever when this script is run from another script or a CI job,
-# as `is-deleted-branch` does for its own queries.
+# The query runs under `git_batch_ssh`, as `is-deleted-branch` runs its own
+# queries.
 # A remote that this script cannot ask is not an error; the branch is created.
 if [ -n "${REMOTE}" ] \
   && git_batch_ssh "${COLLISION_REPO}" ls-remote --exit-code "${REMOTE}" \
@@ -614,14 +590,14 @@ fi
 # Fetch the upstream repository only now that no test can refuse the branch,
 # so that a refused name does not wait on it.
 find_upstream_commit
-# The fast-forward of the new branch happens in the new worktree, so it needs
-# the upstream commit in ${WORKTREE_HOST} as well.  The fetch above updated
-# only this repository's remote-tracking branches, so ${WORKTREE_HOST} may lack
-# the commit even if it has a remote of the same name.  A failure to copy it
-# costs only the fast-forward, not the choice of ${WORKTREE_HOST}.
+# The new branch starts at ${UPSTREAM_COMMIT}, so a new worktree registered in
+# ${WORKTREE_HOST} needs that commit there.  The fetch above updated only this
+# repository's remote-tracking branches, so ${WORKTREE_HOST} might lack the
+# commit even if it has a remote of the same name.  A failure to copy it costs
+# only the fast-forward, not the choice of ${WORKTREE_HOST}.
 if [ -n "${WORKTREE_HOST}" ] && [ -n "${UPSTREAM_COMMIT}" ] \
   && ! copy_objects_to "${WORKTREE_HOST}" "${UPSTREAM_REF}"; then
-  echo "${SCRIPT_NAME}: so the new branch will not start at ${UPSTREAM_NAME}" >&2
+  echo "${SCRIPT_NAME}: so neither ${TOPLEVEL} nor the new branch is fast-forwarded to ${UPSTREAM_NAME}" >&2
   UPSTREAM_COMMIT=''
 fi
 
@@ -629,6 +605,91 @@ fi
 # the branch.
 if [ -n "${WORKTREE_HOST}" ]; then
   note_worktree_host
+fi
+
+# Usage: fast_forward_upstream
+# Fast-forwards the current branch, its index, and its working tree in
+# ${TOPLEVEL} from the current commit to ${UPSTREAM_COMMIT}, the upstream
+# repository's default branch, carrying every uncommitted change forward.
+# The fast-forward is not made if it would change a file that has a staged
+# change, an unstaged modification, or an unstaged deletion, or if it would
+# overwrite an untracked file; then this prints a warning, changes nothing,
+# and returns 1.  Such a failure is not fatal, because the current commit is
+# usable.  As `git merge` does, the fast-forward overwrites an ignored file
+# that the upstream repository has started to track.  If the index and the
+# working tree were fast-forwarded but the branch could not be, this exits,
+# after saying how to finish the fast-forward.
+#
+# `git read-tree -m -u` does to the index and the working tree what a
+# fast-forward or `git checkout` does:  it carries every local change
+# forward, and it refuses, before changing anything, if the fast-forward
+# changes a file that has a staged change or an unstaged modification, or if
+# it would overwrite an untracked file.  It does not refuse for an unstaged
+# deletion:  it writes the upstream version of the file, which undoes the
+# deletion, so that case is tested first.  `git merge --ff-only` is not used,
+# because configuration can change what it does:  `merge.autoStash` would
+# stash the changes on the stash stack that every worktree shares and reapply
+# them with possible conflicts.  Plumbing commands heed no such
+# configuration.  Nor is `git reset --keep` used, which would unstage the
+# staged changes.
+fast_forward_upstream() {
+  if ! ffu_head="$(git -C "${TOPLEVEL}" rev-parse --verify HEAD)"; then
+    echo "${SCRIPT_NAME}: warning: cannot determine the commit of ${TOPLEVEL}, so it was not fast-forwarded to ${UPSTREAM_NAME}." >&2
+    return 1
+  fi
+  ffu_skipped="${SCRIPT_NAME}: warning: ${TOPLEVEL} was not fast-forwarded to ${UPSTREAM_NAME}, the upstream repository's default branch"
+  # `git read-tree` takes a file whose metadata the index records wrongly, if
+  # only in its modification time, for one with an unstaged change, so refresh
+  # the index first, as `git status` would.  With `-q`, a file with an
+  # unstaged change is no failure, but a locked index is.
+  if ! git -C "${TOPLEVEL}" update-index -q --refresh > /dev/null \
+    || ! ffu_deleted="$(git -C "${TOPLEVEL}" diff-files --name-only --diff-filter=D)" \
+    || ! ffu_changed="$(git -C "${TOPLEVEL}" diff-tree -r --name-only --no-renames \
+      "${ffu_head}" "${UPSTREAM_COMMIT}")"; then
+    echo "${ffu_skipped}, because its state could not be determined." >&2
+    return 1
+  fi
+  ffu_overlap="${ffu_skipped}, because the fast-forward would change files that have uncommitted changes there, or would overwrite untracked files there."
+  if [ -n "${ffu_deleted}" ] \
+    && printf '%s\n' "${ffu_changed}" | grep -q -x -F -e "${ffu_deleted}"; then
+    echo "${ffu_overlap}" >&2
+    return 1
+  fi
+  # Ignore HUP, INT, and TERM between the update of the index and working tree
+  # and the update of the branch, so that no interruption leaves the files at
+  # ${UPSTREAM_COMMIT} and the branch at ${ffu_head}.  The git commands inherit
+  # the disposition.  The subshell keeps it from replacing the traps that
+  # `trap_branch_cleanup` installed; the shell runs the trap for a signal that
+  # arrives meanwhile once the subshell exits.
+  ffu_status=0
+  (
+    trap '' HUP INT TERM
+    git -C "${TOPLEVEL}" read-tree -m -u "${ffu_head}" "${UPSTREAM_COMMIT}" || exit 1
+    git -C "${TOPLEVEL}" update-ref -m "${SCRIPT_NAME}: fast-forward to ${UPSTREAM_NAME}" \
+      HEAD "${UPSTREAM_COMMIT}" "${ffu_head}" || exit 2
+  ) || ffu_status=$?
+  case "${ffu_status}" in
+    0) ;;
+    1)
+      echo "${ffu_overlap}" >&2
+      return 1
+      ;;
+    *)
+      echo "${SCRIPT_NAME}: ERROR: the index and working tree of ${TOPLEVEL} were fast-forwarded to ${UPSTREAM_NAME}, but its branch could not be, so they differ from its commit.  To finish the fast-forward, run:" >&2
+      echo "  git -C '${TOPLEVEL}' update-ref HEAD ${UPSTREAM_COMMIT} ${ffu_head}" >&2
+      exit 1
+      ;;
+  esac
+}
+if [ -n "${UPSTREAM_COMMIT}" ]; then
+  if fast_forward_upstream; then
+    echo "${SCRIPT_NAME}: fast-forwarded ${TOPLEVEL} to ${UPSTREAM_NAME}, the upstream repository's default branch, where the new branch starts." >&2
+  elif [ "${MODE}" = 'clean' ]; then
+    echo "${SCRIPT_NAME}: the new branch starts at ${UPSTREAM_NAME} all the same, because it is a clean checkout." >&2
+  else
+    echo "${SCRIPT_NAME}: so the new branch starts at the current commit of ${TOPLEVEL}." >&2
+    UPSTREAM_COMMIT=''
+  fi
 fi
 
 # Usage: make_tmpdir
@@ -685,9 +746,11 @@ case "${MODE}" in
     # shared object store.  This is the one mode that creates the worktree
     # directly at its final name with nothing to follow, which is acceptable
     # because `git worktree add` is one fast command; the default mode, whose
-    # copy is slow, does its work under a temporary name instead.  A clean
-    # checkout has no uncommitted changes to carry over a fast-forward, so it
-    # is made at ${UPSTREAM_COMMIT} directly, if there is one.
+    # copy is slow, does its work under a temporary name instead.  The
+    # checkout is made at ${UPSTREAM_COMMIT}, if there is one, even if
+    # `fast_forward_upstream` left the current branch behind it, because a
+    # clean checkout has no uncommitted changes for the fast-forward to
+    # conflict with.
     if [ -n "${UPSTREAM_COMMIT}" ]; then
       add_worktree "${BRANCHDIR}" "${BRANCHNAME}" "${UPSTREAM_COMMIT}"
     else
@@ -768,76 +831,6 @@ esac
 WORKTREE_TO_CLEAN=""
 WORKTREE_GITDIR_TO_CLEAN=""
 BRANCH_TO_CLEAN=""
-
-# Usage: fast_forward_upstream
-# Moves the new branch in ${BRANCHDIR} from the current commit to
-# ${UPSTREAM_COMMIT}, the upstream repository's default branch, if that leaves
-# the new directory's uncommitted changes intact.  Otherwise, prints a warning,
-# leaves the new branch at the current commit, and returns 1.  Every failure
-# is reported but not fatal, because the new branch is usable at the current
-# commit.
-#
-# `git read-tree -m -u` does to the index and the working tree what a
-# fast-forward or `git checkout` does:  it carries every local change
-# forward, and it refuses, before changing anything, if the fast-forward
-# changes a file that has a staged change or an unstaged modification, or if
-# it would overwrite an untracked file.  It does not refuse for an unstaged
-# deletion:  it writes the upstream version of the file, which undoes the
-# deletion, so that case is tested first.  `git merge --ff-only` is not used,
-# because configuration can change what it does:  `merge.autoStash` would
-# stash the changes on the stash stack that every worktree shares and reapply
-# them with possible conflicts.  Plumbing commands heed no such
-# configuration.  Nor is `git reset --keep` used, which would unstage the
-# staged changes.
-fast_forward_upstream() {
-  if ! ffu_head="$(git -C "${BRANCHDIR}" rev-parse --verify HEAD)"; then
-    echo "${SCRIPT_NAME}: warning: cannot determine the commit of ${BRANCHDIR}, so it was not fast-forwarded to ${UPSTREAM_NAME}." >&2
-    return 1
-  fi
-  ffu_skipped="${SCRIPT_NAME}: warning: the new branch starts at the current commit of ${TOPLEVEL}, not at ${UPSTREAM_NAME}, the upstream repository's default branch"
-  # The default mode and `--copy` copied the index, whose recorded file
-  # metadata does not match the copied files, if only in their inode numbers.
-  # `git read-tree` would take every such file for one with an unstaged
-  # change, so refresh the index first, as `git status` would.  With `-q`, a
-  # file with an unstaged change is no failure, but a locked index is.
-  if ! git -C "${BRANCHDIR}" update-index -q --refresh > /dev/null \
-    || ! ffu_deleted="$(git -C "${BRANCHDIR}" diff-files --name-only --diff-filter=D)" \
-    || ! ffu_changed="$(git -C "${BRANCHDIR}" diff-tree -r --name-only --no-renames \
-      "${ffu_head}" "${UPSTREAM_COMMIT}")"; then
-    echo "${ffu_skipped}, because the state of ${BRANCHDIR} could not be determined." >&2
-    return 1
-  fi
-  # Ignore HUP, INT, and TERM between the update of the index and working tree
-  # and the update of the branch, so that no interruption leaves the files at
-  # ${UPSTREAM_COMMIT} and the branch at ${ffu_head}.  The git commands inherit
-  # the disposition.  The traps are not reinstated afterward:  they clean up
-  # the new directory only until it is complete, which it is by now.
-  ffu_overlap="${ffu_skipped}, because the fast-forward would change files that have uncommitted changes in ${BRANCHDIR}, or would overwrite untracked files there."
-  if [ -n "${ffu_deleted}" ] \
-    && printf '%s\n' "${ffu_changed}" | grep -q -x -F -e "${ffu_deleted}"; then
-    echo "${ffu_overlap}" >&2
-    return 1
-  fi
-  trap '' HUP INT TERM
-  if ! git -C "${BRANCHDIR}" read-tree -m -u "${ffu_head}" "${UPSTREAM_COMMIT}"; then
-    trap - HUP INT TERM
-    echo "${ffu_overlap}" >&2
-    return 1
-  fi
-  if ! git -C "${BRANCHDIR}" update-ref -m "${SCRIPT_NAME}: fast-forward to ${UPSTREAM_NAME}" \
-    HEAD "${UPSTREAM_COMMIT}" "${ffu_head}"; then
-    trap - HUP INT TERM
-    echo "${SCRIPT_NAME}: warning: the new branch in ${BRANCHDIR} could not be fast-forwarded to ${UPSTREAM_NAME}, but its index and working tree were, so they differ from its commit.  To finish the fast-forward, run:" >&2
-    echo "  git -C '${BRANCHDIR}' update-ref HEAD ${UPSTREAM_COMMIT} ${ffu_head}" >&2
-    return 1
-  fi
-  trap - HUP INT TERM
-}
-# `--clean` created the new branch at ${UPSTREAM_COMMIT}.
-if [ -n "${UPSTREAM_COMMIT}" ] \
-  && { [ "${MODE}" = 'clean' ] || fast_forward_upstream; }; then
-  echo "${SCRIPT_NAME}: fast-forwarded the new branch to ${UPSTREAM_NAME}, the upstream repository's default branch." >&2
-fi
 
 # Usage: warn_about_old_pathname
 # Warns about each file in ${BRANCHDIR} that git does not track and that

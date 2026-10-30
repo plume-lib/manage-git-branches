@@ -16,9 +16,7 @@ The key principles of this work style are:
    That is, never run `git checkout`, and never run `git stash`.
 3. To create a new branch, run the command `gnb` or `git-new-branch`.  It
    creates a new directory holding a new branch that starts as a copy of
-   the branch from which you ran `gnb`.  If you ran `gnb` on a fork's
-   `master` that lags behind the upstream repository's, the new branch starts
-   at the upstream repository's latest `master` instead.
+   the branch from which you ran `gnb`.
 4. To check out an existing branch, run `gcb` or `git-checkout-branch`.
    It creates a new directory and checks out the branch there.
 
@@ -43,29 +41,17 @@ The commands are:
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
   new branch, and it does not build.
-  The new branch starts at the current commit, after a `git pull`.  If the
-  current branch has the name of the upstream repository's default branch
-  (the upstream repository is chosen as `git-pull-upstream` chooses it), and
-  that default branch is a fast-forward of the current commit, as for a
-  fork's `master` that lags behind `upstream/master`, then the new branch
-  starts at the default branch's latest commit instead, unless that would
-  touch the uncommitted changes that the new directory carries or would add,
-  remove, or update a submodule.  The new branch's most recent commit is
-  never a newly-created merge.  The current branch is not changed, beyond
-  the `git pull`.
-  By default, the new directory is a worktree (see
-  [below](#worktrees)) that shares the repository, and its contents are the
-  same as the current directory's, including uncommitted changes and
-  untracked files.  With `--clean`, it is a worktree that holds a clean
-  checkout and nothing else.  With `--copy`, it is a copy of the whole
-  directory, `.git` included, and so an independent clone; a working tree
-  that has submodules always gets this.
-  Build output that the default mode or `--copy` copies may still refer to
-  the current directory's files by their absolute pathnames, and a build in
-  the new directory may not recompile it; this command warns about each file
-  that git does not track and that contains the current directory's
-  pathname or is a symbolic link into the current directory.
-  `git-new-branch --help` prints a synopsis.
+  The new branch starts at the current commit, after a `git pull`.  On a
+  fork's `master` that lags behind `upstream/master`, this command first
+  fast-forwards `master` to `upstream/master`.
+  By default, the new directory is a worktree (see [below](#worktrees)) whose
+  contents are the same as the current directory's, including uncommitted
+  changes, untracked files, and build output; `--clean` and `--copy` make
+  other kinds of directory.
+  `git-new-branch --help` prints a synopsis, which describes the modes.  The
+  comments in [`git-new-branch`](git-new-branch) give the details,
+  such as when the fast-forward is not made and which copied build output
+  this command warns about.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
@@ -291,7 +277,7 @@ Do not remove or move a worktree with file-system commands:
   until you run `git worktree repair` in it.
 
 None of this applies to a directory made by `git-new-branch --copy`:  each of
-those is an independent clone, which you may remove or move like any other
+those is an independent clone, which you can remove or move like any other
 directory.
 
 `git-new-branch`, `git-checkout-branch`, `git-remove-branch-directory`, and
