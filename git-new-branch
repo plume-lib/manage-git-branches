@@ -22,28 +22,10 @@
 #    nothing with the current repository.
 #
 # The default mode and `--copy` copy build output, which can still refer to
-# the current directory's files:  it can contain the current directory's
-# pathname, or be a symbolic link into the current directory.  For example, a
-# program into which the build compiled the pathname of its installation
-# directory runs the files installed in the current directory, and a build in
-# the new directory might not recompile it, even after a reconfiguration.
-# These modes find the "stale files":  the files in the new directory and in
-# its submodules that git does not track and that contain the current
-# directory's pathname or are symbolic links into the current directory.
-#
-# These modes delete each stale file that a tool presumably regenerates, and
-# say how many files they deleted.  This script cannot know which files a tool
-# regenerates, so it judges by the directory that contains the stale file.  It
-# deletes a stale file that is within a `build/` directory, Gradle's
-# `.gradle/` directory, or a cache directory, at any depth, if git ignores
-# that directory.  A cache directory, such as Ruff's `.ruff_cache/` or
-# Cargo's `target/`, is one that contains a `CACHEDIR.TAG` file, as the Cache
-# Directory Tagging Specification (https://bford.info/cachedir/) defines; it
-# also qualifies if git ignores its `CACHEDIR.TAG` file rather than the
-# directory itself.  But this script does not delete the stale file if git
-# also ignores the directory that contains that `build/`, `.gradle/`, or cache
-# directory, such as a dependency's directory in `node_modules/`, or if that
-# directory is a submodule.  These modes warn about each other stale file.
+# the current directory's files.  These modes delete such files that a tool
+# presumably regenerates, and warn about the others.
+# `delete_or_warn_about_old_pathname` says which files those are, and
+# `delete_stale_build_output` says which of them are deleted.
 #
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
@@ -723,10 +705,11 @@ delete_stale_build_output() {
       printf '%s\n' "${stale_file}"
       continue
     fi
-    # The files in a directory usually arrive one after another, so the
-    # directory's status is computed only when it differs from the previous
-    # file's.  ${stale_delete} is "yes" if the files in ${stale_dir} are
-    # deleted and "no" if they are not.
+    # ${stale_delete} is "yes" if the files in ${stale_dir} are deleted and
+    # "no" if they are not.  It is computed again only when ${stale_dir}
+    # differs from the previous file's, which saves the `git check-ignore`
+    # processes.  The order of the input affects only how often it is
+    # computed, not its value.
     if [ "${stale_dir}" != "${stale_last_dir}" ]; then
       stale_last_dir="${stale_dir}"
       if [ -e "${BRANCHDIR}/${stale_dir}/.git" ]; then
@@ -788,10 +771,11 @@ delete_stale_build_output() {
 # examined, because they are not build output.
 #
 # A stale file is usually build output that still refers to the files in
-# ${TOPLEVEL} rather than to their copies, such as a program into which the
-# build compiled the pathname of its installation directory.  A build in
-# ${BRANCHDIR} might not recompile it, even after a reconfiguration, because
-# build tools rarely notice a changed pathname.
+# ${TOPLEVEL} rather than to their copies.  For example, a program into which
+# the build compiled the pathname of its installation directory runs the files
+# installed in ${TOPLEVEL}.  A build in ${BRANCHDIR} might not recompile it,
+# even after a reconfiguration, because build tools rarely notice a changed
+# pathname.
 #
 # Deletes each stale file that a tool presumably regenerates, as
 # `delete_stale_build_output` describes, and warns about each other stale
