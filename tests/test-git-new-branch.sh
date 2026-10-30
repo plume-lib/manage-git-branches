@@ -895,6 +895,7 @@ done
 # which is resolved in the fork.
 fork_parent="${tmpdir}/forks"
 mkdir "${fork_parent}"
+fork_parent="$(CDPATH='' cd -- "${fork_parent}" && pwd -P)" || exit 1
 git clone -q --bare "${repo}" "${tmpdir}/proj.git"
 git clone -q --bare "${repo}" "${tmpdir}/proj-fork.git"
 git clone -q "${tmpdir}/proj.git" "${fork_parent}/proj"
@@ -1057,6 +1058,7 @@ fi
 # directory's branch, without saying so.
 only_parent="${tmpdir}/onlybranch"
 mkdir "${only_parent}"
+only_parent="$(CDPATH='' cd -- "${only_parent}" && pwd -P)" || exit 1
 git clone -q "${tmpdir}/proj.git" "${only_parent}/proj"
 git clone -q "${tmpdir}/proj-fork.git" "${only_parent}/proj-fork-me-branch-feature"
 git -C "${only_parent}/proj-fork-me-branch-feature" remote add upstream "${tmpdir}/proj.git"

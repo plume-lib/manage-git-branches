@@ -1335,8 +1335,9 @@ repository_key() {
 ## location (see `url_location`) with each URL put in one form, so that two
 ## spellings of one repository's URL, such as `git@github.com:org/proj.git` and
 ## `https://github.com/org/proj`, have the same key.  The form is the host, in
-## lower case, and the path, without a scheme, a user, a port, or a trailing
-## "/" or ".git".  The path is in lower case too for a host that ignores the
+## lower case, and the path, without a scheme, a user, or a trailing "/" or
+## ".git".  A port is part of the host, except the default port of the scheme,
+## which names the same repository as no port.  The path is in lower case too for a host that ignores the
 ## case of its paths, and only for such a host, because two paths that differ
 ## only in case may name different repositories.  A physical path is its own
 ## key.  Prints nothing if URL has no location.
@@ -1350,10 +1351,21 @@ url_key() {
       return 0
       ;;
   esac
-  url_key_url="$(printf '%s\n' "${url_key_location}" \
-    | sed -e 's#^[A-Za-z][A-Za-z0-9+.-]*://##' -e 's#^[^@/]*@##' \
-      -e 's#^\([^/:]*\):[0-9]*/#\1/#' -e 's#^\([^/:]*\):#\1/#' \
-      -e 's#/*$##' -e 's#\.git$##')"
+  case "${url_key_location}" in
+    *://*)
+      url_key_scheme="$(printf '%s\n' "${url_key_location%%://*}" | tr '[:upper:]' '[:lower:]')"
+      url_key_url="$(printf '%s\n' "${url_key_location#*://}" | sed -e 's#^[^@/]*@##')"
+      url_key_authority="${url_key_url%%/*}"
+      case "${url_key_scheme}:${url_key_authority}" in
+        ssh:*:22 | git+ssh:*:22 | ssh+git:*:22 | git:*:9418 | http:*:80 | https:*:443)
+          url_key_url="${url_key_authority%:*}${url_key_url#"${url_key_authority}"}"
+          ;;
+      esac
+      ;;
+    # An scp-style URL, `[user@]host:path`.
+    *) url_key_url="$(printf '%s\n' "${url_key_location}" | sed -e 's#^[^@/]*@##' -e 's#^\([^/:]*\):#\1/#')" ;;
+  esac
+  url_key_url="$(printf '%s\n' "${url_key_url}" | sed -e 's#/*$##' -e 's#\.git$##')"
   url_key_host="$(printf '%s\n' "${url_key_url%%/*}" | tr '[:upper:]' '[:lower:]')"
   case "${url_key_url}" in
     */*) url_key_path="/${url_key_url#*/}" ;;
