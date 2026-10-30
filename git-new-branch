@@ -296,7 +296,7 @@ BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 # collision does not cost the user a full copy of the repository.  Among them,
 # every test that needs no network access comes first -- including the test for
 # ${BRANCHDIR} and the `git pull` that follows them -- so that a purely local
-# failure is reported without waiting for a remote, which may take as long as a
+# failure is reported without waiting for a remote, which can take as long as a
 # connection attempt takes to time out.
 
 # "HEAD" is not the name of a branch, though it looks like one to a user and a
@@ -366,7 +366,7 @@ if ! PULL_OUTPUT="$(git_batch_ssh . pull -q 2>&1)"; then
   echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
 fi
 
-# The pull may have brought in a submodule.  If it switched the mode to the
+# The pull might have brought in a submodule.  If it switched the mode to the
 # copy, the copy's own test of `.git` applies.  The sparse-checkout test above
 # matters only to the default mode, which this cannot switch to.
 PRE_PULL_MODE="${MODE}"
@@ -403,7 +403,7 @@ fi
 # which remote the new branch would eventually be pushed to.
 #
 # When the new branch is created in ${WORKTREE_HOST}, though, its pushes are
-# governed by that repository's configuration, which may name other remotes,
+# governed by that repository's configuration, which might name other remotes,
 # and this branch's configuration does not apply to it.  Then the tests below
 # consult ${WORKTREE_HOST}'s remotes, and the remote is the one that
 # ${WORKTREE_HOST} would push a branch with no configuration to.
@@ -456,8 +456,8 @@ for tracking_remote in ${TRACKING_REMOTES}; do
   fi
 done
 
-# This clone shows no such branch, so ask the remote itself:  the clone may
-# never have fetched the branch, or may not fetch it at all.
+# This clone shows no such branch, so ask the remote itself:  the clone might
+# never have fetched the branch, or might not fetch it at all.
 #
 # Asking the remote does not change it.  In particular, this script does not
 # push the new branch.
@@ -487,8 +487,8 @@ fi
 # above, so that nothing -- in particular no remote query, which can take as
 # long as a connection attempt takes to time out -- runs between the test and
 # the assignment below.  Whatever the copy then leaves at that location was
-# created by this script and the traps may remove it, even if the copy is
-# interrupted before it finishes.
+# created by this script and the traps can safely remove it, even if the copy
+# is interrupted before it finishes.
 make_tmpdir() {
   if [ -e "${BRANCH_TMPDIR}" ]; then
     echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
@@ -793,7 +793,7 @@ delete_or_warn_about_old_pathname() {
   done
   warn_old_pattern="(${warn_old_pattern})([^-_.A-Za-z0-9]|\$)"
   # The first pass examines each symbolic link by its target's pathname.
-  # grep would follow it instead, and read the target, which may be a file in
+  # grep would follow it instead, and read the target, which might be a file in
   # ${TOPLEVEL}, a directory, or a FIFO that blocks grep.  The second pass
   # examines the contents of every other file, except one whose name says
   # that its contents are compressed, such as an archive or an image:
@@ -853,7 +853,7 @@ delete_or_warn_about_old_pathname() {
   if [ "${warn_old_count}" -gt 5 ]; then
     echo "  and $((warn_old_count - 5)) more" >&2
   fi
-  echo "${SCRIPT_NAME}: They are probably build output that still refers to the files in ${TOPLEVEL}, and a build may not recompile them, even after a reconfiguration.  Delete the build output and rebuild." >&2
+  echo "${SCRIPT_NAME}: They are probably build output that still refers to the files in ${TOPLEVEL}, and a build might not recompile them, even after a reconfiguration.  Delete the build output and rebuild." >&2
   # `--clean` is refused when the current commit has submodules.
   if ! has_gitlinks HEAD; then
     echo "${SCRIPT_NAME}: Or remove ${BRANCHDIR} with git-remove-branch-directory, and run \`${SCRIPT_NAME} --clean ${BRANCHNAME}\`, which copies no untracked file and no uncommitted change." >&2
