@@ -968,15 +968,20 @@ case "${out}" in
 esac
 
 # GitHub ignores the case of a repository's path, so a fork's spelling of the
-# upstream repository might differ in case.
+# upstream repository might differ in case.  The fake `ssh` keeps the test
+# offline even if the command were to contact the remote.
 github_parent="${tmpdir}/github"
 mkdir "${github_parent}"
 git clone -q "${tmpdir}/proj.git" "${github_parent}/proj"
+use_fake_ssh "${github_parent}/proj" "${tmpdir}/github-ssh-arguments"
 git -C "${github_parent}/proj" remote set-url origin git@github.com:Some-Org/proj.git
 git clone -q "${tmpdir}/proj-fork.git" "${github_parent}/proj-fork-me"
 git -C "${github_parent}/proj-fork-me" remote add upstream https://github.com/some-org/Proj
 if out="$(cd "${github_parent}/proj" && "${GIT_NEW_BRANCH}" --clean github 2>&1)"; then
   fail "zero exit status for a GitHub repository spelled in a different case by the fork"
+fi
+if [ -s "${tmpdir}/github-ssh-arguments" ]; then
+  fail "the refusal contacted the remote: $(cat "${tmpdir}/github-ssh-arguments")"
 fi
 
 # A pathname that begins with "~" names one repository in every directory.
