@@ -1026,8 +1026,8 @@ physical_path() {
 ## the new worktree exists, even after OTHER's pull request lands.  So a
 ## sibling named REPONAME, which conventionally holds the clone that branch
 ## directories are made from, is a better home, if it is a main working tree
-## of the same project:  if it and DIRECTORY's repository have a remote URL in
-## common.
+## of the same project:  if it and DIRECTORY's repository have a remote in
+## common, as `repository_key` judges it.
 ##
 ## A sparse checkout and per-worktree configuration are exceptions.
 ## `git worktree add` gives the new worktree the sparse-checkout patterns and
@@ -1071,14 +1071,15 @@ main_clone_for() {
       return 0
     fi
   done
-  # Each line is "KEY VALUE", and a URL or a pathname may contain a space.
-  mcf_urls="$(git -C "${mcf_host}" config --get-regexp '^remote\..*\.url$' \
-    | sed -e 's/^[^ ]* //' | sort -u)"
-  if [ -z "${mcf_urls}" ]; then
+  mcf_keys="$(git -C "${mcf_host}" remote | while IFS= read -r mcf_remote; do
+    repository_key "${mcf_host}" "${mcf_remote}"
+  done | sort -u)"
+  if [ -z "${mcf_keys}" ]; then
     return 0
   fi
-  if git -C "${mcf_main}" config --get-regexp '^remote\..*\.url$' \
-    | sed -e 's/^[^ ]* //' | grep -q -x -F -- "${mcf_urls}"; then
+  if git -C "${mcf_main}" remote | while IFS= read -r mcf_remote; do
+    repository_key "${mcf_main}" "${mcf_remote}"
+  done | grep -q -x -F -- "${mcf_keys}"; then
     printf '%s\n' "${mcf_main}"
   fi
 }
@@ -1260,51 +1261,110 @@ is_deleted_branch_was_pushed() {
 ## Usage: remote_location DIRECTORY REMOTE
 ## Prints the location of the repository that REMOTE names in DIRECTORY.
 ## REMOTE is a remote of the clone in DIRECTORY, or a URL or a pathname, which
-## git accepts in place of a remote's name.  The location is the URL that
-## REMOTE resolves to or, for a pathname, the physical path of the directory
-## that it names.  `git ls-remote --get-url` resolves REMOTE, applying
-## `url.*.insteadOf` rewriting as a query would.
+## git accepts in place of a remote's name.  The location is that of the URL
+## that REMOTE resolves to; see `url_location`.  `git ls-remote --get-url`
+## resolves REMOTE, applying `url.*.insteadOf` rewriting as a query would.
+##
+## Prints nothing if git cannot resolve REMOTE, or if REMOTE resolves to a
+## pathname that names no directory.  Git takes a name that is not a remote's
+## to be a pathname, so this includes a misspelled remote name, unless
+## DIRECTORY contains a directory of that name.
+remote_location() {
+  remote_location_url="$(git -C "$1" ls-remote --get-url "$2" 2> /dev/null)" \
+    || return 0
+  url_location "$1" "${remote_location_url}"
+}
+
+## Usage: url_location DIRECTORY URL
+## Prints the location of the repository that URL, as git would use it in
+## DIRECTORY, names.  The location is URL itself or, for a pathname or a
+## `file://` URL, the physical path of the directory that it names.
 ##
 ## A pathname is resolved in DIRECTORY, as git resolves it, so two directories
 ## that both say "../upstream.git" do not name one repository.  A pathname
 ## that begins with "~" is not relative to DIRECTORY, and its location is the
 ## pathname itself.
 ##
-## Prints nothing if git cannot resolve REMOTE, or if REMOTE resolves to a
-## pathname that names no directory.  Git takes a name that is not a remote's to be a pathname, so this includes
-## a misspelled remote name, unless DIRECTORY contains a directory of that
-## name.
-remote_location() {
-  remote_location_url="$(git -C "$1" ls-remote --get-url "$2" 2> /dev/null)" \
-    || return 0
+## Prints nothing if URL is empty, or if it is a pathname that names no
+## directory.
+url_location() {
+  url_location_url="$2"
   # Git reads a string as a URL if it has a scheme, and as an scp-style URL if
   # a colon precedes the first slash.  Anything else is a pathname.
-  case "${remote_location_url}" in
+  case "${url_location_url}" in
     '') return 0 ;;
+    file:///*) url_location_url="${url_location_url#file://}" ;;
     *://* | '~'*)
-      printf '%s\n' "${remote_location_url}"
+      printf '%s\n' "${url_location_url}"
       return 0
       ;;
     *:*)
-      case "${remote_location_url%%:*}" in
+      case "${url_location_url%%:*}" in
         */*) ;;
         *)
-          printf '%s\n' "${remote_location_url}"
+          printf '%s\n' "${url_location_url}"
           return 0
           ;;
       esac
       ;;
   esac
-  case "${remote_location_url}" in
-    /*) remote_location_path="${remote_location_url}" ;;
-    *) remote_location_path="$1/${remote_location_url}" ;;
+  case "${url_location_url}" in
+    /*) url_location_path="${url_location_url}" ;;
+    *) url_location_path="$1/${url_location_url}" ;;
   esac
   # Unlike the `physical_path` calls in `is_deleted_branch`, which explain the
   # failure that they let through, this one is expected to fail:  a remote that
   # names a pathname that no longer exists is an ordinary reason to have no
   # location.  Discard `cd`'s diagnostic, which would name the pathname with no
   # hint of what asked about it.
-  physical_path "${remote_location_path}" 2> /dev/null || true
+  physical_path "${url_location_path}" 2> /dev/null || true
+}
+
+## Usage: repository_key DIRECTORY REMOTE
+## Prints a key for the repository that REMOTE names in DIRECTORY, as
+## `url_key` does for the URL that `git ls-remote --get-url` resolves REMOTE
+## to.  Prints nothing if REMOTE has no location (see `remote_location`).
+repository_key() {
+  repository_key_url="$(git -C "$1" ls-remote --get-url "$2" 2> /dev/null)" \
+    || return 0
+  url_key "$1" "${repository_key_url}"
+}
+
+## Usage: url_key DIRECTORY URL
+## Prints a key for the repository that URL names in DIRECTORY, which is its
+## location (see `url_location`) with each URL put in one form, so that two
+## spellings of one repository's URL, such as `git@github.com:org/proj.git` and
+## `https://github.com/org/proj`, have the same key.  The form is the host, in
+## lower case, and the path, without a scheme, a user, a port, or a trailing
+## "/" or ".git".  The path is in lower case too for a host that ignores the
+## case of its paths, and only for such a host, because two paths that differ
+## only in case may name different repositories.  A physical path is its own
+## key.  Prints nothing if URL has no location.
+url_key() {
+  url_key_location="$(url_location "$1" "$2")"
+  case "${url_key_location}" in
+    '') return 0 ;;
+    # A physical path, or a pathname that is not relative to a directory.
+    /* | '~'*)
+      printf '%s\n' "${url_key_location}"
+      return 0
+      ;;
+  esac
+  url_key_url="$(printf '%s\n' "${url_key_location}" \
+    | sed -e 's#^[A-Za-z][A-Za-z0-9+.-]*://##' -e 's#^[^@/]*@##' \
+      -e 's#^\([^/:]*\):[0-9]*/#\1/#' -e 's#^\([^/:]*\):#\1/#' \
+      -e 's#/*$##' -e 's#\.git$##')"
+  url_key_host="$(printf '%s\n' "${url_key_url%%/*}" | tr '[:upper:]' '[:lower:]')"
+  case "${url_key_url}" in
+    */*) url_key_path="/${url_key_url#*/}" ;;
+    *) url_key_path='' ;;
+  esac
+  case "${url_key_host}" in
+    github.com)
+      url_key_path="$(printf '%s\n' "${url_key_path}" | tr '[:upper:]' '[:lower:]')"
+      ;;
+  esac
+  printf '%s%s\n' "${url_key_host}" "${url_key_path}"
 }
 
 ## The answers that remotes have already given this file, so that one
@@ -1332,7 +1392,10 @@ remote_heads_answers=0
 ## Four things decide it.  One is the location that REMOTE resolves to (see
 ## `remote_location`), which is what determines whether two queries ask the
 ## same repository -- not whether the directories share a repository, and not
-## what they call the remote.
+## what they call the remote.  Two spellings of one repository's URL, which
+## `repository_key` equates, are different queries:  they reach the repository
+## through different transports and credentials, which may be told different
+## branches or fail differently.
 ##
 ## Another is the SSH configuration, because `git_batch_ssh` takes
 ## `core.sshCommand` and `ssh.variant` from the directory it is given:  two

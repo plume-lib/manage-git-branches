@@ -345,97 +345,97 @@ if [ -e "${BRANCHDIR}" ]; then
   exit 1
 fi
 
-# Usage: repository_key DIRECTORY REMOTE
-# Prints a key for the repository that REMOTE names in DIRECTORY, which is its
-# location (see `remote_location`) with each URL put in one form.  Two
-# spellings of one repository's URL, such as `git@github.com:org/proj.git` and
-# `https://github.com/org/proj`, have the same key:  the host and the path, in
-# lower case, without a user, a port, or a trailing "/" or ".git".  Prints
-# nothing if REMOTE has no location.
-repository_key() {
-  repository_key_location="$(remote_location "$1" "$2")"
-  case "${repository_key_location}" in
-    '') ;;
-    # A physical path, or a pathname that is not relative to a directory.
-    /* | '~'*) printf '%s\n' "${repository_key_location}" ;;
-    *)
-      printf '%s\n' "${repository_key_location}" \
-        | sed -e 's#^[A-Za-z][A-Za-z0-9+.-]*://##' -e 's#^[^@/]*@##' \
-          -e 's#^\([^/:]*\):[0-9]*/#\1/#' -e 's#^\([^/:]*\):#\1/#' \
-          -e 's#/*$##' -e 's#\.git$##' \
-        | tr '[:upper:]' '[:lower:]'
-      ;;
-  esac
-}
-
-# Usage: is_fork_sibling DIRECTORY KEY SELF
-# Succeeds if DIRECTORY is a clone, other than the one whose physical path is
-# SELF, whose remote "upstream" has the repository key KEY.
+# Usage: is_fork_sibling DIRECTORY KEYS
+# Succeeds if DIRECTORY is a clone, other than this one, whose remote
+# "upstream" has one of the repository keys (see `url_key`) in KEYS, which
+# holds one per line.
 is_fork_sibling() {
   # Testing for `.git` also rejects a glob pattern that matched nothing, and it
   # keeps `git -C` from finding a repository that contains DIRECTORY.
   [ -e "$1/.git" ] \
-    && [ "$(physical_path "$1")" != "$3" ] \
+    && [ "$(physical_path "$1")" != "${TOPLEVEL}" ] \
     && git -C "$1" config --get remote.upstream.url > /dev/null 2>&1 \
-    && [ "$(repository_key "$1" upstream)" = "$2" ]
+    && repository_key "$1" upstream | grep -q -x -F -- "$2"
 }
 
 # Usage: check_not_upstream_clone
 # Exits with an explanation if this clone is the clone of an upstream
 # repository whose fork the user has in a sibling directory; see the comment at
-# the top of this file.  The new branch has no configuration of its own, so
-# the repository that it would be pushed to is the one that a branch with no
-# configuration is pushed to.  That repository is judged by the remote's URL,
-# not by a `pushurl` or `pushInsteadOf` setting.
+# the top of this file.
+#
+# The repository that the new branch would be pushed to is judged as `git push`
+# would judge it for the new branch, which has no configuration of its own:
+# by the configuration of the repository that the branch is created in,
+# ${WORKTREE_HOST} or else this one, and by the URLs that `git push` uses,
+# which `remote.<name>.pushurl` and `url.<base>.pushInsteadOf` may set.  A
+# remote given as a URL or a pathname rather than as a remote's name is judged
+# by its URL, without `pushInsteadOf` rewriting.
+#
+# Unlike the tests for a collision below, this test ignores the current
+# branch's configuration.  In a fork, the main branch may track the upstream
+# repository, which says nothing about where a branch for a pull request is
+# pushed, and judging by it would refuse in the fork itself.
 #
 # Only the fork's main working tree is named, not each of its branch
 # directories, which share its configuration and so would each match too.  A
 # branch directory is examined only if its fork has no main working tree here.
 check_not_upstream_clone() {
-  cnuc_remote="$(push_remote . '')"
+  cnuc_repo="${WORKTREE_HOST:-.}"
+  cnuc_remote="$(push_remote "${cnuc_repo}" '')"
   if [ -z "${cnuc_remote}" ]; then
     return 0
   fi
-  cnuc_key="$(repository_key . "${cnuc_remote}")"
-  if [ -z "${cnuc_key}" ]; then
+  if is_remote_name "${cnuc_repo}" "${cnuc_remote}"; then
+    cnuc_urls="$(git -C "${cnuc_repo}" remote get-url --push --all "${cnuc_remote}" 2> /dev/null)"
+  else
+    cnuc_urls="$(git -C "${cnuc_repo}" ls-remote --get-url "${cnuc_remote}" 2> /dev/null)"
+  fi
+  cnuc_keys="$(printf '%s\n' "${cnuc_urls}" | while IFS= read -r cnuc_url; do
+    url_key "${cnuc_repo}" "${cnuc_url}"
+  done)"
+  if [ -z "${cnuc_keys}" ]; then
     return 0
   fi
   cnuc_project="${REPO%%-branch-*}"
   cnuc_project="${cnuc_project%%-fork-*}"
-  cnuc_self="$(physical_path .)"
   cnuc_forks=''
   for cnuc_sibling in "${PARENTDIR}/${cnuc_project}"-fork-*; do
     case "${cnuc_sibling##*/}" in
       *-branch-*) continue ;;
     esac
-    if is_fork_sibling "${cnuc_sibling}" "${cnuc_key}" "${cnuc_self}"; then
+    if is_fork_sibling "${cnuc_sibling}" "${cnuc_keys}"; then
       cnuc_forks="${cnuc_forks}  ${cnuc_sibling}
 "
     fi
   done
+  cnuc_branch_dir=''
   if [ -z "${cnuc_forks}" ]; then
     for cnuc_sibling in "${PARENTDIR}/${cnuc_project}"-fork-*-branch-*; do
       cnuc_name="${cnuc_sibling##*/}"
       if [ ! -e "${PARENTDIR}/${cnuc_name%%-branch-*}/.git" ] \
-        && is_fork_sibling "${cnuc_sibling}" "${cnuc_key}" "${cnuc_self}"; then
-        cnuc_forks="  ${cnuc_sibling}
-"
+        && is_fork_sibling "${cnuc_sibling}" "${cnuc_keys}"; then
+        cnuc_branch_dir="${cnuc_sibling}"
         break
       fi
     done
   fi
-  if [ -z "${cnuc_forks}" ]; then
+  if [ -z "${cnuc_forks}" ] && [ -z "${cnuc_branch_dir}" ]; then
     return 0
   fi
-  echo "${SCRIPT_NAME}: ERROR: the new branch would be pushed to ${cnuc_remote} ($(git ls-remote --get-url "${cnuc_remote}")), which is the upstream repository of the fork in each of these directories:" >&2
-  printf '%s' "${cnuc_forks}" >&2
-  echo "${SCRIPT_NAME}: A branch for a pull request belongs in your fork, so run ${SCRIPT_NAME} there.  To create the branch here anyway, pass --allow-upstream." >&2
+  cnuc_url_list="$(printf '%s\n' "${cnuc_urls}" | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')"
+  if [ -n "${cnuc_forks}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: the new branch would be pushed to ${cnuc_remote} (${cnuc_url_list}), which is the upstream repository of the fork in each of these directories:" >&2
+    printf '%s' "${cnuc_forks}" >&2
+    echo "${SCRIPT_NAME}: A branch for a pull request belongs in your fork, so run ${SCRIPT_NAME} there.  To create the branch here anyway, pass --allow-upstream." >&2
+  else
+    # The new branch starts at the current commit, so running this command in a
+    # branch directory would start it on that directory's branch.
+    echo "${SCRIPT_NAME}: ERROR: the new branch would be pushed to ${cnuc_remote} (${cnuc_url_list}), which is the upstream repository of the fork in this branch directory:" >&2
+    echo "  ${cnuc_branch_dir}" >&2
+    echo "${SCRIPT_NAME}: A branch for a pull request belongs in your fork.  Run ${SCRIPT_NAME} in a clone of the fork, such as a new one in ${PARENTDIR}/${cnuc_name%%-branch-*}, or in ${cnuc_branch_dir} if the new branch should start at its current commit.  To create the branch here anyway, pass --allow-upstream." >&2
+  fi
   exit 1
 }
-
-if [ "${ALLOW_UPSTREAM}" = 0 ]; then
-  check_not_upstream_clone
-fi
 
 # In the worktree modes, register the new worktree in the project's main clone
 # rather than in a branch directory, when this repository is a branch
@@ -447,6 +447,12 @@ if [ -n "${WORKTREE_HOST}" ] \
   && git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
   echo "${SCRIPT_NAME}: ${WORKTREE_HOST} has its own branch ${BRANCHNAME}, so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
   WORKTREE_HOST=''
+fi
+
+# The refusal precedes the pull, so that a refused command changes nothing.
+if [ "${ALLOW_UPSTREAM}" = 0 ]; then
+  REFUSAL_WORKTREE_HOST="${WORKTREE_HOST}"
+  check_not_upstream_clone
 fi
 
 # Bring this working tree up to date, so that the branch is based on the most
@@ -498,6 +504,12 @@ if [ -n "${WORKTREE_HOST}" ]; then
     echo "${SCRIPT_NAME}: so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
     WORKTREE_HOST=''
   fi
+fi
+
+# The pull or the copy of objects may have changed the repository that the
+# branch is created in, and so the repository that it would be pushed to.
+if [ "${ALLOW_UPSTREAM}" = 0 ] && [ "${WORKTREE_HOST}" != "${REFUSAL_WORKTREE_HOST}" ]; then
+  check_not_upstream_clone
 fi
 
 # Determine which remote the new branch would collide with:  the remote that

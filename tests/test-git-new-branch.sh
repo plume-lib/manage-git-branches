@@ -955,7 +955,7 @@ mkdir "${url_parent}"
 git clone -q "${tmpdir}/proj.git" "${url_parent}/proj"
 git -C "${url_parent}/proj" remote set-url origin git@example.invalid:Some-Org/proj.git
 git clone -q "${tmpdir}/proj-fork.git" "${url_parent}/proj-fork-me"
-git -C "${url_parent}/proj-fork-me" remote add upstream https://example.invalid/some-org/proj/
+git -C "${url_parent}/proj-fork-me" remote add upstream https://EXAMPLE.invalid/Some-Org/proj/
 if out="$(cd "${url_parent}/proj" && "${GIT_NEW_BRANCH}" --clean spelled 2>&1)"; then
   fail "zero exit status for an upstream repository spelled differently by the fork"
 fi
@@ -963,6 +963,18 @@ case "${out}" in
   *"git-new-branch: ERROR: the new branch would be pushed to origin (git@example.invalid:Some-Org/proj.git)"*) ;;
   *) fail "unexpected message for an upstream repository spelled differently by the fork: ${out}" ;;
 esac
+
+# GitHub ignores the case of a repository's path, so a fork's spelling of the
+# upstream repository may differ in case.
+github_parent="${tmpdir}/github"
+mkdir "${github_parent}"
+git clone -q "${tmpdir}/proj.git" "${github_parent}/proj"
+git -C "${github_parent}/proj" remote set-url origin git@github.com:Some-Org/proj.git
+git clone -q "${tmpdir}/proj-fork.git" "${github_parent}/proj-fork-me"
+git -C "${github_parent}/proj-fork-me" remote add upstream https://github.com/some-org/Proj
+if out="$(cd "${github_parent}/proj" && "${GIT_NEW_BRANCH}" --clean github 2>&1)"; then
+  fail "zero exit status for a GitHub repository spelled in a different case by the fork"
+fi
 
 # A pathname that begins with "~" names one repository in every directory.
 tilde_parent="${tmpdir}/tilde"
@@ -979,6 +991,83 @@ fi
 case "${out}" in
   *"git-new-branch: ERROR: the new branch would be pushed to origin (~/no-such-dir/proj.git)"*) ;;
   *) fail "unexpected message for an upstream repository named by a pathname that begins with ~: ${out}" ;;
+esac
+
+# A `file://` URL and a pathname that name one directory are one repository.
+file_parent="${tmpdir}/fileurl"
+mkdir "${file_parent}"
+git clone -q "${tmpdir}/proj.git" "${file_parent}/proj"
+git clone -q "${tmpdir}/proj-fork.git" "${file_parent}/proj-fork-me"
+git -C "${file_parent}/proj-fork-me" remote add upstream "file://${tmpdir}/proj.git"
+if out="$(cd "${file_parent}/proj" && "${GIT_NEW_BRANCH}" --clean fileurl 2>&1)"; then
+  fail "zero exit status for an upstream repository named by a file:// URL in the fork: ${out}"
+fi
+
+# The URLs that `git push` uses say where the new branch would be pushed, not
+# the remote's URL:  a `pushurl` or a `pushInsteadOf` rewrite that names the
+# fork is not refused, and a `pushurl` that names the upstream repository is.
+push_parent="${tmpdir}/pushurls"
+mkdir "${push_parent}"
+git clone -q "${tmpdir}/proj.git" "${push_parent}/proj"
+git clone -q "${tmpdir}/proj-fork.git" "${push_parent}/proj-fork-me"
+git -C "${push_parent}/proj-fork-me" remote add upstream "${tmpdir}/proj.git"
+git -C "${push_parent}/proj" remote set-url --push origin "${tmpdir}/proj-fork.git"
+if ! out="$(cd "${push_parent}/proj" && "${GIT_NEW_BRANCH}" --clean pushurl 2>&1)"; then
+  fail "refused a clone whose pushurl names the fork: ${out}"
+fi
+git -C "${push_parent}/proj" config --unset remote.origin.pushurl
+git -C "${push_parent}/proj" config "url.${tmpdir}/proj-fork.git.pushInsteadOf" "${tmpdir}/proj.git"
+if ! out="$(cd "${push_parent}/proj" && "${GIT_NEW_BRANCH}" --clean pushinsteadof 2>&1)"; then
+  fail "refused a clone whose pushInsteadOf names the fork: ${out}"
+fi
+git -C "${push_parent}/proj" config --remove-section "url.${tmpdir}/proj-fork.git"
+git -C "${push_parent}/proj" remote set-url origin "${tmpdir}/proj-fork.git"
+git -C "${push_parent}/proj" remote set-url --push origin "${tmpdir}/proj.git"
+if out="$(cd "${push_parent}/proj" && "${GIT_NEW_BRANCH}" --clean pushtoupstream 2>&1)"; then
+  fail "zero exit status for a clone whose pushurl names the upstream repository"
+fi
+case "${out}" in
+  *"git-new-branch: ERROR: the new branch would be pushed to origin (${tmpdir}/proj.git)"*) ;;
+  *) fail "unexpected message for a clone whose pushurl names the upstream repository: ${out}" ;;
+esac
+
+# When the new worktree is registered in the main clone, that clone's
+# configuration says where the new branch would be pushed, not the
+# configuration of the branch directory that the command runs in.
+host_parent="${tmpdir}/host"
+mkdir "${host_parent}"
+git clone -q "${tmpdir}/proj.git" "${host_parent}/proj"
+git clone -q "${tmpdir}/proj.git" "${host_parent}/proj-branch-other"
+git -C "${host_parent}/proj-branch-other" remote set-url --push origin "${tmpdir}/proj-fork.git"
+git clone -q "${tmpdir}/proj-fork.git" "${host_parent}/proj-fork-me"
+git -C "${host_parent}/proj-fork-me" remote add upstream "${tmpdir}/proj.git"
+if out="$(cd "${host_parent}/proj-branch-other" && "${GIT_NEW_BRANCH}" --clean inhost 2>&1)"; then
+  fail "zero exit status for a worktree registered in a clone of an upstream repository"
+fi
+case "${out}" in
+  *"git-new-branch: ERROR: the new branch would be pushed to origin (${tmpdir}/proj.git)"*) ;;
+  *) fail "unexpected message for a worktree registered in a clone of an upstream repository: ${out}" ;;
+esac
+if ! out="$(cd "${host_parent}/proj-branch-other" && "${GIT_NEW_BRANCH}" --copy inbranchdir 2>&1)"; then
+  fail "refused a copy of a clone whose pushurl names the fork: ${out}"
+fi
+
+# When the fork has only a branch directory here, the refusal does not suggest
+# running the command in it, which would start the new branch at that
+# directory's branch, without saying so.
+only_parent="${tmpdir}/onlybranch"
+mkdir "${only_parent}"
+git clone -q "${tmpdir}/proj.git" "${only_parent}/proj"
+git clone -q "${tmpdir}/proj-fork.git" "${only_parent}/proj-fork-me-branch-feature"
+git -C "${only_parent}/proj-fork-me-branch-feature" remote add upstream "${tmpdir}/proj.git"
+if out="$(cd "${only_parent}/proj" && "${GIT_NEW_BRANCH}" --clean onlybranch 2>&1)"; then
+  fail "zero exit status beside a fork that has only a branch directory"
+fi
+case "${out}" in
+  *"the upstream repository of the fork in this branch directory:
+  ${only_parent}/proj-fork-me-branch-feature
+"*"such as a new one in ${only_parent}/proj-fork-me, or in ${only_parent}/proj-fork-me-branch-feature if the new branch should start at its current commit"*) ;;
+  *) fail "unexpected message beside a fork that has only a branch directory: ${out}" ;;
 esac
 
 # The default mode and `--copy` warn about each untracked or ignored file that
