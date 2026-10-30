@@ -907,20 +907,20 @@ ln -s "${stale_parent}" "${stale_link}" || exit 1
 stale="${stale_parent}/stale-branch-main"
 stale_logical="${stale_link}/stale-branch-main"
 make_repo "${stale}" || exit 1
-printf 'build/\n' > "${stale}/.gitignore"
+printf 'out/\n' > "${stale}/.gitignore"
 git -C "${stale}" add .gitignore
 git -C "${stale}" commit -q -m 'Ignore build output'
 stale_top="$(git -C "${stale}" rev-parse --show-toplevel)"
-mkdir "${stale}/build"
-printf 'launcher\000%s/inst/libexec\000' "${stale_top}" > "${stale}/build/launcher"
-printf 'prefix\000%s\000' "${stale_top}" > "${stale}/build/prefix.bin"
-printf '#define PREFIX "%s"\n' "${stale_top}" > "${stale}/build/config.h"
-printf 'SRCDIR = %s/src\n' "${stale_logical}" > "${stale}/build/Makefile"
-ln -s "${stale_top}/build" "${stale}/build/current" || exit 1
+mkdir "${stale}/out"
+printf 'launcher\000%s/inst/libexec\000' "${stale_top}" > "${stale}/out/launcher"
+printf 'prefix\000%s\000' "${stale_top}" > "${stale}/out/prefix.bin"
+printf '#define PREFIX "%s"\n' "${stale_top}" > "${stale}/out/config.h"
+printf 'SRCDIR = %s/src\n' "${stale_logical}" > "${stale}/out/Makefile"
+ln -s "${stale_top}/out" "${stale}/out/current" || exit 1
 printf '%s-other/file %s.bak/file\n' "${stale_top}" "${stale_top}" > "${stale}/sibling.txt"
-printf '%s/lib\n' "${stale_top}" > "${stale}/build/library.jar"
-mkfifo "${stale}/build/fifo" || exit 1
-ln -s fifo "${stale}/build/fifo-link" || exit 1
+printf '%s/lib\n' "${stale_top}" > "${stale}/out/library.jar"
+mkfifo "${stale}/out/fifo" || exit 1
+ln -s fifo "${stale}/out/fifo-link" || exit 1
 for mode in '' --copy; do
   branch="stale${mode#--}"
   if ! out="$(cd "${stale_logical}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
@@ -930,7 +930,7 @@ for mode in '' --copy; do
     *"warning: these files in ${stale_parent}/stale-branch-${branch}, which git does not track, contain the pathname of ${stale_logical} (also ${stale_top}) or are symbolic links into it:"*) ;;
     *) fail "${mode:-the default mode} did not warn about build output that contains the source's pathname: ${out}" ;;
   esac
-  for stale_file in build/launcher build/prefix.bin build/config.h build/Makefile build/current; do
+  for stale_file in out/launcher out/prefix.bin out/config.h out/Makefile out/current; do
     case "${out}" in
       *"  ${stale_file}
 "*) ;;
@@ -952,6 +952,161 @@ fi
 case "${out}" in
   *"contain the pathname"*) fail "--clean warned about build output that it does not copy: ${out}" ;;
 esac
+
+# A stale file (one that contains the source's pathname) is deleted from the
+# new directory rather than named if it is in a `build/` directory, Gradle's
+# `.gradle/` directory, or a cache directory (one that contains a
+# `CACHEDIR.TAG` file), at the top level or below it, that git ignores.  A
+# cache directory also qualifies if only its contents are ignored, as by the
+# `.gitignore` file that Ruff writes into `.ruff_cache/`.  These stale files
+# are named:  one outside those directories, in a directory whose
+# `CACHEDIR.TAG` file lacks the signature; one in a `build/` directory that
+# git does not ignore, whether or not git ignores the file; one in a cache
+# directory whose contents git does not ignore; and one in a `build/`
+# directory within an ignored directory.  A file in `build/` that does not contain the
+# source's pathname is kept.
+deleted="${stale_parent}/deleted-branch-main"
+make_repo "${deleted}" || exit 1
+printf 'build/\n!tools/build/\nlocal.properties\n.gradle/\nout/\nnode_modules/\ntarget/\n' \
+  > "${deleted}/.gitignore"
+git -C "${deleted}" add .gitignore
+git -C "${deleted}" commit -q -m 'Ignore build output'
+deleted_top="$(git -C "${deleted}" rev-parse --show-toplevel)"
+mkdir -p "${deleted}/build/classes" "${deleted}/sub/build" "${deleted}/out" \
+  "${deleted}/.gradle/8.14/executionHistory" "${deleted}/.gradle/buildOutputCleanup" \
+  "${deleted}/sub/.gradle/8.14/executionHistory" "${deleted}/tools/build" \
+  "${deleted}/node_modules/addon/build" "${deleted}/.ruff_cache/0.14.7" \
+  "${deleted}/tools/.ruff_cache/0.14.6" "${deleted}/sub/target/debug" \
+  "${deleted}/out/cache" || exit 1
+printf '%s/src\n' "${deleted_top}" > "${deleted}/tools/build/deploy.conf"
+printf 'sdk.dir=%s/sdk\n' "${deleted_top}" > "${deleted}/tools/build/local.properties"
+printf '%s/src\n' "${deleted_top}" > "${deleted}/node_modules/addon/build/config.gypi"
+printf '%s/src\n' "${deleted_top}" > "${deleted}/build/classes/Main.class"
+ln -s "${deleted_top}/build" "${deleted}/build/current" || exit 1
+printf 'no pathname\n' > "${deleted}/build/unrelated.txt"
+printf 'history\000%s/src\000' "${deleted_top}" \
+  > "${deleted}/.gradle/8.14/executionHistory/executionHistory.bin"
+printf 'outputs\000%s/build\000' "${deleted_top}" \
+  > "${deleted}/.gradle/buildOutputCleanup/outputFiles.bin"
+printf '%s/src\n' "${deleted_top}" > "${deleted}/sub/build/output.txt"
+printf 'history\000%s/src\000' "${deleted_top}" \
+  > "${deleted}/sub/.gradle/8.14/executionHistory/executionHistory.bin"
+printf '# Automatically created by ruff.\n*\n' > "${deleted}/.ruff_cache/.gitignore"
+printf 'Signature: 8a477f597d28d172789f06886806bc55\n' \
+  > "${deleted}/.ruff_cache/CACHEDIR.TAG"
+printf 'cache\000%s/src/main.py\000' "${deleted_top}" \
+  > "${deleted}/.ruff_cache/0.14.7/14439530856958427592"
+printf 'cache\000%s/tools/main.py\000' "${deleted_top}" \
+  > "${deleted}/tools/.ruff_cache/0.14.6/1942947381310501558"
+printf 'Signature: 8a477f597d28d172789f06886806bc55\n' \
+  > "${deleted}/tools/.ruff_cache/CACHEDIR.TAG"
+printf 'Signature: 8a477f597d28d172789f06886806bc55' \
+  > "${deleted}/sub/target/CACHEDIR.TAG"
+printf '%s/src\n' "${deleted_top}" > "${deleted}/sub/target/debug/main.d"
+printf 'Not a signature\n' > "${deleted}/out/cache/CACHEDIR.TAG"
+printf '%s/src\n' "${deleted_top}" > "${deleted}/out/cache/entry"
+for mode in '' --copy; do
+  branch="deleted${mode#--}"
+  deleted_new="${stale_parent}/deleted-branch-${branch}"
+  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+    fail "nonzero exit status for ${mode:-the default mode} with build output to delete: ${out}"
+  fi
+  case "${out}" in
+    *": 8 files in \`.gradle/\`, \`.ruff_cache/\`, \`build/\`, and \`target/\`."*) ;;
+    *) fail "${mode:-the default mode} did not say that it deleted 8 files: ${out}" ;;
+  esac
+  for deleted_file in out/cache/entry \
+    tools/build/deploy.conf tools/build/local.properties \
+    node_modules/addon/build/config.gypi \
+    tools/.ruff_cache/0.14.6/1942947381310501558; do
+    case "${out}" in
+      *"  ${deleted_file}
+"*) ;;
+      *) fail "${mode:-the default mode} did not name ${deleted_file}: ${out}" ;;
+    esac
+    if [ ! -f "${deleted_new}/${deleted_file}" ]; then
+      fail "${mode:-the default mode} deleted ${deleted_file}"
+    fi
+  done
+  for deleted_file in build/classes/Main.class build/current \
+    .gradle/8.14/executionHistory/executionHistory.bin \
+    .gradle/buildOutputCleanup/outputFiles.bin sub/build/output.txt \
+    sub/.gradle/8.14/executionHistory/executionHistory.bin \
+    .ruff_cache/0.14.7/14439530856958427592 sub/target/debug/main.d; do
+    case "${out}" in
+      *"  ${deleted_file}
+"*) fail "${mode:-the default mode} named ${deleted_file} rather than deleting it: ${out}" ;;
+    esac
+    if [ -e "${deleted_new}/${deleted_file}" ] || [ -L "${deleted_new}/${deleted_file}" ]; then
+      fail "${mode:-the default mode} did not delete ${deleted_file}"
+    fi
+    if [ ! -e "${deleted}/${deleted_file}" ] && [ ! -L "${deleted}/${deleted_file}" ]; then
+      fail "${mode:-the default mode} deleted ${deleted_file} from the source"
+    fi
+  done
+  if [ ! -f "${deleted_new}/build/unrelated.txt" ]; then
+    fail "${mode:-the default mode} deleted a file in build/ that does not contain the source's pathname"
+  fi
+done
+
+# Files in a submodule are examined too, and the submodule's `build/` and
+# `.gradle/` directories are treated like the superproject's.  A submodule at
+# `build/` is not a `build/` directory, so a file in it that the submodule
+# ignores is named.
+subdeleted_parent="${tmpdir}/subdeleted"
+mkdir -p "${subdeleted_parent}" || exit 1
+subdeleted_parent="$(CDPATH='' cd -- "${subdeleted_parent}" && pwd -P)" || exit 1
+make_submodule_superproject "${subdeleted_parent}" || exit 1
+subdeleted="${subdeleted_parent}/super-branch-main"
+(
+  cd "${subdeleted}" || exit 1
+  git -c protocol.file.allow=always submodule add -q ../submodule-origin build || exit 1
+  git commit -q -m 'Add a submodule at build'
+) || exit 1
+printf 'build/\n.gradle/\n' > "${subdeleted}/sub/.gitignore"
+printf 'out/\n' > "${subdeleted}/build/.gitignore"
+mkdir -p "${subdeleted}/build/out" || exit 1
+printf '%s/src\n' "${subdeleted}" > "${subdeleted}/build/out/tool.txt"
+mkdir -p "${subdeleted}/sub/build/classes" \
+  "${subdeleted}/sub/.gradle/8.14/executionHistory" || exit 1
+printf '%s/src\n' "${subdeleted}" > "${subdeleted}/sub/build/classes/Main.class"
+printf 'history\000%s/src\000' "${subdeleted}" \
+  > "${subdeleted}/sub/.gradle/8.14/executionHistory/executionHistory.bin"
+printf '%s/src\n' "${subdeleted}" > "${subdeleted}/sub/notes.txt"
+for mode in '' --copy; do
+  branch="subdeleted${mode#--}"
+  subdeleted_new="${subdeleted_parent}/super-branch-${branch}"
+  if ! out="$(cd "${subdeleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+    fail "nonzero exit status for ${mode:-the default mode} with build output to delete in a submodule: ${out}"
+  fi
+  case "${out}" in
+    *": 2 files in \`.gradle/\` and \`build/\`."*) ;;
+    *) fail "${mode:-the default mode} did not say that it deleted 2 files in a submodule: ${out}" ;;
+  esac
+  for named_file in sub/notes.txt build/out/tool.txt; do
+    case "${out}" in
+      *"  ${named_file}
+"*) ;;
+      *) fail "${mode:-the default mode} did not name ${named_file}: ${out}" ;;
+    esac
+    if [ ! -f "${subdeleted_new}/${named_file}" ]; then
+      fail "${mode:-the default mode} deleted ${named_file}"
+    fi
+  done
+  for deleted_file in sub/build/classes/Main.class \
+    sub/.gradle/8.14/executionHistory/executionHistory.bin; do
+    case "${out}" in
+      *"  ${deleted_file}
+"*) fail "${mode:-the default mode} named ${deleted_file} rather than deleting it: ${out}" ;;
+    esac
+    if [ -e "${subdeleted_new}/${deleted_file}" ]; then
+      fail "${mode:-the default mode} did not delete ${deleted_file}"
+    fi
+    if [ ! -e "${subdeleted}/${deleted_file}" ]; then
+      fail "${mode:-the default mode} deleted ${deleted_file} from the source"
+    fi
+  done
+done
 
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then
