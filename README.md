@@ -53,11 +53,11 @@ The commands are:
   request belongs in the fork; `--allow-upstream` overrides the refusal.
   If git's configuration sets `github.user`, only a fork whose ORG is that
   user counts.
-  Build output that the default mode or `--copy` copies may still refer to
-  the current directory's files by their absolute pathnames, and a build in
-  the new directory may not recompile it; this command warns about each file
-  that git does not track and that contains the current directory's
-  pathname or is a symbolic link into the current directory.
+  Build output that the default mode or `--copy` copies can still refer to
+  the current directory's files by their absolute pathnames.  This command
+  deletes such files that a tool presumably regenerates, and warns about the
+  others; the comments in [`git-new-branch`](git-new-branch) say which files
+  those are.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:

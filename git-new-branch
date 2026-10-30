@@ -21,15 +21,11 @@
 #    directory, `.git` included, so it is an independent clone that shares
 #    nothing with the current repository.
 #
-# The default mode and `--copy` copy build output, which may contain the
-# current directory's pathname, or be a symbolic link into the current
-# directory, and so still refer to the current directory's files.  For
-# example, a program into which the build compiled the pathname of its
-# installation directory runs the files installed in the current directory,
-# and a build in the new directory may not recompile it, even after a
-# reconfiguration.  These modes warn about each file that git does not track
-# and that contains the current directory's pathname or is a symbolic link
-# into the current directory.
+# The default mode and `--copy` copy build output, which can still refer to
+# the current directory's files.  These modes delete such files that a tool
+# presumably regenerates, and warn about the others.
+# `delete_or_warn_about_old_pathname` says which files those are, and
+# `delete_stale_build_output` says which of them are deleted.
 #
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
@@ -313,7 +309,7 @@ BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 # collision does not cost the user a full copy of the repository.  Among them,
 # every test that needs no network access comes first -- including the test for
 # ${BRANCHDIR} and the `git pull` that follows them -- so that a purely local
-# failure is reported without waiting for a remote, which may take as long as a
+# failure is reported without waiting for a remote, which can take as long as a
 # connection attempt takes to time out.
 
 # "HEAD" is not the name of a branch, though it looks like one to a user and a
@@ -491,7 +487,7 @@ if ! PULL_OUTPUT="$(git_batch_ssh . pull -q 2>&1)"; then
   echo "${SCRIPT_NAME}: continuing, using the current commit of ${TOPLEVEL}." >&2
 fi
 
-# The pull may have brought in a submodule.  If it switched the mode to the
+# The pull might have brought in a submodule.  If it switched the mode to the
 # copy, the copy's own test of `.git` applies.  The sparse-checkout test above
 # matters only to the default mode, which this cannot switch to.
 PRE_PULL_MODE="${MODE}"
@@ -528,7 +524,7 @@ fi
 # which remote the new branch would eventually be pushed to.
 #
 # When the new branch is created in ${WORKTREE_HOST}, though, its pushes are
-# governed by that repository's configuration, which may name other remotes,
+# governed by that repository's configuration, which might name other remotes,
 # and this branch's configuration does not apply to it.  Then the tests below
 # consult ${WORKTREE_HOST}'s remotes, and the remote is the one that
 # ${WORKTREE_HOST} would push a branch with no configuration to.
@@ -581,8 +577,8 @@ for tracking_remote in ${TRACKING_REMOTES}; do
   fi
 done
 
-# This clone shows no such branch, so ask the remote itself:  the clone may
-# never have fetched the branch, or may not fetch it at all.
+# This clone shows no such branch, so ask the remote itself:  the clone might
+# never have fetched the branch, or might not fetch it at all.
 #
 # Asking the remote does not change it.  In particular, this script does not
 # push the new branch.
@@ -612,8 +608,8 @@ fi
 # above, so that nothing -- in particular no remote query, which can take as
 # long as a connection attempt takes to time out -- runs between the test and
 # the assignment below.  Whatever the copy then leaves at that location was
-# created by this script and the traps may remove it, even if the copy is
-# interrupted before it finishes.
+# created by this script and the traps can safely remove it, even if the copy
+# is interrupted before it finishes.
 make_tmpdir() {
   if [ -e "${BRANCH_TMPDIR}" ]; then
     echo "${SCRIPT_NAME}: ERROR: directory exists: ${BRANCH_TMPDIR}" >&2
@@ -736,17 +732,176 @@ WORKTREE_TO_CLEAN=""
 WORKTREE_GITDIR_TO_CLEAN=""
 BRANCH_TO_CLEAN=""
 
-# Usage: warn_about_old_pathname
-# Warns about each file in ${BRANCHDIR} that git does not track and that
-# contains the pathname of ${TOPLEVEL}, or is a symbolic link to it or into
-# it.  The pathname is sought both as ${LOGICAL_TOPLEVEL} and as ${TOPLEVEL}.
-# Such a file is usually build output that still refers to the files in
-# ${TOPLEVEL} rather than to their copies, such as a program into which the
-# build compiled the pathname of its installation directory.  A build in
-# ${BRANCHDIR} may not recompile it, even after a reconfiguration, because
-# build tools rarely notice a changed pathname.  Tracked files are not
+# Usage: check_ignore PATHNAME
+# Runs `git check-ignore` on PATHNAME, which is relative to ${BRANCHDIR}, in
+# the repository that contains it, which for a file in a submodule is the
+# submodule's.  Returns 0 if git ignores PATHNAME, 1 if it does not, and 128
+# on an error.
+check_ignore() {
+  case "$1" in
+    */*) git -C "${BRANCHDIR}/${1%/*}" check-ignore -q -- "${1##*/}" 2> /dev/null ;;
+    *) git -C "${BRANCHDIR}" check-ignore -q -- "$1" 2> /dev/null ;;
+  esac
+}
+
+# Usage: is_cache_dir DIRECTORY
+# Returns 0 if DIRECTORY is a cache directory, and 1 otherwise.  A cache
+# directory contains a `CACHEDIR.TAG` file that begins with the signature that
+# the Cache Directory Tagging Specification (https://bford.info/cachedir/)
+# defines.  The tool that wrote it regenerates its contents.
+is_cache_dir() {
+  [ -f "$1/CACHEDIR.TAG" ] || return 1
+  cache_tag_line=''
+  IFS= read -r cache_tag_line < "$1/CACHEDIR.TAG" 2> /dev/null
+  case "${cache_tag_line}" in
+    'Signature: 8a477f597d28d172789f06886806bc55'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Usage: delete_stale_build_output OLD_NAMES
+# Reads the pathnames of stale files, relative to ${BRANCHDIR}, one per line,
+# from standard input.  Deletes each stale file that a tool presumably
+# regenerates, and prints the pathname of each other stale file, including
+# each one that cannot be deleted.  Says on standard error how many files it
+# deleted; OLD_NAMES is the pathname that they contained or were symbolic
+# links into.
+#
+# Whether a tool regenerates a file is not knowable, so it is judged by the
+# directory that contains the file.  A tool presumably regenerates the files
+# in a `build/` directory, in Gradle's `.gradle/` directory, and in a cache
+# directory, as `is_cache_dir` defines it, such as Ruff's `.ruff_cache/` or
+# Cargo's `target/`, whether at the top level, in a subproject, or in a
+# submodule, if git ignores that directory.  Some tools write into a cache
+# directory a `.gitignore` file that ignores the directory's contents but not
+# the directory itself, so a cache directory also qualifies if git ignores
+# its `CACHEDIR.TAG` file.  No file is deleted from a directory that:
+#  * git does not ignore, because the directory might hold hand-written files,
+#    such as local configuration;
+#  * is within another directory that git ignores, such as a dependency's
+#    directory in `node_modules/`, because no build of the project
+#    regenerates the dependency's files; or
+#  * is a submodule, because the submodule's files are not in a `build/`,
+#    `.gradle/`, or cache directory of the submodule's own repository.
+# This is a function, rather than code in the command substitution of
+# `delete_or_warn_about_old_pathname`, because bash 3.2, which is /bin/sh on
+# macOS, ends a command substitution at the ")" of a `case` pattern within it.
+delete_stale_build_output() {
+  stale_count=0
+  # ${stale_names} lists the names of the directories that files were
+  # deleted from, each followed by a newline.
+  stale_names=''
+  stale_last_dir=''
+  while IFS= read -r stale_file; do
+    if [ -z "${stale_file}" ]; then
+      continue
+    fi
+    # ${stale_dir} is the outermost `build/`, `.gradle/`, or cache directory
+    # that contains the file, or is empty if there is none, and
+    # ${stale_owner} is the directory that contains ${stale_dir}, or is empty
+    # for ${BRANCHDIR}, which git never ignores.
+    stale_dir=''
+    stale_owner=''
+    stale_rest="${stale_file}"
+    while [ -z "${stale_dir}" ]; do
+      case "${stale_rest}" in
+        */*) ;;
+        *) break ;;
+      esac
+      stale_component="${stale_rest%%/*}"
+      stale_rest="${stale_rest#*/}"
+      stale_candidate="${stale_owner:+${stale_owner}/}${stale_component}"
+      case "${stale_component}" in
+        build | .gradle) stale_dir="${stale_candidate}" ;;
+        *)
+          if is_cache_dir "${BRANCHDIR}/${stale_candidate}"; then
+            stale_dir="${stale_candidate}"
+          else
+            stale_owner="${stale_candidate}"
+          fi
+          ;;
+      esac
+    done
+    if [ -z "${stale_dir}" ]; then
+      printf '%s\n' "${stale_file}"
+      continue
+    fi
+    # ${stale_delete} is "yes" if the files in ${stale_dir} are deleted and
+    # "no" if they are not.  It is computed again only when ${stale_dir}
+    # differs from the previous file's, which saves the `git check-ignore`
+    # processes.  The order of the input affects only how often it is
+    # computed, not its value.
+    if [ "${stale_dir}" != "${stale_last_dir}" ]; then
+      stale_last_dir="${stale_dir}"
+      if [ -e "${BRANCHDIR}/${stale_dir}/.git" ]; then
+        stale_delete=no
+      elif [ -n "${stale_owner}" ] && {
+        check_ignore "${stale_owner}"
+        [ $? -ne 1 ]
+      }; then
+        stale_delete=no
+      elif check_ignore "${stale_dir}"; then
+        stale_delete=yes
+      elif is_cache_dir "${BRANCHDIR}/${stale_dir}" \
+        && check_ignore "${stale_dir}/CACHEDIR.TAG"; then
+        stale_delete=yes
+      else
+        stale_delete=no
+      fi
+    fi
+    if [ "${stale_delete}" = yes ] \
+      && rm -f -- "${BRANCHDIR}/${stale_file}" 2> /dev/null; then
+      stale_count=$((stale_count + 1))
+      stale_names="${stale_names}${stale_dir##*/}
+"
+      continue
+    fi
+    printf '%s\n' "${stale_file}"
+  done
+  if [ "${stale_count}" -gt 0 ]; then
+    if [ "${stale_count}" -eq 1 ]; then
+      stale_files='1 file'
+    else
+      stale_files="${stale_count} files"
+    fi
+    # ${stale_dirs} is an English list of the distinct names in
+    # ${stale_names}, in sorted order.
+    stale_dirs="$(printf '%s' "${stale_names}" | LC_ALL=C sort -u | awk '
+      { name[NR] = "`" $0 "/`" }
+      END {
+        if (NR == 1) {
+          print name[1]
+        } else if (NR == 2) {
+          print name[1] " and " name[2]
+        } else {
+          for (i = 1; i < NR; i++) {
+            printf "%s, ", name[i]
+          }
+          print "and " name[NR]
+        }
+      }')"
+    echo "${SCRIPT_NAME}: deleted generated files in ${BRANCHDIR} that contained the pathname of $1 or were symbolic links into it: ${stale_files} in ${stale_dirs}.  The tools that generated them regenerate them, but a build directory that a tool such as CMake or autotools configured might need to be reconfigured." >&2
+  fi
+}
+
+# Usage: delete_or_warn_about_old_pathname
+# Finds the stale files in ${BRANCHDIR}:  the files in ${BRANCHDIR} and in its
+# submodules that git does not track and that contain the pathname of
+# ${TOPLEVEL} or are symbolic links to it or into it.  The pathname is sought
+# both as ${LOGICAL_TOPLEVEL} and as ${TOPLEVEL}.  Tracked files are not
 # examined, because they are not build output.
-warn_about_old_pathname() {
+#
+# A stale file is usually build output that still refers to the files in
+# ${TOPLEVEL} rather than to their copies.  For example, a program into which
+# the build compiled the pathname of its installation directory runs the files
+# installed in ${TOPLEVEL}.  A build in ${BRANCHDIR} might not recompile it,
+# even after a reconfiguration, because build tools rarely notice a changed
+# pathname.
+#
+# Deletes each stale file that a tool presumably regenerates, as
+# `delete_stale_build_output` describes, and warns about each other stale
+# file.
+delete_or_warn_about_old_pathname() {
   # The pattern matches the pathname where it ends, or where it continues
   # with a character other than a letter, digit, "-", "_", or ".", such as
   # "/", a quotation mark, or a NUL.  So a sibling directory whose name
@@ -759,7 +914,7 @@ warn_about_old_pathname() {
   done
   warn_old_pattern="(${warn_old_pattern})([^-_.A-Za-z0-9]|\$)"
   # The first pass examines each symbolic link by its target's pathname.
-  # grep would follow it instead, and read the target, which may be a file in
+  # grep would follow it instead, and read the target, which might be a file in
   # ${TOPLEVEL}, a directory, or a FIFO that blocks grep.  The second pass
   # examines the contents of every other file, except one whose name says
   # that its contents are compressed, such as an archive or an image:
@@ -771,7 +926,16 @@ warn_about_old_pathname() {
   warn_old_files="$(
     exec 2> /dev/null
     cd -- "${BRANCHDIR}" || exit
-    git ls-files -z --others \
+    # Lists each file that git does not track, in ${BRANCHDIR} and in its
+    # submodules, by its pathname relative to ${BRANCHDIR}, each followed by
+    # a NUL.  `git ls-files --others` does not descend into a submodule.
+    list_untracked() {
+      git ls-files -z --others
+      # shellcheck disable=SC2016 # The shells that git and xargs run expand the scripts.
+      git submodule --quiet foreach --recursive \
+        'git ls-files -z --others | xargs -0 sh -c '\''for file; do printf "%s/%s\000" "$0" "${file}"; done'\'' "${displaypath}"'
+    }
+    list_untracked \
       | LC_ALL=C xargs -0 sh -c '
         pattern="$1"
         shift
@@ -780,7 +944,7 @@ warn_about_old_pathname() {
             printf "%s\n" "${file}"
           fi
         done' sh "${warn_old_pattern}"
-    git ls-files -z --others \
+    list_untracked \
       | xargs -0 sh -c '
         for file; do
           if [ ! -L "${file}" ]; then
@@ -795,13 +959,14 @@ warn_about_old_pathname() {
         done' sh \
       | LC_ALL=C xargs -0 grep -l -E -e "${warn_old_pattern}" --
   )"
-  if [ -z "${warn_old_files}" ]; then
-    return
-  fi
   if [ "${LOGICAL_TOPLEVEL}" = "${TOPLEVEL}" ]; then
     warn_old_names="${TOPLEVEL}"
   else
     warn_old_names="${LOGICAL_TOPLEVEL} (also ${TOPLEVEL})"
+  fi
+  warn_old_files="$(printf '%s\n' "${warn_old_files}" | delete_stale_build_output "${warn_old_names}")"
+  if [ -z "${warn_old_files}" ]; then
+    return
   fi
   echo "${SCRIPT_NAME}: warning: these files in ${BRANCHDIR}, which git does not track, contain the pathname of ${warn_old_names} or are symbolic links into it:" >&2
   printf '%s\n' "${warn_old_files}" | head -n 5 | sed 's/^/  /' >&2
@@ -809,14 +974,14 @@ warn_about_old_pathname() {
   if [ "${warn_old_count}" -gt 5 ]; then
     echo "  and $((warn_old_count - 5)) more" >&2
   fi
-  echo "${SCRIPT_NAME}: They are probably build output that still refers to the files in ${TOPLEVEL}, and a build may not recompile them, even after a reconfiguration.  Delete the build output and rebuild." >&2
+  echo "${SCRIPT_NAME}: They are probably build output that still refers to the files in ${TOPLEVEL}, and a build might not recompile them, even after a reconfiguration.  Delete the build output and rebuild." >&2
   # `--clean` is refused when the current commit has submodules.
   if ! has_gitlinks HEAD; then
     echo "${SCRIPT_NAME}: Or remove ${BRANCHDIR} with git-remove-branch-directory, and run \`${SCRIPT_NAME} --clean ${BRANCHNAME}\`, which copies no untracked file and no uncommitted change." >&2
   fi
 }
 if [ "${MODE}" != 'clean' ]; then
-  warn_about_old_pathname
+  delete_or_warn_about_old_pathname
 fi
 
 echo "Success: created ${BRANCHDIR}"
