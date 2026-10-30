@@ -51,7 +51,7 @@ The commands are:
   `git-new-branch --help` prints a synopsis, which describes the modes.  The
   comments in [`git-new-branch`](git-new-branch) give the details,
   such as when the fast-forward is not made and which copied build output
-  this command warns about.
+  this command deletes, and which it warns about.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
