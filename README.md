@@ -36,7 +36,7 @@ The commands are:
   submodules gets a copy of the whole directory instead, which is an
   independent clone.
   Below is a definition for an alias `gcb`.
-* [`git-new-branch`](git-new-branch) `[--clean | --copy] BRANCHNAME`:
+* [`git-new-branch`](git-new-branch) `[--clean | --copy] [--verbose] BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
@@ -52,7 +52,7 @@ The commands are:
   the current directory's files by their absolute pathnames.  This command
   deletes such files that a tool presumably regenerates, and warns about the
   others; the comments in [`git-new-branch`](git-new-branch) say which files
-  those are.
+  those are.  With `--verbose`, it also says how many files it deleted.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:

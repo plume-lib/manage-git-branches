@@ -1008,7 +1008,7 @@ printf '%s/src\n' "${deleted_top}" > "${deleted}/out/cache/entry"
 for mode in '' --copy; do
   branch="deleted${mode#--}"
   deleted_new="${stale_parent}/deleted-branch-${branch}"
-  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} --verbose "${branch}" 2>&1)"; then
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete: ${out}"
   fi
   case "${out}" in
@@ -1049,6 +1049,17 @@ for mode in '' --copy; do
   fi
 done
 
+# Without `--verbose`, the files are deleted silently.
+if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" deletedquiet 2>&1)"; then
+  fail "nonzero exit status without --verbose with build output to delete: ${out}"
+fi
+case "${out}" in
+  *"deleted generated files"*) fail "said that it deleted files without --verbose: ${out}" ;;
+esac
+if [ -e "${stale_parent}/deleted-branch-deletedquiet/build/classes/Main.class" ]; then
+  fail "did not delete build/classes/Main.class without --verbose"
+fi
+
 # Files in a submodule are examined too, and the submodule's `build/` and
 # `.gradle/` directories are treated like the superproject's.  A submodule at
 # `build/` is not a `build/` directory, so a file in it that the submodule
@@ -1076,7 +1087,7 @@ printf '%s/src\n' "${subdeleted}" > "${subdeleted}/sub/notes.txt"
 for mode in '' --copy; do
   branch="subdeleted${mode#--}"
   subdeleted_new="${subdeleted_parent}/super-branch-${branch}"
-  if ! out="$(cd "${subdeleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+  if ! out="$(cd "${subdeleted}" && "${GIT_NEW_BRANCH}" ${mode} --verbose "${branch}" 2>&1)"; then
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete in a submodule: ${out}"
   fi
   case "${out}" in

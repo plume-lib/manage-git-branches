@@ -4,7 +4,7 @@
 # in a sibling directory named REPONAME-branch-NEWBRANCHNAME/.
 #
 # Usage:
-#   git-new-branch [--clean | --copy] NEWBRANCHNAME
+#   git-new-branch [--clean | --copy] [--verbose] NEWBRANCHNAME
 #
 # The new branch starts at the current commit.  There are three modes:
 #
@@ -23,7 +23,8 @@
 #
 # The default mode and `--copy` copy build output, which can still refer to
 # the current directory's files.  These modes delete such files that a tool
-# presumably regenerates, and warn about the others.
+# presumably regenerates, and warn about the others.  With `--verbose`, they
+# also say how many files they deleted.
 # `delete_or_warn_about_old_pathname` says which files those are, and
 # `delete_stale_build_output` says which of them are deleted.
 #
@@ -126,13 +127,15 @@ fi
 unset_git_location_variables
 
 usage() {
-  echo "Usage: ${SCRIPT_NAME} [--clean | --copy] NEWBRANCHNAME" >&2
+  echo "Usage: ${SCRIPT_NAME} [--clean | --copy] [--verbose] NEWBRANCHNAME" >&2
 }
 
 # The mode:  "worktree" (the default), "clean", or "copy".  Selected on once,
 # where the three implementations diverge, so that every check before that
 # point is common to all three.
 MODE='worktree'
+# "yes" if --verbose was given, and "no" otherwise.
+VERBOSE='no'
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --clean | --copy)
@@ -144,6 +147,7 @@ while [ "$#" -gt 0 ]; do
       fi
       MODE="${1#--}"
       ;;
+    --verbose) VERBOSE='yes' ;;
     --)
       shift
       break
@@ -642,9 +646,9 @@ is_cache_dir() {
 # Reads the pathnames of stale files, relative to ${BRANCHDIR}, one per line,
 # from standard input.  Deletes each stale file that a tool presumably
 # regenerates, and prints the pathname of each other stale file, including
-# each one that cannot be deleted.  Says on standard error how many files it
-# deleted; OLD_NAMES is the pathname that they contained or were symbolic
-# links into.
+# each one that cannot be deleted.  If ${VERBOSE} is "yes", says on standard
+# error how many files it deleted; OLD_NAMES is the pathname that they
+# contained or were symbolic links into.
 #
 # Whether a tool regenerates a file is not knowable, so it is judged by the
 # directory that contains the file.  A tool presumably regenerates the files
@@ -737,7 +741,7 @@ delete_stale_build_output() {
     fi
     printf '%s\n' "${stale_file}"
   done
-  if [ "${stale_count}" -gt 0 ]; then
+  if [ "${VERBOSE}" = yes ] && [ "${stale_count}" -gt 0 ]; then
     if [ "${stale_count}" -eq 1 ]; then
       stale_files='1 file'
     else
