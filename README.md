@@ -50,9 +50,9 @@ The commands are:
   fork's `master` that lags behind `upstream/master`, then the new branch
   starts at the default branch's latest commit instead, unless that would
   touch the uncommitted changes that the new directory carries or would add,
-  remove, or update a submodule.  The new
-  branch is never a merge.  The current branch is not changed, beyond the
-  `git pull`.
+  remove, or update a submodule.  The new branch's most recent commit is
+  never a newly-created merge.  The current branch is not changed, beyond
+  the `git pull`.
   By default, the new directory is a worktree (see
   [below](#worktrees)) that shares the repository, and its contents are the
   same as the current directory's, including uncommitted changes and

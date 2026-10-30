@@ -10,65 +10,54 @@
 # The new branch starts at the current commit, after a `git pull` of the
 # current branch.  If the current branch has the name of the upstream
 # repository's default branch, and that default branch is a fast-forward of
-# the current commit, as for a fork's `master` that lags behind
-# `upstream/master`, then the new branch starts at the default branch's latest
-# commit instead.  The new branch is never a merge.  The current branch is not
-# changed, beyond the `git pull`.
+# the current commit (as for a fork's `master` that lags behind
+# `upstream/master`) then the new branch starts at the default branch's
+# latest commit instead.  The new branch's most recent commit is never a
+# newly-created merge.  The current branch is not changed, beyond the `git
+# pull`.
 #
 # The new directory is:
-#   (default)  a worktree with the current directory's contents, including
-#              uncommitted changes, untracked files, and build output
-#   --clean    a worktree with a clean checkout and nothing else:  the
-#              cheapest mode, for starting fresh work
-#   --copy     a copy of the whole current directory, `.git` included:  an
-#              independent clone
+#   (default)  a linked worktree of the current repository, made by
+#              `git worktree add`, so that it shares the repository's object
+#              store rather than holding a copy of it.  Its contents are the
+#              same as the current directory's, including uncommitted
+#              changes, staged changes, untracked files, and ignored files
+#              such as build output.
+#   --clean    a linked worktree that holds a clean checkout of the current
+#              commit and nothing else.  It is the cheapest mode, in both
+#              time and disk space, for starting fresh work.
+#   --copy     a copy of the whole current directory, `.git` included, so it
+#              is an independent clone that shares nothing with the current
+#              repository.
 #
 # Every effect is local:  this command never pushes the new branch, and it
 # does not build.
 #
 # Details:
 #
-# By default, the new directory is a linked worktree of the current
-# repository, made by `git worktree add`, so that it shares the repository's
-# object store rather than holding a copy of it.  Its contents are the same as
-# the current directory's, including uncommitted changes, staged changes,
-# untracked files, and ignored files such as build output.  With `--clean`,
-# the new directory is a linked worktree that holds a clean checkout of the
-# current commit and nothing else.  It is the cheapest mode, in both time and
-# disk space.  With `--copy`, the new directory is a copy of the whole current
-# directory, `.git` included, so it is an independent clone that shares
-# nothing with the current repository.
-#
 # The upstream repository is the remote that `git-pull-upstream` merges from:
 # the remote named `upstream` if there is one, as in a fork, then `origin`,
 # then the clone's only remote if it has exactly one.  This command fetches it
-# and updates `REMOTE/HEAD`, which names its default branch, unless the
-# `git pull` already fetched it, or `REMOTE/HEAD` already names an existing
-# branch of another name than the current branch and the upstream repository
-# has no branch of the current branch's name.  A clone that cannot fetch it,
-# as without network access, gets a
-# warning, and the new branch starts at the current commit.  A current branch
-# of another name, such as a release branch or a pull request's branch, or
-# one with commits that the default branch lacks, as in a downstream fork,
-# leaves the new branch at the current commit, with no message.  The
-# fast-forward is made in the new directory only.  The uncommitted changes
-# that the default mode and `--copy` carry into the new directory are kept:
-# if the fast-forward would change a file that has such a change, or would
-# overwrite an untracked file, it is not made, with a warning.  Nor is it
-# made, with a warning, if it would add, remove, or update a submodule.  As
-# `git merge` does, the fast-forward overwrites an ignored file that the
-# upstream repository has started to track; the current directory still holds
-# the original.
+# and updates `REMOTE/HEAD`, which names its default branch, unless the `git
+# pull` already fetched it, or `REMOTE/HEAD` already names an existing branch
+# of another name than the current branch and the upstream repository has no
+# branch of the current branch's name.  A clone that cannot fetch it, as
+# without network access, gets a warning, and the new branch starts at the
+# current commit.  A current branch of another name, such as a release branch
+# or a pull request's branch, or one with commits that the default branch
+# lacks, as in a downstream fork, leaves the new branch at the current commit,
+# with no message.  The fast-forward is made in the new directory only.  The
+# uncommitted changes that the default mode and `--copy` carry into the new
+# directory are kept:  if the fast-forward would change a file that has such a
+# change, or would overwrite an untracked file, it is not made, with a warning.
+# Nor is it made, with a warning, if it would add, remove, or update a
+# submodule.  As `git merge` does, the fast-forward overwrites an ignored file
+# that the upstream repository has started to track; the current directory
+# still holds the original.
 #
-# The default mode and `--copy` copy build output, which may contain the
-# current directory's pathname, or be a symbolic link into the current
-# directory, and so still refer to the current directory's files.  For
-# example, a program into which the build compiled the pathname of its
-# installation directory runs the files installed in the current directory,
-# and a build in the new directory may not recompile it, even after a
-# reconfiguration.  These modes warn about each file that git does not track
-# and that contains the current directory's pathname or is a symbolic link
-# into the current directory.
+# The default mode and `--copy` copy build output, which might still refer to
+# the current directory's files.  These modes warn about such files; see
+# `warn_about_old_pathname` for which files are warned about.
 #
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
@@ -443,8 +432,8 @@ fi
 # of the current commit, or to the empty string if there is none.  That
 # commit is the latest commit of the upstream repository's default branch,
 # if the current branch has the same name as that default branch and that
-# commit is a fast-forward of the current commit, as for a fork's `master`
-# that lags behind `upstream/master`, and that commit changes no submodule.
+# commit is a fast-forward of the current commit (as for a fork's `master`
+# that lags behind `upstream/master`) and that commit changes no submodule.
 # A fast-forward that adds a submodule would leave it uninitialized, and in
 # a worktree it could not be initialized.  A fast-forward that updates or
 # removes a submodule would leave the submodule's checkout as it was.  Also
@@ -855,11 +844,12 @@ fi
 # contains the pathname of ${TOPLEVEL}, or is a symbolic link to it or into
 # it.  The pathname is sought both as ${LOGICAL_TOPLEVEL} and as ${TOPLEVEL}.
 # Such a file is usually build output that still refers to the files in
-# ${TOPLEVEL} rather than to their copies, such as a program into which the
-# build compiled the pathname of its installation directory.  A build in
-# ${BRANCHDIR} may not recompile it, even after a reconfiguration, because
-# build tools rarely notice a changed pathname.  Tracked files are not
-# examined, because they are not build output.
+# ${TOPLEVEL} rather than to their copies.  For example, a program into which
+# the build compiled the pathname of its installation directory runs the files
+# installed in ${TOPLEVEL}.  A build in ${BRANCHDIR} may not recompile it,
+# even after a reconfiguration, because build tools rarely notice a changed
+# pathname.  Tracked files are not examined, because they are not build
+# output.
 warn_about_old_pathname() {
   # The pattern matches the pathname where it ends, or where it continues
   # with a character other than a letter, digit, "-", "_", or ".", such as
