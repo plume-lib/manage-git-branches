@@ -968,7 +968,7 @@ case "${out}" in
 esac
 
 # GitHub ignores the case of a repository's path, so a fork's spelling of the
-# upstream repository may differ in case.
+# upstream repository might differ in case.
 github_parent="${tmpdir}/github"
 mkdir "${github_parent}"
 git clone -q "${tmpdir}/proj.git" "${github_parent}/proj"

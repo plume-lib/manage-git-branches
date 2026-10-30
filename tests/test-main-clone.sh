@@ -288,6 +288,21 @@ if [ "$(host_of "${work}/proj-branch-new6")" != "${work}/proj-branch-forked" ]; 
   fail "new6 is registered in $(host_of "${work}/proj-branch-new6"), not in ${work}/proj-branch-forked"
 fi
 
+# A main clone and a branch directory that determine no remote for a new
+# branch -- no "origin", no `remote.pushDefault`, and two remotes -- say nothing
+# about where it would be pushed, so having a remote in common is enough.
+git clone -q -o upstream "${work}/remote.git" "${work}/noorigin"
+git clone -q -o upstream -b other "${work}/remote.git" "${work}/noorigin-branch-other"
+for repo in "${work}/noorigin" "${work}/noorigin-branch-other"; do
+  git -C "${repo}" remote add mine "${work}/fork.git"
+done
+if ! out="$(cd "${work}/noorigin-branch-other" && "${GIT_NEW_BRANCH}" --clean new7 2>&1)"; then
+  fail "git-new-branch --clean new7 failed: ${out}"
+fi
+if [ "$(host_of "${work}/noorigin-branch-new7")" != "${work}/noorigin" ]; then
+  fail "new7 is registered in $(host_of "${work}/noorigin-branch-new7"), not in ${work}/noorigin"
+fi
+
 # A sparse main clone is not used.
 git -C "${work}/proj" config core.sparseCheckout true
 if ! out="$(cd "${other}" && "${GIT_NEW_BRANCH}" --clean sparse 2>&1)"; then

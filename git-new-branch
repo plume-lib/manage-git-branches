@@ -58,14 +58,14 @@
 # In the worktree modes, this script writes into the current repository:  it
 # creates the new branch there and registers the new worktree in its `.git`.
 # There is one exception.  If the current repository is a branch directory's,
-# REPONAME-branch-OTHER/, and a sibling REPONAME/ is a clone of the same
-# project, the branch and the worktree are created in REPONAME/ instead, after
-# the commit and staged files that they need are copied there, if they can be
-# and if REPONAME/ has no branch of that name; otherwise, the new worktree would
-# prevent the removal of
-# REPONAME-branch-OTHER/.  Then the test for a branch of the same name on a
-# remote consults REPONAME/'s remotes, because REPONAME/'s configuration says
-# where the new branch would be pushed.
+# REPONAME-branch-OTHER/, and a sibling REPONAME/ is a clone that would push a
+# new branch to the same repositories (see `main_clone_for` in
+# common-functions.sh), the branch and the worktree are created in REPONAME/
+# instead, after the commit and staged files that they need are copied there,
+# if they can be and if REPONAME/ has no branch of that name; otherwise, the
+# new worktree would prevent the removal of REPONAME-branch-OTHER/.  Then the
+# test for a branch of the same name on a remote consults REPONAME/'s remotes,
+# because REPONAME/'s configuration says where the new branch would be pushed.
 # Every effect of this script is local, all the same:  it never contacts a
 # remote except to read from it, and in particular it does not push the new
 # branch.  Therefore, the new branch has no upstream branch, which
@@ -380,13 +380,13 @@ is_fork_sibling() {
 # The repository that the new branch would be pushed to is judged as `git push`
 # would judge it for the new branch, which has no configuration of its own:
 # by this repository's configuration and by the URLs that `git push` uses (see
-# `push_urls`).  The new branch is pushed to the same repositories wherever it
+# `remote_urls`).  The new branch is pushed to the same repositories wherever it
 # is created:  ${WORKTREE_HOST}, if it is created there, pushes where this
 # repository does (see `main_clone_for`), and a copy has this repository's
 # configuration.
 #
 # Unlike the tests for a collision below, this test ignores the current
-# branch's configuration.  In a fork, the main branch may track the upstream
+# branch's configuration.  In a fork, the main branch might track the upstream
 # repository, which says nothing about where a branch for a pull request is
 # pushed, and judging by it would refuse in the fork itself.
 #
@@ -406,7 +406,7 @@ check_not_upstream_clone() {
   if [ -z "${cnuc_remote}" ]; then
     return 0
   fi
-  cnuc_urls="$(push_urls . "${cnuc_remote}")"
+  cnuc_urls="$(remote_urls . "${cnuc_remote}" --push)"
   cnuc_keys="$(printf '%s\n' "${cnuc_urls}" | url_keys .)"
   if [ -z "${cnuc_keys}" ]; then
     return 0

@@ -1031,7 +1031,9 @@ physical_path() {
 ## Having a remote in common is not enough.  A clone of a fork has a remote
 ## "upstream" in common with a clone of the upstream repository, but a branch
 ## registered in the latter would be pushed to the upstream repository rather
-## than to the fork.
+## than to the fork.  If neither clone determines a remote for such a branch,
+## though, neither says where the branch would be pushed, and having a remote
+## in common, as `repository_key` judges it, is enough.
 ##
 ## A sparse checkout and per-worktree configuration are exceptions.
 ## `git worktree add` gives the new worktree the sparse-checkout patterns and
@@ -1076,9 +1078,21 @@ main_clone_for() {
     fi
   done
   mcf_keys="$(push_keys "${mcf_host}")"
-  if [ -n "${mcf_keys}" ] && [ "$(push_keys "${mcf_main}")" = "${mcf_keys}" ]; then
-    printf '%s\n' "${mcf_main}"
+  if [ "$(push_keys "${mcf_main}")" != "${mcf_keys}" ]; then
+    return 0
   fi
+  if [ -z "${mcf_keys}" ]; then
+    mcf_keys="$(git -C "${mcf_host}" remote | while IFS= read -r mcf_remote; do
+      repository_key "${mcf_host}" "${mcf_remote}"
+    done | sort -u)"
+    if [ -z "${mcf_keys}" ] \
+      || ! git -C "${mcf_main}" remote | while IFS= read -r mcf_remote; do
+        repository_key "${mcf_main}" "${mcf_remote}"
+      done | grep -q -x -F -- "${mcf_keys}"; then
+      return 0
+    fi
+  fi
+  printf '%s\n' "${mcf_main}"
 }
 
 ## Usage: note_worktree_host
@@ -1328,16 +1342,19 @@ repository_key() {
   url_key "$1" "${repository_key_url}"
 }
 
-## Usage: push_urls DIRECTORY REMOTE
-## Prints, one per line, the URLs that `git push` in DIRECTORY uses for REMOTE,
-## which is a remote of the clone in DIRECTORY, or a URL or a pathname, which
-## git accepts in place of a remote's name.  A remote's URLs are those that
-## `remote.<name>.pushurl` and `url.<base>.pushInsteadOf` may set.  A URL or a
-## pathname is itself, without `pushInsteadOf` rewriting.
-push_urls() {
+## Usage: remote_urls DIRECTORY REMOTE [--push]
+## Prints, one per line, the URLs that the clone in DIRECTORY fetches from, or
+## with --push pushes to, for REMOTE, which is the name of a remote, a URL or a
+## pathname (which git accepts in place of a remote's name), or empty.  A
+## remote's push URLs are those that `remote.<name>.pushurl` and
+## `url.<base>.pushInsteadOf` set, if they set any.  A URL or a pathname is
+## rewritten by `url.<base>.insteadOf`, as `git ls-remote --get-url` rewrites
+## it, but not by `url.<base>.pushInsteadOf`, although `git push` applies that
+## too.
+remote_urls() {
   if is_remote_name "$1" "$2"; then
-    git -C "$1" remote get-url --push --all "$2" 2> /dev/null
-  else
+    git -C "$1" remote get-url ${3:+"$3"} --all "$2" 2> /dev/null
+  elif [ -n "$2" ]; then
     git -C "$1" ls-remote --get-url "$2" 2> /dev/null
   fi
 }
@@ -1345,12 +1362,12 @@ push_urls() {
 ## Usage: push_keys DIRECTORY
 ## Prints, one per line and sorted, the repository keys (see `url_key`) of the
 ## URLs that `git push` in DIRECTORY would push a branch with no configuration
-## to; see `push_remote` and `push_urls`.  Prints nothing if DIRECTORY
+## to; see `push_remote` and `remote_urls`.  Prints nothing if DIRECTORY
 ## determines no remote for such a branch.
 push_keys() {
   push_keys_remote="$(push_remote "$1" '')"
   if [ -n "${push_keys_remote}" ]; then
-    push_urls "$1" "${push_keys_remote}" | url_keys "$1" | sort -u
+    remote_urls "$1" "${push_keys_remote}" --push | url_keys "$1" | sort -u
   fi
 }
 
@@ -1372,7 +1389,7 @@ url_keys() {
 ## ".git".  A port is part of the host, except the default port of the scheme,
 ## which names the same repository as no port.  The path is in lower case too
 ## for a host that ignores the case of its paths, and only for such a host,
-## because two paths that differ only in case may name different repositories.
+## because two paths that differ only in case might name different repositories.
 ## A physical path is its own key, and a `file://` URL has the key of its
 ## pathname.  Prints nothing if URL has no location.
 url_key() {
@@ -1457,8 +1474,8 @@ remote_heads_answers=0
 ## same repository -- not whether the directories share a repository, and not
 ## what they call the remote.  Two spellings of one repository's URL, which
 ## `repository_key` equates, are different queries:  they reach the repository
-## through different transports and credentials, which may be told different
-## branches or fail differently.
+## through different transports and credentials, which might be told
+## different branches or might fail differently.
 ##
 ## Another is the SSH configuration, because `git_batch_ssh` takes
 ## `core.sshCommand` and `ssh.variant` from the directory it is given:  two
