@@ -308,6 +308,24 @@ check_url_key 'example.com:8443/org/proj' 'example.com/8443/org/proj'
 # Only a host that ignores the case of its paths has its path in lower case.
 check_url_key 'https://example.com/Org/Proj' 'example.com/Org/Proj'
 
+# A `file://` URL and the pathname of one directory are one repository, but
+# they reach it through different transports, so one answer to
+# `git ls-remote` does not serve both.
+git init -q --bare "${WORK_DIR}/heads.git"
+for heads_dir in heads-by-url heads-by-path; do
+  git init -q "${WORK_DIR}/${heads_dir}"
+done
+git -C "${WORK_DIR}/heads-by-url" remote add origin "file://${WORK_DIR}/heads.git"
+git -C "${WORK_DIR}/heads-by-path" remote add origin "${WORK_DIR}/heads.git"
+by_url="$(repository_key "${WORK_DIR}/heads-by-url" origin)"
+if [ -z "${by_url}" ] || [ "${by_url}" != "$(repository_key "${WORK_DIR}/heads-by-path" origin)" ]; then
+  fail "repository_key does not equate a file:// URL with its pathname"
+fi
+by_url="$(remote_heads_key "${WORK_DIR}/heads-by-url" origin)"
+if [ -z "${by_url}" ] || [ "${by_url}" = "$(remote_heads_key "${WORK_DIR}/heads-by-path" origin)" ]; then
+  fail "remote_heads_key [${by_url}] does not distinguish a file:// URL from its pathname"
+fi
+
 ## Usage: check_is_deleted_branch DIRECTORY EXPECTED DESCRIPTION
 ## Checks that `is_deleted_branch DIRECTORY` returns status EXPECTED.
 check_is_deleted_branch() {

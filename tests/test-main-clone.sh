@@ -261,7 +261,9 @@ if [ "$(host_of "${work}/proj-branch-solo-only")" != "${other}" ]; then
 fi
 
 # git-new-branch asks the remote that the main clone would push the new
-# branch to.
+# branch to, which is the main clone's name for the repository that the branch
+# directory pushes to.
+git -C "${other}" config remote.pushDefault fork
 git -C "${work}/proj" config remote.pushDefault mine
 if out="$(cd "${other}" && "${GIT_NEW_BRANCH}" --clean fork-taken 2>&1)"; then
   fail "git-new-branch fork-taken succeeded, though ${work}/proj pushes to mine, which has it"
@@ -270,7 +272,21 @@ case "${out}" in
   *"registering the new worktree"*) fail "git-new-branch fork-taken said that it registered a worktree: ${out}" ;;
 esac
 [ ! -e "${work}/proj-branch-fork-taken" ] || fail "proj-branch-fork-taken was created"
+git -C "${other}" config --unset remote.pushDefault
 git -C "${work}/proj" config --unset remote.pushDefault
+
+# A main clone that has a remote in common with the branch directory, but that
+# pushes elsewhere, is not used.  Here the branch directory is a clone of a
+# fork, and the main clone pushes to the fork's upstream repository, so a
+# branch registered in the main clone would be pushed there.
+git clone -q -b fork-only "${work}/fork.git" "${work}/proj-branch-forked"
+git -C "${work}/proj-branch-forked" remote add upstream "${work}/remote.git"
+if ! out="$(cd "${work}/proj-branch-forked" && "${GIT_NEW_BRANCH}" --clean new6 2>&1)"; then
+  fail "git-new-branch --clean new6 failed: ${out}"
+fi
+if [ "$(host_of "${work}/proj-branch-new6")" != "${work}/proj-branch-forked" ]; then
+  fail "new6 is registered in $(host_of "${work}/proj-branch-new6"), not in ${work}/proj-branch-forked"
+fi
 
 # A sparse main clone is not used.
 git -C "${work}/proj" config core.sparseCheckout true

@@ -1026,8 +1026,12 @@ physical_path() {
 ## the new worktree exists, even after OTHER's pull request lands.  So a
 ## sibling named REPONAME, which conventionally holds the clone that branch
 ## directories are made from, is a better home, if it is a main working tree
-## of the same project:  if it and DIRECTORY's repository have a remote in
-## common, as `repository_key` judges it.
+## that pushes where DIRECTORY's repository does:  if both would push a branch
+## with no configuration to the same repositories, as `push_keys` judges them.
+## Having a remote in common is not enough.  A clone of a fork has a remote
+## "upstream" in common with a clone of the upstream repository, but a branch
+## registered in the latter would be pushed to the upstream repository rather
+## than to the fork.
 ##
 ## A sparse checkout and per-worktree configuration are exceptions.
 ## `git worktree add` gives the new worktree the sparse-checkout patterns and
@@ -1071,15 +1075,8 @@ main_clone_for() {
       return 0
     fi
   done
-  mcf_keys="$(git -C "${mcf_host}" remote | while IFS= read -r mcf_remote; do
-    repository_key "${mcf_host}" "${mcf_remote}"
-  done | sort -u)"
-  if [ -z "${mcf_keys}" ]; then
-    return 0
-  fi
-  if git -C "${mcf_main}" remote | while IFS= read -r mcf_remote; do
-    repository_key "${mcf_main}" "${mcf_remote}"
-  done | grep -q -x -F -- "${mcf_keys}"; then
+  mcf_keys="$(push_keys "${mcf_host}")"
+  if [ -n "${mcf_keys}" ] && [ "$(push_keys "${mcf_main}")" = "${mcf_keys}" ]; then
     printf '%s\n' "${mcf_main}"
   fi
 }
@@ -1277,8 +1274,10 @@ remote_location() {
 
 ## Usage: url_location DIRECTORY URL
 ## Prints the location of the repository that URL, as git would use it in
-## DIRECTORY, names.  The location is URL itself or, for a pathname or a
-## `file://` URL, the physical path of the directory that it names.
+## DIRECTORY, names.  The location is URL itself or, for a pathname, the
+## physical path of the directory that it names.  A `file://` URL is a URL,
+## because git reaches the repository through another transport than for its
+## pathname.
 ##
 ## A pathname is resolved in DIRECTORY, as git resolves it, so two directories
 ## that both say "../upstream.git" do not name one repository.  A pathname
@@ -1293,7 +1292,6 @@ url_location() {
   # a colon precedes the first slash.  Anything else is a pathname.
   case "${url_location_url}" in
     '') return 0 ;;
-    file:///*) url_location_url="${url_location_url#file://}" ;;
     *://* | '~'*)
       printf '%s\n' "${url_location_url}"
       return 0
@@ -1330,6 +1328,41 @@ repository_key() {
   url_key "$1" "${repository_key_url}"
 }
 
+## Usage: push_urls DIRECTORY REMOTE
+## Prints, one per line, the URLs that `git push` in DIRECTORY uses for REMOTE,
+## which is a remote of the clone in DIRECTORY, or a URL or a pathname, which
+## git accepts in place of a remote's name.  A remote's URLs are those that
+## `remote.<name>.pushurl` and `url.<base>.pushInsteadOf` may set.  A URL or a
+## pathname is itself, without `pushInsteadOf` rewriting.
+push_urls() {
+  if is_remote_name "$1" "$2"; then
+    git -C "$1" remote get-url --push --all "$2" 2> /dev/null
+  else
+    git -C "$1" ls-remote --get-url "$2" 2> /dev/null
+  fi
+}
+
+## Usage: push_keys DIRECTORY
+## Prints, one per line and sorted, the repository keys (see `url_key`) of the
+## URLs that `git push` in DIRECTORY would push a branch with no configuration
+## to; see `push_remote` and `push_urls`.  Prints nothing if DIRECTORY
+## determines no remote for such a branch.
+push_keys() {
+  push_keys_remote="$(push_remote "$1" '')"
+  if [ -n "${push_keys_remote}" ]; then
+    push_urls "$1" "${push_keys_remote}" | url_keys "$1" | sort -u
+  fi
+}
+
+## Usage: url_keys DIRECTORY
+## Reads URLs, one per line, and prints the key (see `url_key`) of each that
+## has one, as git would use it in DIRECTORY.
+url_keys() {
+  while IFS= read -r url_keys_url; do
+    url_key "$1" "${url_keys_url}"
+  done
+}
+
 ## Usage: url_key DIRECTORY URL
 ## Prints a key for the repository that URL names in DIRECTORY, which is its
 ## location (see `url_location`) with each URL put in one form, so that two
@@ -1337,12 +1370,16 @@ repository_key() {
 ## `https://github.com/org/proj`, have the same key.  The form is the host, in
 ## lower case, and the path, without a scheme, a user, or a trailing "/" or
 ## ".git".  A port is part of the host, except the default port of the scheme,
-## which names the same repository as no port.  The path is in lower case too for a host that ignores the
-## case of its paths, and only for such a host, because two paths that differ
-## only in case may name different repositories.  A physical path is its own
-## key.  Prints nothing if URL has no location.
+## which names the same repository as no port.  The path is in lower case too
+## for a host that ignores the case of its paths, and only for such a host,
+## because two paths that differ only in case may name different repositories.
+## A physical path is its own key, and a `file://` URL has the key of its
+## pathname.  Prints nothing if URL has no location.
 url_key() {
-  url_key_location="$(url_location "$1" "$2")"
+  case "$2" in
+    file:///*) url_key_location="$(url_location "$1" "${2#file://}")" ;;
+    *) url_key_location="$(url_location "$1" "$2")" ;;
+  esac
   case "${url_key_location}" in
     '') return 0 ;;
     # A physical path, or a pathname that is not relative to a directory.
@@ -1351,32 +1388,46 @@ url_key() {
       return 0
       ;;
   esac
-  case "${url_key_location}" in
-    *://*)
-      url_key_scheme="$(printf '%s\n' "${url_key_location%%://*}" | tr '[:upper:]' '[:lower:]')"
-      url_key_url="$(printf '%s\n' "${url_key_location#*://}" | sed -e 's#^[^@/]*@##')"
-      url_key_authority="${url_key_url%%/*}"
-      case "${url_key_scheme}:${url_key_authority}" in
-        ssh:*:22 | git+ssh:*:22 | ssh+git:*:22 | git:*:9418 | http:*:80 | https:*:443)
-          url_key_url="${url_key_authority%:*}${url_key_url#"${url_key_authority}"}"
-          ;;
-      esac
-      ;;
-    # An scp-style URL, `[user@]host:path`.
-    *) url_key_url="$(printf '%s\n' "${url_key_location}" | sed -e 's#^[^@/]*@##' -e 's#^\([^/:]*\):#\1/#')" ;;
-  esac
-  url_key_url="$(printf '%s\n' "${url_key_url}" | sed -e 's#/*$##' -e 's#\.git$##')"
-  url_key_host="$(printf '%s\n' "${url_key_url%%/*}" | tr '[:upper:]' '[:lower:]')"
-  case "${url_key_url}" in
-    */*) url_key_path="/${url_key_url#*/}" ;;
-    *) url_key_path='' ;;
-  esac
-  case "${url_key_host}" in
-    github.com)
-      url_key_path="$(printf '%s\n' "${url_key_path}" | tr '[:upper:]' '[:lower:]')"
-      ;;
-  esac
-  printf '%s%s\n' "${url_key_host}" "${url_key_path}"
+  # One process puts the URL in its form; the URL is one with a scheme or an
+  # scp-style URL, `[user@]host:path`.
+  printf '%s\n' "${url_key_location}" | awk '{
+    url = $0
+    scheme = ""
+    if (match(url, /^[A-Za-z][A-Za-z0-9+.-]*:\/\//)) {
+      scheme = tolower(substr(url, 1, RLENGTH - 3))
+      url = substr(url, RLENGTH + 1)
+    }
+    sub(/^[^@\/]*@/, "", url)
+    if (scheme == "") {
+      split_at = index(url, ":")
+      host = substr(url, 1, split_at - 1)
+      path = "/" substr(url, split_at + 1)
+    } else {
+      split_at = index(url, "/")
+      if (split_at == 0) {
+        host = url
+        path = ""
+      } else {
+        host = substr(url, 1, split_at - 1)
+        path = substr(url, split_at)
+      }
+      if (match(host, /:[0-9]+$/)) {
+        port = substr(host, RSTART + 1)
+        if ((port == "22" && (scheme == "ssh" || scheme == "git+ssh" || scheme == "ssh+git")) \
+          || (port == "9418" && scheme == "git") || (port == "80" && scheme == "http") \
+          || (port == "443" && scheme == "https")) {
+          host = substr(host, 1, RSTART - 1)
+        }
+      }
+    }
+    sub(/\/*$/, "", path)
+    sub(/\.git$/, "", path)
+    host = tolower(host)
+    if (host == "github.com") {
+      path = tolower(path)
+    }
+    print host path
+  }'
 }
 
 ## The answers that remotes have already given this file, so that one

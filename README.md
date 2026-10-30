@@ -51,6 +51,8 @@ The commands are:
   In a clone of an upstream repository whose fork is in a sibling directory
   `PROJECT-fork-ORG`, the command refuses, because a branch for a pull
   request belongs in the fork; `--allow-upstream` overrides the refusal.
+  If git's configuration sets `github.user`, only a fork whose ORG is that
+  user counts.
   Build output that the default mode or `--copy` copies may still refer to
   the current directory's files by their absolute pathnames, and a build in
   the new directory may not recompile it; this command warns about each file
