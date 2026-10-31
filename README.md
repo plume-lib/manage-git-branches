@@ -236,8 +236,11 @@ main branch.
 linked worktree of the repository that you ran them in, made by
 `git worktree add`.  There is one exception:  if that repository is a branch
 directory's own clone, `REPONAME-branch-OTHER`, and a sibling `REPONAME` is a
-clone of the same project, the new worktree belongs to `REPONAME` instead, so
-that `REPONAME-branch-OTHER` can still be removed once OTHER is done.  (The
+clone that would push a new branch to the same repositories, the new worktree
+belongs to `REPONAME` instead, so that `REPONAME-branch-OTHER` can still be
+removed once OTHER is done.  (A clone of your fork and a clone of its upstream
+repository push to different repositories, so neither hosts the other's
+worktrees.)  (The
 commands fall back to the repository that you ran them in when `REPONAME`
 cannot host the worktree without a difference, such as when either repository
 is a sparse checkout.)  All the branch
