@@ -814,7 +814,7 @@ for mode in '' --clean --copy; do
   if ! out="$(cd "${tracking}" && "${GIT_NEW_BRANCH}" ${mode} "tracked${mode}" 2>&1)"; then
     fail "nonzero exit status under branch.autoSetupMerge=always, mode [${mode}]: ${out}"
   elif upstream="$(git -C "${tmpdir}/tracking-branch-tracked${mode}" \
-    config --get-regexp "^branch\.tracked${mode}\.(remote|merge)$")"; then
+    config --get-regexp "^branch\.tracked${mode}\.(remote|merge)\$")"; then
     fail "branch.autoSetupMerge=always set up an upstream, mode [${mode}]: ${upstream}"
   fi
 done
