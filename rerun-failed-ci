@@ -1,0 +1,620 @@
+#!/bin/sh
+
+# Reruns each failed CI job whose failure appears to be transient, such as a
+# network error or a rate limit, rather than a problem with the code.
+#
+# Usage:
+#   rerun-failed-ci [--dry-run] [--max-attempts N] [PR | BRANCH | URL]...
+#   rerun-failed-ci --classify [LOG-FILE]...
+#
+# With no PR, BRANCH, or URL, this command examines the GitHub pull request
+# for the current branch.  A PR (a number or URL) or BRANCH names a pull
+# request, as for `gh pr checks`; this command examines every failed check of
+# that pull request.  A URL of a CircleCI job or workflow, or of a GitHub
+# Actions job or workflow run, names the failed jobs to examine:  the given
+# job, or every failed job of the given workflow or run.
+#
+# The supported CI services are CircleCI and GitHub Actions.  A failed check
+# from any other service is reported and skipped.
+#
+# A job's failure is transient if the log of its failed steps contains a
+# message about a network problem (such as a timeout, a refused or reset
+# connection, or a failed DNS lookup), an HTTP status code that indicates an
+# overloaded or rate-limited server (such as 429 or 503), or a lost CI runner.
+# The `transient_patterns` variable below lists the messages.  Shell trace
+# lines, which start with `+ `, are ignored, because a script that itself
+# looks for such messages, in order to retry a command, prints them in its
+# trace.  A CircleCI job whose status is `infrastructure_fail` is transient.
+#
+# For each workflow (CircleCI) or workflow run (GitHub Actions) that has a
+# job that failed transiently, this command reruns:
+#  * every failed job, if every failed job failed transiently, or
+#  * otherwise, only the jobs that failed transiently.  GitHub Actions does not
+#    permit a job to be rerun while its workflow run is in progress, so
+#    this command reruns only one of them; run this command again after the
+#    workflow run completes.
+# Rerunning a job also reruns the jobs that depend on it.
+# This command does nothing to a workflow or workflow run that is still in
+# progress, that has been rerun since the failure, or that has already been
+# run N times in total, where N is given by `--max-attempts` (default 3).
+# The limit keeps this command, when it is run repeatedly, from rerunning a
+# job forever whose failure resembles a transient one but is not.
+#
+# With `--dry-run`, this command reports what it would rerun but does not
+# rerun anything.
+#
+# With `--classify`, this command reruns nothing and contacts no server.
+# It reads each LOG-FILE (or standard input), and for each one that
+# shows a transient failure, it prints the line that shows it.  The exit
+# status is 0 if every LOG-FILE shows a transient failure, and 1 otherwise.
+#
+# This command requires `gh` (authenticated to GitHub), `jq`, and `curl`.
+# Rerunning a CircleCI job requires a CircleCI API token:  the value of
+# environment variable `CIRCLECI_CLI_TOKEN` or, if it is unset or empty, the
+# `token` in `~/.circleci/cli.yml`, which `circleci setup` writes.  Reading the
+# logs of a public project's jobs does not require a token.
+
+SCRIPT_NAME="$(basename -- "$0")"
+
+# Prints an error message and exits with a failure status.
+die() {
+  echo "${SCRIPT_NAME}: $*" >&2
+  exit 1
+}
+
+# Extended regular expressions, one per line, that match a line of a log that
+# shows a transient failure.  They are matched without regard to case.
+transient_patterns='(status|response) code:? (403|408|429|5[0-9][0-9])([^0-9]|$)
+HTTP[/0-9.]*( error| status)?:? (408|429|500|502|503|504)([^0-9]|$)
+The requested URL returned error: (408|429|5[0-9][0-9])
+Too Many Requests
+toomanyrequests
+rate limit (exceeded|reached)
+exceeded (a |the )?(secondary )?rate limit
+Service Unavailable
+Bad Gateway
+Gateway Time-?out
+Connect(ion)? timed out
+Connection (reset|refused)
+Read timed out
+SocketTimeoutException
+Network is unreachable
+UnknownHostException
+Temporary failure in name resolution
+Could not resolve host
+Premature end of Content-Length
+Remote host terminated the handshake
+TLS handshake timeout
+i/o timeout
+early EOF
+RPC failed
+remote end hung up unexpectedly
+gnutls_handshake\(\) failed
+SSL_ERROR_SYSCALL
+runner has received a shutdown signal
+lost communication with the server'
+
+# Usage: transient_reason FILE
+# If FILE, a log of the failed steps of a job, shows a transient failure,
+# prints the first line that shows it and succeeds.  Otherwise, fails.
+# Each line of FILE may start with a timestamp, as in a GitHub Actions log.
+transient_reason() {
+  # The start of a terminal escape sequence:  ESC [
+  csi="$(printf '\033')\\["
+  cr="$(printf '\r')"
+  # Removes a byte order mark, a timestamp, terminal escape sequences, and
+  # carriage returns, then removes shell trace lines.
+  reason="$(sed -e "s/^$(printf '\357\273\277')//" \
+    -e 's/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z //' \
+    -e "s/${csi}[0-9;]*[A-Za-z]//g" \
+    -e "s/${cr}//g" -- "$1" \
+    | grep -v '^++* ' \
+    | grep -E -i -e "${transient_patterns}" \
+    | head -n 1)"
+  if [ -z "${reason}" ]; then
+    return 1
+  fi
+  # Removes leading whitespace and shortens a long line.
+  printf '%s\n' "${reason}" | sed -e 's/^[[:space:]]*//' | cut -c 1-200
+}
+
+if [ "${1-}" = "--classify" ]; then
+  shift
+  if [ "$#" -eq 0 ]; then
+    set -- -
+  fi
+  tmpdir="$(mktemp -d)" || exit 1
+  trap 'rm -rf "${tmpdir}"' EXIT
+  status=0
+  for file in "$@"; do
+    if [ "${file}" = "-" ]; then
+      cat > "${tmpdir}/stdin" || exit 1
+      file="${tmpdir}/stdin"
+      name="(standard input)"
+    else
+      if [ ! -r "${file}" ]; then
+        die "cannot read ${file}"
+      fi
+      name="${file}"
+    fi
+    if reason="$(transient_reason "${file}")"; then
+      printf '%s: %s\n' "${name}" "${reason}"
+    else
+      status=1
+    fi
+  done
+  exit "${status}"
+fi
+
+dry_run=
+max_attempts=3
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -n | --dry-run) dry_run=1 ;;
+    --max-attempts)
+      if [ "$#" -lt 2 ]; then die "--max-attempts requires a number"; fi
+      max_attempts="$2"
+      shift
+      ;;
+    --max-attempts=*) max_attempts="${1#--max-attempts=}" ;;
+    --classify) die "--classify must be the first argument" ;;
+    --)
+      shift
+      break
+      ;;
+    -*) die "unknown option: $1" ;;
+    *) break ;;
+  esac
+  shift
+done
+case "${max_attempts}" in
+  '' | *[!0-9]*) die "--max-attempts requires a positive number: ${max_attempts}" ;;
+esac
+if [ "${max_attempts}" -lt 1 ]; then
+  die "--max-attempts requires a positive number: ${max_attempts}"
+fi
+
+for command in gh jq curl; do
+  if ! command -v "${command}" > /dev/null 2>&1; then
+    die "requires the ${command} command"
+  fi
+done
+
+# No command in this script uses filename expansion, and the unquoted
+# expansions that split a list into lines must not expand a "?" in a URL.
+set -f
+
+tab="$(printf '\t')"
+newline='
+'
+
+# Usage: field N LINE
+# Prints the Nth tab-separated field of LINE, or with "N-", the Nth and later
+# fields.
+field() {
+  printf '%s\n' "$2" | cut -f "$1"
+}
+
+tmpdir="$(mktemp -d)" || exit 1
+trap 'rm -rf "${tmpdir}"' EXIT
+trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
+
+# The exit status:  1 if some workflow could not be examined or rerun.
+status=0
+
+# Prints a warning and makes the exit status a failure.
+warn() {
+  echo "${SCRIPT_NAME}: $*" >&2
+  status=1
+}
+
+# Workflows and workflow runs that have already been examined, one per line.
+# A pull request can have several failed checks for one workflow run.
+examined=
+
+# Usage: first_time KEY
+# Succeeds the first time it is called with KEY.
+first_time() {
+  case "
+${examined}" in
+    *"
+$1
+"*) return 1 ;;
+  esac
+  examined="${examined}$1
+"
+}
+
+###########################################################################
+### CircleCI
+###
+
+# The file of HTTP headers for CircleCI API requests.  Putting the token in a
+# file keeps it out of the process list.
+circleci_headers="${tmpdir}/circleci-headers"
+(
+  umask 077
+  token="${CIRCLECI_CLI_TOKEN-}"
+  if [ -z "${token}" ] && [ -r "${HOME}/.circleci/cli.yml" ]; then
+    token="$(sed -n -e 's/^token:[[:space:]]*//p' -- "${HOME}/.circleci/cli.yml" | head -n 1)"
+  fi
+  if [ -n "${token}" ]; then
+    printf 'Circle-Token: %s\n' "${token}"
+  fi
+  printf 'Accept: application/json\n'
+) > "${circleci_headers}" || exit 1
+
+# Usage: circleci_api PATH [JSON-BODY]
+# Prints the result of a CircleCI API request:  a GET request, or a POST
+# request if JSON-BODY is given.  PATH starts with "/api/".
+circleci_api() {
+  if [ "$#" -ge 2 ]; then
+    curl -sS -f -X POST -H @"${circleci_headers}" \
+      -H 'Content-Type: application/json' -d "$2" "https://circleci.com$1"
+  else
+    curl -sS -f -H @"${circleci_headers}" "https://circleci.com$1"
+  fi
+}
+
+# Usage: circleci_workflow_of_job PROJECT-SLUG JOB-NUMBER
+# Prints the ID of the workflow of a CircleCI job.
+circleci_workflow_of_job() {
+  circleci_api "/api/v2/project/$1/job/$2" | jq -r -e '.latest_workflow.id'
+}
+
+# Usage: circleci_job_log PROJECT-SLUG JOB-NUMBER
+# Prints the output of the failed steps of a CircleCI job.
+circleci_job_log() {
+  case "$1" in
+    gh/*) v1_project="github/${1#gh/}" ;;
+    bb/*) v1_project="bitbucket/${1#bb/}" ;;
+    *)
+      echo "${SCRIPT_NAME}: cannot read the log of a job of CircleCI project $1" >&2
+      return 1
+      ;;
+  esac
+  output_urls="$(circleci_api "/api/v1.1/project/${v1_project}/$2" \
+    | jq -r '.steps[].actions[]
+        | select(.status == "failed" or .status == "timedout")
+        | .output_url // empty')" || return 1
+  for output_url in ${output_urls}; do
+    curl -sS -f --compressed "${output_url}" | jq -r '.[].message' || return 1
+  done
+}
+
+# Usage: circleci_workflow WORKFLOW-ID [JOB-NUMBER]
+# Reruns the failed jobs of the CircleCI workflow, or only the given job,
+# that failed transiently.
+circleci_workflow() {
+  wf_id="$1"
+  only_job="${2-}"
+  if ! wf_json="$(circleci_api "/api/v2/workflow/${wf_id}")"; then
+    warn "cannot read CircleCI workflow ${wf_id}"
+    return
+  fi
+  wf_name="$(printf '%s' "${wf_json}" | jq -r '.name')"
+  wf_status="$(printf '%s' "${wf_json}" | jq -r '.status')"
+  slug="$(printf '%s' "${wf_json}" | jq -r '.project_slug')"
+  pipeline_id="$(printf '%s' "${wf_json}" | jq -r '.pipeline_id')"
+  pipeline_number="$(printf '%s' "${wf_json}" | jq -r '.pipeline_number')"
+  wf_url="https://app.circleci.com/pipelines/${slug}/${pipeline_number}/workflows/${wf_id}"
+  echo "CircleCI workflow ${wf_name}: ${wf_url}"
+
+  # The workflows of the pipeline that have the same name, oldest first.
+  # Rerunning a workflow creates another one in the same pipeline.
+  if ! same_name="$(circleci_api "/api/v2/pipeline/${pipeline_id}/workflow" \
+    | jq -r --arg name "${wf_name}" \
+      '[.items[] | select(.name == $name)] | sort_by(.created_at) | .[].id')"; then
+    warn "cannot read the workflows of CircleCI pipeline ${pipeline_id}"
+    return
+  fi
+  latest="$(printf '%s\n' "${same_name}" | tail -n 1)"
+  if [ "${latest}" != "${wf_id}" ]; then
+    echo "  It has been rerun, as https://app.circleci.com/pipelines/${slug}/${pipeline_number}/workflows/${latest}"
+    return
+  fi
+  attempts="$(printf '%s\n' "${same_name}" | grep -c .)"
+
+  case "${wf_status}" in
+    failed | error) ;;
+    success | canceled | unauthorized | not_run)
+      echo "  Its status is ${wf_status}."
+      return
+      ;;
+    *)
+      echo "  Its status is ${wf_status}.  Run ${SCRIPT_NAME} again after it finishes."
+      return
+      ;;
+  esac
+
+  if ! failed_jobs="$(circleci_api "/api/v2/workflow/${wf_id}/job" \
+    | jq -r '.items[]
+        | select(.status == "failed" or .status == "infrastructure_fail"
+                 or .status == "timedout")
+        | [.job_number, .id, .status, .name] | @tsv')"; then
+    warn "cannot read the jobs of CircleCI workflow ${wf_id}"
+    return
+  fi
+
+  # The IDs of the jobs to rerun, separated by commas.
+  rerun_ids=
+  all_transient=1
+  IFS="${newline}"
+  for line in ${failed_jobs}; do
+    unset IFS
+    job_number="$(field 1 "${line}")"
+    job_id="$(field 2 "${line}")"
+    job_status="$(field 3 "${line}")"
+    job_name="$(field 4- "${line}")"
+    if [ -n "${only_job}" ] && [ "${job_number}" != "${only_job}" ]; then
+      continue
+    fi
+    if [ "${job_status}" = "infrastructure_fail" ]; then
+      reason="CircleCI infrastructure failure"
+    elif ! circleci_job_log "${slug}" "${job_number}" > "${tmpdir}/log"; then
+      warn "cannot read the log of CircleCI job ${job_name} (${job_number})"
+      all_transient=
+      continue
+    elif ! reason="$(transient_reason "${tmpdir}/log")"; then
+      echo "  ${job_name}: not transient"
+      all_transient=
+      continue
+    fi
+    echo "  ${job_name}: transient: ${reason}"
+    rerun_ids="${rerun_ids:+${rerun_ids},}\"${job_id}\""
+  done
+  unset IFS
+
+  if [ -z "${rerun_ids}" ]; then
+    return
+  fi
+  if [ "${attempts}" -ge "${max_attempts}" ]; then
+    echo "  Not rerunning:  the workflow has already been run ${attempts} times."
+    return
+  fi
+  if [ -n "${all_transient}" ] && [ -z "${only_job}" ]; then
+    body='{"from_failed": true}'
+    what="the failed jobs"
+  else
+    body="{\"jobs\": [${rerun_ids}]}"
+    what="the transiently failed jobs"
+  fi
+  if [ -n "${dry_run}" ]; then
+    echo "  Would rerun ${what}."
+    return
+  fi
+  if ! new_json="$(circleci_api "/api/v2/workflow/${wf_id}/rerun" "${body}")"; then
+    warn "cannot rerun CircleCI workflow ${wf_id}; is CIRCLECI_CLI_TOKEN set?"
+    return
+  fi
+  new_id="$(printf '%s' "${new_json}" | jq -r '.workflow_id // empty')"
+  echo "  Reran ${what}: https://app.circleci.com/pipelines/${slug}/${pipeline_number}/workflows/${new_id}"
+}
+
+# Usage: circleci_url URL
+# Handles a CircleCI URL, which names a workflow or a job.
+circleci_url() {
+  url="${1%%#*}"
+  wf_id=
+  job_number=
+  case "${url}" in
+    *workflowId=*)
+      wf_id="$(printf '%s\n' "${url}" | sed -e 's/.*[?&]workflowId=\([^&]*\).*/\1/')"
+      ;;
+    */workflow/* | */workflows/*)
+      wf_id="$(printf '%s\n' "${url}" | sed -e 's|.*/workflows*/\([^/?]*\).*|\1|')"
+      ;;
+  esac
+  case "${url}" in
+    *buildNumber=*)
+      job_number="$(printf '%s\n' "${url}" | sed -e 's/.*[?&]buildNumber=\([0-9]*\).*/\1/')"
+      ;;
+    */jobs/[0-9]*)
+      job_number="$(printf '%s\n' "${url}" | sed -e 's|.*/jobs/\([0-9]*\).*|\1|')"
+      ;;
+    https://circleci.com/gh/*/*/[0-9]* | https://circleci.com/bb/*/*/[0-9]*)
+      # A URL in a GitHub commit status, such as
+      # https://circleci.com/gh/ORG/REPO/123?utm_campaign=...
+      path="${url#https://circleci.com/}"
+      path="${path%%\?*}"
+      job_number="${path##*/}"
+      if ! wf_id="$(circleci_workflow_of_job "${path%/*}" "${job_number}")"; then
+        warn "cannot read CircleCI job ${url}"
+        return
+      fi
+      ;;
+  esac
+  if [ -z "${wf_id}" ]; then
+    warn "cannot find a CircleCI workflow in ${url}"
+    return
+  fi
+  if [ -n "${job_number}" ]; then
+    circleci_workflow "${wf_id}" "${job_number}"
+  elif first_time "circleci ${wf_id}"; then
+    circleci_workflow "${wf_id}"
+  fi
+}
+
+###########################################################################
+### GitHub Actions
+###
+
+# Usage: gha_job_log REPO JOB-ID
+# Prints the log of the failed steps of a GitHub Actions job, followed by the
+# job's annotations, which describe failures, such as a lost runner, that
+# leave no log.
+gha_job_log() {
+  # Each line of `--log-failed` output starts with the job name and the step
+  # name, each followed by a tab.
+  gh run view --repo "$1" --job "$2" --log-failed > "${tmpdir}/gh-log" || return 1
+  sed -e "s/^[^${tab}]*${tab}[^${tab}]*${tab}//" -- "${tmpdir}/gh-log" || return 1
+  gh api "repos/$1/check-runs/$2/annotations" --jq '.[].message' || return 1
+}
+
+# Usage: gha_run REPO RUN-ID [JOB-ID]
+# Reruns the failed jobs of the GitHub Actions workflow run, or only the given
+# job, that failed transiently.
+gha_run() {
+  repo="$1"
+  run_id="$2"
+  only_job="${3-}"
+  if ! run_json="$(gh api "repos/${repo}/actions/runs/${run_id}")"; then
+    warn "cannot read GitHub Actions workflow run ${run_id}"
+    return
+  fi
+  run_name="$(printf '%s' "${run_json}" | jq -r '.name')"
+  run_status="$(printf '%s' "${run_json}" | jq -r '.status')"
+  run_conclusion="$(printf '%s' "${run_json}" | jq -r '.conclusion')"
+  attempts="$(printf '%s' "${run_json}" | jq -r '.run_attempt')"
+  echo "GitHub Actions workflow run ${run_name}: https://github.com/${repo}/actions/runs/${run_id}"
+
+  # The failed jobs of the latest attempt of the run.  A job that the latest
+  # attempt did not rerun keeps its ID.
+  if ! failed_jobs="$(gh api --paginate \
+    "repos/${repo}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
+    --jq '.jobs[]
+        | select(.conclusion == "failure" or .conclusion == "timed_out")
+        | [.id, .name] | @tsv')"; then
+    warn "cannot read the jobs of GitHub Actions workflow run ${run_id}"
+    return
+  fi
+  if [ -n "${only_job}" ]; then
+    if ! printf '%s\n' "${failed_jobs}" | grep -q "^${only_job}${tab}"; then
+      echo "  Job ${only_job} is not a failed job of the latest attempt."
+      return
+    fi
+  fi
+
+  if [ "${run_status}" != "completed" ]; then
+    echo "  Its status is ${run_status}.  Run ${SCRIPT_NAME} again after it finishes."
+    return
+  fi
+  if [ "${run_conclusion}" != "failure" ]; then
+    echo "  Its conclusion is ${run_conclusion}."
+    return
+  fi
+
+  # The IDs of the jobs to rerun, one per line.
+  rerun_ids=
+  all_transient=1
+  IFS="${newline}"
+  for line in ${failed_jobs}; do
+    unset IFS
+    job_id="$(field 1 "${line}")"
+    job_name="$(field 2- "${line}")"
+    if [ -n "${only_job}" ] && [ "${job_id}" != "${only_job}" ]; then
+      continue
+    fi
+    if ! gha_job_log "${repo}" "${job_id}" > "${tmpdir}/log"; then
+      warn "cannot read the log of GitHub Actions job ${job_name} (${job_id})"
+      all_transient=
+      continue
+    fi
+    if ! reason="$(transient_reason "${tmpdir}/log")"; then
+      echo "  ${job_name}: not transient"
+      all_transient=
+      continue
+    fi
+    echo "  ${job_name}: transient: ${reason}"
+    rerun_ids="${rerun_ids}${job_id}
+"
+  done
+  unset IFS
+
+  if [ -z "${rerun_ids}" ]; then
+    return
+  fi
+  if [ "${attempts}" -ge "${max_attempts}" ]; then
+    echo "  Not rerunning:  the workflow run has already been run ${attempts} times."
+    return
+  fi
+  if [ -n "${all_transient}" ] && [ -z "${only_job}" ]; then
+    set -- --failed "${run_id}"
+    what="the failed jobs"
+  else
+    first_id="$(printf '%s' "${rerun_ids}" | head -n 1)"
+    set -- --job "${first_id}"
+    what="job ${first_id}"
+    if [ "$(printf '%s' "${rerun_ids}" | grep -c .)" -gt 1 ]; then
+      what="${what} (rerun the other transiently failed jobs after the workflow run finishes)"
+    fi
+  fi
+  if [ -n "${dry_run}" ]; then
+    echo "  Would rerun ${what}."
+    return
+  fi
+  if ! gh run rerun --repo "${repo}" "$@" > /dev/null; then
+    warn "cannot rerun GitHub Actions workflow run ${run_id}"
+    return
+  fi
+  echo "  Reran ${what}."
+}
+
+# Usage: gha_url URL
+# Handles a GitHub Actions URL, which names a workflow run or a job.
+gha_url() {
+  path="${1#https://github.com/}"
+  path="${path%%[?#]*}"
+  repo="$(printf '%s\n' "${path}" | cut -d / -f 1-2)"
+  run_id="$(printf '%s\n' "${path}" | sed -n -e 's|^[^/]*/[^/]*/actions/runs/\([0-9]*\).*|\1|p')"
+  job_id="$(printf '%s\n' "${path}" | sed -n -e 's|.*/job/\([0-9]*\).*|\1|p')"
+  if [ -z "${run_id}" ]; then
+    warn "cannot find a GitHub Actions workflow run in $1"
+    return
+  fi
+  if [ -n "${job_id}" ]; then
+    gha_run "${repo}" "${run_id}" "${job_id}"
+  elif first_time "gha ${repo} ${run_id}"; then
+    gha_run "${repo}" "${run_id}"
+  fi
+}
+
+###########################################################################
+### Main routine
+###
+
+# Usage: pull_request [PR-OR-BRANCH]
+# Handles every failed check of a pull request.
+pull_request() {
+  if ! checks="$(gh pr checks "$@" --json name,bucket,link)" \
+    || ! links="$(printf '%s' "${checks}" \
+      | jq -r '.[] | select(.bucket == "fail") | [.link, .name] | @tsv')"; then
+    warn "cannot read the checks of pull request ${1-for the current branch}"
+    return
+  fi
+  if [ -z "${links}" ]; then
+    echo "No failed checks for pull request ${1-for the current branch}."
+    return
+  fi
+  IFS="${newline}"
+  for line in ${links}; do
+    unset IFS
+    link="$(field 1 "${line}")"
+    name="$(field 2- "${line}")"
+    case "${link}" in
+      https://app.circleci.com/* | https://circleci.com/*)
+        circleci_url "${link}"
+        ;;
+      https://github.com/*/actions/runs/*)
+        # Examine the whole run, so that its failed jobs are rerun together.
+        gha_url "${link%%/job/*}"
+        ;;
+      *) echo "${name}: skipping a check from an unsupported CI service: ${link}" ;;
+    esac
+  done
+  unset IFS
+}
+
+if [ "$#" -eq 0 ]; then
+  pull_request
+fi
+for arg in "$@"; do
+  case "${arg}" in
+    https://app.circleci.com/* | https://circleci.com/*) circleci_url "${arg}" ;;
+    https://github.com/*/actions/runs/*) gha_url "${arg}" ;;
+    *) pull_request "${arg}" ;;
+  esac
+done
+
+exit "${status}"
