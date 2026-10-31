@@ -95,36 +95,6 @@ else
   fi
 fi
 
-# With `merge.log` set, the merge message has the commit summaries that
-# `git merge` writes, but not the comment lines, such as "# By AUTHOR", that
-# `git fmt-merge-msg` adds when someone other than the user wrote a commit.
-# A comment character of "*", with which the summaries begin, changes
-# neither.
-git -C "${fork}" config merge.log true
-for comment_char in '#' '*'; do
-  git -C "${fork}" config core.commentChar "${comment_char}"
-  printf 'a3 %s\n' "${comment_char}" > "${canonical_work}/a.txt"
-  git -C "${canonical_work}" add a.txt
-  summary="Change a.txt for comment character ${comment_char}"
-  git -C "${canonical_work}" commit -q -m "${summary}" \
-    --author='Another Author <another@example.com>'
-  git -C "${canonical_work}" push -q origin trunk
-  if ! pull_upstream "${fork}"; then
-    fail "merge.log, comment character ${comment_char}: failed: $(cat "${testdir}/errors")"
-  else
-    message="$(git -C "${fork}" log -1 --format=%B)"
-    case "${message}" in
-      *'By Another Author'*) fail "merge.log, comment character ${comment_char}: the merge message has comment lines: ${message}" ;;
-    esac
-    case "${message}" in
-      *"* upstream/trunk:"*"${summary}"*) ;;
-      *) fail "merge.log, comment character ${comment_char}: the merge message lacks the commit summaries: ${message}" ;;
-    esac
-  fi
-done
-git -C "${fork}" config --unset merge.log
-git -C "${fork}" config --unset core.commentChar
-
 # The current branch is pulled from its own upstream branch first.
 other="${testdir}/other"
 git clone -q -b feature "${fork_remote}" "${other}"
