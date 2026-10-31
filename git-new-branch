@@ -665,9 +665,9 @@ english_list() {
     }'
 }
 
-# Usage: delete_stale_build_output
-# Reads the pathnames of stale files, relative to ${BRANCHDIR}, one per line,
-# from standard input.  Deletes each stale file that a tool presumably
+# Usage: delete_stale_build_output STALE-FILES
+# STALE-FILES lists the pathnames of stale files, relative to ${BRANCHDIR},
+# one per line.  Deletes each stale file that a tool presumably
 # regenerates, and sets these variables:
 #  * ${stale_kept} lists the pathname of each other stale file, including
 #    each one that cannot be deleted, each followed by a newline.
@@ -701,7 +701,13 @@ delete_stale_build_output() {
   stale_names=''
   stale_configured=''
   stale_last_dir=''
-  while IFS= read -r stale_file; do
+  stale_unread="$1
+"
+  while [ -n "${stale_unread}" ]; do
+    stale_file="${stale_unread%%
+*}"
+    stale_unread="${stale_unread#*
+}"
     if [ -z "${stale_file}" ]; then
       continue
     fi
@@ -869,11 +875,7 @@ delete_or_warn_about_old_pathname() {
   else
     warn_old_names="${LOGICAL_TOPLEVEL} (also ${TOPLEVEL})"
   fi
-  # The here-document, unlike a pipeline, runs `delete_stale_build_output` in
-  # this shell, so that the variables that it sets remain set.
-  delete_stale_build_output << EOF
-${warn_old_files}
-EOF
+  delete_stale_build_output "${warn_old_files}"
   if [ "${VERBOSE}" = yes ] && [ "${stale_count}" -gt 0 ]; then
     if [ "${stale_count}" -eq 1 ]; then
       stale_files='1 file'
