@@ -804,6 +804,21 @@ if [ -n "$(status_of "${tmpdir}/envindex-branch-fromenvindex")" ]; then
   fail "GIT_INDEX_FILE: the --clean worktree is not clean"
 fi
 
+# Under `branch.autoSetupMerge=always`, the new branch still has no upstream,
+# in every mode.
+tracking="${tmpdir}/tracking-branch-main"
+make_repo "${tracking}" || exit 1
+git -C "${tracking}" config branch.autoSetupMerge always
+for mode in '' --clean --copy; do
+  # shellcheck disable=SC2086 # An empty mode is no argument at all.
+  if ! out="$(cd "${tracking}" && "${GIT_NEW_BRANCH}" ${mode} "tracked${mode}" 2>&1)"; then
+    fail "nonzero exit status under branch.autoSetupMerge=always, mode [${mode}]: ${out}"
+  elif upstream="$(git -C "${tmpdir}/tracking-branch-tracked${mode}" \
+    config --get-regexp "^branch\.tracked${mode}\.(remote|merge)$")"; then
+    fail "branch.autoSetupMerge=always set up an upstream, mode [${mode}]: ${upstream}"
+  fi
+done
+
 # Under core.splitIndex, the index that the default mode copies names a
 # shared index file, which must be copied too.
 split="${tmpdir}/split-branch-main"

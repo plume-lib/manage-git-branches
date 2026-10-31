@@ -273,9 +273,10 @@ Do not remove or move a worktree with file-system commands:
   removes the repository that all of them use, and moving it breaks them
   until you run `git worktree repair` in it.
 
-None of this applies to a directory made by `git-new-branch --copy`:  each of
-those is an independent clone, which you can remove or move like any other
-directory.
+None of this applies to a directory made by `git-new-branch --copy`, or to
+the copy that `git-new-branch` or `git-checkout-branch` makes for a working
+tree or branch that has submodules:  each of those is an independent clone,
+which you can remove or move like any other directory.
 
 `git-new-branch`, `git-checkout-branch`, `git-remove-branch-directory`, and
 `git-orphaned-branches` require git 2.31 or later.  The default mode of

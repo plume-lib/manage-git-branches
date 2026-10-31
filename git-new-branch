@@ -540,8 +540,11 @@ case "${MODE}" in
     # with `mv` is safe.
     make_tmpdir
     copy_repository "${BRANCH_TMPDIR}"
-    if ! (cd -- "${BRANCH_TMPDIR}" && git checkout -b "${BRANCHNAME}" -q); then
-      echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)" >&2
+    # `--no-track` sets up no upstream for the new branch even under
+    # `branch.autoSetupMerge=always`, which would otherwise make the current
+    # branch its upstream.
+    if ! (cd -- "${BRANCH_TMPDIR}" && git checkout --no-track -b "${BRANCHNAME}" -q); then
+      echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout --no-track -b \"${BRANCHNAME}\" -q)" >&2
       exit 1
     fi
     if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
