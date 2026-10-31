@@ -683,7 +683,7 @@ if out="$(cd "${superproject}" && "${GIT_NEW_BRANCH}" --clean subclean 2>&1)"; t
   fail "zero exit status for --clean in a repository with submodules"
 fi
 case "${out}" in
-  *"has submodules"*"--copy works here"*) ;;
+  *"has submodules"*"--copy subclean\` works in ${superproject}"*) ;;
   *) fail "unexpected message for --clean in a repository with submodules: ${out}" ;;
 esac
 check_nothing_left "${superproject}" subclean "--clean with submodules"
@@ -733,7 +733,7 @@ if out="$(cd "${pullsub}" && "${GIT_NEW_BRANCH}" --clean pullsubclean 2>&1)"; th
   fail "zero exit status for --clean when the pull brings in a submodule"
 fi
 case "${out}" in
-  *"has submodules"*"--copy works here"*) ;;
+  *"has submodules"*"--copy pullsubclean\` works in "*) ;;
   *) fail "unexpected message for --clean when the pull brings in a submodule: ${out}" ;;
 esac
 check_nothing_left "${pullsub}" pullsubclean "--clean when the pull brings in a submodule"
@@ -1182,8 +1182,7 @@ for slug_source in proj-fork-other proj; do
 done
 
 # A branch that already exists in the fork's clone is an error that names that
-# clone, rather than "this clone", and that says nothing about making the
-# branch.
+# clone, and that says nothing about making the branch.
 if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" mernst:from-other 2>&1)"; then
   fail "zero exit status for a slug whose branch exists in the fork's clone"
 fi
@@ -1227,7 +1226,7 @@ if out="$(cd "${slugs}/sub/super-branch-main" && "${GIT_NEW_BRANCH}" mernst:subs
   fail "zero exit status for a slug whose fork's clone has submodules"
 fi
 case "${out}" in
-  *"a slug makes a worktree, and the current commit of ${slugs}/sub/super-fork-mernst has submodules"*"--copy subslug\` works in ${slugs}/sub/super-fork-mernst"*) ;;
+  *"a slug make a worktree, and the current commit of ${slugs}/sub/super-fork-mernst has submodules"*"--copy subslug\` works in ${slugs}/sub/super-fork-mernst"*) ;;
   *) fail "unexpected message for a slug whose fork's clone has submodules: ${out}" ;;
 esac
 if [ -e "${slugs}/sub/super-fork-mernst-branch-subslug" ]; then
@@ -1294,7 +1293,47 @@ for slug_case in side:"its branch feature-x" detached:"its detached HEAD"; do
   esac
 done
 
+# The slug -:BRANCH makes the branch in the clone PROJECT itself, as ORG "-"
+# does for `git-push-to`.
+if ! out="$(cd "${slugs}/proj-fork-other" && "${GIT_NEW_BRANCH}" -:in-upstream 2>&1)"; then
+  fail "nonzero exit status for -:in-upstream: ${out}"
+fi
+case "${out}" in
+  *"making branch in-upstream in ${slugs}/proj, at commit "*) ;;
+  *) fail "-:in-upstream did not say that it made the branch in proj: ${out}" ;;
+esac
+if [ "$(git -C "${slugs}/proj-branch-in-upstream" symbolic-ref --short HEAD 2> /dev/null)" != in-upstream ]; then
+  fail "-:in-upstream did not make ${slugs}/proj-branch-in-upstream"
+fi
+
+# A slug's pull in a clone whose branch has diverged from its upstream does
+# not merge, which would leave conflicts in a clone other than the current
+# directory.  The new branch starts at that clone's own commit.
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-diverged"
+git -C "${slugs}/proj-fork-diverged" config pull.rebase false
+echo "diverged" > "${slugs}/proj-fork-diverged/conflict.txt"
+git -C "${slugs}/proj-fork-diverged" add conflict.txt
+git -C "${slugs}/proj-fork-diverged" commit -q -m "A diverging commit"
+diverged_commit="$(git -C "${slugs}/proj-fork-diverged" rev-parse HEAD)"
+echo "upstream" > "${slugs}/proj-fork-mernst/conflict.txt"
+git -C "${slugs}/proj-fork-mernst" add conflict.txt
+git -C "${slugs}/proj-fork-mernst" commit -q -m "A conflicting commit"
+if ! out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" diverged:after-divergence 2>&1)"; then
+  fail "nonzero exit status for a slug whose clone has diverged: ${out}"
+fi
+if git -C "${slugs}/proj-fork-diverged" rev-parse --verify --quiet MERGE_HEAD > /dev/null \
+  || [ -n "$(git -C "${slugs}/proj-fork-diverged" ls-files --unmerged)" ]; then
+  fail "a slug's pull left a merge in progress in proj-fork-diverged: ${out}"
+fi
+if [ "$(git -C "${slugs}/proj-fork-diverged-branch-after-divergence" rev-parse HEAD 2> /dev/null)" != "${diverged_commit}" ]; then
+  fail "a slug whose clone has diverged did not start at that clone's commit: ${out}"
+fi
+
 # `--copy` cannot be used with a slug, and a malformed slug is an error.
+# Switching branches in proj makes "@{-1}" resolve there, so that
+# `git check-ref-format --branch` rewrites it rather than rejecting it.
+git -C "${slugs}/proj" checkout -q -b previous
+git -C "${slugs}/proj" checkout -q -
 for slug_args in "--copy mernst:copied" ":nobody" "mernst:" "a/b:feature" \
   "mernst:a:b" "mernst:-x" "mernst:@{-1}"; do
   # shellcheck disable=SC2086 # The arguments are split on purpose.
