@@ -105,7 +105,8 @@ for comment_char in '#' '*'; do
   git -C "${fork}" config core.commentChar "${comment_char}"
   printf 'a3 %s\n' "${comment_char}" > "${canonical_work}/a.txt"
   git -C "${canonical_work}" add a.txt
-  git -C "${canonical_work}" commit -q -m 'Change a.txt again' \
+  summary="Change a.txt for comment character ${comment_char}"
+  git -C "${canonical_work}" commit -q -m "${summary}" \
     --author='Another Author <another@example.com>'
   git -C "${canonical_work}" push -q origin trunk
   if ! pull_upstream "${fork}"; then
@@ -116,7 +117,7 @@ for comment_char in '#' '*'; do
       *'By Another Author'*) fail "merge.log, comment character ${comment_char}: the merge message has comment lines: ${message}" ;;
     esac
     case "${message}" in
-      *"* upstream/trunk:"*) ;;
+      *"* upstream/trunk:"*"${summary}"*) ;;
       *) fail "merge.log, comment character ${comment_char}: the merge message lacks the commit summaries: ${message}" ;;
     esac
   fi
