@@ -48,6 +48,13 @@ The commands are:
   checkout and nothing else.  With `--copy`, it is a copy of the whole
   directory, `.git` included, and so an independent clone; a working tree
   that has submodules always gets this.
+  Instead of BRANCHNAME, the argument can be a slug of the form
+  `ORG:BRANCHNAME`, such as `git-new-branch mernst:feature`, in any working
+  tree of the project, such as `PROJECT`, `PROJECT-fork-OTHERORG`, or one of
+  their branch directories.  It does what `git-new-branch --clean BRANCHNAME`
+  does in the sibling clone `PROJECT-fork-ORG`:  it pulls there, then makes
+  the directory `PROJECT-fork-ORG-branch-BRANCHNAME` at the commit of
+  `PROJECT-fork-ORG`, with none of the current directory's changes.
   Build output that the default mode or `--copy` copies can still refer to
   the current directory's files by their absolute pathnames.  This command
   deletes such files that a tool presumably regenerates, and warns about the
