@@ -761,13 +761,20 @@ delete_stale_build_output() {
       else
         stale_delete=no
       fi
-      # The test precedes the deletion of any file in ${stale_dir}, because
-      # `CMakeCache.txt` and `config.status` contain the pathname of the
-      # source directory and so are deleted too.
-      stale_dir_configured=no
-      if [ "${stale_delete}" = yes ] \
-        && [ -n "$(find "${BRANCHDIR}/${stale_dir}" \( -name CMakeCache.txt -o -name config.status \) -print 2> /dev/null)" ]; then
-        stale_dir_configured=yes
+      # ${stale_markers} lists the directories, relative to ${BRANCHDIR}, in
+      # ${stale_dir} or below it that hold a `CMakeCache.txt` or
+      # `config.status` file, each followed by a newline.  The search precedes
+      # the deletion of any file in ${stale_dir}, because those files contain
+      # the pathname of the source directory and so are deleted too.
+      stale_markers=''
+      if [ "${stale_delete}" = yes ]; then
+        stale_markers="$(cd "${BRANCHDIR}" \
+          && find "./${stale_dir}" \( -name CMakeCache.txt -o -name config.status \) -type f -print 2> /dev/null \
+          | sed -e 's|^\./||' -e 's|/[^/]*$||' | sort -u)"
+        if [ -n "${stale_markers}" ]; then
+          stale_markers="${stale_markers}
+"
+        fi
       fi
     fi
     if [ "${stale_delete}" = yes ] \
@@ -775,16 +782,27 @@ delete_stale_build_output() {
       stale_count=$((stale_count + 1))
       stale_names="${stale_names}${stale_dir##*/}
 "
-      if [ "${stale_dir_configured}" = yes ]; then
-        case "${stale_configured}
+      # Each configured directory that contains the file needs to be
+      # reconfigured.
+      stale_unread_markers="${stale_markers}"
+      while [ -n "${stale_unread_markers}" ]; do
+        stale_marker="${stale_unread_markers%%
+*}"
+        stale_unread_markers="${stale_unread_markers#*
+}"
+        case "${stale_file}" in
+          "${stale_marker}"/*)
+            case "${stale_configured}
 " in
-          *"
-${stale_dir}
+              *"
+${stale_marker}
 "*) ;;
-          *) stale_configured="${stale_configured}
-${stale_dir}" ;;
+              *) stale_configured="${stale_configured}
+${stale_marker}" ;;
+            esac
+            ;;
         esac
-      fi
+      done
       continue
     fi
     printf '%s\n' "${stale_file}"

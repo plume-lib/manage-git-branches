@@ -1089,6 +1089,25 @@ esac
 if [ -e "${stale_parent}/deleted-branch-deletedcmake/sub/build/CMakeCache.txt" ]; then
   fail "did not delete sub/build/CMakeCache.txt"
 fi
+rm -f "${deleted}/sub/build/CMakeCache.txt"
+
+# Each configured directory below a `build/` directory is named, not the
+# `build/` directory itself.
+mkdir -p "${deleted}/sub/build/release" "${deleted}/sub/build/debug"
+printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "${deleted_top}" \
+  > "${deleted}/sub/build/release/CMakeCache.txt"
+printf "ac_pwd='%s'\n" "${deleted_top}" > "${deleted}/sub/build/debug/config.status"
+if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" deletednested 2>&1)"; then
+  fail "nonzero exit status with nested configured build directories: ${out}"
+fi
+case "${out}" in
+  *" from \`sub/build/debug/\` and \`sub/build/release/\` in "*"Reconfigure them before building there."*) ;;
+  *) fail "did not say that sub/build/debug/ and sub/build/release/ need to be reconfigured: ${out}" ;;
+esac
+case "${out}" in
+  *"\`sub/build/\`"*) fail "named sub/build/ rather than the configured directories in it: ${out}" ;;
+esac
+rm -rf "${deleted}/sub/build/release" "${deleted}/sub/build/debug"
 
 # Files in a submodule are examined too, and the submodule's `build/` and
 # `.gradle/` directories are treated like the superproject's.  A submodule at
