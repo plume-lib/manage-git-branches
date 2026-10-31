@@ -456,7 +456,7 @@ for help_option in --help -h; do
     fail "nonzero exit status for ${help_option}"
   fi
   case "${out}" in
-    "Creates a new branch of the current repository"*"git-new-branch [--clean | --copy] NEWBRANCHNAME"*"Nor does this command build.") ;;
+    "Creates a new branch of the current repository"*"git-new-branch [--clean | --copy] [--verbose] NEWBRANCHNAME"*"--verbose"*"Nor does this command build.") ;;
     *) fail "unexpected output for ${help_option}: ${out}" ;;
   esac
   case "${out}" in

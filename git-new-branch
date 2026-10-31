@@ -24,6 +24,9 @@
 #              is an independent clone that shares nothing with the current
 #              repository.
 #
+# With `--verbose`, the default mode and `--copy` also say how many generated
+# files they deleted from the new directory.
+#
 # Every effect is local:  this command never contacts a remote except to
 # read from it, and in particular it does not push the new branch.
 # Therefore, the new branch has no upstream branch, which `git-push-to` and
