@@ -665,16 +665,19 @@ english_list() {
     }'
 }
 
-# Usage: delete_stale_build_output OLD_NAMES
+# Usage: delete_stale_build_output
 # Reads the pathnames of stale files, relative to ${BRANCHDIR}, one per line,
 # from standard input.  Deletes each stale file that a tool presumably
-# regenerates, and prints the pathname of each other stale file, including
-# each one that cannot be deleted.  Says on standard error which of the
-# directories that it deleted files from CMake or autotools configured, as
-# shown by a `CMakeCache.txt` or `config.status` file in them, because such a
-# directory needs to be reconfigured.  If ${VERBOSE} is "yes", also says how
-# many files it deleted.  OLD_NAMES is the pathname that the deleted files
-# contained or were symbolic links into.
+# regenerates, and sets these variables:
+#  * ${stale_kept} lists the pathname of each other stale file, including
+#    each one that cannot be deleted, each followed by a newline.
+#  * ${stale_count} is the number of files that it deleted.
+#  * ${stale_names} lists the names of the directories that it deleted files
+#    from, each followed by a newline.
+#  * ${stale_configured} lists the directories, relative to ${BRANCHDIR},
+#    that it deleted files from and that CMake or autotools configured, as
+#    shown by a `CMakeCache.txt` or `config.status` file in them, each
+#    preceded by a newline.
 #
 # Whether a tool regenerates a file is not knowable, so it is judged by the
 # directory that contains the file.  A tool presumably regenerates the files
@@ -692,17 +695,10 @@ english_list() {
 #    regenerates the dependency's files; or
 #  * is a submodule, because the submodule's files are not in a `build/`,
 #    `.gradle/`, or cache directory of the submodule's own repository.
-# This is a function, rather than code in the command substitution of
-# `delete_or_warn_about_old_pathname`, because bash 3.2, which is /bin/sh on
-# macOS, ends a command substitution at the ")" of a `case` pattern within it.
 delete_stale_build_output() {
+  stale_kept=''
   stale_count=0
-  # ${stale_names} lists the names of the directories that files were
-  # deleted from, each followed by a newline.
   stale_names=''
-  # ${stale_configured} lists the directories, relative to ${BRANCHDIR},
-  # that CMake or autotools configured and that files were deleted from,
-  # each preceded by a newline.
   stale_configured=''
   stale_last_dir=''
   while IFS= read -r stale_file; do
@@ -736,7 +732,8 @@ delete_stale_build_output() {
       esac
     done
     if [ -z "${stale_dir}" ]; then
-      printf '%s\n' "${stale_file}"
+      stale_kept="${stale_kept}${stale_file}
+"
       continue
     fi
     # ${stale_delete} is "yes" if the files in ${stale_dir} are deleted and
@@ -787,25 +784,9 @@ ${stale_dir}" ;;
       fi
       continue
     fi
-    printf '%s\n' "${stale_file}"
+    stale_kept="${stale_kept}${stale_file}
+"
   done
-  if [ "${VERBOSE}" = yes ] && [ "${stale_count}" -gt 0 ]; then
-    if [ "${stale_count}" -eq 1 ]; then
-      stale_files='1 file'
-    else
-      stale_files="${stale_count} files"
-    fi
-    stale_dirs="$(printf '%s' "${stale_names}" | english_list)"
-    echo "${SCRIPT_NAME}: deleted generated files in ${BRANCHDIR} that contained the pathname of $1 or were symbolic links into it: ${stale_files} in ${stale_dirs}.  The tools that generated them regenerate them." >&2
-  fi
-  if [ -n "${stale_configured}" ]; then
-    case "${stale_configured#?}" in
-      *"
-"*) stale_pronoun=them ;;
-      *) stale_pronoun=it ;;
-    esac
-    echo "${SCRIPT_NAME}: deleted generated files that contained the pathname of $1 from $(printf '%s\n' "${stale_configured#?}" | english_list) in ${BRANCHDIR}, which CMake or autotools configured.  Reconfigure ${stale_pronoun} before building there." >&2
-  fi
 }
 
 # Usage: delete_or_warn_about_old_pathname
@@ -888,7 +869,29 @@ delete_or_warn_about_old_pathname() {
   else
     warn_old_names="${LOGICAL_TOPLEVEL} (also ${TOPLEVEL})"
   fi
-  warn_old_files="$(printf '%s\n' "${warn_old_files}" | delete_stale_build_output "${warn_old_names}")"
+  # The here-document, unlike a pipeline, runs `delete_stale_build_output` in
+  # this shell, so that the variables that it sets remain set.
+  delete_stale_build_output << EOF
+${warn_old_files}
+EOF
+  if [ "${VERBOSE}" = yes ] && [ "${stale_count}" -gt 0 ]; then
+    if [ "${stale_count}" -eq 1 ]; then
+      stale_files='1 file'
+    else
+      stale_files="${stale_count} files"
+    fi
+    stale_dirs="$(printf '%s' "${stale_names}" | english_list)"
+    echo "${SCRIPT_NAME}: deleted generated files in ${BRANCHDIR} that contained the pathname of ${warn_old_names} or were symbolic links into it: ${stale_files} in ${stale_dirs}.  The tools that generated them regenerate them." >&2
+  fi
+  if [ -n "${stale_configured}" ]; then
+    case "${stale_configured#?}" in
+      *"
+"*) stale_pronoun=them ;;
+      *) stale_pronoun=it ;;
+    esac
+    echo "${SCRIPT_NAME}: deleted generated files that contained the pathname of ${warn_old_names} from $(printf '%s\n' "${stale_configured#?}" | english_list) in ${BRANCHDIR}, which CMake or autotools configured.  Reconfigure ${stale_pronoun} before building there." >&2
+  fi
+  warn_old_files="${stale_kept%?}"
   if [ -z "${warn_old_files}" ]; then
     return
   fi
