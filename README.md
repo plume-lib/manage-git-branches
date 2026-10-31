@@ -135,6 +135,16 @@ The commands are:
   whitespace and using the patience diff algorithm.
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
+* [`rerun-failed-ci`](rerun-failed-ci)
+  `[--dry-run] [--max-attempts N] [PR | BRANCH | URL]...`:
+  Reruns each failed CI job of a GitHub pull request (by default, the one for
+  the current branch) whose log shows a transient failure, such as a network
+  error or a rate limit, rather than a problem with the code.  A URL names a
+  CircleCI or GitHub Actions job or workflow to examine instead.  It does not
+  rerun a workflow that is still running, that has been rerun since, or that
+  has already run N times (by default, 3).
+  `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
+  shows a transient failure.  This command needs `gh`, `jq`, and `curl`.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
@@ -164,6 +174,9 @@ takes effect when it is set to a non-empty value.
   compilation step, and push whenever the merge succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
+* `CIRCLECI_CLI_TOKEN`: `rerun-failed-ci` uses this CircleCI API token, which
+  rerunning a CircleCI job requires.  If it is not set, `rerun-failed-ci` uses
+  the `token` in `~/.circleci/cli.yml`, which `circleci setup` writes.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
   `git-orphaned-branches`, `git-new-branch`, `git-checkout-branch`, and
   `git-push-to` use these standard Git variables to select the SSH command
