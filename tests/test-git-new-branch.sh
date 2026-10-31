@@ -1011,6 +1011,17 @@ if out="$(cd "${file_parent}/proj" && "${GIT_NEW_BRANCH}" --clean fileurl 2>&1)"
   fail "zero exit status for an upstream repository named by a file:// URL in the fork: ${out}"
 fi
 
+# A dangling symbolic link that sorts before the fork does not hide the fork.
+dangling_parent="${tmpdir}/dangling"
+mkdir "${dangling_parent}"
+git clone -q "${tmpdir}/proj.git" "${dangling_parent}/proj"
+ln -s "${tmpdir}/nonexistent" "${dangling_parent}/proj-fork-a"
+git clone -q "${tmpdir}/proj-fork.git" "${dangling_parent}/proj-fork-me"
+git -C "${dangling_parent}/proj-fork-me" remote add upstream "${tmpdir}/proj.git"
+if out="$(cd "${dangling_parent}/proj" && "${GIT_NEW_BRANCH}" --clean dangling 2>&1)"; then
+  fail "zero exit status for an upstream clone beside a dangling symbolic link and a fork: ${out}"
+fi
+
 # The URLs that `git push` uses say where the new branch would be pushed, not
 # the remote's URL:  a `pushurl` or a `pushInsteadOf` rewrite that names the
 # fork is not refused, and a `pushurl` that names the upstream repository is.

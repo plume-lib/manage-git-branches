@@ -393,9 +393,10 @@ check_not_upstream_clone() {
   cnuc_project="${REPO%%-branch-*}"
   cnuc_project="${cnuc_project%%-fork-*}"
   # Most clones have no fork beside them, and finding none is cheaper than
-  # judging where the new branch would be pushed.
+  # judging where the new branch would be pushed.  A pattern that matches
+  # nothing is left as is, and a lone dangling symbolic link is no fork either.
   set -- "${PARENTDIR}/${cnuc_project}"-fork-*
-  if [ ! -e "$1" ]; then
+  if [ $# -eq 1 ] && [ ! -e "$1" ]; then
     return 0
   fi
   cnuc_remote="$(push_remote . '')"
