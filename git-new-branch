@@ -32,7 +32,8 @@
 # at the commit of PROJECT-fork-ORG after the `git pull` there, not at the
 # current directory's commit.  Its directory is
 # PROJECT-fork-ORG-branch-NEWBRANCHNAME, and it holds none of the current
-# directory's changes.  `--copy` cannot be used with a slug.
+# directory's changes.  `--copy` cannot be used with a slug, and neither can
+# an ORG that contains "-branch-".
 #
 # The default mode and `--copy` copy build output, which can still refer to
 # the current directory's files.  These modes delete such files that a tool
@@ -203,6 +204,14 @@ case "$1" in
       '' | */* | .*)
         echo "${SCRIPT_NAME}: ERROR: not a slug ORG:NEWBRANCHNAME: $1" >&2
         usage
+        exit 1
+        ;;
+      # Every directory name is read as ending in -branch-BRANCH if it
+      # contains "-branch-", so a clone named PROJECT-fork-ORG would be taken
+      # for a branch directory of PROJECT-fork-PREFIX, where PREFIX is the
+      # part of ORG before "-branch-".
+      *-branch-*)
+        echo "${SCRIPT_NAME}: ERROR: an ORG that contains \"-branch-\" cannot be used in a slug, because the name of its fork's clone, PROJECT-fork-ORG, would be read as that of a branch directory: $1" >&2
         exit 1
         ;;
     esac

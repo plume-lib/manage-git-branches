@@ -1243,6 +1243,22 @@ case "${out}" in
   *) fail "unexpected message for a slug whose fork has no clone: ${out}" ;;
 esac
 
+# An ORG that contains "-branch-" is refused even when its fork has a clone,
+# because the clone's name would be read as that of a branch directory.
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-foo-branch-bar"
+if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" foo-branch-bar:feature 2>&1)"; then
+  fail "zero exit status for a slug whose ORG contains -branch-"
+fi
+case "${out}" in
+  *"ERROR: an ORG that contains \"-branch-\" cannot be used in a slug"*) ;;
+  *) fail "unexpected message for a slug whose ORG contains -branch-: ${out}" ;;
+esac
+if [ -e "${slugs}/proj-fork-foo-branch-feature" ] \
+  || git -C "${slugs}/proj-fork-foo-branch-bar" rev-parse --verify --quiet \
+    refs/heads/feature > /dev/null; then
+  fail "a slug whose ORG contains -branch- made a branch"
+fi
+
 # `--copy` cannot be used with a slug, and a malformed slug is an error.
 for slug_args in "--copy mernst:copied" ":nobody" "mernst:" "a/b:feature" \
   "mernst:a:b" "mernst:-x" "mernst:@{-1}"; do
