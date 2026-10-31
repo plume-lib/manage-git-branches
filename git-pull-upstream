@@ -106,6 +106,8 @@ if [ -z "${checked_out_branch}" ]; then
   echo "${SCRIPT_NAME}: HEAD is detached; check out a branch first" >&2
   exit 1
 fi
+# The fetch can prompt, as the push below can, so that a user who must type a
+# passphrase can do so for every one of them.
 if ! remote="$(upstream_remote)" \
   || ! upstream_ref="$(upstream_default_branch "${remote}" 1)"; then
   exit 1

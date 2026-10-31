@@ -40,19 +40,18 @@ The commands are:
   Creates and checks out the given branch of the repository in a new working
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
-  new branch.
-  By default, the new directory is a worktree (see
-  [below](#worktrees)) that shares the repository, and its contents are the
-  same as the current directory's, including uncommitted changes and
-  untracked files.  With `--clean`, it is a worktree that holds a clean
-  checkout and nothing else.  With `--copy`, it is a copy of the whole
-  directory, `.git` included, and so an independent clone; a working tree
-  that has submodules always gets this.
-  Build output that the default mode or `--copy` copies can still refer to
-  the current directory's files by their absolute pathnames.  This command
-  deletes such files that a tool presumably regenerates, and warns about the
-  others; the comments in [`git-new-branch`](git-new-branch) say which files
-  those are.
+  new branch, and it does not build.
+  The new branch starts at the current commit, after a `git pull`.  On a
+  fork's `master` that lags behind `upstream/master`, this command first
+  fast-forwards `master` to `upstream/master`.
+  By default, the new directory is a worktree (see [below](#worktrees)) whose
+  contents are the same as the current directory's, including uncommitted
+  changes, untracked files, and build output; `--clean` and `--copy` make
+  other kinds of directory.
+  `git-new-branch --help` prints a synopsis, which describes the modes.  The
+  comments in [`git-new-branch`](git-new-branch) give the details,
+  such as when the fast-forward is not made and which copied build output
+  this command deletes, and which it warns about.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
@@ -278,7 +277,7 @@ Do not remove or move a worktree with file-system commands:
   until you run `git worktree repair` in it.
 
 None of this applies to a directory made by `git-new-branch --copy`:  each of
-those is an independent clone, which you may remove or move like any other
+those is an independent clone, which you can remove or move like any other
 directory.
 
 `git-new-branch`, `git-checkout-branch`, `git-remove-branch-directory`, and
