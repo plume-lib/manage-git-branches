@@ -722,23 +722,6 @@ is_slug() {
   [ -n "${is_slug_matches}" ]
 }
 
-## Sets ${slug_org}, ${slug_branch}, and ${slug_branch_dir} from the slug
-## ORG:BRANCH or BRANCH.  ${slug_org} is empty if the slug has no ORG.
-## ${slug_branch_dir} is BRANCH as it appears in a directory name.
-parse_slug() {
-  case "$1" in
-    *:*)
-      slug_org="${1%%:*}"
-      slug_branch="${1#*:}"
-      ;;
-    *)
-      slug_org=''
-      slug_branch="$1"
-      ;;
-  esac
-  slug_branch_dir="$(printf '%s\n' "${slug_branch}" | sed -e "s:/:-:g")"
-}
-
 ## Returns 0 if the given directory has the given branch checked out.
 has_branch_checked_out() {
   has_branch_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 1
@@ -918,6 +901,9 @@ newline='
 keys=''
 explicit_projects=''
 for arg; do
+  if ! check_slug_org "$arg"; then
+    exit 1
+  fi
   if ! arg_matches="$(slug_matches "$arg")"; then
     exit 1
   fi

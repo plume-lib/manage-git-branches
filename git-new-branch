@@ -29,11 +29,12 @@
 # working tree, so the result is the same whichever of the project's
 # directories it is run in:  PROJECT, PROJECT-fork-OTHERORG, a branch
 # directory of either, or a worktree of any of those.  The new branch starts
-# at the commit of PROJECT-fork-ORG after the `git pull` there, not at the
-# current directory's commit.  Its directory is
+# at the commit of PROJECT-fork-ORG after the `git pull` there -- that is, on
+# whatever branch PROJECT-fork-ORG has checked out -- not at the current
+# directory's commit.  Its directory is
 # PROJECT-fork-ORG-branch-NEWBRANCHNAME, and it holds none of the current
 # directory's changes.  `--copy` cannot be used with a slug, and neither can
-# an ORG that contains "-branch-".
+# an ORG that contains "-branch-" or "-fork-".
 #
 # The default mode and `--copy` copy build output, which can still refer to
 # the current directory's files.  These modes delete such files that a tool
@@ -188,8 +189,8 @@ require_git 31
 # A slug ORG:NEWBRANCHNAME makes the branch in the clone of ORG's fork, as if
 # this script had been run with `--clean NEWBRANCHNAME` in that clone, so the
 # result does not depend on which of the project's directories it is run in.
-# Git forbids ":" in a branch name, so an argument that contains one is a slug,
-# and the first ":" ends ORG.
+# Git forbids ":" in a branch name, so an argument that contains one is a
+# slug.
 #
 # ${SLUG_FORKDIR} is the clone of ORG's fork, or is empty if the argument is
 # not a slug.  ${THIS_CLONE} names, in messages, the clone that the branch is
@@ -198,23 +199,19 @@ SLUG_FORKDIR=''
 THIS_CLONE='this clone'
 case "$1" in
   *:*)
-    SLUG_ORG="${1%%:*}"
-    SLUG_BRANCH="${1#*:}"
+    parse_slug "$1"
+    SLUG_ORG="${slug_org}"
+    SLUG_BRANCH="${slug_branch}"
     case "${SLUG_ORG}" in
       '' | */* | .*)
         echo "${SCRIPT_NAME}: ERROR: not a slug ORG:NEWBRANCHNAME: $1" >&2
         usage
         exit 1
         ;;
-      # Every directory name is read as ending in -branch-BRANCH if it
-      # contains "-branch-", so a clone named PROJECT-fork-ORG would be taken
-      # for a branch directory of PROJECT-fork-PREFIX, where PREFIX is the
-      # part of ORG before "-branch-".
-      *-branch-*)
-        echo "${SCRIPT_NAME}: ERROR: an ORG that contains \"-branch-\" cannot be used in a slug, because the name of its fork's clone, PROJECT-fork-ORG, would be read as that of a branch directory: $1" >&2
-        exit 1
-        ;;
     esac
+    if ! check_slug_org "$1"; then
+      exit 1
+    fi
     # Reject a bad branch name, such as one that contains another ":" or
     # starts with "-", before the `git pull` in the fork's clone and the
     # query to its remote, rather than when the branch is created.  A name
@@ -244,12 +241,7 @@ case "$1" in
     # A bare repository, or a git directory outside its working tree, has no
     # main working tree that this naming convention could describe, so then
     # they are those of the current working tree.
-    SLUG_MAIN="$(git rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" \
-      || SLUG_MAIN=''
-    case "${SLUG_MAIN}" in
-      */.git) SLUG_MAIN="${SLUG_MAIN%/.git}" ;;
-      *) SLUG_MAIN="${SLUG_TOPLEVEL}" ;;
-    esac
+    SLUG_MAIN="$(main_working_tree)" || SLUG_MAIN="${SLUG_TOPLEVEL}"
     SLUG_PROJECT="$(basename -- "${SLUG_MAIN}")"
     SLUG_PROJECT="${SLUG_PROJECT%%-branch-*}"
     SLUG_PROJECT="${SLUG_PROJECT%%-fork-*}"
@@ -588,8 +580,15 @@ fi
 if [ -n "${WORKTREE_HOST}" ]; then
   note_worktree_host
 fi
+# The base is whatever the fork's clone has checked out, which is not
+# necessarily its main branch, so the message names it.
 if [ -n "${SLUG_FORKDIR}" ]; then
-  echo "${SCRIPT_NAME}: making branch ${BRANCHNAME} in ${SLUG_FORKDIR}, at its commit $(git rev-parse --short HEAD)" >&2
+  if SLUG_BASE="$(git symbolic-ref --quiet --short HEAD 2> /dev/null)"; then
+    SLUG_BASE="its branch ${SLUG_BASE}"
+  else
+    SLUG_BASE='its detached HEAD'
+  fi
+  echo "${SCRIPT_NAME}: making branch ${BRANCHNAME} in ${SLUG_FORKDIR}, at commit $(git rev-parse --short HEAD) of ${SLUG_BASE}" >&2
 fi
 
 # Usage: make_tmpdir

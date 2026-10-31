@@ -1151,7 +1151,7 @@ for slug_case in proj-fork-other/subdir:from-other proj:from-upstream \
     continue
   fi
   case "${out}" in
-    *"making branch ${slug_branch} in ${slugs}/proj-fork-mernst, at its commit $(git -C "${slugs}/proj-fork-mernst" rev-parse --short HEAD)"*) ;;
+    *"making branch ${slug_branch} in ${slugs}/proj-fork-mernst, at commit $(git -C "${slugs}/proj-fork-mernst" rev-parse --short HEAD) of its branch $(git -C "${slugs}/proj-fork-mernst" symbolic-ref --short HEAD)"*) ;;
     *) fail "mernst:${slug_branch} did not say where it made the branch: ${out}" ;;
   esac
   if [ ! -d "${slug_newdir}" ]; then
@@ -1258,6 +1258,41 @@ if [ -e "${slugs}/proj-fork-foo-branch-feature" ] \
     refs/heads/feature > /dev/null; then
   fail "a slug whose ORG contains -branch- made a branch"
 fi
+
+# An ORG that contains "-fork-" is refused even when its fork has a clone,
+# because the clone's name would be read as that of a different fork.
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-foo-fork-bar"
+if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" foo-fork-bar:feature 2>&1)"; then
+  fail "zero exit status for a slug whose ORG contains -fork-"
+fi
+case "${out}" in
+  *"ERROR: an ORG that contains \"-fork-\" cannot be used in a slug"*) ;;
+  *) fail "unexpected message for a slug whose ORG contains -fork-: ${out}" ;;
+esac
+if [ -e "${slugs}/proj-fork-foo-fork-bar-branch-feature" ] \
+  || git -C "${slugs}/proj-fork-foo-fork-bar" rev-parse --verify --quiet \
+    refs/heads/feature > /dev/null; then
+  fail "a slug whose ORG contains -fork- made a branch"
+fi
+
+# A slug branches from whatever the fork's clone has checked out, and the
+# message names it.
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-side"
+git -C "${slugs}/proj-fork-side" checkout -q -b feature-x
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-detached"
+git -C "${slugs}/proj-fork-detached" checkout -q --detach
+for slug_case in side:"its branch feature-x" detached:"its detached HEAD"; do
+  slug_org="${slug_case%%:*}"
+  slug_base="${slug_case#*:}"
+  if ! out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" "${slug_org}:feature-y" 2>&1)"; then
+    fail "nonzero exit status for ${slug_org}:feature-y: ${out}"
+    continue
+  fi
+  case "${out}" in
+    *"making branch feature-y in ${slugs}/proj-fork-${slug_org}, at commit $(git -C "${slugs}/proj-fork-${slug_org}" rev-parse --short HEAD) of ${slug_base}"*) ;;
+    *) fail "${slug_org}:feature-y did not name the base ${slug_base}: ${out}" ;;
+  esac
+done
 
 # `--copy` cannot be used with a slug, and a malformed slug is an error.
 for slug_args in "--copy mernst:copied" ":nobody" "mernst:" "a/b:feature" \

@@ -1019,6 +1019,69 @@ physical_path() {
   (CDPATH='' cd -- "$1" && pwd -P)
 }
 
+## Usage: parse_slug SLUG
+## Sets ${slug_org}, ${slug_branch}, and ${slug_branch_dir} from the slug
+## ORG:BRANCH or BRANCH.  Git forbids ":" in a branch name, so the first ":"
+## ends ORG.  ${slug_org} is empty if the slug has no ORG.  ${slug_branch_dir}
+## is BRANCH as it appears in a directory name, with each "/" replaced by "-".
+parse_slug() {
+  case "$1" in
+    *:*)
+      slug_org="${1%%:*}"
+      slug_branch="${1#*:}"
+      ;;
+    *)
+      slug_org=''
+      slug_branch="$1"
+      ;;
+  esac
+  # shellcheck disable=SC2034 # set for the caller
+  slug_branch_dir="$(printf '%s\n' "${slug_branch}" | sed -e "s:/:-:g")"
+}
+
+## Usage: check_slug_org SLUG
+## Returns 0 if the ORG of the slug ORG:BRANCH can name the clone of a fork,
+## PROJECT-fork-ORG.  Otherwise prints an error on standard error and
+## returns 1.  Sets the variables that `parse_slug` sets.
+##
+## Every directory name that contains "-branch-" is read as that of a branch
+## directory, PREFIX-branch-BRANCH, so a clone named PROJECT-fork-ORG, where
+## ORG contains "-branch-", would be taken for a branch directory.  A
+## directory name is read as PROJECT-fork-ORG with ORG starting after its last
+## "-fork-", so where ORG contains "-fork-", PROJECT-fork-ORG would be read as
+## the clone of a different fork.
+check_slug_org() {
+  parse_slug "$1"
+  case "${slug_org}" in
+    *-branch-*)
+      echo "${SCRIPT_NAME}: ERROR: an ORG that contains \"-branch-\" cannot be used in a slug, because the name of its fork's clone, PROJECT-fork-ORG, would be read as that of a branch directory: $1" >&2
+      return 1
+      ;;
+    *-fork-*)
+      echo "${SCRIPT_NAME}: ERROR: an ORG that contains \"-fork-\" cannot be used in a slug, because the name of its fork's clone, PROJECT-fork-ORG, would be read as that of a different fork: $1" >&2
+      return 1
+      ;;
+  esac
+}
+
+## Usage: main_working_tree [DIRECTORY]
+## Prints the main working tree of the repository that holds DIRECTORY (by
+## default, the current directory):  the working tree whose top level holds
+## the repository's `.git` directory.  Prints nothing and returns 1 if there
+## is none -- for a bare repository, a git directory outside its working tree
+## (as a submodule's is), or a DIRECTORY outside any repository.
+##
+## The variables are prefixed with an abbreviation of this function's name,
+## so that they cannot collide with a sourcing script's variables.
+main_working_tree() {
+  mwt_common="$(git -C "${1:-.}" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" \
+    || return 1
+  case "${mwt_common}" in
+    */.git) printf '%s\n' "${mwt_common%/.git}" ;;
+    *) return 1 ;;
+  esac
+}
+
 ## Usage: main_clone_for DIRECTORY
 ## DIRECTORY is the top level of a working tree.  Prints the main working tree
 ## in which a new worktree of DIRECTORY's repository should be registered, if
@@ -1047,15 +1110,9 @@ physical_path() {
 ## The variables are prefixed with an abbreviation of this function's name,
 ## so that they cannot collide with a sourcing script's variables.
 main_clone_for() {
-  mcf_common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" \
-    || return 0
-  # A bare repository, or a git directory outside its working tree, has no
-  # main working tree that this naming convention could describe.
-  case "${mcf_common}" in
-    */.git) ;;
-    *) return 0 ;;
-  esac
-  mcf_host="${mcf_common%/.git}"
+  # A repository without a main working tree has no name that this naming
+  # convention could describe.
+  mcf_host="$(main_working_tree "$1")" || return 0
   mcf_name="$(basename -- "${mcf_host}")"
   case "${mcf_name}" in
     *-branch-*) ;;
@@ -1094,10 +1151,10 @@ main_clone_for() {
 ## Says, on standard error, that the new worktree is registered in
 ## ${WORKTREE_HOST}, and names the branch directory that this frees:  the main
 ## working tree of the current repository, which is not the current working
-## tree if that is a linked worktree.
+## tree if that is a linked worktree.  ${WORKTREE_HOST} is set by
+## `main_clone_for`, which finds it only if that main working tree exists.
 note_worktree_host() {
-  nwh_main="$(git rev-parse --path-format=absolute --git-common-dir)"
-  nwh_main="${nwh_main%/.git}"
+  nwh_main="$(main_working_tree)" || return 0
   echo "${SCRIPT_NAME}: registering the new worktree in ${WORKTREE_HOST}, the main clone, rather than in ${nwh_main}, so that ${nwh_main} can be removed independently" >&2
 }
 
