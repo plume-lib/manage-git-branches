@@ -24,6 +24,10 @@
 #              is an independent clone that shares nothing with the current
 #              repository.
 #
+# In a clone of an upstream repository whose fork is in a sibling directory,
+# this command refuses, unless `--allow-upstream` is given, because a branch
+# for a pull request belongs in the fork.
+#
 # Every effect is local:  this command never contacts a remote except to
 # read from it, and in particular it does not push the new branch.
 # Therefore, the new branch has no upstream branch, which `git-push-to` and
