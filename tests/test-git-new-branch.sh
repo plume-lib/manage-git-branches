@@ -1110,8 +1110,9 @@ done
 
 # A slug ORG:BRANCH makes the branch in the clone of ORG's fork, at that
 # clone's commit and with none of the current directory's changes, whichever
-# of the project's directories it is run in.  The clones here have no remote,
-# so each `git pull` fails harmlessly.
+# of the project's directories it is run in.  proj-fork-mernst has no remote,
+# so the `git pull` there fails harmlessly and leaves its commit as it is.  The
+# other clones' remote "origin" is proj-fork-mernst.
 slugs="${tmpdir}/slugs"
 mkdir "${slugs}"
 slugs="$(cd "${slugs}" && pwd -P)"
@@ -1132,10 +1133,16 @@ if ! out="$(cd "${slugs}/proj-fork-other" && "${GIT_NEW_BRANCH}" other-branch 2>
   fail "nonzero exit status for other-branch in proj-fork-other: ${out}"
 fi
 mkdir "${slugs}/proj-fork-other/subdir"
+# A linked worktree that is not a sibling of its main working tree, as in
+# PROJECT/.claude/worktrees/NAME, takes the project's name from the main
+# working tree.
+mkdir "${slugs}/elsewhere"
+git -C "${slugs}/proj" worktree add -q --detach "${slugs}/elsewhere/agent-1"
 # Each case is SOURCE-DIRECTORY:NEW-BRANCH.  A "/" in the branch is "-" in its
 # directory name.
 for slug_case in proj-fork-other/subdir:from-other proj:from-upstream \
-  proj-fork-mernst:from-fork proj-fork-other-branch-other-branch:from/branch-dir; do
+  proj-fork-mernst:from-fork proj-fork-other-branch-other-branch:from/branch-dir \
+  elsewhere/agent-1:from-elsewhere; do
   slug_source="${slugs}/${slug_case%%:*}"
   slug_branch="${slug_case#*:}"
   slug_newdir="${slugs}/proj-fork-mernst-branch-$(printf '%s\n' "${slug_branch}" | sed -e 's:/:-:g')"
@@ -1144,7 +1151,7 @@ for slug_case in proj-fork-other/subdir:from-other proj:from-upstream \
     continue
   fi
   case "${out}" in
-    *"making branch ${slug_branch} in ${slugs}/proj-fork-mernst,"*) ;;
+    *"making branch ${slug_branch} in ${slugs}/proj-fork-mernst, at its commit $(git -C "${slugs}/proj-fork-mernst" rev-parse --short HEAD)"*) ;;
     *) fail "mernst:${slug_branch} did not say where it made the branch: ${out}" ;;
   esac
   if [ ! -d "${slug_newdir}" ]; then
@@ -1174,6 +1181,59 @@ for slug_source in proj-fork-other proj; do
   fi
 done
 
+# A branch that already exists in the fork's clone is an error that names that
+# clone, rather than "this clone", and that says nothing about making the
+# branch.
+if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" mernst:from-other 2>&1)"; then
+  fail "zero exit status for a slug whose branch exists in the fork's clone"
+fi
+case "${out}" in
+  *"making branch"*) fail "a refused slug said that it was making the branch: ${out}" ;;
+  *"branch from-other already exists in ${slugs}/proj-fork-mernst."*) ;;
+  *) fail "unexpected message for a slug whose branch exists in the fork's clone: ${out}" ;;
+esac
+
+# A slug given outside any working tree is an error.
+if out="$(cd "${slugs}" && "${GIT_NEW_BRANCH}" mernst:outside 2>&1)"; then
+  fail "zero exit status for a slug given outside a working tree"
+fi
+case "${out}" in
+  *"a slug must be given in a working tree"*) ;;
+  *) fail "unexpected message for a slug given outside a working tree: ${out}" ;;
+esac
+
+# A PROJECT-fork-ORG that is a plain directory inside another repository is
+# refused, rather than given the branch in that repository.
+make_repo "${slugs}/outer" || exit 1
+make_repo "${slugs}/outer/inproj" || exit 1
+mkdir "${slugs}/outer/inproj-fork-mernst"
+if out="$(cd "${slugs}/outer/inproj" && "${GIT_NEW_BRANCH}" mernst:nested 2>&1)"; then
+  fail "zero exit status for a PROJECT-fork-ORG that is not a working tree"
+fi
+case "${out}" in
+  *"not the top level of a working tree: ${slugs}/outer/inproj-fork-mernst"*) ;;
+  *) fail "unexpected message for a PROJECT-fork-ORG that is not a working tree: ${out}" ;;
+esac
+if git -C "${slugs}/outer" rev-parse --verify --quiet refs/heads/nested > /dev/null; then
+  fail "a slug made a branch in the repository that contains PROJECT-fork-ORG"
+fi
+
+# A slug whose fork's clone has submodules is refused, with a message that
+# says where `--copy` works, since `--copy` cannot be used with a slug.
+mkdir "${slugs}/sub"
+make_submodule_superproject "${slugs}/sub" || exit 1
+git -C "${slugs}/sub" clone -q super-branch-main super-fork-mernst
+if out="$(cd "${slugs}/sub/super-branch-main" && "${GIT_NEW_BRANCH}" mernst:subslug 2>&1)"; then
+  fail "zero exit status for a slug whose fork's clone has submodules"
+fi
+case "${out}" in
+  *"a slug makes a worktree, and the current commit of ${slugs}/sub/super-fork-mernst has submodules"*"--copy subslug\` works in ${slugs}/sub/super-fork-mernst"*) ;;
+  *) fail "unexpected message for a slug whose fork's clone has submodules: ${out}" ;;
+esac
+if [ -e "${slugs}/sub/super-fork-mernst-branch-subslug" ]; then
+  fail "a slug whose fork's clone has submodules created a directory"
+fi
+
 # A slug whose fork has no clone is an error that names the missing directory.
 if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" nosuchorg:feature 2>&1)"; then
   fail "zero exit status for a slug whose fork has no clone"
@@ -1184,12 +1244,14 @@ case "${out}" in
 esac
 
 # `--copy` cannot be used with a slug, and a malformed slug is an error.
-for slug_args in "--copy mernst:copied" ":nobody" "mernst:" "a/b:feature"; do
+for slug_args in "--copy mernst:copied" ":nobody" "mernst:" "a/b:feature" \
+  "mernst:a:b" "mernst:-x" "mernst:@{-1}"; do
   # shellcheck disable=SC2086 # The arguments are split on purpose.
   if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" ${slug_args} 2>&1)"; then
     fail "zero exit status for: git-new-branch ${slug_args}"
   fi
   case "${out}" in
+    *"git pull"*) fail "git-new-branch ${slug_args} pulled before refusing: ${out}" ;;
     *"ERROR"*) ;;
     *) fail "unexpected message for git-new-branch ${slug_args}: ${out}" ;;
   esac

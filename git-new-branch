@@ -25,13 +25,14 @@
 # The argument can instead be a slug ORG:NEWBRANCHNAME, such as
 # `mernst:feature`, which makes the branch in ORG's fork of the project.  It
 # acts as `git-new-branch --clean NEWBRANCHNAME` does when run in the clone of
-# ORG's fork, PROJECT-fork-ORG, a sibling of the current working tree's top
-# level, so the result is the same whichever of the project's directories it
-# is run in:  PROJECT, PROJECT-fork-OTHERORG, or a branch directory of either.
-# The new branch starts at the current commit of PROJECT-fork-ORG, not of the
-# current directory, its directory is PROJECT-fork-ORG-branch-NEWBRANCHNAME,
-# and it holds none of the current directory's changes.  `--copy` cannot be
-# used with a slug.
+# ORG's fork, PROJECT-fork-ORG, a sibling of the current repository's main
+# working tree, so the result is the same whichever of the project's
+# directories it is run in:  PROJECT, PROJECT-fork-OTHERORG, a branch
+# directory of either, or a worktree of any of those.  The new branch starts
+# at the commit of PROJECT-fork-ORG after the `git pull` there, not at the
+# current directory's commit.  Its directory is
+# PROJECT-fork-ORG-branch-NEWBRANCHNAME, and it holds none of the current
+# directory's changes.  `--copy` cannot be used with a slug.
 #
 # The default mode and `--copy` copy build output, which can still refer to
 # the current directory's files.  These modes delete such files that a tool
@@ -177,10 +178,23 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
+# This command needs nothing that git 2.31 added, but the worktrees that it
+# makes are safely removed only by `git-remove-branch-directory`, which needs
+# git 2.31.  Making a worktree that cannot be removed safely would be worse
+# than refusing to make it.
+require_git 31
+
 # A slug ORG:NEWBRANCHNAME makes the branch in the clone of ORG's fork, as if
 # this script had been run with `--clean NEWBRANCHNAME` in that clone, so the
 # result does not depend on which of the project's directories it is run in.
-# Git forbids ":" in a branch name, so an argument that contains one is a slug.
+# Git forbids ":" in a branch name, so an argument that contains one is a slug,
+# and the first ":" ends ORG.
+#
+# ${SLUG_FORKDIR} is the clone of ORG's fork, or is empty if the argument is
+# not a slug.  ${THIS_CLONE} names, in messages, the clone that the branch is
+# made in.
+SLUG_FORKDIR=''
+THIS_CLONE='this clone'
 case "$1" in
   *:*)
     SLUG_ORG="${1%%:*}"
@@ -192,8 +206,14 @@ case "$1" in
         exit 1
         ;;
     esac
-    if [ -z "${SLUG_BRANCH}" ]; then
-      echo "${SCRIPT_NAME}: ERROR: not a slug ORG:NEWBRANCHNAME: $1" >&2
+    # Reject a bad branch name, such as one that contains another ":" or
+    # starts with "-", before the `git pull` in the fork's clone and the
+    # query to its remote, rather than when the branch is created.  A name
+    # that `--branch` rewrites, such as "@{-1}", is a reference to a branch
+    # rather than a new name.
+    if [ -z "${SLUG_BRANCH}" ] \
+      || [ "$(git check-ref-format --branch "${SLUG_BRANCH}" 2> /dev/null)" != "${SLUG_BRANCH}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: not a valid branch name: ${SLUG_BRANCH}" >&2
       usage
       exit 1
     fi
@@ -208,12 +228,23 @@ case "$1" in
       echo "${SCRIPT_NAME}: ERROR: a slug must be given in a working tree of the project, such as PROJECT, PROJECT-fork-ORG, or one of their branch directories" >&2
       exit 1
     fi
-    # The directory names of the project are PROJECT, PROJECT-fork-ORG, and
-    # each of those followed by -branch-BRANCH.
-    SLUG_PROJECT="$(basename -- "${SLUG_TOPLEVEL}")"
+    # The project's directories are named PROJECT, PROJECT-fork-ORG, and each
+    # of those followed by -branch-BRANCH, side by side.  A linked worktree
+    # might lie elsewhere, as in PROJECT/.claude/worktrees/NAME, so the names
+    # are those of its main working tree, which holds the `.git` directory.
+    # A bare repository, or a git directory outside its working tree, has no
+    # main working tree that this naming convention could describe, so then
+    # they are those of the current working tree.
+    SLUG_MAIN="$(git rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" \
+      || SLUG_MAIN=''
+    case "${SLUG_MAIN}" in
+      */.git) SLUG_MAIN="${SLUG_MAIN%/.git}" ;;
+      *) SLUG_MAIN="${SLUG_TOPLEVEL}" ;;
+    esac
+    SLUG_PROJECT="$(basename -- "${SLUG_MAIN}")"
     SLUG_PROJECT="${SLUG_PROJECT%%-branch-*}"
     SLUG_PROJECT="${SLUG_PROJECT%%-fork-*}"
-    SLUG_FORKDIR="$(dirname -- "${SLUG_TOPLEVEL}")/${SLUG_PROJECT}-fork-${SLUG_ORG}"
+    SLUG_FORKDIR="$(dirname -- "${SLUG_MAIN}")/${SLUG_PROJECT}-fork-${SLUG_ORG}"
     if [ ! -d "${SLUG_FORKDIR}" ]; then
       echo "${SCRIPT_NAME}: ERROR: there is no clone of ${SLUG_ORG}'s fork of ${SLUG_PROJECT}:  directory does not exist: ${SLUG_FORKDIR}" >&2
       exit 1
@@ -221,7 +252,7 @@ case "$1" in
     # A directory that is not the top level of a working tree would make the
     # branch in whatever repository contains it.
     if ! SLUG_FORK_TOPLEVEL="$(git -C "${SLUG_FORKDIR}" rev-parse --show-toplevel 2> /dev/null)" \
-      || [ "${SLUG_FORK_TOPLEVEL}" != "$(cd -- "${SLUG_FORKDIR}" && pwd -P)" ]; then
+      || [ "${SLUG_FORK_TOPLEVEL}" != "$(physical_path "${SLUG_FORKDIR}")" ]; then
       echo "${SCRIPT_NAME}: ERROR: not the top level of a working tree: ${SLUG_FORKDIR}" >&2
       exit 1
     fi
@@ -229,16 +260,10 @@ case "$1" in
       echo "${SCRIPT_NAME}: ERROR: cannot cd to ${SLUG_FORKDIR}" >&2
       exit 1
     fi
-    echo "${SCRIPT_NAME}: making branch ${SLUG_BRANCH} in ${SLUG_FORKDIR}, from its current commit" >&2
+    THIS_CLONE="${SLUG_FORKDIR}"
     set -- "${SLUG_BRANCH}"
     ;;
 esac
-
-# This command needs nothing that git 2.31 added, but the worktrees that it
-# makes are safely removed only by `git-remove-branch-directory`, which needs
-# git 2.31.  Making a worktree that cannot be removed safely would be worse
-# than refusing to make it.
-require_git 31
 
 trap_branch_cleanup
 
@@ -283,8 +308,13 @@ choose_mode_for_submodules() {
   case "${MODE}" in
     clean)
       if has_gitlinks HEAD; then
-        echo "${SCRIPT_NAME}: ERROR: --clean makes a worktree, and the current commit has submodules, which a worktree cannot hold." >&2
-        echo "${SCRIPT_NAME}: --copy works here, but it copies this whole directory, including .git." >&2
+        if [ -n "${SLUG_FORKDIR}" ]; then
+          echo "${SCRIPT_NAME}: ERROR: a slug makes a worktree, and the current commit of ${SLUG_FORKDIR} has submodules, which a worktree cannot hold." >&2
+          echo "${SCRIPT_NAME}: \`${SCRIPT_NAME} --copy ${SLUG_BRANCH}\` works in ${SLUG_FORKDIR}, but it copies that whole directory, including .git and its uncommitted changes." >&2
+        else
+          echo "${SCRIPT_NAME}: ERROR: --clean makes a worktree, and the current commit has submodules, which a worktree cannot hold." >&2
+          echo "${SCRIPT_NAME}: --copy works here, but it copies this whole directory, including .git." >&2
+        fi
         exit 1
       fi
       ;;
@@ -384,7 +414,7 @@ fi
 # mode gives one behavior on every supported git:  `git worktree add -b` on an
 # unborn HEAD fails in versions of git before 2.42.
 if ! git rev-parse --verify --quiet HEAD > /dev/null; then
-  echo "${SCRIPT_NAME}: ERROR: this repository has no commit, so there is nothing to branch from.  Commit something first." >&2
+  echo "${SCRIPT_NAME}: ERROR: ${THIS_CLONE} has no commit, so there is nothing to branch from.  Commit something first." >&2
   exit 1
 fi
 
@@ -392,7 +422,7 @@ fi
 # the branch below, which fails on one even when no remote has a branch of
 # that name.
 if git rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
-  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists in this clone." >&2
+  echo "${SCRIPT_NAME}: ERROR: branch ${BRANCHNAME} already exists in ${THIS_CLONE}." >&2
   exit 1
 fi
 
@@ -486,7 +516,7 @@ if [ -n "${WORKTREE_HOST}" ]; then
   REMOTE="$(push_remote "${WORKTREE_HOST}" '')"
 else
   COLLISION_REPO='.'
-  COLLISION_CLONE='this clone'
+  COLLISION_CLONE="${THIS_CLONE}"
   BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
   REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
 fi
@@ -543,10 +573,14 @@ if [ -n "${REMOTE}" ] \
   exit 1
 fi
 
-# Say where the new worktree is registered only now that no test can refuse
-# the branch.
+# Say where the new worktree is registered, and where a slug makes the branch,
+# only now that no test can refuse the branch and the pull has settled the
+# commit that it starts at.
 if [ -n "${WORKTREE_HOST}" ]; then
   note_worktree_host
+fi
+if [ -n "${SLUG_FORKDIR}" ]; then
+  echo "${SCRIPT_NAME}: making branch ${BRANCHNAME} in ${SLUG_FORKDIR}, at its commit $(git rev-parse --short HEAD)" >&2
 fi
 
 # Usage: make_tmpdir
