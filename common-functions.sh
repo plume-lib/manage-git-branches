@@ -1035,6 +1035,10 @@ physical_path() {
 ## directories are made from, is a better home, if it is a main working tree
 ## of the same project:  if it and DIRECTORY's repository have a remote URL in
 ## common.
+## This package calls such a REPONAME the project's main clone.  It differs
+## from git's "main working tree":  every clone is a main working tree,
+## including a branch directory made with `--copy`, but a project has at most
+## one main clone.
 ##
 ## A sparse checkout and per-worktree configuration are exceptions.
 ## `git worktree add` gives the new worktree the sparse-checkout patterns and
