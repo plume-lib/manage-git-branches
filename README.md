@@ -46,9 +46,10 @@ The commands are:
   contents are the same as the current directory's, including uncommitted
   changes, untracked files, and build output; `--clean` and `--copy` make
   other kinds of directory.
-  `git-new-branch --help` prints a synopsis, which describes the modes.  The
-  comments in [`git-new-branch`](git-new-branch) give the details, such as
-  which copied build output this command deletes, and which it warns about.
+  `git-new-branch --help` (or `-h`) prints a synopsis, which describes the
+  modes.  The comments in [`git-new-branch`](git-new-branch) give the
+  details, such as which copied build output this command deletes, and which
+  it warns about.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
