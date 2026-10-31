@@ -31,9 +31,9 @@
 # directory's untracked files and those of its uncommitted changes that the
 # checkout does not conflict with.
 #
-# The warnings of `git-new-branch` about removing and moving a worktree apply
-# to the new directory too:  remove it with `git-remove-branch-directory`, and
-# move it with `git worktree move`.
+# Remove the new directory with `git-remove-branch-directory`, and move it
+# with `git worktree move`, never with file-system commands; the "Worktrees"
+# section of README.md says why.
 #
 # This command requires git 2.31 or later.
 

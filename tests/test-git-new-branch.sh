@@ -448,6 +448,26 @@ case "${out}" in
   *"unrecognized option"*) fail "-- did not end the options: ${out}" ;;
 esac
 check_nothing_left "${modes}" -dash "a branch name that begins with -"
+# `--help` and `-h` print the synopsis at the top of the script, to standard
+# output, and exit 0, even with a branch name; they create nothing.  The
+# synopsis ends before the details, with no blank line.
+for help_option in --help -h; do
+  if ! out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" "${help_option}" helped 2> /dev/null)"; then
+    fail "nonzero exit status for ${help_option}"
+  fi
+  case "${out}" in
+    "Creates a new branch of the current repository"*"git-new-branch [--clean | --copy] [--verbose] NEWBRANCHNAME"*"--verbose"*"Nor does this command build.") ;;
+    *) fail "unexpected output for ${help_option}: ${out}" ;;
+  esac
+  case "${out}" in
+    *"#"* | *"Details:"*) fail "the output of ${help_option} is not just the synopsis: ${out}" ;;
+  esac
+  # Command substitution drops trailing newlines, so ask for the last line.
+  if [ -z "$(cd "${modes}" && "${GIT_NEW_BRANCH}" "${help_option}" | tail -n 1)" ]; then
+    fail "the output of ${help_option} ends with a blank line"
+  fi
+  check_nothing_left "${modes}" helped "${help_option}"
+done
 
 # A source that holds every kind of local change:  a staged change, an
 # unstaged change, an uncommitted deletion of a tracked file, an untracked
@@ -1008,7 +1028,7 @@ printf '%s/src\n' "${deleted_top}" > "${deleted}/out/cache/entry"
 for mode in '' --copy; do
   branch="deleted${mode#--}"
   deleted_new="${stale_parent}/deleted-branch-${branch}"
-  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} --verbose "${branch}" 2>&1)"; then
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete: ${out}"
   fi
   case "${out}" in
@@ -1049,6 +1069,66 @@ for mode in '' --copy; do
   fi
 done
 
+# Without `--verbose`, the files are deleted silently, but the stale files
+# that are not deleted are still named.
+for mode in '' --copy; do
+  branch="deletedquiet${mode#--}"
+  deleted_new="${stale_parent}/deleted-branch-${branch}"
+  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+    fail "nonzero exit status for ${mode:-the default mode} without --verbose with build output to delete: ${out}"
+  fi
+  case "${out}" in
+    *"deleted generated files"*) fail "${mode:-the default mode} said that it deleted files without --verbose: ${out}" ;;
+  esac
+  case "${out}" in
+    *"  tools/build/deploy.conf
+"*) ;;
+    *) fail "${mode:-the default mode} did not name tools/build/deploy.conf without --verbose: ${out}" ;;
+  esac
+  if [ -e "${deleted_new}/build/classes/Main.class" ]; then
+    fail "${mode:-the default mode} did not delete build/classes/Main.class without --verbose"
+  fi
+done
+
+# A directory that CMake or autotools configured is named, even without
+# `--verbose`, if files are deleted from it, because it needs to be
+# reconfigured.  Its `CMakeCache.txt` contains the source's pathname, so it is
+# deleted too.
+printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "${deleted_top}" \
+  > "${deleted}/sub/build/CMakeCache.txt"
+if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" deletedcmake 2>&1)"; then
+  fail "nonzero exit status with a configured build directory: ${out}"
+fi
+case "${out}" in
+  *" from \`sub/build/\` in ${stale_parent}/deleted-branch-deletedcmake, which CMake or autotools configured.  Reconfigure it before building there."*) ;;
+  *) fail "did not say that sub/build/ needs to be reconfigured: ${out}" ;;
+esac
+case "${out}" in
+  *"\`build/\`"* | *"\`.gradle/\`"*) fail "named a directory that was not configured: ${out}" ;;
+esac
+if [ -e "${stale_parent}/deleted-branch-deletedcmake/sub/build/CMakeCache.txt" ]; then
+  fail "did not delete sub/build/CMakeCache.txt"
+fi
+rm -f "${deleted}/sub/build/CMakeCache.txt"
+
+# Each configured directory below a `build/` directory is named, not the
+# `build/` directory itself.
+mkdir -p "${deleted}/sub/build/release" "${deleted}/sub/build/debug"
+printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "${deleted_top}" \
+  > "${deleted}/sub/build/release/CMakeCache.txt"
+printf "ac_pwd='%s'\n" "${deleted_top}" > "${deleted}/sub/build/debug/config.status"
+if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" deletednested 2>&1)"; then
+  fail "nonzero exit status with nested configured build directories: ${out}"
+fi
+case "${out}" in
+  *" from \`sub/build/debug/\` and \`sub/build/release/\` in "*"Reconfigure them before building there."*) ;;
+  *) fail "did not say that sub/build/debug/ and sub/build/release/ need to be reconfigured: ${out}" ;;
+esac
+case "${out}" in
+  *"\`sub/build/\`"*) fail "named sub/build/ rather than the configured directories in it: ${out}" ;;
+esac
+rm -rf "${deleted}/sub/build/release" "${deleted}/sub/build/debug"
+
 # Files in a submodule are examined too, and the submodule's `build/` and
 # `.gradle/` directories are treated like the superproject's.  A submodule at
 # `build/` is not a `build/` directory, so a file in it that the submodule
@@ -1076,7 +1156,7 @@ printf '%s/src\n' "${subdeleted}" > "${subdeleted}/sub/notes.txt"
 for mode in '' --copy; do
   branch="subdeleted${mode#--}"
   subdeleted_new="${subdeleted_parent}/super-branch-${branch}"
-  if ! out="$(cd "${subdeleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+  if ! out="$(cd "${subdeleted}" && "${GIT_NEW_BRANCH}" ${mode} --verbose "${branch}" 2>&1)"; then
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete in a submodule: ${out}"
   fi
   case "${out}" in
