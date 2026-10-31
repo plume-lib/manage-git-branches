@@ -52,7 +52,10 @@ The commands are:
   the current directory's files by their absolute pathnames.  This command
   deletes such files that a tool presumably regenerates, and warns about the
   others; the comments in [`git-new-branch`](git-new-branch) say which files
-  those are.  With `--verbose`, it also says how many files it deleted.
+  those are.  It says which of the directories that it deleted files from
+  CMake or autotools configured, because such a directory needs to be
+  reconfigured.  With `--verbose`, it also says how many files it deleted and
+  from which directories.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:

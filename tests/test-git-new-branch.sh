@@ -1049,15 +1049,45 @@ for mode in '' --copy; do
   fi
 done
 
-# Without `--verbose`, the files are deleted silently.
-if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" deletedquiet 2>&1)"; then
-  fail "nonzero exit status without --verbose with build output to delete: ${out}"
+# Without `--verbose`, the files are deleted silently, but the stale files
+# that are not deleted are still named.
+for mode in '' --copy; do
+  branch="deletedquiet${mode#--}"
+  deleted_new="${stale_parent}/deleted-branch-${branch}"
+  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+    fail "nonzero exit status for ${mode:-the default mode} without --verbose with build output to delete: ${out}"
+  fi
+  case "${out}" in
+    *"deleted generated files"*) fail "${mode:-the default mode} said that it deleted files without --verbose: ${out}" ;;
+  esac
+  case "${out}" in
+    *"  tools/build/deploy.conf
+"*) ;;
+    *) fail "${mode:-the default mode} did not name tools/build/deploy.conf without --verbose: ${out}" ;;
+  esac
+  if [ -e "${deleted_new}/build/classes/Main.class" ]; then
+    fail "${mode:-the default mode} did not delete build/classes/Main.class without --verbose"
+  fi
+done
+
+# A directory that CMake or autotools configured is named, even without
+# `--verbose`, if files are deleted from it, because it needs to be
+# reconfigured.  Its `CMakeCache.txt` contains the source's pathname, so it is
+# deleted too.
+printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "${deleted_top}" \
+  > "${deleted}/sub/build/CMakeCache.txt"
+if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" deletedcmake 2>&1)"; then
+  fail "nonzero exit status with a configured build directory: ${out}"
 fi
 case "${out}" in
-  *"deleted generated files"*) fail "said that it deleted files without --verbose: ${out}" ;;
+  *" from \`sub/build/\` in ${stale_parent}/deleted-branch-deletedcmake, which CMake or autotools configured.  Reconfigure it before building there."*) ;;
+  *) fail "did not say that sub/build/ needs to be reconfigured: ${out}" ;;
 esac
-if [ -e "${stale_parent}/deleted-branch-deletedquiet/build/classes/Main.class" ]; then
-  fail "did not delete build/classes/Main.class without --verbose"
+case "${out}" in
+  *"\`build/\`"* | *"\`.gradle/\`"*) fail "named a directory that was not configured: ${out}" ;;
+esac
+if [ -e "${stale_parent}/deleted-branch-deletedcmake/sub/build/CMakeCache.txt" ]; then
+  fail "did not delete sub/build/CMakeCache.txt"
 fi
 
 # Files in a submodule are examined too, and the submodule's `build/` and
