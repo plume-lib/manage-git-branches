@@ -31,7 +31,9 @@
 # Every effect is local:  this command never contacts a remote except to
 # read from it, and in particular it does not push the new branch.
 # Therefore, the new branch has no upstream branch, which `git-push-to` and
-# `git-pull-from` require.  Nor does this command build.
+# `git-pull-from` require.  The first `git push` of the new branch sets its
+# upstream branch if `push.autoSetupRemote` is true; otherwise,
+# `git push -u REMOTE NEWBRANCHNAME` does.  Nor does this command build.
 #
 # Details:
 #
