@@ -1,0 +1,21 @@
+#!/bin/sh
+
+# Prints the lines of each FILE, a CI log, without the formatting that a CI
+# service or a terminal adds.  From each line, it removes a leading byte order
+# mark, a leading timestamp (as in a GitHub Actions or Azure Pipelines log),
+# terminal escape sequences (such as color codes), and carriage returns.
+#
+# Usage:
+#   normalize-log [FILE]...
+#
+# With no FILE, this command reads standard input.
+
+# The start of a terminal escape sequence:  ESC [
+csi="$(printf '\033')\\["
+cr="$(printf '\r')"
+bom="$(printf '\357\273\277')"
+
+exec sed -e "s/^${bom}//" \
+  -e 's/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z //' \
+  -e "s/${csi}[0-9;]*[A-Za-z]//g" \
+  -e "s/${cr}//g" -- "$@"

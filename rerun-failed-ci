@@ -12,10 +12,11 @@
 # request, as for `gh pr checks`; this command examines every failed check of
 # that pull request.  A URL of a CircleCI job or workflow, or of a GitHub
 # Actions job or workflow run, names the failed jobs to examine:  the given
-# job, or every failed job of the given workflow or run.
+# job, or every failed job of the given workflow or run.  A URL of an Azure
+# Pipelines build or of one of its jobs names every failed job of the build.
 #
-# The supported CI services are CircleCI and GitHub Actions.  A failed check
-# from any other service is reported and skipped.
+# The supported CI services are CircleCI, GitHub Actions, and Azure Pipelines.
+# A failed check from any other service is reported and skipped.
 #
 # A job's failure is transient if the log of its failed steps contains a
 # message about a network problem (such as a timeout, a refused or reset
@@ -26,16 +27,19 @@
 # looks for such messages, in order to retry a command, prints them in its
 # trace.  A CircleCI job whose status is `infrastructure_fail` is transient.
 #
-# For each workflow (CircleCI) or workflow run (GitHub Actions) that has a
-# job that failed transiently, this command reruns:
+# For each workflow (CircleCI), workflow run (GitHub Actions), or build (Azure
+# Pipelines) that has a job that failed transiently, this command reruns:
 #  * every failed job, if every failed job failed transiently, or
 #  * otherwise, only the jobs that failed transiently.  GitHub Actions does not
 #    permit a job to be rerun while its workflow run is in progress, so
 #    this command reruns only one of them; run this command again after the
-#    workflow run completes.
+#    workflow run completes.  Azure Pipelines reruns only all the failed jobs
+#    of a stage together, so this command reruns a stage only if every failed
+#    job of the stage failed transiently, and it reruns only one stage at a
+#    time.
 # Rerunning a job also reruns the jobs that depend on it.
-# This command does nothing to a workflow or workflow run that is still in
-# progress, that has been rerun since the failure, or that has already been
+# This command does nothing to a workflow, workflow run, or build that is still
+# in progress, that has been rerun since the failure, or that has already been
 # run N times in total, where N is given by `--max-attempts` (default 3).
 # The limit keeps this command, when it is run repeatedly, from rerunning a
 # job forever whose failure resembles a transient one but is not.
@@ -51,9 +55,48 @@
 # This command requires `gh` (authenticated to GitHub), `jq`, and `curl`.
 # Rerunning a CircleCI job requires a CircleCI API token:  the value of
 # environment variable `CIRCLECI_CLI_TOKEN` or, if it is unset or empty, the
-# `token` in `~/.circleci/cli.yml`, which `circleci setup` writes.  Reading the
-# logs of a public project's jobs does not require a token.
+# `token` in `~/.circleci/cli.yml`, which `circleci setup` writes.  Rerunning an
+# Azure Pipelines build requires an Azure DevOps personal access token with the
+# "Build (Read & execute)" scope, in environment variable `AZURE_DEVOPS_EXT_PAT`.
+# Reading the logs of a public project's jobs does not require a token.
 
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
 # Prints an error message and exits with a failure status.
@@ -61,6 +104,12 @@ die() {
   echo "${SCRIPT_NAME}: $*" >&2
   exit 1
 }
+
+# Without this check, a missing `normalize-log` would make every log look
+# like a non-transient failure.
+if [ ! -x "${SCRIPT_DIR}/normalize-log" ]; then
+  die "cannot run ${SCRIPT_DIR}/normalize-log"
+fi
 
 # Extended regular expressions, one per line, that match a line of a log that
 # shows a transient failure.  They are matched without regard to case.
@@ -92,22 +141,16 @@ remote end hung up unexpectedly
 gnutls_handshake\(\) failed
 SSL_ERROR_SYSCALL
 runner has received a shutdown signal
-lost communication with the server'
+lost communication with the server
+We stopped hearing from agent'
 
 # Usage: transient_reason FILE
 # If FILE, a log of the failed steps of a job, shows a transient failure,
 # prints the first line that shows it and succeeds.  Otherwise, fails.
-# Each line of FILE may start with a timestamp, as in a GitHub Actions log.
+# Shell trace lines in FILE are ignored.
 transient_reason() {
-  # The start of a terminal escape sequence:  ESC [
-  csi="$(printf '\033')\\["
-  cr="$(printf '\r')"
-  # Removes a byte order mark, a timestamp, terminal escape sequences, and
-  # carriage returns, then removes shell trace lines.
-  reason="$(sed -e "s/^$(printf '\357\273\277')//" \
-    -e 's/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z //' \
-    -e "s/${csi}[0-9;]*[A-Za-z]//g" \
-    -e "s/${cr}//g" -- "$1" \
+  log_file="$1"
+  reason="$("${SCRIPT_DIR}/normalize-log" "${log_file}" \
     | grep -v '^++* ' \
     | grep -E -i -e "${transient_patterns}" \
     | head -n 1)"
@@ -174,7 +217,7 @@ if [ "${max_attempts}" -lt 1 ]; then
   die "--max-attempts requires a positive number: ${max_attempts}"
 fi
 
-for command in gh jq curl; do
+for command in gh jq curl base64; do
   if ! command -v "${command}" > /dev/null 2>&1; then
     die "requires the ${command} command"
   fi
@@ -571,6 +614,203 @@ gha_url() {
 }
 
 ###########################################################################
+### Azure Pipelines
+###
+
+# The file of HTTP headers for Azure DevOps API requests.  Putting the token in
+# a file keeps it out of the process list.  It is empty if there is no token.
+azure_headers="${tmpdir}/azure-headers"
+(
+  umask 077
+  if [ -n "${AZURE_DEVOPS_EXT_PAT-}" ]; then
+    printf 'Authorization: Basic %s\n' \
+      "$(printf ':%s' "${AZURE_DEVOPS_EXT_PAT}" | base64 | tr -d '\n')"
+  fi
+) > "${azure_headers}" || exit 1
+
+# Usage: azure_api URL [JSON-BODY]
+# Prints the result of an Azure DevOps API request:  a GET request, or a PATCH
+# request if JSON-BODY is given.  If a GET request with the token fails, this
+# makes it again without the token, because Azure DevOps refuses a token for
+# one organization even when reading a public project of another.
+azure_api() {
+  if [ "$#" -ge 2 ]; then
+    curl -sS -f -X PATCH -H @"${azure_headers}" \
+      -H 'Content-Type: application/json' -d "$2" "$1"
+  elif ! curl -sS -f -H @"${azure_headers}" "$1" 2> "${tmpdir}/azure-error"; then
+    if [ ! -s "${azure_headers}" ] || ! curl -sS -f "$1" 2> /dev/null; then
+      cat -- "${tmpdir}/azure-error" >&2
+      return 1
+    fi
+  fi
+}
+
+# Usage: azure_job_log BUILD-API-URL JOB-ID
+# Prints the logs of the failed tasks of an Azure Pipelines job, followed by
+# the errors that the job and those tasks report, which describe failures,
+# such as a lost agent, that leave no log.  The file ${tmpdir}/timeline holds
+# the timeline of the job's build.
+azure_job_log() {
+  log_ids="$(jq -r --arg job "$2" '.records[]
+      | select(.parentId == $job and .result == "failed")
+      | .log.id // empty' -- "${tmpdir}/timeline")" || return 1
+  for log_id in ${log_ids}; do
+    azure_api "$1/logs/${log_id}?api-version=7.1" || return 1
+  done
+  jq -r --arg job "$2" '.records[]
+      | select(.id == $job or (.parentId == $job and .result == "failed"))
+      | .issues[]?.message' -- "${tmpdir}/timeline"
+}
+
+# Usage: azure_build PROJECT-URL BUILD-ID
+# Reruns the failed jobs of the Azure Pipelines build that failed transiently.
+# PROJECT-URL is of the form https://dev.azure.com/ORGANIZATION/PROJECT.
+azure_build() {
+  build_url="$1/_build/results?buildId=$2"
+  api="$1/_apis/build/builds/$2"
+  if ! build_json="$(azure_api "${api}?api-version=7.1")" \
+    || ! build_name="$(printf '%s' "${build_json}" | jq -r '.definition.name')"; then
+    warn "cannot read Azure Pipelines build ${build_url}"
+    return
+  fi
+  build_status="$(printf '%s' "${build_json}" | jq -r '.status')"
+  build_result="$(printf '%s' "${build_json}" | jq -r '.result')"
+  echo "Azure Pipelines build ${build_name}: ${build_url}"
+
+  if [ "${build_status}" != "completed" ]; then
+    echo "  Its status is ${build_status}.  Run ${SCRIPT_NAME} again after it finishes."
+    return
+  fi
+  if [ "${build_result}" != "failed" ]; then
+    echo "  Its result is ${build_result}."
+    return
+  fi
+
+  # The failed jobs of the latest attempt, each with the identifier and the
+  # number of attempts of its stage.  A record's parent is a stage, a phase,
+  # or a job.
+  if ! azure_api "${api}/timeline?api-version=7.1" > "${tmpdir}/timeline" \
+    || ! failed_jobs="$(jq -r '
+        (reduce .records[] as $r ({}; .[$r.id] = $r)) as $by_id
+        | def stage:
+            if .type == "Stage" then .
+            elif .parentId == null or $by_id[.parentId] == null then null
+            else $by_id[.parentId] | stage end;
+          .records[]
+          | select(.type == "Job" and .result == "failed")
+          | (stage // {}) as $stage
+          | [.id, ($stage.identifier // ""), ($stage.attempt // .attempt), .name]
+          | @tsv' -- "${tmpdir}/timeline")"; then
+    warn "cannot read the timeline of Azure Pipelines build ${build_url}"
+    return
+  fi
+
+  # The stages of the jobs that failed transiently, each with its number of
+  # attempts, one per line.
+  transient_stages=
+  # The stages of the jobs that did not fail transiently, one per line.
+  other_stages=
+  max_attempt=0
+  all_transient=1
+  IFS="${newline}"
+  for line in ${failed_jobs}; do
+    unset IFS
+    job_id="$(field 1 "${line}")"
+    stage="$(field 2 "${line}")"
+    attempt="$(field 3 "${line}")"
+    job_name="$(field 4- "${line}")"
+    if ! azure_job_log "${api}" "${job_id}" > "${tmpdir}/log"; then
+      warn "cannot read the log of Azure Pipelines job ${job_name} (${job_id})"
+    elif ! reason="$(transient_reason "${tmpdir}/log")"; then
+      echo "  ${job_name}: not transient"
+    else
+      echo "  ${job_name}: transient: ${reason}"
+      transient_stages="${transient_stages}${stage}${tab}${attempt}${newline}"
+      if [ "${attempt}" -gt "${max_attempt}" ]; then
+        max_attempt="${attempt}"
+      fi
+      continue
+    fi
+    all_transient=
+    other_stages="${other_stages}${stage}${newline}"
+  done
+  unset IFS
+
+  if [ -z "${transient_stages}" ]; then
+    return
+  fi
+  if [ -n "${all_transient}" ]; then
+    if [ "${max_attempt}" -ge "${max_attempts}" ]; then
+      echo "  Not rerunning:  the build has already been run ${max_attempt} times."
+      return
+    fi
+    set -- "${api}?retry=true&api-version=7.1" '{}'
+    what="the failed jobs"
+  else
+    # The stage to rerun, and whether there are others.
+    rerun_stage=
+    more_stages=
+    IFS="${newline}"
+    for line in $(printf '%s' "${transient_stages}" | sort -u -t "${tab}" -k 1,1); do
+      unset IFS
+      stage="$(field 1 "${line}")"
+      attempt="$(field 2 "${line}")"
+      case "${newline}${other_stages}" in
+        *"${newline}${stage}${newline}"*)
+          echo "  Not rerunning stage ${stage:-of the build}:  it has a failed job that did not fail transiently, and Azure Pipelines reruns all the failed jobs of a stage."
+          ;;
+        *)
+          if [ "${attempt}" -ge "${max_attempts}" ]; then
+            echo "  Not rerunning stage ${stage}:  it has already been run ${attempt} times."
+          elif [ -z "${rerun_stage}" ]; then
+            rerun_stage="${stage}"
+          else
+            more_stages=1
+          fi
+          ;;
+      esac
+    done
+    unset IFS
+    if [ -z "${rerun_stage}" ]; then
+      return
+    fi
+    set -- "${api}/stages/${rerun_stage}?api-version=7.1" \
+      '{"state": "retry", "forceRetryAllJobs": false}'
+    what="the failed jobs of stage ${rerun_stage}"
+    if [ -n "${more_stages}" ]; then
+      what="${what} (rerun the other stages after the build finishes)"
+    fi
+  fi
+  if [ -n "${dry_run}" ]; then
+    echo "  Would rerun ${what}."
+    return
+  fi
+  if [ ! -s "${azure_headers}" ]; then
+    warn "cannot rerun Azure Pipelines build ${build_url}:  AZURE_DEVOPS_EXT_PAT is not set"
+    return
+  fi
+  if ! azure_api "$@" > /dev/null; then
+    warn "cannot rerun Azure Pipelines build ${build_url}; does AZURE_DEVOPS_EXT_PAT have the Build (Read & execute) scope?"
+    return
+  fi
+  echo "  Reran ${what}."
+}
+
+# Usage: azure_url URL
+# Handles an Azure Pipelines URL, which names a build or one of its jobs.
+azure_url() {
+  project_url="${1%%/_build*}"
+  build_id="$(printf '%s\n' "$1" | sed -n -e 's/.*[?&]buildId=\([0-9]*\).*/\1/p')"
+  if [ -z "${build_id}" ] || [ "${project_url}" = "$1" ]; then
+    warn "cannot find an Azure Pipelines build in $1"
+    return
+  fi
+  if first_time "azure ${project_url} ${build_id}"; then
+    azure_build "${project_url}" "${build_id}"
+  fi
+}
+
+###########################################################################
 ### Main routine
 ###
 
@@ -600,6 +840,9 @@ pull_request() {
         # Examine the whole run, so that its failed jobs are rerun together.
         gha_url "${link%%/job/*}"
         ;;
+      https://dev.azure.com/*/_build/* | https://*.visualstudio.com/*/_build/*)
+        azure_url "${link}"
+        ;;
       *) echo "${name}: skipping a check from an unsupported CI service: ${link}" ;;
     esac
   done
@@ -613,6 +856,7 @@ for arg in "$@"; do
   case "${arg}" in
     https://app.circleci.com/* | https://circleci.com/*) circleci_url "${arg}" ;;
     https://github.com/*/actions/runs/*) gha_url "${arg}" ;;
+    https://dev.azure.com/*/_build/* | https://*.visualstudio.com/*/_build/*) azure_url "${arg}" ;;
     *) pull_request "${arg}" ;;
   esac
 done

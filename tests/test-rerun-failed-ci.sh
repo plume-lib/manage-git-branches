@@ -59,6 +59,8 @@ check_classify 0 "Caused by: java.net.SocketTimeoutException: Read timed out" \
   "$(printf '\033[31mCaused by: java.net.SocketTimeoutException: Read timed out\033[0m\r')"
 check_classify 0 "The runner has received a shutdown signal." \
   "The runner has received a shutdown signal."
+check_classify 0 "We stopped hearing from agent Azure Pipelines 3." \
+  "We stopped hearing from agent Azure Pipelines 3."
 check_classify 1 "" \
   "Execution failed for task ':spotlessJavaCheck'.
 BUILD FAILED in 28s"
@@ -92,8 +94,9 @@ bin="${work}/bin"
 api="${work}/api"
 mkdir -p "${bin}" || exit 1
 
-# The fake `curl` serves https://circleci.com/PATH and https://logs/PATH.  It
-# records a POST request's body.
+# The fake `curl` serves https://circleci.com/PATH and https://HOST/PATH,
+# ignoring a query string.  It records the URL and body of a POST or PATCH
+# request.
 cat > "${bin}/curl" << 'EOF'
 #!/bin/sh
 body=
@@ -114,6 +117,7 @@ if [ -n "${body}" ]; then
   printf '{"workflow_id": "new-workflow"}\n'
   exit 0
 fi
+path="${path%%\?*}"
 if [ ! -f "${FAKE_API}/${path}/_" ]; then
   echo "curl: (22) The requested URL returned error: 404" >&2
   exit 22
@@ -174,7 +178,7 @@ run_rerun() {
   shift
   : > "${work}/reruns"
   if ! PATH="${bin}:${PATH}" FAKE_API="${api}" CIRCLECI_CLI_TOKEN=token \
-    "${RERUN}" "$@" > "${work}/output" 2>&1; then
+    AZURE_DEVOPS_EXT_PAT=token "${RERUN}" "$@" > "${work}/output" 2>&1; then
     fail "rerun-failed-ci $* failed:"
     cat "${work}/output"
   fi
@@ -325,11 +329,116 @@ gha_run 100 completed failure 3
 run_rerun '' https://github.com/org/repo/actions/runs/100
 
 ###########################################################################
+### Azure Pipelines
+###
+
+azure=dev.azure.com/org/proj/_apis/build/builds
+
+# Usage: azure_build ID STATUS RESULT
+azure_build() {
+  put "${azure}/$1" "{\"definition\": {\"name\": \"pipeline\"}, \"status\": \"$2\",
+    \"result\": \"$3\"}"
+}
+
+# Usage: azure_timeline BUILD-ID [STAGE ATTEMPT JOB-NAME RESULT LOG-TEXT]...
+# Makes the fake server serve the timeline of a build.  Each stage has one
+# job, which has one task, whose log is LOG-TEXT.  A job's ID is its name.
+azure_timeline() {
+  build_id="$1"
+  shift
+  records='{"id": "other", "parentId": null, "type": "Checkpoint", "result": "failed"}'
+  n=0
+  while [ "$#" -gt 0 ]; do
+    n=$((n + 1))
+    records="${records},
+      {\"id\": \"stage-$1\", \"parentId\": null, \"type\": \"Stage\",
+       \"identifier\": \"$1\", \"attempt\": $2, \"result\": \"$4\"},
+      {\"id\": \"phase-$3\", \"parentId\": \"stage-$1\", \"type\": \"Phase\",
+       \"identifier\": \"$1.$3\", \"attempt\": $2, \"result\": \"$4\"},
+      {\"id\": \"$3\", \"parentId\": \"phase-$3\", \"type\": \"Job\",
+       \"name\": \"$3\", \"attempt\": $2, \"result\": \"$4\", \"log\": {\"id\": 99}},
+      {\"id\": \"task-$3\", \"parentId\": \"$3\", \"type\": \"Task\",
+       \"result\": \"$4\", \"log\": {\"id\": ${n}},
+       \"issues\": [{\"message\": \"Bash exited with code '1'.\"}]}"
+    put "${azure}/${build_id}/logs/${n}" \
+      "$(printf '\357\273\2772026-10-31T13:39:57.3265176Z %s\r' "$5")"
+    shift 5
+  done
+  put "${azure}/${build_id}/timeline" "{\"records\": [${records}]}"
+}
+
+# Every failed job failed transiently:  rerun the failed jobs of the build.
+azure_build 500 completed failed
+azure_timeline 500 \
+  s1 1 a failed "${gradle_429}" \
+  s1 1 b succeeded "" \
+  s2 1 c failed "We stopped hearing from agent Azure Pipelines 3."
+run_rerun "${azure}/500?retry=true&api-version=7.1 {}" \
+  'https://dev.azure.com/org/proj/_build/results?buildId=500&view=logs&jobId=a'
+run_rerun '' --dry-run 'https://dev.azure.com/org/proj/_build/results?buildId=500'
+if ! grep -q 'Would rerun the failed jobs' "${work}/output"; then
+  fail "--dry-run did not report the Azure Pipelines rerun"
+  cat "${work}/output"
+fi
+
+# Only some failed jobs failed transiently:  rerun a stage whose failed jobs
+# all failed transiently.
+azure_build 600 completed failed
+azure_timeline 600 \
+  s1 1 a failed "Connection reset" \
+  s1 1 b failed "Test failed" \
+  s2 1 c failed "Read timed out" \
+  s3 1 d failed "Could not resolve host: github.com" \
+  s4 1 e failed "Test failed"
+run_rerun "${azure}/600/stages/s2?api-version=7.1 {\"state\": \"retry\", \"forceRetryAllJobs\": false}" \
+  'https://dev.azure.com/org/proj/_build/results?buildId=600'
+for message in 'Not rerunning stage s1' 'rerun the other stages'; do
+  if ! grep -q "${message}" "${work}/output"; then
+    fail "the output does not contain '${message}'"
+    cat "${work}/output"
+  fi
+done
+# A stage that has reached the attempt limit is not rerun.
+azure_timeline 600 \
+  s2 3 c failed "Read timed out" \
+  s3 1 d failed "Could not resolve host: github.com" \
+  s4 1 e failed "Test failed"
+run_rerun "${azure}/600/stages/s3?api-version=7.1 {\"state\": \"retry\", \"forceRetryAllJobs\": false}" \
+  'https://dev.azure.com/org/proj/_build/results?buildId=600'
+# A URL whose host is ORGANIZATION.visualstudio.com.
+mkdir -p "${api}/myorg.visualstudio.com" || exit 1
+cp -R "${api}/dev.azure.com/org/proj" "${api}/myorg.visualstudio.com/" || exit 1
+run_rerun "myorg.visualstudio.com/proj/_apis/build/builds/600/stages/s3?api-version=7.1 {\"state\": \"retry\", \"forceRetryAllJobs\": false}" \
+  'https://myorg.visualstudio.com/proj/_build/results?buildId=600'
+
+# A build that is in progress, or that has reached the attempt limit, is not
+# rerun.
+azure_build 500 inProgress null
+run_rerun '' 'https://dev.azure.com/org/proj/_build/results?buildId=500'
+azure_build 500 completed failed
+azure_timeline 500 s1 3 a failed "Connection reset"
+run_rerun '' 'https://dev.azure.com/org/proj/_build/results?buildId=500'
+
+# Rerunning requires a token.
+azure_timeline 500 s1 1 a failed "Connection reset"
+: > "${work}/reruns"
+if PATH="${bin}:${PATH}" FAKE_API="${api}" AZURE_DEVOPS_EXT_PAT='' \
+  "${RERUN}" 'https://dev.azure.com/org/proj/_build/results?buildId=500' \
+  > "${work}/output" 2>&1; then
+  fail "rerun-failed-ci succeeded without an Azure DevOps token"
+fi
+if [ -s "${work}/reruns" ] || ! grep -q 'AZURE_DEVOPS_EXT_PAT is not set' "${work}/output"; then
+  fail "rerun-failed-ci did not report the missing Azure DevOps token"
+  cat "${work}/output"
+fi
+
+###########################################################################
 ### Pull requests
 ###
 
 # A pull request's failed checks:  two jobs of one GitHub Actions run, which
-# is examined once, a CircleCI workflow, and an unsupported service.
+# is examined once, a CircleCI workflow, two jobs of one Azure Pipelines
+# build, which is examined once, and an unsupported service.
 gha_run 100 completed failure 1
 put repos/org/repo/actions/runs/100/jobs '{"jobs": [
   {"id": 101, "name": "a", "conclusion": "failure"},
@@ -339,9 +448,12 @@ put pr-5 '[
   {"name": "d", "bucket": "fail", "link": "https://github.com/org/repo/actions/runs/100/job/104"},
   {"name": "e", "bucket": "pass", "link": "https://github.com/org/repo/actions/runs/200/job/201"},
   {"name": "build", "bucket": "fail", "link": "https://app.circleci.com/workflow/wf1?utm_source=github-checks-link"},
+  {"name": "p1", "bucket": "fail", "link": "https://dev.azure.com/org/proj/_build/results?buildId=500&view=logs&jobId=a"},
+  {"name": "p2", "bucket": "fail", "link": "https://dev.azure.com/org/proj/_build/results?buildId=500&view=logs&jobId=b"},
   {"name": "other", "bucket": "fail", "link": "https://example.com/build/1"}]'
-run_rerun 'gh run rerun --repo org/repo --failed 100
-api/v2/workflow/wf1/rerun {"from_failed": true}' 5
+run_rerun "gh run rerun --repo org/repo --failed 100
+api/v2/workflow/wf1/rerun {\"from_failed\": true}
+${azure}/500?retry=true&api-version=7.1 {}" 5
 if ! grep -q 'other: skipping a check from an unsupported CI service' "${work}/output"; then
   fail "the output does not mention the unsupported check"
   cat "${work}/output"

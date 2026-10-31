@@ -140,11 +140,17 @@ The commands are:
   Reruns each failed CI job of a GitHub pull request (by default, the one for
   the current branch) whose log shows a transient failure, such as a network
   error or a rate limit, rather than a problem with the code.  A URL names a
-  CircleCI or GitHub Actions job or workflow to examine instead.  It does not
+  CircleCI, GitHub Actions, or Azure Pipelines job or workflow to examine
+  instead.  It does not
   rerun a workflow that is still running, that has been rerun since, or that
   has already run N times (by default, 3).
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
   shows a transient failure.  This command needs `gh`, `jq`, and `curl`.
+* [`normalize-log`](normalize-log) `[FILE]...`:
+  Prints each CI log (by default, standard input) without the formatting that
+  a CI service or a terminal adds:  a leading byte order mark, a leading
+  timestamp (as in a GitHub Actions or Azure Pipelines log), terminal escape
+  sequences, and carriage returns.  `rerun-failed-ci` uses it.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
@@ -177,6 +183,9 @@ takes effect when it is set to a non-empty value.
 * `CIRCLECI_CLI_TOKEN`: `rerun-failed-ci` uses this CircleCI API token, which
   rerunning a CircleCI job requires.  If it is not set, `rerun-failed-ci` uses
   the `token` in `~/.circleci/cli.yml`, which `circleci setup` writes.
+* `AZURE_DEVOPS_EXT_PAT`: `rerun-failed-ci` uses this Azure DevOps personal
+  access token, which rerunning an Azure Pipelines build requires.  The token
+  needs the "Build (Read & execute)" scope.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
   `git-orphaned-branches`, `git-new-branch`, `git-checkout-branch`, and
   `git-push-to` use these standard Git variables to select the SSH command
