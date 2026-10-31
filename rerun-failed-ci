@@ -326,10 +326,10 @@ circleci_job_log() {
   done
 }
 
-# Usage: circleci_workflow WORKFLOW-ID [JOB-NUMBER]
+# Usage: circleci_rerun_failed WORKFLOW-ID [JOB-NUMBER]
 # Reruns the failed jobs of the CircleCI workflow, or only the given job,
 # that failed transiently.
-circleci_workflow() {
+circleci_rerun_failed() {
   wf_id="$1"
   only_job="${2-}"
   if ! wf_json="$(circleci_api "/api/v2/workflow/${wf_id}")"; then
@@ -435,9 +435,10 @@ circleci_workflow() {
   echo "  Reran ${what}: https://app.circleci.com/pipelines/${slug}/${pipeline_number}/workflows/${new_id}"
 }
 
-# Usage: circleci_url URL
-# Handles a CircleCI URL, which names a workflow or a job.
-circleci_url() {
+# Usage: circleci_rerun_failed_url URL
+# Reruns the transiently failed jobs that a CircleCI URL names:  the jobs of a
+# workflow, or one job.
+circleci_rerun_failed_url() {
   url="${1%%#*}"
   wf_id=
   job_number=
@@ -473,9 +474,9 @@ circleci_url() {
     return
   fi
   if [ -n "${job_number}" ]; then
-    circleci_workflow "${wf_id}" "${job_number}"
+    circleci_rerun_failed "${wf_id}" "${job_number}"
   elif first_time "circleci ${wf_id}"; then
-    circleci_workflow "${wf_id}"
+    circleci_rerun_failed "${wf_id}"
   fi
 }
 
@@ -495,10 +496,10 @@ gha_job_log() {
   gh api "repos/$1/check-runs/$2/annotations" --jq '.[].message' || return 1
 }
 
-# Usage: gha_run REPO RUN-ID [JOB-ID]
+# Usage: gha_rerun_failed REPO RUN-ID [JOB-ID]
 # Reruns the failed jobs of the GitHub Actions workflow run, or only the given
 # job, that failed transiently.
-gha_run() {
+gha_rerun_failed() {
   repo="$1"
   run_id="$2"
   only_job="${3-}"
@@ -594,9 +595,10 @@ gha_run() {
   echo "  Reran ${what}."
 }
 
-# Usage: gha_url URL
-# Handles a GitHub Actions URL, which names a workflow run or a job.
-gha_url() {
+# Usage: gha_rerun_failed_url URL
+# Reruns the transiently failed jobs that a GitHub Actions URL names:  the jobs
+# of a workflow run, or one job.
+gha_rerun_failed_url() {
   path="${1#https://github.com/}"
   path="${path%%[?#]*}"
   repo="$(printf '%s\n' "${path}" | cut -d / -f 1-2)"
@@ -607,9 +609,9 @@ gha_url() {
     return
   fi
   if [ -n "${job_id}" ]; then
-    gha_run "${repo}" "${run_id}" "${job_id}"
+    gha_rerun_failed "${repo}" "${run_id}" "${job_id}"
   elif first_time "gha ${repo} ${run_id}"; then
-    gha_run "${repo}" "${run_id}"
+    gha_rerun_failed "${repo}" "${run_id}"
   fi
 }
 
@@ -662,10 +664,10 @@ azure_job_log() {
       | .issues[]?.message' -- "${tmpdir}/timeline"
 }
 
-# Usage: azure_build PROJECT-URL BUILD-ID
+# Usage: azure_rerun_failed PROJECT-URL BUILD-ID
 # Reruns the failed jobs of the Azure Pipelines build that failed transiently.
 # PROJECT-URL is of the form https://dev.azure.com/ORGANIZATION/PROJECT.
-azure_build() {
+azure_rerun_failed() {
   build_url="$1/_build/results?buildId=$2"
   api="$1/_apis/build/builds/$2"
   if ! build_json="$(azure_api "${api}?api-version=7.1")" \
@@ -796,9 +798,10 @@ azure_build() {
   echo "  Reran ${what}."
 }
 
-# Usage: azure_url URL
-# Handles an Azure Pipelines URL, which names a build or one of its jobs.
-azure_url() {
+# Usage: azure_rerun_failed_url URL
+# Reruns the transiently failed jobs of the Azure Pipelines build that a URL
+# names; the URL can name the build or one of its jobs.
+azure_rerun_failed_url() {
   project_url="${1%%/_build*}"
   build_id="$(printf '%s\n' "$1" | sed -n -e 's/.*[?&]buildId=\([0-9]*\).*/\1/p')"
   if [ -z "${build_id}" ] || [ "${project_url}" = "$1" ]; then
@@ -806,7 +809,7 @@ azure_url() {
     return
   fi
   if first_time "azure ${project_url} ${build_id}"; then
-    azure_build "${project_url}" "${build_id}"
+    azure_rerun_failed "${project_url}" "${build_id}"
   fi
 }
 
@@ -814,9 +817,9 @@ azure_url() {
 ### Main routine
 ###
 
-# Usage: pull_request [PR-OR-BRANCH]
-# Handles every failed check of a pull request.
-pull_request() {
+# Usage: pr_rerun_failed [PR-OR-BRANCH]
+# Reruns the transiently failed checks of a pull request.
+pr_rerun_failed() {
   if ! checks="$(gh pr checks "$@" --json name,bucket,link)" \
     || ! links="$(printf '%s' "${checks}" \
       | jq -r '.[] | select(.bucket == "fail") | [.link, .name] | @tsv')"; then
@@ -834,14 +837,14 @@ pull_request() {
     name="$(field 2- "${line}")"
     case "${link}" in
       https://app.circleci.com/* | https://circleci.com/*)
-        circleci_url "${link}"
+        circleci_rerun_failed_url "${link}"
         ;;
       https://github.com/*/actions/runs/*)
         # Examine the whole run, so that its failed jobs are rerun together.
-        gha_url "${link%%/job/*}"
+        gha_rerun_failed_url "${link%%/job/*}"
         ;;
       https://dev.azure.com/*/_build/* | https://*.visualstudio.com/*/_build/*)
-        azure_url "${link}"
+        azure_rerun_failed_url "${link}"
         ;;
       *) echo "${name}: skipping a check from an unsupported CI service: ${link}" ;;
     esac
@@ -850,14 +853,14 @@ pull_request() {
 }
 
 if [ "$#" -eq 0 ]; then
-  pull_request
+  pr_rerun_failed
 fi
 for arg in "$@"; do
   case "${arg}" in
-    https://app.circleci.com/* | https://circleci.com/*) circleci_url "${arg}" ;;
-    https://github.com/*/actions/runs/*) gha_url "${arg}" ;;
-    https://dev.azure.com/*/_build/* | https://*.visualstudio.com/*/_build/*) azure_url "${arg}" ;;
-    *) pull_request "${arg}" ;;
+    https://app.circleci.com/* | https://circleci.com/*) circleci_rerun_failed_url "${arg}" ;;
+    https://github.com/*/actions/runs/*) gha_rerun_failed_url "${arg}" ;;
+    https://dev.azure.com/*/_build/* | https://*.visualstudio.com/*/_build/*) azure_rerun_failed_url "${arg}" ;;
+    *) pr_rerun_failed "${arg}" ;;
   esac
 done
 
