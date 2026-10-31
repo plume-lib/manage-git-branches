@@ -5,6 +5,7 @@
 #
 # Usage:
 #   git-new-branch [--clean | --copy] NEWBRANCHNAME
+#   git-new-branch [--clean] ORG:NEWBRANCHNAME
 #
 # The new branch starts at the current commit.  There are three modes:
 #
@@ -20,6 +21,17 @@
 #  * With `--copy`, the new directory is a copy of the whole current
 #    directory, `.git` included, so it is an independent clone that shares
 #    nothing with the current repository.
+#
+# The argument can instead be a slug ORG:NEWBRANCHNAME, such as
+# `mernst:feature`, which makes the branch in ORG's fork of the project.  It
+# acts as `git-new-branch --clean NEWBRANCHNAME` does when run in the clone of
+# ORG's fork, PROJECT-fork-ORG, a sibling of the current working tree's top
+# level, so the result is the same whichever of the project's directories it
+# is run in:  PROJECT, PROJECT-fork-OTHERORG, or a branch directory of either.
+# The new branch starts at the current commit of PROJECT-fork-ORG, not of the
+# current directory, its directory is PROJECT-fork-ORG-branch-NEWBRANCHNAME,
+# and it holds none of the current directory's changes.  `--copy` cannot be
+# used with a slug.
 #
 # The default mode and `--copy` copy build output, which can still refer to
 # the current directory's files.  These modes delete such files that a tool
@@ -127,6 +139,7 @@ unset_git_location_variables
 
 usage() {
   echo "Usage: ${SCRIPT_NAME} [--clean | --copy] NEWBRANCHNAME" >&2
+  echo "   or: ${SCRIPT_NAME} [--clean] ORG:NEWBRANCHNAME" >&2
 }
 
 # The mode:  "worktree" (the default), "clean", or "copy".  Selected on once,
@@ -163,6 +176,63 @@ if [ "$#" -ne 1 ]; then
   usage
   exit 1
 fi
+
+# A slug ORG:NEWBRANCHNAME makes the branch in the clone of ORG's fork, as if
+# this script had been run with `--clean NEWBRANCHNAME` in that clone, so the
+# result does not depend on which of the project's directories it is run in.
+# Git forbids ":" in a branch name, so an argument that contains one is a slug.
+case "$1" in
+  *:*)
+    SLUG_ORG="${1%%:*}"
+    SLUG_BRANCH="${1#*:}"
+    case "${SLUG_ORG}" in
+      '' | */* | .*)
+        echo "${SCRIPT_NAME}: ERROR: not a slug ORG:NEWBRANCHNAME: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+    if [ -z "${SLUG_BRANCH}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: not a slug ORG:NEWBRANCHNAME: $1" >&2
+      usage
+      exit 1
+    fi
+    if [ "${MODE}" = 'copy' ]; then
+      echo "${SCRIPT_NAME}: ERROR: --copy cannot be used with a slug, which always makes a clean worktree" >&2
+      usage
+      exit 1
+    fi
+    MODE='clean'
+    if ! SLUG_TOPLEVEL="$(git rev-parse --show-toplevel 2> /dev/null)" \
+      || [ -z "${SLUG_TOPLEVEL}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: a slug must be given in a working tree of the project, such as PROJECT, PROJECT-fork-ORG, or one of their branch directories" >&2
+      exit 1
+    fi
+    # The directory names of the project are PROJECT, PROJECT-fork-ORG, and
+    # each of those followed by -branch-BRANCH.
+    SLUG_PROJECT="$(basename -- "${SLUG_TOPLEVEL}")"
+    SLUG_PROJECT="${SLUG_PROJECT%%-branch-*}"
+    SLUG_PROJECT="${SLUG_PROJECT%%-fork-*}"
+    SLUG_FORKDIR="$(dirname -- "${SLUG_TOPLEVEL}")/${SLUG_PROJECT}-fork-${SLUG_ORG}"
+    if [ ! -d "${SLUG_FORKDIR}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: there is no clone of ${SLUG_ORG}'s fork of ${SLUG_PROJECT}:  directory does not exist: ${SLUG_FORKDIR}" >&2
+      exit 1
+    fi
+    # A directory that is not the top level of a working tree would make the
+    # branch in whatever repository contains it.
+    if ! SLUG_FORK_TOPLEVEL="$(git -C "${SLUG_FORKDIR}" rev-parse --show-toplevel 2> /dev/null)" \
+      || [ "${SLUG_FORK_TOPLEVEL}" != "$(cd -- "${SLUG_FORKDIR}" && pwd -P)" ]; then
+      echo "${SCRIPT_NAME}: ERROR: not the top level of a working tree: ${SLUG_FORKDIR}" >&2
+      exit 1
+    fi
+    if ! cd -- "${SLUG_FORKDIR}"; then
+      echo "${SCRIPT_NAME}: ERROR: cannot cd to ${SLUG_FORKDIR}" >&2
+      exit 1
+    fi
+    echo "${SCRIPT_NAME}: making branch ${SLUG_BRANCH} in ${SLUG_FORKDIR}, from its current commit" >&2
+    set -- "${SLUG_BRANCH}"
+    ;;
+esac
 
 # This command needs nothing that git 2.31 added, but the worktrees that it
 # makes are safely removed only by `git-remove-branch-directory`, which needs

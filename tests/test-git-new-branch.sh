@@ -1108,6 +1108,96 @@ for mode in '' --copy; do
   done
 done
 
+# A slug ORG:BRANCH makes the branch in the clone of ORG's fork, at that
+# clone's commit and with none of the current directory's changes, whichever
+# of the project's directories it is run in.  The clones here have no remote,
+# so each `git pull` fails harmlessly.
+slugs="${tmpdir}/slugs"
+mkdir "${slugs}"
+slugs="$(cd "${slugs}" && pwd -P)"
+make_repo "${slugs}/proj-fork-mernst" || exit 1
+mernst_commit="$(git -C "${slugs}/proj-fork-mernst" rev-parse HEAD)"
+echo "uncommitted in mernst" > "${slugs}/proj-fork-mernst/file.txt"
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-other"
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj"
+for slug_source in proj-fork-other proj; do
+  echo "a change in ${slug_source}" > "${slugs}/${slug_source}/file.txt"
+  git -C "${slugs}/${slug_source}" commit -q -a -m "A commit in ${slug_source}"
+  echo "uncommitted in ${slug_source}" > "${slugs}/${slug_source}/file.txt"
+  echo "untracked" > "${slugs}/${slug_source}/untracked.txt"
+done
+# The branch directory gets the uncommitted and untracked files of
+# proj-fork-other.
+if ! out="$(cd "${slugs}/proj-fork-other" && "${GIT_NEW_BRANCH}" other-branch 2>&1)"; then
+  fail "nonzero exit status for other-branch in proj-fork-other: ${out}"
+fi
+mkdir "${slugs}/proj-fork-other/subdir"
+# Each case is SOURCE-DIRECTORY:NEW-BRANCH.  A "/" in the branch is "-" in its
+# directory name.
+for slug_case in proj-fork-other/subdir:from-other proj:from-upstream \
+  proj-fork-mernst:from-fork proj-fork-other-branch-other-branch:from/branch-dir; do
+  slug_source="${slugs}/${slug_case%%:*}"
+  slug_branch="${slug_case#*:}"
+  slug_newdir="${slugs}/proj-fork-mernst-branch-$(printf '%s\n' "${slug_branch}" | sed -e 's:/:-:g')"
+  if ! out="$(cd "${slug_source}" && "${GIT_NEW_BRANCH}" "mernst:${slug_branch}" 2>&1)"; then
+    fail "nonzero exit status for mernst:${slug_branch} in ${slug_source}: ${out}"
+    continue
+  fi
+  case "${out}" in
+    *"making branch ${slug_branch} in ${slugs}/proj-fork-mernst,"*) ;;
+    *) fail "mernst:${slug_branch} did not say where it made the branch: ${out}" ;;
+  esac
+  if [ ! -d "${slug_newdir}" ]; then
+    fail "mernst:${slug_branch} did not create ${slug_newdir}: ${out}"
+    continue
+  fi
+  if [ "$(git -C "${slug_newdir}" symbolic-ref --short HEAD)" != "${slug_branch}" ]; then
+    fail "mernst:${slug_branch} did not check out ${slug_branch} in ${slug_newdir}"
+  fi
+  if [ "$(git -C "${slug_newdir}" rev-parse HEAD)" != "${mernst_commit}" ]; then
+    fail "mernst:${slug_branch} did not start at the commit of proj-fork-mernst"
+  fi
+  if ! git -C "${slugs}/proj-fork-mernst" rev-parse --verify --quiet \
+    "refs/heads/${slug_branch}" > /dev/null; then
+    fail "mernst:${slug_branch} did not make the branch in proj-fork-mernst"
+  fi
+  if [ -n "$(git -C "${slug_newdir}" status --porcelain --ignored)" ]; then
+    fail "mernst:${slug_branch} is not a clean checkout: $(git -C "${slug_newdir}" status --porcelain --ignored)"
+  fi
+done
+for slug_source in proj-fork-other proj; do
+  if git -C "${slugs}/${slug_source}" rev-parse --verify --quiet \
+    refs/heads/from-other > /dev/null \
+    || git -C "${slugs}/${slug_source}" rev-parse --verify --quiet \
+      refs/heads/from-upstream > /dev/null; then
+    fail "a slug made a branch in ${slug_source}"
+  fi
+done
+
+# A slug whose fork has no clone is an error that names the missing directory.
+if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" nosuchorg:feature 2>&1)"; then
+  fail "zero exit status for a slug whose fork has no clone"
+fi
+case "${out}" in
+  *"directory does not exist: ${slugs}/proj-fork-nosuchorg"*) ;;
+  *) fail "unexpected message for a slug whose fork has no clone: ${out}" ;;
+esac
+
+# `--copy` cannot be used with a slug, and a malformed slug is an error.
+for slug_args in "--copy mernst:copied" ":nobody" "mernst:" "a/b:feature"; do
+  # shellcheck disable=SC2086 # The arguments are split on purpose.
+  if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" ${slug_args} 2>&1)"; then
+    fail "zero exit status for: git-new-branch ${slug_args}"
+  fi
+  case "${out}" in
+    *"ERROR"*) ;;
+    *) fail "unexpected message for git-new-branch ${slug_args}: ${out}" ;;
+  esac
+done
+if [ -e "${slugs}/proj-fork-mernst-branch-copied" ]; then
+  fail "--copy with a slug created a directory"
+fi
+
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then
   fail "zero exit status when given no argument"
