@@ -164,13 +164,12 @@ The commands are:
   been rerun since, nor a job that has already run N times (by default, 3).
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
   shows a transient failure.  This command needs Python 3 and `gh`.
-* [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:
-  Cancels the unfinished GitHub Actions, Azure Pipelines, and CircleCI builds
-  of each blocked pull request (one that depends on another open pull
-  request), and each build that a more recent build of the same branch makes
-  redundant.  Run it in the directory that holds the documents that
-  `pr-status.py` generates; it uses `pr-status.py` to find the blocked pull
-  requests.  This command needs Python 3.11 or later and `gh`.
+* [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:  Cancels certain
+  CI builds: for blocked pull requests (one that depends on another open
+  pull request), and ones that are redundant because of a more recent build
+  of the same branch.  Run it in a directory that holds the working copy
+  directories.  Works for Azure Pipelines, CircleCI, and GitHub Actions.
+  This command needs Python 3.11 or later and `gh`.
 * [`normalize-log`](normalize-log) `[FILE]...`:
   Prints each CI log (by default, standard input) without the formatting that
   a CI service or a terminal adds:  a leading byte order mark, a leading
