@@ -8,9 +8,9 @@
 # Usage:
 #   git-pull-upstream [--nocompile] [--llm | --no-llm] [--claude | --codex]
 #
-# By default, this script asks an AI agent to resolve merge conflicts and to
-# fix a failed build, as `git-push-to` does; the "--llm", "--no-llm",
-# "--claude", and "--codex" options are as for `git-push-to`.
+# By default, this script asks an AI agent to resolve merge conflicts, as
+# `git-push-to` does; the "--llm", "--no-llm", "--claude", and "--codex"
+# options are as for `git-push-to`.
 #
 # The upstream repository is the remote named `upstream` if there is one, as
 # in a fork, then `origin`, then the clone's only remote if it has exactly
@@ -169,7 +169,8 @@ fi
 # earlier run of this command made but did not push, as when its build
 # failed, and would copy that merge's commits onto the current branch.
 # `--no-edit` keeps the merge from stopping at an editor.
-if ! pull_resolving "${llm_agent}" "$(pwd)" -q --no-rebase --no-edit; then
+if ! git pull -q --no-rebase --no-edit; then
+  echo "${SCRIPT_NAME}: problem pulling in $(pwd)" >&2
   exit 1
 fi
 

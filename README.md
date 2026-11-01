@@ -93,11 +93,10 @@ The commands are:
   has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
   directories form one more chain per PROJECT.
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
-  When a merge or a pull has conflicts that `git rerere` does not resolve, it
+  When a merge has conflicts that `git rerere` does not resolve, it
   asks Claude (or, with `--codex`, Codex) to edit the conflicted hunks.  It
   checks that nothing outside the conflict regions changed and that no
-  conflict marker remains, commits the merge, and continues.  If the build
-  fails, it asks the agent to fix it, up to 3 times, and commits the fix.
+  conflict marker remains, commits the merge, and continues.
   `--no-llm` turns this off; `--llm`, `--claude`, and `--codex` turn it on.
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]
@@ -112,8 +111,8 @@ The commands are:
   `[--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
-  succeeds.  It asks an AI agent to resolve conflicts and to fix a failed
-  build, as `git-push-to` does, and it accepts the same `--llm`, `--no-llm`,
+  succeeds.  It asks an AI agent to resolve conflicts, as `git-push-to` does,
+  and it accepts the same `--llm`, `--no-llm`,
   `--claude`, and `--codex` options.
   OTHER-REPO-DIR and the current directory must both be the top level of a
   working tree and must each have an upstream branch.
@@ -126,17 +125,9 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of `upstream`.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
-  It asks an AI agent to resolve conflicts and to fix a failed build, as
-  `git-push-to` does, and it accepts the same `--llm`, `--no-llm`, `--claude`,
+  It asks an AI agent to resolve conflicts, as `git-push-to` does, and it
+  accepts the same `--llm`, `--no-llm`, `--claude`,
   and `--codex` options.
-* [`resolve-conflicts`](resolve-conflicts)
-  `[--nocompile] [--claude | --codex] [-C DIR]`:
-  Runs `pr-status`, which regenerates `pr-dependencies.md`, then runs each
-  `git-push-to` command in its section "Dependency chains with conflicts",
-  with `--claude` (or `--codex`) so that an AI agent resolves the conflicts
-  and fixes failed builds.  Repeats until no chain has conflicts, for up to 3
-  rounds; stops after a round in which a chain fails.  It runs only the
-  commands that `pr-status` writes, and refuses any other.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but Eclipse `.project`

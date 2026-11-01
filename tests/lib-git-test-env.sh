@@ -65,7 +65,7 @@ sanitize_git_env() {
   : > "${GIT_CONFIG_GLOBAL}" || return 1
 
   # By default, the commands under test run an AI agent, `claude` or `codex`,
-  # when a merge has conflicts or a build fails.  A test must never run a real
+  # when a merge has conflicts.  A test must never run a real
   # agent, which would be slow and costly and would make the result depend on
   # the agent.  These stand-ins fail.  A test that wants an agent puts its own
   # stand-in earlier on the PATH.
