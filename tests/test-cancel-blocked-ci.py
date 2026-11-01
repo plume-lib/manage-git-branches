@@ -93,7 +93,7 @@ class CancelBlockedCiTest(unittest.TestCase):
             ),
             contextlib.redirect_stderr(stderr),
         ):
-            result = cancel_blocked_ci.redundant_builds("repo", "org/repo", {})
+            result = cancel_blocked_ci.redundant_builds("repo", "org/repo", {}, [])
         self.assertEqual(result, ["workflow"])
         self.assertIn("repo: failed to find redundant Azure Pipelines builds", stderr.getvalue())
 
@@ -129,6 +129,35 @@ class CancelBlockedCiTest(unittest.TestCase):
         self.assertEqual(
             [(identifier, subject, reason) for identifier, subject, _, reason in result],
             [(("github", 0), "repo main", ", made redundant by run 1")],
+        )
+
+    def test_redundant_azure_builds(self) -> None:
+        """A build that waits for a check of a stage makes no older build redundant."""
+
+        def build(n: int) -> dict[str, Any]:
+            return {
+                "id": n,
+                "status": "inProgress",
+                "reason": "individualCI",
+                "sourceBranch": "refs/heads/main",
+                "definition": {"id": 1, "name": "ci"},
+                "_links": {
+                    "web": {"href": f"https://dev.azure.com/org/p/_build/results?buildId={n}"}
+                },
+            }
+
+        def azure_get(url: str) -> Any:
+            if "/timeline" not in url:
+                return {"value": [build(n) for n in (1, 2, 3)]}
+            # Build 3 waits for an approval.
+            state = "inProgress" if "/builds/3/" in url else "completed"
+            return {"records": [{"type": "Checkpoint.Approval", "state": state}]}
+
+        with mock.patch.object(ci_build, "azure_get", azure_get):
+            result = cancel_blocked_ci.redundant_azure_builds("repo", "org/repo", "org", "p")
+        self.assertEqual(
+            [(identifier, reason) for identifier, _, _, reason in result],
+            [(("azure", "org", "1"), ", made redundant by build 2")],
         )
 
     def test_blocked_pr_runs(self) -> None:

@@ -20,14 +20,15 @@ same event, is on the same branch and is running or queued to run -- for example
 when several pushes to the main branch each started a build.  A manual or
 scheduled build is never redundant, because it can differ from a more recent one in
 its inputs or its schedule.  Nor is a build redundant because of a more recent one
-that waits for an approval or for a concurrency group, because the more recent one
-might never run.  The script cancels redundant builds in every repository that the
+that waits for an approval or for a concurrency group (for Azure Pipelines, for a
+check of a stage, such as an approval or an exclusive lock), because the more
+recent one might never run.  The script cancels redundant builds in every repository that the
 config describes.
 
 The CI systems are GitHub Actions, Azure Pipelines, and CircleCI.  For Azure
 Pipelines and CircleCI, only the builds of each blocked PR's head commit are
 cancelled.  The Azure Pipelines projects of a repository are those that built
-the head commit of its default branch or of one of its 5 most recently created
+the head commit of its default branch or of any of its 5 most recently created
 open PRs.  The CircleCI projects of a repository are those that built the head
 commit of its default branch, and only their pipelines from the past day can be
 redundant.
@@ -39,6 +40,7 @@ This script uses the `pr-status` script, which it finds in its own directory or,
 """
 
 import argparse
+import collections
 import concurrent.futures
 import datetime as dt
 import functools
@@ -49,6 +51,7 @@ import operator
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import types
 import urllib.error
@@ -121,13 +124,15 @@ def blocked_prs(cfg):
 
     Returns:
         For each repository, a tuple of its label, its GitHub name, its default branch,
-        and a list of the reference and gh JSON of each of its blocked PRs.
+        a list of the head commits of its 5 most recently created open PRs, and a list
+        of the reference and gh JSON of each of its blocked PRs.
     """
     return [
         (
             m.repo.label,
             m.repo.gh,
             m.repo.default_branch,
+            [m.repo.prs[n]["headRefOid"] for n in sorted(m.repo.prs)[-5:]],
             [(m.repo.ref(n), m.repo.prs[n]) for n in m.blocked()],
         )
         for m in pr_status.load_models(cfg, pairwise=False)
@@ -198,6 +203,8 @@ def superseded(builds, key, order, can_supersede):
         groups.setdefault(key(b), []).append(b)
     result = []
     for group in groups.values():
+        if len(group) < 2:  # Avoid calling can_supersede, which can be costly.
+            continue
         group.sort(key=order, reverse=True)
         latest = next((i for i, b in enumerate(group) if can_supersede(b)), len(group))
         result.extend((b, group[latest]) for b in group[latest + 1 :])
@@ -231,7 +238,7 @@ def redundant_runs(label, gh, runs):
     for (owner, branch), branch_runs in runs.items():
         if not owner:  # Runs of different deleted forks are indistinguishable.
             continue
-        name = branch if owner == gh.split("/")[0] else f"{owner}:{branch}"
+        name = branch if owner.lower() == gh.split("/")[0].lower() else f"{owner}:{branch}"
         for r, latest in superseded(
             [r for r in branch_runs if r["event"] in GITHUB_REDUNDANT_EVENTS],
             operator.itemgetter("workflow_id", "event"),
@@ -249,31 +256,45 @@ def redundant_runs(label, gh, runs):
     return result
 
 
-def azure_projects(gh):
+def azure_projects(gh, pr_shas):
     """Find the Azure Pipelines projects that build the GitHub repository gh.
+
+    Args:
+        gh: the repository's GitHub name.
+        pr_shas: the head commits of some of gh's open PRs.
 
     Returns:
         A set of the organization and project of each Azure Pipelines project that
-        built the head commit of gh's default branch or of one of the 5 most recently
-        created open PRs, or the empty set if the Azure Pipelines app has no check suite
-        for the head commit of the default branch.
+        built the head commit of gh's default branch or of one of pr_shas, or the empty
+        set if the Azure Pipelines app has no check suite for the head commit of the
+        default branch.
     """
     suites = ci_build.gh_api(f"repos/{gh}/commits/HEAD/check-suites?per_page=100")
     if not any(s["app"]["slug"] == "azure-pipelines" for s in suites["check_suites"]):
         return set()
-    shas = ["HEAD"] + [
-        pr["headRefOid"]
-        for pr in json.loads(
-            ci_build.run(["gh", "pr", "list", "-R", gh, "--limit", "5", "--json", "headRefOid"])
-        )
-    ]
-    for sha in shas:
-        projects = {
-            parsed[:2] for _, _, url in checks(gh, sha) if (parsed := ci_build.parse_azure_url(url))
-        }
-        if projects:
-            return projects
-    return set()
+    return {
+        parsed[:2]
+        for sha_checks in concurrently(lambda sha: checks(gh, sha), ["HEAD", *pr_shas])
+        for _, _, url in sha_checks
+        if (parsed := ci_build.parse_azure_url(url))
+    }
+
+
+def azure_build_waits(org, project, build):
+    """Determine whether an Azure Pipelines build waits for a check of a stage.
+
+    A check is, for example, an approval or an exclusive lock.
+
+    Returns:
+        True if a check of a stage of the build is in progress.
+    """
+    timeline = ci_build.azure_get(
+        f"{ci_build.azure_api(org, project, build)}/timeline?api-version=7.1"
+    )
+    return any(
+        r.get("type", "").startswith("Checkpoint") and r.get("state") == "inProgress"
+        for r in (timeline or {}).get("records") or []
+    )
 
 
 def redundant_azure_builds(label, gh, org, project):
@@ -311,8 +332,7 @@ def redundant_azure_builds(label, gh, org, project):
             [b for b in builds if b["reason"] in AZURE_REDUNDANT_REASONS],
             lambda b: (b["definition"]["id"], b["reason"], b["sourceBranch"]),
             operator.itemgetter("id"),
-            # A build that waits for an approval is in progress, so every build can.
-            lambda _: True,
+            lambda b: not azure_build_waits(org, project, b["id"]),
         )
     ]
 
@@ -339,6 +359,9 @@ def redundant_circleci_workflows(label, gh):
         for project in sorted(projects)
         for branch, p in recent_pipelines(project)
     ]
+    # A pipeline's workflows can be redundant only if its branch has another pipeline.
+    counts = collections.Counter((project, branch) for project, branch, _ in pipelines)
+    pipelines = [pbp for pbp in pipelines if counts[pbp[:2]] > 1]
     # the project, branch, pipeline, and workflow of each unfinished workflow
     workflows = [
         (project, branch, p, w)
@@ -409,26 +432,38 @@ def unfinished_workflows(pipeline):
         raise
 
 
-def redundant_builds(label, gh, runs):
+def redundant_builds(label, gh, runs, pr_shas):
     """Find the redundant unfinished builds of the GitHub repository gh.
 
     Args:
         label: the repository's label.
         gh: the repository's GitHub name.
         runs: the unfinished GitHub Actions runs, as unfinished_runs returns them.
+        pr_shas: the head commits of some of gh's open PRs, whose checks show which
+            Azure Pipelines projects build gh.
 
     Returns:
         A list of the identifier, subject, build, and reason of each redundant build.
     """
     result = redundant_runs(label, gh, runs)
     try:
-        for org, project in azure_projects(gh):
-            result += redundant_azure_builds(label, gh, org, project)
+        projects = azure_projects(gh, pr_shas)
     except ci_build.REQUEST_ERRORS as e:
         print(
-            f"{label}: failed to find redundant Azure Pipelines builds: {ci_build.failure(e)}",
+            f"{label}: failed to find the Azure Pipelines projects: {ci_build.failure(e)}",
             file=sys.stderr,
         )
+        projects = set()
+    for org, project in sorted(projects):
+        # A failure in one project does not stop the examination of the others.
+        try:
+            result += redundant_azure_builds(label, gh, org, project)
+        except ci_build.REQUEST_ERRORS as e:  # ruff: ignore[try-except-in-loop]
+            print(
+                f"{label}: failed to find redundant Azure Pipelines builds in {org}/{project}:"
+                f" {ci_build.failure(e)}",
+                file=sys.stderr,
+            )
     try:
         result += redundant_circleci_workflows(label, gh)
     except ci_build.REQUEST_ERRORS as e:
@@ -597,8 +632,11 @@ def circleci_workflows_of_jobs(project, sha, jobs):
     """Find the CircleCI workflows of unfinished jobs of commit sha, whose URLs name no workflow.
 
     The workflows are the unfinished workflows of the project's recent pipelines of
-    commit sha, which finding redundant workflows has usually already read.  Only if
-    there is no such pipeline is each job looked up.
+    commit sha that a push or a pull request started; finding redundant workflows has
+    usually already read the list of those pipelines.  Only if there is no such
+    pipeline with an unfinished workflow is each job looked up.  So a job of another
+    pipeline of commit sha, such as one that the API started, is found only if there
+    is no such pipeline.
 
     Args:
         project: the project slug of the jobs.
@@ -683,12 +721,28 @@ def main():
         "-n", "--dry-run", action="store_true", help="report the builds but do not cancel them"
     )
     dry_run = parser.parse_args().dry_run
+    base = pathlib.Path.cwd()
+    # The current directory holds the working copies; it is not one of them.
+    toplevel = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], check=False, capture_output=True, text=True
+    )
+    if toplevel.returncode == 0:
+        sys.exit(
+            f"{PROGRAM}: {base} is in the git working copy {toplevel.stdout.strip()}; "
+            f"run {PROGRAM} in the directory that holds the working copies"
+        )
     if pathlib.Path(pr_status.CONFIG).exists():
         with pathlib.Path(pr_status.CONFIG).open() as f:
             cfg = json.load(f)
     else:
-        cfg = pr_status.default_config(str(pathlib.Path.cwd()))
-    for label, gh, default_branch, blocked in blocked_prs(cfg):
+        try:
+            cfg = pr_status.default_config(str(base))
+        except SystemExit as e:
+            # Name this program, not pr-status, in the error message.
+            if isinstance(e.code, str):
+                sys.exit(PROGRAM + ": " + e.code.removeprefix("pr-status.py: "))
+            raise
+    for label, gh, default_branch, pr_shas, blocked in blocked_prs(cfg):
         try:
             runs = unfinished_runs(gh)
         except ci_build.REQUEST_ERRORS as e:
@@ -698,7 +752,7 @@ def main():
             )
             runs = {}
         handled = set()  # identifiers of the builds that have been cancelled or reported
-        for identifier, subject, build, reason in redundant_builds(label, gh, runs):
+        for identifier, subject, build, reason in redundant_builds(label, gh, runs, pr_shas):
             handled.add(identifier)
             handle(subject, build, dry_run, reason)
         for ref, pr in blocked:
