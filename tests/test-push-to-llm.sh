@@ -904,14 +904,16 @@ fi
 ## merges a local commit, which changes file.txt, with a commit of the remote
 ## that adds "BROKEN" to other.txt.  Unless MAIN is "main", main is reset to
 ## the initial commit, which feature already contains, so that merging main
-## changes nothing.  Sets ${feature_head} to the remote's feature and
-## ${local_head} to the local feature before the pull.
+## changes nothing.  Sets ${feature_head} to the remote's feature,
+## ${local_head} to the local feature before the pull, and ${pull_base} to the
+## commit at which the two diverged.
 setup_pull_breaks() {
   setup_case "$1" build
   if [ "${2:-}" != main ]; then
     git -C "${main_dir}" reset -q --hard HEAD^
     git -C "${main_dir}" push -q --force
   fi
+  pull_base="${feature_head}"
   git clone -q -b feature "${remote}" "${case_dir}/other-clone"
   echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
   git -C "${case_dir}/other-clone" commit -q -a -m "Break the build remotely"
@@ -925,10 +927,12 @@ setup_pull_breaks() {
 ## Usage: check_pull_fixed DESCRIPTION MERGED
 ## Checks that the fix of the build, whose message names MERGED, was
 ## committed on top of the merge of the pull of feature, and was pushed, and
-## that the agent was told what changed since ${local_head}.
+## that the agent was told what the local feature, ${local_head}, and the
+## remote's feature, ${feature_head}, changed since ${pull_base}.
 check_pull_fixed() {
-  if ! grep -q "git diff ${local_head} HEAD" "${STUB_PROMPT}"; then
-    fail "$1: the instructions do not name the head before the pull: $(cat "${STUB_PROMPT}")"
+  if ! grep -q "git diff ${pull_base} ${local_head}" "${STUB_PROMPT}" \
+    || ! grep -q "git diff ${pull_base} ${feature_head}" "${STUB_PROMPT}"; then
+    fail "$1: the instructions do not show what each side of the pull changed: $(cat "${STUB_PROMPT}")"
   fi
   message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
   if [ "${message}" != "Fix the build after merging $2" ]; then
@@ -967,6 +971,61 @@ if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
 fi
 check_pull_fixed "pull and merge that break the build" \
   "remote-tracking branch 'origin/feature' and branch 'main'"
+if ! grep -q "Then the script merged branch 'main' into branch feature" "${STUB_PROMPT}"; then
+  fail "pull and merge that break the build: the instructions do not describe the merge of main: $(cat "${STUB_PROMPT}")"
+fi
+
+## A pull that fast-forwards makes no merge, so it did not break the build,
+## which was already broken on the remote; no agent is asked to fix it.
+setup_pull_breaks pull-build-fast-forward
+git -C "${feature_dir}" reset -q --hard HEAD^
+STUB_BUILD=fix push_to good --llm
+check_not_pushed "pull that fast-forwards to a broken build"
+case "${push_output}" in
+  *"unable to build"*) ;;
+  *) fail "pull that fast-forwards to a broken build: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "pull that fast-forwards to a broken build: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## The pull of TO_DIR merges even if `pull.rebase` is set, so the agent fixes
+## the merge.
+setup_pull_breaks pull-build-rebase
+git -C "${feature_dir}" config pull.rebase true
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "pull with pull.rebase that breaks the build: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "pull with pull.rebase that breaks the build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+check_pull_fixed "pull with pull.rebase that breaks the build" \
+  "remote-tracking branch 'origin/feature'"
+
+## In a rerun after a failed build, a pull that merges new commits of the
+## remote shows the agent the unpushed merge of the earlier run, which broke
+## the build.
+setup_case pull-build-rerun build
+STUB_BUILD=none push_to good --llm
+check_not_pushed "failed build before a rerun"
+: > "${STUB_LOG}"
+pull_base="${feature_head}"
+local_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+echo "unrelated" > "${case_dir}/other-clone/third.txt"
+git -C "${case_dir}/other-clone" add third.txt
+git -C "${case_dir}/other-clone" commit -q -m "Change feature remotely"
+git -C "${case_dir}/other-clone" push -q
+feature_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "rerun whose pull merges: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "rerun whose pull merges: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+check_pull_fixed "rerun whose pull merges" "remote-tracking branch 'origin/feature'"
 
 ## With --no-llm, a pull that breaks the build is not given to an agent.
 setup_pull_breaks pull-build-no-llm

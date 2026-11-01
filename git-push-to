@@ -112,20 +112,23 @@
 # edits the conflicted files, and this script checks its resolution as
 # described above.  That applies to the merge of FROM_DIR's branch into
 # TO_DIR, and to the merges of the pulls that update FROM_DIR and TO_DIR from
-# their remotes.  A pull that rebases, as `pull.rebase` can make it do, is not
-# resolved.  If the agent fails, this script stops with the merge still in
+# their remotes.  A pull of FROM_DIR that rebases, as `pull.rebase` can make
+# it do, is not resolved; the pull of TO_DIR always merges.  If the agent fails, this script stops with the merge still in
 # progress.
 #
-# When the build of TO_DIR fails, and the pull of TO_DIR or the merge into it
-# changed TO_DIR's branch, the agent edits files to fix it, without building;
+# When the build of TO_DIR fails, and a merge that this script made changed
+# TO_DIR's branch -- the merge of FROM_DIR's branch, or the merge that the
+# pull of TO_DIR made -- the agent edits files to fix it, without building;
 # then this script builds again.  The agent gets up to 3 attempts.  When the
 # build succeeds, this script commits the agent's changes on top of the
 # merges, as "Fix the build after merging ...", and pushes.  If the build
 # still fails, this script stops, with the agent's changes staged but not
-# committed.  If neither the pull nor the merge changed TO_DIR's branch, as
-# in a rerun after a failed build, they did not cause the failure, so the
-# agent is not asked to fix it.  (The pull of FROM_DIR is not considered:
-# any change that it makes reaches TO_DIR through the merge.)
+# committed.  If no merge changed TO_DIR's branch, as in a rerun after a
+# failed build, no merge caused the failure, so the agent is not asked to
+# fix it.  A pull that fast-forwards TO_DIR's branch makes no merge:  the
+# commits that it brings were already on the remote.  (The pull of FROM_DIR
+# is not considered:  any change that it makes reaches TO_DIR through the
+# merge.)
 
 # Here is an example of use.
 #
@@ -421,15 +424,15 @@ git_push_to() {
     return 1
   fi
 
-  # `merge_build_push` asks the agent to fix the build if the pull or the
-  # merge changed TO_DIR.
-  if ! to_orig_head="$(git rev-parse --verify HEAD)"; then
-    echo "${SCRIPT_NAME}: cannot read HEAD in ${to_absolute}" >&2
+  # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
+  # that an earlier run of this command made but did not push, as when its
+  # build failed, and would copy that merge's commits onto TO_DIR's branch.
+  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase; then
     return 1
   fi
-  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q; then
-    return 1
-  fi
+  # `merge_build_push` asks the agent to fix a failed build if the pull's
+  # merge or the merge of FROM_DIR's branch changed TO_DIR's branch.
+  to_pull_merge="${pull_merge_commit}"
 
   # Note: pwd=to_absolute
   if ! fetch_branch "${from_absolute}" "${from_branch}"; then
@@ -449,7 +452,7 @@ git_push_to() {
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
     "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}" \
-    "${to_orig_head}"; then
+    "${to_pull_merge}"; then
     return 1
   fi
 
