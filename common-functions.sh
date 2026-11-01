@@ -1530,17 +1530,22 @@ build_logged() {
   return "${build_logged_status:-1}"
 }
 
-## Usage: build_and_fix AGENT DESCRIPTION ORIG_HEAD
+## Usage: build_and_fix AGENT DESCRIPTION ACCOUNT
 ## Builds the current directory, the top level of a working tree, with
 ## `compile-project`, just after merging DESCRIPTION, such as
 ## "branch 'feature'" or
-## "branch 'feature' of github.com:ORG/REPO and branch 'main'", into a branch
-## whose head was ORIG_HEAD before the merges.  If the build
-## fails, asks the AI agent AGENT ("claude" or "codex"), if it can be run, to
-## fix it, without building, then builds again; it makes up to ${build_fix_attempts} attempts.
+## "branch 'feature' of github.com:ORG/REPO and branch 'main'", into the
+## current branch.  If the build fails, asks the AI agent AGENT ("claude" or
+## "codex"), if it can be run, to fix it, without building, then builds
+## again; it makes up to ${build_fix_attempts} attempts.  The agent's
+## instructions begin with ACCOUNT, which says what was merged and which
+## commands show what each merge changed, such as "A script merged branch
+## 'feature' into branch main, whose head had been 0a1b2c...  `git diff
+## 0a1b2c... HEAD` shows what merging changed."
 ## Once the build succeeds, commits the agent's changes, if any, on top of the
-## merges.  Returns 1, after printing a diagnostic, if the build still fails;
-## the agent's changes then remain, staged but not committed.
+## merges, with the message "Fix the build after merging DESCRIPTION".
+## Returns 1, after printing a diagnostic, if the build still fails; the
+## agent's changes then remain, staged but not committed.
 build_fix_attempts=3
 build_and_fix() {
   fix_with="$1"
@@ -1563,7 +1568,6 @@ build_and_fix() {
     return 1
   fi
   fix_head="$(git rev-parse --verify HEAD)" || return 1
-  fix_branch="$(git symbolic-ref --quiet --short HEAD)" || fix_branch="HEAD"
   fix_attempt=1
   fix_earlier=''
   while :; do
@@ -1575,11 +1579,11 @@ build_and_fix() {
 Earlier attempts to fix the build changed files, but the build still failed.  Their changes are staged; \`git diff --cached\` shows them."
     fi
     fix_prompt="You are fixing a failed build in the git working tree $(pwd).
-A script merged $2 into branch ${fix_branch}, whose head had been $3, and then built the project, which failed.  \`git diff $3 HEAD\` shows what merging changed.  The end of the build output is below; the full output is in ${fix_log}.${fix_earlier}
+$3  After merging, the script built the project, which failed.  The end of the build output is below; the full output is in ${fix_log}.${fix_earlier}
 
 Rules:
 
-* Make the smallest change that fixes the build and that respects the intent of ${fix_branch} and of every branch merged into it.  Often, merging combined changes that do not fit together, such as a call to a method that another branch renamed.
+* Make the smallest change that fixes the build and that respects the intent of the current branch and of every branch merged into it.  Often, merging combined changes that do not fit together, such as a call to a method that another branch renamed.
 * Do not disable, delete, or weaken tests, checks, or warnings to make the build pass.
 * Do not run any git command that changes the index, HEAD, or any other ref, such as \`git add\`, \`git commit\`, \`git checkout\`, \`git restore\`, \`git reset\`, \`git merge\`, \`git stash\`, or \`git rebase\`.  The script commits your changes.
 * Run commands in the current directory, which is the working tree, without \`cd\` or \`git -C\`.  A command in another form needs approval, which nobody is present to give.
@@ -1686,9 +1690,9 @@ parse_llm_option() {
 ## RESOLVER, if it is not empty, about any that `git rerere` did not resolve,
 ## and commits the merge with the message that `git pull` composed.  (A pull that rebases cannot be resolved this way.)
 ## Sets ${pull_merge} to the merge commit that the pull made, as a full hash
-## such as "0bb9f58...", or to the empty string if the pull made no merge
-## commit, as when the branch was up to date or the pull fast-forwarded or
-## rebased it.
+## such as the 40 hexadecimal digits that `git rev-parse HEAD` prints, or to
+## the empty string if the pull made no merge commit, as when it found
+## nothing new, fast-forwarded the branch, or rebased it.
 ## Returns 1, after printing a diagnostic, if a merge is already in progress
 ## in DIRECTORY, or if the pull fails and its conflicts are not resolved.
 pull_resolving() {
@@ -1702,59 +1706,56 @@ pull_resolving() {
     echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
     return 1
   fi
-  if ! pull_orig_head="$(git -C "${pull_dir}" rev-parse --verify HEAD)"; then
+  if ! pull_old_head="$(git -C "${pull_dir}" rev-parse --verify HEAD)"; then
     echo "${SCRIPT_NAME}: cannot read HEAD in ${pull_dir}" >&2
     return 1
   fi
   # `rerere.autoUpdate` false and the configured conflict style are as for
   # the merge in `merge_build_push`.
-  if git -C "${pull_dir}" -c rerere.autoUpdate=false pull "$@"; then
-    pull_record_merge
-    return 0
+  if ! git -C "${pull_dir}" -c rerere.autoUpdate=false pull "$@"; then
+    echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
+    if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+      return 1
+    fi
+    # Git names the conflicted files relative to the top level of the working
+    # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
+    # the current directory unchanged.
+    if ! (
+      if ! pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)" \
+        || ! cd "${pull_top}"; then
+        echo "${SCRIPT_NAME}: cannot cd to the top level of ${pull_dir}" >&2
+        exit 1
+      fi
+      pull_source="$(upstream_description)"
+      if ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
+        exit 1
+      fi
+      # MERGE_MSG ends with comment lines that list the conflicts.
+      if ! git commit -q --no-edit --cleanup=strip; then
+        echo "${SCRIPT_NAME}: cannot commit the merge of ${pull_source} in $(pwd)" >&2
+        exit 1
+      fi
+    ); then
+      return 1
+    fi
   fi
-  echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
-  if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  if ! pull_new_head="$(git -C "${pull_dir}" rev-parse --verify HEAD)"; then
+    echo "${SCRIPT_NAME}: cannot read HEAD in ${pull_dir}" >&2
     return 1
   fi
-  # Git names the conflicted files relative to the top level of the working
-  # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
-  # the current directory unchanged.
-  (
-    if ! pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)" \
-      || ! cd "${pull_top}"; then
-      echo "${SCRIPT_NAME}: cannot cd to the top level of ${pull_dir}" >&2
-      exit 1
-    fi
-    pull_source="$(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null)" \
-      || pull_source="its upstream branch"
-    if ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
-      exit 1
-    fi
-    # MERGE_MSG ends with comment lines that list the conflicts.
-    if ! git commit -q --no-edit --cleanup=strip; then
-      echo "${SCRIPT_NAME}: cannot commit the merge of ${pull_source} in $(pwd)" >&2
-      exit 1
-    fi
-  ) || return 1
-  pull_record_merge
-}
-
-## Usage: pull_record_merge
-## Sets ${pull_merge}, for `pull_resolving`, to HEAD of ${pull_dir} if a pull
-## that started at ${pull_orig_head} made it as a merge commit, and to the
-## empty string otherwise.
-# shellcheck disable=SC2034 # pull_merge is used by the commands that source this file
-pull_record_merge() {
-  pull_merge=''
-  pull_new_head="$(git -C "${pull_dir}" rev-parse --verify HEAD)" || return 0
-  # A merge commit that the pull made has the head before the pull as its
-  # first parent.  So can the commit that a fast-forward moves to, as when a
-  # merge was made from the same head in another clone and pushed; but that
-  # commit is the one that the pull fetched, which FETCH_HEAD names.
-  if [ "$(git -C "${pull_dir}" rev-parse --verify --quiet "${pull_new_head}^1")" = "${pull_orig_head}" ] \
-    && [ "$(git -C "${pull_dir}" rev-parse --verify --quiet FETCH_HEAD)" != "${pull_new_head}" ]; then
+  # The pull made a merge commit if the new head is a merge whose first parent
+  # is the old head, unless the pull fast-forwarded to that merge, which was
+  # then made elsewhere, as in another clone or by GitHub's "Update branch"
+  # button.  FETCH_HEAD names first the commit that `git pull` merges or
+  # fast-forwards to.
+  if [ "${pull_new_head}" != "${pull_old_head}" ] \
+    && git -C "${pull_dir}" rev-parse --verify --quiet "${pull_new_head}^2" > /dev/null \
+    && [ "$(git -C "${pull_dir}" rev-parse --verify --quiet "${pull_new_head}^1")" = "${pull_old_head}" ] \
+    && [ "$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" != "${pull_new_head}" ]; then
+    # shellcheck disable=SC2034 # used by the commands that source this file
     pull_merge="${pull_new_head}"
   fi
+  return 0
 }
 
 ## Usage: merge_description SUBJECT HASH
@@ -1775,6 +1776,29 @@ merge_description() {
   esac
 }
 
+## Usage: upstream_description
+## Prints a description of the upstream branch of the current branch, in the
+## form that `git merge` uses in a merge message:  for example,
+## "remote-tracking branch 'origin/feature'", or "branch 'main'" if the
+## upstream branch is a branch of the local repository.  If git cannot name
+## the upstream branch with a ref of the local repository, as when
+## `branch.BRANCH.remote` is a URL, prints "the upstream branch of branch
+## 'BRANCH'".
+upstream_description() {
+  upstream_description_ref="$(git rev-parse --symbolic-full-name '@{upstream}' 2> /dev/null)"
+  case "${upstream_description_ref}" in
+    refs/remotes/*) echo "remote-tracking branch '${upstream_description_ref#refs/remotes/}'" ;;
+    refs/heads/*) echo "branch '${upstream_description_ref#refs/heads/}'" ;;
+    *)
+      if upstream_description_branch="$(git symbolic-ref --quiet --short HEAD)"; then
+        echo "the upstream branch of branch '${upstream_description_branch}'"
+      else
+        echo "the upstream branch"
+      fi
+      ;;
+  esac
+}
+
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [PULL_MERGE [COMMIT_PULL_MERGE]]]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
@@ -1783,20 +1807,22 @@ merge_description() {
 ## "remote-tracking branch 'upstream/master'".  SOURCE names COMMIT in
 ## diagnostics.  If the merge has conflicts, `resolve_merge_conflicts`
 ## resolves them, asking RESOLVER, if it is given and not empty, about any
-## that `git rerere` did not resolve; and if the build fails, `build_and_fix`
-## asks RESOLVER, if it is given and not empty, to fix it.  PULL_MERGE, if it
-## is given and not empty, is a merge commit that a pull of the current
-## branch made just before this call, as `pull_resolving` sets ${pull_merge}.
-## COMMIT_PULL_MERGE, if it is given and not empty, is likewise a merge
-## commit that a pull of COMMIT's branch, in another clone, made.
-## The agent is asked to fix the build only if the pull or the merge made a
-## merge commit, or if the merge brought in COMMIT_PULL_MERGE, as by
-## fast-forwarding to it.  The agent is told about the merge commits that are
-## not pushed:  those that HEAD reaches through first parents without passing
-## a commit that is not a merge commit or that is in a remote-tracking branch,
-## such as the branch that the current branch pushes to or pulls from.  They
-## include a merge that an earlier run made but did not push because its
-## build failed.
+## that `git rerere` did not resolve.  PULL_MERGE, if it is given and not
+## empty, is a merge commit that a pull of the current branch from its
+## upstream branch made just before this call, as a full hash such as the one
+## to which `pull_resolving` sets ${pull_merge}.  COMMIT_PULL_MERGE, if it is
+## given and not empty, is likewise a merge commit that a pull of COMMIT's
+## branch, in another clone, made.  If the build fails, `build_and_fix` asks
+## RESOLVER, if it is given and not empty, to fix it, but only if the merge
+## of COMMIT made a merge commit, or PULL_MERGE is given, or the merge brought
+## in COMMIT_PULL_MERGE, as by fast-forwarding to it:  otherwise, no merge
+## that this call or the pulls made caused the failure.  The agent is told
+## about the merge commits that are not pushed:  those that HEAD reaches
+## through first parents without passing a commit that is not a merge commit
+## or that is in a remote-tracking branch, such as the branch that the
+## current branch pushes to or pulls from.  They include a merge that an
+## earlier run made but did not push because its build failed.  The agent is
+## also told what each side of PULL_MERGE changed.
 ## Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
@@ -1921,7 +1947,23 @@ merge_build_push() {
         merge_fixed="$2"
         merge_fix_from="${merge_orig_head}"
       fi
-      if ! build_and_fix "$5" "${merge_fixed}" "${merge_fix_from}"; then
+      merge_branch="$(git symbolic-ref --quiet --short HEAD)" || merge_branch=HEAD
+      merge_account="A script merged ${merge_fixed} into branch ${merge_branch}, whose head had been ${merge_fix_from}.  \`git diff ${merge_fix_from} HEAD\` shows what merging changed."
+      # Show each side of the pull's merge too.  The commits that only the
+      # current branch had can include a merge that an earlier run made but
+      # did not push, as when its build failed; that merge, not the pull's,
+      # can have broken the build.
+      if [ -n "${6:-}" ]; then
+        if ! merge_pull_ours="$(git rev-parse --verify --quiet "$6^1")" \
+          || ! merge_pull_theirs="$(git rev-parse --verify --quiet "$6^2")" \
+          || ! merge_pull_base="$(git merge-base "${merge_pull_ours}" "${merge_pull_theirs}")"; then
+          echo "${SCRIPT_NAME}: cannot read the parents of the pull's merge $6 in $(pwd)" >&2
+          return 1
+        fi
+        merge_upstream="$(upstream_description)"
+        merge_account="${merge_account}  The pull of branch ${merge_branch} merged ${merge_upstream}, whose head was ${merge_pull_theirs}, into it, whose head had been ${merge_pull_ours}.  The two had diverged at commit ${merge_pull_base}:  \`git diff ${merge_pull_base} ${merge_pull_ours}\` shows the changes of the commits that only branch ${merge_branch} had, and \`git diff ${merge_pull_base} ${merge_pull_theirs}\` shows those of the commits that only ${merge_upstream} had."
+      fi
+      if ! build_and_fix "$5" "${merge_fixed}" "${merge_account}"; then
         return 1
       fi
     elif ! "${SCRIPT_DIR}"/compile-project; then

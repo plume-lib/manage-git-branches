@@ -25,7 +25,8 @@
 #  * build using `compile-project` (see its documentation),
 #  * push the current branch if the build succeeds.
 # If the build fails, this script asks the AI agent to fix it only if the
-# pull or the merge made a merge commit.
+# pull or the merge made a merge commit.  A pull or merge that fast-forwards
+# the current branch makes no merge commit.
 # If the current branch already contains the upstream repository's default
 # branch, it skips the merge, and it stops there if the current branch matches
 # the branch that it pushes to (which differs from the branch that it pulls
@@ -174,8 +175,8 @@ fi
 if ! pull_resolving "${llm_agent}" "$(pwd)" -q --no-rebase --no-edit; then
   exit 1
 fi
-# `merge_build_push` asks the agent to fix the build if the pull or the merge
-# made a merge commit.
+# `merge_build_push` asks the agent to fix a failed build if the pull or the
+# merge of the upstream repository's default branch made a merge commit.
 pulled_merge="${pull_merge}"
 
 # Stop if there is nothing to merge and nothing to push.  If there is nothing

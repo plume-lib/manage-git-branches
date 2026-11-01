@@ -126,11 +126,13 @@
 # still fails, this script stops, with the agent's changes staged but not
 # committed.  The agent is told about every merge commit on TO_DIR's branch
 # that is not pushed, including one that an earlier run made but did not
-# push because its build failed.
+# push because its build failed, and about what each side of the pull's
+# merge changed.
 # Otherwise, the pulls and the merge did not cause the failure, so the agent
 # is not asked to fix it.  That is the case in a rerun after a failed build,
 # and when the pull or the merge fast-forwarded to a commit that fails to
-# build by itself.
+# build by itself:  the commits that a fast-forward brings were already on
+# the remote.
 
 # Here is an example of use.
 #
@@ -429,14 +431,14 @@ git_push_to() {
     return 1
   fi
 
-  # `--no-rebase` because a rebase would drop a merge that an earlier run of
-  # this command made but did not push, as when its build failed, and would
-  # copy that merge's commits onto TO_DIR's branch.
+  # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
+  # that an earlier run of this command made but did not push, as when its
+  # build failed, and would copy that merge's commits onto TO_DIR's branch.
   if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase; then
     return 1
   fi
-  # `merge_build_push` asks the agent to fix the build if the pull or the
-  # merge made a merge commit.
+  # `merge_build_push` asks the agent to fix a failed build if the pull or
+  # the merge of FROM_DIR's branch made a merge commit.
   to_pull_merge="${pull_merge}"
 
   # Note: pwd=to_absolute

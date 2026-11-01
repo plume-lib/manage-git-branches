@@ -904,14 +904,16 @@ fi
 ## merges a local commit, which changes file.txt, with a commit of the remote
 ## that adds "BROKEN" to other.txt.  Unless MAIN is "main", main is reset to
 ## the initial commit, which feature already contains, so that merging main
-## changes nothing.  Sets ${feature_head} to the remote's feature and
-## ${local_head} to the local feature before the pull.
+## changes nothing.  Sets ${feature_head} to the remote's feature,
+## ${local_head} to the local feature before the pull, and ${pull_base} to the
+## commit at which the two diverged.
 setup_pull_breaks() {
   setup_case "$1" build
   if [ "${2:-}" != main ]; then
     git -C "${main_dir}" reset -q --hard HEAD^
     git -C "${main_dir}" push -q --force
   fi
+  pull_base="${feature_head}"
   git clone -q -b feature "${remote}" "${case_dir}/other-clone"
   echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
   git -C "${case_dir}/other-clone" commit -q -a -m "Break the build remotely"
@@ -925,10 +927,16 @@ setup_pull_breaks() {
 ## Usage: check_pull_fixed DESCRIPTION MERGED
 ## Checks that the fix of the build, whose message names MERGED, was
 ## committed on top of the merge of the pull of feature, and was pushed, and
-## that the agent was told what changed since ${local_head}.
+## that the agent was told what changed since ${local_head}, and what the
+## local feature, ${local_head}, and the remote's feature, ${feature_head},
+## changed since ${pull_base}.
 check_pull_fixed() {
   if ! grep -q "git diff ${local_head} HEAD" "${STUB_PROMPT}"; then
     fail "$1: the instructions do not name the head before the pull: $(cat "${STUB_PROMPT}")"
+  fi
+  if ! grep -q "git diff ${pull_base} ${local_head}" "${STUB_PROMPT}" \
+    || ! grep -q "git diff ${pull_base} ${feature_head}" "${STUB_PROMPT}"; then
+    fail "$1: the instructions do not show what each side of the pull changed: $(cat "${STUB_PROMPT}")"
   fi
   message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
   if [ "${message}" != "Fix the build after merging $2" ]; then
@@ -987,6 +995,10 @@ setup_pull_breaks pull-ff-build
 git -C "${feature_dir}" reset -q --hard HEAD^
 STUB_BUILD=fix push_to good --llm
 check_not_pushed "fast-forward pull that breaks the build"
+case "${push_output}" in
+  *"unable to build"*) ;;
+  *) fail "fast-forward pull that breaks the build: wrong diagnostic: ${push_output}" ;;
+esac
 if [ -s "${STUB_LOG}" ]; then
   fail "fast-forward pull that breaks the build: an agent ran: $(cat "${STUB_LOG}")"
 fi
