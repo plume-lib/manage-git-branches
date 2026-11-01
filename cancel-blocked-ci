@@ -224,19 +224,19 @@ def concurrently(f, items):
 
 
 def superseded(builds, key, order, commit, can_supersede):
-    """Return the builds that a more recent build with the same key makes redundant.
+    """Return those of the given builds that a more recent build with the same key makes redundant.
 
     A build is redundant if the most recent build with its key that can make older
     builds redundant is more recent than it and tests a different commit.
 
     Args:
-        builds: the builds.
+        builds: a list of builds.
         key: a function from a build to what it must share with the builds that make
             it redundant.
         order: a function from a build to a value that is greater for more recent builds.
         commit: a function from a build to the commit that it tests.
-        can_supersede: a function from a build to whether it can make older builds
-            redundant.
+        can_supersede: a function from a build to True if the build can make older builds
+            redundant, and False otherwise.
 
     Returns:
         A list of pairs of a redundant build and the most recent build with its key that
@@ -273,11 +273,12 @@ def branch_name(branch):
 
 
 def branch_subject(label, branch):
-    """Name a branch of the repository with the given label in output.
+    """Return the name, for output, of the given branch of the given repository.
 
     Args:
-        label: the repository's label.
-        branch: the branch, such as "main", "refs/heads/main", or "refs/pull/123/merge".
+        label: a repository's label, its name in output, such as "daikon".
+        branch: the name of a branch of that repository, such as "main",
+            "refs/heads/main", or "refs/pull/123/merge".
 
     Returns:
         A reference to the PR if branch holds a PR, and otherwise label and branch.
@@ -567,7 +568,7 @@ def azure_projects(gh, pr_shas):
     """Return the Azure Pipelines projects that build the GitHub repository gh.
 
     Args:
-        gh: the repository's GitHub slug, such as "ORG/REPO".
+        gh: a repository's GitHub slug, such as "ORG/REPO".
         pr_shas: the head commits of some of gh's open PRs.
 
     Returns:
@@ -583,14 +584,14 @@ def azure_projects(gh, pr_shas):
 
 
 def azure_build_waits(org, project, build):
-    """Return True if an Azure Pipelines build waits for a check of a stage.
+    """Return True if the given Azure Pipelines build waits for a check of a stage.
 
     A check is, for example, an approval or an exclusive lock.
 
     Args:
-        org: the Azure DevOps organization.
-        project: the Azure DevOps project.
-        build: the build's id, an integer such as 123 in ".../_build/results?buildId=123".
+        org: the build's Azure DevOps organization.
+        project: the build's Azure DevOps project.
+        build: a build's id, an integer such as 123 in ".../_build/results?buildId=123".
 
     Returns:
         True if a check of a stage of the build is in progress.
@@ -605,13 +606,13 @@ def azure_build_waits(org, project, build):
 
 
 def redundant_azure_builds(label, gh, org, project):
-    """Return the redundant unfinished builds of the GitHub repository gh in an Azure project.
+    """Return the redundant unfinished builds of the GitHub repository gh in the given project.
 
     Args:
         label: the repository's label.
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-        org: the Azure DevOps organization.
-        project: the Azure DevOps project.
+        gh: a repository's GitHub slug, such as "ORG/REPO".
+        org: the project's Azure DevOps organization.
+        project: an Azure DevOps project.
 
     Returns:
         A list of the subject, Build, and reason of each redundant build.
@@ -645,13 +646,13 @@ def redundant_azure_builds(label, gh, org, project):
 
 
 def redundant_azure_builds_or_report(label, gh, org, project):
-    """Return the redundant unfinished builds of gh in an Azure project, reporting any failure.
+    """Return the redundant unfinished builds of gh in the given project, reporting any failure.
 
     Args:
         label: the repository's label.
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-        org: the Azure DevOps organization.
-        project: the Azure DevOps project.
+        gh: a repository's GitHub slug, such as "ORG/REPO".
+        org: the project's Azure DevOps organization.
+        project: an Azure DevOps project.
 
     Returns:
         A list of the subject, Build, and reason of each redundant build, or the
@@ -805,10 +806,10 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
 
 @functools.cache
 def recent_pipelines(project):
-    """Return the recent pipelines of a CircleCI project that a push or a pull request started.
+    """Return the recent pipelines of the given CircleCI project that a push or a PR started.
 
     Args:
-        project: the project slug, such as "gh/ORG/REPO".
+        project: a CircleCI project slug, such as "gh/ORG/REPO".
 
     Returns:
         A list of the branch and pipeline of each pipeline from the past day that a push
@@ -831,7 +832,7 @@ def unfinished_workflows(pipeline):
     """Return the unfinished workflows of the CircleCI pipeline with the given id.
 
     Args:
-        pipeline: the pipeline's id, a UUID such as "5034460f-c7c4-4c43-9457-de07e2029e7b"
+        pipeline: a pipeline's id, a UUID such as "5034460f-c7c4-4c43-9457-de07e2029e7b"
             (not its number, such as 7 in a pipeline's URL).
 
     Returns:
@@ -855,7 +856,7 @@ def redundant_circleci_workflows(label, gh):
 
     Args:
         label: the repository's label.
-        gh: the repository's GitHub slug, such as "ORG/REPO".
+        gh: a repository's GitHub slug, such as "ORG/REPO".
 
     Returns:
         A list of the subject, Build, and reason of each redundant workflow.
@@ -971,9 +972,9 @@ def redundant_runs(label, gh, runs):
 
     Args:
         label: the repository's label.
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-        runs: a map from (head repository owner, branch) to the unfinished runs of that
-            branch, as unfinished_runs returns it.
+        gh: a repository's GitHub slug, such as "ORG/REPO".
+        runs: the repository's unfinished runs, as a map from (head repository owner,
+            branch) to the unfinished runs of that branch, as unfinished_runs returns it.
 
     Returns:
         A list of the subject, Build, and reason of each redundant run.
@@ -1127,8 +1128,9 @@ def redundant_builds(label, gh, runs, pr_shas):
 
     Args:
         label: the repository's label.
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-        runs: the unfinished GitHub Actions runs, as unfinished_runs returns them.
+        gh: a repository's GitHub slug, such as "ORG/REPO".
+        runs: the repository's unfinished GitHub Actions runs, as unfinished_runs returns
+            them.
         pr_shas: the head commits of some of gh's open PRs, whose checks show which
             Azure Pipelines projects build gh.
 
