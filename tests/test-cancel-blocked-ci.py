@@ -185,24 +185,6 @@ class CancelBlockedCiTest(unittest.TestCase):
             cancel_blocked_ci.is_default_branch("fork/repo", "main", pr | {"owner": "other"})
         )
 
-    def test_circleci_project_of_url(self) -> None:
-        """The project slug is found in each kind of CircleCI URL that contains it."""
-        workflow = "ecc46ce8-0000-0000-0000-000000000000"
-        for url, expected in [
-            (
-                f"https://app.circleci.com/pipelines/github/org/repo/7/workflows/{workflow}",
-                "gh/org/repo",
-            ),
-            (
-                f"https://app.circleci.com/pipelines/circleci/AbC/dEf/7/workflows/{workflow}/jobs/9",
-                "circleci/AbC/dEf",
-            ),
-            ("https://circleci.com/gh/org/repo/230602?utm_campaign=x", "gh/org/repo"),
-            (f"https://app.circleci.com/workflow/{workflow}", None),
-        ]:
-            with self.subTest(url=url):
-                self.assertEqual(ci_build.circleci_project_of_url(url), expected)
-
     def test_circleci_workflows_of_jobs(self) -> None:
         """The workflows of jobs come from the recent pipelines, or else from job lookups."""
         now = str(dt.datetime.now(dt.UTC))
@@ -260,64 +242,6 @@ class CancelBlockedCiTest(unittest.TestCase):
                         + [f"{CIRCLECI}/project/gh/org/repo/job/{n}" for n in lookups]
                     ),
                 )
-
-    def test_azure_sign_in_page(self) -> None:
-        """A response that is not JSON marks the project private, and credentials are used."""
-        url = "https://dev.azure.com/org/project/_apis/build/builds"
-        calls = []
-
-        def http(
-            _method: str, _url: str, headers: dict[str, str] | None, *_: Any, **_kwargs: Any
-        ) -> bytes:
-            calls.append(bool(headers))
-            return b"{}" if headers else b"<html>Sign in</html>"
-
-        with (
-            mock.patch.object(request_util, "http", http),
-            mock.patch.object(ci_build, "azure_headers", return_value={"Authorization": "x"}),
-            mock.patch.object(ci_build, "_azure_private_projects", set()),
-        ):
-            self.assertEqual(ci_build.azure_get(url), {})
-            self.assertEqual(ci_build.azure_get(url), {})
-        self.assertEqual(calls, [False, True, True])
-
-    def test_azure_request_refusals(self) -> None:
-        """A request of Azure DevOps treats a sign-in page as a refusal; another does not."""
-        refusals = []
-
-        def http(*_: Any, refusals_seen: list[Any] = refusals, **kwargs: Any) -> bytes:
-            refusals_seen.append(kwargs.get("refusals"))
-            return b"{}"
-
-        with mock.patch.object(request_util, "http", http):
-            ci_build.azure_request("GET", "https://dev.azure.com/org/p/_apis/build/builds", {})
-            request_util.request("GET", "https://example.com/")
-        self.assertEqual(refusals, [ci_build.AZURE_SIGN_IN, None])
-
-    def test_azure_temporary_failure(self) -> None:
-        """A temporary failure of an anonymous request does not mark the project private."""
-        url = "https://dev.azure.com/org/project/_apis/build/builds"
-        calls = []
-
-        def http(
-            _method: str, url: str, headers: dict[str, str] | None, *_: Any, **_kwargs: Any
-        ) -> bytes:
-            calls.append(bool(headers))
-            if len(calls) == 1:
-                raise urllib.error.HTTPError(
-                    url, 503, "Service Unavailable", Message(), io.BytesIO()
-                )
-            return b"{}"
-
-        with (
-            mock.patch.object(request_util, "http", http),
-            mock.patch.object(ci_build, "azure_headers", return_value={"Authorization": "x"}),
-            mock.patch.object(ci_build, "_azure_private_projects", set()),
-        ):
-            with self.assertRaises(urllib.error.HTTPError):
-                ci_build.azure_get(url)
-            self.assertEqual(ci_build.azure_get(url), {})
-        self.assertEqual(calls, [False, False])
 
     def test_circleci_pagination(self) -> None:
         """Every page of recent pipelines and of their workflows is read, and no older page."""

@@ -101,7 +101,7 @@ def azure_headers() -> dict[str, str]:
                 "tsv",
             ]
         ).strip()
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.SubprocessError):  # no `az`, no login, or a timeout
         return {}
     return {"Authorization": f"Bearer {token}"} if token else {}
 
