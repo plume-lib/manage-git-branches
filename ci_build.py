@@ -420,8 +420,8 @@ def circleci_project_of_url(url: str) -> str | None:
 ###
 
 
-class GithubActionsRunUrl(NamedTuple):
-    """The workflow run and job that the URL of a GitHub Actions run or job shows.
+class GithubActionsRunUrlParts(NamedTuple):
+    """The parts of the URL of a GitHub Actions workflow run or of one of its jobs.
 
     For example, "https://github.com/ORG/REPO/actions/runs/123/job/456" shows repository
     "ORG/REPO", run 123, and job 456.
@@ -438,15 +438,15 @@ class GithubActionsRunUrl(NamedTuple):
     job: int | None
 
     @classmethod
-    def from_url(cls, url: str) -> GithubActionsRunUrl | None:
-        """Return the GitHub Actions workflow run and job that url shows.
+    def from_url(cls, url: str) -> GithubActionsRunUrlParts | None:
+        """Return the parts of the given URL of a GitHub Actions workflow run or job.
 
         Args:
             url: any URL.  This method recognizes the URL of a GitHub Actions workflow
                 run or of one of its jobs, as GITHUB_ACTIONS_RUN documents.
 
         Returns:
-            The run and job, or None if url is not the URL of a GitHub Actions run.
+            The parts, or None if url is not the URL of a GitHub Actions run.
         """
         if match := GITHUB_ACTIONS_RUN.match(url):
             return cls(match[1], int(match[2]), int(match[3]) if match[3] else None)

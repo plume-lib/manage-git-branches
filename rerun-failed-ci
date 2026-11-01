@@ -424,7 +424,7 @@ class Rerunner:
         Args:
             url: a URL of an Azure Pipelines build, or of one of its jobs.
         """
-        parsed = ci_build.AzureBuildUrl.from_url(url)
+        parsed = ci_build.AzureBuildUrlParts.from_url(url)
         if parsed is None:
             self.warn(f"cannot find an Azure Pipelines build in {url}")
             return
@@ -557,19 +557,20 @@ class Rerunner:
             url: a URL of a CircleCI workflow, or of a job.
             whole_workflow: True if a URL that names a job names the jobs of its workflow.
         """
+        parsed = ci_build.CircleciUrlParts.from_url(url)
         try:
-            parsed = ci_build.CircleciWorkflowAndJob.from_url(url)
+            workflow = parsed.lookup_workflow() if parsed else None
         except request_util.REQUEST_ERRORS as e:
             self.warn(f"cannot read CircleCI job {url}: {request_util.failure(e)}")
             return
-        if parsed.workflow is None:
+        if parsed is None or workflow is None:
             self.warn(f"cannot find a CircleCI workflow in {url}")
             return
         job = None if whole_workflow else parsed.job
         if job is not None:
-            self.circleci_rerun_failed(parsed.workflow, job)
-        elif self.record_if_unexamined(("circleci", parsed.workflow)):
-            self.circleci_rerun_failed(parsed.workflow)
+            self.circleci_rerun_failed(workflow, job)
+        elif self.record_if_unexamined(("circleci", workflow)):
+            self.circleci_rerun_failed(workflow)
 
     ###########################################################################
     ### GitHub Actions
@@ -681,7 +682,7 @@ class Rerunner:
             url: a URL of a GitHub Actions workflow run, or of a job.
             whole_run: True if a URL that names a job names the jobs of its run.
         """
-        parsed = ci_build.GithubActionsRunUrl.from_url(url)
+        parsed = ci_build.GithubActionsRunUrlParts.from_url(url)
         if parsed is None:
             self.warn(f"cannot find a GitHub Actions workflow run in {url}")
             return
@@ -706,11 +707,11 @@ class Rerunner:
         Returns:
             True if url is the URL of a supported CI service.
         """
-        if ci_build.AzureBuildUrl.from_url(url) is not None:
+        if ci_build.AzureBuildUrlParts.from_url(url) is not None:
             self.azure_rerun_failed_url(url)
-        elif ci_build.CircleciUrl.from_url(url) is not None:
+        elif ci_build.CircleciUrlParts.from_url(url) is not None:
             self.circleci_rerun_failed_url(url, whole_workflow)
-        elif ci_build.GithubActionsRunUrl.from_url(url) is not None:
+        elif ci_build.GithubActionsRunUrlParts.from_url(url) is not None:
             self.gha_rerun_failed_url(url, whole_workflow)
         else:
             return False
