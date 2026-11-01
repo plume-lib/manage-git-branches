@@ -154,6 +154,11 @@ The commands are:
   whitespace and using the patience diff algorithm.
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
+* [`normalize-log`](normalize-log) `[FILE]...`:
+  Prints each CI log (by default, standard input) without the formatting that
+  a CI service or a terminal adds:  a leading byte order mark, a leading
+  timestamp (as in a GitHub Actions or Azure Pipelines log), terminal escape
+  sequences, and carriage returns.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
