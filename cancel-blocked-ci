@@ -1022,7 +1022,7 @@ def blocked_pr_runs(pr, runs, on_shared_branch):
     Returns:
         A list of the runs.
     """
-    events = {"pull_request"} if on_shared_branch else GITHUB_REDUNDANT_EVENTS
+    events = {"pull_request"} if on_shared_branch else {"pull_request", "push"}
     branch_runs = runs.get((pr["owner"].lower(), pr["headRefName"]), [])
     return [r for r in branch_runs if r["event"] in events]
 
