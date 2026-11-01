@@ -78,36 +78,28 @@ fi
 # shellcheck source=common-functions.sh
 . "${SCRIPT_DIR}/common-functions.sh"
 
-# The options to pass to `git-push-to`.  Each is one of the fixed words that
-# this loop accepts, none of which contains whitespace, so they can be kept in
-# a whitespace-separated string.
-push_to_options=''
-while [ "$#" -ge 1 ]; do
-  case "$1" in
-    --nocompile) push_to_options="${push_to_options} $1" ;;
+# Check the options, which `git-push-to` receives unchanged.  The loop leaves
+# the first argument that is not an option in ${other_dir}, which must be the
+# last argument.
+option_count=0
+other_dir=''
+for argument in "$@"; do
+  case "${argument}" in
+    --nocompile) ;;
     *)
-      if ! parse_llm_option "$1"; then break; fi
-      push_to_options="${push_to_options} $1"
+      if ! parse_llm_option "${argument}"; then
+        other_dir="${argument}"
+        break
+      fi
       ;;
   esac
-  shift
+  option_count=$((option_count + 1))
 done
 
-if [ "$#" -ne 1 ]; then
+if [ "$#" -ne $((option_count + 1)) ]; then
   echo "Usage: ${SCRIPT_NAME} [--nocompile] ${llm_options_usage} OTHER-REPO-DIR" >&2
   exit 1
 fi
-
-# Prints the absolute pathname of the given directory, with symbolic links
-# resolved.  Prints nothing and returns nonzero if the directory cannot be
-# canonicalized, which the callers below diagnose.
-# `realpath` would be simpler, but POSIX added it only in 2024 and some systems
-# still lack it, whereas `cd` and `pwd -P` are portable.  `cd` writes its own
-# diagnostic when it fails; discard it, because the callers below write a
-# better one.
-absolute_path() {
-  (CDPATH='' cd -- "$1" && pwd -P) 2> /dev/null
-}
 
 # Like each argument of `git-push-to`, the current directory must be the top
 # level of a clone.  Diagnose that here rather than leaving it to `git-push-to`,
@@ -127,7 +119,7 @@ fi
 # through a symbolic link that `git rev-parse --show-toplevel` resolved.
 # Canonicalize what git printed as well, rather than depending on git to have
 # done so; git documents the pathname as absolute but not as physical.
-if [ "$(pwd -P)" != "$(absolute_path "${toplevel}")" ]; then
+if [ "$(pwd -P)" != "$(physical_path "${toplevel}" 2> /dev/null)" ]; then
   echo "${SCRIPT_NAME}: not the top level of a git working tree: $(pwd)" >&2
   echo "${SCRIPT_NAME}: its top level is: ${toplevel}" >&2
   exit 1
@@ -140,26 +132,29 @@ fi
 # Canonicalize the argument before running `git` in it:  `git -C` fails on a
 # directory that cannot be entered, so without this test such a directory would
 # be reported as not being a clone, which is not what is known about it.
-other_physical="$(absolute_path "$1")"
-if [ ! -d "$1" ]; then
-  echo "${SCRIPT_NAME}: no such directory: $1" >&2
+# `physical_path` prints nothing if it cannot canonicalize the directory,
+# which is diagnosed below; its own diagnostic is discarded, because the one
+# below is better.
+other_physical="$(physical_path "${other_dir}" 2> /dev/null)"
+if [ ! -d "${other_dir}" ]; then
+  echo "${SCRIPT_NAME}: no such directory: ${other_dir}" >&2
   exit 1
 fi
 if [ -z "${other_physical}" ]; then
-  echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
+  echo "${SCRIPT_NAME}: cannot canonicalize: ${other_dir}" >&2
   exit 1
 fi
-if ! other_toplevel="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" \
+if ! other_toplevel="$(git -C "${other_dir}" rev-parse --show-toplevel 2> /dev/null)" \
   || [ -z "${other_toplevel}" ]; then
-  echo "${SCRIPT_NAME}: not the top level of a git working tree: $1" >&2
+  echo "${SCRIPT_NAME}: not the top level of a git working tree: ${other_dir}" >&2
   exit 1
 fi
 # As above, compare physical pathnames, canonicalizing both.
-if [ "${other_physical}" != "$(absolute_path "${other_toplevel}")" ]; then
-  echo "${SCRIPT_NAME}: not the top level of a git working tree: $1" >&2
+if [ "${other_physical}" != "$(physical_path "${other_toplevel}" 2> /dev/null)" ]; then
+  echo "${SCRIPT_NAME}: not the top level of a git working tree: ${other_dir}" >&2
   echo "${SCRIPT_NAME}: its top level is: ${other_toplevel}" >&2
   exit 1
 fi
 
-# shellcheck disable=SC2086 # Split ${push_to_options} into options.
-exec "${SCRIPT_DIR}"/git-push-to ${push_to_options} "$1" .
+# "$@" is the options followed by OTHER-REPO-DIR.
+exec "${SCRIPT_DIR}"/git-push-to "$@" .

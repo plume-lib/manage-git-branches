@@ -93,12 +93,23 @@ The commands are:
   has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
   directories form one more chain per PROJECT.
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
-  When a merge has conflicts that `git rerere` does not resolve, it
-  asks Claude (or, with `--codex`, Codex) to edit the conflicted hunks.  It
-  checks that nothing outside the conflict regions changed and that no
-  conflict marker remains, commits the merge, and continues.  If the build
-  fails, it asks the agent to fix it, up to 3 times, and commits the fix.
-  `--no-llm` turns this off; `--llm`, `--claude`, and `--codex` turn it on.
+  When a merge has conflicts, it uses the resolutions that `git rerere`
+  recorded, and it asks an AI agent, Claude (or, with `--codex`, Codex), to
+  edit the conflicted hunks that rerere does not resolve.  It checks every
+  resolution, whether from rerere or from the agent:  that nothing outside
+  the conflict regions changed and that no conflict marker remains.  Then
+  it commits the merge and continues.
+  If the build fails, it asks the agent to fix it, up to 3 times, and
+  commits the fix.
+  `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
+  on.
+  The agent runs in a sandbox, which requires a recent version:  Claude
+  Code with the `--restricted` option and the setting
+  `permissions.blockReadsOutsideWorkingDirectories`, or Codex with
+  permission profiles (the setting `default_permissions`).  Claude Code
+  2.1.316 and Codex 0.165.0 work.  The sandbox lets the agent read every
+  file of the working tree, including ignored files such as `.env`, and the
+  repository.
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]
   FROM_DIR TO_DIR ...`:
@@ -112,8 +123,9 @@ The commands are:
   `[--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
-  succeeds.  It asks an AI agent to resolve conflicts and to fix a failed
-  build, as `git-push-to` does, and it accepts the same `--llm`, `--no-llm`,
+  succeeds.  It handles conflicts and a failed build as `git-push-to` does,
+  using `git rerere` and an AI agent, and it accepts the same `--llm`,
+  `--no-llm`,
   `--claude`, and `--codex` options.
   OTHER-REPO-DIR and the current directory must both be the top level of a
   working tree and must each have an upstream branch.
@@ -126,8 +138,9 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of `upstream`.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
-  It asks an AI agent to resolve conflicts and to fix a failed build, as
-  `git-push-to` does, and it accepts the same `--llm`, `--no-llm`, `--claude`,
+  It handles conflicts and a failed build as `git-push-to` does, using
+  `git rerere` and an AI agent, and it accepts the same `--llm`, `--no-llm`,
+  `--claude`,
   and `--codex` options.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
@@ -203,6 +216,11 @@ takes effect when it is set to a non-empty value.
 * `MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT`: `git-push-to`,
   `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` skip the
   compilation step, and push whenever the merge succeeds.
+* `MANAGE_GIT_BRANCHES_LLM_TIMEOUT`: the number of seconds that `git-push-to`,
+  `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` let an AI agent
+  run when it resolves merge conflicts.  An agent that runs longer is stopped,
+  and the merge is left in progress.  The default is 1800 (30 minutes); 0
+  means no limit.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
