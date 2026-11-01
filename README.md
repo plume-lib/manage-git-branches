@@ -154,6 +154,13 @@ The commands are:
   whitespace and using the patience diff algorithm.
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
+* [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:
+  Cancels the unfinished GitHub Actions, Azure Pipelines, and CircleCI builds
+  of each blocked pull request (one that depends on another open pull
+  request), and each build that a more recent build of the same branch makes
+  redundant.  Run it in the directory that holds the documents that
+  `pr-status.py` generates; it uses `pr-status.py` to find the blocked pull
+  requests.  This command needs Python 3.11 or later and `gh`.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
@@ -183,6 +190,14 @@ takes effect when it is set to a non-empty value.
   compilation step, and push whenever the merge succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
+* `CIRCLECI_CLI_TOKEN`: `cancel-blocked-ci` uses this CircleCI API token,
+  which cancelling a CircleCI workflow requires.  If it is not set, it uses
+  the `token` in `~/.circleci/cli.yml` or (for the snap package)
+  `~/snap/circleci/current/.circleci/cli.yml`, which `circleci setup` writes.
+* `AZURE_DEVOPS_EXT_PAT`: `cancel-blocked-ci` uses this Azure DevOps personal
+  access token, which cancelling an Azure Pipelines build, or reading a
+  private project, requires.  The token needs the "Build (Read & execute)"
+  scope.  If it is not set, it uses the account that `az login` logged in.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
   `git-orphaned-branches`, `git-new-branch`, `git-checkout-branch`, and
   `git-push-to` use these standard Git variables to select the SSH command
