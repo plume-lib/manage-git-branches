@@ -870,8 +870,8 @@ upstream_default_branch_git() {
 
 ## Usage: check_conflict_resolution FILE
 ## Checks the resolution of the conflicts in FILE, a file of the current
-## working tree, against AUTO_MERGE, git's automatic merge, which contains the
-## conflict markers.  A conflict region starts with a line "<<<<<<<" and ends
+## working tree, against AUTO_MERGE, the git ref that names git's automatic
+## merge, which contains the conflict markers.  A conflict region starts with a line "<<<<<<<" and ends
 ## with the matching line ">>>>>>>"; a recursive merge nests regions.  The
 ## resolution is acceptable if it consists of the text outside the conflict
 ## regions, unchanged and in order, with any text in place of each region,
@@ -1047,7 +1047,7 @@ $(printf '%s\n' "${resolve_unresolved}" | sed -e 's/^/  /')
 
 Resolve every conflict by editing those files.  Rules:
 
-* Edit only the conflict regions, each of which starts with a line \"<<<<<<<\" and ends with a line \">>>>>>>\".  Remove every conflict marker line.  Do not change any other part of any file, even of a file that has conflicts:  git merged the rest cleanly.
+* Edit only the conflict regions, each of which starts with a line \"<<<<<<<\" and ends with a line \">>>>>>>\".  A region holds the text of ${resolve_branch}, then after a line \"|||||||\" the text of the merge base, then after a line \"=======\" the text being merged in.  Remove every conflict marker line.  Do not change any other part of any file, even of a file that has conflicts:  git merged the rest cleanly.
 * Do not resolve a file by taking one side wholesale.  Combine the intent of both sides.  To learn each side's intent, read the history, for example with \`git log --merge -p -- FILE\`, \`git diff HEAD...MERGE_HEAD -- FILE\` (the changes being merged in), and \`git diff MERGE_HEAD...HEAD -- FILE\` (the changes on ${resolve_branch}).
 * Do not run any git command that changes the index, HEAD, or any other ref, such as \`git add\`, \`git commit\`, \`git checkout\`, \`git restore\`, \`git reset\`, \`git merge\`, \`git stash\`, or \`git rebase\`.  A script stages the files and commits the merge after you finish.
 * Run commands in the current directory, which is the working tree, without \`cd\` or \`git -C\`.  A command in another form needs approval, which nobody is present to give.
@@ -1346,7 +1346,10 @@ merge_build_push() {
   # `--no-log` prevents a second copy of the commit summaries:  `git merge`
   # appends them to a message given with `-m` when `merge.log` is set, and
   # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
-  if ! git merge -q --no-edit --no-log -m "${merge_message}" "$1"; then
+  # The "diff3" conflict style puts the merge base's text in each conflict
+  # region, which helps whoever resolves it.
+  if ! git -c merge.conflictStyle=diff3 merge -q --no-edit --no-log \
+    -m "${merge_message}" "$1"; then
     echo "${SCRIPT_NAME}: problem merging $3 into $(pwd)" >&2
     # A failed merge without MERGE_HEAD did not start, for example because it
     # would overwrite a modified file; there are no conflicts to resolve.
