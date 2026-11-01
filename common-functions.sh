@@ -1530,33 +1530,23 @@ build_logged() {
   return "${build_logged_status:-1}"
 }
 
-## Usage: build_and_fix AGENT MESSAGE ACCOUNT
-## Builds the current directory, the top level of a working tree, with
-## `compile-project`.  If the build fails, asks the AI agent AGENT ("claude"
-## or "codex"), if it can be run, to fix it, without building, then builds
-## again; it makes up to ${build_fix_attempts} attempts.  The agent's
-## instructions begin with ACCOUNT, which says what might have broken the
-## build and which commands show it, such as "Branch feature has commits that
-## the remote branch refs/remotes/origin/feature lacks, among them merges ...".
-## Once the build succeeds, commits the agent's changes, if any, with the
-## message MESSAGE, such as "Fix the build after merging branch 'main'".
-## Returns 1, after printing a diagnostic, if the build still fails; the
-## agent's changes then remain, staged but not committed.
+## Usage: fix_failed_build AGENT LOG MESSAGE ACCOUNT
+## Asks the AI agent AGENT ("claude" or "codex") to fix the build of the
+## current directory, the top level of a working tree, which failed with the
+## output in the file LOG, without building; then builds again with
+## `compile-project`, writing the output to LOG.  It makes up to
+## ${build_fix_attempts} attempts.  The agent's instructions begin with
+## ACCOUNT, which says what might have broken the build and which commands
+## show it, such as "The script just merged commit 1a2b3c4d into branch
+## feature.  Branch feature has commits that ...".  Once the build succeeds,
+## commits the agent's changes, if any, with the message MESSAGE, such as
+## "Fix the build after merging branch 'main'".  Returns 1, after printing a
+## diagnostic, if the build still fails; the agent's changes then remain,
+## staged but not committed.
 build_fix_attempts=3
-build_and_fix() {
+fix_failed_build() {
   fix_with="$1"
-  if ! fix_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-build.log)"; then
-    echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
-    return 1
-  fi
-  if build_logged "${fix_log}"; then
-    return 0
-  fi
-  echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
-  # Without the agent, stop as with "--no-llm".
-  if ! agent_available "${fix_with}"; then
-    return 1
-  fi
+  fix_log="$2"
   # The agent's changes are committed below, and so would be any change that
   # the build made to tracked files.
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
@@ -1575,7 +1565,7 @@ build_and_fix() {
 Earlier attempts to fix the build changed files, but the build still failed.  Their changes are staged; \`git diff --cached\` shows them."
     fi
     fix_prompt="You are fixing a failed build in the git working tree $(pwd).
-$3  A script then built the project, which failed.  The end of the build output is below; the full output is in ${fix_log}.${fix_earlier}
+$4  A script then built the project, which failed.  The end of the build output is below; the full output is in ${fix_log}.${fix_earlier}
 
 Rules:
 
@@ -1643,7 +1633,7 @@ $(tail -n 100 "${fix_log}")"
     fi
     fix_attempt=$((fix_attempt + 1))
   done
-  if ! printf '%s\n' "$2" | git commit -q --cleanup=whitespace -F -; then
+  if ! printf '%s\n' "$3" | git commit -q --cleanup=whitespace -F -; then
     echo "${SCRIPT_NAME}: cannot commit the changes of ${fix_with} in $(pwd)" >&2
     return 1
   fi
@@ -1755,34 +1745,63 @@ upstream_description() {
 ## Usage: remote_branch_refs DIRECTORY
 ## Prints the full names, separated by spaces, of the remote-tracking branches
 ## that the branch checked out in DIRECTORY pushes to and pulls from, such as
-## "refs/remotes/origin/feature".  Omits any that does not exist, and prints
-## each only once.  If the branch pushes to a remote other than the one that
-## it pulls from, first fetches the remote that it pushes to, because `git
-## pull` fetches only the remote that it pulls from; if that fetch fails,
-## prints a warning and uses the remote-tracking branch as it is.
+## "refs/remotes/origin/feature".  Omits any that does not exist or that is a
+## local branch rather than a remote-tracking branch, and prints each only
+## once.  If the branch pushes to a remote other than the one that it pulls
+## from, first fetches the branch that it pushes to, because `git pull`
+## fetches only the remote that it pulls from; if that fetch fails, prints a
+## warning and uses the remote-tracking branch as it is.
 remote_branch_refs() {
   remote_refs_list=''
   if remote_refs_branch="$(git -C "$1" symbolic-ref --quiet HEAD)" \
     && remote_refs_push="$(git -C "$1" rev-parse --symbolic-full-name '@{push}' 2> /dev/null)" \
     && git -C "$1" rev-parse --verify --quiet "${remote_refs_push}" > /dev/null; then
     remote_refs_push_remote="$(git -C "$1" for-each-ref --format='%(push:remotename)' "${remote_refs_branch}")"
-    if [ -n "${remote_refs_push_remote}" ] \
-      && [ "${remote_refs_push_remote}" != "$(git -C "$1" for-each-ref --format='%(upstream:remotename)' "${remote_refs_branch}")" ] \
-      && ! git -C "$1" fetch -q "${remote_refs_push_remote}"; then
-      echo "${SCRIPT_NAME}: cannot fetch ${remote_refs_push_remote} in $1; ${remote_refs_push} might be out of date" >&2
-    fi
+    # `%(push:remoteref)` is empty unless the remote has push refspecs; then
+    # the branch pushes to the branch of the same name.
+    remote_refs_push_branch="$(git -C "$1" for-each-ref --format='%(push:remoteref)' "${remote_refs_branch}")"
+    case "${remote_refs_push}" in
+      refs/remotes/*)
+        if [ -n "${remote_refs_push_remote}" ] \
+          && [ "${remote_refs_push_remote}" != "$(git -C "$1" for-each-ref --format='%(upstream:remotename)' "${remote_refs_branch}")" ] \
+          && ! git -C "$1" fetch -q "${remote_refs_push_remote}" \
+            "+${remote_refs_push_branch:-${remote_refs_branch}}:${remote_refs_push}" < /dev/null; then
+          echo "${SCRIPT_NAME}: cannot fetch ${remote_refs_push#refs/remotes/} in $1; it might be out of date" >&2
+        fi
+        ;;
+    esac
   fi
   for remote_refs_kind in push upstream; do
     if remote_refs_ref="$(git -C "$1" rev-parse --symbolic-full-name "@{${remote_refs_kind}}" 2> /dev/null)" \
-      && [ -n "${remote_refs_ref}" ] \
       && git -C "$1" rev-parse --verify --quiet "${remote_refs_ref}" > /dev/null; then
       case " ${remote_refs_list} " in
         *" ${remote_refs_ref} "*) ;;
-        *) remote_refs_list="${remote_refs_list:+${remote_refs_list} }${remote_refs_ref}" ;;
+        *)
+          case "${remote_refs_ref}" in
+            refs/remotes/*) remote_refs_list="${remote_refs_list:+${remote_refs_list} }${remote_refs_ref}" ;;
+          esac
+          ;;
       esac
     fi
   done
   printf '%s\n' "${remote_refs_list}"
+}
+
+## Usage: built_commits DIRECTORY
+## Prints, separated by spaces, the merge base of the branch checked out in
+## DIRECTORY with each remote-tracking branch that it pushes to and pulls
+## from (see `remote_branch_refs`), such as
+## "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b".  The histories of those
+## commits were built where they were pushed.  The commits are in the
+## branch's history, so every repository that has the branch has them.
+built_commits() {
+  built_list=''
+  for built_ref in $(remote_branch_refs "$1"); do
+    if built_commit="$(git -C "$1" merge-base HEAD "${built_ref}")"; then
+      built_list="${built_list:+${built_list} }${built_commit}"
+    fi
+  done
+  printf '%s\n' "${built_list}"
 }
 
 ## Usage: has_unbuilt_merge BUILT
@@ -1793,7 +1812,7 @@ remote_branch_refs() {
 ## the build if all of these hold:
 ##  * the current branch has a merge commit that is in the history of none of
 ##    the remote branches that the current branch pushes to and pulls from
-##    (see `remote_branch_refs`) and the commits in BUILT,
+##    (see `remote_branch_refs`), if any, and the commits in BUILT,
 ##  * that merge commit's tree differs from each of its parents' trees, so
 ##    that the merge combined changes, and
 ##  * the current branch's tree differs from those remote branches' and
@@ -1810,9 +1829,6 @@ remote_branch_refs() {
 ## already had.  Prints a diagnostic if it returns 1 because git fails.
 has_unbuilt_merge() {
   merge_fix_remotes="$(remote_branch_refs .)"
-  if [ -z "${merge_fix_remotes}" ]; then
-    return 1
-  fi
   merge_fix_built=''
   for merge_fix_commit in $1; do
     if git rev-parse --verify --quiet "${merge_fix_commit}^{commit}" > /dev/null; then
@@ -1870,26 +1886,26 @@ has_unbuilt_merge() {
 }* ${merge_fix_abbrev} ${merge_fix_subject}"
     fi
   done
-${merge_fix_log}
-EOF
   if [ -z "${merge_fix_subjects}" ]; then
     return 1
   fi
   merge_fix_branch="$(git symbolic-ref --quiet --short HEAD)" || merge_fix_branch=HEAD
   case "${merge_fix_remotes}" in
-    *' '*) merge_fix_lack="the remote branches $(printf '%s' "${merge_fix_remotes}" | sed -e 's/ / and /') lack" ;;
-    *) merge_fix_lack="the remote branch ${merge_fix_remotes} lacks" ;;
+    '') merge_fix_lack="Git cannot name a remote branch that branch ${merge_fix_branch} pushes to or pulls from, so its commits might not have been built" ;;
+    *' '*) merge_fix_lack="Branch ${merge_fix_branch} has commits that the remote branches $(printf '%s' "${merge_fix_remotes}" | sed -e 's/ / and /') lack" ;;
+    *) merge_fix_lack="Branch ${merge_fix_branch} has commits that the remote branch ${merge_fix_remotes} lacks" ;;
   esac
   if [ -n "${merge_fix_built}" ]; then
     merge_fix_other="other than those in the history of ${merge_fix_built}, which were built elsewhere"
   else
     merge_fix_other=''
   fi
-  merge_fix_account="Branch ${merge_fix_branch} has commits that ${merge_fix_lack}${merge_fix_other:+, ${merge_fix_other}}.  Among them are these merges, oldest first, any of which might have combined changes that do not fit together:
+  merge_fix_excluded="${merge_fix_remotes}${merge_fix_remotes:+${merge_fix_built:+ }}${merge_fix_built}"
+  merge_fix_account="${merge_fix_lack}${merge_fix_other:+, ${merge_fix_other}}.  Among those commits are these merges, oldest first, any of which might have combined changes that do not fit together:
 
 ${merge_fix_list}
 
-\`git log --graph --stat HEAD --not ${merge_fix_remotes}${merge_fix_built:+ ${merge_fix_built}}\` lists those commits, and for a merge M among them, \`git diff M^1 M\` shows what merging changed."
+\`git log --graph --stat HEAD${merge_fix_excluded:+ --not ${merge_fix_excluded}}\` lists those commits, and for a merge M among them, \`git diff M^1 M\` shows what merging changed."
   # `git merge` writes a subject such as "Merge branch 'main' into feature",
   # and on the default branch it omits " into feature".
   case "${merge_fix_subjects}" in
@@ -1911,7 +1927,7 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
   return 0
 }
 
-## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [BUILT]]
+## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [BUILT [DIRECTORY]]]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
 ## pushes the current branch if the build succeeds.  DESCRIPTION is what
@@ -1919,14 +1935,16 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
 ## "remote-tracking branch 'upstream/master'".  SOURCE names COMMIT in
 ## diagnostics.  If the merge has conflicts, `resolve_merge_conflicts`
 ## resolves them, asking RESOLVER, if it is given and not empty, about any
-## that `git rerere` did not resolve.  If the build fails, `build_and_fix`
-## asks RESOLVER, if it is given and not empty, to fix it, but only if a
-## merge on the current branch might have broken the build, as
-## `has_unbuilt_merge BUILT` determines.  BUILT is a list of commits,
-## separated by spaces, whose histories were built elsewhere, such as
-## "refs/remotes/upstream/main".  The merge commit can be the one that this
-## call made, one that a pull made, or one that an earlier call made but did
-## not push, as when its build failed.
+## that `git rerere` did not resolve.  If the build fails,
+## `fix_failed_build` asks RESOLVER, if it is given and not empty, to fix
+## it, but only if a merge on the current branch might have broken the
+## build, as `has_unbuilt_merge` determines.  Its argument is BUILT, a list
+## of commits, separated by spaces, whose histories were built elsewhere,
+## such as "refs/remotes/upstream/main", together with the `built_commits`
+## of DIRECTORY, a working tree such as the one that COMMIT comes from, if
+## DIRECTORY is given and not empty.  The merge commit can be the one that
+## this call made, one that a pull made, or one that an earlier call made
+## but did not push, as when its build failed.
 ## Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
@@ -1997,9 +2015,30 @@ merge_build_push() {
   fi
 
   if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
-    if [ -n "${5:-}" ] && has_unbuilt_merge "${6:-}"; then
+    if ! merge_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-build.log)"; then
+      echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
+      return 1
+    fi
+    if ! build_logged "${merge_log}"; then
+      echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
+      # Without the agent, stop as with "--no-llm".  Whether a merge might
+      # have broken the build is decided only now, because deciding can
+      # fetch.
+      if [ -z "${5:-}" ] || ! agent_available "$5"; then
+        return 1
+      fi
+      merge_built="${6:-}"
+      if [ -n "${7:-}" ]; then
+        merge_built="${merge_built}${merge_built:+ }$(built_commits "$7")"
+      fi
+      if ! has_unbuilt_merge "${merge_built}"; then
+        return 1
+      fi
       # What this call's merge did, for the agent.
-      merge_new_head="$(git rev-parse --verify HEAD)" || return 1
+      if ! merge_new_head="$(git rev-parse --verify HEAD)"; then
+        echo "${SCRIPT_NAME}: cannot read HEAD in $(pwd)" >&2
+        return 1
+      fi
       if [ "${merge_new_head}" = "${merge_old_head}" ]; then
         merge_did="Branch ${merge_fix_branch} already contained commit $1, so the script's merge of it changed nothing."
       elif [ "${merge_new_head}" = "$(git rev-parse --verify --quiet "$1^{commit}")" ]; then
@@ -2007,12 +2046,9 @@ merge_build_push() {
       else
         merge_did="The script just merged commit $1 into branch ${merge_fix_branch}."
       fi
-      if ! build_and_fix "$5" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
+      if ! fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
         return 1
       fi
-    elif ! "${SCRIPT_DIR}"/compile-project; then
-      echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
-      return 1
     fi
   fi
 

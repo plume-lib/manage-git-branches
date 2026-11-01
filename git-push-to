@@ -412,17 +412,6 @@ git_push_to() {
   if ! pull_resolving "${llm_agent}" "${from_absolute}" -q; then
     return 1
   fi
-  # The commits of the remote branches that FROM_DIR's branch pushes to and
-  # pulls from.  Their histories were built where they were pushed, so a
-  # failed build of TO_DIR does not ask the agent about their merges.
-  # FROM_DIR's own merges, such as the one that the pull just made, are not
-  # among them.
-  from_built=''
-  for from_remote in $(remote_branch_refs "${from_absolute}"); do
-    if from_commit="$(git -C "${from_absolute}" rev-parse --verify --quiet "${from_remote}^{commit}")"; then
-      from_built="${from_built:+${from_built} }${from_commit}"
-    fi
-  done
 
   orig_dir=$(pwd)
 
@@ -461,10 +450,14 @@ git_push_to() {
   # ../myrepo-branch-feature into main", and would head the commit summaries
   # that `merge.log` turns on with "* 'feature' of ../myrepo-branch-feature:".
   # `merge_build_push` describes the commit as a branch of this repository.
+  # The histories of the remote branches that FROM_DIR's branch pushes to and
+  # pulls from were built where they were pushed, so a failed build of TO_DIR
+  # does not ask the agent about their merges.  FROM_DIR's own merges, such
+  # as the one that the pull just made, are not among them.
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
     "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}" \
-    "${from_built}"; then
+    '' "${from_absolute}"; then
     return 1
   fi
 
