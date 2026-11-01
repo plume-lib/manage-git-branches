@@ -84,20 +84,62 @@ class CancelBlockedCiTest(unittest.TestCase):
             self.assertEqual(cm.exception.code, 2)
 
     def test_azure_projects(self) -> None:
-        """The Azure Pipelines projects come from the checks of the default branch and of PRs."""
-        checks = {
-            "HEAD": [Check("completed", "ci", "https://github.com/org/repo/actions/runs/1")],
-            # A commit status, not a check run, as from an OAuth service connection.
-            "pr1": [Check("pending", "ci", "https://dev.azure.com/org/p/_build/results?buildId=7")],
-            "pr2": [
-                Check("completed", "ci", "https://org2.visualstudio.com/q/_build/results?buildId=8")
-            ],
+        """Each Azure Pipelines project comes from a build URL, in either form."""
+        urls = [
+            "https://github.com/org/repo/actions/runs/1",
+            "https://dev.azure.com/org/p/_build/results?buildId=7",
+            "https://dev.azure.com/org/p/_build/results?buildId=9",
+            "https://org2.visualstudio.com/q/_build/results?buildId=8",
+        ]
+        self.assertEqual(cancel_blocked_ci.azure_projects(urls), {("org", "p"), ("org2", "q")})
+
+    def test_check_urls(self) -> None:
+        """One GraphQL request finds the URLs, and a commit with over 100 checks uses REST."""
+        azure = "https://dev.azure.com/org/p/_build/results?buildId=7"
+        circleci = "https://app.circleci.com/pipelines/gh/org/repo/1/workflows/w"
+
+        def contexts(*nodes: dict[str, Any], more: bool = False) -> dict[str, Any]:
+            return {
+                "statusCheckRollup": {
+                    "contexts": {"pageInfo": {"hasNextPage": more}, "nodes": list(nodes)}
+                }
+            }
+
+        response = {
+            "data": {
+                "repository": {
+                    # A check run and a commit status, and a commit status without a URL.
+                    "c0": contexts(
+                        {"detailsUrl": azure}, {"targetUrl": circleci}, {"targetUrl": None}
+                    ),
+                    "c1": contexts({"detailsUrl": azure}, more=True),
+                    # A commit that GitHub does not have.
+                    "c2": None,
+                    # A commit without check runs or commit statuses.
+                    "c3": {"statusCheckRollup": None},
+                }
+            }
         }
-        with mock.patch.object(cancel_blocked_ci, "checks", lambda _gh, sha: checks[sha]):
-            self.assertEqual(
-                cancel_blocked_ci.azure_projects("org/repo", ["pr1", "pr2"]),
-                {("org", "p"), ("org2", "q")},
-            )
+        queries = []
+
+        def run(cmd: list[str]) -> str:
+            queries.append(cmd)
+            return json.dumps(response)
+
+        rest = [Check("completed", "ci", azure), Check("completed", "ci", circleci)]
+        with (
+            mock.patch.object(request_util, "run", run),
+            mock.patch.object(
+                cancel_blocked_ci, "checks", lambda _gh, sha: rest if sha == "pr1" else []
+            ),
+        ):
+            result = cancel_blocked_ci.check_urls("org/repo", ["HEAD", "pr1", "pr2", "pr3"])
+        self.assertEqual(len(queries), 1)
+        self.assertIn('c0: object(expression: "HEAD")', queries[0][-1])
+        self.assertEqual(
+            result,
+            {"HEAD": [azure, circleci], "pr1": [azure, circleci], "pr2": [], "pr3": []},
+        )
 
     def test_redundant_azure_builds(self) -> None:
         """A build that waits for a check of a stage makes no older build redundant.
@@ -181,13 +223,10 @@ class CancelBlockedCiTest(unittest.TestCase):
         with (
             mock.patch.object(request_util, "http", http),
             mock.patch.object(ci_build, "circleci_token", return_value="token"),
-            mock.patch.object(
-                cancel_blocked_ci,
-                "checks",
-                return_value=[Check("completed", "ci", "https://app.circleci.com/workflow/x")],
-            ),
         ):
-            result = cancel_blocked_ci.redundant_circleci_workflows("repo", "org/repo")
+            result = cancel_blocked_ci.redundant_circleci_workflows(
+                "repo", "org/repo", ["https://app.circleci.com/workflow/x"]
+            )
         self.assertEqual(sorted(requested), sorted([*pages, deleted]))
         self.assertEqual(
             [(build.key, reason) for _, build, reason in result],
@@ -280,6 +319,7 @@ class CancelBlockedCiTest(unittest.TestCase):
             with self.subTest(azure_get.__name__):
                 stderr = io.StringIO()
                 with (
+                    mock.patch.object(cancel_blocked_ci, "check_urls", return_value={"HEAD": []}),
                     mock.patch.object(
                         cancel_blocked_ci, "azure_projects", return_value={("org", "p")}
                     ),
@@ -297,6 +337,7 @@ class CancelBlockedCiTest(unittest.TestCase):
         """A response that is not JSON is reported, and the other CI services are examined."""
         stderr = io.StringIO()
         with (
+            mock.patch.object(cancel_blocked_ci, "check_urls", return_value={"HEAD": []}),
             mock.patch.object(cancel_blocked_ci, "azure_projects", return_value={("org", "p")}),
             mock.patch.object(
                 ci_build, "azure_get", side_effect=json.JSONDecodeError("not JSON", "<html>", 0)
