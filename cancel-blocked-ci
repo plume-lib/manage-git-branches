@@ -607,7 +607,7 @@ def azure_projects(gh, pr_shas):
         parsed[:2]
         for sha_checks in concurrently(lambda sha: checks(gh, sha), ["HEAD", *pr_shas])
         for check in sha_checks
-        if (parsed := ci_build.parse_azure_url(check.url))
+        if (parsed := ci_build.AzureBuildUrl.from_url(check.url))
     }
 
 
@@ -921,7 +921,7 @@ def redundant_circleci_workflows(label, gh):
         # A URL without a project slug is of the project that GitHub's OAuth app connects.
         ci_build.circleci_project_of_url(check.url) or f"gh/{gh}"
         for check in checks(gh, "HEAD")
-        if ci_build.parse_circleci_url(check.url) is not None
+        if ci_build.CircleciUrl.from_url(check.url) is not None
     }
     if projects:
         warn_if_no_circleci_token()
