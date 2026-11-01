@@ -1,4 +1,4 @@
-"""Access the builds of CI services:  GitHub Actions, Azure Pipelines, and CircleCI.
+"""Access the builds of CI services:  Azure Pipelines, CircleCI, and GitHub Actions.
 
 This module recognizes the URLs of builds and jobs, finds credentials, and makes
 requests of the services' APIs.
@@ -272,10 +272,8 @@ def circleci_items(path: str) -> Iterator[Any]:
     page_token = None
     while True:
         query = f"?page-token={urllib.parse.quote(page_token, safe='')}" if page_token else ""
-        page = request_util.request("GET", f"{CIRCLECI_API}{path}{query}", circleci_headers())
-        if not isinstance(page, dict):
-            msg = f"CircleCI returned {page!r} instead of a page of items for {path}"
-            raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
+        url = f"{CIRCLECI_API}{path}{query}"
+        page = request_util.json_object(request_util.request("GET", url, circleci_headers()), url)
         yield from page["items"]
         page_token = page.get("next_page_token")
         if not page_token:

@@ -5,15 +5,16 @@ Usage (run in the directory that holds the working copy directories):
   cancel-blocked-ci             # cancel the builds
   cancel-blocked-ci --dry-run   # report the builds that would be cancelled (alias: -n)
 
-A PR is blocked if it depends on another open PR.
+A blocked PR is one that depends on another open PR.
 
 The builds of a blocked PR are those of its head branch that the PR or a push
-started.  If the head branch is the repository's default branch (as for a PR that
-merges the default branch into a release branch), they are only the builds that the
-PR started.
+started.  If the head branch is a shared branch, they are only the builds that the
+PR started.  A shared branch is the repository's default branch (as for a PR that
+merges the default branch into a release branch), a protected branch, or the base
+branch of an open PR.
 
-The CI systems are GitHub Actions, Azure Pipelines, and CircleCI.  For Azure
-Pipelines and CircleCI, only the builds of each blocked PR's head commit are
+The supported CI systems are Azure Pipelines, CircleCI, and GitHub Actions.  For
+Azure Pipelines and CircleCI, only the builds of each blocked PR's head commit are
 cancelled.
 
 Cancelling a build requires credentials, as described in `ci_build.py`.
@@ -24,6 +25,7 @@ The exit status is 1 if finding or cancelling any build failed, and 0 otherwise.
 import argparse
 import collections.abc
 import concurrent.futures
+import contextlib
 import dataclasses
 import functools
 import importlib.machinery
@@ -58,14 +60,20 @@ def report_failure(message):
 def load_pr_status() -> types.ModuleType:
     """Import the pr-status script, whose name is not a legal module name.
 
+    The script is pr-status in the directory of this script, or else pr-status or
+    pr-status.py on the PATH.
+
     Returns:
         The imported module.
     """
     path = pathlib.Path(__file__).resolve().parent / "pr-status"
     if not path.exists():
-        found = shutil.which("pr-status.py")
+        found = shutil.which("pr-status") or shutil.which("pr-status.py")
         if found is None:
-            sys.exit(f"{PROGRAM}: cannot find pr-status or pr-status.py")
+            sys.exit(
+                f"{PROGRAM}: cannot find pr-status in {path.parent},"
+                " nor pr-status or pr-status.py on the PATH"
+            )
         path = pathlib.Path(found)
     loader = importlib.machinery.SourceFileLoader("pr_status", str(path))
     spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -79,19 +87,19 @@ def load_pr_status() -> types.ModuleType:
 pr_status = load_pr_status()
 
 
-# The statuses of unfinished GitHub Actions runs.
-GITHUB_UNFINISHED_STATUSES = ["queued", "in_progress", "waiting", "requested", "pending"]
 # The statuses of Azure Pipelines builds that have finished or are being cancelled.
 AZURE_FINISHED_STATUSES = {"completed", "cancelling"}
 # The statuses of unfinished CircleCI workflows.
 CIRCLECI_UNFINISHED_STATUSES = {"running", "on_hold", "failing"}
+# The statuses of unfinished GitHub Actions runs.
+GITHUB_UNFINISHED_STATUSES = ["queued", "in_progress", "waiting", "requested", "pending"]
 
 # Matches a branch that holds a PR, such as "refs/pull/123/merge" or "pull/123".
 PULL_BRANCH = re.compile(r"(?:refs/)?pull/(\d+)(?:/merge|/head)?")
 
 
 def pr_name(label, ref):
-    """Name a PR in output.
+    """Return the name of a PR for output.
 
     Args:
         label: the name of the PR's repository in output (by default, the repository's
@@ -104,6 +112,35 @@ def pr_name(label, ref):
     return f"{label} {ref}" if ref.startswith("#") else ref
 
 
+class BlockedPr(typing.NamedTuple):
+    """A blocked PR.
+
+    Attributes:
+        name: how output names the PR, as pr_name makes it, such as "daikon #555".
+        pr: the PR, as a dict that pr-status makes from the JSON of `gh pr list`, with
+            keys such as "number", "headRefName", "headRefOid", and "owner".
+    """
+
+    name: str
+    pr: dict
+
+
+class RepoBlockedPrs(typing.NamedTuple):
+    """The blocked PRs of a repository.
+
+    Attributes:
+        label: the name of the repository in output, such as "daikon".
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+        prs: the BlockedPr of each of the repository's blocked PRs.
+        base_branches: the base branches of the repository's open PRs, such as "main".
+    """
+
+    label: str
+    gh: str
+    prs: list[BlockedPr]
+    base_branches: set[str]
+
+
 def blocked_prs(cfg):
     """Return the blocked PRs, as pr-status computes them from its config cfg.
 
@@ -112,22 +149,21 @@ def blocked_prs(cfg):
             constructs it by default.
 
     Returns:
-        For each repository, a tuple of its label, its GitHub slug (such as "ORG/REPO"),
-        and a list of the name (as pr_name makes it) and dict (as
-        pr-status makes it) of each of its blocked PRs.
+        A list of the RepoBlockedPrs of each repository.
     """
     return [
-        (
+        RepoBlockedPrs(
             m.repo.label,
             m.repo.gh,
-            [(pr_name(m.repo.label, m.repo.ref(n)), m.repo.prs[n]) for n in m.blocked()],
+            [BlockedPr(pr_name(m.repo.label, m.repo.ref(n)), m.repo.prs[n]) for n in m.blocked()],
+            {pr["baseRefName"] for pr in m.repo.prs.values()},
         )
         for m in pr_status.load_models(cfg, pairwise=False)
     ]
 
 
 def concurrently(f, items):
-    """Call f on each of the items, concurrently.
+    """Call f on each of the items, concurrently, and return the results.
 
     Args:
         f: a function of one argument.
@@ -143,6 +179,390 @@ def concurrently(f, items):
     """  # ruff: ignore[docstring-extraneous-exception]  -- executor.map re-raises f's exceptions
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         return list(executor.map(f, items))
+
+
+def branch_name(branch):
+    """Return the name of a branch, in a form that is the same for every CI service.
+
+    Args:
+        branch: the branch, such as "main", "refs/heads/main", "pull/123", or
+            "refs/pull/123/merge".
+
+    Returns:
+        "pull/N" if branch holds PR N, and otherwise branch without "refs/heads/".
+    """
+    if match := PULL_BRANCH.fullmatch(branch):
+        return f"pull/{match[1]}"
+    return branch.removeprefix("refs/heads/")
+
+
+class BuildState(typing.NamedTuple):
+    """The state of a CI build.
+
+    Attributes:
+        branch: the build's branch, such as "main", "refs/heads/main", or
+            "refs/pull/123/merge", or None if the build has none.
+        finished: True if the build has finished.
+    """
+
+    branch: str | None
+    finished: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class Build:
+    """A CI build:  an Azure Pipelines build, a CircleCI workflow, or a GitHub Actions run.
+
+    Attributes:
+        key: a tuple that distinguishes the build from every other build, such as
+            ("azure", ORG, BUILD-ID), ("circleci", WORKFLOW-ID), or ("github", RUN-ID).
+        status: the build's status, such as "queued", "in_progress", or "running".
+        description: how output names the build, such as "run 123 (ci)".
+        url: the URL of the build's web page.
+        cancelling: a function of no arguments that cancels the build.
+        state_function: a function of no arguments that returns the build's BuildState.
+            If the CI service does not provide it, the function raises an exception in
+            request_util.REQUEST_ERRORS.
+    """
+
+    key: tuple
+    status: str
+    description: str
+    url: str
+    cancelling: collections.abc.Callable[[], object]
+    state_function: collections.abc.Callable[[], BuildState]
+
+    @classmethod
+    def from_azure_pipelines_build(cls, status, org, project, build, name, url):
+        """Create a new Build for an Azure Pipelines build.
+
+        Args:
+            status: the build's status, as GitHub names it, such as "queued" or "in_progress".
+            org: the Azure DevOps organization.
+            project: the Azure DevOps project.
+            build: the build's id, an integer such as 123 in ".../_build/results?buildId=123".
+            name: a name for the build, such as its pipeline's name.
+            url: the URL of the build's web page.
+
+        Returns:
+            The Build of the Azure Pipelines build.
+        """
+        api = f"{ci_build.azure_api(org, project, build)}?api-version=7.1"
+        return cls(
+            ("azure", org, str(build)),
+            status,
+            f"Azure Pipelines build {build} ({name})",
+            url,
+            lambda: ci_build.azure_request(
+                "PATCH", api, ci_build.azure_headers(), {"status": "cancelling"}
+            ),
+            functools.partial(azure_build_state, org, project, build),
+        )
+
+    @classmethod
+    def from_circleci_workflow(cls, status, workflow, name):
+        """Create a new Build for a CircleCI workflow.
+
+        Args:
+            status: the workflow's status, such as "running" or "pending".
+            workflow: the workflow's id, a UUID such as the one after "/workflows/" in its URL.
+            name: a name for the workflow, such as its name or the name of one of its jobs.
+
+        Returns:
+            The Build of the workflow.
+        """
+        api = f"{ci_build.CIRCLECI_API}/v2/workflow/{workflow}/cancel"
+
+        return cls(
+            ("circleci", workflow),
+            status,
+            f"CircleCI workflow {workflow} ({name})",
+            f"https://app.circleci.com/workflow/{workflow}",
+            lambda: request_util.request("POST", api, ci_build.circleci_headers()),
+            functools.partial(circleci_workflow_state, workflow),
+        )
+
+    @classmethod
+    def from_github_actions_run(cls, gh, r):
+        """Create a new Build for the GitHub Actions run r in the GitHub repository gh.
+
+        Args:
+            gh: the repository's GitHub slug, such as "ORG/REPO".
+            r: the run, as a dict parsed from the GitHub API's JSON, with keys such as
+                "id", "status", and "html_url".
+
+        Returns:
+            The Build of r.
+        """
+        api = f"repos/{gh}/actions/runs/{r['id']}"
+        return cls(
+            ("github", r["id"]),
+            r["status"],
+            f"run {r['id']} ({r['name']})",
+            r["html_url"],
+            lambda: request_util.run(["gh", "run", "cancel", "-R", gh, str(r["id"])]),
+            lambda: BuildState(r["head_branch"], request_util.gh_api(api)["status"] == "completed"),
+        )
+
+    def cancel(self, subject):
+        """Cancel the build, reporting any failure.
+
+        Args:
+            subject: what the build tests, such as a PR; used for diagnostics.
+        """
+        try:
+            self.cancelling()
+        except request_util.REQUEST_ERRORS as e:
+            # A build can finish after it is found and before it is cancelled.  Failing to
+            # cancel a build that has finished is not a failure.
+            try:
+                finished = self.state_function().finished
+            except request_util.REQUEST_ERRORS:
+                finished = False
+            if not finished:
+                report_failure(f"{subject}: failed to cancel {self.url}: {request_util.failure(e)}")
+
+
+class Check(typing.NamedTuple):
+    """A check run or commit status of a commit, as GitHub reports a CI build or job.
+
+    Attributes:
+        status: the status, such as "queued" or "in_progress", or "completed" if the
+            check has completed.
+        name: the name of the check run or the context of the commit status.
+        url: the URL of the check's details, such as the web page of a CI build or job.
+    """
+
+    status: str
+    name: str
+    url: str
+
+
+@functools.cache
+def checks(gh, sha):
+    """Return the check runs and commit statuses of commit sha in the GitHub repository gh.
+
+    Args:
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+        sha: the commit.
+
+    Returns:
+        A list of Check, omitting each check run and commit status that has no URL.
+    """
+    result = []
+    for page in request_util.gh_api(
+        f"repos/{gh}/commits/{sha}/check-runs?per_page=100", paginate=True
+    ):
+        result.extend(
+            Check(c["status"], c["name"], c["details_url"])
+            for c in page["check_runs"]
+            if c["details_url"]
+        )
+    for page in request_util.gh_api(f"repos/{gh}/commits/{sha}/status?per_page=100", paginate=True):
+        result.extend(
+            Check(
+                "pending" if s["state"] == "pending" else "completed", s["context"], s["target_url"]
+            )
+            for s in page["statuses"]
+            if s["target_url"]
+        )
+    return result
+
+
+def github_default_branch(gh):
+    """Return the default branch of the GitHub repository gh.
+
+    A pr-status config need not name a repository's default branch, so this function asks
+    GitHub.
+
+    Args:
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+
+    Returns:
+        The default branch, such as "main".
+    """
+    return request_util.gh_api(f"repos/{gh}")["default_branch"]
+
+
+def github_protected_branches(gh):
+    """Return the protected branches of the GitHub repository gh.
+
+    Args:
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+
+    Returns:
+        A set of the protected branches, such as "main".
+    """
+    return {
+        b["name"]
+        for page in request_util.gh_api(
+            f"repos/{gh}/branches?protected=true&per_page=100", paginate=True
+        )
+        for b in page
+    }
+
+
+def is_from_repo(gh, pr):
+    """Return True if a PR's head branch is in the repository gh, rather than in a fork.
+
+    Args:
+        gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
+        pr: the PR, as a dict that pr-status makes from the JSON of `gh pr list`, with
+            keys such as "number", "headRefName", and "owner".
+
+    Returns:
+        True if the owner of the PR's head repository is gh's owner.
+    """
+    return pr["owner"].lower() == gh.split("/")[0].lower()
+
+
+def is_on_shared_branch(gh, shared_branches, pr):
+    """Return True if a PR's head branch is a shared branch of its repository.
+
+    Args:
+        gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
+        shared_branches: the repository's shared branches, such as "main", whose builds
+            serve more than one PR.
+        pr: the PR, as a dict that pr-status makes from the JSON of `gh pr list`, with
+            keys such as "number", "headRefName", and "owner".
+
+    Returns:
+        True if the PR's head branch is one of the shared branches.
+    """
+    return is_from_repo(gh, pr) and pr["headRefName"] in shared_branches
+
+
+def pr_branches(gh, shared_branches, pr):
+    """Return the branches whose builds are for a given PR.
+
+    Args:
+        gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
+        shared_branches: the repository's shared branches, such as "main", whose builds
+            serve more than one PR.
+        pr: the PR, as a dict that pr-status makes from the JSON of `gh pr list`, with
+            keys such as "number", "headRefName", and "owner".
+
+    Returns:
+        A set of the branches, named as branch_name names them:  "pull/N" for the PR's
+        number N, and the PR's head branch if it is a branch of gh other than the
+        shared branches.
+    """
+    result = {f"pull/{pr['number']}"}
+    if is_from_repo(gh, pr) and pr["headRefName"] not in shared_branches:
+        result.add(pr["headRefName"])
+    return result
+
+
+def azure_build_state(org, project, build):
+    """Return the state of an Azure Pipelines build.
+
+    Args:
+        org: the Azure DevOps organization.
+        project: the Azure DevOps project.
+        build: the build's id, an integer such as 123 in ".../_build/results?buildId=123".
+
+    Returns:
+        The BuildState of the build, whose branch is the build's source branch, such as
+        "refs/heads/main" or "refs/pull/123/merge".  A build that is being cancelled
+        counts as finished.
+    """
+    api = f"{ci_build.azure_api(org, project, build)}?api-version=7.1"
+    record = request_util.json_object(ci_build.azure_get(api), api)
+    return BuildState(record["sourceBranch"], record["status"] in AZURE_FINISHED_STATUSES)
+
+
+@functools.cache
+def warn_if_no_circleci_token():
+    """If there is no CircleCI token, warn (only once) that CircleCI will refuse requests."""
+    if not ci_build.circleci_token():
+        print(
+            f"{PROGRAM}: no CircleCI token found in $CIRCLECI_CLI_TOKEN or in "
+            + " or ".join(ci_build.CIRCLECI_CONFIGS)
+            + ", so CircleCI will refuse to cancel workflows and to describe those of a"
+            " private project;"
+            " create a personal API token and run `circleci setup`",
+            file=sys.stderr,
+        )
+
+
+def circleci_workflow_state(workflow):
+    """Return the state of a CircleCI workflow.
+
+    Args:
+        workflow: the workflow's id, a UUID such as the one after "/workflows/" in its URL.
+
+    Returns:
+        The BuildState of the workflow, whose branch is that of the workflow's pipeline,
+        as circleci_pipeline_branch returns it.
+    """
+    api = f"{ci_build.CIRCLECI_API}/v2/workflow/{workflow}"
+    w = request_util.json_object(request_util.request("GET", api, ci_build.circleci_headers()), api)
+    finished = w["status"] not in CIRCLECI_UNFINISHED_STATUSES
+    return BuildState(circleci_pipeline_branch(w["pipeline_id"]), finished)
+
+
+@functools.cache
+def circleci_pipeline_branch(pipeline):
+    """Return the branch of a CircleCI pipeline.
+
+    Args:
+        pipeline: the pipeline's id, a UUID such as "5034460f-c7c4-4c43-9457-de07e2029e7b"
+            (not its number, such as 7 in a pipeline's URL).
+
+    Returns:
+        The pipeline's branch, such as "main" or "pull/123", or else its tag, or else None.
+    """
+    api = f"{ci_build.CIRCLECI_API}/v2/pipeline/{pipeline}"
+    p = request_util.json_object(request_util.request("GET", api, ci_build.circleci_headers()), api)
+    vcs = p.get("vcs") or {}
+    return vcs.get("branch") or vcs.get("tag")
+
+
+def circleci_workflows_of_jobs(subject, jobs):
+    """Return the CircleCI workflows that contain unfinished jobs.
+
+    A job's URL, such as "https://circleci.com/gh/ORG/REPO/123", gives the job's project
+    and number but not the id of the workflow that contains the job.
+
+    Args:
+        subject: what the jobs test, such as a PR; used for diagnostics.
+        jobs: the Check of each job, whose URL does not contain its workflow's id.
+
+    Returns:
+        A list of the Build of each workflow.
+    """
+    # Looking up one job's workflow and then listing the workflow's jobs takes two
+    # requests per workflow, rather than one request per job.
+    found = set()  # (project, job number) of each job whose workflow is in result
+    result = []
+    failures = []
+    for status, name, url in jobs:
+        _, project, number = ci_build.parse_circleci_url(url)
+        if (project, number) in found:
+            continue
+        try:
+            workflow = ci_build.circleci_workflow_of_url(url)[0]
+        except request_util.REQUEST_ERRORS as e:
+            failures.append(e)
+            continue
+        if workflow is None:
+            report_failure(f"{subject}: no CircleCI workflow found for {url}")
+            continue
+        result.append(Build.from_circleci_workflow(status, workflow, name))
+        # If listing the workflow's jobs fails, its other jobs are looked up one by one,
+        # and unfinished_other_builds discards the duplicate Builds.
+        with contextlib.suppress(request_util.REQUEST_ERRORS):
+            found.update(
+                (project, j["job_number"])
+                for j in ci_build.circleci_items(f"/v2/workflow/{workflow}/job")
+                if "job_number" in j
+            )
+    if failures:
+        report_failure(
+            f"{subject}: failed to look up {len(failures)} CircleCI job(s):"
+            f" {request_util.failure(failures[0])}"
+        )
+    return result
 
 
 def unfinished_runs(gh):
@@ -186,344 +606,26 @@ def run_owner(r):
     return (r["head_repository"] or {}).get("owner", {}).get("login")
 
 
-def branch_name(branch):
-    """Name a branch the same way, whatever the CI service.
-
-    Args:
-        branch: the branch, such as "main", "refs/heads/main", "pull/123", or
-            "refs/pull/123/merge".
-
-    Returns:
-        "pull/N" if branch holds PR N, and otherwise branch without "refs/heads/".
-    """
-    if match := PULL_BRANCH.fullmatch(branch):
-        return f"pull/{match[1]}"
-    return branch.removeprefix("refs/heads/")
-
-
-def pipeline_branch(p):
-    """Return the branch of a CircleCI pipeline.
-
-    Args:
-        p: the pipeline, as a dict parsed from the CircleCI API's JSON, with keys such as
-            "id" and "vcs".
-
-    Returns:
-        The pipeline's branch, such as "main" or "pull/123", or else its tag, or else None.
-    """
-    vcs = p.get("vcs") or {}
-    return vcs.get("branch") or vcs.get("tag")
-
-
-@dataclasses.dataclass(frozen=True)
-class Build:
-    """A CI build:  a GitHub Actions run, an Azure Pipelines build, or a CircleCI workflow.
-
-    Attributes:
-        key: a tuple that distinguishes the build from every other build, such as
-            ("github", RUN-ID), ("azure", ORG, BUILD-ID), or ("circleci", WORKFLOW-ID).
-        status: the build's status, such as "queued", "in_progress", or "running".
-        description: how output names the build, such as "run 123 (ci)".
-        url: the URL of the build's web page.
-        cancelling: a function of no arguments that cancels the build.
-        state_function: a function of no arguments that returns the build's state:  its
-            branch (None if it has none) and whether it has finished.  If the CI service
-            does not provide them, it raises an exception in request_util.REQUEST_ERRORS.
-    """
-
-    key: tuple
-    status: str
-    description: str
-    url: str
-    cancelling: collections.abc.Callable[[], object]
-    state_function: collections.abc.Callable[[], tuple[str | None, bool]]
-
-    @classmethod
-    def from_github_actions_run(cls, gh, r):
-        """Make the Build of the GitHub Actions run r in the GitHub repository gh.
-
-        Args:
-            gh: the repository's GitHub slug, such as "ORG/REPO".
-            r: the run, as a dict parsed from the GitHub API's JSON, with keys such as
-                "id", "status", and "html_url".
-
-        Returns:
-            The Build of r.
-        """
-        api = f"repos/{gh}/actions/runs/{r['id']}"
-        return cls(
-            ("github", r["id"]),
-            r["status"],
-            f"run {r['id']} ({r['name']})",
-            r["html_url"],
-            lambda: request_util.run(["gh", "run", "cancel", "-R", gh, str(r["id"])]),
-            lambda: (r["head_branch"], request_util.gh_api(api)["status"] == "completed"),
-        )
-
-    @classmethod
-    def from_azure_pipelines_build(cls, status, org, project, build, name, url):
-        """Make the Build of an Azure Pipelines build.
-
-        Args:
-            status: the build's status, as GitHub names it, such as "queued" or "in_progress".
-            org: the Azure DevOps organization.
-            project: the Azure DevOps project.
-            build: the build's id, an integer such as 123 in ".../_build/results?buildId=123".
-            name: a name for the build, such as its pipeline's name.
-            url: the URL of the build's web page.
-
-        Returns:
-            The Build of the Azure Pipelines build.
-        """
-        api = f"{ci_build.azure_api(org, project, build)}?api-version=7.1"
-        return cls(
-            ("azure", org, str(build)),
-            status,
-            f"Azure Pipelines build {build} ({name})",
-            url,
-            lambda: ci_build.azure_request(
-                "PATCH", api, ci_build.azure_headers(), {"status": "cancelling"}
-            ),
-            functools.partial(azure_build_state, org, project, build),
-        )
-
-    @classmethod
-    def from_circleci_workflow(cls, status, workflow, name):
-        """Make the Build of a CircleCI workflow.
-
-        Args:
-            status: the workflow's status, such as "running" or "pending".
-            workflow: the workflow's id, a UUID such as the one after "/workflows/" in its URL.
-            name: a name for the workflow, such as its name or the name of one of its jobs.
-
-        Returns:
-            The Build of the workflow.
-        """
-        api = f"{ci_build.CIRCLECI_API}/v2/workflow/{workflow}/cancel"
-
-        return cls(
-            ("circleci", workflow),
-            status,
-            f"CircleCI workflow {workflow} ({name})",
-            f"https://app.circleci.com/workflow/{workflow}",
-            lambda: request_util.request("POST", api, ci_build.circleci_headers()),
-            functools.partial(circleci_workflow_state, workflow),
-        )
-
-    def cancel(self, subject):
-        """Cancel the build, reporting any failure.
-
-        A build can finish after it is found and before it is cancelled.  Failing to cancel
-        a build that has finished is not a failure.
-
-        Args:
-            subject: what the build tests, such as a PR; used for diagnostics.
-        """
-        try:
-            self.cancelling()
-        except request_util.REQUEST_ERRORS as e:
-            try:
-                finished = self.state_function()[1]
-            except request_util.REQUEST_ERRORS:
-                finished = False
-            if not finished:
-                report_failure(f"{subject}: failed to cancel {self.url}: {request_util.failure(e)}")
-
-
-@functools.cache
-def warn_if_no_circleci_token():
-    """If there is no CircleCI token, warn (only once) that CircleCI will refuse requests."""
-    if not ci_build.circleci_token():
-        print(
-            f"{PROGRAM}: no CircleCI token found in $CIRCLECI_CLI_TOKEN or in "
-            + " or ".join(ci_build.CIRCLECI_CONFIGS)
-            + ", so CircleCI will refuse to cancel workflows and to describe those of a"
-            " private project;"
-            " create a personal API token and run `circleci setup`",
-            file=sys.stderr,
-        )
-
-
-class Check(typing.NamedTuple):
-    """A check run or commit status of a commit, as GitHub reports a CI build or job.
-
-    Attributes:
-        status: the status, such as "queued" or "in_progress", or "completed" if the
-            check has completed.
-        name: the name of the check run or the context of the commit status.
-        url: the URL of the check's details, such as the web page of a CI build or job.
-    """
-
-    status: str
-    name: str
-    url: str
-
-
-@functools.cache
-def checks(gh, sha):
-    """Return the check runs and commit statuses of commit sha in the GitHub repository gh.
-
-    Args:
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-        sha: the commit.
-
-    Returns:
-        A list of the Check of each check run and commit status that has a URL.
-    """
-    result = []
-    for page in request_util.gh_api(
-        f"repos/{gh}/commits/{sha}/check-runs?per_page=100", paginate=True
-    ):
-        result.extend(
-            Check(c["status"], c["name"], c["details_url"])
-            for c in page["check_runs"]
-            if c["details_url"]
-        )
-    for page in request_util.gh_api(f"repos/{gh}/commits/{sha}/status?per_page=100", paginate=True):
-        result.extend(
-            Check(
-                "pending" if s["state"] == "pending" else "completed", s["context"], s["target_url"]
-            )
-            for s in page["statuses"]
-            if s["target_url"]
-        )
-    return result
-
-
-def github_default_branch(gh):
-    """Return the default branch of the GitHub repository gh.
-
-    A pr-status config need not name a repository's default branch, so this function asks
-    GitHub.
-
-    Args:
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-
-    Returns:
-        The default branch, such as "main".
-    """
-    return request_util.gh_api(f"repos/{gh}")["default_branch"]
-
-
-def is_from_repo(gh, pr):
-    """Return True if a PR's head branch is in the repository gh, rather than in a fork.
-
-    Args:
-        gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
-        pr: the PR, as a dict that pr-status makes from the JSON of `gh pr list`, with
-            keys such as "number", "headRefName", and "owner".
-
-    Returns:
-        True if the owner of the PR's head repository is gh's owner.
-    """
-    return pr["owner"].lower() == gh.split("/")[0].lower()
-
-
-def is_on_default_branch(gh, default_branch, pr):
-    """Return True if a PR is on the default branch of its repository.
-
-    Args:
-        gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
-        default_branch: the repository's default branch.
-        pr: the PR, as a dict that pr-status makes from the JSON of `gh pr list`, with
-            keys such as "number", "headRefName", and "owner".
-
-    Returns:
-        True if the PR's head branch is the repository's default branch.
-    """
-    return is_from_repo(gh, pr) and pr["headRefName"] == default_branch
-
-
-def blocked_pr_runs(pr, runs, on_default_branch):
+def blocked_pr_runs(pr, runs, on_shared_branch):
     """Return the unfinished GitHub Actions runs of a blocked PR.
 
     The runs of the PR are the runs of its head branch that the PR or a push started.
-    If the head branch is the repository's default branch, they are only the runs that
-    the PR started.  A run that another open PR with the same head branch started is
-    indistinguishable from a run that this PR started.
+    If the head branch is a shared branch, they are only the runs that the PR started.
+    A run that another open PR with the same head branch started is indistinguishable
+    from a run that this PR started.
 
     Args:
         pr: the PR, as a dict that pr-status makes from the JSON of `gh pr list`, with
             keys such as "number", "headRefName", and "owner".
         runs: the unfinished runs, as unfinished_runs returns them.
-        on_default_branch: True if the PR's head branch is the repository's default branch.
+        on_shared_branch: True if the PR's head branch is a shared branch, as
+            is_on_shared_branch determines.
 
     Returns:
         A list of the runs.
     """
-    events = {"pull_request"} if on_default_branch else {"pull_request", "push"}
+    events = {"pull_request"} if on_shared_branch else {"pull_request", "push"}
     return [r for r in runs.get((pr["owner"], pr["headRefName"]), []) if r["event"] in events]
-
-
-def pr_branches(gh, default_branch, pr):
-    """Return the branches whose builds are for a given PR.
-
-    Args:
-        gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
-        default_branch: the repository's default branch.
-        pr: the PR, as a dict that pr-status makes from the JSON of `gh pr list`, with
-            keys such as "number", "headRefName", and "owner".
-
-    Returns:
-        A set of the branches, named as branch_name names them:  "pull/N" for the PR's
-        number N, and the PR's head branch if it is a branch of gh other than the
-        default branch.
-    """
-    result = {f"pull/{pr['number']}"}
-    if is_from_repo(gh, pr) and pr["headRefName"] != default_branch:
-        result.add(pr["headRefName"])
-    return result
-
-
-def azure_build_state(org, project, build):
-    """Return the branch of an Azure Pipelines build, and whether it has finished.
-
-    Args:
-        org: the Azure DevOps organization.
-        project: the Azure DevOps project.
-        build: the build's id, an integer such as 123 in ".../_build/results?buildId=123".
-
-    Returns:
-        A pair of the build's source branch (such as "refs/heads/main" or "refs/pull/123/merge")
-        and a boolean (true if the build has finished or is being cancelled).
-    """
-    record = ci_build.azure_get(f"{ci_build.azure_api(org, project, build)}?api-version=7.1")
-    return record["sourceBranch"], record["status"] in AZURE_FINISHED_STATUSES
-
-
-def circleci_workflow_state(workflow):
-    """Return the branch of a CircleCI workflow, and whether it has finished.
-
-    Args:
-        workflow: the workflow's id, a UUID such as the one after "/workflows/" in its URL.
-
-    Returns:
-        The branch of the workflow's pipeline, as pipeline_branch returns it, and
-        whether the workflow has finished.
-    """
-    w = request_util.request(
-        "GET", f"{ci_build.CIRCLECI_API}/v2/workflow/{workflow}", ci_build.circleci_headers()
-    )
-    finished = w["status"] not in CIRCLECI_UNFINISHED_STATUSES
-    return circleci_pipeline_branch(w["pipeline_id"]), finished
-
-
-@functools.cache
-def circleci_pipeline_branch(pipeline):
-    """Return the branch of a CircleCI pipeline.
-
-    Args:
-        pipeline: the pipeline's id, a UUID such as "5034460f-c7c4-4c43-9457-de07e2029e7b"
-            (not its number, such as 7 in a pipeline's URL).
-
-    Returns:
-        The pipeline's branch, as pipeline_branch returns it.
-    """
-    return pipeline_branch(
-        request_util.request(
-            "GET", f"{ci_build.CIRCLECI_API}/v2/pipeline/{pipeline}", ci_build.circleci_headers()
-        )
-    )
 
 
 def unfinished_other_builds(subject, gh, sha, branches):
@@ -559,7 +661,7 @@ def unfinished_other_builds(subject, gh, sha, branches):
             elif project is not None and job is not None:
                 jobs.append(check)
             else:
-                print(f"{subject}: no CircleCI workflow found for {url}", file=sys.stderr)
+                report_failure(f"{subject}: no CircleCI workflow found for {url}")
     for build in circleci_workflows_of_jobs(subject, jobs):
         add(build)
     candidates = list(builds.values())
@@ -569,31 +671,27 @@ def unfinished_other_builds(subject, gh, sha, branches):
     ):
         if state is None:  # build_state reported the failure.
             continue
-        branch, finished = state
         # GitHub can show a build as unfinished after it finishes.
-        if finished:
+        if state.finished:
             continue
-        if branch is None:
-            print(
-                f"{subject}: not cancelling {build.url}, whose branch is unknown", file=sys.stderr
-            )
+        if state.branch is None:
+            report_failure(f"{subject}: not cancelling {build.url}, whose branch is unknown")
         # Other branches can be at commit sha too.
-        elif branch_name(branch) in branches:
+        elif branch_name(state.branch) in branches:
             result.append(build)
     return result
 
 
 def build_state(subject, build):
-    """Return the state of a build:  its branch and whether it has finished.
+    """Return the state of a build.
 
     Args:
         subject: what the build tests, such as a PR; used for diagnostics.
         build: the Build.
 
     Returns:
-        The build's branch (None if it has none) and whether it has finished, or None if
-        the CI service does not provide them, in which case this function reports the
-        failure.
+        The build's BuildState, or None if the CI service does not provide it, in which
+        case this function reports the failure.
     """
     try:
         return build.state_function()
@@ -604,75 +702,27 @@ def build_state(subject, build):
         return None
 
 
-def circleci_workflows_of_jobs(subject, jobs):
-    """Return the CircleCI workflows that contain unfinished jobs.
-
-    A job's URL, such as "https://circleci.com/gh/ORG/REPO/123", can give the job's project
-    and number but not the id of the workflow that contains the job.
-
-    Args:
-        subject: what the jobs test, such as a PR; used for diagnostics.
-        jobs: the Check of each job, whose URL does not contain its workflow's id.
-
-    Returns:
-        A list of the Build of each workflow.
-    """
-
-    def lookup(url):
-        """Return the workflow id of a CircleCI job.
-
-        Args:
-            url: the URL of a CircleCI job.
-
-        Returns:
-            The workflow id (None if there is none) and None, or None and the exception
-            that the lookup raised.
-        """
-        try:
-            return ci_build.circleci_workflow_of_url(url)[0], None
-        except request_util.REQUEST_ERRORS as e:
-            return None, e
-
-    result = []
-    failures = []
-    for (status, name, url), (workflow, error) in zip(
-        jobs, concurrently(lookup, [job.url for job in jobs]), strict=True
-    ):
-        if error is not None:
-            failures.append(error)
-        elif workflow is None:
-            print(f"{subject}: no CircleCI workflow found for {url}", file=sys.stderr)
-        else:
-            result.append(Build.from_circleci_workflow(status, workflow, name))
-    if failures:
-        report_failure(
-            f"{subject}: failed to look up {len(failures)} CircleCI job(s):"
-            f" {request_util.failure(failures[0])}"
-        )
-    return result
-
-
-def blocked_pr_builds(gh, default_branch, runs, blocked):
+def blocked_pr_builds(gh, shared_branches, runs, blocked):
     """Return the unfinished builds of a blocked PR.
 
     Args:
         gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
-        default_branch: the repository's default branch.
+        shared_branches: the repository's shared branches, such as "main", whose builds
+            serve more than one PR.
         runs: the unfinished GitHub Actions runs, as unfinished_runs returns them.
-        blocked: the PR's name, as pr_name makes it (used for diagnostics), and the PR, as
-            a dict that pr-status makes from the JSON of `gh pr list`.
+        blocked: the BlockedPr.
 
     Returns:
         A list of the Build of each build.
     """
-    subject, pr = blocked
-    on_default_branch = is_on_default_branch(gh, default_branch, pr)
+    subject, pr = blocked.name, blocked.pr
+    on_shared_branch = is_on_shared_branch(gh, shared_branches, pr)
     builds = [
-        Build.from_github_actions_run(gh, r) for r in blocked_pr_runs(pr, runs, on_default_branch)
+        Build.from_github_actions_run(gh, r) for r in blocked_pr_runs(pr, runs, on_shared_branch)
     ]
     try:
         builds += unfinished_other_builds(
-            subject, gh, pr["headRefOid"], pr_branches(gh, default_branch, pr)
+            subject, gh, pr["headRefOid"], pr_branches(gh, shared_branches, pr)
         )
     except request_util.REQUEST_ERRORS as e:
         report_failure(
@@ -680,20 +730,6 @@ def blocked_pr_builds(gh, default_branch, runs, blocked):
             f" {request_util.failure(e)}"
         )
     return builds
-
-
-def handle(subject, build, dry_run):
-    """Cancel, or if dry_run is true report, the build of subject.
-
-    Args:
-        subject: what the build tests, such as a PR.
-        build: the Build.
-        dry_run: True if the build should be reported but not cancelled.
-    """
-    action = "would cancel" if dry_run else "cancelling"
-    print(f"{subject}: {action} {build.status} {build.description}")
-    if not dry_run:
-        build.cancel(subject)
 
 
 def main():
@@ -709,31 +745,45 @@ def main():
         repos = blocked_prs(pr_status.load_config(PROGRAM))
     except request_util.REQUEST_ERRORS as e:
         sys.exit(f"{PROGRAM}: failed to find the blocked PRs: {request_util.failure(e)}")
-    for label, gh, blocked in repos:
-        if not blocked:
+    action = "would cancel" if dry_run else "cancelling"
+    to_cancel = []  # the subject (such as a PR) and the Build of each build to cancel
+    for repo in repos:
+        if not repo.prs:
             continue
+        gh = repo.gh
         try:
-            default_branch = github_default_branch(gh)
+            shared_branches = {
+                github_default_branch(gh),
+                *github_protected_branches(gh),
+                *repo.base_branches,
+            }
         except request_util.REQUEST_ERRORS as e:
-            report_failure(f"{label}: failed to find the default branch: {request_util.failure(e)}")
+            report_failure(
+                f"{repo.label}: failed to find the default and protected branches:"
+                f" {request_util.failure(e)}"
+            )
             continue
         try:
             runs = unfinished_runs(gh)
         except request_util.REQUEST_ERRORS as e:
             report_failure(
-                f"{label}: failed to find unfinished GitHub Actions runs: {request_util.failure(e)}"
+                f"{repo.label}: failed to find unfinished GitHub Actions runs:"
+                f" {request_util.failure(e)}"
             )
             runs = {}
-        handled = set()  # the keys of the builds that have been cancelled or reported
-        for (subject, _), builds in zip(
-            blocked,
-            concurrently(functools.partial(blocked_pr_builds, gh, default_branch, runs), blocked),
+        handled = set()  # the keys of the builds that have been reported
+        for blocked, builds in zip(
+            repo.prs,
+            concurrently(functools.partial(blocked_pr_builds, gh, shared_branches, runs), repo.prs),
             strict=True,
         ):
             for build in builds:
                 if build.key not in handled:
                     handled.add(build.key)
-                    handle(subject, build, dry_run)
+                    print(f"{blocked.name}: {action} {build.status} {build.description}")
+                    to_cancel.append((blocked.name, build))
+    if not dry_run:
+        concurrently(lambda item: item[1].cancel(item[0]), to_cancel)
     if failed:
         sys.exit(1)
 
