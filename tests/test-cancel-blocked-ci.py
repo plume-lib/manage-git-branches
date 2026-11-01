@@ -234,10 +234,28 @@ class CancelBlockedCiTest(unittest.TestCase):
                 stderr.getvalue(),
             )
 
+    def test_unfinished_runs(self) -> None:
+        """Unfinished runs are grouped by head branch and by head repository owner.
+
+        The owner is in lower case, and it is None if the head repository is gone.
+        """
+        runs = [
+            {"id": 1, "head_branch": "main", "head_repository": {"owner": {"login": "Org"}}},
+            {"id": 2, "head_branch": "main", "head_repository": {"owner": {"login": "org"}}},
+            {"id": 3, "head_branch": "main", "head_repository": None},
+        ]
+        with mock.patch.object(request_util, "gh_api", return_value=[{"workflow_runs": runs}]):
+            result = cancel_blocked_ci.unfinished_runs("org/repo")
+        self.assertEqual(
+            {key: [r["id"] for r in branch_runs] for key, branch_runs in result.items()},
+            {("org", "main"): [1, 2], (None, "main"): [3]},
+        )
+
     def test_blocked_pr_runs(self) -> None:
         """A blocked PR's runs are those that it or a push started on its head branch.
 
         If the head branch is a shared branch, they are only those that the PR started.
+        The PR's owner can differ in letter case from the owner in runs.
         """
         runs = {
             ("org", "main"): [
@@ -245,7 +263,7 @@ class CancelBlockedCiTest(unittest.TestCase):
                 for n, event in enumerate(["pull_request", "push", "schedule", "workflow_dispatch"])
             ]
         }
-        pr = {"owner": "org", "headRefName": "main", "number": 5}
+        pr = {"owner": "Org", "headRefName": "main", "number": 5}
         for on_shared_branch, expected in [(False, [0, 1]), (True, [0])]:
             with self.subTest(on_shared_branch=on_shared_branch):
                 self.assertEqual(
