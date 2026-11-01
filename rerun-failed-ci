@@ -156,7 +156,7 @@ def normalize_log(log: str) -> str:
 
 
 def transient_reason(log: str) -> str | None:
-    """Find a line of log, a log of the failed steps of a job, that shows a transient failure.
+    """Return a line of log, a log of the failed steps of a job, that shows a transient failure.
 
     Shell trace lines in the log are ignored, as are the scripts that GitHub Actions
     (between "##[group]Run" and "##[endgroup]") and Azure Pipelines (between
@@ -747,7 +747,7 @@ def circleci_job_log(slug: str, job: int) -> str:
 
 
 def gha_jobs(repo: str, run: int, which: str) -> list[dict[str, Any]]:
-    """Find the jobs of a GitHub Actions workflow run.
+    """Return the jobs of a GitHub Actions workflow run.
 
     Args:
         repo: the repository's GitHub slug, such as "ORG/REPO".
@@ -803,7 +803,7 @@ def gha_job_log(repo: str, job: int) -> tuple[str, bool]:
 
 
 def azure_stage(record: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Find the stage that contains a record of an Azure Pipelines timeline.
+    """Return the stage that contains a record of an Azure Pipelines timeline.
 
     A record's parent is a stage, a phase, or a job.
 

@@ -368,7 +368,7 @@ def circleci_workflow_of_url(url: str) -> tuple[str | None, int | None]:
 
 
 def parse_github_actions_url(url: str) -> tuple[str, int, int | None] | None:
-    """Find the GitHub Actions workflow run and job that url shows.
+    """Return the GitHub Actions workflow run and job that url shows.
 
     Returns:
         The repository's GitHub slug (such as "ORG/REPO"), the run id, and the job id
