@@ -1364,8 +1364,8 @@ build_logged() {
 ## Builds the current directory, the top level of a working tree, with
 ## `compile-project`, just after merging DESCRIPTION, such as
 ## "branch 'feature'", into a branch whose head was ORIG_HEAD.  If the build
-## fails, asks the AI agent AGENT ("claude" or "codex") to fix it, without
-## building, then builds again; it makes up to ${build_fix_attempts} attempts.
+## fails, asks the AI agent AGENT ("claude" or "codex"), if it can be run, to
+## fix it, without building, then builds again; it makes up to ${build_fix_attempts} attempts.
 ## Once the build succeeds, commits the agent's changes, if any, on top of the
 ## merge.  Returns 1, after printing a diagnostic, if the build still fails;
 ## the agent's changes then remain, staged but not committed.
@@ -1380,6 +1380,10 @@ build_and_fix() {
     return 0
   fi
   echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
+  # Without the agent, stop as with "--no-llm".
+  if ! agent_available "${fix_with}"; then
+    return 1
+  fi
   # The agent's changes are committed below, and so would be any change that
   # the build made to tracked files.
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then

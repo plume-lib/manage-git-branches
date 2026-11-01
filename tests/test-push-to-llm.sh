@@ -580,6 +580,28 @@ if [ -s "${STUB_LOG}" ]; then
 fi
 build=0
 
+## An agent that is not installed is not asked to fix the build.  The merge
+## has no conflicts, so that the build is reached.  As above, the test is
+## skipped if a real agent is on the PATH.
+if ! env PATH="${no_agent_path}" sh -c 'command -v claude' > /dev/null 2>&1; then
+  setup_case build-no-agent build
+  write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
+  git -C "${feature_dir}" commit -q -a -m "Match main"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  if push_output="$(PATH="${no_agent_path}" MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT='' \
+    "${COMMANDS_DIR}/git-push-to" --llm "${main_dir}" "${feature_dir}" 2>&1)"; then
+    push_status=0
+  else
+    push_status=$?
+  fi
+  check_not_pushed "build with an agent that is not installed"
+  case "${push_output}" in
+    *"unable to build"*"cannot run claude, which is not on the PATH"*) ;;
+    *) fail "build with an agent that is not installed: wrong diagnostic: ${push_output}" ;;
+  esac
+fi
+
 ## `git-pull-upstream` resolves conflicts too.
 setup_case pull-upstream
 git -C "${feature_dir}" remote set-head origin main
