@@ -204,7 +204,7 @@ def azure_get(url: str) -> Any:
 
 
 def parse_azure_url(url: str) -> tuple[str, str, int] | None:
-    """Find the Azure Pipelines build that url shows, which is a build's or a job's URL.
+    """Return the Azure Pipelines build that url shows, which is a build's or a job's URL.
 
     Args:
         url: any URL.  This function recognizes the URL of an Azure Pipelines build or
@@ -283,7 +283,7 @@ def circleci_items(path: str) -> Iterator[Any]:
 
 
 def parse_circleci_url(url: str) -> tuple[str | None, str | None, int | None] | None:
-    """Find the CircleCI workflow and job that url shows.
+    """Return the CircleCI workflow and job that url shows.
 
     Args:
         url: any URL.  This function recognizes a URL that contains "circleci.com/",
@@ -307,7 +307,7 @@ def parse_circleci_url(url: str) -> tuple[str | None, str | None, int | None] | 
 
 
 def circleci_project_of_url(url: str) -> str | None:
-    """Find the CircleCI project of the pipeline, workflow, or job that url shows.
+    """Return the CircleCI project of the pipeline, workflow, or job that url shows.
 
     Args:
         url: any URL.  This function recognizes the URL of a CircleCI pipeline or of one
@@ -325,7 +325,7 @@ def circleci_project_of_url(url: str) -> str | None:
 
 
 def circleci_workflow_of_url(url: str) -> tuple[str | None, int | None]:
-    """Find the CircleCI workflow and job that url shows.
+    """Return the CircleCI workflow and job that url shows.
 
     If url names a job but not its workflow, as the URL of a job in a GitHub commit
     status does, this looks up the job's workflow; if the lookup fails, this raises an
