@@ -560,9 +560,19 @@ check_resolution accept "both sides kept" \
 # region, outside it.
 check_resolution accept "blank lines at the end of the region and after it" \
   a '<<<<<<< HEAD' b '' '=======' c '' '>>>>>>> other' '' d -- a b '' c '' d
+check_resolution reject "a separator remains" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- a b '=======' c d
+# A line "=======" is permitted if MERGE_HEAD's file contains one.
+ccr_blob="$(printf '%s\n' 'Title B' '=======' | git -C "${WORK_DIR}/ccr" hash-object -w --stdin)"
+ccr_tree="$(printf '100644 blob %s\tf.txt\n' "${ccr_blob}" | git -C "${WORK_DIR}/ccr" mktree)"
+ccr_commit="$(git -C "${WORK_DIR}/ccr" -c user.name=Test -c user.email=test@example.com \
+  commit-tree -m 'MERGE_HEAD' "${ccr_tree}")"
+# Git refuses to write MERGE_HEAD with `git update-ref`.
+printf '%s\n' "${ccr_commit}" > "${WORK_DIR}/ccr/.git/MERGE_HEAD"
 check_resolution accept "a heading underline that looks like a separator" \
   intro '<<<<<<< HEAD' 'Title A' '=======' '=======' 'Title B' '=======' '>>>>>>> other' text \
   -- intro 'Title B' '=======' text
+rm "${WORK_DIR}/ccr/.git/MERGE_HEAD"
 check_resolution accept "diff3 style" \
   a '<<<<<<< HEAD' b '||||||| base' x '=======' c '>>>>>>> other' d -- a bc d
 check_resolution accept "two regions" \
@@ -615,6 +625,10 @@ check_resolution_raw accept "CRLF line endings in the working tree" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\naA\r\nb\r\n'
 check_resolution_raw reject "CRLF line endings, and a clean line changed" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\naA\r\nB\r\n'
+check_resolution_raw reject "CRLF line endings, and a marker without a label remains" \
+  'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\naA\r\n>>>>>>>\r\nb\r\n'
+check_resolution_raw reject "CRLF line endings, and a separator remains" \
+  'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\na\r\n=======\r\nA\r\nb\r\n'
 rm "${WORK_DIR}/ccr/.gitattributes"
 
 echo "${SCRIPT_NAME}: OK"

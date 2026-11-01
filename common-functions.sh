@@ -874,10 +874,11 @@ upstream_default_branch_git() {
 ## with the matching line ">>>>>>>"; a recursive merge nests regions.  The
 ## resolution is acceptable if it consists of the text outside the conflict
 ## regions, unchanged and in order, with any text in place of each region,
-## except a line that starts with "<<<<<<<", "|||||||", or ">>>>>>>".  (A line
-## "=======" can be content, such as a Markdown heading's underline.)  Returns
-## 1, after printing a diagnostic for each problem, if the resolution is not
-## acceptable.
+## except a line that starts with "<<<<<<<", "|||||||", or ">>>>>>>", or a
+## line "=======".  A line "=======" can be content, such as a Markdown
+## heading's underline, so it is permitted if the file contains one in HEAD or
+## in MERGE_HEAD.  Returns 1, after printing a diagnostic for each problem, if
+## the resolution is not acceptable.
 ##
 ## This compares content rather than the hunks of `git diff`, which can put a
 ## change on either of two identical lines, one inside a region and one
@@ -903,13 +904,21 @@ check_conflict_resolution() {
   if [ -n "$(tail -c 1 < "$1")" ]; then
     check_conflict_w_newline=no
   fi
+  check_conflict_separator=no
+  for check_conflict_side in HEAD MERGE_HEAD; do
+    if git cat-file --filters "${check_conflict_side}:$1" 2> /dev/null \
+      | awk '/^=======\r?$/ { found = 1 } END { exit !found }'; then
+      check_conflict_separator=yes
+    fi
+  done
   # shellcheck disable=SC2016 # awk, not the shell, expands $0 and the like.
   {
     git cat-file --filters "AUTO_MERGE:$1" | awk '{ print "A" $0 }'
     awk '{ print "W" $0 }' < "$1"
   } | CHECK_FILE="$1" CHECK_SCRIPT_NAME="${SCRIPT_NAME}" \
     CHECK_A_NEWLINE="${check_conflict_a_newline}" \
-    CHECK_W_NEWLINE="${check_conflict_w_newline}" awk '
+    CHECK_W_NEWLINE="${check_conflict_w_newline}" \
+    CHECK_SEPARATOR="${check_conflict_separator}" awk '
     function problem(message) {
       printf "%s: %s: %s\n", ENVIRON["CHECK_SCRIPT_NAME"], ENVIRON["CHECK_FILE"], message > "/dev/stderr"
       status = 1
@@ -936,13 +945,13 @@ check_conflict_resolution() {
       block_start[0] = 1
       depth = 0
       for (i = 1; i <= num_a; i++) {
-        if (a[i] ~ /^<<<<<<<+( |$)/) {
+        if (a[i] ~ /^<<<<<<<+( |\r?$)/) {
           if (depth == 0) {
             block_len[num_regions] = i - block_start[num_regions]
             num_regions++
           }
           depth++
-        } else if (depth > 0 && a[i] ~ /^>>>>>>>+( |$)/) {
+        } else if (depth > 0 && a[i] ~ /^>>>>>>>+( |\r?$)/) {
           depth--
           if (depth == 0) block_start[num_regions] = i + 1
         }
@@ -980,10 +989,12 @@ check_conflict_resolution() {
       for (k = 1; k <= block_len[0]; k++) clean[k] = 1
       for (k = last_pos; k <= num_w; k++) clean[k] = 1
 
-      # The text in place of the regions has no conflict markers.
+      # The text in place of the regions has no conflict markers.  A line
+      # in a file with CRLF line endings ends with "\r".
       for (k = 1; k <= num_w; k++) {
-        if (!clean[k] && (w[k] ~ /^<<<<<<<+( |$)/ || w[k] ~ /^[|][|][|][|][|][|][|]+( |$)/ \
-                          || w[k] ~ /^>>>>>>>+( |$)/)) {
+        if (!clean[k] && (w[k] ~ /^<<<<<<<+( |\r?$)/ || w[k] ~ /^[|][|][|][|][|][|][|]+( |\r?$)/ \
+                          || w[k] ~ /^>>>>>>>+( |\r?$)/ \
+                          || (ENVIRON["CHECK_SEPARATOR"] != "yes" && w[k] ~ /^=======\r?$/))) {
           problem("line " k " is a conflict marker")
         }
       }
@@ -996,8 +1007,8 @@ check_conflict_resolution() {
 ## current directory, the top level of a working tree, and stages the result.
 ## Conflicts that `git rerere` has already resolved need no more work.  For
 ## any others, this function asks an AI agent, RESOLVER ("claude" or
-## "codex"), to edit the conflicted files.  Either way, it checks every
-## resolution with `check_conflict_resolution`.  SOURCE names COMMIT in
+## "codex"), to edit the conflicted files, or fails if RESOLVER is empty.
+## Either way, it checks every resolution with `check_conflict_resolution`.  SOURCE names COMMIT in
 ## diagnostics and in the agent's instructions.  Returns 1, after printing a
 ## diagnostic, on failure, and leaves the merge in progress.
 ##
@@ -1074,11 +1085,6 @@ resolve_merge_conflicts() {
     return 1
   fi
 
-  # The agent must not create files, which would not be committed but which
-  # a later build could use, or change or delete the untracked files.
-  resolve_untracked="$(untracked_state)"
-  resolve_ignored="$(ignored_files)"
-
   # The files that `git rerere` did not resolve.
   resolve_unresolved="$(printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
     if ! check_conflict_resolution "${resolve_file}" 2> /dev/null; then
@@ -1086,10 +1092,20 @@ resolve_merge_conflicts() {
     fi
   done)"
 
+  resolve_ran_agent=0
   if [ -z "${resolve_unresolved}" ]; then
     echo "${SCRIPT_NAME}: \`git rerere\` resolved the conflicts in $(pwd)" >&2
     resolve_with="git rerere"
+  elif [ -z "${resolve_with}" ]; then
+    printf '%s\n' "${resolve_unresolved}" | sed -e "s/^/${SCRIPT_NAME}: conflicted: /" >&2
+    echo "${resolve_failed}" >&2
+    return 1
   else
+    # The agent must not create files, which would not be committed but
+    # which a later build could use, or change or delete the untracked files.
+    resolve_untracked="$(untracked_state)"
+    resolve_ignored="$(ignored_files)"
+    resolve_ran_agent=1
     resolve_branch="$(git symbolic-ref --quiet --short HEAD)" || resolve_branch="HEAD"
     resolve_prompt="You are resolving merge conflicts in the git working tree $(pwd).
 \`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts in these files:
@@ -1128,15 +1144,17 @@ Finish with a brief summary of how you resolved each conflict."
     printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} changed a file that had no conflict: /" >&2
     resolve_ok=0
   fi
-  resolve_untracked_changes="$(untracked_changes "${resolve_untracked}")"
-  if [ -n "${resolve_untracked_changes}" ]; then
-    printf '%s\n' "${resolve_untracked_changes}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} /" >&2
-    resolve_ok=0
-  fi
-  resolve_created="$(ignored_files | grep -F -x -v -- "${resolve_ignored}")"
-  if [ -n "${resolve_created}" ]; then
-    printf '%s\n' "${resolve_created}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} created a file: /" >&2
-    resolve_ok=0
+  if [ "${resolve_ran_agent}" -eq 1 ]; then
+    resolve_untracked_changes="$(untracked_changes "${resolve_untracked}")"
+    if [ -n "${resolve_untracked_changes}" ]; then
+      printf '%s\n' "${resolve_untracked_changes}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} /" >&2
+      resolve_ok=0
+    fi
+    resolve_created="$(ignored_files | grep -F -x -v -- "${resolve_ignored}")"
+    if [ -n "${resolve_created}" ]; then
+      printf '%s\n' "${resolve_created}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} created a file: /" >&2
+      resolve_ok=0
+    fi
   fi
   # Every conflicted file is checked, including one that the agent did not
   # change, whose conflict markers remain.
@@ -1265,7 +1283,9 @@ run_agent() {
   # settings file could come from the merged branch.  `--strict-mcp-config`
   # leaves out MCP servers, whose tools could act elsewhere.  Of the git
   # commands that Claude may run, which read the repository, `git diff`,
-  # `git log`, and `git show` can write a file named by `--output`.
+  # `git log`, and `git show` can write a file named by `--output`.  Claude
+  # refuses a shell redirection of their output to a file outside the
+  # working tree or in `.git`.
   #
   # Codex's sandbox confines its writes to the working tree.
   case "$1" in
@@ -1311,7 +1331,10 @@ git_control_state() {
     fi
   done
   if [ -d "${git_control_hooks}" ]; then
-    find "${git_control_hooks}" -type f -exec cksum {} + | sort
+    # `-L` follows a symbolic link, so that a change to the file that a hook
+    # links to changes the summary.  Every other entry, such as a dangling
+    # link, is listed by name.
+    find -L "${git_control_hooks}" -type f -exec cksum {} + -o -print | sort
   fi
 }
 
@@ -1350,9 +1373,9 @@ parse_llm_option() {
 ## pushes the current branch if the build succeeds.  DESCRIPTION is what
 ## `git fmt-merge-msg` says that COMMIT is, such as "branch 'feature'" or
 ## "remote-tracking branch 'upstream/master'".  SOURCE names COMMIT in
-## diagnostics.  If RESOLVER is given and not empty, and the merge has
-## conflicts, `resolve_merge_conflicts` resolves them, asking RESOLVER if
-## `git rerere` did not.
+## diagnostics.  If the merge has conflicts, `resolve_merge_conflicts`
+## resolves them, asking RESOLVER, if it is given and not empty, about any
+## that `git rerere` did not resolve.
 ## Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
@@ -1383,10 +1406,10 @@ merge_build_push() {
     echo "${SCRIPT_NAME}: problem merging $3 into $(pwd)" >&2
     # A failed merge without MERGE_HEAD did not start, for example because it
     # would overwrite a modified file; there are no conflicts to resolve.
-    if [ -z "${5:-}" ] || ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    if ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
       return 1
     fi
-    if ! resolve_merge_conflicts "$5" "$1" "$3"; then
+    if ! resolve_merge_conflicts "${5:-}" "$1" "$3"; then
       return 1
     fi
     # `-F` supplies the message, rather than MERGE_MSG, to which `git merge`

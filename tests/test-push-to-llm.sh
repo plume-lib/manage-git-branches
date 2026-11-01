@@ -51,6 +51,8 @@ fail() {
 ##   config: as "good", but also changes git's configuration
 ##   change-untracked: as "good", but also changes the untracked file notes.txt
 ##   delete-untracked: as "good", but also deletes the untracked file notes.txt
+##   separator: removes the conflict marker lines except "======="
+##   hook-link: as "good", but also makes a hook a symbolic link to file.txt
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
@@ -58,6 +60,11 @@ basename -- "$0" >> "${STUB_LOG}"
 cat > "${STUB_PROMPT}"
 if [ "${STUB_MODE}" = fail ]; then exit 3; fi
 if [ "${STUB_MODE}" = none ]; then exit 0; fi
+if [ "${STUB_MODE}" = separator ]; then
+  sed -e '/^<<<<<<< /d' -e '/^>>>>>>> /d' file.txt > file.txt.new
+  mv file.txt.new file.txt
+  exit 0
+fi
 sed -e '/^<<<<<<< /d' -e '/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new
 mv file.txt.new file.txt
 if [ "${STUB_MODE}" = clean ]; then
@@ -72,6 +79,9 @@ if [ "${STUB_MODE}" = change-untracked ]; then
 fi
 if [ "${STUB_MODE}" = delete-untracked ]; then
   rm notes.txt
+fi
+if [ "${STUB_MODE}" = hook-link ]; then
+  ln -s ../../file.txt .git/hooks/pre-commit
 fi
 if [ "${STUB_MODE}" = config ]; then
   git config core.fsmonitor "echo pwned"
@@ -323,6 +333,24 @@ if [ -s "${STUB_LOG}" ]; then
   fail "marker-like line: an agent ran: $(cat "${STUB_LOG}")"
 fi
 
+## A remaining separator is rejected.
+setup_case separator
+push_to separator --llm
+check_not_resolved "remaining separator"
+case "${push_output}" in
+  *"is a conflict marker"*) ;;
+  *) fail "remaining separator: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that adds a hook that is a symbolic link is rejected.
+setup_case hook-link
+push_to hook-link --llm
+check_not_resolved "agent that adds a linked hook"
+case "${push_output}" in
+  *"changed git's configuration or hooks"*) ;;
+  *) fail "agent that adds a linked hook: wrong diagnostic: ${push_output}" ;;
+esac
+
 ## An agent that changes git's configuration is rejected.
 setup_case config
 push_to config --llm
@@ -333,9 +361,10 @@ case "${push_output}" in
 esac
 
 ## A resolution that `git rerere` recorded needs no agent, whether or not
-## rerere stages the files that it resolves.
-for auto_update in false true; do
-  setup_case "rerere-${auto_update}"
+## rerere stages the files that it resolves, and is used even with --no-llm.
+for rerere_case in false:--llm true:--llm false:--no-llm true:--no-llm; do
+  auto_update="${rerere_case%%:*}"
+  setup_case "rerere-${auto_update}${rerere_case#*:}"
   git -C "${feature_dir}" config rerere.enabled true
   git -C "${feature_dir}" config rerere.autoUpdate "${auto_update}"
   git -C "${feature_dir}" fetch -q
@@ -345,8 +374,8 @@ for auto_update in false true; do
   (cd "${feature_dir}" && sed -e '/^<<<<<<< /d' -e '/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new \
     && mv file.txt.new file.txt && git add file.txt && git commit -q --no-edit) 2> /dev/null
   git -C "${feature_dir}" reset -q --hard "${feature_head}"
-  push_to none --llm
-  check_resolved "" "rerere (autoUpdate ${auto_update})"
+  push_to none "${rerere_case#*:}"
+  check_resolved "" "rerere (autoUpdate ${auto_update}, ${rerere_case#*:})"
 done
 
 ## `git-pull-upstream` resolves conflicts too.
