@@ -7,8 +7,8 @@
 # A script that sources this file must set ${SCRIPT_DIR} to the directory that
 # contains this package's files, because `git_batch_ssh` runs a wrapper script
 # from that directory and `check_conflict_resolution` runs an awk program
-# from it.  It must also set ${SCRIPT_NAME} to its own name, which
-# the diagnostics below use.
+# from it.  It must also set ${SCRIPT_NAME} to its own name, which the
+# diagnostics below use.
 
 ## Usage: unset_git_location_variables
 ## Unsets $GIT_DIR, $GIT_WORK_TREE, $GIT_INDEX_FILE, $GIT_COMMON_DIR, and
@@ -956,10 +956,10 @@ has_separator_line() {
 ## Conflicts that `git rerere` has already resolved need no more work.  For
 ## any others, this function asks an AI agent, RESOLVER ("claude" or
 ## "codex"), to edit the conflicted files, or fails if RESOLVER is empty or
-## cannot be run.
-## Either way, it checks every resolution with `check_conflict_resolution`.  SOURCE names COMMIT in
-## diagnostics and in the agent's instructions.  Returns 1, after printing a
-## diagnostic, on failure, and leaves the merge in progress.
+## cannot be run.  Either way, it checks every resolution with
+## `check_conflict_resolution`.  SOURCE names COMMIT in diagnostics and in the
+## agent's instructions.  Returns 1, after printing a diagnostic, on failure,
+## and leaves the merge in progress.
 ##
 ## Only content conflicts are resolved, in which every conflicted file
 ## contains conflict markers.  For any other conflict, such as a file that one
@@ -1046,7 +1046,7 @@ resolve_merge_conflicts() {
     echo "${SCRIPT_NAME}: \`git rerere\` resolved the conflicts in $(pwd)" >&2
     resolve_with="git rerere"
   elif [ -z "${resolve_with}" ] || ! agent_available "${resolve_with}"; then
-    printf '%s\n' "${resolve_unresolved}" | sed -e "s/^/${SCRIPT_NAME}: conflicted: /" >&2
+    report_unresolved "${resolve_unresolved}"
     echo "${resolve_failed}" >&2
     return 1
   else
@@ -1199,6 +1199,20 @@ ${untracked_changes_file}	"*)
 ## only the names of ignored files, not their contents.
 ignored_files() {
   git -c core.quotePath=false ls-files --others --ignored --exclude-standard --directory
+}
+
+## Usage: report_unresolved FILES
+## Says why each of FILES, a list of conflicted files one per line, is not
+## acceptably resolved:  that it still has conflict markers, or else what
+## `check_conflict_resolution` finds wrong with its resolution.
+report_unresolved() {
+  printf '%s\n' "$1" | while IFS= read -r report_unresolved_file; do
+    if grep -q '^<<<<<<<' "${report_unresolved_file}" 2> /dev/null; then
+      echo "${SCRIPT_NAME}: conflicted: ${report_unresolved_file}" >&2
+    else
+      check_conflict_resolution "${report_unresolved_file}" || true
+    fi
+  done
 }
 
 ## Usage: resolve_other_changes
