@@ -1353,19 +1353,22 @@ pull_resolving() {
     echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
     return 1
   fi
-  # The "diff3" conflict style puts the merge base's text in each conflict
-  # region, which helps whoever resolves it.
-  if git -C "${pull_dir}" -c merge.conflictStyle=diff3 pull "$@"; then
+  # `rerere.autoUpdate` false and the configured conflict style are as for
+  # the merge in `merge_build_push`.
+  if git -C "${pull_dir}" -c rerere.autoUpdate=false pull "$@"; then
     return 0
   fi
   echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
   if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
     return 1
   fi
-  # A subshell, so that the current directory does not change.
+  # Git names the conflicted files relative to the top level of the working
+  # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
+  # the current directory unchanged.
   (
-    if ! cd "${pull_dir}"; then
-      echo "${SCRIPT_NAME}: cannot cd to ${pull_dir}" >&2
+    if ! pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)" \
+      || ! cd "${pull_top}"; then
+      echo "${SCRIPT_NAME}: cannot cd to the top level of ${pull_dir}" >&2
       exit 1
     fi
     pull_source="$(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null)" \

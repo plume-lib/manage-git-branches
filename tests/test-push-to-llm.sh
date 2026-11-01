@@ -455,6 +455,37 @@ case "${message}" in
   *) fail "conflict in pulling: wrong message for the merge of the pull: ${message}" ;;
 esac
 
+## A conflict in pulling that `git rerere` resolves needs no agent, even when
+## rerere stages the files that it resolves.
+setup_case pull-rerere
+git -C "${feature_dir}" config rerere.enabled true
+git -C "${feature_dir}" config rerere.autoUpdate true
+git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+printf '%s\n' one two three-remote four five six SEVEN-feature eight nine > "${case_dir}/other-clone/file.txt"
+git -C "${case_dir}/other-clone" commit -q -a -m "Change feature remotely"
+git -C "${case_dir}/other-clone" push -q
+printf '%s\n' one two three-local four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Change feature locally"
+local_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+if git -C "${feature_dir}" pull -q --no-rebase --no-edit > /dev/null 2>&1; then
+  fail "pull-rerere: the pull has no conflicts"
+fi
+printf '%s\n' one two three-local three-remote four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" add file.txt
+git -C "${feature_dir}" commit -q --no-edit 2> /dev/null
+git -C "${feature_dir}" reset -q --hard "${local_head}"
+push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "pull-rerere: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "pull-rerere: expected claude to run once, for the merge of main, but ran: $(cat "${STUB_LOG}")"
+fi
+expected="$(printf '%s\n' ONE two three-local three-remote four five six SEVEN-feature SEVEN-main eight nine)"
+if [ "$(git -C "${remote}" show refs/heads/feature:file.txt)" != "${expected}" ]; then
+  fail "pull-rerere: wrong result: $(git -C "${remote}" show refs/heads/feature:file.txt)"
+fi
+
 ## `git-pull-upstream` resolves conflicts too.
 setup_case pull-upstream
 git -C "${feature_dir}" remote set-head origin main
