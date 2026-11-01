@@ -159,7 +159,9 @@ The commands are:
   pull request), and ones that are redundant because of a more recent build
   of the same branch.  Run it in a directory that holds the working copy
   directories.  Works for Azure Pipelines, CircleCI, and GitHub Actions.
-  This command needs Python 3.11 or later and `gh`.
+  This command needs Python 3.11 or later, `gh`, and `pr-status` (in the
+  directory of `cancel-blocked-ci`, or as `pr-status.py` on the PATH), which
+  finds the blocked pull requests.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
