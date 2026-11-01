@@ -445,6 +445,8 @@ def redundant_circleci_workflows(label, gh):
         for check in checks(gh, "HEAD")
         if ci_build.parse_circleci_url(check.url) is not None
     }
+    if projects:
+        warn_if_no_circleci_token()
     # the project, branch, and pipeline of each recent pipeline that can be redundant
     pipelines = [
         (project, branch, p)
