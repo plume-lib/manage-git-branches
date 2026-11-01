@@ -423,6 +423,13 @@ case "${push_output}" in
   *) fail "remaining separator: wrong diagnostic: ${push_output}" ;;
 esac
 
+## A separator is permitted in a file whose sides contain a line "=======".
+setup_case separator-content "======="
+push_to separator --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "separator in a file that contains one: git-push-to failed: ${push_output}"
+fi
+
 ## An agent that adds a hook that is a symbolic link is rejected.
 setup_case hook-link
 push_to hook-link --llm

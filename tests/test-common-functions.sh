@@ -519,13 +519,16 @@ git init -q "${WORK_DIR}/ccr"
 ## Usage: check_resolution_files EXPECTED DESCRIPTION
 ## Makes AUTO_MERGE a tree whose file f.txt is ${WORK_DIR}/ccr-auto, and checks
 ## that `check_conflict_resolution` accepts (EXPECTED "accept") or rejects
-## (EXPECTED "reject") the resolution in ${WORK_DIR}/ccr/f.txt.
+## (EXPECTED "reject") the resolution in ${WORK_DIR}/ccr/f.txt.  It passes
+## ${ccr_separator} as the argument that says whether a line "=======" is
+## permitted.
+ccr_separator=no
 check_resolution_files() {
   check_resolution_blob="$(git -C "${WORK_DIR}/ccr" hash-object --no-filters -w "${WORK_DIR}/ccr-auto")"
   check_resolution_tree="$(printf '100644 blob %s\tf.txt\n' "${check_resolution_blob}" \
     | git -C "${WORK_DIR}/ccr" mktree)"
   git -C "${WORK_DIR}/ccr" update-ref AUTO_MERGE "${check_resolution_tree}"
-  if (cd "${WORK_DIR}/ccr" && check_conflict_resolution f.txt 2> /dev/null); then
+  if (cd "${WORK_DIR}/ccr" && check_conflict_resolution f.txt "${ccr_separator}" 2> /dev/null); then
     check_resolution_actual=accept
   else
     check_resolution_actual=reject
@@ -562,17 +565,11 @@ check_resolution accept "blank lines at the end of the region and after it" \
   a '<<<<<<< HEAD' b '' '=======' c '' '>>>>>>> other' '' d -- a b '' c '' d
 check_resolution reject "a separator remains" \
   a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- a b '=======' c d
-# A line "=======" is permitted if MERGE_HEAD's file contains one.
-ccr_blob="$(printf '%s\n' 'Title B' '=======' | git -C "${WORK_DIR}/ccr" hash-object -w --stdin)"
-ccr_tree="$(printf '100644 blob %s\tf.txt\n' "${ccr_blob}" | git -C "${WORK_DIR}/ccr" mktree)"
-ccr_commit="$(git -C "${WORK_DIR}/ccr" -c user.name=Test -c user.email=test@example.com \
-  commit-tree -m 'MERGE_HEAD' "${ccr_tree}")"
-# Git refuses to write MERGE_HEAD with `git update-ref`.
-printf '%s\n' "${ccr_commit}" > "${WORK_DIR}/ccr/.git/MERGE_HEAD"
-check_resolution accept "a heading underline that looks like a separator" \
+ccr_separator=yes
+check_resolution accept "a heading underline that looks like a separator, when permitted" \
   intro '<<<<<<< HEAD' 'Title A' '=======' '=======' 'Title B' '=======' '>>>>>>> other' text \
   -- intro 'Title B' '=======' text
-rm "${WORK_DIR}/ccr/.git/MERGE_HEAD"
+ccr_separator=no
 check_resolution accept "diff3 style" \
   a '<<<<<<< HEAD' b '||||||| base' x '=======' c '>>>>>>> other' d -- a bc d
 check_resolution accept "two regions" \
