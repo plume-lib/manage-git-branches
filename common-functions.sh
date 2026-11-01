@@ -904,6 +904,10 @@ check_conflict_resolution() {
   if [ -n "$(tail -c 1 < "$1")" ]; then
     check_conflict_w_newline=no
   fi
+  # "yes" if FILE contains a line "=======" in HEAD or in MERGE_HEAD, and "no"
+  # otherwise.  If "yes", such a line in the text in place of a conflict
+  # region can be content rather than a leftover separator, so it is
+  # permitted.
   check_conflict_separator=no
   for check_conflict_side in HEAD MERGE_HEAD; do
     if git cat-file --filters "${check_conflict_side}:$1" 2> /dev/null \
