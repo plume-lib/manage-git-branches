@@ -145,7 +145,7 @@ def request(
 
 
 def json_object(response: Any, url: str) -> dict[str, Any]:
-    """Return a response that should be a JSON object, or raise ValueError if it is not.
+    """Return the given response if it is a JSON object, or raise ValueError if it is not.
 
     Args:
         response: a response body parsed as JSON, as request returns it, such as a dict or
