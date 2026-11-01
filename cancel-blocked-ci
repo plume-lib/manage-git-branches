@@ -28,11 +28,9 @@ import dataclasses
 import functools
 import importlib.machinery
 import importlib.util
-import json
 import pathlib
 import re
 import shutil
-import subprocess
 import sys
 import types
 import typing
@@ -707,26 +705,8 @@ def main():
         "-n", "--dry-run", action="store_true", help="report the builds but do not cancel them"
     )
     dry_run = parser.parse_args().dry_run
-    base = pathlib.Path.cwd()
-    # The current directory holds the working copy directories; it is not one of them.
-    toplevel = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], check=False, capture_output=True, text=True
-    )
-    if toplevel.returncode == 0:
-        sys.exit(
-            f"{PROGRAM}: {base} is in the git working copy {toplevel.stdout.strip()}; "
-            f"run {PROGRAM} in the directory that holds the working copy directories"
-        )
-    if pathlib.Path(pr_status.CONFIG).exists():
-        with pathlib.Path(pr_status.CONFIG).open() as f:
-            cfg = json.load(f)
-    else:
-        try:
-            cfg = pr_status.default_config(str(base))
-        except pr_status.ConfigError as e:
-            sys.exit(f"{PROGRAM}: {e}")
     try:
-        repos = blocked_prs(cfg)
+        repos = blocked_prs(pr_status.load_config(PROGRAM))
     except request_util.REQUEST_ERRORS as e:
         sys.exit(f"{PROGRAM}: failed to find the blocked PRs: {request_util.failure(e)}")
     for label, gh, blocked in repos:
