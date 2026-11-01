@@ -20,6 +20,8 @@ cancelled.
 
 Cancelling a build requires credentials, as described in `ci_build.py`.
 
+The exit status is 1 if finding or cancelling any build failed, and 0 otherwise.
+
 This script uses the `pr-status` script, which it finds in its own directory or, as
 `pr-status.py`, on the PATH.
 """
@@ -41,6 +43,20 @@ import ci_build
 import request_util
 
 PROGRAM = pathlib.Path(sys.argv[0]).name
+
+# Whether finding or cancelling any build failed.
+failed = False
+
+
+def report_failure(message):
+    """Report that finding or cancelling a build failed, and make the exit status 1.
+
+    Args:
+        message: a description of the failure.
+    """
+    global failed
+    failed = True
+    print(message, file=sys.stderr)
 
 
 def load_pr_status() -> types.ModuleType:
@@ -446,10 +462,28 @@ def unfinished_other_builds(gh, sha, branches):
     return [
         (identifier, build)
         for (identifier, (build, _)), branch in zip(
-            items, concurrently(lambda item: item[1][1](), items), strict=True
+            items, concurrently(build_branch, list(builds.values())), strict=True
         )
         if branch is not None and branch_name(branch) in branches
     ]
+
+
+def build_branch(build_and_branch_of):
+    """Find the branch of a build, reporting any failure.
+
+    Args:
+        build_and_branch_of: the build (its status, description, URL, and cancelling
+            function) and a function of no arguments that returns its branch.
+
+    Returns:
+        The build's branch, or None if it has none or finding it fails.
+    """
+    build, branch_of = build_and_branch_of
+    try:
+        return branch_of()
+    except request_util.REQUEST_ERRORS as e:
+        report_failure(f"  failed to find the branch of {build[2]}: {request_util.failure(e)}")
+        return None
 
 
 def circleci_build_on(status, workflow, name):
@@ -508,10 +542,9 @@ def circleci_workflows_of_jobs(sha, jobs):
         else:
             result.append((workflow, (state, name)))
     if failures:
-        print(
+        report_failure(
             f"  failed to look up {len(failures)} CircleCI job(s) of {sha}:"
-            f" {request_util.failure(failures[0])}",
-            file=sys.stderr,
+            f" {request_util.failure(failures[0])}"
         )
     return result
 
@@ -541,10 +574,9 @@ def blocked_pr_builds(label, gh, default_branch, runs, blocked):
             gh, pr["headRefOid"], pr_branches(gh, pr, on_default_branch)
         )
     except request_util.REQUEST_ERRORS as e:
-        print(
+        report_failure(
             f"{pr_name(label, ref)}: failed to find Azure Pipelines and CircleCI"
-            f" builds: {request_util.failure(e)}",
-            file=sys.stderr,
+            f" builds: {request_util.failure(e)}"
         )
     return builds
 
@@ -559,7 +591,7 @@ def cancel(cancelling, url):
     try:
         cancelling()
     except request_util.REQUEST_ERRORS as e:
-        print(f"  failed to cancel {url}: {request_util.failure(e)}", file=sys.stderr)
+        report_failure(f"  failed to cancel {url}: {request_util.failure(e)}")
 
 
 def handle(subject, build, dry_run):
@@ -611,10 +643,8 @@ def main():
         try:
             runs = unfinished_runs(gh)
         except request_util.REQUEST_ERRORS as e:
-            print(
-                f"{label}: failed to find unfinished GitHub Actions runs:"
-                f" {request_util.failure(e)}",
-                file=sys.stderr,
+            report_failure(
+                f"{label}: failed to find unfinished GitHub Actions runs: {request_util.failure(e)}"
             )
             runs = {}
         handled = set()  # identifiers of the builds that have been cancelled or reported
@@ -629,6 +659,8 @@ def main():
                 if identifier not in handled:
                     handled.add(identifier)
                     handle(pr_name(label, ref), build, dry_run)
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

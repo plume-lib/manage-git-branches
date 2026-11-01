@@ -14,6 +14,7 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest import mock
@@ -101,7 +102,10 @@ class CancelBlockedCiTest(unittest.TestCase):
         self.assertEqual(cancel_blocked_ci.pr_branches("upstream/repo", pr, False), {"pull/5"})
 
     def test_unfinished_other_builds(self) -> None:
-        """Only the builds of the given branches are a commit's builds."""
+        """Only the builds of the given branches are a commit's builds.
+
+        A build whose branch cannot be found is reported, and the exit status becomes 1.
+        """
         workflow = "0123456789abcdef0123456789abcdef0123"
         other_workflow = "fedcba9876543210fedcba9876543210fedc"
         checks = [
@@ -109,10 +113,18 @@ class CancelBlockedCiTest(unittest.TestCase):
             ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=2"),
             ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=3"),
             ("completed", "ci", "https://dev.azure.com/org/p/_build/results?buildId=4"),
+            # Finding the branch of build 5 fails.
+            ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=5"),
             ("pending", "build", f"https://app.circleci.com/workflow/{workflow}"),
             ("pending", "build", f"https://app.circleci.com/workflow/{other_workflow}"),
         ]
         azure_branches = {1: "refs/pull/5/merge", 2: "refs/heads/feature", 3: "refs/heads/other"}
+
+        def azure_build_branch(_org: str, _project: str, build: int) -> str:
+            if build not in azure_branches:
+                raise urllib.error.URLError("unreachable")
+            return azure_branches[build]
+
         circleci_branches = {workflow: "feature", other_workflow: "other"}
         for branches, expected in [
             (
@@ -127,14 +139,19 @@ class CancelBlockedCiTest(unittest.TestCase):
                 mock.patch.object(
                     cancel_blocked_ci,
                     "azure_build_branch",
-                    lambda _org, _project, build: azure_branches[build],
+                    azure_build_branch,
                 ),
                 mock.patch.object(
                     cancel_blocked_ci, "circleci_workflow_branch", circleci_branches.get
                 ),
+                mock.patch.object(cancel_blocked_ci, "failed", new=False),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
             ):
                 result = cancel_blocked_ci.unfinished_other_builds("org/repo", "abc", branches)
+                self.assertTrue(cancel_blocked_ci.failed)
             self.assertEqual([identifier for identifier, _ in result], expected)
+            self.assertIn("failed to find the branch of", stderr.getvalue())
+            self.assertIn("buildId=5", stderr.getvalue())
 
     def test_circleci_workflows_of_jobs(self) -> None:
         """The workflows of jobs whose URLs name no workflow come from job lookups."""
