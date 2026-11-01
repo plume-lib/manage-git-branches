@@ -94,6 +94,8 @@
 # options "--llm", "--claude", and "--codex" each override an earlier
 # "--no-llm", and "--no-llm" overrides any of them that precedes it.
 # "--llm" turns on the agent that the last "--claude" or "--codex" chose.
+# If the agent cannot be run because its command is not on the PATH, this
+# script acts as it does with "--no-llm".
 #
 # When a merge has conflicts that `git rerere` does not resolve, the agent
 # edits the conflicted files.  That applies to the merge of FROM_DIR's branch
