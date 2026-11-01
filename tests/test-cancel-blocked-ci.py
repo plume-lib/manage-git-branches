@@ -74,6 +74,13 @@ class CancelBlockedCiTest(unittest.TestCase):
                 cancel_blocked_ci.main()
             self.assertEqual(cm.exception.code, 2)
 
+    def test_pr_name(self) -> None:
+        """A bare "#N" is preceded by the repository's label, and another reference is not."""
+        self.assertEqual(cancel_blocked_ci.pr_name("daikon", "#555"), "daikon #555")
+        self.assertEqual(cancel_blocked_ci.pr_name("daikon", "daikon#555"), "daikon#555")
+        # A reference with a prefix names its repository, even if the prefix is not the label.
+        self.assertEqual(cancel_blocked_ci.pr_name("Daikon", "daikon#555"), "daikon#555")
+
     def test_blocked_pr_runs(self) -> None:
         """A blocked PR's runs are those that it or a push started on its head branch."""
         runs = {

@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Cancel the unfinished CI runs of blocked PRs.
 
-Usage (run in the directory that holds the working copies, as for pr-status):
+Usage (run in the directory that holds the working copy directories):
   cancel-blocked-ci             # cancel the runs
   cancel-blocked-ci --dry-run   # report the runs that would be cancelled (alias: -n)
 
-A PR is blocked if it depends on another open PR, as pr-status computes it from
-pr-status-config.json or, if there is no pr-status-config.json, from the config that
-pr-status constructs by default.  Excluded PRs are never blocked.
+A PR is blocked if it depends on another open PR.
 
 The builds of a blocked PR are those of its head branch that the PR or a push
 started.  If the head branch is the repository's default branch (as for a PR that
@@ -21,9 +19,6 @@ cancelled.
 Cancelling a build requires credentials, as described in `ci_build.py`.
 
 The exit status is 1 if finding or cancelling any build failed, and 0 otherwise.
-
-This script uses the `pr-status` script, which it finds in its own directory or, as
-`pr-status.py`, on the PATH.
 """
 
 import argparse
@@ -44,7 +39,7 @@ import request_util
 
 PROGRAM = pathlib.Path(sys.argv[0]).name
 
-# Whether finding or cancelling any build failed.
+# True if finding or cancelling any build failed.
 failed = False
 
 
@@ -83,11 +78,12 @@ def load_pr_status() -> types.ModuleType:
 pr_status = load_pr_status()
 
 
-UNFINISHED = ["queued", "in_progress", "waiting", "requested", "pending"]
+# The statuses of unfinished GitHub Actions runs.
+GITHUB_UNFINISHED_STATUSES = ["queued", "in_progress", "waiting", "requested", "pending"]
 # The statuses of Azure Pipelines builds that have finished or are being cancelled.
-AZURE_FINISHED = {"completed", "cancelling"}
+AZURE_FINISHED_STATUSES = {"completed", "cancelling"}
 # The statuses of unfinished CircleCI workflows.
-CIRCLECI_UNFINISHED = {"running", "on_hold", "failing"}
+CIRCLECI_UNFINISHED_STATUSES = {"running", "on_hold", "failing"}
 
 # Matches a branch that holds a PR, such as "refs/pull/123/merge" or "pull/123".
 PULL_BRANCH = re.compile(r"(?:refs/)?pull/(\d+)(?:/merge|/head)?")
@@ -97,13 +93,14 @@ def pr_name(label, ref):
     """Name a PR in output.
 
     Args:
-        label: the label of the PR's repository.
+        label: the name of the PR's repository in output (by default, the repository's
+            name, such as "daikon").
         ref: the reference to the PR, such as "#555" or "daikon#555".
 
     Returns:
-        ref, preceded by the repository's label unless ref already starts with it.
+        ref, preceded by the repository's label if ref is a bare "#N".
     """
-    return ref if ref.startswith(label) else f"{label} {ref}"
+    return f"{label} {ref}" if ref.startswith("#") else ref
 
 
 def blocked_prs(cfg):
@@ -159,7 +156,7 @@ def unfinished_runs(gh):
         lambda status: request_util.gh_api(
             f"repos/{gh}/actions/runs?status={status}&per_page=100", paginate=True
         ),
-        UNFINISHED,
+        GITHUB_UNFINISHED_STATUSES,
     ):
         for page in pages:
             for r in page["workflow_runs"]:
@@ -241,7 +238,7 @@ def unless_finished(cancelling, finished):
 
     Args:
         cancelling: a function of no arguments that cancels the build.
-        finished: a function of no arguments that returns whether the build has finished.
+        finished: a function of no arguments that returns True if the build has finished.
 
     Returns:
         A function of no arguments that calls cancelling.  If cancelling fails, the
@@ -361,7 +358,7 @@ def circleci_build(status, workflow, name):
 
 
 def is_default_branch(gh, default_branch, pr):
-    """Determine whether a PR's head branch is the default branch of its repository.
+    """Return True if a PR's head branch is the default branch of its repository.
 
     Args:
         gh: the GitHub name of the PR's repository.
@@ -385,7 +382,7 @@ def blocked_pr_runs(pr, runs, on_default_branch):
     Args:
         pr: the gh JSON of the PR.
         runs: the unfinished runs, as unfinished_runs returns them.
-        on_default_branch: whether the PR's head branch is the repository's default branch.
+        on_default_branch: True if the PR's head branch is the repository's default branch.
 
     Returns:
         A list of the runs.
@@ -400,7 +397,7 @@ def pr_branches(gh, pr, on_default_branch):
     Args:
         gh: the GitHub name of the PR's repository.
         pr: the gh JSON of the PR.
-        on_default_branch: whether the PR's head branch is the repository's default branch.
+        on_default_branch: True if the PR's head branch is the repository's default branch.
 
     Returns:
         A set of the branches, named as branch_name names them:  "pull/N" for the PR's
@@ -426,7 +423,7 @@ def azure_build_state(org, project, build):
         and whether the build has finished or is being cancelled.
     """
     record = ci_build.azure_get(f"{ci_build.azure_api(org, project, build)}?api-version=7.1")
-    return record["sourceBranch"], record["status"] in AZURE_FINISHED
+    return record["sourceBranch"], record["status"] in AZURE_FINISHED_STATUSES
 
 
 def circleci_workflow_state(workflow):
@@ -442,7 +439,8 @@ def circleci_workflow_state(workflow):
     w = request_util.request(
         "GET", f"{ci_build.CIRCLECI_API}/v2/workflow/{workflow}", ci_build.circleci_headers()
     )
-    return circleci_pipeline_branch(w["pipeline_id"]), w["status"] not in CIRCLECI_UNFINISHED
+    finished = w["status"] not in CIRCLECI_UNFINISHED_STATUSES
+    return circleci_pipeline_branch(w["pipeline_id"]), finished
 
 
 @functools.cache
@@ -658,7 +656,7 @@ def handle(subject, build, dry_run):
     Args:
         subject: what the build tests, such as a PR.
         build: the status, description, URL, and cancelling function of the build.
-        dry_run: whether to only report the build.
+        dry_run: True if the build should be reported but not cancelled.
     """
     status, description, url, cancelling = build
     print(f"{subject}: {'would cancel' if dry_run else 'cancelling'} {status} {description}")
@@ -676,14 +674,14 @@ def main():
     )
     dry_run = parser.parse_args().dry_run
     base = pathlib.Path.cwd()
-    # The current directory holds the working copies; it is not one of them.
+    # The current directory holds the working copy directories; it is not one of them.
     toplevel = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"], check=False, capture_output=True, text=True
     )
     if toplevel.returncode == 0:
         sys.exit(
             f"{PROGRAM}: {base} is in the git working copy {toplevel.stdout.strip()}; "
-            f"run {PROGRAM} in the directory that holds the working copies"
+            f"run {PROGRAM} in the directory that holds the working copy directories"
         )
     if pathlib.Path(pr_status.CONFIG).exists():
         with pathlib.Path(pr_status.CONFIG).open() as f:
