@@ -888,6 +888,7 @@ check_conflict_resolution() {
     echo "${SCRIPT_NAME}: $1: the file was deleted" >&2
     return 1
   fi
+
   # The awk program below that checks the resolution reads both versions of
   # FILE from its standard input.  So that it can tell them apart, the two
   # `awk` commands that feed it put a tag at the start of each line:  "A" for
@@ -908,6 +909,7 @@ check_conflict_resolution() {
   if [ -n "$(tail -c 1 < "$1")" ]; then
     check_conflict_w_newline=no
   fi
+
   # "yes" if FILE contains a line "=======" in HEAD or in MERGE_HEAD, and "no"
   # otherwise.  If "yes", such a line in the text in place of a conflict
   # region can be content rather than a leftover separator, so it is
@@ -919,6 +921,7 @@ check_conflict_resolution() {
       check_conflict_separator=yes
     fi
   done
+
   # shellcheck disable=SC2016 # awk, not the shell, expands $0 and the like.
   {
     git cat-file --filters "AUTO_MERGE:$1" | awk '{ print "A" $0 }'
@@ -931,6 +934,7 @@ check_conflict_resolution() {
       printf "%s: %s: %s\n", ENVIRON["CHECK_SCRIPT_NAME"], ENVIRON["CHECK_FILE"], message > "/dev/stderr"
       status = 1
     }
+
     # Returns 1 if the lines of block B, a clean block of AUTO_MERGE, are the
     # lines of the working tree that start at line POS.
     function block_at(b, pos,   k) {
@@ -940,12 +944,16 @@ check_conflict_resolution() {
       }
       return 1
     }
+
+    # Describes block B in a diagnostic.
     function block_lines(b) {
       if (block_len[b] == 0) return "an empty block"
       return "lines " block_start[b] "-" (block_start[b] + block_len[b] - 1) " of AUTO_MERGE"
     }
+
     /^A/ { a[++num_a] = substr($0, 2); next }
     /^W/ { w[++num_w] = substr($0, 2); next }
+
     END {
       # Split AUTO_MERGE into the clean blocks 0..num_regions, between the
       # regions.
@@ -964,6 +972,7 @@ check_conflict_resolution() {
           if (depth == 0) block_start[num_regions] = i + 1
         }
       }
+
       if (depth != 0) { problem("AUTO_MERGE has an unterminated conflict region"); exit 1 }
       if (num_regions == 0) { problem("AUTO_MERGE has no conflict markers"); exit 1 }
       block_len[num_regions] = num_a + 1 - block_start[num_regions]
@@ -978,12 +987,14 @@ check_conflict_resolution() {
         problem("the text after the last conflict region changed")
         exit 1
       }
+
       # The final newline belongs to the last line, which is clean unless the
       # file ends with a conflict region.
       if (block_len[num_regions] > 0 && ENVIRON["CHECK_A_NEWLINE"] != ENVIRON["CHECK_W_NEWLINE"]) {
         problem("the final newline was added or removed")
         exit 1
       }
+
       pos = block_len[0] + 1
       for (b = 1; b < num_regions; b++) {
         while (pos + block_len[b] <= last_pos && !block_at(b, pos)) pos++
@@ -994,6 +1005,7 @@ check_conflict_resolution() {
         for (k = 0; k < block_len[b]; k++) clean[pos + k] = 1
         pos += block_len[b]
       }
+
       for (k = 1; k <= block_len[0]; k++) clean[k] = 1
       for (k = last_pos; k <= num_w; k++) clean[k] = 1
 
