@@ -119,10 +119,10 @@ record_resolution() {
 }
 
 ## Usage: push_to
-## Runs `git-push-to ${main_dir} ${feature_dir}`.  Sets ${push_status} to its
-## exit status and ${push_output} to its output.
+## Runs `git-push-to --no-llm ${main_dir} ${feature_dir}`.  Sets
+## ${push_status} to its exit status and ${push_output} to its output.
 push_to() {
-  if push_output="$("${COMMANDS_DIR}/git-push-to" "${main_dir}" "${feature_dir}" 2>&1)"; then
+  if push_output="$("${COMMANDS_DIR}/git-push-to" --no-llm "${main_dir}" "${feature_dir}" 2>&1)"; then
     push_status=0
   else
     push_status=$?
