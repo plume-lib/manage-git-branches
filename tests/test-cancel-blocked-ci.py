@@ -83,6 +83,36 @@ class CancelBlockedCiTest(unittest.TestCase):
         # A reference with a prefix names its repository, even if the prefix is not the label.
         self.assertEqual(cancel_blocked_ci.pr_name("Daikon", "daikon#555"), "daikon#555")
 
+    def test_blocked_prs(self) -> None:
+        """Open PRs make shared branches:  every base branch, and unblocked PRs' head branches.
+
+        The head branch of a blocked PR, or of a PR from a fork, is not made shared.
+        """
+        prs = {
+            1: {"owner": "org", "headRefName": "feature", "baseRefName": "main"},
+            2: {"owner": "org", "headRefName": "feature", "baseRefName": "develop"},
+            3: {"owner": "org", "headRefName": "blocked-only", "baseRefName": "main"},
+            4: {"owner": "fork", "headRefName": "fix", "baseRefName": "main"},
+        }
+        model = mock.Mock()
+        model.repo.label = "repo"
+        model.repo.gh = "Org/repo"
+        model.repo.prs = prs
+        model.repo.ref.side_effect = lambda n: f"#{n}"
+        model.blocked.return_value = [2, 3]
+        with mock.patch.object(
+            cancel_blocked_ci.pr_status, "load_models", create=True, return_value=[model]
+        ):
+            [repo] = cancel_blocked_ci.blocked_prs({})
+        self.assertEqual(
+            repo.prs,
+            [
+                cancel_blocked_ci.BlockedPr("repo #2", prs[2]),
+                cancel_blocked_ci.BlockedPr("repo #3", prs[3]),
+            ],
+        )
+        self.assertEqual(repo.pr_shared_branches, {"main", "develop", "feature"})
+
     def test_circleci_workflows_of_jobs(self) -> None:
         """The workflows of jobs whose URLs do not contain workflow ids come from lookups.
 
