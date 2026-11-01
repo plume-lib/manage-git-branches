@@ -160,9 +160,9 @@ The commands are:
   changes that have not been merged into the current branch do not appear.
 * [`rerun-failed-ci`](rerun-failed-ci)
   `[--dry-run] [--max-attempts N] [PR | BRANCH | URL]...`:
-  For each transient failure of a CI job, reruns it.  Works on the given a
+  For each transient failure of a CI job, reruns it.  Works on the given
   GitHub pull request (by default, the one for the current branch).  A URL
-  names a Azure Pipelines, CircleCI, or GitHub Actions job or workflow.
+  names an Azure Pipelines, CircleCI, or GitHub Actions job or workflow.
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
   shows a transient failure.  This command needs Python 3.9 or later and
   `gh`.
