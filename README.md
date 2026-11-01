@@ -36,7 +36,7 @@ The commands are:
   submodules gets a copy of the whole directory instead, which is an
   independent clone.
   Below is a definition for an alias `gcb`.
-* [`git-new-branch`](git-new-branch) `[--clean | --copy] BRANCHNAME`:
+* [`git-new-branch`](git-new-branch) `[--clean | --copy] [--allow-upstream] BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
@@ -58,6 +58,11 @@ The commands are:
   `PROJECT-fork-ORG-branch-BRANCHNAME` at the commit of `PROJECT-fork-ORG`,
   with none of the current directory's changes.  As for `git-push-to`, ORG
   `-` stands for the clone `PROJECT` itself.
+  In a clone of an upstream repository whose fork is in a sibling directory
+  `PROJECT-fork-ORG`, the command refuses, because a branch for a pull
+  request belongs in the fork; `--allow-upstream` overrides the refusal.
+  If git's configuration sets `github.user`, only a fork whose ORG is that
+  user counts.
   `git-new-branch --help` (or `-h`) prints a synopsis, which describes the
   modes.  The comments in [`git-new-branch`](git-new-branch) give the
   details, such as when the fast-forward is not made and which copied build
