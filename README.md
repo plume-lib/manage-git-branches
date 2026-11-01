@@ -155,13 +155,12 @@ The commands are:
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
 * [`normalize-log`](normalize-log) `[FILE]...`:
-  Prints each CI log (by default, standard input) without the formatting that
-  a CI service or a terminal adds:  terminal escape sequences, a leading byte
-  order mark, a leading timestamp (as in a GitHub Actions or Azure Pipelines
-  log), and carriage returns.  It also deletes progress messages that a
-  terminal would overwrite or erase:  the text before a carriage return that is
-  not at the end of a line, and the text before an escape sequence that erases
-  the whole line.
+  Prints the file (by default, standard input) without formatting that
+  affects a terminal:  terminal escape sequences, a leading byte order
+  mark, a leading timestamp, and carriage returns.  It also deletes
+  progress messages that a terminal would overwrite or erase:  the text
+  before a carriage return that is not at the end of a line, and the text
+  before an escape sequence that erases the whole line.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
