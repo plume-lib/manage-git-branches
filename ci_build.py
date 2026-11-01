@@ -117,7 +117,7 @@ def azure_headers() -> dict[str, str]:
 
 
 def azure_cli_headers() -> AzureTokenHeaders:
-    """Make the HTTP headers that authenticate to Azure DevOps as the account of `az login`.
+    """Return the HTTP headers that authenticate to Azure DevOps as the account of `az login`.
 
     Returns:
         The headers, and the time until which to use them.
