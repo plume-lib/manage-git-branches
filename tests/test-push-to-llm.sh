@@ -1049,6 +1049,65 @@ if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
   fail "rerun that pulls: the build is not fixed"
 fi
 
+## When the merge fast-forwards to a merge commit that the pull of FROM_DIR
+## made, the agent is asked to fix the build, and is told about that merge.
+setup_case pull-from-ff-build build
+git -C "${main_dir}" reset -q --hard HEAD^
+git -C "${main_dir}" push -q --force
+git -C "${feature_dir}" reset -q --hard "$(git -C "${main_dir}" rev-parse HEAD)"
+git -C "${feature_dir}" push -q --force
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+git clone -q -b main "${remote}" "${case_dir}/other-clone"
+echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
+git -C "${case_dir}/other-clone" commit -q -a -m "Break the build remotely"
+git -C "${case_dir}/other-clone" push -q
+echo "local" > "${main_dir}/local.txt"
+git -C "${main_dir}" add local.txt
+git -C "${main_dir}" commit -q -m "Add local.txt"
+from_local="$(git -C "${main_dir}" rev-parse HEAD)"
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "fast-forward to a merge of FROM_DIR's pull: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "fast-forward to a merge of FROM_DIR's pull: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q "git diff ${from_local} HEAD" "${STUB_PROMPT}"; then
+  fail "fast-forward to a merge of FROM_DIR's pull: the instructions do not name FROM_DIR's head before its pull: $(cat "${STUB_PROMPT}")"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'main' of ${remote%.git}" ]; then
+  fail "fast-forward to a merge of FROM_DIR's pull: wrong message for the fix: ${message}"
+fi
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+  fail "fast-forward to a merge of FROM_DIR's pull: the build is not fixed"
+fi
+
+## A merge commit in the branch that the current branch pushes to is pushed,
+## even if it is not in the upstream branch, so the agent is not told of it.
+setup_pull_breaks pull-push-remote
+git init -q --bare -b main "${case_dir}/fork.git"
+git -C "${feature_dir}" remote add fork "${case_dir}/fork.git"
+git -C "${feature_dir}" config branch.feature.pushRemote fork
+pushed_merge="$(git -C "${feature_dir}" commit-tree -p HEAD -p HEAD~2 \
+  -m "Merge branch 'side' into feature" "HEAD^{tree}")"
+git -C "${feature_dir}" reset -q --hard "${pushed_merge}"
+git -C "${feature_dir}" push -q fork feature
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "merge in the push branch: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "merge in the push branch: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q "git diff ${pushed_merge} HEAD" "${STUB_PROMPT}"; then
+  fail "merge in the push branch: the instructions do not name the pushed merge: $(cat "${STUB_PROMPT}")"
+fi
+message="$(git -C "${case_dir}/fork.git" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'feature' of ${remote%.git}" ]; then
+  fail "merge in the push branch: wrong message for the fix: ${message}"
+fi
+
 ## With --no-llm, a pull that breaks the build is not given to an agent.
 setup_pull_breaks pull-build-no-llm
 STUB_BUILD=fix push_to good --no-llm

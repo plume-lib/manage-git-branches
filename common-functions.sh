@@ -1757,26 +1757,25 @@ pull_record_merge() {
   fi
 }
 
-## Usage: merge_description MERGE
-## Prints what the subject of the merge commit MERGE says was merged, which
-## is the subject without its leading "Merge " and its trailing " into
-## BRANCH":  for example, "branch 'main'" for the subject
-## "Merge branch 'main' into feature".  Prints "commit " and MERGE's
-## abbreviated hash, as in "commit 0bb9f58", if the subject does not begin
-## with "Merge ".
+## Usage: merge_description SUBJECT HASH
+## Prints what SUBJECT, the subject of a merge commit, says was merged, which
+## is SUBJECT without its leading "Merge " and its trailing " into BRANCH":
+## for example, "branch 'main'" for the subject
+## "Merge branch 'main' into feature".  Prints "commit HASH", as in
+## "commit 0bb9f58", if SUBJECT does not begin with "Merge ".
+## HASH: the merge commit's abbreviated hash, such as "0bb9f58".
 merge_description() {
-  merge_description_subject="$(git log -1 --format=%s "$1")" || merge_description_subject=''
-  case "${merge_description_subject}" in
+  case "$1" in
     "Merge "?*)
       # A branch name contains no space, so " into " followed by text without
       # a space ends the subject only if it names the destination branch.
-      printf '%s\n' "${merge_description_subject#Merge }" | sed -e 's/ into [^ ]*$//'
+      printf '%s\n' "${1#Merge }" | sed -e 's/ into [^ ]*$//'
       ;;
-    *) echo "commit $(git rev-parse --short "$1")" ;;
+    *) echo "commit $2" ;;
   esac
 }
 
-## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [PULL_MERGE]]
+## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [PULL_MERGE [COMMIT_PULL_MERGE]]]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
 ## pushes the current branch if the build succeeds.  DESCRIPTION is what
@@ -1788,11 +1787,16 @@ merge_description() {
 ## asks RESOLVER, if it is given and not empty, to fix it.  PULL_MERGE, if it
 ## is given and not empty, is a merge commit that a pull of the current
 ## branch made just before this call, as `pull_resolving` sets ${pull_merge}.
+## COMMIT_PULL_MERGE, if it is given and not empty, is likewise a merge
+## commit that a pull of COMMIT's branch, in another clone, made.
 ## The agent is asked to fix the build only if the pull or the merge made a
-## merge commit.  It is told about the merge commits that are not pushed:
-## those that HEAD reaches through first parents without passing a commit
-## that is not a merge commit or that is in the upstream branch.  They include
-## a merge that an earlier run made but did not push because its build failed.
+## merge commit, or if the merge brought in COMMIT_PULL_MERGE, as by
+## fast-forwarding to it.  The agent is told about the merge commits that are
+## not pushed:  those that HEAD reaches through first parents without passing
+## a commit that is not a merge commit or that is in a remote-tracking branch,
+## such as the branch that the current branch pushes to or pulls from.  They
+## include a merge that an earlier run made but did not push because its
+## build failed.
 ## Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
@@ -1867,31 +1871,56 @@ merge_build_push() {
       echo "${SCRIPT_NAME}: cannot read HEAD or $3 in $(pwd)" >&2
       return 1
     fi
-    # If neither the pull nor the merge made a merge commit, neither caused a
-    # failure of the build, which the agent would merely work around.  A
-    # merge that made no commit either changed nothing or fast-forwarded to
-    # COMMIT, whose own failure it is.
+    # If neither the pulls nor the merge made a merge commit that the merge
+    # brought in, none of them caused a failure of the build, which the agent
+    # would merely work around.  A merge that made no commit either changed
+    # nothing or fast-forwarded to COMMIT, whose own failure it is unless a
+    # pull of COMMIT's branch made it.
     if [ -n "${5:-}" ] && { [ -n "${6:-}" ] \
       || { [ "${merge_new_head}" != "${merge_orig_head}" ] \
-        && [ "${merge_new_head}" != "${merge_commit}" ]; }; }; then
-      # Collect the merge commits that are not pushed, oldest first, and the
-      # first parent of the oldest one.  A commit in the upstream branch is
-      # pushed.  Without an upstream branch, only the merge commits that the
-      # pull and the merge made are collected.
-      if ! merge_pushed="$(git rev-parse --verify --quiet '@{upstream}')"; then
-        merge_pushed="${6:+$6^1}"
-        merge_pushed="${merge_pushed:-${merge_orig_head}}"
+        && [ "${merge_new_head}" != "${merge_commit}" ]; } \
+      || { [ -n "${7:-}" ] && git merge-base --is-ancestor "$7" HEAD \
+        && ! git merge-base --is-ancestor "$7" "${merge_orig_head}"; }; }; then
+      # The commits that are not pushed and that HEAD reaches through first
+      # parents, newest first, each as its abbreviated hash, its parents' full
+      # hashes, a tab, and its subject.  A commit is pushed if it is in a
+      # remote-tracking branch.  That is simpler and more robust than naming
+      # the branch that `git push` pushes to:  `@{push}` cannot name it when
+      # `push.default` is "simple" and `branch.BRANCH.pushRemote` names a
+      # remote other than the upstream branch's.
+      merge_tab="$(printf '\t')"
+      if ! merge_log="$(git log --first-parent --no-show-signature \
+        --format="%h %P${merge_tab}%s" HEAD --not --remotes)"; then
+        echo "${SCRIPT_NAME}: cannot read the history of HEAD in $(pwd)" >&2
+        return 1
       fi
-      merge_fixed=''
-      merge_fix_from="${merge_new_head}"
-      while git rev-parse --verify --quiet "${merge_fix_from}^2" > /dev/null \
-        && ! git merge-base --is-ancestor "${merge_fix_from}" "${merge_pushed}"; do
-        merge_fixed="$(merge_description "${merge_fix_from}")${merge_fixed:+ and ${merge_fixed}}"
-        if ! merge_fix_from="$(git rev-parse --verify "${merge_fix_from}^1")"; then
-          echo "${SCRIPT_NAME}: cannot read the history of HEAD in $(pwd)" >&2
-          return 1
-        fi
-      done
+      # Print the first parent of the oldest of the merge commits at the start
+      # of that list, and then their descriptions, oldest first.  The loop
+      # runs in a subshell, which prints what it collects.
+      merge_collected="$(printf '%s\n' "${merge_log}" | {
+        merge_fixed=''
+        merge_fix_from=''
+        while IFS= read -r merge_line; do
+          merge_parents="${merge_line#* }"
+          merge_subject="${merge_parents#*"${merge_tab}"}"
+          merge_parents="${merge_parents%%"${merge_tab}"*}"
+          case "${merge_parents}" in
+            *" "*) ;;
+            *) break ;; # A commit with one parent is not a merge commit.
+          esac
+          merge_fixed="$(merge_description "${merge_subject}" "${merge_line%% *}")${merge_fixed:+ and ${merge_fixed}}"
+          merge_fix_from="${merge_parents%% *}"
+        done
+        printf '%s\n%s\n' "${merge_fix_from}" "${merge_fixed}"
+      })"
+      merge_fix_from="$(printf '%s\n' "${merge_collected}" | sed -n 1p)"
+      merge_fixed="$(printf '%s\n' "${merge_collected}" | sed -n 2p)"
+      # The pulls or the merge made a merge commit, which is not pushed, so
+      # this does not happen.
+      if [ -z "${merge_fix_from}" ]; then
+        merge_fixed="$2"
+        merge_fix_from="${merge_orig_head}"
+      fi
       if ! build_and_fix "$5" "${merge_fixed}" "${merge_fix_from}"; then
         return 1
       fi
