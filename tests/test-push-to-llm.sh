@@ -89,7 +89,8 @@ if [ "${STUB_MODE}" = separator ]; then
   mv file.txt.new file.txt
   exit 0
 fi
-sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new
+sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^=======$/d' -e '/^>>>>>>> /d' \
+  file.txt > file.txt.new
 mv file.txt.new file.txt
 if [ "${STUB_MODE}" = clean ]; then
   sed -e 's/^three$/THREE/' file.txt > file.txt.new
@@ -291,6 +292,18 @@ setup_case claude
 push_to good --llm
 check_resolved claude "--llm"
 
+## The merge uses the configured conflict style, which can be "diff3".
+setup_case diff3
+git -C "${feature_dir}" config merge.conflictStyle diff3
+push_to none --llm
+if ! grep -q '^||||||| ' "${feature_dir}/file.txt"; then
+  fail "diff3: the merge did not use the configured conflict style"
+fi
+setup_case diff3-good
+git -C "${feature_dir}" config merge.conflictStyle diff3
+push_to good --llm
+check_resolved claude "diff3"
+
 ## --codex implies --llm.
 setup_case codex
 push_to good --codex
@@ -344,9 +357,6 @@ esac
 setup_case none
 push_to none --llm
 check_not_resolved "remaining conflict markers"
-if ! grep -q '^||||||| ' "${feature_dir}/file.txt"; then
-  fail "remaining conflict markers: the merge did not use the diff3 conflict style"
-fi
 case "${push_output}" in
   *"is a conflict marker"*) ;;
   *) fail "remaining conflict markers: wrong diagnostic: ${push_output}" ;;

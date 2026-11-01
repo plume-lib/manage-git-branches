@@ -1,13 +1,12 @@
 # An awk program that `check_conflict_resolution`, in common-functions.sh,
-# runs to check the resolution of the conflicts in a file.  Its standard input
-# holds two versions of the file, one after the other:  first every line of
-# the file in AUTO_MERGE, git's automatic merge, which has the conflict
-# markers, each with "A" prepended; then every line of the file in the
-# working tree, each with "W" prepended.  It reads these environment
+# runs to check the resolution of the conflicts in a file.  It reads two
+# versions of the file:  from its standard input, the file in AUTO_MERGE,
+# git's automatic merge, which has the conflict markers, followed by one more
+# newline; and from its second operand, the file in the working tree.  Its
+# first operand is "-", for the standard input.  It reads these environment
 # variables:
 #   CHECK_FILE         the file's name, for diagnostics
 #   CHECK_SCRIPT_NAME  the name of the command, for diagnostics
-#   CHECK_A_NEWLINE    "yes" if AUTO_MERGE's file ends with a newline, else "no"
 #   CHECK_W_NEWLINE    "yes" if the working tree's file ends with a newline,
 #                      else "no"
 #   CHECK_SEPARATOR    "yes" if a line "=======" is permitted in the text in
@@ -37,10 +36,20 @@ function block_lines(b) {
   return "lines " block_start[b] "-" (block_start[b] + block_len[b] - 1) " of AUTO_MERGE"
 }
 
-/^A/ { a[++num_a] = substr($0, 2); next }
-/^W/ { w[++num_w] = substr($0, 2); next }
+FILENAME == ARGV[2] { w[++num_w] = $0; next }
+{ a[++num_a] = $0 }
 
 END {
+  # The newline that follows AUTO_MERGE's file makes its last line empty if
+  # and only if the file ends with a newline.  An empty file counts as ending
+  # with one.
+  a_newline = "no"
+  if (a[num_a] == "") {
+    a_newline = "yes"
+    delete a[num_a]
+    num_a--
+  }
+
   # Split AUTO_MERGE into the clean blocks 0..num_regions, between the
   # regions.
   num_regions = 0
@@ -76,7 +85,7 @@ END {
 
   # The final newline belongs to the last line, which is clean unless the
   # file ends with a conflict region.
-  if (block_len[num_regions] > 0 && ENVIRON["CHECK_A_NEWLINE"] != ENVIRON["CHECK_W_NEWLINE"]) {
+  if (block_len[num_regions] > 0 && a_newline != ENVIRON["CHECK_W_NEWLINE"]) {
     problem("the final newline was added or removed")
     exit 1
   }
