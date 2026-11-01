@@ -48,13 +48,13 @@ mkdir "${WORK_DIR}/test-bin"
 STUB_LOG="${WORK_DIR}/stub-log"
 export STUB_LOG
 
-## The stub agent removes the conflict marker lines of file.txt, keeping both
-## sides.
+## The stub agent removes the conflict marker lines of file.txt and the merge
+## base's text, keeping both sides.
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
 echo claude >> "${STUB_LOG}"
 cat > /dev/null
-sed -e '/^<<<<<<< /d' -e '/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new
+sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new
 mv file.txt.new file.txt
 EOF
 
