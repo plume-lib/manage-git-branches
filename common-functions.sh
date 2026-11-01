@@ -870,17 +870,15 @@ upstream_default_branch_git() {
 
 ## Usage: check_conflict_resolution FILE SEPARATOR
 ## Checks the resolution of the conflicts in FILE against AUTO_MERGE, the git
-## ref that names git's automatic merge, which contains the conflict markers.
-## FILE is a pathname relative to the top level of the working tree, which
-## must be the current directory.  A conflict region starts with a line
-## "<<<<<<<" and ends with the matching line ">>>>>>>"; a recursive merge
-## nests regions.  The resolution is acceptable if it consists of the text
-## outside the conflict regions, unchanged and in order, with any text in
-## place of each region, except a line that starts with "<<<<<<<", "|||||||",
-## or ">>>>>>>", or a line "=======".  SEPARATOR is "yes" if a line "======="
-## is nonetheless permitted, and "no" otherwise.  Such a line can be content,
-## such as a Markdown heading's underline.  Returns 1, after printing a
-## diagnostic for each problem, if the resolution is not acceptable.
+## ref that names git's automatic merge, which contains the conflict markers:
+## returns 0 if the text outside the conflict regions is unchanged and no
+## conflict marker remains, and returns 1, after printing a diagnostic for
+## each problem, otherwise.  check-conflict-resolution.awk states exactly
+## what is acceptable.  FILE is a pathname relative to the top level of the
+## working tree, which must be the current directory.  SEPARATOR is "yes" if
+## a line "=======" in place of a conflict region is content, such as a
+## Markdown heading's underline, rather than a conflict marker, and "no"
+## otherwise.
 ##
 ## This compares content rather than the hunks of `git diff`, which can put a
 ## change on either of two identical lines, one inside a region and one
@@ -891,9 +889,9 @@ check_conflict_resolution() {
     return 1
   fi
 
-  # The awk program check-conflict-resolution.awk, which checks the
-  # resolution, reads FILE in AUTO_MERGE from its standard input and FILE in
-  # the working tree as a file operand.  The "./" keeps awk from taking a
+  # This function passes FILE in AUTO_MERGE to the awk program
+  # check-conflict-resolution.awk as MERGED, on standard input, and FILE in
+  # the working tree as RESOLVED.  The "./" keeps awk from taking a
   # FILE such as "x=y" for a variable assignment.  `--filters` converts
   # AUTO_MERGE's file as a checkout would, such as to CRLF line endings, to
   # match the working tree.
