@@ -130,7 +130,7 @@ _azure_private_projects: set[str] = set()
 AZURE_REFUSALS = {203, 401, 403, 404}
 
 
-def azure_get(url: str) -> Any:
+def azure_get(url: str, *, text: bool = False) -> Any:
     """Get url from Azure DevOps, anonymously if the project permits it.
 
     A request is first made anonymously, because Azure DevOps refuses a token for one
@@ -139,15 +139,22 @@ def azure_get(url: str) -> Any:
 
     Args:
         url: the URL, in the Azure DevOps API.
+        text: whether the response is text rather than JSON.
 
     Returns:
-        The response body, parsed as JSON.
+        The response body:  text, or parsed JSON.
     """
+
+    def get(headers: dict[str, str]) -> Any:
+        if text:
+            return request_util.http("GET", url, headers).decode(errors="replace")
+        return request_util.request("GET", url, headers)
+
     match = re.match(r"https://dev\.azure\.com/([^/]+/[^/]+)/", url)
     project = match[1] if match else url
     if project not in _azure_private_projects:
         try:
-            return request_util.request("GET", url, {})
+            return get({})
         except (urllib.error.HTTPError, ValueError) as e:
             # A response that is not JSON is a sign-in page.  Another failure, such as a
             # 503, can be temporary and does not indicate a private project.
@@ -155,7 +162,7 @@ def azure_get(url: str) -> Any:
             if not refused or not azure_headers():
                 raise
             _azure_private_projects.add(project)
-    return request_util.request("GET", url, azure_headers())
+    return get(azure_headers())
 
 
 def parse_azure_url(url: str) -> tuple[str, str, int] | None:

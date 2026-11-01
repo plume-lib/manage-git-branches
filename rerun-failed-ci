@@ -75,6 +75,7 @@ from pathlib import Path
 from typing import Any
 
 import ci_build
+import request_util
 
 PROGRAM = Path(sys.argv[0]).name
 
@@ -273,9 +274,11 @@ class Rerunner:
         """
         api = f"{ci_build.CIRCLECI_API}/v2"
         try:
-            wf = ci_build.request("GET", f"{api}/workflow/{workflow}", ci_build.circleci_headers())
-        except ci_build.REQUEST_ERRORS as e:
-            self.warn(f"cannot read CircleCI workflow {workflow}: {ci_build.failure(e)}")
+            wf = request_util.request(
+                "GET", f"{api}/workflow/{workflow}", ci_build.circleci_headers()
+            )
+        except request_util.REQUEST_ERRORS as e:
+            self.warn(f"cannot read CircleCI workflow {workflow}: {request_util.failure(e)}")
             return
         pipeline = (
             f"https://app.circleci.com/pipelines/{wf['project_slug']}/{wf['pipeline_number']}"
@@ -293,10 +296,10 @@ class Rerunner:
                 ),
                 key=operator.itemgetter("created_at"),
             )
-        except ci_build.REQUEST_ERRORS as e:
+        except request_util.REQUEST_ERRORS as e:
             self.warn(
                 f"cannot read the workflows of CircleCI pipeline {wf['pipeline_id']}:"
-                f" {ci_build.failure(e)}"
+                f" {request_util.failure(e)}"
             )
             return
         if same_name and same_name[-1]["id"] != workflow:
@@ -317,9 +320,9 @@ class Rerunner:
                 for j in ci_build.circleci_items(f"/v2/workflow/{workflow}/job")
                 if j["status"] in CIRCLECI_FAILED
             ]
-        except ci_build.REQUEST_ERRORS as e:
+        except request_util.REQUEST_ERRORS as e:
             self.warn(
-                f"cannot read the jobs of CircleCI workflow {workflow}: {ci_build.failure(e)}"
+                f"cannot read the jobs of CircleCI workflow {workflow}: {request_util.failure(e)}"
             )
             return
         if only_job is not None:
@@ -336,10 +339,10 @@ class Rerunner:
             else:
                 try:
                     log = circleci_job_log(wf["project_slug"], job["job_number"])
-                except ci_build.REQUEST_ERRORS as e:
+                except request_util.REQUEST_ERRORS as e:
                     self.warn(
                         f"cannot read the log of CircleCI job {job['name']}"
-                        f" ({job['job_number']}): {ci_build.failure(e)}"
+                        f" ({job['job_number']}): {request_util.failure(e)}"
                     )
                     all_transient = False
                     continue
@@ -362,15 +365,15 @@ class Rerunner:
             body, what = {"jobs": rerun_ids}, "the transiently failed jobs"
 
         def rerunning() -> Any:
-            return ci_build.request(
+            return request_util.request(
                 "POST", f"{api}/workflow/{workflow}/rerun", ci_build.circleci_headers(), body
             )
 
         try:
             result = self.rerun(what, rerunning)
-        except ci_build.REQUEST_ERRORS as e:
+        except request_util.REQUEST_ERRORS as e:
             hint = "" if ci_build.circleci_token() else "; there is no CircleCI token"
-            self.warn(f"cannot rerun CircleCI workflow {workflow}: {ci_build.failure(e)}{hint}")
+            self.warn(f"cannot rerun CircleCI workflow {workflow}: {request_util.failure(e)}{hint}")
             return
         if result is not None:
             print(f"  Reran {what}: {pipeline}/workflows/{result.get('workflow_id', '')}")
@@ -384,8 +387,8 @@ class Rerunner:
         """
         try:
             workflow, job = ci_build.circleci_workflow_of_url(url)
-        except ci_build.REQUEST_ERRORS as e:
-            self.warn(f"cannot read CircleCI job {url}: {ci_build.failure(e)}")
+        except request_util.REQUEST_ERRORS as e:
+            self.warn(f"cannot read CircleCI job {url}: {request_util.failure(e)}")
             return
         if workflow is None:
             self.warn(f"cannot find a CircleCI workflow in {url}")
@@ -410,9 +413,9 @@ class Rerunner:
             only_job: the id of the job to examine, or None to examine every job.
         """
         try:
-            run_json = ci_build.gh_api(f"repos/{repo}/actions/runs/{run}")
-        except ci_build.REQUEST_ERRORS as e:
-            self.warn(f"cannot read GitHub Actions workflow run {run}: {ci_build.failure(e)}")
+            run_json = request_util.gh_api(f"repos/{repo}/actions/runs/{run}")
+        except request_util.REQUEST_ERRORS as e:
+            self.warn(f"cannot read GitHub Actions workflow run {run}: {request_util.failure(e)}")
             return
         print(
             f"GitHub Actions workflow run {run_json['name']}:"
@@ -430,9 +433,10 @@ class Rerunner:
         try:
             latest_jobs = gha_jobs(repo, run, "latest")
             all_jobs = gha_jobs(repo, run, "all")
-        except ci_build.REQUEST_ERRORS as e:
+        except request_util.REQUEST_ERRORS as e:
             self.warn(
-                f"cannot read the jobs of GitHub Actions workflow run {run}: {ci_build.failure(e)}"
+                f"cannot read the jobs of GitHub Actions workflow run {run}:"
+                f" {request_util.failure(e)}"
             )
             return
         failed_jobs = [j for j in latest_jobs if j["conclusion"] in GITHUB_FAILED]
@@ -481,13 +485,13 @@ class Rerunner:
         try:
             if (
                 self.rerun(
-                    what, lambda: ci_build.run(["gh", "run", "rerun", "--repo", repo, *args])
+                    what, lambda: request_util.run(["gh", "run", "rerun", "--repo", repo, *args])
                 )
                 is not None
             ):
                 print(f"  Reran {what}.")
-        except ci_build.REQUEST_ERRORS as e:
-            self.warn(f"cannot rerun GitHub Actions workflow run {run}: {ci_build.failure(e)}")
+        except request_util.REQUEST_ERRORS as e:
+            self.warn(f"cannot rerun GitHub Actions workflow run {run}: {request_util.failure(e)}")
 
     def gha_rerun_failed_url(self, url: str, whole_run: bool = False) -> None:
         """Rerun the transiently failed jobs that a GitHub Actions URL names.
@@ -524,8 +528,8 @@ class Rerunner:
         api = ci_build.azure_api(org, project, build)
         try:
             build_json = ci_build.azure_get(f"{api}?api-version=7.1")
-        except ci_build.REQUEST_ERRORS as e:
-            self.warn(f"cannot read Azure Pipelines build {build_url}: {ci_build.failure(e)}")
+        except request_util.REQUEST_ERRORS as e:
+            self.warn(f"cannot read Azure Pipelines build {build_url}: {request_util.failure(e)}")
             return
         print(f"Azure Pipelines build {build_json['definition']['name']}: {build_url}")
         if build_json["status"] != "completed":
@@ -539,10 +543,10 @@ class Rerunner:
 
         try:
             records = ci_build.azure_get(f"{api}/timeline?api-version=7.1")["records"]
-        except ci_build.REQUEST_ERRORS as e:
+        except request_util.REQUEST_ERRORS as e:
             self.warn(
                 f"cannot read the timeline of Azure Pipelines build {build_url}:"
-                f" {ci_build.failure(e)}"
+                f" {request_util.failure(e)}"
             )
             return
 
@@ -618,15 +622,15 @@ class Rerunner:
                     " not set and `az login` has not been run"
                 )
                 return False
-            ci_build.request("PATCH", url, headers, body)
+            request_util.request("PATCH", url, headers, body)
             return True
 
         try:
             if self.rerun(what, rerunning):
                 print(f"  Reran {what}.")
-        except ci_build.REQUEST_ERRORS as e:
+        except request_util.REQUEST_ERRORS as e:
             self.warn(
-                f"cannot rerun Azure Pipelines build {build_url}: {ci_build.failure(e)};"
+                f"cannot rerun Azure Pipelines build {build_url}: {request_util.failure(e)};"
                 " do the credentials have the Build (Read & execute) scope?"
             )
 
@@ -677,13 +681,13 @@ class Rerunner:
         """
         description = pr or "for the current branch"
         try:
-            checks = ci_build.run(
+            checks = request_util.run(
                 ["gh", "pr", "checks", *([pr] if pr else []), "--json", "name,bucket,state,link"]
             )
             failed = [c for c in json.loads(checks) if c["bucket"] == "fail"]
-        except ci_build.REQUEST_ERRORS as e:
+        except request_util.REQUEST_ERRORS as e:
             self.warn(
-                f"cannot read the checks of pull request {description}: {ci_build.failure(e)}"
+                f"cannot read the checks of pull request {description}: {request_util.failure(e)}"
             )
             return
         if not failed:
@@ -727,7 +731,7 @@ def circleci_job_log(slug: str, job: int) -> str:
     if v1_vcs is None:
         msg = f"cannot read the log of a job of CircleCI project {slug}"
         raise ValueError(msg)
-    details = ci_build.request(
+    details = request_util.request(
         "GET",
         f"{ci_build.CIRCLECI_API}/v1.1/project/{v1_vcs}/{project}/{job}",
         ci_build.circleci_headers(),
@@ -736,7 +740,9 @@ def circleci_job_log(slug: str, job: int) -> str:
     for step in details["steps"]:
         for action in step["actions"]:
             if action.get("status") in {"failed", "timedout"} and action.get("output_url"):
-                output.extend(m["message"] for m in ci_build.request("GET", action["output_url"]))
+                output.extend(
+                    m["message"] for m in request_util.request("GET", action["output_url"])
+                )
     return "\n".join(output)
 
 
@@ -752,7 +758,7 @@ def gha_jobs(repo: str, run: int, which: str) -> list[dict[str, Any]]:
     Returns:
         The jobs.
     """
-    pages = ci_build.gh_api(
+    pages = request_util.gh_api(
         f"repos/{repo}/actions/runs/{run}/jobs?filter={which}&per_page=100", paginate=True
     )
     return [job for page in pages for job in page["jobs"]]
@@ -777,19 +783,21 @@ def gha_job_log(repo: str, job: int) -> tuple[str, bool]:
     parts = []
     read = True
     try:
-        log = ci_build.run(["gh", "run", "view", "--repo", repo, "--job", str(job), "--log-failed"])
+        log = request_util.run(
+            ["gh", "run", "view", "--repo", repo, "--job", str(job), "--log-failed"]
+        )
         # Each line starts with the job name and the step name, each followed by a tab.
         parts.extend(line.split("\t", 2)[-1] for line in log.splitlines())
-    except ci_build.REQUEST_ERRORS:
+    except request_util.REQUEST_ERRORS:
         read = False
     try:
-        pages = ci_build.gh_api(
+        pages = request_util.gh_api(
             f"repos/{repo}/check-runs/{job}/annotations?per_page=100", paginate=True
         )
         parts.extend(
             a["message"] for page in pages for a in page if a.get("annotation_level") == "failure"
         )
-    except ci_build.REQUEST_ERRORS:
+    except request_util.REQUEST_ERRORS:
         pass
     return "\n".join(parts), read
 
@@ -840,7 +848,7 @@ def azure_job_log(api: str, job: dict[str, Any], records: list[dict[str, Any]]) 
             parts.append(
                 ci_build.azure_get(f"{api}/logs/{task['log']['id']}?api-version=7.1", text=True)
             )
-        except ci_build.REQUEST_ERRORS:
+        except request_util.REQUEST_ERRORS:
             read = False
     parts.extend(
         issue["message"]

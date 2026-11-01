@@ -26,6 +26,7 @@ RERUN = TOPLEVEL / "rerun-failed-ci"
 sys.path.insert(0, str(TOPLEVEL))
 
 import ci_build  # ruff: ignore[module-import-not-at-top-of-file]
+import request_util  # ruff: ignore[module-import-not-at-top-of-file]
 
 if TYPE_CHECKING:
     import types
@@ -94,7 +95,7 @@ class FakeServer:
         headers: dict[str, str] | None = None,  # ruff: ignore[unused-method-argument]
         body: Any = None,
     ) -> bytes:
-        """Serve an HTTP request, as ci_build.http does.
+        """Serve an HTTP request, as request_util.http does.
 
         Returns:
             The response body.
@@ -111,7 +112,7 @@ class FakeServer:
         return (response if isinstance(response, str) else json.dumps(response)).encode()
 
     def run(self, cmd: list[str]) -> str:
-        """Run a `gh` command, as ci_build.run does.
+        """Run a `gh` command, as request_util.run does.
 
         Returns:
             The command's output.
@@ -320,8 +321,8 @@ class RerunTestCase(unittest.TestCase):
         """Create the FakeServer and install it in place of the real servers."""
         self.server = FakeServer()
         for patcher in [
-            mock.patch.object(ci_build, "http", self.server.http),
-            mock.patch.object(ci_build, "run", self.server.run),
+            mock.patch.object(request_util, "http", self.server.http),
+            mock.patch.object(request_util, "run", self.server.run),
             mock.patch.object(ci_build, "circleci_token", return_value="token"),
             mock.patch.object(
                 ci_build, "azure_headers", return_value={"Authorization": "Basic token"}
