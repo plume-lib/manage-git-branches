@@ -414,8 +414,10 @@ git_push_to() {
     return 1
   fi
   # `merge_build_push` asks the agent to fix the build if the merge brings in
-  # a merge commit that this pull made.
-  from_pull_merge="${pull_merge}"
+  # a merge commit that this pull made, but not one that FROM_DIR's branch
+  # or its upstream branch already had.
+  from_old_head="${pull_old_head}"
+  from_pull_fetched="${pull_fetched}"
 
   orig_dir=$(pwd)
 
@@ -440,9 +442,9 @@ git_push_to() {
     return 1
   fi
   # `merge_build_push` asks the agent to fix a failed build if the pull or
-  # the merge of FROM_DIR's branch made a merge commit, and it does not
-  # tell the agent about merge commits that the upstream branch contains.
-  to_pull_merge="${pull_merge}"
+  # the merge of FROM_DIR's branch made a merge commit, but not because of
+  # one that TO_DIR's branch or its upstream branch already had.
+  to_old_head="${pull_old_head}"
   to_pull_fetched="${pull_fetched}"
 
   # Note: pwd=to_absolute
@@ -463,7 +465,8 @@ git_push_to() {
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
     "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}" \
-    "${to_pull_merge}" "${to_pull_fetched}" "${from_pull_merge}"; then
+    "${to_pull_fetched}" "${to_old_head}" "${from_old_head}" \
+    "${from_pull_fetched}"; then
     return 1
   fi
 

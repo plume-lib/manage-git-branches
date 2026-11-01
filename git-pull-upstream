@@ -176,10 +176,10 @@ if ! pull_resolving "${llm_agent}" "$(pwd)" -q --no-rebase --no-edit; then
   exit 1
 fi
 # `merge_build_push` asks the agent to fix a failed build if the pull or the
-# merge of the upstream repository's default branch made a merge commit, and
-# it does not tell the agent about merge commits that the current branch's
-# upstream branch contains.
-pulled_merge="${pull_merge}"
+# merge of the upstream repository's default branch made a merge commit, but
+# not because of one that the current branch or its upstream branch already
+# had.
+pulled_old_head="${pull_old_head}"
 pulled_fetched="${pull_fetched}"
 
 # Stop if there is nothing to merge and nothing to push.  If there is nothing
@@ -220,6 +220,6 @@ if ! upstream_head="$(git rev-parse --verify --quiet "${upstream_ref}")"; then
 fi
 if ! merge_build_push "${upstream_head}" \
   "remote-tracking branch '${upstream_ref#refs/remotes/}'" "${upstream_ref}" \
-  "${nocompile}" "${llm_agent}" "${pulled_merge}" "${pulled_fetched}"; then
+  "${nocompile}" "${llm_agent}" "${pulled_fetched}" "${pulled_old_head}"; then
   exit 1
 fi
