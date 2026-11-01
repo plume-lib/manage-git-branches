@@ -130,9 +130,9 @@ push_to() {
 }
 
 ## Usage: check_resolved DESCRIPTION MERGE-MESSAGE [LINE...]
-## Checks that the command succeeded and pushed the merge of main into
-## feature, with MERGE-MESSAGE as its message, and with ${cfile} consisting of
-## the LINEs, or else of ${default_resolution}.
+## Checks that the command succeeded without reporting a problem merging, and
+## pushed the merge of main into feature, with MERGE-MESSAGE as its message,
+## and with ${cfile} consisting of the LINEs, or else of ${default_resolution}.
 check_resolved() {
   check_description="$1"
   check_message="$2"
@@ -144,6 +144,9 @@ check_resolved() {
   if [ "${push_status}" -ne 0 ]; then
     fail "${check_description}: the command failed: ${push_output}"
   fi
+  case "${push_output}" in
+    *"problem merging"*) fail "${check_description}: reported a problem: ${push_output}" ;;
+  esac
   remote_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
   if [ "${remote_head}" != "$(git -C "${feature_dir}" rev-parse HEAD)" ]; then
     fail "${check_description}: the merge was not pushed"
@@ -251,6 +254,36 @@ record_resolution false ONE two three four five six SAME SEVEN-feature SEVEN-mai
 push_to
 check_not_resolved "a line that looks like a conflict marker" \
   "file.txt contains lines that look like conflict markers"
+
+## The same holds when one side renamed the file, so that the other side
+## has it under its old name.
+setup_case marker-like-renamed
+git -C "${main_dir}" mv file.txt moved.txt
+git -C "${main_dir}" commit -q -m "Rename file.txt"
+git -C "${main_dir}" push -q
+printf '%s\n' one two three four five six SAME SEVEN-feature SAME2 eight '>>>>>>> nine' \
+  > "${feature_dir}/file.txt"
+commit_feature "Add a line that looks like a conflict marker"
+cfile=moved.txt
+record_resolution false ONE two three four five six SAME SEVEN-feature SEVEN-main SAME2 eight '>>>>>>> nine'
+push_to
+check_not_resolved "a line that looks like a conflict marker, in a renamed file" \
+  "moved.txt contains lines that look like conflict markers"
+
+## A line "=======" in the resolution is accepted if a side contains one,
+## such as a Markdown heading's underline.  rerere cannot parse a conflict
+## region that contains such a line unless the conflict markers are longer,
+## as the attribute `conflict-marker-size` makes them.
+setup_case separator
+printf '%s\n' 'file.txt conflict-marker-size=10' > "${feature_dir}/.gitattributes"
+git -C "${feature_dir}" add .gitattributes
+printf '%s\n' one two three four five six SAME SEVEN-feature '=======' SAME2 eight nine \
+  > "${feature_dir}/file.txt"
+commit_feature "Underline a heading"
+record_resolution false ONE two three four five six SAME SEVEN-feature '=======' SEVEN-main SAME2 eight nine
+push_to
+check_resolved "a line that looks like a separator" "Merge branch 'main' into feature" \
+  ONE two three four five six SAME SEVEN-feature '=======' SEVEN-main SAME2 eight nine
 
 ## A change in the working tree other than the merge is refused.
 setup_case other-change
