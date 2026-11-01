@@ -202,10 +202,6 @@ while [ "$#" -gt 0 ]; do
       fi
       MODE="${1#--}"
       ;;
-    -h | --help)
-      print_synopsis
-      exit
-      ;;
     --)
       shift
       break
