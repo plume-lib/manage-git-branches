@@ -451,9 +451,9 @@ class CancelBlockedCiTest(unittest.TestCase):
                 mock.patch.object(cancel_blocked_ci, "failed", new=False),
                 contextlib.redirect_stderr(io.StringIO()) as stderr,
             ):
-                build.cancel()
+                build.cancel("repo#5")
                 self.assertEqual(cancel_blocked_ci.failed, reported)
-            self.assertEqual("failed to cancel https://x/1" in stderr.getvalue(), reported)
+            self.assertEqual("repo#5: failed to cancel https://x/1" in stderr.getvalue(), reported)
 
 
 if __name__ == "__main__":
