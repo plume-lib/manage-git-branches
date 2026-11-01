@@ -251,7 +251,10 @@ class CancelBlockedCiTest(unittest.TestCase):
             self.assertIn("buildId=5", stderr.getvalue())
 
     def test_circleci_workflows_of_jobs(self) -> None:
-        """The workflows of jobs come from the recent pipelines, or else from job lookups."""
+        """The workflows of jobs come from the recent pipelines, or else from job lookups.
+
+        Only the recent pipelines of the given branches count.
+        """
         now = str(dt.datetime.now(dt.UTC))
         jobs = [("pending", f"job{n}", f"https://circleci.com/gh/org/repo/{n}") for n in (1, 2)]
 
@@ -265,9 +268,12 @@ class CancelBlockedCiTest(unittest.TestCase):
             }
 
         workflow = {"id": "w1", "name": "build", "status": "running", "created_at": now}
-        for sha, expected, lookups in [
-            ("abc", [("w1", ("running", "build"))], []),
-            ("def", [("w9", ("pending", "job1")), ("w9", ("pending", "job2"))], [1, 2]),
+        looked_up = [("w9", ("pending", "job1"), None), ("w9", ("pending", "job2"), None)]
+        for sha, branch, expected, lookups in [
+            ("abc", "feature", [("w1", ("running", "build"), "feature")], []),
+            # The pipeline of commit abc is on another branch.
+            ("abc", "other", looked_up, [1, 2]),
+            ("def", "feature", looked_up, [1, 2]),
         ]:
             pages = {
                 f"{CIRCLECI}/project/gh/org/repo/pipeline": {"items": [pipeline("abc")]},
@@ -291,22 +297,40 @@ class CancelBlockedCiTest(unittest.TestCase):
                 return json.dumps(pages[url]).encode()
 
             with (
-                self.subTest(sha=sha),
+                self.subTest(sha=sha, branch=branch),
                 mock.patch.object(request_util, "http", http),
                 mock.patch.object(ci_build, "circleci_token", return_value="token"),
             ):
                 cancel_blocked_ci.recent_pipelines.cache_clear()
                 cancel_blocked_ci.unfinished_workflows.cache_clear()
-                result = cancel_blocked_ci.circleci_workflows_of_jobs("gh/org/repo", sha, jobs)
+                result = cancel_blocked_ci.circleci_workflows_of_jobs(
+                    "gh/org/repo", sha, {branch}, jobs
+                )
                 self.assertEqual(result, expected)
                 self.assertEqual(
                     sorted(requested),
                     sorted(
                         [f"{CIRCLECI}/project/gh/org/repo/pipeline"]
-                        + ([f"{CIRCLECI}/pipeline/p1/workflow"] if sha == "abc" else [])
+                        + ([f"{CIRCLECI}/pipeline/p1/workflow"] if not lookups else [])
                         + [f"{CIRCLECI}/project/gh/org/repo/job/{n}" for n in lookups]
                     ),
                 )
+
+    def test_azure_projects(self) -> None:
+        """The Azure Pipelines projects come from the checks of the default branch and of PRs."""
+        checks = {
+            "HEAD": [("completed", "ci", "https://github.com/org/repo/actions/runs/1")],
+            # A commit status, not a check run, as from an OAuth service connection.
+            "pr1": [("pending", "ci", "https://dev.azure.com/org/p/_build/results?buildId=7")],
+            "pr2": [
+                ("completed", "ci", "https://org2.visualstudio.com/q/_build/results?buildId=8")
+            ],
+        }
+        with mock.patch.object(cancel_blocked_ci, "checks", lambda _gh, sha: checks[sha]):
+            self.assertEqual(
+                cancel_blocked_ci.azure_projects("org/repo", ["pr1", "pr2"]),
+                {("org", "p"), ("org2", "q")},
+            )
 
     def test_circleci_pagination(self) -> None:
         """Every page of recent pipelines and of their workflows is read, and no older page."""

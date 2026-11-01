@@ -328,13 +328,8 @@ def azure_projects(gh, pr_shas):
 
     Returns:
         A set of the organization and project of each Azure Pipelines project that
-        built the head commit of gh's default branch or of one of pr_shas, or the empty
-        set if the Azure Pipelines app has no check suite for the head commit of the
-        default branch.
+        built the head commit of gh's default branch or of one of pr_shas.
     """
-    suites = request_util.gh_api(f"repos/{gh}/commits/HEAD/check-suites?per_page=100")
-    if not any(s["app"]["slug"] == "azure-pipelines" for s in suites["check_suites"]):
-        return set()
     return {
         parsed[:2]
         for sha_checks in concurrently(lambda sha: checks(gh, sha), ["HEAD", *pr_shas])
@@ -422,10 +417,9 @@ def redundant_azure_builds_or_report(label, gh, org, project):
     try:
         return redundant_azure_builds(label, gh, org, project)
     except request_util.REQUEST_ERRORS as e:
-        print(
+        report_failure(
             f"{label}: failed to find redundant Azure Pipelines builds in {org}/{project}:"
-            f" {request_util.failure(e)}",
-            file=sys.stderr,
+            f" {request_util.failure(e)}"
         )
         return []
 
@@ -558,9 +552,8 @@ def redundant_builds(label, gh, runs, pr_shas):
     try:
         projects = azure_projects(gh, pr_shas)
     except request_util.REQUEST_ERRORS as e:
-        print(
-            f"{label}: failed to find the Azure Pipelines projects: {request_util.failure(e)}",
-            file=sys.stderr,
+        report_failure(
+            f"{label}: failed to find the Azure Pipelines projects: {request_util.failure(e)}"
         )
         projects = set()
     for org, project in sorted(projects):
@@ -568,9 +561,8 @@ def redundant_builds(label, gh, runs, pr_shas):
     try:
         result += redundant_circleci_workflows(label, gh)
     except request_util.REQUEST_ERRORS as e:
-        print(
-            f"{label}: failed to find redundant CircleCI workflows: {request_util.failure(e)}",
-            file=sys.stderr,
+        report_failure(
+            f"{label}: failed to find redundant CircleCI workflows: {request_util.failure(e)}"
         )
     return result
 
@@ -825,8 +817,12 @@ def unfinished_other_builds(gh, sha, branches):
             else:
                 print(f"  no CircleCI workflow found for {url}", file=sys.stderr)
     for project, project_jobs in jobs.items():
-        for workflow, (state, name) in circleci_workflows_of_jobs(project, sha, project_jobs):
-            builds.setdefault(("circleci", workflow), circleci_build_on(state, workflow, name))
+        for workflow, (state, name), branch in circleci_workflows_of_jobs(
+            project, sha, branches, project_jobs
+        ):
+            builds.setdefault(
+                ("circleci", workflow), circleci_build_on(state, workflow, name, branch)
+            )
     # Other branches can be at commit sha too.
     items = list(builds.items())
     return [
@@ -856,13 +852,14 @@ def build_branch(build_and_branch_of):
         return None
 
 
-def circleci_build_on(status, workflow, name):
+def circleci_build_on(status, workflow, name, branch=None):
     """Describe a CircleCI workflow, and how to find its branch.
 
     Args:
         status: the workflow's status, such as "running" or "pending".
         workflow: the id of the workflow.
         name: a name for the workflow, such as its name or the name of one of its jobs.
+        branch: the workflow's branch, or None if it is not known.
 
     Returns:
         The workflow, as circleci_build describes it, and a function of no arguments
@@ -870,33 +867,35 @@ def circleci_build_on(status, workflow, name):
     """
     return (
         circleci_build(status, workflow, name),
-        functools.partial(circleci_workflow_branch, workflow),
+        functools.partial(circleci_workflow_branch, workflow) if branch is None else lambda: branch,
     )
 
 
-def circleci_workflows_of_jobs(project, sha, jobs):
+def circleci_workflows_of_jobs(project, sha, branches, jobs):
     """Find the CircleCI workflows of unfinished jobs of commit sha, whose URLs name no workflow.
 
     The workflows are the unfinished workflows of the project's recent pipelines of
-    commit sha that a push or a pull request started; finding redundant workflows has
-    usually already read the list of those pipelines.  Only if there is no such
-    pipeline with an unfinished workflow is each job looked up.  So a job of another
-    pipeline of commit sha, such as one that the API started, is found only if there
-    is no such pipeline.
+    commit sha on the branches that a push or a pull request started; finding redundant
+    workflows has usually already read the list of those pipelines.  Only if there is
+    no such pipeline with an unfinished workflow is each job looked up.  So a job of
+    another pipeline of commit sha, such as one that the API started, is found only if
+    there is no such pipeline.
 
     Args:
         project: the project slug of the jobs.
         sha: the commit.
+        branches: the branches, named as branch_name names them.
         jobs: the status, name, and URL of each job.
 
     Returns:
-        A list of the id, and the status and name, of each workflow.
+        A list of the id, the status and name, and the branch (None if it is not known)
+        of each workflow.  A workflow that a job lookup found can be on any branch.
     """
     try:
         workflows = [
-            w
-            for _, p in recent_pipelines(project)
-            if p["vcs"].get("revision") == sha
+            (w, branch)
+            for branch, p in recent_pipelines(project)
+            if p["vcs"].get("revision") == sha and branch_name(branch) in branches
             for w in unfinished_workflows(p["id"])
         ]
     except request_util.REQUEST_ERRORS as e:
@@ -906,7 +905,7 @@ def circleci_workflows_of_jobs(project, sha, jobs):
         )
         workflows = []
     if workflows:
-        return [(w["id"], (w["status"], w["name"])) for w in workflows]
+        return [(w["id"], (w["status"], w["name"]), branch) for w, branch in workflows]
 
     def lookup(url):
         """Find the workflow of a CircleCI job.
@@ -933,7 +932,7 @@ def circleci_workflows_of_jobs(project, sha, jobs):
         elif workflow is None:
             print(f"  no CircleCI workflow found for {url}", file=sys.stderr)
         else:
-            result.append((workflow, (state, name)))
+            result.append((workflow, (state, name), None))
     if failures:
         report_failure(
             f"  failed to look up {len(failures)} CircleCI job(s) of {sha}:"
