@@ -60,10 +60,13 @@ AZURE = "https://dev.azure.com/org/proj/_apis/build/builds"
 
 
 def uuid(n: int) -> str:
-    """Make a CircleCI workflow id.
+    """Return the CircleCI workflow id that ends with the given number.
+
+    Args:
+        n: a workflow's number, such as 2.
 
     Returns:
-        A UUID that ends with n.
+        A UUID that ends with n, such as "00000000-0000-0000-0000-000000000002".
     """
     return f"00000000-0000-0000-0000-{n:012d}"
 
@@ -98,7 +101,7 @@ class FakeServer:
         *,
         refusals: Mapping[int, str] | None = None,  # ruff: ignore[unused-method-argument]
     ) -> bytes:
-        """Serve an HTTP request, as request_util.http does.
+        """Serve the given HTTP request, as request_util.http does.
 
         A request other than a GET, which reruns jobs, requires credentials.
 
@@ -119,7 +122,7 @@ class FakeServer:
         return (response if isinstance(response, str) else json.dumps(response)).encode()
 
     def run(self, cmd: list[str]) -> str:
-        """Run a `gh` command, as request_util.run does.
+        """Run the given `gh` command, as request_util.run does.
 
         Returns:
             The command's output.
@@ -143,112 +146,17 @@ class FakeServer:
         raise AssertionError(msg)
 
     ###########################################################################
-    ### CircleCI
-    ###
-
-    def circleci_workflow(
-        self, n: int, status: str, workflows: list[tuple[int, str]] | None = None
-    ) -> None:
-        """Serve a CircleCI workflow named "build".
-
-        Args:
-            n: the workflow's number, from which its id is made.
-            status: the workflow's status.
-            workflows: the number and creation date of each workflow of the pipeline;
-                by default, only this workflow.
-        """
-        self.urls[f"{CIRCLECI}/v2/workflow/{uuid(n)}"] = {
-            "name": "build",
-            "status": status,
-            "project_slug": "gh/org/repo",
-            "pipeline_id": f"pipe-{n}",
-            "pipeline_number": 7,
-        }
-        self.urls[f"{CIRCLECI}/v2/pipeline/pipe-{n}/workflow"] = {
-            "items": [
-                {"id": uuid(w), "name": "build", "created_at": created}
-                for w, created in (workflows or [(n, "2026-01-01")])
-            ]
-            + [{"id": uuid(999), "name": "other", "created_at": "2026-01-09"}],
-        }
-
-    def circleci_jobs(self, n: int, *pages: list[tuple[int, str]]) -> None:
-        """Serve the jobs of a CircleCI workflow.
-
-        Args:
-            n: the workflow's number.
-            pages: the pages of jobs; each job is a job number and a status.
-        """
-        path = f"{CIRCLECI}/v2/workflow/{uuid(n)}/job"
-        for i, jobs in enumerate(pages):
-            self.urls[path + (f"#page{i}" if i else "")] = {
-                "items": [
-                    {"job_number": j, "id": f"id{j}", "status": s, "name": f"job{j}"}
-                    for j, s in jobs
-                ],
-                "next_page_token": f"page{i + 1}" if i + 1 < len(pages) else None,
-            }
-
-    def circleci_job(self, job: int, log: str) -> None:
-        """Serve a CircleCI job whose failed step printed log."""
-        self.urls[f"{CIRCLECI}/v1.1/project/github/org/repo/{job}"] = {
-            "steps": [
-                {"actions": [{"status": "success", "output_url": f"https://logs/ok-{job}"}]},
-                {"actions": [{"status": "failed", "output_url": f"https://logs/out-{job}"}]},
-            ]
-        }
-        self.urls[f"https://logs/out-{job}"] = [{"message": log}]
-        self.urls[f"https://logs/ok-{job}"] = [{"message": "Connection reset, but it succeeded"}]
-
-    ###########################################################################
-    ### GitHub Actions
-    ###
-
-    def gha_run(
-        self, status: str, conclusion: str | None, jobs: list[tuple[int, str, str]]
-    ) -> None:
-        """Serve GitHub Actions run 100, whose latest attempt has the given jobs.
-
-        Args:
-            status: the run's status.
-            conclusion: the run's conclusion.
-            jobs: the id, name, and conclusion of each job of the latest attempt.
-        """
-        self.gh["repos/org/repo/actions/runs/100"] = {
-            "name": "CI",
-            "status": status,
-            "conclusion": conclusion,
-            "run_attempt": 1,
-        }
-        page = [{"jobs": [{"id": i, "name": n, "conclusion": c} for i, n, c in jobs]}]
-        self.gh["repos/org/repo/actions/runs/100/jobs?filter=latest&per_page=100"] = page
-        self.gh["repos/org/repo/actions/runs/100/jobs?filter=all&per_page=100"] = page
-
-    def gha_job(
-        self, job: int, log: str | None, annotation: str = "Exit code 1.", level: str = "failure"
-    ) -> None:
-        """Serve the log (None for none) and the annotation of a GitHub Actions job.
-
-        Args:
-            job: the job's id.
-            log: the log of the job's failed steps, or None for none.
-            annotation: the message of the job's annotation.
-            level: the level of the annotation, such as "failure" or "warning".
-        """
-        if log is not None:
-            self.gh_logs[job] = "".join(
-                f"job\tstep\t﻿2026-10-31T13:39:57.3265176Z {line}\n" for line in log.splitlines()
-            )
-        self.gh[f"repos/org/repo/check-runs/{job}/annotations?per_page=100"] = [
-            [{"message": annotation, "annotation_level": level}]
-        ]
-
-    ###########################################################################
     ### Azure Pipelines
     ###
 
     def azure_build(self, build: int, status: str, result: str | None) -> None:
-        """Serve an Azure Pipelines build."""
+        """Serve the given Azure Pipelines build.
+
+        Args:
+            build: the id of a build.
+            status: the build's status, such as "completed".
+            result: the build's result, such as "failed", or None if it has none.
+        """
         self.urls[f"{AZURE}/{build}"] = {
             "definition": {"name": "pipeline"},
             "status": status,
@@ -261,7 +169,7 @@ class FakeServer:
         *jobs: tuple[str, int, str, str, str | None],
         issue: dict[str, str] | None = None,
     ) -> None:
-        """Serve the timeline of an Azure Pipelines build.
+        """Serve the timeline of the given Azure Pipelines build.
 
         Args:
             build: the id of a build.
@@ -319,6 +227,112 @@ class FakeServer:
             if log is not None:
                 self.urls[f"{AZURE}/{build}/logs/{n}"] = f"﻿2026-10-31T13:39:57.3265176Z {log}\r\n"
         self.urls[f"{AZURE}/{build}/timeline"] = {"records": records}
+
+    ###########################################################################
+    ### CircleCI
+    ###
+
+    def circleci_workflow(
+        self, n: int, status: str, workflows: list[tuple[int, str]] | None = None
+    ) -> None:
+        """Serve the given CircleCI workflow, which is named "build".
+
+        Args:
+            n: a workflow's number, from which uuid makes its id.
+            status: the workflow's status.
+            workflows: the number and creation date of each workflow of the pipeline;
+                by default, only this workflow.
+        """
+        self.urls[f"{CIRCLECI}/v2/workflow/{uuid(n)}"] = {
+            "name": "build",
+            "status": status,
+            "project_slug": "gh/org/repo",
+            "pipeline_id": f"pipe-{n}",
+            "pipeline_number": 7,
+        }
+        self.urls[f"{CIRCLECI}/v2/pipeline/pipe-{n}/workflow"] = {
+            "items": [
+                {"id": uuid(w), "name": "build", "created_at": created}
+                for w, created in (workflows or [(n, "2026-01-01")])
+            ]
+            + [{"id": uuid(999), "name": "other", "created_at": "2026-01-09"}],
+        }
+
+    def circleci_jobs(self, n: int, *pages: list[tuple[int, str]]) -> None:
+        """Serve the jobs of the given CircleCI workflow.
+
+        Args:
+            n: a workflow's number, from which uuid makes its id.
+            pages: the pages of jobs; each job is a job number and a status.
+        """
+        path = f"{CIRCLECI}/v2/workflow/{uuid(n)}/job"
+        for i, jobs in enumerate(pages):
+            self.urls[path + (f"#page{i}" if i else "")] = {
+                "items": [
+                    {"job_number": j, "id": f"id{j}", "status": s, "name": f"job{j}"}
+                    for j, s in jobs
+                ],
+                "next_page_token": f"page{i + 1}" if i + 1 < len(pages) else None,
+            }
+
+    def circleci_job(self, job: int, log: str) -> None:
+        """Serve the given CircleCI job, whose failed step printed log.
+
+        Args:
+            job: a job's number.
+            log: the output of the job's failed step.
+        """
+        self.urls[f"{CIRCLECI}/v1.1/project/github/org/repo/{job}"] = {
+            "steps": [
+                {"actions": [{"status": "success", "output_url": f"https://logs/ok-{job}"}]},
+                {"actions": [{"status": "failed", "output_url": f"https://logs/out-{job}"}]},
+            ]
+        }
+        self.urls[f"https://logs/out-{job}"] = [{"message": log}]
+        self.urls[f"https://logs/ok-{job}"] = [{"message": "Connection reset, but it succeeded"}]
+
+    ###########################################################################
+    ### GitHub Actions
+    ###
+
+    def gha_run(
+        self, status: str, conclusion: str | None, jobs: list[tuple[int, str, str]]
+    ) -> None:
+        """Serve GitHub Actions run 100, whose latest attempt has the given jobs.
+
+        Args:
+            status: the run's status.
+            conclusion: the run's conclusion.
+            jobs: the id, name, and conclusion of each job of the latest attempt.
+        """
+        self.gh["repos/org/repo/actions/runs/100"] = {
+            "name": "CI",
+            "status": status,
+            "conclusion": conclusion,
+            "run_attempt": 1,
+        }
+        page = [{"jobs": [{"id": i, "name": n, "conclusion": c} for i, n, c in jobs]}]
+        self.gh["repos/org/repo/actions/runs/100/jobs?filter=latest&per_page=100"] = page
+        self.gh["repos/org/repo/actions/runs/100/jobs?filter=all&per_page=100"] = page
+
+    def gha_job(
+        self, job: int, log: str | None, annotation: str = "Exit code 1.", level: str = "failure"
+    ) -> None:
+        """Serve the log and the annotation of the given GitHub Actions job.
+
+        Args:
+            job: a job's id.
+            log: the log of the job's failed steps, or None for none.
+            annotation: the message of the job's annotation.
+            level: the level of the annotation, such as "failure" or "warning".
+        """
+        if log is not None:
+            self.gh_logs[job] = "".join(
+                f"job\tstep\t﻿2026-10-31T13:39:57.3265176Z {line}\n" for line in log.splitlines()
+            )
+        self.gh[f"repos/org/repo/check-runs/{job}/annotations?per_page=100"] = [
+            [{"message": annotation, "annotation_level": level}]
+        ]
 
 
 class RerunTestCase(unittest.TestCase):
@@ -411,8 +425,8 @@ class ClassifyTest(unittest.TestCase):
                 "\033[31mCaused by: java.net.SocketTimeoutException: Read timed out\033[0m\r",
                 "Caused by: java.net.SocketTimeoutException: Read timed out",
             ),
-            ("The runner has received a shutdown signal.", None),
             ("We stopped hearing from agent Azure Pipelines 3.", None),
+            ("The runner has received a shutdown signal.", None),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
         ]:
@@ -432,16 +446,16 @@ class ClassifyTest(unittest.TestCase):
                 "+ grep -q -E 'Connection (reset|refused)|Read timed out' /tmp/log\n"
                 "2026-10-31T13:41:49.6228534Z ++ echo 'Connection reset'"
             ),
-            # A script that GitHub Actions echoes before running it.
-            (
-                "##[group]Run ./gradlew build || grep -q 'Connection reset' build.log\n"
-                "  shell: /usr/bin/bash -e {0}\n##[endgroup]\nerror: cannot find symbol"
-            ),
             # A script that Azure Pipelines echoes before running it.
             (
                 "Generating script.\nScript contents:\ngrep -q 'Connection reset' build.log\n"
                 "========================== Starting Command Output ===========================\n"
                 "error: cannot find symbol"
+            ),
+            # A script that GitHub Actions echoes before running it.
+            (
+                "##[group]Run ./gradlew build || grep -q 'Connection reset' build.log\n"
+                "  shell: /usr/bin/bash -e {0}\n##[endgroup]\nerror: cannot find symbol"
             ),
         ]:
             with self.subTest(log=log):
@@ -469,6 +483,114 @@ class ClassifyTest(unittest.TestCase):
             with self.subTest(args=args):
                 result = subprocess.run([RERUN, *args], capture_output=True, check=False)
                 self.assertNotEqual(result.returncode, 0)
+
+
+###########################################################################
+### Azure Pipelines
+###
+
+
+class AzureTest(RerunTestCase):
+    """Tests for Azure Pipelines builds."""
+
+    BUILD = "https://dev.azure.com/org/proj/_build/results?buildId=500"
+    RETRY = f"PATCH {AZURE}/500?retry=true&api-version=7.1 {{}}"
+
+    def stage_retry(self, stage: str, host: str = AZURE) -> str:
+        """Describe the request that retries the given stage of build 500.
+
+        Args:
+            stage: a stage's identifier, such as "s1".
+            host: the URL of the builds of the build's project in the Azure DevOps API.
+
+        Returns:
+            The description.
+        """
+        body = '{"state": "retry", "forceRetryAllJobs": false}'
+        return f"PATCH {host}/500/stages/{stage}?api-version=7.1 {body}"
+
+    def setUp(self) -> None:
+        """Serve build 500, whose failed jobs all failed transiently."""
+        super().setUp()
+        self.server.azure_build(500, "completed", "failed")
+        self.server.azure_timeline(
+            500,
+            ("s1", 1, "a", "failed", GRADLE_429),
+            ("s1", 1, "b", "succeeded", ""),
+            ("s2", 1, "c", "failed", "We stopped hearing from agent Azure Pipelines 3."),
+        )
+
+    def test_all_transient(self) -> None:
+        """If every failed job failed transiently, the build's failed jobs are rerun."""
+        output = self.assert_reruns([self.RETRY], f"{self.BUILD}&view=logs&jobId=a")
+        self.assertIn("Reran the failed jobs.", output)
+        output = self.assert_reruns([], "--dry-run", self.BUILD)
+        self.assertIn("Would rerun the failed jobs", output)
+
+    def test_some_transient(self) -> None:
+        """A stage whose failed jobs all failed transiently is rerun."""
+        self.server.azure_timeline(
+            500,
+            ("s1", 1, "a", "failed", "Connection reset"),
+            ("s1", 1, "b", "failed", "Test failed"),
+            ("s2", 3, "c", "failed", "Read timed out"),
+            ("s3", 1, "d", "failed", "Could not resolve host: github.com"),
+            ("s4", 1, "e", "failed", "Could not resolve host: github.com"),
+            ("s5", 1, "f", "failed", "Test failed"),
+        )
+        output = self.assert_reruns([self.stage_retry("s3")], self.BUILD)
+        for message in [
+            "Not rerunning stage s1:  it has a failed job that did not fail transiently",
+            "Not rerunning stage s2:  it has already been run 3 times.",
+            "rerun the other stages",
+        ]:
+            self.assertIn(message, output)
+
+    def test_unreadable_log(self) -> None:
+        """A stage that has a job whose log cannot be read is not rerun."""
+        self.server.azure_timeline(
+            500,
+            ("s1", 1, "a", "failed", "Connection reset"),
+            ("s1", 1, "b", "failed", None),
+            ("s2", 1, "c", "failed", "Read timed out"),
+        )
+        output = self.assert_reruns([self.stage_retry("s2")], self.BUILD, status=1)
+        self.assertIn("Not rerunning stage s1:  it has a failed job whose log could not", output)
+
+    def test_warning_issue(self) -> None:
+        """A warning that a task reports does not make a job transient."""
+        self.server.azure_timeline(
+            500,
+            ("s1", 1, "a", "failed", "Test failed"),
+            issue={"type": "warning", "message": "Retrying after 503 Service Unavailable"},
+        )
+        output = self.assert_reruns([], self.BUILD)
+        self.assertIn("a: not transient", output)
+
+    def test_visualstudio_url(self) -> None:
+        """A URL whose host is ORGANIZATION.visualstudio.com is supported."""
+        self.server.urls = {
+            url.replace("dev.azure.com/org/", "dev.azure.com/myorg/"): response
+            for url, response in self.server.urls.items()
+        }
+        self.assert_reruns(
+            [self.RETRY.replace("dev.azure.com/org/", "dev.azure.com/myorg/")],
+            "https://myorg.visualstudio.com/proj/_build/results?buildId=500",
+        )
+
+    def test_not_rerun(self) -> None:
+        """A build that is in progress or that has reached the limit is not rerun."""
+        self.server.azure_build(500, "inProgress", None)
+        self.assert_reruns([], self.BUILD)
+        self.server.azure_build(500, "completed", "failed")
+        self.server.azure_timeline(500, ("s1", 3, "a", "failed", "Connection reset"))
+        self.assert_reruns([], self.BUILD)
+
+    def test_no_credentials(self) -> None:
+        """Rerunning requires credentials."""
+        with mock.patch.object(ci_build, "azure_headers", dict):
+            output = self.assert_reruns([], self.BUILD, status=1)
+        self.assertIn("AZURE_DEVOPS_EXT_PAT is not set", output)
 
 
 ###########################################################################
@@ -682,110 +804,6 @@ class GithubActionsTest(RerunTestCase):
 
 
 ###########################################################################
-### Azure Pipelines
-###
-
-
-class AzureTest(RerunTestCase):
-    """Tests for Azure Pipelines builds."""
-
-    BUILD = "https://dev.azure.com/org/proj/_build/results?buildId=500"
-    RETRY = f"PATCH {AZURE}/500?retry=true&api-version=7.1 {{}}"
-
-    def stage_retry(self, stage: str, host: str = AZURE) -> str:
-        """Describe the request that retries a stage of build 500.
-
-        Returns:
-            The description.
-        """
-        body = '{"state": "retry", "forceRetryAllJobs": false}'
-        return f"PATCH {host}/500/stages/{stage}?api-version=7.1 {body}"
-
-    def setUp(self) -> None:
-        """Serve build 500, whose failed jobs all failed transiently."""
-        super().setUp()
-        self.server.azure_build(500, "completed", "failed")
-        self.server.azure_timeline(
-            500,
-            ("s1", 1, "a", "failed", GRADLE_429),
-            ("s1", 1, "b", "succeeded", ""),
-            ("s2", 1, "c", "failed", "We stopped hearing from agent Azure Pipelines 3."),
-        )
-
-    def test_all_transient(self) -> None:
-        """If every failed job failed transiently, the build's failed jobs are rerun."""
-        output = self.assert_reruns([self.RETRY], f"{self.BUILD}&view=logs&jobId=a")
-        self.assertIn("Reran the failed jobs.", output)
-        output = self.assert_reruns([], "--dry-run", self.BUILD)
-        self.assertIn("Would rerun the failed jobs", output)
-
-    def test_some_transient(self) -> None:
-        """A stage whose failed jobs all failed transiently is rerun."""
-        self.server.azure_timeline(
-            500,
-            ("s1", 1, "a", "failed", "Connection reset"),
-            ("s1", 1, "b", "failed", "Test failed"),
-            ("s2", 3, "c", "failed", "Read timed out"),
-            ("s3", 1, "d", "failed", "Could not resolve host: github.com"),
-            ("s4", 1, "e", "failed", "Could not resolve host: github.com"),
-            ("s5", 1, "f", "failed", "Test failed"),
-        )
-        output = self.assert_reruns([self.stage_retry("s3")], self.BUILD)
-        for message in [
-            "Not rerunning stage s1:  it has a failed job that did not fail transiently",
-            "Not rerunning stage s2:  it has already been run 3 times.",
-            "rerun the other stages",
-        ]:
-            self.assertIn(message, output)
-
-    def test_unreadable_log(self) -> None:
-        """A stage that has a job whose log cannot be read is not rerun."""
-        self.server.azure_timeline(
-            500,
-            ("s1", 1, "a", "failed", "Connection reset"),
-            ("s1", 1, "b", "failed", None),
-            ("s2", 1, "c", "failed", "Read timed out"),
-        )
-        output = self.assert_reruns([self.stage_retry("s2")], self.BUILD, status=1)
-        self.assertIn("Not rerunning stage s1:  it has a failed job whose log could not", output)
-
-    def test_warning_issue(self) -> None:
-        """A warning that a task reports does not make a job transient."""
-        self.server.azure_timeline(
-            500,
-            ("s1", 1, "a", "failed", "Test failed"),
-            issue={"type": "warning", "message": "Retrying after 503 Service Unavailable"},
-        )
-        output = self.assert_reruns([], self.BUILD)
-        self.assertIn("a: not transient", output)
-
-    def test_visualstudio_url(self) -> None:
-        """A URL whose host is ORGANIZATION.visualstudio.com is supported."""
-        self.server.urls = {
-            url.replace("dev.azure.com/org/", "dev.azure.com/myorg/"): response
-            for url, response in self.server.urls.items()
-        }
-        self.assert_reruns(
-            [self.RETRY.replace("dev.azure.com/org/", "dev.azure.com/myorg/")],
-            "https://myorg.visualstudio.com/proj/_build/results?buildId=500",
-        )
-
-    def test_not_rerun(self) -> None:
-        """A build that is in progress or that has reached the limit is not rerun."""
-        self.server.azure_build(500, "inProgress", None)
-        self.assert_reruns([], self.BUILD)
-        self.server.azure_build(500, "completed", "failed")
-        self.server.azure_timeline(500, ("s1", 3, "a", "failed", "Connection reset"))
-        self.assert_reruns([], self.BUILD)
-
-    def test_no_credentials(self) -> None:
-        """Rerunning requires credentials."""
-        with mock.patch.object(ci_build, "azure_headers", dict):
-            output = self.assert_reruns([], self.BUILD, status=1)
-        self.assertIn("AZURE_DEVOPS_EXT_PAT is not set", output)
-
-
-###########################################################################
 ### Pull requests
 ###
 
@@ -794,11 +812,11 @@ class PullRequestTest(RerunTestCase):
     """Tests for the failed checks of a pull request."""
 
     def test_checks(self) -> None:
-        """Each workflow, run, or build is examined once, and its failed jobs rerun together."""
+        """Each build, workflow, or run is examined once, and its failed jobs rerun together."""
         s = self.server
-        s.gha_run("completed", "failure", [(101, "a", "failure"), (104, "d", "failure")])
-        s.gha_job(101, GRADLE_429)
-        s.gha_job(104, "Read timed out")
+        s.azure_build(500, "completed", "failed")
+        s.azure_timeline(500, ("s1", 1, "p", "failed", "Connection reset"))
+        azure = "https://dev.azure.com/org/proj/_build/results?buildId=500&view=logs&jobId="
         s.circleci_workflow(2, "failed")
         s.circleci_jobs(2, [(21, "failed"), (22, "failed"), (23, "failed")])
         s.circleci_job(21, "Connection reset")
@@ -808,27 +826,27 @@ class PullRequestTest(RerunTestCase):
             s.urls[f"{CIRCLECI}/v2/project/gh/org/repo/job/{job}"] = {
                 "latest_workflow": {"id": uuid(2)}
             }
-        s.azure_build(500, "completed", "failed")
-        s.azure_timeline(500, ("s1", 1, "p", "failed", "Connection reset"))
-        azure = "https://dev.azure.com/org/proj/_build/results?buildId=500&view=logs&jobId="
+        s.gha_run("completed", "failure", [(101, "a", "failure"), (104, "d", "failure")])
+        s.gha_job(101, GRADLE_429)
+        s.gha_job(104, "Read timed out")
         s.pr_checks["5"] = [
-            {"name": "a", "bucket": "fail", "link": "https://github.com/org/repo/actions/runs/100/job/101"},
-            {"name": "d", "bucket": "fail", "link": "https://github.com/org/repo/actions/runs/100/job/104"},
-            {"name": "e", "bucket": "pass", "link": "https://github.com/org/repo/actions/runs/200/job/201"},
+            {"name": "p1", "bucket": "fail", "link": f"{azure}p"},
+            {"name": "p2", "bucket": "fail", "link": f"{azure}q"},
             # CircleCI commit statuses, which name jobs of one workflow.
             {"name": "c21", "bucket": "fail", "link": "https://circleci.com/gh/org/repo/21"},
             {"name": "c22", "bucket": "fail", "link": "https://circleci.com/gh/org/repo/22"},
             {"name": "c23", "bucket": "fail", "link": "https://circleci.com/gh/org/repo/23"},
-            {"name": "p1", "bucket": "fail", "link": f"{azure}p"},
-            {"name": "p2", "bucket": "fail", "link": f"{azure}q"},
+            {"name": "a", "bucket": "fail", "link": "https://github.com/org/repo/actions/runs/100/job/101"},
+            {"name": "d", "bucket": "fail", "link": "https://github.com/org/repo/actions/runs/100/job/104"},
+            {"name": "e", "bucket": "pass", "link": "https://github.com/org/repo/actions/runs/200/job/201"},
             {"name": "other", "bucket": "fail", "link": "https://example.com/build/1"},
             {"name": "approve", "bucket": "fail", "state": "ACTION_REQUIRED", "link": "https://github.com/org/repo/pull/5"},
         ]  # fmt: skip
         output = self.assert_reruns(
             [
-                "gh run rerun --repo org/repo --failed 100",
-                f'POST {CIRCLECI}/v2/workflow/{uuid(2)}/rerun {{"jobs": ["id21", "id23"]}}',
                 f"PATCH {AZURE}/500?retry=true&api-version=7.1 {{}}",
+                f'POST {CIRCLECI}/v2/workflow/{uuid(2)}/rerun {{"jobs": ["id21", "id23"]}}',
+                "gh run rerun --repo org/repo --failed 100",
             ],
             "5",
         )

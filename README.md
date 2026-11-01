@@ -162,8 +162,8 @@ The commands are:
   `[--dry-run] [--max-attempts N] [PR | BRANCH | URL]...`:
   Reruns each failed CI job of a GitHub pull request (by default, the one for
   the current branch) whose log shows a transient failure, such as a network
-  error or a rate limit, rather than a problem with the code.  A URL names a
-  CircleCI, GitHub Actions, or Azure Pipelines job or workflow to examine
+  error or a rate limit, rather than a problem with the code.  A URL names an
+  Azure Pipelines, CircleCI, or GitHub Actions job or workflow to examine
   instead.  It does not rerun a workflow that is still running or that has
   been rerun since, nor a job that has already run N times (by default, 3).
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
@@ -205,14 +205,14 @@ takes effect when it is set to a non-empty value.
   compilation step, and push whenever the merge succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
-* `CIRCLECI_CLI_TOKEN`: the commands that use the CircleCI API use this
-  CircleCI API token.  If it is not set, they use the `token` in
-  `~/.circleci/cli.yml` or (for the snap package)
-  `~/snap/circleci/current/.circleci/cli.yml`, which `circleci setup` writes.
 * `AZURE_DEVOPS_EXT_PAT`: the commands that use the Azure DevOps API use this
   Azure DevOps personal access token, which must have the
   "Build (Read & execute)" scope.  If it is not set, they use the account
   that `az login` logged in.
+* `CIRCLECI_CLI_TOKEN`: the commands that use the CircleCI API use this
+  CircleCI API token.  If it is not set, they use the `token` in
+  `~/.circleci/cli.yml` or (for the snap package)
+  `~/snap/circleci/current/.circleci/cli.yml`, which `circleci setup` writes.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
   `git-orphaned-branches`, `git-new-branch`, `git-checkout-branch`, and
   `git-push-to` use these standard Git variables to select the SSH command

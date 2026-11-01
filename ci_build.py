@@ -1,4 +1,4 @@
-"""Access the builds of CI services:  GitHub Actions, Azure Pipelines, and CircleCI.
+"""Access the builds of CI services:  Azure Pipelines, CircleCI, and GitHub Actions.
 
 This module recognizes the URLs of builds and jobs, finds credentials, and makes
 requests of the services' APIs.
@@ -65,18 +65,18 @@ CIRCLECI_VCS_SLUGS = {"github": "gh", "bitbucket": "bb"}
 # The VCS names, such as "github", that the CircleCI v1.1 API uses in place of the VCS
 # slugs, such as "gh", of the v2 API.
 CIRCLECI_VCS_NAMES = {slug: name for name, slug in CIRCLECI_VCS_SLUGS.items()}
-# The URL of a GitHub Actions workflow run or of one of its jobs, such as
-# "https://github.com/ORG/REPO/actions/runs/123/job/456".  The groups are the
+# Matches the URL of a GitHub Actions workflow run or of one of its jobs, such as
+# "https://github.com/ORG/REPO/actions/runs/123/job/456".  The capturing groups are the
 # repository, the run, and the job.
 GITHUB_ACTIONS_RUN = re.compile(
     r"https://github\.com/([^/]+/[^/]+)/actions/runs/(\d+)(?:/attempts/\d+)?(?:/job/(\d+))?"
 )
 
-CIRCLECI_API = "https://circleci.com/api"
 # The application ID of Azure DevOps in Microsoft Entra ID, which is the same for every
 # organization.  `az account get-access-token --resource` issues a token for Azure DevOps
 # only when given this ID.
 AZURE_DEVOPS_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
+CIRCLECI_API = "https://circleci.com/api"
 # The configuration files of the CircleCI CLI, which `circleci setup` writes.
 CIRCLECI_CONFIGS = ("~/.circleci/cli.yml", "~/snap/circleci/current/.circleci/cli.yml")
 
