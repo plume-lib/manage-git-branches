@@ -6,6 +6,7 @@ The tests contact no server:  fakes replace the HTTP requests that the modules m
 from __future__ import annotations
 
 import io
+import subprocess
 import sys
 import unittest
 import urllib.error
@@ -74,6 +75,15 @@ class CiBuildTest(unittest.TestCase):
             ci_build.azure_request("GET", "https://dev.azure.com/org/p/_apis/build/builds", {})
             request_util.request("GET", "https://example.com/")
         self.assertEqual(refusals, [ci_build.AZURE_SIGN_IN, None])
+
+    def test_command_timeout(self) -> None:
+        """A command that runs too long is stopped, with an error in REQUEST_ERRORS."""
+        with (
+            mock.patch.object(request_util, "COMMAND_TIMEOUT", 0.1),
+            self.assertRaises(request_util.REQUEST_ERRORS) as cm,
+        ):
+            request_util.run(["sleep", "10"])
+        self.assertIsInstance(cm.exception, subprocess.TimeoutExpired)
 
     def test_azure_temporary_failure(self) -> None:
         """A temporary failure of an anonymous request does not mark the project private."""
