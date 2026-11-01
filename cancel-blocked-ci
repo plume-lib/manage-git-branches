@@ -415,6 +415,22 @@ class Build:
                 report_failure(f"{subject}: failed to cancel {self.url}: {request_util.failure(e)}")
 
 
+class RedundantBuild(typing.NamedTuple):
+    """An unfinished build that a more recent build makes redundant.
+
+    Attributes:
+        subject: what the build tests, such as "daikon #555" or "daikon main"; used in
+            output.
+        build: the Build.
+        reason: why the build is redundant, as a suffix for output, such as
+            ", made redundant by build 123".
+    """
+
+    subject: str
+    build: Build
+    reason: str
+
+
 class Check(typing.NamedTuple):
     """A check run or commit status of a commit, as GitHub reports a CI build or job.
 
@@ -615,7 +631,7 @@ def redundant_azure_builds(label, gh, org, project):
         project: an Azure DevOps project.
 
     Returns:
-        A list of the subject, Build, and reason of each redundant build.
+        The RedundantBuild of each redundant build.
     """
     builds = ci_build.azure_get(
         f"{ci_build.azure_api(org, project)}?statusFilter={','.join(AZURE_UNFINISHED)}"
@@ -623,7 +639,7 @@ def redundant_azure_builds(label, gh, org, project):
         "&api-version=7.1"
     )["value"]
     return [
-        (
+        RedundantBuild(
             branch_subject(label, b["sourceBranch"]),
             Build.from_azure_pipelines_build(
                 AZURE_UNFINISHED.get(b["status"], b["status"]),
@@ -655,9 +671,8 @@ def redundant_azure_builds_or_report(label, gh, org, project):
         project: an Azure DevOps project.
 
     Returns:
-        A list of the subject, Build, and reason of each redundant build, or the
-        empty list if Azure Pipelines does not provide them, in which case this function
-        reports the failure.
+        The RedundantBuild of each redundant build, or the empty list if Azure Pipelines
+        does not provide them, in which case this function reports the failure.
     """
     try:
         return redundant_azure_builds(label, gh, org, project)
@@ -708,15 +723,15 @@ def circleci_pipeline_branch(pipeline):
             (not its number, such as 7 in a pipeline's URL).
 
     Returns:
-        The pipeline's branch, as pipeline_branch returns it.
+        The pipeline's branch, as circleci_pipeline_dict_branch returns it.
     """
     api = f"{ci_build.CIRCLECI_API}/v2/pipeline/{pipeline}"
-    return pipeline_branch(
+    return circleci_pipeline_dict_branch(
         request_util.json_object(request_util.request("GET", api, ci_build.circleci_headers()), api)
     )
 
 
-def pipeline_branch(p):
+def circleci_pipeline_dict_branch(p):
     """Return the branch of the CircleCI pipeline p.
 
     Args:
@@ -757,9 +772,9 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
     try:
         workflows = [
             w
-            for branch, p in recent_pipelines(project)
-            if p["vcs"].get("revision") == sha and branch_name(branch) in branches
-            for w in unfinished_workflows(p["id"])
+            for p in recent_pipelines(project)
+            if p.json["vcs"].get("revision") == sha and branch_name(p.branch) in branches
+            for w in unfinished_workflows(p.json["id"])
         ]
     except request_util.REQUEST_ERRORS as e:
         print(
@@ -804,6 +819,35 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
     return result
 
 
+class CircleciPipeline(typing.NamedTuple):
+    """A CircleCI pipeline that a push or a pull request started.
+
+    Attributes:
+        project: the pipeline's CircleCI project slug, such as "gh/ORG/REPO".
+        branch: the pipeline's branch, as circleci_pipeline_dict_branch returns it, such as
+            "main" or "pull/123".
+        json: the pipeline, as a dict parsed from the CircleCI API's JSON, with keys such as
+            "id", "number", and "vcs".
+    """
+
+    project: str
+    branch: str
+    json: dict
+
+
+class CircleciWorkflow(typing.NamedTuple):
+    """A workflow of a CircleCI pipeline that a push or a pull request started.
+
+    Attributes:
+        pipeline: the CircleciPipeline of the workflow's pipeline.
+        json: the workflow, as a dict parsed from the CircleCI API's JSON, with keys such as
+            "id", "name", "status", and "created_at".
+    """
+
+    pipeline: CircleciPipeline
+    json: dict
+
+
 @functools.cache
 def recent_pipelines(project):
     """Return the recent pipelines of the given CircleCI project that a push or a PR started.
@@ -812,8 +856,8 @@ def recent_pipelines(project):
         project: a CircleCI project slug, such as "gh/ORG/REPO".
 
     Returns:
-        A list of the branch and pipeline of each pipeline from the past day that a push
-        or a pull request started, most recent first.
+        The CircleciPipeline of each pipeline from the past day that a push or a pull
+        request started, most recent first.
     """
     cutoff = dt.datetime.now(dt.UTC) - CIRCLECI_WINDOW
     result = []
@@ -821,9 +865,9 @@ def recent_pipelines(project):
     for p in ci_build.circleci_items(f"/v2/project/{project}/pipeline"):
         if dt.datetime.fromisoformat(p["created_at"]) < cutoff:
             break
-        branch = pipeline_branch(p)
+        branch = circleci_pipeline_dict_branch(p)
         if branch and p["trigger"]["type"] in CIRCLECI_REDUNDANT_TRIGGERS:
-            result.append((branch, p))
+            result.append(CircleciPipeline(project, branch, p))
     return result
 
 
@@ -859,7 +903,7 @@ def redundant_circleci_workflows(label, gh):
         gh: a repository's GitHub slug, such as "ORG/REPO".
 
     Returns:
-        A list of the subject, Build, and reason of each redundant workflow.
+        The RedundantBuild of each redundant workflow.
     """
     projects = {
         # A URL without a project slug is of the project that GitHub's OAuth app connects.
@@ -869,37 +913,33 @@ def redundant_circleci_workflows(label, gh):
     }
     if projects:
         warn_if_no_circleci_token()
-    # the project, branch, and pipeline of each recent pipeline that can be redundant
-    pipelines = [
-        (project, branch, p)
-        for project in sorted(projects)
-        for branch, p in recent_pipelines(project)
-    ]
+    # the CircleciPipeline of each recent pipeline that can be redundant
+    pipelines = [p for project in sorted(projects) for p in recent_pipelines(project)]
     # A pipeline's workflows can be redundant only if its branch has another pipeline.
-    counts = collections.Counter((project, branch) for project, branch, _ in pipelines)
-    pipelines = [pbp for pbp in pipelines if counts[pbp[:2]] > 1]
-    # the project, branch, pipeline, and workflow of each unfinished workflow
+    counts = collections.Counter((p.project, p.branch) for p in pipelines)
+    pipelines = [p for p in pipelines if counts[p.project, p.branch] > 1]
+    # the CircleciWorkflow of each unfinished workflow
     workflows = [
-        (project, branch, p, w)
-        for (project, branch, p), pipeline_workflows in zip(
+        CircleciWorkflow(p, w)
+        for p, pipeline_workflows in zip(
             pipelines,
-            concurrently(lambda pbp: unfinished_workflows(pbp[2]["id"]), pipelines),
+            concurrently(lambda p: unfinished_workflows(p.json["id"]), pipelines),
             strict=True,
         )
         for w in pipeline_workflows
     ]
     return [
-        (
-            branch_subject(label, branch),
-            Build.from_circleci_workflow(w["status"], w["id"], w["name"]),
-            f", made redundant by workflow {latest[3]['id']}",
+        RedundantBuild(
+            branch_subject(label, w.pipeline.branch),
+            Build.from_circleci_workflow(w.json["status"], w.json["id"], w.json["name"]),
+            f", made redundant by workflow {latest.json['id']}",
         )
-        for (_, branch, _, w), latest in superseded(
+        for w, latest in superseded(
             workflows,
-            lambda pbpw: (pbpw[0], pbpw[1], pbpw[3]["name"]),
-            lambda pbpw: (pbpw[2]["number"], pbpw[3]["created_at"]),
-            lambda pbpw: pbpw[2]["vcs"].get("revision"),
-            lambda pbpw: pbpw[3]["status"] in CIRCLECI_SUPERSEDING,
+            lambda w: (w.pipeline.project, w.pipeline.branch, w.json["name"]),
+            lambda w: (w.pipeline.json["number"], w.json["created_at"]),
+            lambda w: w.pipeline.json["vcs"].get("revision"),
+            lambda w: w.json["status"] in CIRCLECI_SUPERSEDING,
         )
     ]
 
@@ -977,7 +1017,7 @@ def redundant_runs(label, gh, runs):
             branch) to the unfinished runs of that branch, as unfinished_runs returns it.
 
     Returns:
-        A list of the subject, Build, and reason of each redundant run.
+        The RedundantBuild of each redundant run.
     """
     result = []
     for (owner, branch), branch_runs in runs.items():
@@ -992,7 +1032,7 @@ def redundant_runs(label, gh, runs):
             lambda r: r["status"] in GITHUB_SUPERSEDING,
         ):
             result.append(
-                (
+                RedundantBuild(
                     f"{label} {name}",
                     Build.from_github_actions_run(gh, r),
                     f", made redundant by run {latest['id']}",
@@ -1135,7 +1175,7 @@ def redundant_builds(label, gh, runs, pr_shas):
             Azure Pipelines projects build gh.
 
     Returns:
-        A list of the subject, Build, and reason of each redundant build.
+        The RedundantBuild of each redundant build.
     """
     result = []
     try:
@@ -1196,11 +1236,15 @@ def main():
             )
             runs = {}
         handled = set()  # the keys of the builds that have been reported
-        for subject, build, reason in redundant_builds(repo.label, gh, runs, repo.pr_shas):
+        for redundant in redundant_builds(repo.label, gh, runs, repo.pr_shas):
+            build = redundant.build
             if build.key not in handled:
                 handled.add(build.key)
-                print(f"{subject}: {action} {build.status} {build.description}{reason}")
-                to_cancel.append((subject, build))
+                print(
+                    f"{redundant.subject}: {action} {build.status} {build.description}"
+                    f"{redundant.reason}"
+                )
+                to_cancel.append((redundant.subject, build))
         for blocked, builds in zip(
             prs,
             concurrently(functools.partial(blocked_pr_builds, gh, shared_branches, runs), prs),
