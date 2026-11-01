@@ -299,7 +299,7 @@ def branch_subject(label, branch):
         A reference to the PR if branch holds a PR, and otherwise label and branch.
     """
     if match := PULL_BRANCH.fullmatch(branch):
-        return f"{label}#{match[1]}"
+        return pr_name(label, f"#{match[1]}")
     return f"{label} {branch.removeprefix('refs/heads/')}"
 
 
@@ -624,12 +624,11 @@ def azure_build_waits(org, project, build):
     Returns:
         True if a check of a stage of the build is in progress.
     """
-    timeline = ci_build.azure_get(
-        f"{ci_build.azure_api(org, project, build)}/timeline?api-version=7.1"
-    )
+    api = f"{ci_build.azure_api(org, project, build)}/timeline?api-version=7.1"
+    timeline = request_util.json_object(ci_build.azure_get(api) or {}, api)
     return any(
         (r.get("type") or "").startswith("Checkpoint") and r.get("state") == "inProgress"
-        for r in (timeline or {}).get("records") or []
+        for r in timeline.get("records") or []
     )
 
 
@@ -645,11 +644,12 @@ def redundant_azure_builds(label, gh, org, project):
     Returns:
         The RedundantBuild of each redundant build.
     """
-    builds = ci_build.azure_get(
+    api = (
         f"{ci_build.azure_api(org, project)}?statusFilter={','.join(AZURE_UNFINISHED)}"
         f"&repositoryId={urllib.parse.quote(gh, safe='')}&repositoryType=GitHub"
         "&api-version=7.1"
-    )["value"]
+    )
+    builds = request_util.json_object(ci_build.azure_get(api), api)["value"]
     return [
         RedundantBuild(
             branch_subject(label, b["sourceBranch"]),
@@ -1047,7 +1047,8 @@ def redundant_runs(label, gh, runs):
         for r, latest in superseded(
             [r for r in branch_runs if r["event"] in GITHUB_REDUNDANT_EVENTS],
             operator.itemgetter("workflow_id", "event"),
-            operator.itemgetter("created_at"),
+            # created_at is in whole seconds, so the id orders runs created in the same second.
+            operator.itemgetter("created_at", "id"),
             operator.itemgetter("head_sha"),
             lambda r: r["status"] in GITHUB_SUPERSEDING,
         ):

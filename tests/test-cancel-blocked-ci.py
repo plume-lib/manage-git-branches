@@ -233,6 +233,66 @@ class CancelBlockedCiTest(unittest.TestCase):
             [(("github", 0), "repo main", ", made redundant by run 1")],
         )
 
+    def test_redundant_runs_in_same_second(self) -> None:
+        """Of two runs created in the same second, the one with the greater id is more recent."""
+        runs = {
+            ("org", "main"): [
+                {
+                    "id": n,
+                    "name": "build",
+                    "status": "queued",
+                    "html_url": f"https://github.com/org/repo/actions/runs/{n}",
+                    "workflow_id": 7,
+                    "event": "push",
+                    "head_sha": f"sha{n}",
+                    "created_at": "2026-10-31T00:00:00Z",
+                }
+                for n in (8, 9)
+            ]
+        }
+        result = cancel_blocked_ci.redundant_runs("repo", "org/repo", runs)
+        self.assertEqual(
+            [(build.key, reason) for _, build, reason in result],
+            [(("github", 8), ", made redundant by run 9")],
+        )
+
+    def test_azure_response_not_object(self) -> None:
+        """A response that is JSON but not an object is reported, and does not crash."""
+
+        def empty_body(_url: str) -> Any:
+            return None
+
+        def timeline_list(url: str) -> Any:
+            if "/timeline" in url:
+                return [{"type": "Checkpoint.Approval", "state": "inProgress"}]
+            build = {
+                "id": 1,
+                "status": "inProgress",
+                "reason": "individualCI",
+                "sourceBranch": "refs/heads/main",
+                "sourceVersion": "commit1",
+                "definition": {"id": 1, "name": "ci"},
+                "_links": {"web": {"href": "https://dev.azure.com/org/p/_build"}},
+            }
+            return {"value": [build, {**build, "id": 2, "sourceVersion": "commit2"}]}
+
+        for azure_get in (empty_body, timeline_list):
+            with self.subTest(azure_get.__name__):
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(
+                        cancel_blocked_ci, "azure_projects", return_value={("org", "p")}
+                    ),
+                    mock.patch.object(ci_build, "azure_get", azure_get),
+                    mock.patch.object(
+                        cancel_blocked_ci, "redundant_circleci_workflows", return_value=[]
+                    ),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    result = cancel_blocked_ci.redundant_builds("repo", "org/repo", {}, [])
+                self.assertEqual(result, [])
+                self.assertIn("instead of a JSON object", stderr.getvalue())
+
     def test_unreadable_azure_project(self) -> None:
         """A response that is not JSON is reported, and the other CI services are examined."""
         stderr = io.StringIO()
@@ -256,6 +316,13 @@ class CancelBlockedCiTest(unittest.TestCase):
         self.assertEqual(cancel_blocked_ci.pr_name("daikon", "daikon#555"), "daikon#555")
         # A reference with a prefix names its repository, even if the prefix is not the label.
         self.assertEqual(cancel_blocked_ci.pr_name("Daikon", "daikon#555"), "daikon#555")
+
+    def test_branch_subject(self) -> None:
+        """A branch that holds a PR is named as pr_name names the PR."""
+        for branch in ("refs/pull/123/merge", "pull/123"):
+            self.assertEqual(cancel_blocked_ci.branch_subject("daikon", branch), "daikon #123")
+        for branch in ("main", "refs/heads/main"):
+            self.assertEqual(cancel_blocked_ci.branch_subject("daikon", branch), "daikon main")
 
     def test_blocked_prs(self) -> None:
         """Open PRs make shared branches:  every base branch, and unblocked PRs' head branches.
