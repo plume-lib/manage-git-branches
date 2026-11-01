@@ -50,10 +50,12 @@ fail() {
 ##   fail:   exits with status 3
 ##   commit: as "good", but also commits the merge
 ##   create: as "good", but also creates a file
+##   config: as "good", but also changes git's configuration
 ## Otherwise, it is fixing a build, and it acts according to ${STUB_BUILD}:
 ##   fix:    removes the lines of other.txt that break the build
 ##   bad:    creates or changes notes.txt, which does not fix the build
 ##   once:   as "bad" the first time, and as "none" afterward
+##   ignored: creates fix.local, a file that git ignores
 ##   none:   changes nothing (the default)
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
@@ -70,6 +72,7 @@ if ! grep -q '^<<<<<<< ' file.txt; then
     once)
       if [ ! -e notes.txt ]; then echo "an attempt" > notes.txt; fi
       ;;
+    ignored) echo "a fix" > fix.local ;;
   esac
   exit 0
 fi
@@ -83,6 +86,9 @@ if [ "${STUB_MODE}" = clean ]; then
 fi
 if [ "${STUB_MODE}" = create ]; then
   echo "scratch" > scratch.txt
+fi
+if [ "${STUB_MODE}" = config ]; then
+  git config core.fsmonitor "echo pwned"
 fi
 if [ "${STUB_MODE}" = commit ]; then
   git add file.txt
@@ -123,7 +129,8 @@ setup_case() {
     printf '\t@if grep -n BROKEN other.txt; then echo "other.txt is broken" >&2; exit 1; fi\n' \
       >> "${case_dir}/seed/Makefile"
     echo "fine" > "${case_dir}/seed/other.txt"
-    git -C "${case_dir}/seed" add Makefile other.txt
+    echo '*.local' > "${case_dir}/seed/.gitignore"
+    git -C "${case_dir}/seed" add Makefile other.txt .gitignore
   fi
   git -C "${case_dir}/seed" commit -q -m "Initial commit"
   git -C "${case_dir}/seed" remote add origin "${remote}"
@@ -303,6 +310,15 @@ case "${push_output}" in
   *) fail "agent that creates a file: wrong diagnostic: ${push_output}" ;;
 esac
 
+## An agent that changes git's configuration is rejected.
+setup_case config
+push_to config --llm
+check_not_resolved "agent that changes git's configuration"
+case "${push_output}" in
+  *"changed git's configuration or hooks"*) ;;
+  *) fail "agent that changes git's configuration: wrong diagnostic: ${push_output}" ;;
+esac
+
 ## A rerun does not mistake the merge that an earlier run left in progress
 ## for a conflicted pull.
 setup_case rerun
@@ -356,6 +372,7 @@ if [ "$(git -C "${remote}" show refs/heads/feature:file.txt)" != "${expected}" ]
 fi
 message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature^1)"
 case "${message}" in
+  *Conflicts*) fail "conflict in pulling: the message lists the conflicts: ${message}" ;;
   "Merge branch 'feature' of "*) ;;
   *) fail "conflict in pulling: wrong message for the merge of the pull: ${message}" ;;
 esac
@@ -408,6 +425,26 @@ fi
 if ! git -C "${feature_dir}" diff --cached --name-only | grep -q -x notes.txt; then
   fail "bad build fix: the agent's changes are not staged"
 fi
+# A rerun does not build the staged changes, which would not be pushed.
+: > "${STUB_LOG}"
+STUB_BUILD=bad push_to good --llm
+check_not_resolved "rerun after a bad build fix"
+case "${push_output}" in
+  *"has uncommitted changes"*) ;;
+  *) fail "rerun after a bad build fix: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "rerun after a bad build fix: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## An agent that creates a file that git ignores is rejected.
+setup_case build-ignored build
+STUB_BUILD=ignored push_to good --llm
+check_not_resolved "build fix in an ignored file"
+case "${push_output}" in
+  *"created a file that git ignores: fix.local"*) ;;
+  *) fail "build fix in an ignored file: wrong diagnostic: ${push_output}" ;;
+esac
 
 ## An attempt that changes nothing ends the attempts, even after an earlier
 ## attempt changed files; the later attempt learns of the earlier one.
@@ -444,6 +481,13 @@ STUB_BUILD=fix push_to good --no-llm
 check_not_resolved "build with --no-llm"
 if [ -s "${STUB_LOG}" ]; then
   fail "build with --no-llm: an agent ran: $(cat "${STUB_LOG}")"
+fi
+# The merge is now committed.  A rerun merges nothing, so the merge did not
+# cause the failure, and no agent is asked to fix it.
+STUB_BUILD=fix push_to good --llm
+check_not_resolved "build failure without a merge"
+if [ -s "${STUB_LOG}" ]; then
+  fail "build failure without a merge: an agent ran: $(cat "${STUB_LOG}")"
 fi
 build=0
 

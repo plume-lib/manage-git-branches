@@ -581,4 +581,38 @@ check_resolution reject "a marker remains" \
 check_resolution reject "no conflict markers in AUTO_MERGE" \
   a b c -- a b c
 
+## Usage: check_resolution_raw EXPECTED DESCRIPTION AUTO_MERGE_TEXT RESOLUTION_TEXT
+## Like `check_resolution`, but takes the files' contents as printf formats,
+## so that a test can omit the final newline or use CRLF line endings.
+check_resolution_raw() {
+  # shellcheck disable=SC2059 # The contents are formats.
+  printf "$3" > "${WORK_DIR}/ccr-auto"
+  # shellcheck disable=SC2059 # The contents are formats.
+  printf "$4" > "${WORK_DIR}/ccr/f.txt"
+  check_resolution_blob="$(git -C "${WORK_DIR}/ccr" hash-object --no-filters -w "${WORK_DIR}/ccr-auto")"
+  check_resolution_tree="$(printf '100644 blob %s\tf.txt\n' "${check_resolution_blob}" \
+    | git -C "${WORK_DIR}/ccr" mktree)"
+  git -C "${WORK_DIR}/ccr" update-ref AUTO_MERGE "${check_resolution_tree}"
+  if (cd "${WORK_DIR}/ccr" && check_conflict_resolution f.txt 2> /dev/null); then
+    check_resolution_actual=accept
+  else
+    check_resolution_actual=reject
+  fi
+  if [ "${check_resolution_actual}" != "$1" ]; then
+    fail "check_conflict_resolution: $2: expected $1, got ${check_resolution_actual}"
+  fi
+}
+
+check_resolution_raw accept "no final newline" \
+  '<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\nc' 'aA\nb\nc'
+check_resolution_raw reject "no final newline, and the last line changed" \
+  '<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\nc' 'aA\nb\nC'
+# A checkout converts the repository's LF line endings to CRLF.
+printf '* text eol=crlf\n' > "${WORK_DIR}/ccr/.gitattributes"
+check_resolution_raw accept "CRLF line endings in the working tree" \
+  'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\naA\r\nb\r\n'
+check_resolution_raw reject "CRLF line endings, and a clean line changed" \
+  'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\naA\r\nB\r\n'
+rm "${WORK_DIR}/ccr/.gitattributes"
+
 echo "${SCRIPT_NAME}: OK"

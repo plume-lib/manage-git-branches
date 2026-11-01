@@ -889,11 +889,13 @@ check_conflict_resolution() {
   fi
   # Each line of the input is tagged:  "A" for a line of the file in
   # AUTO_MERGE, which all come first, and "W" for a line of the file in the
-  # working tree.
+  # working tree.  `awk` ends every line with a newline, even the last line of
+  # a file that lacks one.  `--filters` converts AUTO_MERGE's file as a
+  # checkout would, such as to CRLF line endings, to match the working tree.
   # shellcheck disable=SC2016 # awk, not the shell, expands $0 and the like.
   {
-    git show "AUTO_MERGE:$1" | sed -e 's/^/A/'
-    sed -e 's/^/W/' < "$1"
+    git cat-file --filters "AUTO_MERGE:$1" | awk '{ print "A" $0 }'
+    awk '{ print "W" $0 }' < "$1"
   } | CHECK_FILE="$1" CHECK_SCRIPT_NAME="${SCRIPT_NAME}" awk '
     function problem(message) {
       printf "%s: %s: %s\n", ENVIRON["CHECK_SCRIPT_NAME"], ENVIRON["CHECK_FILE"], message > "/dev/stderr"
@@ -1044,6 +1046,7 @@ resolve_merge_conflicts() {
   # The agent must not create files, which would not be committed but which
   # a later build could use.
   resolve_untracked="$(untracked_files)"
+  resolve_ignored="$(ignored_files)"
 
   # The files that `git rerere` did not resolve.
   resolve_unresolved="$(printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
@@ -1094,7 +1097,10 @@ Finish with a brief summary of how you resolved each conflict."
     printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} changed a file that had no conflict: /" >&2
     resolve_ok=0
   fi
-  resolve_created="$(untracked_files | grep -F -x -v -- "${resolve_untracked}")"
+  resolve_created="$({
+    untracked_files | grep -F -x -v -- "${resolve_untracked}"
+    ignored_files | grep -F -x -v -- "${resolve_ignored}"
+  })"
   if [ -n "${resolve_created}" ]; then
     printf '%s\n' "${resolve_created}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} created a file: /" >&2
     resolve_ok=0
@@ -1141,6 +1147,15 @@ untracked_files() {
   git -c core.quotePath=false ls-files --others --exclude-standard
 }
 
+## Usage: ignored_files
+## Prints, one per line, the files of the working tree that git ignores, with
+## each directory that git ignores entirely as a single line.  A file that is
+## created in such a directory does not change the output, but listing every
+## file of a directory of build output would be slow.
+ignored_files() {
+  git -c core.quotePath=false ls-files --others --ignored --exclude-standard --directory
+}
+
 ## Usage: resolve_other_changes
 ## Prints, one per line, each file that differs from AUTO_MERGE in the working
 ## tree or in the index and is not in ${resolve_files}, the conflicted files.
@@ -1158,6 +1173,12 @@ resolve_other_changes() {
 ## people, such as conflicting changes, which might try to make the agent do
 ## more.  Returns 1, after printing a diagnostic, if the agent fails.
 run_agent() {
+  # Each agent's sandbox keeps it from changing git's configuration or hooks,
+  # which name commands that git runs.  Check that anyway.
+  if ! run_agent_git_state="$(git_control_state)"; then
+    echo "${SCRIPT_NAME}: cannot read git's configuration in $(pwd)" >&2
+    return 1
+  fi
   # Each agent reads its instructions from standard input.
   #
   # Claude's restricted mode confines the file tools to the current
@@ -1185,11 +1206,35 @@ run_agent() {
       ;;
   esac
   run_agent_status=$?
+  if [ "$(git_control_state)" != "${run_agent_git_state}" ]; then
+    echo "${SCRIPT_NAME}: $1 changed git's configuration or hooks in $(pwd); check them before running git there" >&2
+    return 1
+  fi
   if [ "${run_agent_status}" -ne 0 ]; then
     echo "${SCRIPT_NAME}: $1 failed with status ${run_agent_status}" >&2
     return 1
   fi
   return 0
+}
+
+## Usage: git_control_state
+## Prints a summary of the files of the current repository that name commands
+## that git runs:  its configuration files and its hooks.  The summary changes
+## if any of them changes.
+git_control_state() {
+  git_control_common="$(git rev-parse --path-format=absolute --git-common-dir)" || return 1
+  git_control_dir="$(git rev-parse --path-format=absolute --git-dir)" || return 1
+  git_control_hooks="$(git rev-parse --path-format=absolute --git-path hooks)" || return 1
+  for git_control_file in "${git_control_common}/config" "${git_control_dir}/config.worktree"; do
+    if [ -f "${git_control_file}" ]; then
+      cksum < "${git_control_file}"
+    else
+      echo "no ${git_control_file}"
+    fi
+  done
+  if [ -d "${git_control_hooks}" ]; then
+    find "${git_control_hooks}" -type f -exec cksum {} + | sort
+  fi
 }
 
 ## Usage: build_logged LOG
@@ -1222,10 +1267,10 @@ build_and_fix() {
     return 0
   fi
   echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
-  # The agent's changes are committed below, and so would be any other
-  # change.  A build might also modify tracked files.
+  # The agent's changes are committed below, and so would be any change that
+  # the build made to tracked files.
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-    echo "${SCRIPT_NAME}: the working tree has uncommitted changes; fix the build by hand" >&2
+    echo "${SCRIPT_NAME}: the build changed tracked files in $(pwd); fix the build by hand" >&2
     return 1
   fi
   fix_head="$(git rev-parse --verify HEAD)" || return 1
@@ -1234,6 +1279,7 @@ build_and_fix() {
   fix_earlier=''
   while :; do
     fix_untracked="$(untracked_files)"
+    fix_ignored="$(ignored_files)"
     if [ "${fix_attempt}" -gt 1 ]; then
       fix_earlier="
 
@@ -1268,6 +1314,13 @@ $(tail -n 100 "${fix_log}")"
     # Stage the agent's changes:  to tracked files, and the files that it
     # created.  The changes of earlier attempts are already staged.
     fix_new="$(untracked_files | grep -F -x -v -- "${fix_untracked}")"
+    # A file that git ignores would not be committed, but the build could use
+    # it.
+    fix_new_ignored="$(ignored_files | grep -F -x -v -- "${fix_ignored}")"
+    if [ -n "${fix_new_ignored}" ]; then
+      printf '%s\n' "${fix_new_ignored}" | sed -e "s/^/${SCRIPT_NAME}: ${fix_with} created a file that git ignores: /" >&2
+      return 1
+    fi
     if git diff --quiet && [ -z "${fix_new}" ]; then
       echo "${SCRIPT_NAME}: ${fix_with} did not fix the build in $(pwd); it changed nothing" >&2
       return 1
@@ -1371,9 +1424,7 @@ pull_resolving() {
       exit 1
     fi
     # MERGE_MSG ends with comment lines that list the conflicts.
-    if ! pull_message_file="$(git rev-parse --git-path MERGE_MSG)" \
-      || ! git stripspace --strip-comments < "${pull_message_file}" \
-        | git commit -q --cleanup=whitespace -F -; then
+    if ! git commit -q --no-edit --cleanup=strip; then
       echo "${SCRIPT_NAME}: cannot commit the merge of ${pull_source} in $(pwd)" >&2
       exit 1
     fi
@@ -1439,7 +1490,15 @@ merge_build_push() {
   fi
 
   if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
-    if [ -n "${5:-}" ]; then
+    # A build of uncommitted changes, such as those that a failed attempt to
+    # fix the build left staged, says nothing about the commit that is pushed.
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+      echo "${SCRIPT_NAME}: the working tree of $(pwd) has uncommitted changes; commit or discard them" >&2
+      return 1
+    fi
+    # If the merge changed nothing, it did not cause a failure of the build,
+    # which the agent would merely work around.
+    if [ -n "${5:-}" ] && [ "$(git rev-parse --verify HEAD)" != "${merge_orig_head}" ]; then
       if ! build_and_fix "$5" "$2" "${merge_orig_head}"; then
         return 1
       fi
