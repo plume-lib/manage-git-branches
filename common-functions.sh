@@ -1019,14 +1019,16 @@ resolve_merge_conflicts() {
       fi
       resolve_contains_separator=no
       for resolve_stage in 1 2 3; do
+        # The "(" before each pattern lets bash 3.2, which is /bin/sh on
+        # macOS, parse a case statement inside a command substitution.
         case "$(git cat-file blob ":${resolve_stage}:${resolve_file}" 2> /dev/null \
           | awk "${resolve_scan}")" in
-          marker)
+          (marker)
             echo "${SCRIPT_NAME}: ${resolve_file} contains lines that look like conflict markers; resolve its conflicts by hand" >&2
             resolve_status=1
             continue 2
             ;;
-          separator)
+          (separator)
             if [ "${resolve_stage}" -ne 1 ]; then
               resolve_contains_separator=yes
             fi
