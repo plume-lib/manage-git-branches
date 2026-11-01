@@ -123,15 +123,16 @@
 # "Fix the build after merging ...", and pushes.  If the build still fails,
 # this script stops, with the agent's changes staged but not committed.
 # A merge might have broken the build if TO_DIR's branch has a merge commit
-# that is in none of the remote branch that it pushes to, the one that it
-# pulls from, and the history of FROM_DIR's branch, and its tree differs
-# from those remote branches'.  That merge commit can be the merge of
-# FROM_DIR's branch, the merge that the pull of TO_DIR made, or a merge that
-# an earlier run made but did not push, as when its build failed; so a rerun
-# after a failed build asks the agent too.  If there is no such merge
-# commit, as after a pull that only fast-forwarded TO_DIR's branch, the
-# agent would merely work around a failure that no merge caused, so it is
-# not asked.
+# that is in the history of none of the remote branches that TO_DIR's branch
+# and FROM_DIR's branch push to and pull from, and that combined changes
+# (its tree differs from each of its parents' trees), and if TO_DIR's tree
+# differs from those remote branches' trees.  That merge commit can be the
+# merge of FROM_DIR's branch, the merge that the pull of TO_DIR or of
+# FROM_DIR made, or a merge that an earlier run made but did not push, as
+# when its build failed; so a rerun after a failed build asks the agent too.
+# If there is no such merge commit, as after a pull that only fast-forwarded
+# TO_DIR's branch, the agent would merely work around a failure that no
+# merge caused, so it is not asked.
 
 # Here is an example of use.
 #
@@ -411,6 +412,17 @@ git_push_to() {
   if ! pull_resolving "${llm_agent}" "${from_absolute}" -q; then
     return 1
   fi
+  # The commits of the remote branches that FROM_DIR's branch pushes to and
+  # pulls from.  Their histories were built where they were pushed, so a
+  # failed build of TO_DIR does not ask the agent about their merges.
+  # FROM_DIR's own merges, such as the one that the pull just made, are not
+  # among them.
+  from_built=''
+  for from_remote in $(remote_branch_refs "${from_absolute}"); do
+    if from_commit="$(git -C "${from_absolute}" rev-parse --verify --quiet "${from_remote}^{commit}")"; then
+      from_built="${from_built:+${from_built} }${from_commit}"
+    fi
+  done
 
   orig_dir=$(pwd)
 
@@ -430,8 +442,7 @@ git_push_to() {
   # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
   # that an earlier run of this command made but did not push, as when its
   # build failed, and would copy that merge's commits onto TO_DIR's branch.
-  # `--no-edit` keeps the merge from stopping at an editor.
-  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase --no-edit; then
+  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase; then
     return 1
   fi
 
@@ -452,7 +463,8 @@ git_push_to() {
   # `merge_build_push` describes the commit as a branch of this repository.
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
-    "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}"; then
+    "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}" \
+    "${from_built}"; then
     return 1
   fi
 

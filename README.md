@@ -99,9 +99,10 @@ The commands are:
   resolve.  It checks every resolution, whether from rerere or from the
   agent:  that nothing outside the conflict regions changed and that no
   conflict marker remains.  Then it commits the merge and continues.
-  If the build fails, and TO_DIR's branch has a merge that its remote
-  branches lack, such as the one that it just made, it asks the agent to fix
-  the build, up to 3 times, and commits the fix.
+  If the build fails, and TO_DIR's branch has a merge that neither its
+  remote branches nor those of FROM_DIR's branch contain, such as the one
+  that it just made, it asks the agent to fix the build, up to 3 times, and
+  commits the fix.
   `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
   on.
   The agent runs in a sandbox, which requires a recent version:  Claude

@@ -906,9 +906,12 @@ fi
 
 ## With --no-llm, a failed build is not given to an agent.  Feature makes
 ## main's change to file.txt too, so that the merge has no conflicts, which
-## --no-llm would leave unresolved, and the build runs.
+## --no-llm would leave unresolved, and the build runs.  Feature also adds a
+## file, so that the merge's tree is not main's.
 setup_case build-no-llm build
 write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
+echo "feature" > "${feature_dir}/feature.txt"
+git -C "${feature_dir}" add feature.txt
 git -C "${feature_dir}" commit -q -a -m "Change feature as main does"
 git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
@@ -934,6 +937,9 @@ fi
 if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "rerun after a failed build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
 fi
+if ! grep -q 'already contained commit' "${STUB_PROMPT}"; then
+  fail "rerun after a failed build: the instructions do not say that the merge changed nothing: $(cat "${STUB_PROMPT}")"
+fi
 message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
 if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
   fail "rerun after a failed build: wrong message for the fix: ${message}"
@@ -956,6 +962,81 @@ case "${push_output}" in
 esac
 if [ -s "${STUB_LOG}" ]; then
   fail "build failure without a merge: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## A merge that FROM_DIR's branch has but its remote lacks was not built, so
+## the agent is asked to fix a build that it breaks, even when TO_DIR's
+## branch fast-forwards to FROM_DIR's.  Main and feature are reset to the
+## initial commit; then main makes a change and merges a side branch that
+## adds "BROKEN" to other.txt, without pushing.
+setup_case build-fast-forward-from-merge build
+git -C "${main_dir}" reset -q --hard HEAD^
+git -C "${main_dir}" push -q --force
+git -C "${feature_dir}" reset -q --hard HEAD^
+git -C "${feature_dir}" push -q --force
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+git -C "${main_dir}" switch -q -c side
+echo "BROKEN" >> "${main_dir}/other.txt"
+git -C "${main_dir}" commit -q -a -m "Break the build on side"
+git -C "${main_dir}" switch -q main
+write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
+git -C "${main_dir}" commit -q -a -m "Change main locally"
+git -C "${main_dir}" merge -q --no-ff --no-edit side
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "fast-forward to an unpushed merge: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "fast-forward to an unpushed merge: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q 'just fast-forwarded branch feature' "${STUB_PROMPT}"; then
+  fail "fast-forward to an unpushed merge: the instructions do not say that the merge fast-forwarded: $(cat "${STUB_PROMPT}")"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'side'" ]; then
+  fail "fast-forward to an unpushed merge: wrong message for the fix: ${message}"
+fi
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+  fail "fast-forward to an unpushed merge: the build is not fixed"
+fi
+
+## The remote branch that the current branch pushes to is fetched before
+## deciding whether a merge broke the build, if it is on a remote that the
+## pull does not fetch.  Feature pushes to a fork.  A run with --no-llm
+## merges main and fails to build; then the merge is pushed to the fork from
+## elsewhere, which leaves the local remote-tracking branch out of date.  The
+## fork has the merge, so the agent is not asked.
+setup_case build-push-remote build
+write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
+echo "feature" > "${feature_dir}/feature.txt"
+git -C "${feature_dir}" add feature.txt
+git -C "${feature_dir}" commit -q -a -m "Change feature as main does"
+git -C "${feature_dir}" push -q
+fork="${case_dir}/fork.git"
+git clone -q --bare "${remote}" "${fork}"
+git -C "${feature_dir}" remote add fork "${fork}"
+git -C "${feature_dir}" fetch -q fork
+git -C "${feature_dir}" config branch.feature.pushRemote fork
+# Git can name the branch that "simple" pushes to only if it is the upstream
+# branch.
+git -C "${feature_dir}" config push.default current
+fork_head="$(git -C "${fork}" rev-parse refs/heads/feature)"
+STUB_BUILD=fix push_to good --no-llm
+if [ "${push_status}" -eq 0 ] || [ "$(git -C "${fork}" rev-parse refs/heads/feature)" != "${fork_head}" ]; then
+  fail "build with a push remote: the first run pushed: ${push_output}"
+fi
+git -C "${feature_dir}" push -q fork feature
+git -C "${feature_dir}" update-ref refs/remotes/fork/feature "${fork_head}"
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -eq 0 ]; then
+  fail "build with an out-of-date push remote: git-push-to succeeded"
+fi
+case "${push_output}" in
+  *"unable to build"*) ;;
+  *) fail "build with an out-of-date push remote: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "build with an out-of-date push remote: an agent ran: $(cat "${STUB_LOG}")"
 fi
 
 ## Usage: set_pull_subject
@@ -1069,6 +1150,22 @@ for ff in true false; do
   fi
 done
 
+## A merge that a pull makes, although it could have fast-forwarded,
+## combines no changes, so the fix's message does not list it.
+setup_pull_breaks pull-build-no-ff-merge main
+git -C "${feature_dir}" reset -q --hard HEAD^
+local_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+git -C "${feature_dir}" config pull.ff false
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "pull with pull.ff=false and a merge that breaks the build: git-push-to failed: ${push_output}"
+fi
+check_pull_fixed "pull with pull.ff=false and a merge that breaks the build" \
+  "Fix the build after merging branch 'main'"
+if grep -q -F "${pull_subject}" "${STUB_PROMPT}"; then
+  fail "pull with pull.ff=false and a merge that breaks the build: the instructions list the pull's merge: $(cat "${STUB_PROMPT}")"
+fi
+
 ## The pull of TO_DIR merges even if `pull.rebase` is set, so the agent fixes
 ## the merge.
 setup_pull_breaks pull-build-rebase
@@ -1132,11 +1229,14 @@ check_pull_fixed "git-pull-upstream after a pull that breaks the build" \
 build=0
 
 ## An agent that is not installed is not asked to fix the build.  The merge
-## has no conflicts, so that the build is reached.  As above, the test is
+## has no conflicts, so that the build is reached, and its tree is not
+## main's.  As above, the test is
 ## skipped if a real agent is on the PATH.
 if ! env PATH="${no_agent_path}" sh -c 'command -v claude' > /dev/null 2>&1; then
   setup_case build-no-agent build
   write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
+  echo "feature" > "${feature_dir}/feature.txt"
+  git -C "${feature_dir}" add feature.txt
   git -C "${feature_dir}" commit -q -a -m "Match main"
   git -C "${feature_dir}" push -q
   feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
