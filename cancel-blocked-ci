@@ -587,7 +587,7 @@ def azure_build(status, org, project, build, name, url):
         status,
         f"Azure Pipelines build {build} ({name})",
         url,
-        lambda: request_util.request(
+        lambda: ci_build.azure_request(
             "PATCH", api, ci_build.azure_headers(), {"status": "cancelling"}
         ),
     )

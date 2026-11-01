@@ -126,8 +126,29 @@ def azure_api(org: str, project: str, build: str | int | None = None) -> str:
 # The Azure DevOps projects, as "ORG/PROJECT", that refused an anonymous request.
 _azure_private_projects: set[str] = set()
 # The HTTP statuses with which Azure DevOps refuses an anonymous request to a private
-# project.  203 is a sign-in page, as http reports it.
+# project.  203 is a sign-in page, as azure_request reports it.
 AZURE_REFUSALS = {203, 401, 403, 404}
+# The successful status with which Azure DevOps responds to a request that lacks the
+# needed credentials, with a sign-in page, and a description of it.
+AZURE_SIGN_IN = {203: "a sign-in page instead of the requested data"}
+
+
+def azure_request(method: str, url: str, headers: dict[str, str], body: Any = None) -> Any:
+    """Make an HTTP request of Azure DevOps whose response is JSON.
+
+    If Azure DevOps refuses the request, including with a sign-in page, this raises
+    urllib.error.HTTPError.
+
+    Args:
+        method: the HTTP method, such as "GET".
+        url: the URL, in the Azure DevOps API.
+        headers: the HTTP headers.
+        body: the request body, which is sent as JSON, or None for no body.
+
+    Returns:
+        The response body, parsed as JSON, or None if it is empty.
+    """
+    return request_util.request(method, url, headers, body, refusals=AZURE_SIGN_IN)
 
 
 def azure_get(url: str, *, text: bool = False) -> Any:
@@ -205,11 +226,10 @@ def circleci_token() -> str | None:
 
 
 def circleci_headers() -> dict[str, str]:
-    """Determine how to authenticate to CircleCI.
+    """Return the HTTP headers that authenticate to CircleCI.
 
     Returns:
-        The HTTP headers that authenticate to CircleCI, or no headers if there is no
-        token.
+        The headers, or no headers if there is no token.
     """
     token = circleci_token()
     return {"Circle-Token": token} if token else {}
