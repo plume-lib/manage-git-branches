@@ -1678,6 +1678,54 @@ parse_llm_option() {
   return 0
 }
 
+## Usage: pull_resolving RESOLVER DIRECTORY PULL-ARGUMENT...
+## Runs `git -C DIRECTORY pull PULL-ARGUMENT...`.  If the pull merges and the
+## merge has conflicts, resolves them with `resolve_merge_conflicts`, asking
+## RESOLVER, if it is not empty, about any that `git rerere` did not resolve,
+## and commits the merge with the message that `git pull` composed.  (A pull that rebases cannot be resolved this way.)
+## Returns 1, after printing a diagnostic, if a merge is already in progress
+## in DIRECTORY, or if the pull fails and its conflicts are not resolved.
+pull_resolving() {
+  pull_resolver="$1"
+  pull_dir="$2"
+  shift 2
+  # Otherwise, `git pull` would refuse to run, and the merge in progress would
+  # seem to be the pull's.
+  if git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
+    return 1
+  fi
+  # `rerere.autoUpdate` false and the configured conflict style are as for
+  # the merge in `merge_build_push`.
+  if git -C "${pull_dir}" -c rerere.autoUpdate=false pull "$@"; then
+    return 0
+  fi
+  echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
+  if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    return 1
+  fi
+  # Git names the conflicted files relative to the top level of the working
+  # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
+  # the current directory unchanged.
+  (
+    if ! pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)" \
+      || ! cd "${pull_top}"; then
+      echo "${SCRIPT_NAME}: cannot cd to the top level of ${pull_dir}" >&2
+      exit 1
+    fi
+    pull_source="$(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null)" \
+      || pull_source="its upstream branch"
+    if ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
+      exit 1
+    fi
+    # MERGE_MSG ends with comment lines that list the conflicts.
+    if ! git commit -q --no-edit --cleanup=strip; then
+      echo "${SCRIPT_NAME}: cannot commit the merge of ${pull_source} in $(pwd)" >&2
+      exit 1
+    fi
+  )
+}
+
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and

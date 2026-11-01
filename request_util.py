@@ -41,13 +41,13 @@ REQUEST_ERRORS = (
 
 
 def run(cmd: list[str]) -> str:
-    """Run a command.
+    """Run the given command, and return its standard output.
 
     If the command fails, this raises subprocess.CalledProcessError.  If it runs longer
     than COMMAND_TIMEOUT seconds, this stops it and raises subprocess.TimeoutExpired.
 
     Args:
-        cmd: the command and its arguments.
+        cmd: a command and its arguments, such as ["gh", "api", "repos/ORG/REPO"].
 
     Returns:
         The command's standard output, in which any byte that is not part of a UTF-8
@@ -64,10 +64,10 @@ def run(cmd: list[str]) -> str:
 
 
 def gh_api(path: str, *, paginate: bool = False) -> Any:
-    """Make a GitHub API request with `gh api`.
+    """Make the given GitHub API request with `gh api`, and return the response.
 
     Args:
-        path: the request, such as "repos/ORG/REPO/actions/runs/123".
+        path: a request, such as "repos/ORG/REPO/actions/runs/123".
         paginate: True if every page of the response should be read.
 
     Returns:
@@ -86,13 +86,13 @@ def http(
     *,
     refusals: Mapping[int, str] | None = None,
 ) -> bytes:
-    """Make an HTTP request.
+    """Make the given HTTP request, and return the response body.
 
     Args:
-        method: the HTTP method, such as "GET".
-        url: the URL.
-        headers: the HTTP headers.
-        body: the request body, which is sent as JSON, or None for no body.
+        method: an HTTP method, such as "GET".
+        url: a URL.
+        headers: HTTP headers.
+        body: a request body, which is sent as JSON, or None for no body.
         refusals: a map from each successful status with which the server refuses the
             request, such as one that a sign-in page has, to a description of it.
 
@@ -127,13 +127,13 @@ def request(
     *,
     refusals: Mapping[int, str] | None = None,
 ) -> Any:
-    """Make an HTTP request whose response is JSON.
+    """Make the given HTTP request, whose response is JSON, and return the parsed response.
 
     Args:
-        method: the HTTP method, such as "GET".
-        url: the URL.
-        headers: the HTTP headers.
-        body: the request body, which is sent as JSON, or None for no body.
+        method: an HTTP method, such as "GET".
+        url: a URL.
+        headers: HTTP headers.
+        body: a request body, which is sent as JSON, or None for no body.
         refusals: a map from each successful status with which the server refuses the
             request to a description of it, as for http.
 
@@ -189,10 +189,10 @@ def request_object(
 
 
 def failure(e: Exception) -> str:
-    """Describe a failed command or HTTP request.
+    """Return a description of the given failed command or HTTP request.
 
     Args:
-        e: the exception that the command or the HTTP request raised.
+        e: an exception that a command or an HTTP request raised.
 
     Returns:
         A description of e, including any error output or error response.
@@ -206,12 +206,12 @@ def failure(e: Exception) -> str:
 
 
 def error_message(text: str) -> str:
-    """Extract the explanation part from the body of an HTTP error response.
+    """Return the explanation in the given body of an HTTP error response.
 
     The body can be a long HTML page.
 
     Args:
-        text: the body of the response.
+        text: a body of an HTTP error response.
 
     Returns:
         One line:  the "message" of a JSON body, the title of an HTML body, or else the
