@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Checks that `git-push-to` works with the real AI agents:  that each one
-# resolves a merge conflict.
+# resolves a merge conflict and fixes a build that a merge broke.
 #
 # Usage:
 #   tests/check-real-agents.sh [AGENT...]
@@ -176,6 +176,43 @@ EOF
       *Goodbye*) ;;
       *) report "${description}" "lost main's change to farewell(), which merged cleanly" ;;
     esac
+    check_builds "${description}"
+  fi
+
+  ## A build that the merge breaks:  main renames greet() to salute(), and
+  ## feature adds a new file that calls greet().  The merge has no textual
+  ## conflict.
+  description="${agent}: build"
+  echo "${SCRIPT_NAME}: ${description}"
+  setup_case "${agent}-build"
+  sed -e 's/def greet(/def salute(/' "${main_dir}/greetings.py" > "${main_dir}/greetings.py.new"
+  mv "${main_dir}/greetings.py.new" "${main_dir}/greetings.py"
+  sed -e 's/greetings\.greet(/greetings.salute(/' "${main_dir}/app.py" > "${main_dir}/app.py.new"
+  mv "${main_dir}/app.py.new" "${main_dir}/app.py"
+  commit_push "${main_dir}" "Rename greet() to salute()"
+  cat > "${feature_dir}/farewells.py" << 'EOF'
+import greetings
+
+
+def greet_and_leave(name):
+    return greetings.greet(name) + " " + greetings.farewell(name)
+
+
+if __name__ == "__main__":
+    print(greet_and_leave("world"))
+EOF
+  git -C "${feature_dir}" add farewells.py
+  commit_push "${feature_dir}" "Add greet_and_leave()"
+  push_to "${agent}"
+  if [ "${push_status}" -ne 0 ]; then
+    report "${description}" "git-push-to failed"
+  elif [ "$(git -C "${remote}" rev-list --count refs/heads/feature)" -ne 5 ]; then
+    report "${description}" "expected the fix on top of a merge of 2 branches of 1 commit each"
+  else
+    message="$(git -C "${remote}" log -1 --format=%s refs/heads/feature)"
+    if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
+      report "${description}" "the pushed branch does not end with the fix: ${message}"
+    fi
     check_builds "${description}"
   fi
 done
