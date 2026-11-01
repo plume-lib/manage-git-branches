@@ -49,6 +49,8 @@ fail() {
 ##   commit: as "good", but also commits the merge
 ##   create: as "good", but also creates a file
 ##   config: as "good", but also changes git's configuration
+##   change-untracked: as "good", but also changes the untracked file notes.txt
+##   delete-untracked: as "good", but also deletes the untracked file notes.txt
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
@@ -65,6 +67,12 @@ fi
 if [ "${STUB_MODE}" = create ]; then
   echo "scratch" > scratch.txt
 fi
+if [ "${STUB_MODE}" = change-untracked ]; then
+  echo "changed" >> notes.txt
+fi
+if [ "${STUB_MODE}" = delete-untracked ]; then
+  rm notes.txt
+fi
 if [ "${STUB_MODE}" = config ]; then
   git config core.fsmonitor "echo pwned"
 fi
@@ -80,17 +88,19 @@ STUB_LOG="${WORK_DIR}/stub-log"
 STUB_PROMPT="${WORK_DIR}/stub-prompt"
 export STUB_LOG STUB_PROMPT
 
-## Usage: setup_case NAME
+## Usage: setup_case NAME [LAST-LINE]
 ## Creates a remote under ${WORK_DIR}/NAME with branches "main" and
-## "feature", whose changes to file.txt conflict, and a clone of each.  Sets
+## "feature", whose changes to file.txt conflict, and a clone of each.  Every
+## version of file.txt ends with the line LAST-LINE, if it is given.  Sets
 ## ${main_dir} and ${feature_dir} to the clones and ${remote} to the remote.
 setup_case() {
+  case_last_line="${2-}"
   case_dir="${WORK_DIR}/$1"
   mkdir "${case_dir}"
   remote="${case_dir}/myrepo.git"
   git init -q --bare -b main "${remote}"
   git init -q -b main "${case_dir}/seed"
-  printf '%s\n' one two three four five six seven eight nine > "${case_dir}/seed/file.txt"
+  write_file "${case_dir}/seed/file.txt" one two three four five six seven eight nine
   git -C "${case_dir}/seed" add file.txt
   git -C "${case_dir}/seed" commit -q -m "Initial commit"
   git -C "${case_dir}/seed" remote add origin "${remote}"
@@ -104,14 +114,25 @@ setup_case() {
   git -C "${main_dir}" config pull.rebase false
   git -C "${feature_dir}" config pull.rebase false
 
-  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${main_dir}/file.txt"
+  write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
   git -C "${main_dir}" commit -q -a -m "Change main"
   git -C "${main_dir}" push -q
-  printf '%s\n' one two three four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
+  write_file "${feature_dir}/file.txt" one two three four five six SEVEN-feature eight nine
   git -C "${feature_dir}" commit -q -a -m "Change feature"
   git -C "${feature_dir}" push -q
   feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
   : > "${STUB_LOG}"
+}
+
+## Usage: write_file FILE LINE...
+## Writes the LINEs, and then ${case_last_line} if it is not empty, to FILE.
+write_file() {
+  write_file_name="$1"
+  shift
+  printf '%s\n' "$@" > "${write_file_name}"
+  if [ -n "${case_last_line}" ]; then
+    printf '%s\n' "${case_last_line}" >> "${write_file_name}"
+  fi
 }
 
 ## Usage: push_to MODE OPTION...
@@ -160,18 +181,26 @@ check_resolved() {
   fi
 }
 
-## Usage: check_not_resolved DESCRIPTION
-## Checks that git-push-to failed, pushed nothing, and left the merge in
-## progress.
-check_not_resolved() {
+## Usage: check_not_pushed DESCRIPTION
+## Checks that git-push-to failed and pushed nothing.
+check_not_pushed() {
   if [ "${push_status}" -eq 0 ]; then
     fail "$1: git-push-to succeeded"
   fi
   if [ "$(git -C "${remote}" rev-parse refs/heads/feature)" != "${feature_head}" ]; then
     fail "$1: pushed to feature"
   fi
-  if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null \
-    && [ "$(git -C "${feature_dir}" rev-parse HEAD)" = "${feature_head}" ]; then
+}
+
+## Usage: check_not_resolved DESCRIPTION
+## Checks that git-push-to failed, pushed nothing, committed nothing, and left
+## the merge in progress.
+check_not_resolved() {
+  check_not_pushed "$1"
+  if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "${feature_head}" ]; then
+    fail "$1: HEAD changed"
+  fi
+  if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
     fail "$1: the merge is not in progress"
   fi
 }
@@ -214,6 +243,11 @@ setup_case codex-resolve
 push_to good --codex --llm
 check_resolved codex "--codex --llm"
 
+## --llm turns on the agent that was chosen before --no-llm.
+setup_case codex-no-llm-llm
+push_to good --codex --no-llm --llm
+check_resolved codex "--codex --no-llm --llm"
+
 ## The last of --claude and --codex wins.
 setup_case codex-claude
 push_to good --codex --claude
@@ -249,7 +283,7 @@ esac
 ## An agent that commits is rejected.
 setup_case commit
 push_to commit --llm
-check_not_resolved "agent that commits"
+check_not_pushed "agent that commits"
 case "${push_output}" in
   *"changed HEAD or MERGE_HEAD"*) ;;
   *) fail "agent that commits: wrong diagnostic: ${push_output}" ;;
@@ -263,6 +297,31 @@ case "${push_output}" in
   *"created a file: scratch.txt"*) ;;
   *) fail "agent that creates a file: wrong diagnostic: ${push_output}" ;;
 esac
+
+## An agent that changes or deletes an untracked file is rejected.
+for untracked_mode in change-untracked delete-untracked; do
+  setup_case "${untracked_mode}"
+  echo "notes" > "${feature_dir}/notes.txt"
+  push_to "${untracked_mode}" --llm
+  check_not_resolved "${untracked_mode}"
+  case "${untracked_mode}:${push_output}" in
+    change-untracked:*"changed an untracked file: notes.txt"*) ;;
+    delete-untracked:*"deleted an untracked file: notes.txt"*) ;;
+    *) fail "${untracked_mode}: wrong diagnostic: ${push_output}" ;;
+  esac
+done
+
+## A file that contains a line that looks like a conflict marker is refused.
+setup_case marker-like '>>>>>>> fixture'
+push_to good --llm
+check_not_resolved "marker-like line"
+case "${push_output}" in
+  *"contains lines that look like conflict markers"*) ;;
+  *) fail "marker-like line: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "marker-like line: an agent ran: $(cat "${STUB_LOG}")"
+fi
 
 ## An agent that changes git's configuration is rejected.
 setup_case config

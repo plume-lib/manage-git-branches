@@ -1075,8 +1075,8 @@ resolve_merge_conflicts() {
   fi
 
   # The agent must not create files, which would not be committed but which
-  # a later build could use.
-  resolve_untracked="$(untracked_files)"
+  # a later build could use, or change or delete the untracked files.
+  resolve_untracked="$(untracked_state)"
   resolve_ignored="$(ignored_files)"
 
   # The files that `git rerere` did not resolve.
@@ -1128,10 +1128,12 @@ Finish with a brief summary of how you resolved each conflict."
     printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} changed a file that had no conflict: /" >&2
     resolve_ok=0
   fi
-  resolve_created="$({
-    untracked_files | grep -F -x -v -- "${resolve_untracked}"
-    ignored_files | grep -F -x -v -- "${resolve_ignored}"
-  })"
+  resolve_untracked_changes="$(untracked_changes "${resolve_untracked}")"
+  if [ -n "${resolve_untracked_changes}" ]; then
+    printf '%s\n' "${resolve_untracked_changes}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} /" >&2
+    resolve_ok=0
+  fi
+  resolve_created="$(ignored_files | grep -F -x -v -- "${resolve_ignored}")"
   if [ -n "${resolve_created}" ]; then
     printf '%s\n' "${resolve_created}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} created a file: /" >&2
     resolve_ok=0
@@ -1178,11 +1180,56 @@ untracked_files() {
   git -c core.quotePath=false ls-files --others --exclude-standard
 }
 
+## Usage: untracked_state
+## Prints, one per line, each file that `untracked_files` prints, a tab, and a
+## checksum of its contents.  Git quotes a pathname that contains a tab.
+untracked_state() {
+  untracked_files | while IFS= read -r untracked_state_file; do
+    if [ -L "${untracked_state_file}" ]; then
+      untracked_state_sum="link $(readlink -- "${untracked_state_file}")"
+    elif [ -d "${untracked_state_file}" ]; then
+      # A nested repository, which git lists rather than its files.
+      untracked_state_sum='directory'
+    else
+      untracked_state_sum="$(cksum < "${untracked_state_file}")" \
+        || untracked_state_sum='unreadable'
+    fi
+    printf '%s\t%s\n' "${untracked_state_file}" "${untracked_state_sum}"
+  done
+}
+
+## Usage: untracked_changes STATE
+## Compares the untracked files with STATE, an earlier output of
+## `untracked_state`.  Prints, one per line, "created a file: FILE",
+## "changed an untracked file: FILE", or "deleted an untracked file: FILE"
+## for each difference.
+untracked_changes() {
+  untracked_changes_now="$(untracked_state)"
+  printf '%s\n' "$1" "${untracked_changes_now}" | sort | uniq -u \
+    | while IFS= read -r untracked_changes_line; do
+      untracked_changes_file="${untracked_changes_line%%	*}"
+      if [ -z "${untracked_changes_file}" ]; then continue; fi
+      case "
+$1" in
+        *"
+${untracked_changes_file}	"*)
+          if [ -e "${untracked_changes_file}" ] || [ -L "${untracked_changes_file}" ]; then
+            echo "changed an untracked file: ${untracked_changes_file}"
+          else
+            echo "deleted an untracked file: ${untracked_changes_file}"
+          fi
+          ;;
+        *) echo "created a file: ${untracked_changes_file}" ;;
+      esac
+    done | sort -u
+}
+
 ## Usage: ignored_files
 ## Prints, one per line, the files of the working tree that git ignores, with
 ## each directory that git ignores entirely as a single line.  A file that is
 ## created in such a directory does not change the output, but listing every
-## file of a directory of build output would be slow.
+## file of a directory of build output would be slow.  So a caller checks
+## only the names of ignored files, not their contents.
 ignored_files() {
   git -c core.quotePath=false ls-files --others --ignored --exclude-standard --directory
 }
