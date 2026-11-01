@@ -139,8 +139,9 @@ def azure_api(org: str, project: str, build: str | int | None = None) -> str:
     """Return the Azure DevOps API URL of a build, or of all the builds of a project.
 
     Args:
-        org: the Azure DevOps organization.
-        project: the Azure DevOps project, by name or by ID.
+        org: an Azure DevOps organization's name, such as "checkerframework".
+        project: a project of the organization, by name, such as "checker-framework", or
+            by id, a UUID such as "4dcb7892-...".
         build: the ID of the build, such as 24267 (the buildId in the URL of the build, not
             its build number, such as "20261031.1"), or None for all of the project's builds.
 
@@ -217,15 +218,16 @@ def azure_get(url: str) -> Any:
     return azure_request("GET", url, azure_headers())
 
 
-class AzureBuildUrl(NamedTuple):
-    """The Azure Pipelines build that the URL of a build or of one of its jobs shows.
+class AzureBuildUrlParts(NamedTuple):
+    """The parts of the URL of an Azure Pipelines build or of one of its jobs.
 
     For example, "https://dev.azure.com/ORG/PROJECT/_build/results?buildId=24267" shows
     build 24267 of project "PROJECT" of organization "ORG".
 
     Attributes:
-        org: an Azure DevOps organization.
-        project: a project of the organization, by name or by ID.
+        org: an Azure DevOps organization's name, such as "checkerframework".
+        project: a project of the organization, by name, such as "checker-framework", or
+            by id, a UUID such as "4dcb7892-...".
         build: the ID of a build of the project, such as 24267 (the buildId in the URL of
             the build, not its build number, such as "20261031.1").
     """
@@ -235,8 +237,8 @@ class AzureBuildUrl(NamedTuple):
     build: int
 
     @classmethod
-    def from_url(cls, url: str) -> AzureBuildUrl | None:
-        """Return the Azure Pipelines build that the given URL shows.
+    def from_url(cls, url: str) -> AzureBuildUrlParts | None:
+        """Return the parts of the given URL of an Azure Pipelines build.
 
         Args:
             url: any URL.  This method recognizes the URL of an Azure Pipelines build or
@@ -244,7 +246,7 @@ class AzureBuildUrl(NamedTuple):
                 AZURE_BUILD documents.
 
         Returns:
-            The build, or None if url is not the URL of an Azure Pipelines build.
+            The parts, or None if url is not the URL of an Azure Pipelines build.
         """
         if match := AZURE_BUILD.match(url):
             return cls(match[1] or match[2], match[3], int(match[4]))
@@ -313,19 +315,19 @@ def circleci_items(path: str) -> Iterator[Any]:
             return
 
 
-class CircleciUrl(NamedTuple):
-    """The CircleCI workflow, project, and job that a CircleCI URL shows.
+class CircleciUrlParts(NamedTuple):
+    """The parts of a CircleCI URL:  the workflow, project, and job that it names.
 
-    For example, "https://app.circleci.com/workflow/ecc46ce8-..." shows a workflow, and
-    "https://circleci.com/gh/ORG/REPO/230602" shows job 230602 of project "gh/ORG/REPO".
+    For example, "https://app.circleci.com/workflow/ecc46ce8-..." names a workflow, and
+    "https://circleci.com/gh/ORG/REPO/230602" names job 230602 of project "gh/ORG/REPO".
 
     Attributes:
         workflow: a workflow's id, a UUID such as "ecc46ce8-...", or None if the URL
             does not contain it.
-        project: the project slug of the job, such as "gh/ORG/REPO", or None if the URL
-            does not contain it.
-        job: the number of a job, an integer such as 230602, or None if the URL names a
-            workflow.
+        project: the project slug, such as "gh/ORG/REPO" or "circleci/ORG-ID/PROJECT-ID",
+            or None if the URL does not contain it.
+        job: the number of a job, an integer such as 230602, or None if the URL names no
+            job, such as the URL of a workflow or of a pipeline.
     """
 
     workflow: str | None
@@ -333,79 +335,64 @@ class CircleciUrl(NamedTuple):
     job: int | None
 
     @classmethod
-    def from_url(cls, url: str) -> CircleciUrl | None:
-        """Return the CircleCI workflow, project, and job that the given URL shows.
+    def from_url(cls, url: str) -> CircleciUrlParts | None:
+        """Return the CircleCI workflow, project, and job that the given URL names.
+
+        This method makes no request of CircleCI.
 
         Args:
             url: any URL.  This method recognizes a URL that contains "circleci.com/",
-                such as the URL of a CircleCI workflow, of a job of a workflow, or of a
-                job that names its project but not its workflow, as CIRCLECI_WORKFLOW,
-                CIRCLECI_JOB_OF_WORKFLOW, and CIRCLECI_JOB document.
+                such as the URL of a CircleCI pipeline, of a workflow, of a job of a
+                workflow, or of a job that names its project but not its workflow, as
+                CIRCLECI_PIPELINE, CIRCLECI_WORKFLOW, CIRCLECI_JOB_OF_WORKFLOW, and
+                CIRCLECI_JOB document.
 
         Returns:
-            The workflow, project, and job, or None if url is not a CircleCI URL.
+            The workflow, project, and job, or None if url is not a CircleCI URL.  Each
+            of them is None if url does not contain it, as for "https://circleci.com/docs/".
         """
         if "circleci.com/" not in url:
             return None
         if match := CIRCLECI_JOB.match(url):
             vcs = CIRCLECI_VCS_SLUGS.get(match[1], match[1])
             return cls(None, f"{vcs}/{match[2]}/{match[3]}", int(match[4]))
+        project = None
+        if match := CIRCLECI_PIPELINE.search(url):
+            project = f"{CIRCLECI_VCS_SLUGS.get(match[1], match[1])}/{match[2]}/{match[3]}"
         workflow = match[1] if (match := CIRCLECI_WORKFLOW.search(url)) else None
         job = int(match[1]) if (match := CIRCLECI_JOB_OF_WORKFLOW.search(url)) else None
-        return cls(workflow, None, job)
+        return cls(workflow, project, job)
 
+    def lookup_workflow(self) -> str | None:
+        """Return the id of the workflow that this names, or else of the workflow of its job.
 
-class CircleciWorkflowAndJob(NamedTuple):
-    """A CircleCI workflow, and a job of it.
-
-    Attributes:
-        workflow: a workflow's id, a UUID such as "ecc46ce8-...", or None if it is not
-            known.
-        job: the number of a job of the workflow, an integer such as 230602, or None for
-            the whole workflow.
-    """
-
-    workflow: str | None
-    job: int | None
-
-    @classmethod
-    def from_url(cls, url: str) -> CircleciWorkflowAndJob:
-        """Return the CircleCI workflow and job that the given URL shows.
-
-        If url names a job but not its workflow, as the URL of a job in a GitHub commit
-        status does, this looks up the job's workflow; if the lookup fails, this raises
-        an exception in request_util.REQUEST_ERRORS.
-
-        Args:
-            url: any URL.  This method recognizes the CircleCI URLs that
-                CircleciUrl.from_url recognizes.
+        If this names a job and its project but not its workflow, as the URL of a job in
+        a GitHub commit status does, this requests the job's workflow from CircleCI; if
+        the request fails, this raises an exception in request_util.REQUEST_ERRORS.
 
         Returns:
-            The workflow (None if there is none) and the job (None if url names a
-            workflow or is not a CircleCI URL).
+            The workflow's id, a UUID such as "ecc46ce8-...", or None if this names
+            neither a workflow nor a job and its project, or if CircleCI reports no
+            workflow for the job.
         """
-        workflow, project, job = CircleciUrl.from_url(url) or CircleciUrl(None, None, None)
-        if workflow is None and project is not None and job is not None:
-            result = request_util.request(
-                "GET", f"{CIRCLECI_API}/v2/project/{project}/job/{job}", circleci_headers()
-            )
-            workflow = ((result or {}).get("latest_workflow") or {}).get("id")
-        return cls(workflow, job)
+        if self.workflow is not None or self.project is None or self.job is None:
+            return self.workflow
+        result = request_util.request(
+            "GET", f"{CIRCLECI_API}/v2/project/{self.project}/job/{self.job}", circleci_headers()
+        )
+        return ((result or {}).get("latest_workflow") or {}).get("id")
 
 
 def circleci_project_of_url(url: str) -> str | None:
-    """Return the CircleCI project of the pipeline, workflow, or job that url shows.
+    """Return the CircleCI project of the pipeline, workflow, or job that url names.
 
     Args:
-        url: any URL.  This function recognizes the URL of a CircleCI pipeline or of one
-            of its workflows or jobs, as CIRCLECI_PIPELINE documents, and the URL of a job
-            that names its project, as CIRCLECI_JOB documents.
+        url: any URL.  This function recognizes the CircleCI URLs that
+            CircleciUrlParts.from_url recognizes.
 
     Returns:
         The project slug, such as "gh/ORG/REPO" or "circleci/ORG-ID/PROJECT-ID", or None
         if url does not contain it.
     """
-    if match := CIRCLECI_PIPELINE.search(url):
-        return f"{CIRCLECI_VCS_SLUGS.get(match[1], match[1])}/{match[2]}/{match[3]}"
-    parsed = CircleciUrl.from_url(url)
+    parsed = CircleciUrlParts.from_url(url)
     return parsed.project if parsed else None
