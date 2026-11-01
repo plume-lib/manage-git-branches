@@ -99,11 +99,10 @@ The commands are:
   resolve.  It checks every resolution, whether from rerere or from the
   agent:  that nothing outside the conflict regions changed and that no
   conflict marker remains.  Then it commits the merge and continues.
-  If the build fails, and the pull of TO_DIR or the merge made a merge
-  commit, or the merge brought in, as by fast-forwarding, a merge commit
-  that the pull of FROM_DIR made, it asks the agent to fix the build, up to
-  3 times, and commits the fix.  A pull or merge that fast-forwards makes no
-  merge commit.
+  If the build fails, and TO_DIR's branch has a merge that neither its
+  remote branches nor those of FROM_DIR's branch contain, such as the one
+  that it just made, it asks the agent to fix the build, up to 3 times, and
+  commits the fix.
   `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
   on.
   The agent runs in a sandbox, which requires a recent version:  Claude
@@ -193,9 +192,10 @@ The commands are:
   whitespace and using the patience diff algorithm.
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
-* [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:  Cancels the
-  unfinished CI builds of blocked pull requests (ones that depend on another
-  open pull request).  Run it in a directory that holds the working copy
+* [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:  Cancels certain
+  CI builds: for blocked pull requests (ones that depend on another open
+  pull request), and ones that are redundant because of a more recent build
+  of the same branch.  Run it in a directory that holds the working copy
   directories.  Works for Azure Pipelines, CircleCI, and GitHub Actions.
   This command needs Python 3.11 or later, `gh`, and `pr-status`.
 * [`rerun-failed-ci`](rerun-failed-ci)

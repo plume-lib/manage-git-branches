@@ -628,25 +628,4 @@ check_resolution_raw reject "CRLF line endings, and a separator remains" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\na\r\n=======\r\nA\r\nb\r\n'
 rm "${WORK_DIR}/ccr/.gitattributes"
 
-## Tests of merge_description.
-
-## Usage: check_merge_description SUBJECT EXPECTED
-## Checks that `merge_description` prints EXPECTED for a merge commit whose
-## subject is SUBJECT and whose abbreviated hash is 0bb9f58.
-check_merge_description() {
-  md_actual="$(merge_description "$1" 0bb9f58)"
-  if [ "${md_actual}" != "$2" ]; then
-    fail "merge_description for [$1] printed [${md_actual}], not [$2]"
-  fi
-}
-
-check_merge_description "Merge branch 'main' into feature" "branch 'main'"
-check_merge_description "Merge remote-tracking branch 'upstream/master'" \
-  "remote-tracking branch 'upstream/master'"
-check_merge_description "Merge branch 'feature' of ../my repo into feature" \
-  "branch 'feature' of ../my repo"
-check_merge_description "Merge branch 'a' into b into c" "branch 'a' into b"
-check_merge_description "Combine the branches" "commit 0bb9f58"
-check_merge_description "Merge " "commit 0bb9f58"
-
 echo "${SCRIPT_NAME}: OK"

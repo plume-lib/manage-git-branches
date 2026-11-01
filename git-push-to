@@ -117,22 +117,23 @@
 # resolved.  If the agent fails, this script stops with the merge still in
 # progress.
 #
-# When the build of TO_DIR fails, and the pull of TO_DIR or the merge into it
-# made a merge commit, or the merge brought in a merge commit that the pull of
-# FROM_DIR made, the agent edits files to fix it, without building;
-# then this script builds again.  The agent gets up to 3 attempts.  When the
-# build succeeds, this script commits the agent's changes on top of the
-# merges, as "Fix the build after merging ...", and pushes.  If the build
-# still fails, this script stops, with the agent's changes staged but not
-# committed.  The agent is told about those merges, about what each side of
-# the merge commits that the pulls made changed, and about every other merge
-# commit on TO_DIR's branch that is not pushed, such as one that an earlier
-# run made but did not push because its build failed.
-# Otherwise, the pulls and the merge did not cause the failure, so the agent
-# is not asked to fix it.  That is the case in a rerun after a failed build,
-# and when the pull or the merge fast-forwarded to a commit that fails to
-# build by itself:  the commits that a fast-forward brings were already on
-# the remote.
+# When the build of TO_DIR fails, and a merge on TO_DIR's branch might have
+# broken it, the agent edits files to fix it, without building; then this
+# script builds again.  The agent gets up to 3 attempts.  When the build
+# succeeds, this script commits the agent's changes on top of the merges, as
+# "Fix the build after merging ...", and pushes.  If the build still fails,
+# this script stops, with the agent's changes staged but not committed.
+# A merge might have broken the build if TO_DIR's branch has a merge commit
+# that is in the history of none of the remote branches that TO_DIR's branch
+# and FROM_DIR's branch push to and pull from, and that combined changes
+# (its tree differs from each of its parents' trees), and if TO_DIR's tree
+# differs from those remote branches' trees.  That merge commit can be the
+# merge of FROM_DIR's branch, the merge that the pull of TO_DIR or of
+# FROM_DIR made, or a merge that an earlier run made but did not push, as
+# when its build failed; so a rerun after a failed build asks the agent too.
+# If there is no such merge commit, as after a pull that only fast-forwarded
+# TO_DIR's branch, the agent would merely work around a failure that no
+# merge caused, so it is not asked.
 
 # Here is an example of use.
 #
@@ -409,15 +410,9 @@ git_push_to() {
     return 1
   fi
 
-  # `--no-edit` keeps the merge from stopping at an editor.
-  if ! pull_resolving "${llm_agent}" "${from_absolute}" -q --no-edit; then
+  if ! pull_resolving "${llm_agent}" "${from_absolute}" -q; then
     return 1
   fi
-  # `merge_build_push` asks the agent to fix the build if the merge brings in
-  # a merge commit that this pull made, but not one that FROM_DIR's branch
-  # or its upstream branch already had.
-  from_old_head="${pull_old_head}"
-  from_pull_fetched="${pull_fetched}"
 
   orig_dir=$(pwd)
 
@@ -437,15 +432,9 @@ git_push_to() {
   # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
   # that an earlier run of this command made but did not push, as when its
   # build failed, and would copy that merge's commits onto TO_DIR's branch.
-  # `--no-edit` keeps the merge from stopping at an editor.
-  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase --no-edit; then
+  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase; then
     return 1
   fi
-  # `merge_build_push` asks the agent to fix a failed build if the pull or
-  # the merge of FROM_DIR's branch made a merge commit, but not because of
-  # one that TO_DIR's branch or its upstream branch already had.
-  to_old_head="${pull_old_head}"
-  to_pull_fetched="${pull_fetched}"
 
   # Note: pwd=to_absolute
   if ! fetch_branch "${from_absolute}" "${from_branch}"; then
@@ -462,11 +451,14 @@ git_push_to() {
   # ../myrepo-branch-feature into main", and would head the commit summaries
   # that `merge.log` turns on with "* 'feature' of ../myrepo-branch-feature:".
   # `merge_build_push` describes the commit as a branch of this repository.
+  # The histories of the remote branches that FROM_DIR's branch pushes to and
+  # pulls from were built where they were pushed, so a failed build of TO_DIR
+  # does not ask the agent about their merges.  FROM_DIR's own merges, such
+  # as the one that the pull just made, are not among them.
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
     "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}" \
-    "${to_pull_fetched}" "${to_old_head}" "${from_old_head}" \
-    "${from_pull_fetched}"; then
+    '' "${from_absolute}"; then
     return 1
   fi
 
