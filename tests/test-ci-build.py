@@ -184,7 +184,7 @@ class CiBuildTest(unittest.TestCase):
             ):
                 request_util.request_object("GET", url)
 
-    def test_circleci_url_parts_lookup_workflow_not_object(self) -> None:
+    def test_circleci_lookup_workflow_not_object(self) -> None:
         """A job lookup whose response is not a JSON object raises an error in REQUEST_ERRORS."""
         parts = ci_build.CircleciUrlParts(None, "gh/org/repo", 123)
         for content in [b"", b"[]"]:
@@ -195,7 +195,7 @@ class CiBuildTest(unittest.TestCase):
             ):
                 parts.lookup_workflow()
 
-    def test_circleci_url_parts_lookup_workflow(self) -> None:
+    def test_circleci_lookup_workflow(self) -> None:
         """A job's workflow is looked up when its URL does not name the workflow."""
         parts = ci_build.CircleciUrlParts(None, "gh/org/repo", 123)
         response = b'{"latest_workflow": {"id": "W"}}'
