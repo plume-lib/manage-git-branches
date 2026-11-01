@@ -167,8 +167,8 @@ while [ "$#" -gt 0 ]; do
       shift
       break
       ;;
-    # A slug whose ORG is "-".
-    -:*) break ;;
+    # A slug, whose ORG can start with "-".
+    *:*) break ;;
     -?*)
       # A typo such as `--cleann` must not silently create a branch of that
       # name.
@@ -202,17 +202,9 @@ require_git 31
 SLUG_CLONE=''
 case "$1" in
   *:*)
-    parse_slug "$1"
-    SLUG_ORG="${slug_org}"
-    SLUG_BRANCH="${slug_branch}"
-    case "${SLUG_ORG}" in
-      '' | */* | .*)
-        echo "${SCRIPT_NAME}: ERROR: not a slug ORG:NEWBRANCHNAME: $1" >&2
-        usage
-        exit 1
-        ;;
-    esac
+    # This sets ${slug_org} and ${slug_branch}.
     if ! check_slug_org "$1"; then
+      usage
       exit 1
     fi
     # Reject a bad branch name, such as one that contains another ":" or
@@ -220,9 +212,9 @@ case "$1" in
     # query to its remote, rather than when the branch is created.  A name
     # that `--branch` rewrites, such as "@{-1}", is a reference to a branch
     # rather than a new name.
-    if [ -z "${SLUG_BRANCH}" ] \
-      || [ "$(git check-ref-format --branch "${SLUG_BRANCH}" 2> /dev/null)" != "${SLUG_BRANCH}" ]; then
-      echo "${SCRIPT_NAME}: ERROR: not a valid branch name: ${SLUG_BRANCH}" >&2
+    if [ -z "${slug_branch}" ] \
+      || [ "$(git check-ref-format --branch "${slug_branch}" 2> /dev/null)" != "${slug_branch}" ]; then
+      echo "${SCRIPT_NAME}: ERROR: not a valid branch name: ${slug_branch}" >&2
       usage
       exit 1
     fi
@@ -245,15 +237,15 @@ case "$1" in
     # main working tree that this naming convention could describe, so then
     # they are those of the current working tree.
     SLUG_MAIN="$(main_working_tree)" || SLUG_MAIN="${SLUG_TOPLEVEL}"
-    SLUG_PROJECT="$(basename -- "${SLUG_MAIN}")"
-    SLUG_PROJECT="${SLUG_PROJECT%%-branch-*}"
-    SLUG_PROJECT="${SLUG_PROJECT%%-fork-*}"
-    if [ "${SLUG_ORG}" = '-' ]; then
+    SLUG_MAIN_NAME="$(basename -- "${SLUG_MAIN}")"
+    parse_clone_name "${SLUG_MAIN_NAME%%-branch-*}"
+    SLUG_PROJECT="${clone_project}"
+    if [ "${slug_org}" = '-' ]; then
       SLUG_CLONE="$(dirname -- "${SLUG_MAIN}")/${SLUG_PROJECT}"
       SLUG_CLONE_DESCRIPTION="clone of ${SLUG_PROJECT}"
     else
-      SLUG_CLONE="$(dirname -- "${SLUG_MAIN}")/${SLUG_PROJECT}-fork-${SLUG_ORG}"
-      SLUG_CLONE_DESCRIPTION="clone of ${SLUG_ORG}'s fork of ${SLUG_PROJECT}"
+      SLUG_CLONE="$(dirname -- "${SLUG_MAIN}")/${SLUG_PROJECT}-fork-${slug_org}"
+      SLUG_CLONE_DESCRIPTION="clone of ${slug_org}'s fork of ${SLUG_PROJECT}"
     fi
     if [ ! -d "${SLUG_CLONE}" ]; then
       echo "${SCRIPT_NAME}: ERROR: there is no ${SLUG_CLONE_DESCRIPTION}:  directory does not exist: ${SLUG_CLONE}" >&2
@@ -278,7 +270,7 @@ case "$1" in
       echo "${SCRIPT_NAME}: ERROR: cannot cd to ${SLUG_CLONE}" >&2
       exit 1
     fi
-    set -- "${SLUG_BRANCH}"
+    set -- "${slug_branch}"
     ;;
 esac
 BRANCHNAME="$1"
@@ -326,7 +318,7 @@ choose_mode_for_submodules() {
   case "${MODE}" in
     clean)
       if has_gitlinks HEAD; then
-        echo "${SCRIPT_NAME}: ERROR: --clean and a slug make a worktree, and the current commit of ${TOPLEVEL} has submodules, which a worktree cannot hold." >&2
+        echo "${SCRIPT_NAME}: ERROR: the new branch would be a worktree, and the current commit of ${TOPLEVEL} has submodules, which a worktree cannot hold." >&2
         echo "${SCRIPT_NAME}: \`${SCRIPT_NAME} --copy ${BRANCHNAME}\` works in ${TOPLEVEL}, but it copies that whole directory, including .git and its uncommitted changes." >&2
         exit 1
       fi
@@ -395,7 +387,7 @@ if [ "${MODE}" != 'clean' ]; then
 fi
 
 REPO=$(basename "$(pwd)")
-BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
+BRANCHNOSLASH="$(branch_dir_name "${BRANCHNAME}")"
 # Canonicalize the parent directory, because ${BRANCHDIR} does not exist yet.
 if ! PARENTDIR="$(realpath ..)" || [ -z "${PARENTDIR}" ]; then
   echo "${SCRIPT_NAME}: Cannot canonicalize the parent directory of $(pwd)" >&2
@@ -467,14 +459,12 @@ fi
 # captured rather than shown, so a prompt would be invisible and would block
 # this script forever; a failure that says why is better than a silent hang.
 #
-# A slug pulls in a clone other than the current directory, where a merge that
-# stopped on conflicts would be left for the user to find, so there the pull
-# only fast-forwards.
-PULL_FF_ONLY=''
-if [ -n "${SLUG_CLONE}" ]; then
-  PULL_FF_ONLY='--ff-only'
-fi
-if ! PULL_OUTPUT="$(git_batch_ssh . pull -q ${PULL_FF_ONLY:+"${PULL_FF_ONLY}"} 2>&1)"; then
+# A slug pulls in a clone other than the current directory, where a merge or
+# rebase that stopped on conflicts would be left for the user to find, so
+# there the pull only fast-forwards.  `--no-rebase` is needed too:  in some
+# versions of git, a configured `pull.rebase` or `branch.BRANCH.rebase`
+# overrides `--ff-only`.
+if ! PULL_OUTPUT="$(git_batch_ssh . pull -q ${SLUG_CLONE:+--no-rebase --ff-only} 2>&1)"; then
   echo "${SCRIPT_NAME}: warning: \`git pull\` failed in ${TOPLEVEL}:" >&2
   if [ -n "${PULL_OUTPUT}" ]; then
     echo "${PULL_OUTPUT}" >&2

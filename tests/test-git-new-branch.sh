@@ -1226,7 +1226,7 @@ if out="$(cd "${slugs}/sub/super-branch-main" && "${GIT_NEW_BRANCH}" mernst:subs
   fail "zero exit status for a slug whose fork's clone has submodules"
 fi
 case "${out}" in
-  *"a slug make a worktree, and the current commit of ${slugs}/sub/super-fork-mernst has submodules"*"--copy subslug\` works in ${slugs}/sub/super-fork-mernst"*) ;;
+  *"the new branch would be a worktree, and the current commit of ${slugs}/sub/super-fork-mernst has submodules"*"--copy subslug\` works in ${slugs}/sub/super-fork-mernst"*) ;;
   *) fail "unexpected message for a slug whose fork's clone has submodules: ${out}" ;;
 esac
 if [ -e "${slugs}/sub/super-fork-mernst-branch-subslug" ]; then
@@ -1310,7 +1310,9 @@ fi
 # not merge, which would leave conflicts in a clone other than the current
 # directory.  The new branch starts at that clone's own commit.
 git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-diverged"
-git -C "${slugs}/proj-fork-diverged" config pull.rebase false
+# With `pull.rebase`, a pull that is not restricted to a fast-forward would
+# rebase, and some versions of git let that override `--ff-only`.
+git -C "${slugs}/proj-fork-diverged" config pull.rebase true
 echo "diverged" > "${slugs}/proj-fork-diverged/conflict.txt"
 git -C "${slugs}/proj-fork-diverged" add conflict.txt
 git -C "${slugs}/proj-fork-diverged" commit -q -m "A diverging commit"
@@ -1335,13 +1337,14 @@ fi
 git -C "${slugs}/proj" checkout -q -b previous
 git -C "${slugs}/proj" checkout -q -
 for slug_args in "--copy mernst:copied" ":nobody" "mernst:" "a/b:feature" \
-  "mernst:a:b" "mernst:-x" "mernst:@{-1}"; do
+  "mernst:a:b" "mernst:-x" "mernst:@{-1}" "-x:feature"; do
   # shellcheck disable=SC2086 # The arguments are split on purpose.
   if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" ${slug_args} 2>&1)"; then
     fail "zero exit status for: git-new-branch ${slug_args}"
   fi
   case "${out}" in
     *"git pull"*) fail "git-new-branch ${slug_args} pulled before refusing: ${out}" ;;
+    *"unrecognized option"*) fail "git-new-branch ${slug_args} was not read as a slug: ${out}" ;;
     *"ERROR"*) ;;
     *) fail "unexpected message for git-new-branch ${slug_args}: ${out}" ;;
   esac

@@ -789,17 +789,16 @@ slug_matches() {
     if [ ! -d "${dir}" ]; then continue; fi
     name="${dir#./}"
     name="${name%-branch-"${slug_branch_dir}"}"
-    project="${name%-fork-*}"
-    org="${name##*-fork-}"
+    parse_clone_name "${name}"
     # For example, "p-fork-o-branch-x-branch-main" is not a directory for
     # branch "main".
-    case "${org}" in *-branch-*) continue ;; esac
-    if [ -n "${slug_org}" ] && [ "${org}" != "${slug_org}" ]; then continue; fi
+    case "${clone_org}" in *-branch-*) continue ;; esac
+    if [ -n "${slug_org}" ] && [ "${clone_org}" != "${slug_org}" ]; then continue; fi
     if ! check_branch_dir "${dir}"; then
       match_status=1
       continue
     fi
-    printf '%s:%s\n' "${project}" "${org}"
+    printf '%s:%s\n' "${clone_project}" "${clone_org}"
   done
   if [ -z "${slug_org}" ]; then
     for dir in ./*-branch-"${slug_branch_dir}"; do
@@ -827,14 +826,13 @@ slug_matches() {
   for dir in ./*-fork-*; do
     if [ ! -d "${dir}" ]; then continue; fi
     name="${dir#./}"
-    project="${name%-fork-*}"
-    org="${name##*-fork-}"
-    case "${org}" in *-branch-*) continue ;; esac
-    if [ -n "${slug_org}" ] && [ "${org}" != "${slug_org}" ]; then continue; fi
+    parse_clone_name "${name}"
+    case "${clone_org}" in *-branch-*) continue ;; esac
+    if [ -n "${slug_org}" ] && [ "${clone_org}" != "${slug_org}" ]; then continue; fi
     # A PROJECT-fork-ORG-branch-BRANCH directory takes precedence.
     if [ -d "${name}-branch-${slug_branch_dir}" ]; then continue; fi
     if has_branch_checked_out "${dir}" "${slug_branch}"; then
-      printf '%s:%s\n' "${project}" "${org}"
+      printf '%s:%s\n' "${clone_project}" "${clone_org}"
     fi
   done
   return "${match_status}"

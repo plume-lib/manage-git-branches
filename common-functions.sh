@@ -1019,11 +1019,39 @@ physical_path() {
   (CDPATH='' cd -- "$1" && pwd -P)
 }
 
+## Usage: branch_dir_name BRANCH
+## Prints BRANCH as it appears in the name of a branch directory, with each
+## "/" replaced by "-".
+branch_dir_name() {
+  printf '%s\n' "$1" | sed -e 's:/:-:g'
+}
+
+## Usage: parse_clone_name NAME
+## Sets ${clone_project} and ${clone_org} from NAME, the name of a clone,
+## PROJECT-fork-ORG or PROJECT, without a -branch-BRANCH suffix.  ORG starts
+## after the last "-fork-" in NAME, so PROJECT can contain "-fork-" but ORG
+## cannot; see `check_slug_org`.  ${clone_org} is "-" for a NAME that has no
+## "-fork-", as ORG "-" stands for PROJECT in a slug.
+parse_clone_name() {
+  case "$1" in
+    *-fork-*)
+      clone_project="${1%-fork-*}"
+      clone_org="${1##*-fork-}"
+      ;;
+    *)
+      # shellcheck disable=SC2034 # set for the caller
+      clone_project="$1"
+      # shellcheck disable=SC2034 # set for the caller
+      clone_org='-'
+      ;;
+  esac
+}
+
 ## Usage: parse_slug SLUG
 ## Sets ${slug_org}, ${slug_branch}, and ${slug_branch_dir} from the slug
 ## ORG:BRANCH or BRANCH.  Git forbids ":" in a branch name, so the first ":"
 ## ends ORG.  ${slug_org} is empty if the slug has no ORG.  ${slug_branch_dir}
-## is BRANCH as it appears in a directory name, with each "/" replaced by "-".
+## is BRANCH as it appears in a directory name; see `branch_dir_name`.
 parse_slug() {
   case "$1" in
     *:*)
@@ -1036,13 +1064,17 @@ parse_slug() {
       ;;
   esac
   # shellcheck disable=SC2034 # set for the caller
-  slug_branch_dir="$(printf '%s\n' "${slug_branch}" | sed -e "s:/:-:g")"
+  slug_branch_dir="$(branch_dir_name "${slug_branch}")"
 }
 
 ## Usage: check_slug_org SLUG
-## Returns 0 if the ORG of the slug ORG:BRANCH can name the clone of a fork,
-## PROJECT-fork-ORG.  Otherwise prints an error on standard error and
-## returns 1.  Sets the variables that `parse_slug` sets.
+## Returns 0 if the slug BRANCH has no ORG, or if the ORG of the slug
+## ORG:BRANCH can name the clone of a fork, PROJECT-fork-ORG.  Otherwise
+## prints an error on standard error and returns 1.  Sets the variables that
+## `parse_slug` sets.
+##
+## A pathname cannot serve as ORG, so an ORG that is empty, contains "/", or
+## starts with "." is not one.
 ##
 ## Every directory name that contains "-branch-" is read as that of a branch
 ## directory, PREFIX-branch-BRANCH, so a clone named PROJECT-fork-ORG, where
@@ -1052,6 +1084,16 @@ parse_slug() {
 ## the clone of a different fork.
 check_slug_org() {
   parse_slug "$1"
+  case "$1" in
+    *:*)
+      case "${slug_org}" in
+        '' | */* | .*)
+          echo "${SCRIPT_NAME}: ERROR: not a slug ORG:BRANCH: $1" >&2
+          return 1
+          ;;
+      esac
+      ;;
+  esac
   case "${slug_org}" in
     *-branch-*)
       echo "${SCRIPT_NAME}: ERROR: an ORG that contains \"-branch-\" cannot be used in a slug, because the name of its fork's clone, PROJECT-fork-ORG, would be read as that of a branch directory: $1" >&2
