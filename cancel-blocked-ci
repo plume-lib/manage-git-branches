@@ -111,27 +111,28 @@ pr_status = load_pr_status()
 
 # The statuses of Azure Pipelines builds that have finished or are being cancelled.
 AZURE_FINISHED_STATUSES = {"completed", "cancelling"}
+# The statuses of unfinished Azure Pipelines builds, and the corresponding GitHub statuses.
+AZURE_UNFINISHED = {"inProgress": "in_progress", "notStarted": "queued"}
 # The statuses of unfinished CircleCI workflows.
 CIRCLECI_UNFINISHED_STATUSES = {"running", "on_hold", "failing"}
 # The statuses of unfinished GitHub Actions runs.
 GITHUB_UNFINISHED_STATUSES = ["queued", "in_progress", "waiting", "requested", "pending"]
 
-# The events, reasons, and trigger types of the GitHub Actions runs, Azure Pipelines
-# builds, and CircleCI pipelines that a more recent build can make redundant:  those
+# The reasons, trigger types, and events of the Azure Pipelines builds, CircleCI
+# pipelines, and GitHub Actions runs that a more recent build can make redundant:  those
 # that a push or a pull request started.
-GITHUB_REDUNDANT_EVENTS = {"push", "pull_request"}
 AZURE_REDUNDANT_REASONS = {"individualCI", "batchedCI", "pullRequest"}
 CIRCLECI_REDUNDANT_TRIGGERS = {"webhook"}
-# The statuses of the GitHub Actions runs and CircleCI workflows that can make an
+GITHUB_REDUNDANT_EVENTS = {"push", "pull_request"}
+# The statuses of the CircleCI workflows and GitHub Actions runs that can make an
 # older build redundant:  those that are running or queued to run, and not those that
 # wait for an approval or for a concurrency group.
-GITHUB_SUPERSEDING = {"requested", "queued", "in_progress"}
 CIRCLECI_SUPERSEDING = {"running", "failing"}
+GITHUB_SUPERSEDING = {"requested", "queued", "in_progress"}
 
 # How long ago a CircleCI pipeline can have been created and still have an unfinished workflow.
 CIRCLECI_WINDOW = dt.timedelta(days=1)
-# The statuses of unfinished Azure Pipelines builds, and the corresponding GitHub statuses.
-AZURE_UNFINISHED = {"inProgress": "in_progress", "notStarted": "queued"}
+
 # Matches a branch that holds a PR, such as "refs/pull/123/merge" or "pull/123".
 PULL_BRANCH = re.compile(r"(?:refs/)?pull/(\d+)(?:/merge|/head)?")
 
@@ -171,12 +172,14 @@ class RepoBlockedPrs(typing.NamedTuple):
         gh: a repository's GitHub slug, such as "ORG/REPO".
         prs: the BlockedPr of each of the repository's blocked PRs.
         base_branches: the base branches of the repository's open PRs, such as "main".
+        pr_shas: the head commits of the repository's 5 most recently created open PRs.
     """
 
     label: str
     gh: str
     prs: list[BlockedPr]
     base_branches: set[str]
+    pr_shas: list[str]
 
 
 def blocked_prs(cfg):
@@ -284,235 +287,6 @@ def branch_subject(label, branch):
     return f"{label} {branch.removeprefix('refs/heads/')}"
 
 
-def redundant_runs(label, gh, runs):
-    """Return the redundant unfinished GitHub Actions runs in the GitHub repository gh.
-
-    Args:
-        label: the repository's label.
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-        runs: a map from (head repository owner, branch) to the unfinished runs of that
-            branch, as unfinished_runs returns it.
-
-    Returns:
-        A list of the subject, Build, and reason of each redundant run.
-    """
-    result = []
-    for (owner, branch), branch_runs in runs.items():
-        if not owner:  # Runs of different deleted forks are indistinguishable.
-            continue
-        name = branch if owner.lower() == gh.split("/")[0].lower() else f"{owner}:{branch}"
-        for r, latest in superseded(
-            [r for r in branch_runs if r["event"] in GITHUB_REDUNDANT_EVENTS],
-            operator.itemgetter("workflow_id", "event"),
-            operator.itemgetter("created_at"),
-            operator.itemgetter("head_sha"),
-            lambda r: r["status"] in GITHUB_SUPERSEDING,
-        ):
-            result.append(
-                (
-                    f"{label} {name}",
-                    Build.from_github_actions_run(gh, r),
-                    f", made redundant by run {latest['id']}",
-                )
-            )
-    return result
-
-
-def azure_projects(gh, pr_shas):
-    """Return the Azure Pipelines projects that build the GitHub repository gh.
-
-    Args:
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-        pr_shas: the head commits of some of gh's open PRs.
-
-    Returns:
-        A set of the organization and project of each Azure Pipelines project that
-        built the head commit of gh's default branch or of one of pr_shas.
-    """
-    return {
-        parsed[:2]
-        for sha_checks in concurrently(lambda sha: checks(gh, sha), ["HEAD", *pr_shas])
-        for check in sha_checks
-        if (parsed := ci_build.parse_azure_url(check.url))
-    }
-
-
-def azure_build_waits(org, project, build):
-    """Return True if an Azure Pipelines build waits for a check of a stage.
-
-    A check is, for example, an approval or an exclusive lock.
-
-    Args:
-        org: the Azure DevOps organization.
-        project: the Azure DevOps project.
-        build: the build's id, an integer such as 123 in ".../_build/results?buildId=123".
-
-    Returns:
-        True if a check of a stage of the build is in progress.
-    """
-    timeline = ci_build.azure_get(
-        f"{ci_build.azure_api(org, project, build)}/timeline?api-version=7.1"
-    )
-    return any(
-        (r.get("type") or "").startswith("Checkpoint") and r.get("state") == "inProgress"
-        for r in (timeline or {}).get("records") or []
-    )
-
-
-def redundant_azure_builds(label, gh, org, project):
-    """Return the redundant unfinished builds of the GitHub repository gh in an Azure project.
-
-    Args:
-        label: the repository's label.
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-        org: the Azure DevOps organization.
-        project: the Azure DevOps project.
-
-    Returns:
-        A list of the subject, Build, and reason of each redundant build.
-    """
-    builds = ci_build.azure_get(
-        f"{ci_build.azure_api(org, project)}?statusFilter={','.join(AZURE_UNFINISHED)}"
-        f"&repositoryId={urllib.parse.quote(gh, safe='')}&repositoryType=GitHub"
-        "&api-version=7.1"
-    )["value"]
-    return [
-        (
-            branch_subject(label, b["sourceBranch"]),
-            Build.from_azure_pipelines_build(
-                AZURE_UNFINISHED.get(b["status"], b["status"]),
-                org,
-                project,
-                b["id"],
-                b["definition"]["name"],
-                b["_links"]["web"]["href"],
-            ),
-            f", made redundant by build {latest['id']}",
-        )
-        for b, latest in superseded(
-            [b for b in builds if b["reason"] in AZURE_REDUNDANT_REASONS],
-            lambda b: (b["definition"]["id"], b["reason"], b["sourceBranch"]),
-            operator.itemgetter("id"),
-            operator.itemgetter("sourceVersion"),
-            lambda b: not azure_build_waits(org, project, b["id"]),
-        )
-    ]
-
-
-def redundant_azure_builds_or_report(label, gh, org, project):
-    """Return the redundant unfinished builds of gh in an Azure project, reporting any failure.
-
-    Args:
-        label: the repository's label.
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-        org: the Azure DevOps organization.
-        project: the Azure DevOps project.
-
-    Returns:
-        A list of the subject, Build, and reason of each redundant build, or the
-        empty list if Azure Pipelines does not provide them, in which case this function
-        reports the failure.
-    """
-    try:
-        return redundant_azure_builds(label, gh, org, project)
-    except request_util.REQUEST_ERRORS as e:
-        report_failure(
-            f"{label}: failed to find redundant Azure Pipelines builds in {org}/{project}:"
-            f" {request_util.failure(e)}"
-        )
-        return []
-
-
-def redundant_circleci_workflows(label, gh):
-    """Return the redundant unfinished CircleCI workflows of the GitHub repository gh.
-
-    Args:
-        label: the repository's label.
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-
-    Returns:
-        A list of the subject, Build, and reason of each redundant workflow.
-    """
-    projects = {
-        # A URL without a project slug is of the project that GitHub's OAuth app connects.
-        ci_build.circleci_project_of_url(check.url) or f"gh/{gh}"
-        for check in checks(gh, "HEAD")
-        if ci_build.parse_circleci_url(check.url) is not None
-    }
-    if projects:
-        warn_if_no_circleci_token()
-    # the project, branch, and pipeline of each recent pipeline that can be redundant
-    pipelines = [
-        (project, branch, p)
-        for project in sorted(projects)
-        for branch, p in recent_pipelines(project)
-    ]
-    # A pipeline's workflows can be redundant only if its branch has another pipeline.
-    counts = collections.Counter((project, branch) for project, branch, _ in pipelines)
-    pipelines = [pbp for pbp in pipelines if counts[pbp[:2]] > 1]
-    # the project, branch, pipeline, and workflow of each unfinished workflow
-    workflows = [
-        (project, branch, p, w)
-        for (project, branch, p), pipeline_workflows in zip(
-            pipelines,
-            concurrently(lambda pbp: unfinished_workflows(pbp[2]["id"]), pipelines),
-            strict=True,
-        )
-        for w in pipeline_workflows
-    ]
-    return [
-        (
-            branch_subject(label, branch),
-            Build.from_circleci_workflow(w["status"], w["id"], w["name"]),
-            f", made redundant by workflow {latest[3]['id']}",
-        )
-        for (_, branch, _, w), latest in superseded(
-            workflows,
-            lambda pbpw: (pbpw[0], pbpw[1], pbpw[3]["name"]),
-            lambda pbpw: (pbpw[2]["number"], pbpw[3]["created_at"]),
-            lambda pbpw: pbpw[2]["vcs"].get("revision"),
-            lambda pbpw: pbpw[3]["status"] in CIRCLECI_SUPERSEDING,
-        )
-    ]
-
-
-@functools.cache
-def recent_pipelines(project):
-    """Return the recent pipelines of a CircleCI project that a push or a pull request started.
-
-    Args:
-        project: the project slug, such as "gh/ORG/REPO".
-
-    Returns:
-        A list of the branch and pipeline of each pipeline from the past day that a push
-        or a pull request started, most recent first.
-    """
-    cutoff = dt.datetime.now(dt.UTC) - CIRCLECI_WINDOW
-    result = []
-    # The pipelines are listed most recent first.
-    for p in ci_build.circleci_items(f"/v2/project/{project}/pipeline"):
-        if dt.datetime.fromisoformat(p["created_at"]) < cutoff:
-            break
-        branch = pipeline_branch(p)
-        if branch and p["trigger"]["type"] in CIRCLECI_REDUNDANT_TRIGGERS:
-            result.append((branch, p))
-    return result
-
-
-def pipeline_branch(p):
-    """Return the branch of the given CircleCI pipeline.
-
-    Args:
-        p: a pipeline, as a dict parsed from the CircleCI API's JSON, with keys such as
-            "id" and "vcs".
-
-    Returns:
-        The pipeline's branch, such as "main" or "pull/123", or else its tag, or else None.
-    """
-    vcs = p.get("vcs") or {}
-    return vcs.get("branch") or vcs.get("tag")
-
-
 class BuildState(typing.NamedTuple):
     """The state of a CI build.
 
@@ -524,62 +298,6 @@ class BuildState(typing.NamedTuple):
 
     branch: str | None
     finished: bool
-
-
-@functools.cache
-def unfinished_workflows(pipeline):
-    """Return the unfinished workflows of the CircleCI pipeline with the given id.
-
-    Args:
-        pipeline: the pipeline's id, a UUID such as "5034460f-c7c4-4c43-9457-de07e2029e7b"
-            (not its number, such as 7 in a pipeline's URL).
-
-    Returns:
-        A list of the unfinished workflows, or the empty list if the pipeline no longer
-        exists.
-    """
-    try:
-        return [
-            w
-            for w in ci_build.circleci_items(f"/v2/pipeline/{pipeline}/workflow")
-            if w["status"] in CIRCLECI_UNFINISHED_STATUSES
-        ]
-    except urllib.error.HTTPError as e:
-        if e.code == 404:  # The pipeline was deleted after it was listed.
-            return []
-        raise
-
-
-def redundant_builds(label, gh, runs, pr_shas):
-    """Return the redundant unfinished builds of the GitHub repository gh.
-
-    Args:
-        label: the repository's label.
-        gh: the repository's GitHub slug, such as "ORG/REPO".
-        runs: the unfinished GitHub Actions runs, as unfinished_runs returns them.
-        pr_shas: the head commits of some of gh's open PRs, whose checks show which
-            Azure Pipelines projects build gh.
-
-    Returns:
-        A list of the subject, Build, and reason of each redundant build.
-    """
-    result = redundant_runs(label, gh, runs)
-    try:
-        projects = azure_projects(gh, pr_shas)
-    except request_util.REQUEST_ERRORS as e:
-        report_failure(
-            f"{label}: failed to find the Azure Pipelines projects: {request_util.failure(e)}"
-        )
-        projects = set()
-    for org, project in sorted(projects):
-        result += redundant_azure_builds_or_report(label, gh, org, project)
-    try:
-        result += redundant_circleci_workflows(label, gh)
-    except request_util.REQUEST_ERRORS as e:
-        report_failure(
-            f"{label}: failed to find redundant CircleCI workflows: {request_util.failure(e)}"
-        )
-    return result
 
 
 @dataclasses.dataclass(frozen=True)
@@ -845,6 +563,111 @@ def azure_build_state(org, project, build):
     return BuildState(record["sourceBranch"], record["status"] in AZURE_FINISHED_STATUSES)
 
 
+def azure_projects(gh, pr_shas):
+    """Return the Azure Pipelines projects that build the GitHub repository gh.
+
+    Args:
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+        pr_shas: the head commits of some of gh's open PRs.
+
+    Returns:
+        A set of the organization and project of each Azure Pipelines project that
+        built the head commit of gh's default branch or of one of pr_shas.
+    """
+    return {
+        parsed[:2]
+        for sha_checks in concurrently(lambda sha: checks(gh, sha), ["HEAD", *pr_shas])
+        for check in sha_checks
+        if (parsed := ci_build.parse_azure_url(check.url))
+    }
+
+
+def azure_build_waits(org, project, build):
+    """Return True if an Azure Pipelines build waits for a check of a stage.
+
+    A check is, for example, an approval or an exclusive lock.
+
+    Args:
+        org: the Azure DevOps organization.
+        project: the Azure DevOps project.
+        build: the build's id, an integer such as 123 in ".../_build/results?buildId=123".
+
+    Returns:
+        True if a check of a stage of the build is in progress.
+    """
+    timeline = ci_build.azure_get(
+        f"{ci_build.azure_api(org, project, build)}/timeline?api-version=7.1"
+    )
+    return any(
+        (r.get("type") or "").startswith("Checkpoint") and r.get("state") == "inProgress"
+        for r in (timeline or {}).get("records") or []
+    )
+
+
+def redundant_azure_builds(label, gh, org, project):
+    """Return the redundant unfinished builds of the GitHub repository gh in an Azure project.
+
+    Args:
+        label: the repository's label.
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+        org: the Azure DevOps organization.
+        project: the Azure DevOps project.
+
+    Returns:
+        A list of the subject, Build, and reason of each redundant build.
+    """
+    builds = ci_build.azure_get(
+        f"{ci_build.azure_api(org, project)}?statusFilter={','.join(AZURE_UNFINISHED)}"
+        f"&repositoryId={urllib.parse.quote(gh, safe='')}&repositoryType=GitHub"
+        "&api-version=7.1"
+    )["value"]
+    return [
+        (
+            branch_subject(label, b["sourceBranch"]),
+            Build.from_azure_pipelines_build(
+                AZURE_UNFINISHED.get(b["status"], b["status"]),
+                org,
+                project,
+                b["id"],
+                b["definition"]["name"],
+                b["_links"]["web"]["href"],
+            ),
+            f", made redundant by build {latest['id']}",
+        )
+        for b, latest in superseded(
+            [b for b in builds if b["reason"] in AZURE_REDUNDANT_REASONS],
+            lambda b: (b["definition"]["id"], b["reason"], b["sourceBranch"]),
+            operator.itemgetter("id"),
+            operator.itemgetter("sourceVersion"),
+            lambda b: not azure_build_waits(org, project, b["id"]),
+        )
+    ]
+
+
+def redundant_azure_builds_or_report(label, gh, org, project):
+    """Return the redundant unfinished builds of gh in an Azure project, reporting any failure.
+
+    Args:
+        label: the repository's label.
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+        org: the Azure DevOps organization.
+        project: the Azure DevOps project.
+
+    Returns:
+        A list of the subject, Build, and reason of each redundant build, or the
+        empty list if Azure Pipelines does not provide them, in which case this function
+        reports the failure.
+    """
+    try:
+        return redundant_azure_builds(label, gh, org, project)
+    except request_util.REQUEST_ERRORS as e:
+        report_failure(
+            f"{label}: failed to find redundant Azure Pipelines builds in {org}/{project}:"
+            f" {request_util.failure(e)}"
+        )
+        return []
+
+
 @functools.cache
 def warn_if_no_circleci_token():
     """If there is no CircleCI token, warn (only once) that CircleCI will refuse requests."""
@@ -884,34 +707,75 @@ def circleci_pipeline_branch(pipeline):
             (not its number, such as 7 in a pipeline's URL).
 
     Returns:
-        The pipeline's branch, such as "main" or "pull/123", or else its tag, or else None.
+        The pipeline's branch, as pipeline_branch returns it.
     """
     api = f"{ci_build.CIRCLECI_API}/v2/pipeline/{pipeline}"
-    p = request_util.json_object(request_util.request("GET", api, ci_build.circleci_headers()), api)
+    return pipeline_branch(
+        request_util.json_object(request_util.request("GET", api, ci_build.circleci_headers()), api)
+    )
+
+
+def pipeline_branch(p):
+    """Return the branch of the CircleCI pipeline p.
+
+    Args:
+        p: a pipeline, as a dict parsed from the CircleCI API's JSON, with keys such as
+            "id" and "vcs".
+
+    Returns:
+        The pipeline's branch, such as "main" or "pull/123", or else its tag, or else None.
+    """
     vcs = p.get("vcs") or {}
     return vcs.get("branch") or vcs.get("tag")
 
 
-def circleci_workflows_of_jobs(subject, jobs):
-    """Return the CircleCI workflows that contain the given unfinished jobs.
+def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
+    """Return the CircleCI workflows that contain the given unfinished jobs of commit sha.
 
     A job's URL, such as "https://circleci.com/gh/ORG/REPO/123", gives the job's project
     and number but not the id of the workflow that contains the job.
 
+    If the project has pipelines from the past day of commit sha on the branches, started
+    by a push or a pull request, and those pipelines have unfinished workflows, then the
+    result is those workflows, whether or not they contain the jobs.  Otherwise, the
+    result is the workflows that contain the jobs, which can be on any branch.  So the
+    workflow of a job in another pipeline of commit sha, such as one that the API
+    started, is in the result only if there are no such pipelines.
+
     Args:
         subject: what the jobs test, such as a PR; used for diagnostics.
-        jobs: Checks of CircleCI jobs whose URLs do not contain their workflows' ids.
+        project: a CircleCI project slug, such as "gh/ORG/REPO".
+        sha: a commit.
+        branches: branches, named as branch_name names them.
+        jobs: Checks of CircleCI jobs of project whose URLs do not contain their workflows'
+            ids.
 
     Returns:
         A list of the Build of each workflow.
     """
+    try:
+        workflows = [
+            w
+            for branch, p in recent_pipelines(project)
+            if p["vcs"].get("revision") == sha and branch_name(branch) in branches
+            for w in unfinished_workflows(p["id"])
+        ]
+    except request_util.REQUEST_ERRORS as e:
+        print(
+            f"{subject}: failed to list the pipelines of {project}: {request_util.failure(e)}",
+            file=sys.stderr,
+        )
+        workflows = []
+    if workflows:
+        return [Build.from_circleci_workflow(w["status"], w["id"], w["name"]) for w in workflows]
+
     # Looking up one job's workflow and then listing the workflow's jobs takes two
     # requests per workflow, rather than one request per job.
     found = set()  # (project, job number) of each job whose workflow is in result
     result = []
     failures = []
     for status, name, url in jobs:
-        _, project, number = ci_build.parse_circleci_url(url)
+        _, _, number = ci_build.parse_circleci_url(url)
         if (project, number) in found:
             continue
         try:
@@ -937,6 +801,106 @@ def circleci_workflows_of_jobs(subject, jobs):
             f" {request_util.failure(failures[0])}"
         )
     return result
+
+
+@functools.cache
+def recent_pipelines(project):
+    """Return the recent pipelines of a CircleCI project that a push or a pull request started.
+
+    Args:
+        project: the project slug, such as "gh/ORG/REPO".
+
+    Returns:
+        A list of the branch and pipeline of each pipeline from the past day that a push
+        or a pull request started, most recent first.
+    """
+    cutoff = dt.datetime.now(dt.UTC) - CIRCLECI_WINDOW
+    result = []
+    # The pipelines are listed most recent first.
+    for p in ci_build.circleci_items(f"/v2/project/{project}/pipeline"):
+        if dt.datetime.fromisoformat(p["created_at"]) < cutoff:
+            break
+        branch = pipeline_branch(p)
+        if branch and p["trigger"]["type"] in CIRCLECI_REDUNDANT_TRIGGERS:
+            result.append((branch, p))
+    return result
+
+
+@functools.cache
+def unfinished_workflows(pipeline):
+    """Return the unfinished workflows of the CircleCI pipeline with the given id.
+
+    Args:
+        pipeline: the pipeline's id, a UUID such as "5034460f-c7c4-4c43-9457-de07e2029e7b"
+            (not its number, such as 7 in a pipeline's URL).
+
+    Returns:
+        A list of the unfinished workflows, or the empty list if the pipeline no longer
+        exists.
+    """
+    try:
+        return [
+            w
+            for w in ci_build.circleci_items(f"/v2/pipeline/{pipeline}/workflow")
+            if w["status"] in CIRCLECI_UNFINISHED_STATUSES
+        ]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:  # The pipeline was deleted after it was listed.
+            return []
+        raise
+
+
+def redundant_circleci_workflows(label, gh):
+    """Return the redundant unfinished CircleCI workflows of the GitHub repository gh.
+
+    Args:
+        label: the repository's label.
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+
+    Returns:
+        A list of the subject, Build, and reason of each redundant workflow.
+    """
+    projects = {
+        # A URL without a project slug is of the project that GitHub's OAuth app connects.
+        ci_build.circleci_project_of_url(check.url) or f"gh/{gh}"
+        for check in checks(gh, "HEAD")
+        if ci_build.parse_circleci_url(check.url) is not None
+    }
+    if projects:
+        warn_if_no_circleci_token()
+    # the project, branch, and pipeline of each recent pipeline that can be redundant
+    pipelines = [
+        (project, branch, p)
+        for project in sorted(projects)
+        for branch, p in recent_pipelines(project)
+    ]
+    # A pipeline's workflows can be redundant only if its branch has another pipeline.
+    counts = collections.Counter((project, branch) for project, branch, _ in pipelines)
+    pipelines = [pbp for pbp in pipelines if counts[pbp[:2]] > 1]
+    # the project, branch, pipeline, and workflow of each unfinished workflow
+    workflows = [
+        (project, branch, p, w)
+        for (project, branch, p), pipeline_workflows in zip(
+            pipelines,
+            concurrently(lambda pbp: unfinished_workflows(pbp[2]["id"]), pipelines),
+            strict=True,
+        )
+        for w in pipeline_workflows
+    ]
+    return [
+        (
+            branch_subject(label, branch),
+            Build.from_circleci_workflow(w["status"], w["id"], w["name"]),
+            f", made redundant by workflow {latest[3]['id']}",
+        )
+        for (_, branch, _, w), latest in superseded(
+            workflows,
+            lambda pbpw: (pbpw[0], pbpw[1], pbpw[3]["name"]),
+            lambda pbpw: (pbpw[2]["number"], pbpw[3]["created_at"]),
+            lambda pbpw: pbpw[2]["vcs"].get("revision"),
+            lambda pbpw: pbpw[3]["status"] in CIRCLECI_SUPERSEDING,
+        )
+    ]
 
 
 def unfinished_runs(gh):
@@ -998,8 +962,42 @@ def blocked_pr_runs(pr, runs, on_shared_branch):
     Returns:
         A list of the runs.
     """
-    events = {"pull_request"} if on_shared_branch else {"pull_request", "push"}
+    events = {"pull_request"} if on_shared_branch else GITHUB_REDUNDANT_EVENTS
     return [r for r in runs.get((pr["owner"], pr["headRefName"]), []) if r["event"] in events]
+
+
+def redundant_runs(label, gh, runs):
+    """Return the redundant unfinished GitHub Actions runs in the GitHub repository gh.
+
+    Args:
+        label: the repository's label.
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+        runs: a map from (head repository owner, branch) to the unfinished runs of that
+            branch, as unfinished_runs returns it.
+
+    Returns:
+        A list of the subject, Build, and reason of each redundant run.
+    """
+    result = []
+    for (owner, branch), branch_runs in runs.items():
+        if not owner:  # Runs of different deleted forks are indistinguishable.
+            continue
+        name = branch if owner.lower() == gh.split("/")[0].lower() else f"{owner}:{branch}"
+        for r, latest in superseded(
+            [r for r in branch_runs if r["event"] in GITHUB_REDUNDANT_EVENTS],
+            operator.itemgetter("workflow_id", "event"),
+            operator.itemgetter("created_at"),
+            operator.itemgetter("head_sha"),
+            lambda r: r["status"] in GITHUB_SUPERSEDING,
+        ):
+            result.append(
+                (
+                    f"{label} {name}",
+                    Build.from_github_actions_run(gh, r),
+                    f", made redundant by run {latest['id']}",
+                )
+            )
+    return result
 
 
 def unfinished_other_builds(subject, gh, sha, branches):
@@ -1122,6 +1120,39 @@ def blocked_pr_builds(gh, shared_branches, runs, blocked):
         Build.from_github_actions_run(gh, r) for r in blocked_pr_runs(pr, runs, on_shared_branch)
     )
     return builds
+
+
+def redundant_builds(label, gh, runs, pr_shas):
+    """Return the redundant unfinished builds of the GitHub repository gh.
+
+    Args:
+        label: the repository's label.
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+        runs: the unfinished GitHub Actions runs, as unfinished_runs returns them.
+        pr_shas: the head commits of some of gh's open PRs, whose checks show which
+            Azure Pipelines projects build gh.
+
+    Returns:
+        A list of the subject, Build, and reason of each redundant build.
+    """
+    result = []
+    try:
+        projects = azure_projects(gh, pr_shas)
+    except request_util.REQUEST_ERRORS as e:
+        report_failure(
+            f"{label}: failed to find the Azure Pipelines projects: {request_util.failure(e)}"
+        )
+        projects = set()
+    for org, project in sorted(projects):
+        result += redundant_azure_builds_or_report(label, gh, org, project)
+    try:
+        result += redundant_circleci_workflows(label, gh)
+    except request_util.REQUEST_ERRORS as e:
+        report_failure(
+            f"{label}: failed to find redundant CircleCI workflows: {request_util.failure(e)}"
+        )
+    result += redundant_runs(label, gh, runs)
+    return result
 
 
 def main():
