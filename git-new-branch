@@ -48,8 +48,8 @@
 # `.claude/worktrees/`, because its copy would share that worktree's HEAD and
 # index; they say which ones they left out.
 #
-# `choose_mode_for_submodules` says why submodules change the mode, or
-# prevent `--clean`.  A repository that has no
+# The documentation of `choose_mode_for_submodules` says why submodules change
+# the mode or prevent `--clean`.  A repository that has no
 # commit is refused, because there is nothing to branch from.  Every mode but
 # `--clean` is refused while a merge, cherry-pick, revert, or rebase is in
 # progress, because the new directory would get the operation's staged
