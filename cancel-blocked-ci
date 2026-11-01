@@ -803,11 +803,11 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
     result = []
     failures = []
     for status, name, url in jobs:
-        _, _, number = ci_build.parse_circleci_url(url)
+        _, _, number = ci_build.CircleciUrl.from_url(url)
         if (project, number) in found:
             continue
         try:
-            workflow = ci_build.circleci_workflow_of_url(url)[0]
+            workflow = ci_build.CircleciWorkflowAndJob.from_url(url).workflow
         except request_util.REQUEST_ERRORS as e:
             failures.append(e)
             continue
@@ -1094,10 +1094,10 @@ def unfinished_other_builds(subject, gh, sha, branches):
         status, name, url = check
         if status == "completed":
             continue
-        if parsed := ci_build.parse_azure_url(url):
+        if parsed := ci_build.AzureBuildUrl.from_url(url):
             org, project, build = parsed
             add(Build.from_azure_pipelines_build(status, org, project, build, name, url))
-        elif (parsed := ci_build.parse_circleci_url(url)) is not None:
+        elif (parsed := ci_build.CircleciUrl.from_url(url)) is not None:
             warn_if_no_circleci_token()
             workflow, project, job = parsed
             if workflow is not None:
