@@ -49,16 +49,16 @@
 # A slug ORG:NEWBRANCHNAME acts as `git-new-branch --clean NEWBRANCHNAME` does
 # when run in PROJECT-fork-ORG, a sibling of the current repository's main
 # working tree, so the result is the same whichever of the project's
-# directories it is run in:  PROJECT, PROJECT-fork-OTHERORG, a branch
-# directory of either, or a worktree of any of those.  The new branch starts on
-# whatever branch PROJECT-fork-ORG has checked out, not at the current
-# directory's commit.  If the pull there cannot fast-forward, it changes
-# nothing, and the new branch starts at PROJECT-fork-ORG's current commit.
-# The new directory holds none of the current directory's changes.  `--clean`
-# is accepted with a slug but has no effect.  `--copy` cannot be used with a slug, and neither can an ORG that
-# would make directory names ambiguous:  one that is "branch", starts with
-# "branch-" or "fork-", ends with "-branch", or contains "-branch-" or
-# "-fork-".
+# directories it is run in:  PROJECT, PROJECT-fork-OTHERORG, a branch directory
+# of either, or a worktree of any of those.  The new branch starts on whatever
+# branch PROJECT-fork-ORG has checked out, not at the current directory's
+# commit.  If the pull there cannot fast-forward, it changes nothing, and the
+# new branch starts at PROJECT-fork-ORG's current commit.  The new directory
+# holds none of the current directory's changes.  `--clean` is accepted with a
+# slug but has no effect.  `--copy` cannot be used with a slug, and neither can
+# an ORG that would make directory names ambiguous:  one that is "branch",
+# starts with "branch-" or "fork-", ends with "-branch", or contains "-branch-"
+# or "-fork-".
 #
 # The default mode and `--copy` copy build output, which can still refer to
 # the current directory's files.  These modes delete such files that a tool
