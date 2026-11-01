@@ -93,12 +93,12 @@ The commands are:
   has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
   directories form one more chain per PROJECT.
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
-  When a merge has conflicts, it uses the resolutions that `git rerere`
-  recorded, and it asks an AI agent, Claude (or, with `--codex`, Codex), to
-  edit the conflicted hunks that rerere does not resolve.  It checks every
-  resolution, whether from rerere or from the agent:  that nothing outside
-  the conflict regions changed and that no conflict marker remains.  Then
-  it commits the merge and continues.
+  When a merge or a pull has conflicts, it uses the resolutions that
+  `git rerere` recorded, and it asks an AI agent, Claude (or, with
+  `--codex`, Codex), to edit the conflicted hunks that rerere does not
+  resolve.  It checks every resolution, whether from rerere or from the
+  agent:  that nothing outside the conflict regions changed and that no
+  conflict marker remains.  Then it commits the merge and continues.
   If the build fails, it asks the agent to fix it, up to 3 times, and
   commits the fix.
   `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
