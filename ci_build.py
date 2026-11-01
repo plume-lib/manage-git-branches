@@ -371,8 +371,8 @@ def parse_github_actions_url(url: str) -> tuple[str, int, int | None] | None:
     """Find the GitHub Actions workflow run and job that url shows.
 
     Returns:
-        The repository (as ORG/REPO), the run id, and the job id (None if url names a
-        run), or None if url is not the URL of a GitHub Actions run.
+        The repository's GitHub slug (such as "ORG/REPO"), the run id, and the job id
+        (None if url names a run), or None if url is not the URL of a GitHub Actions run.
     """
     if match := GITHUB_ACTIONS_RUN.match(url):
         return match[1], int(match[2]), int(match[3]) if match[3] else None

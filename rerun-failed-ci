@@ -408,7 +408,7 @@ class Rerunner:
         """Rerun the jobs of a GitHub Actions run, or only the given job, that failed transiently.
 
         Args:
-            repo: the repository, as ORG/REPO.
+            repo: the repository's GitHub slug, such as "ORG/REPO".
             run: the id of the workflow run.
             only_job: the id of the job to examine, or None to examine every job.
         """
@@ -750,7 +750,7 @@ def gha_jobs(repo: str, run: int, which: str) -> list[dict[str, Any]]:
     """Find the jobs of a GitHub Actions workflow run.
 
     Args:
-        repo: the repository, as ORG/REPO.
+        repo: the repository's GitHub slug, such as "ORG/REPO".
         run: the id of the workflow run.
         which: "latest" for the jobs of the latest attempt, or "all" for the jobs of
             every attempt.
@@ -772,7 +772,7 @@ def gha_job_log(repo: str, job: int) -> tuple[str, bool]:
     produce them.
 
     Args:
-        repo: the repository, as ORG/REPO.
+        repo: the repository's GitHub slug, such as "ORG/REPO".
         job: the id of the job.
 
     Returns:
