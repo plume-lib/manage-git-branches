@@ -45,7 +45,10 @@ actual="$("${NORMALIZE_LOG}" "${work}/log1" "${work}/log2")"
 if [ "${actual}" != "${expected1}
 ${expected2}" ]; then
   fail "normalize-log on two files printed
-${actual}"
+${actual}
+rather than
+${expected1}
+${expected2}"
 fi
 
 actual="$("${NORMALIZE_LOG}" < "${work}/log2")"

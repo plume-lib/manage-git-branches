@@ -1,21 +1,59 @@
 #!/bin/sh
 
 # Prints the lines of each FILE, a CI log, without the formatting that a CI
-# service or a terminal adds.  From each line, it removes a leading byte order
-# mark, a leading timestamp (as in a GitHub Actions or Azure Pipelines log),
-# terminal escape sequences (such as color codes), and carriage returns.
+# service or a terminal adds.  From each line, it removes terminal escape
+# sequences (such as color codes, cursor movements, and hyperlinks), a leading
+# byte order mark, and a leading timestamp (as in a GitHub Actions or Azure
+# Pipelines log).  It also removes carriage returns, along with progress
+# messages that a terminal would overwrite or erase:
+#  * It deletes the carriage returns at the end of a line.
+#  * It deletes all text up to and including the last other carriage return in
+#    the line.  A terminal overwrites only as many columns as the later text
+#    covers, so a terminal can show more of the earlier text than this command
+#    prints.  For example, from "Downloading 100% CR Done", this command prints
+#    "Done", but a terminal shows "Doneloading 100%".
+#  * It deletes all text before an escape sequence that erases the whole line:
+#    "ESC [ 2 K", or "ESC [ K" or "ESC [ 0 K" right after a carriage return.
 #
 # Usage:
 #   normalize-log [FILE]...
 #
 # With no FILE, this command reads standard input.
 
-# The start of a terminal escape sequence:  ESC [
-csi="$(printf '\033')\\["
+# The C locale makes sed accept arbitrary bytes, and it makes each range
+# expression denote a range of byte values.
+LC_ALL=C
+export LC_ALL
+
+esc="$(printf '\033')"
+bel="$(printf '\007')"
 cr="$(printf '\r')"
 bom="$(printf '\357\273\277')"
+# A timestamp such as "2026-10-31T13:39:57.3265176Z".
+ts='[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z'
 
-exec sed -e "s/^${bom}//" \
-  -e 's/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z //' \
-  -e "s/${csi}[0-9;]*[A-Za-z]//g" \
-  -e "s/${cr}//g" -- "$@"
+# The sed commands run in this order:
+#  1. Delete the text before an escape sequence that erases the whole line.
+#  2. Delete the remaining escape sequences, so that they do not hide a
+#     carriage return or a leading byte order mark or timestamp.  These are:
+#      * an operating system command (OSC), such as a hyperlink:  ESC ] then
+#        text that ends with BEL or with ESC \
+#      * a control sequence (CSI), such as a color code:  ESC [ then parameter
+#        bytes, intermediate bytes, and a final byte, as in "ESC [ 1 ; 3 1 m"
+#      * any other escape sequence:  ESC then intermediate bytes and a final
+#        byte, as in "ESC ( B" or "ESC 7"
+#  3. Delete the carriage returns, and the text before a carriage return that
+#     is not at the end of the line.
+#  4. Delete a leading byte order mark, then a leading timestamp.
+exec sed -e "s/.*${esc}\\[2K//" \
+  -e "s/.*${cr}${esc}\\[0\\{0,1\\}K//" \
+  -e "s|${esc}][^${bel}${esc}]*${bel}||g" \
+  -e "s|${esc}][^${bel}${esc}]*${esc}\\\\||g" \
+  -e "s|${esc}\\[[0-?]*[ -/]*[@-~]||g" \
+  -e "s|${esc}[ -/]*[0-~]||g" \
+  -e "s/${cr}*\$//" \
+  -e "s/.*${cr}//" \
+  -e "s/^${bom}//" \
+  -e "s/^${ts}\$//" \
+  -e "s/^${ts} //" \
+  -- "$@"

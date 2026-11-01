@@ -165,10 +165,13 @@ The commands are:
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
   shows a transient failure.  This command needs Python 3 and `gh`.
 * [`normalize-log`](normalize-log) `[FILE]...`:
-  Prints each CI log (by default, standard input) without the formatting that
-  a CI service or a terminal adds:  a leading byte order mark, a leading
-  timestamp (as in a GitHub Actions or Azure Pipelines log), terminal escape
-  sequences, and carriage returns.  `rerun-failed-ci` uses it.
+  Prints the file (by default, standard input) without formatting that
+  affects a terminal:  terminal escape sequences, a leading byte order
+  mark, a leading timestamp, and carriage returns.  It also deletes
+  progress messages that a terminal would overwrite or erase:  the text
+  before a carriage return that is not at the end of a line, and the text
+  before an escape sequence that erases the whole line.
+  `rerun-failed-ci` uses it.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
