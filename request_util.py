@@ -164,6 +164,30 @@ def json_object(response: Any, url: str) -> dict[str, Any]:
     return response
 
 
+def request_object(
+    method: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    body: Any = None,
+    *,
+    refusals: Mapping[int, str] | None = None,
+) -> dict[str, Any]:
+    """Return the given HTTP request's response, or raise ValueError if it is not a JSON object.
+
+    Args:
+        method: the HTTP method, such as "GET".
+        url: a URL.
+        headers: the HTTP headers.
+        body: the request body, which is sent as JSON, or None for no body.
+        refusals: a map from each successful status with which the server refuses the
+            request to a description of it, as for http.
+
+    Returns:
+        The response body, parsed as JSON.
+    """
+    return json_object(request(method, url, headers, body, refusals=refusals), url)
+
+
 def failure(e: Exception) -> str:
     """Describe a failed command or HTTP request.
 

@@ -1,4 +1,4 @@
-"""Access the builds of CI services:  Azure Pipelines, CircleCI, and GitHub Actions.
+"""Access the builds of CI services:  Azure Pipelines and CircleCI.
 
 This module recognizes the URLs of builds and jobs, finds credentials, and makes
 requests of the services' APIs.
@@ -272,8 +272,9 @@ def circleci_items(path: str) -> Iterator[Any]:
     page_token = None
     while True:
         query = f"?page-token={urllib.parse.quote(page_token, safe='')}" if page_token else ""
-        url = f"{CIRCLECI_API}{path}{query}"
-        page = request_util.json_object(request_util.request("GET", url, circleci_headers()), url)
+        page = request_util.request_object(
+            "GET", f"{CIRCLECI_API}{path}{query}", circleci_headers()
+        )
         yield from page["items"]
         page_token = page.get("next_page_token")
         if not page_token:
@@ -339,8 +340,8 @@ def circleci_workflow_of_url(url: str) -> tuple[str | None, int | None]:
     """
     workflow, slug, job = parse_circleci_url(url) or (None, None, None)
     if workflow is None and slug is not None and job is not None:
-        result = request_util.request(
+        result = request_util.request_object(
             "GET", f"{CIRCLECI_API}/v2/project/{slug}/job/{job}", circleci_headers()
         )
-        workflow = ((result or {}).get("latest_workflow") or {}).get("id")
+        workflow = (result.get("latest_workflow") or {}).get("id")
     return workflow, job
