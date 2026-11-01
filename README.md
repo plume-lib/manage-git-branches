@@ -92,6 +92,9 @@ The commands are:
   has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
   directories form one more chain per PROJECT.
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
+  When `git rerere` resolves a merge's conflicts, it checks that nothing
+  outside the conflict regions changed and that no conflict marker remains,
+  commits the merge, and continues.
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--squash] FROM_DIR TO_DIR ...`:
   Runs `git-push-to` on the arguments, then rebases each branch onto the
@@ -114,6 +117,7 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of `upstream`.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
+  It handles conflicts that `git rerere` resolves, as `git-push-to` does.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but Eclipse `.project`
@@ -159,6 +163,13 @@ The commands are:
   open pull request).  Run it in a directory that holds the working copy
   directories.  Works for Azure Pipelines, CircleCI, and GitHub Actions.
   This command needs Python 3.11 or later, `gh`, and `pr-status`.
+* [`normalize-log`](normalize-log) `[FILE]...`:
+  Prints the file (by default, standard input) without formatting that
+  affects a terminal:  terminal escape sequences, a leading byte order
+  mark, a leading timestamp, and carriage returns.  It also deletes
+  progress messages that a terminal would overwrite or erase:  the text
+  before a carriage return that is not at the end of a line, and the text
+  before an escape sequence that erases the whole line.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
