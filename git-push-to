@@ -104,6 +104,8 @@
 # "--llm" turns on the agent that the last "--claude" or "--codex" chose.
 # If the agent cannot be run because its command is not on the PATH, this
 # script acts as it does with "--no-llm".
+# The agent runs in a sandbox, which requires a recent version of it; see
+# the README.
 #
 # When a merge has conflicts that `git rerere` does not resolve, the agent
 # edits the conflicted files, and this script checks its resolution as

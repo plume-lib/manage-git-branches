@@ -47,6 +47,7 @@ fail() {
 ##   clean:  as "good", but also changes a line that merged cleanly
 ##   none:   changes nothing
 ##   fail:   exits with status 3
+##   fail-create: creates a file, then exits with status 3
 ##   commit: as "good", but also commits the merge
 ##   create: as "good", but also creates a file
 ##   config: as "good", but also changes git's configuration
@@ -54,13 +55,42 @@ fail() {
 ##   delete-untracked: as "good", but also deletes the untracked file notes.txt
 ##   separator: as "good", but keeps the line "======="
 ##   hook-link: as "good", but also makes a hook a symbolic link to file.txt
+##   stage:  stages a resolution that changes a line that merged cleanly, then
+##           writes the resolution of "good"
+##   create-ignored: as "good", but also creates build/new.class in the
+##           ignored directory build
+##   change-ignored: as "good", but also changes the ignored file build/old.txt
+##   include: as "good", but also changes local.gitconfig, which git's
+##           configuration includes
+##   attributes: as "good", but also changes .git/info/attributes
+##   change-rerere: as "good", but also changes other.txt, whose conflict
+##           `git rerere` resolved
+##   change-quoted: as "good", but also changes the untracked file a"b\c
+##   change-nested: as "good", but also changes nested/file.txt in an
+##           untracked nested repository
+##   separator-long: removes the conflict marker lines other than separators
+##           of any length
+##   auto-merge: as "good", but also makes AUTO_MERGE name HEAD's tree
+##   sandbox-dirs: as "good", but also creates the empty directories that
+##           Codex's sandbox creates
+##   hang:   runs for 60 seconds, changing nothing
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
 basename -- "$0" >> "${STUB_LOG}"
 cat > "${STUB_PROMPT}"
 if [ "${STUB_MODE}" = fail ]; then exit 3; fi
+if [ "${STUB_MODE}" = fail-create ]; then
+  echo "scratch" > scratch.txt
+  exit 3
+fi
 if [ "${STUB_MODE}" = none ]; then exit 0; fi
+if [ "${STUB_MODE}" = hang ]; then exec sleep 60; fi
+if [ "${STUB_MODE}" = separator-long ]; then
+  sed -e '/^<<<<<<</d' -e '/^>>>>>>>/d' file.txt > file.txt.new
+  mv file.txt.new file.txt
+  exit 0
+fi
 if [ "${STUB_MODE}" = separator ]; then
   sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/{' -e '/^=======$/!d' -e '}' \
     -e '/^>>>>>>> /d' file.txt > file.txt.new
@@ -70,6 +100,23 @@ fi
 sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^=======$/d' -e '/^>>>>>>> /d' \
   file.txt > file.txt.new
 mv file.txt.new file.txt
+if [ "${STUB_MODE}" = stage ]; then
+  cp file.txt good.tmp
+  sed -e 's/^three$/THREE/' good.tmp > file.txt
+  git add file.txt
+  mv good.tmp file.txt
+fi
+case "${STUB_MODE}" in
+  create-ignored) echo "class" > build/new.class ;;
+  change-ignored) echo "changed" >> build/old.txt ;;
+  include) printf '[core]\n\tfsmonitor = echo pwned\n' >> local.gitconfig ;;
+  attributes) echo '* diff=pwned' >> .git/info/attributes ;;
+  change-rerere) echo "agent" >> other.txt ;;
+  change-quoted) echo "changed" >> 'a"b\c' ;;
+  change-nested) echo "changed" >> nested/file.txt ;;
+  auto-merge) git update-ref AUTO_MERGE "$(git rev-parse 'HEAD^{tree}')" ;;
+  sandbox-dirs) mkdir .agents .aws .codex ;;
+esac
 if [ "${STUB_MODE}" = clean ]; then
   sed -e 's/^three$/THREE/' file.txt > file.txt.new
   mv file.txt.new file.txt
@@ -321,8 +368,17 @@ setup_case fail
 push_to fail --llm
 check_not_resolved "failing agent"
 case "${push_output}" in
-  *"claude failed with status 3"*) ;;
+  *"claude failed with status 3"*"conflicted: file.txt"*) ;;
   *) fail "failing agent: wrong diagnostic: ${push_output}" ;;
+esac
+
+## The work of an agent that fails is checked too.
+setup_case fail-create
+push_to fail-create --llm
+check_not_resolved "failing agent that creates a file"
+case "${push_output}" in
+  *"claude failed with status 3"*"created a file: scratch.txt"*) ;;
+  *) fail "failing agent that creates a file: wrong diagnostic: ${push_output}" ;;
 esac
 
 ## An agent that commits is rejected.
@@ -330,7 +386,7 @@ setup_case commit
 push_to commit --llm
 check_not_pushed "agent that commits"
 case "${push_output}" in
-  *"changed HEAD or MERGE_HEAD"*) ;;
+  *"changed HEAD, MERGE_HEAD, or AUTO_MERGE"*) ;;
   *) fail "agent that commits: wrong diagnostic: ${push_output}" ;;
 esac
 
@@ -350,8 +406,8 @@ for untracked_mode in change-untracked delete-untracked; do
   push_to "${untracked_mode}" --llm
   check_not_resolved "${untracked_mode}"
   case "${untracked_mode}:${push_output}" in
-    change-untracked:*"changed an untracked file: notes.txt"*) ;;
-    delete-untracked:*"deleted an untracked file: notes.txt"*) ;;
+    change-untracked:*"changed a file: notes.txt"*) ;;
+    delete-untracked:*"deleted a file: notes.txt"*) ;;
     *) fail "${untracked_mode}: wrong diagnostic: ${push_output}" ;;
   esac
 done
@@ -384,12 +440,83 @@ if [ "${push_status}" -ne 0 ]; then
   fail "separator in a file that contains one: git-push-to failed: ${push_output}"
 fi
 
+## A remaining separator that is longer than 7 "=" is rejected.  Git writes
+## one for a file whose attribute `conflict-marker-size` is larger.
+setup_case separator-long
+echo 'file.txt conflict-marker-size=10' > "${feature_dir}/.git/info/attributes"
+push_to separator-long --llm
+check_not_resolved "remaining long separator"
+case "${push_output}" in
+  *"is a conflict marker"*) ;;
+  *) fail "remaining long separator: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that changes AUTO_MERGE is rejected.
+setup_case auto-merge
+push_to auto-merge --llm
+check_not_pushed "agent that changes AUTO_MERGE"
+case "${push_output}" in
+  *"changed HEAD, MERGE_HEAD, or AUTO_MERGE"*) ;;
+  *) fail "agent that changes AUTO_MERGE: wrong diagnostic: ${push_output}" ;;
+esac
+
+## The empty directories that Codex's sandbox creates are removed, and do
+## not keep the resolution from being committed.
+setup_case sandbox-dirs
+push_to sandbox-dirs --codex
+check_resolved codex "Codex's sandbox directories"
+for sandbox_dir in .agents .aws .codex; do
+  if [ -e "${feature_dir}/${sandbox_dir}" ]; then
+    fail "Codex's sandbox directories: ${sandbox_dir} remains"
+  fi
+done
+
+## An agent that runs longer than MANAGE_GIT_BRANCHES_LLM_TIMEOUT is stopped.
+setup_case hang
+hang_start="$(date +%s)"
+MANAGE_GIT_BRANCHES_LLM_TIMEOUT=2
+export MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+push_to hang --llm
+unset MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+hang_seconds="$(($(date +%s) - hang_start))"
+check_not_resolved "agent that runs too long"
+case "${push_output}" in
+  *"claude did not finish within 2 seconds"*) ;;
+  *) fail "agent that runs too long: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "${hang_seconds}" -ge 30 ]; then
+  fail "agent that runs too long: took ${hang_seconds} seconds"
+fi
+
+## A time limit that is not a number is rejected.
+setup_case bad-timeout
+MANAGE_GIT_BRANCHES_LLM_TIMEOUT=soon
+export MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+push_to good --llm
+unset MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+check_not_resolved "bad MANAGE_GIT_BRANCHES_LLM_TIMEOUT"
+case "${push_output}" in
+  *"MANAGE_GIT_BRANCHES_LLM_TIMEOUT is not a number of seconds: soon"*) ;;
+  *) fail "bad MANAGE_GIT_BRANCHES_LLM_TIMEOUT: wrong diagnostic: ${push_output}" ;;
+esac
+
+## A hook in the working tree, or a hook that links to a file in it, can be
+## resolved like any other file.
+setup_case hook-in-tree
+git -C "${feature_dir}" config core.hooksPath .
+push_to good --llm
+check_resolved claude "core.hooksPath in the working tree"
+setup_case hook-links-to-conflict
+ln -s ../../file.txt "${feature_dir}/.git/hooks/pre-commit"
+push_to good --llm
+check_resolved claude "hook that links to a conflicted file"
+
 ## An agent that adds a hook that is a symbolic link is rejected.
 setup_case hook-link
 push_to hook-link --llm
 check_not_resolved "agent that adds a linked hook"
 case "${push_output}" in
-  *"changed git's configuration or hooks"*) ;;
+  *"changed git's configuration, attributes, or hooks"*) ;;
   *) fail "agent that adds a linked hook: wrong diagnostic: ${push_output}" ;;
 esac
 
@@ -398,7 +525,7 @@ setup_case config
 push_to config --llm
 check_not_resolved "agent that changes git's configuration"
 case "${push_output}" in
-  *"changed git's configuration or hooks"*) ;;
+  *"changed git's configuration, attributes, or hooks"*) ;;
   *) fail "agent that changes git's configuration: wrong diagnostic: ${push_output}" ;;
 esac
 
@@ -416,6 +543,104 @@ esac
 if [ -s "${STUB_LOG}" ]; then
   fail "rerun: an agent ran: $(cat "${STUB_LOG}")"
 fi
+
+## An agent that stages a file is rejected, even if the working tree holds an
+## acceptable resolution.
+setup_case stage
+push_to stage --llm
+check_not_resolved "agent that stages a file"
+case "${push_output}" in
+  *"changed the index"*) ;;
+  *) fail "agent that stages a file: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that creates or changes a file that git ignores is rejected, even
+## in a directory that git ignores entirely.  The ignored files do not keep
+## an acceptable resolution from being committed.
+for ignored_mode in good create-ignored change-ignored; do
+  setup_case "ignored-${ignored_mode}"
+  echo 'build/' >> "${feature_dir}/.git/info/exclude"
+  mkdir "${feature_dir}/build"
+  echo "old" > "${feature_dir}/build/old.txt"
+  push_to "${ignored_mode}" --llm
+  case "${ignored_mode}" in
+    good)
+      check_resolved claude "ignored files"
+      continue
+      ;;
+  esac
+  check_not_resolved "${ignored_mode}"
+  case "${ignored_mode}:${push_output}" in
+    create-ignored:*"created a file: build/new.class"*) ;;
+    change-ignored:*"changed a file: build/old.txt"*) ;;
+    *) fail "${ignored_mode}: wrong diagnostic: ${push_output}" ;;
+  esac
+done
+
+## An agent that changes an untracked file whose name git quotes, or a file
+## in an untracked nested repository, is rejected.
+setup_case change-quoted
+echo "notes" > "${feature_dir}/a\"b\\c"
+push_to change-quoted --llm
+check_not_resolved "change-quoted"
+case "${push_output}" in
+  *'changed a file: a"b\c'*) ;;
+  *) fail "change-quoted: wrong diagnostic: ${push_output}" ;;
+esac
+setup_case change-nested
+git init -q "${feature_dir}/nested"
+echo "nested" > "${feature_dir}/nested/file.txt"
+push_to change-nested --llm
+check_not_resolved "change-nested"
+case "${push_output}" in
+  *"changed a file: nested/file.txt"*) ;;
+  *) fail "change-nested: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that changes a file that git's configuration includes, or the
+## repository's attributes, is rejected.
+for control_mode in include attributes; do
+  setup_case "${control_mode}"
+  echo 'local.gitconfig' >> "${feature_dir}/.git/info/exclude"
+  : > "${feature_dir}/local.gitconfig"
+  git -C "${feature_dir}" config include.path ../local.gitconfig
+  push_to "${control_mode}" --llm
+  check_not_resolved "${control_mode}"
+  case "${push_output}" in
+    *"changed git's configuration, attributes, or hooks"*) ;;
+    *) fail "${control_mode}: wrong diagnostic: ${push_output}" ;;
+  esac
+done
+
+## An agent that changes a file whose conflict `git rerere` resolved is
+## rejected.  Only the other conflicted file is named to the agent.
+setup_case change-rerere
+echo "other main" > "${main_dir}/other.txt"
+git -C "${main_dir}" add other.txt
+git -C "${main_dir}" commit -q -m "Add other.txt on main"
+git -C "${main_dir}" push -q
+echo "other feature" > "${feature_dir}/other.txt"
+git -C "${feature_dir}" add other.txt
+git -C "${feature_dir}" commit -q -m "Add other.txt on feature"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+git -C "${feature_dir}" config rerere.enabled true
+git -C "${feature_dir}" fetch -q
+if git -C "${feature_dir}" merge -q --no-edit origin/main > /dev/null 2>&1; then
+  fail "change-rerere: the merge has no conflicts"
+fi
+printf '%s\n' "other feature" "other main" > "${feature_dir}/other.txt"
+git -C "${feature_dir}" rerere 2> /dev/null
+git -C "${feature_dir}" merge --abort
+push_to change-rerere --llm
+check_not_resolved "change-rerere"
+if grep -q 'other.txt' "${STUB_PROMPT}"; then
+  fail "change-rerere: the instructions name the file that rerere resolved"
+fi
+case "${push_output}" in
+  *"changed a file: other.txt"*) ;;
+  *) fail "change-rerere: wrong diagnostic: ${push_output}" ;;
+esac
 
 ## A resolution that `git rerere` recorded needs no agent, whether or not
 ## rerere stages the files that it resolves.  test-push-to-rerere.sh tests
