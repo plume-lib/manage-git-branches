@@ -28,6 +28,14 @@
 # A working tree that has submodules gets `--copy` automatically, and
 # `--clean` is refused when the current commit has submodules.
 #
+# With a slug ORG:NEWBRANCHNAME, such as `mernst:feature`, the new branch is
+# made in the clone of ORG's fork, PROJECT-fork-ORG, rather than in the
+# current repository.  Its directory is PROJECT-fork-ORG-branch-NEWBRANCHNAME,
+# a `--clean` worktree, and the new branch starts instead at the commit of
+# PROJECT-fork-ORG, after a `git pull` there.  As for `git-push-to`, ORG "-"
+# stands for the clone PROJECT itself, so `-:NEWBRANCHNAME` makes
+# PROJECT-branch-NEWBRANCHNAME.
+#
 # Every effect is local:  this command never contacts a remote except to
 # read from it, and in particular it does not push the new branch.  It also
 # gives the new branch no upstream branch, even under
@@ -38,22 +46,16 @@
 #
 # Details:
 #
-# The argument can instead be a slug ORG:NEWBRANCHNAME, such as
-# `mernst:feature`, which makes the branch in ORG's fork of the project.  It
-# acts as `git-new-branch --clean NEWBRANCHNAME` does when run in the clone of
-# ORG's fork, PROJECT-fork-ORG, a sibling of the current repository's main
+# A slug ORG:NEWBRANCHNAME acts as `git-new-branch --clean NEWBRANCHNAME` does
+# when run in PROJECT-fork-ORG, a sibling of the current repository's main
 # working tree, so the result is the same whichever of the project's
 # directories it is run in:  PROJECT, PROJECT-fork-OTHERORG, a branch
-# directory of either, or a worktree of any of those.  The new branch starts
-# at the commit of PROJECT-fork-ORG after the `git pull` there -- that is, on
-# whatever branch PROJECT-fork-ORG has checked out -- not at the current
+# directory of either, or a worktree of any of those.  The new branch starts on
+# whatever branch PROJECT-fork-ORG has checked out, not at the current
 # directory's commit.  If the pull there cannot fast-forward, it changes
 # nothing, and the new branch starts at PROJECT-fork-ORG's current commit.
-# Its directory is PROJECT-fork-ORG-branch-NEWBRANCHNAME, and it holds none of
-# the current directory's changes.  As for `git-push-to`, ORG "-" stands for
-# the clone PROJECT itself, so `-:NEWBRANCHNAME` makes
-# PROJECT-branch-NEWBRANCHNAME.  `--clean` is accepted with a slug but has no
-# effect.  `--copy` cannot be used with a slug, and neither can an ORG that
+# The new directory holds none of the current directory's changes.  `--clean`
+# is accepted with a slug but has no effect.  `--copy` cannot be used with a slug, and neither can an ORG that
 # would make directory names ambiguous:  one that is "branch", starts with
 # "branch-" or "fork-", ends with "-branch", or contains "-branch-" or
 # "-fork-".
