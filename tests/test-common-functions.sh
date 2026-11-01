@@ -516,9 +516,27 @@ fi
 ## resolution to f.txt in the working tree.
 git init -q "${WORK_DIR}/ccr"
 
+## Usage: check_resolution_files EXPECTED DESCRIPTION
+## Makes AUTO_MERGE a tree whose file f.txt is ${WORK_DIR}/ccr-auto, and checks
+## that `check_conflict_resolution` accepts (EXPECTED "accept") or rejects
+## (EXPECTED "reject") the resolution in ${WORK_DIR}/ccr/f.txt.
+check_resolution_files() {
+  check_resolution_blob="$(git -C "${WORK_DIR}/ccr" hash-object --no-filters -w "${WORK_DIR}/ccr-auto")"
+  check_resolution_tree="$(printf '100644 blob %s\tf.txt\n' "${check_resolution_blob}" \
+    | git -C "${WORK_DIR}/ccr" mktree)"
+  git -C "${WORK_DIR}/ccr" update-ref AUTO_MERGE "${check_resolution_tree}"
+  if (cd "${WORK_DIR}/ccr" && check_conflict_resolution f.txt 2> /dev/null); then
+    check_resolution_actual=accept
+  else
+    check_resolution_actual=reject
+  fi
+  if [ "${check_resolution_actual}" != "$1" ]; then
+    fail "check_conflict_resolution: $2: expected $1, got ${check_resolution_actual}"
+  fi
+}
+
 ## Usage: check_resolution EXPECTED DESCRIPTION AUTO_MERGE_LINES -- RESOLUTION_LINES
-## Checks that `check_conflict_resolution` accepts (EXPECTED "accept") or
-## rejects (EXPECTED "reject") the resolution.
+## Like `check_resolution_files`, but takes the files' lines as arguments.
 check_resolution() {
   check_resolution_expected="$1"
   check_resolution_description="$2"
@@ -533,18 +551,7 @@ check_resolution() {
   for check_resolution_line; do
     printf '%s\n' "${check_resolution_line}" >> "${WORK_DIR}/ccr/f.txt"
   done
-  check_resolution_blob="$(git -C "${WORK_DIR}/ccr" hash-object -w "${WORK_DIR}/ccr-auto")"
-  check_resolution_tree="$(printf '100644 blob %s\tf.txt\n' "${check_resolution_blob}" \
-    | git -C "${WORK_DIR}/ccr" mktree)"
-  git -C "${WORK_DIR}/ccr" update-ref AUTO_MERGE "${check_resolution_tree}"
-  if (cd "${WORK_DIR}/ccr" && check_conflict_resolution f.txt 2> /dev/null); then
-    check_resolution_actual=accept
-  else
-    check_resolution_actual=reject
-  fi
-  if [ "${check_resolution_actual}" != "${check_resolution_expected}" ]; then
-    fail "check_conflict_resolution: ${check_resolution_description}: expected ${check_resolution_expected}, got ${check_resolution_actual}"
-  fi
+  check_resolution_files "${check_resolution_expected}" "${check_resolution_description}"
 }
 
 check_resolution accept "both sides kept" \
@@ -553,9 +560,19 @@ check_resolution accept "both sides kept" \
 # region, outside it.
 check_resolution accept "blank lines at the end of the region and after it" \
   a '<<<<<<< HEAD' b '' '=======' c '' '>>>>>>> other' '' d -- a b '' c '' d
+check_resolution reject "a separator remains" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- a b '=======' c d
+# A line "=======" is permitted if MERGE_HEAD's file contains one.
+ccr_blob="$(printf '%s\n' 'Title B' '=======' | git -C "${WORK_DIR}/ccr" hash-object -w --stdin)"
+ccr_tree="$(printf '100644 blob %s\tf.txt\n' "${ccr_blob}" | git -C "${WORK_DIR}/ccr" mktree)"
+ccr_commit="$(git -C "${WORK_DIR}/ccr" -c user.name=Test -c user.email=test@example.com \
+  commit-tree -m 'MERGE_HEAD' "${ccr_tree}")"
+# Git refuses to write MERGE_HEAD with `git update-ref`.
+printf '%s\n' "${ccr_commit}" > "${WORK_DIR}/ccr/.git/MERGE_HEAD"
 check_resolution accept "a heading underline that looks like a separator" \
   intro '<<<<<<< HEAD' 'Title A' '=======' '=======' 'Title B' '=======' '>>>>>>> other' text \
   -- intro 'Title B' '=======' text
+rm "${WORK_DIR}/ccr/.git/MERGE_HEAD"
 check_resolution accept "diff3 style" \
   a '<<<<<<< HEAD' b '||||||| base' x '=======' c '>>>>>>> other' d -- a bc d
 check_resolution accept "two regions" \
@@ -582,37 +599,36 @@ check_resolution reject "no conflict markers in AUTO_MERGE" \
   a b c -- a b c
 
 ## Usage: check_resolution_raw EXPECTED DESCRIPTION AUTO_MERGE_TEXT RESOLUTION_TEXT
-## Like `check_resolution`, but takes the files' contents as printf formats,
-## so that a test can omit the final newline or use CRLF line endings.
+## Like `check_resolution_files`, but takes the files' contents as printf
+## formats, so that a test can omit the final newline or use CRLF line endings.
 check_resolution_raw() {
   # shellcheck disable=SC2059 # The contents are formats.
   printf "$3" > "${WORK_DIR}/ccr-auto"
   # shellcheck disable=SC2059 # The contents are formats.
   printf "$4" > "${WORK_DIR}/ccr/f.txt"
-  check_resolution_blob="$(git -C "${WORK_DIR}/ccr" hash-object --no-filters -w "${WORK_DIR}/ccr-auto")"
-  check_resolution_tree="$(printf '100644 blob %s\tf.txt\n' "${check_resolution_blob}" \
-    | git -C "${WORK_DIR}/ccr" mktree)"
-  git -C "${WORK_DIR}/ccr" update-ref AUTO_MERGE "${check_resolution_tree}"
-  if (cd "${WORK_DIR}/ccr" && check_conflict_resolution f.txt 2> /dev/null); then
-    check_resolution_actual=accept
-  else
-    check_resolution_actual=reject
-  fi
-  if [ "${check_resolution_actual}" != "$1" ]; then
-    fail "check_conflict_resolution: $2: expected $1, got ${check_resolution_actual}"
-  fi
+  check_resolution_files "$1" "$2"
 }
 
 check_resolution_raw accept "no final newline" \
   '<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\nc' 'aA\nb\nc'
 check_resolution_raw reject "no final newline, and the last line changed" \
   '<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\nc' 'aA\nb\nC'
+check_resolution_raw reject "the final newline was added" \
+  '<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\nc' 'aA\nb\nc\n'
+check_resolution_raw reject "the final newline was removed" \
+  '<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\nc\n' 'aA\nb\nc'
+check_resolution_raw accept "no final newline after a region at the end" \
+  'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\n' 'x\naA'
 # A checkout converts the repository's LF line endings to CRLF.
 printf '* text eol=crlf\n' > "${WORK_DIR}/ccr/.gitattributes"
 check_resolution_raw accept "CRLF line endings in the working tree" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\naA\r\nb\r\n'
 check_resolution_raw reject "CRLF line endings, and a clean line changed" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\naA\r\nB\r\n'
+check_resolution_raw reject "CRLF line endings, and a marker without a label remains" \
+  'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\naA\r\n>>>>>>>\r\nb\r\n'
+check_resolution_raw reject "CRLF line endings, and a separator remains" \
+  'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\na\r\n=======\r\nA\r\nb\r\n'
 rm "${WORK_DIR}/ccr/.gitattributes"
 
 echo "${SCRIPT_NAME}: OK"
