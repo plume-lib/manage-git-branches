@@ -1066,25 +1066,12 @@ is_cache_dir() {
   esac
 }
 
-# Usage: english_list
-# Reads names from standard input, one per line, and prints an English list
-# of the distinct ones, in sorted order, each in backquotes and followed by
-# "/".
-english_list() {
-  LC_ALL=C sort -u | awk '
-    { name[NR] = "`" $0 "/`" }
-    END {
-      if (NR == 1) {
-        print name[1]
-      } else if (NR == 2) {
-        print name[1] " and " name[2]
-      } else {
-        for (i = 1; i < NR; i++) {
-          printf "%s, ", name[i]
-        }
-        print "and " name[NR]
-      }
-    }'
+# Usage: dir_list
+# Reads directory names from standard input, one per line, and prints a
+# comma-separated list of the distinct ones, in sorted order, each in
+# backquotes and followed by "/".
+dir_list() {
+  LC_ALL=C sort -u | awk '{ printf "%s`%s/`", sep, $0; sep = ", " } END { print "" }'
 }
 
 # Usage: delete_stale_build_output OLD_NAMES
@@ -1235,7 +1222,7 @@ ${stale_marker}" ;;
     else
       stale_files="${stale_count} files"
     fi
-    stale_dirs="$(printf '%s' "${stale_names}" | english_list)"
+    stale_dirs="$(printf '%s' "${stale_names}" | dir_list)"
     echo "${SCRIPT_NAME}: deleted generated files in ${BRANCHDIR} that contained the pathname of $1 or were symbolic links into it: ${stale_files} in ${stale_dirs}.  The tools that generated them regenerate them." >&2
   fi
   if [ -n "${stale_configured}" ]; then
@@ -1244,7 +1231,7 @@ ${stale_marker}" ;;
 "*) stale_pronoun=them ;;
       *) stale_pronoun=it ;;
     esac
-    echo "${SCRIPT_NAME}: deleted generated files that contained the pathname of $1 from $(printf '%s\n' "${stale_configured#?}" | english_list) in ${BRANCHDIR}, which CMake or autotools configured.  Reconfigure ${stale_pronoun} before building there." >&2
+    echo "${SCRIPT_NAME}: deleted generated files that contained the pathname of $1 from $(printf '%s\n' "${stale_configured#?}" | dir_list) in ${BRANCHDIR}, which CMake or autotools configured.  Reconfigure ${stale_pronoun} before building there." >&2
   fi
 }
 
