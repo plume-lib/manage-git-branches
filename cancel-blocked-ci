@@ -141,9 +141,9 @@ def pr_name(label, ref):
     """Return the name, for output, of the given PR.
 
     Args:
-        label: a repository's name in output (by default, the repository's name, such as
-            "daikon").
-        ref: a reference to a PR of that repository, such as "#555" or "daikon#555".
+        label: the name in output of the PR's repository (by default, the repository's
+            name, such as "daikon").
+        ref: a reference to a PR, such as "#555" or "daikon#555".
 
     Returns:
         ref, preceded by the repository's label if ref is a bare "#N".
@@ -330,8 +330,8 @@ class Build:
 
         Args:
             status: the build's status, as GitHub names it, such as "queued" or "in_progress".
-            org: an Azure DevOps organization.
-            project: an Azure DevOps project of org.
+            org: the build's Azure DevOps organization.
+            project: the build's Azure DevOps project.
             build: a build's id, an integer such as 123 in ".../_build/results?buildId=123".
             name: a name for the build, such as its pipeline's name.
             url: the URL of the build's web page.
@@ -379,9 +379,9 @@ class Build:
         """Create a new Build for the GitHub Actions run r in the GitHub repository gh.
 
         Args:
-            gh: a repository's GitHub slug, such as "ORG/REPO".
-            r: a run in that repository, as a dict parsed from the GitHub API's JSON, with
-                keys such as "id", "status", and "html_url".
+            gh: the GitHub slug of the run's repository, such as "ORG/REPO".
+            r: a run, as a dict parsed from the GitHub API's JSON, with keys such as "id",
+                "status", and "html_url".
 
         Returns:
             The Build of r.
@@ -435,8 +435,7 @@ class Check(typing.NamedTuple):
     """A check run or commit status of a commit, as GitHub reports a CI build or job.
 
     Attributes:
-        status: the status, such as "queued" or "in_progress", or "completed" if the
-            check has completed.
+        status: the status, such as "queued", "in_progress", or "completed".
         name: the name of the check run or the context of the commit status.
         url: the URL of the check's details, such as the web page of a CI build or job.
     """
@@ -448,15 +447,15 @@ class Check(typing.NamedTuple):
 
 @functools.cache
 def checks(gh, sha):
-    """Return the check runs and commit statuses of commit sha in the GitHub repository gh.
+    """Return the check runs and commit statuses of the given commit.
 
     Args:
         gh: a repository's GitHub slug, such as "ORG/REPO".
-        sha: a commit in that repository, or "HEAD" for the head commit of its
+        sha: the SHA of a commit in that repository, or "HEAD" for the head commit of its
             default branch.
 
     Returns:
-        A list of Check, omitting each check run and commit status that has no URL.
+        Checks for the commit, omitting each check run and commit status that has no URL.
     """
     result = []
     for page in request_util.gh_api(
@@ -552,9 +551,7 @@ def pr_branches(gh, shared_branches, pr):
             keys such as "number", "headRefName", and "owner".
 
     Returns:
-        A set of the branches, named as branch_name names them:  "pull/N" for the PR's
-        number N, and the PR's head branch if it is a branch of gh other than the
-        shared branches.
+        A set of the branches, named as branch_name names them.
     """
     result = {f"pull/{pr['number']}"}
     if is_from_repo(gh, pr) and pr["headRefName"] not in shared_branches:
@@ -563,11 +560,11 @@ def pr_branches(gh, shared_branches, pr):
 
 
 def azure_build_state(org, project, build):
-    """Return the state of the given Azure Pipelines build.
+    """Return the BuildState of the given Azure Pipelines build.
 
     Args:
-        org: an Azure DevOps organization.
-        project: an Azure DevOps project of org.
+        org: the build's Azure DevOps organization.
+        project: the build's Azure DevOps project.
         build: a build's id, an integer such as 123 in ".../_build/results?buildId=123".
 
     Returns:
@@ -767,7 +764,7 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
             ids.
 
     Returns:
-        A list of the Build of each workflow.
+        The unfinished Builds.
     """
     try:
         workflows = [
@@ -1053,11 +1050,11 @@ def unfinished_other_builds(subject, gh, sha, branches):
     Args:
         subject: what the builds test, such as a PR; used for diagnostics.
         gh: a repository's GitHub slug, such as "ORG/REPO".
-        sha: a commit in that repository.
+        sha: the SHA of a commit in that repository.
         branches: branches, named as branch_name names them.
 
     Returns:
-        A list of the Build of each build.
+        The unfinished Builds.
     """
     builds = {}  # the key attribute of each Build -> the Build
 
@@ -1143,7 +1140,7 @@ def blocked_pr_builds(gh, shared_branches, runs, blocked):
         blocked: a BlockedPr.
 
     Returns:
-        A list of the Build of each build.
+        The unfinished Builds.
     """
     subject, pr = blocked.name, blocked.pr
     try:
@@ -1198,7 +1195,10 @@ def redundant_builds(label, gh, runs, pr_shas):
 
 
 def main():
-    """Cancel, or with --dry-run report, the builds of blocked PRs and redundant builds."""
+    """Cancel the builds of blocked PRs and redundant builds.
+
+    With --dry-run, report them instead.
+    """
     parser = argparse.ArgumentParser(
         prog=PROGRAM, description=__doc__.splitlines()[0] if __doc__ else None
     )
