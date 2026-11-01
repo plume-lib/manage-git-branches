@@ -99,6 +99,8 @@ The commands are:
   resolve.  It checks every resolution, whether from rerere or from the
   agent:  that nothing outside the conflict regions changed and that no
   conflict marker remains.  Then it commits the merge and continues.
+  If the build fails, it asks the agent to fix it, up to 3 times, and
+  commits the fix.
   `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
   on.
   The agent runs in a sandbox, which requires a recent version:  Claude
@@ -121,8 +123,9 @@ The commands are:
   `[--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
-  succeeds.  It handles conflicts as `git-push-to` does, using `git rerere`
-  and an AI agent, and it accepts the same `--llm`, `--no-llm`,
+  succeeds.  It handles conflicts and a failed build as `git-push-to` does,
+  using `git rerere` and an AI agent, and it accepts the same `--llm`,
+  `--no-llm`,
   `--claude`, and `--codex` options.
   OTHER-REPO-DIR and the current directory must both be the top level of a
   working tree and must each have an upstream branch.
@@ -135,9 +138,18 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of `upstream`.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
-  It handles conflicts as `git-push-to` does, using `git rerere` and an AI
-  agent, and it accepts the same `--llm`, `--no-llm`, `--claude`,
+  It handles conflicts and a failed build as `git-push-to` does, using
+  `git rerere` and an AI agent, and it accepts the same `--llm`, `--no-llm`,
+  `--claude`,
   and `--codex` options.
+* [`resolve-conflicts`](resolve-conflicts)
+  `[--nocompile] [--claude | --codex] [-C DIR]`:
+  Runs `pr-status`, which regenerates `pr-dependencies.md`, then runs each
+  `git-push-to` command in its section "Dependency chains with conflicts",
+  with `--claude` (or `--codex`), which asks an AI agent for help.  Repeats
+  until no chain has conflicts, for up to 3 rounds; stops after a round in
+  which a chain fails.  It runs only the commands that `pr-status` writes,
+  and refuses any other.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but Eclipse `.project`
@@ -178,6 +190,14 @@ The commands are:
   whitespace and using the patience diff algorithm.
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
+* [`rerun-failed-ci`](rerun-failed-ci)
+  `[--dry-run] [--max-attempts N] [PR | BRANCH | URL]...`:
+  For each transient failure of a CI job, reruns it.  Works on the given
+  GitHub pull request (by default, the one for the current branch).  A URL
+  names an Azure Pipelines, CircleCI, or GitHub Actions job or workflow.
+  `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
+  shows a transient failure.  This command needs Python 3.9 or later and
+  `gh`.
 * [`normalize-log`](normalize-log) `[FILE]...`:
   Prints the file (by default, standard input) without formatting that
   affects a terminal:  terminal escape sequences, a leading byte order
@@ -219,6 +239,14 @@ takes effect when it is set to a non-empty value.
   means no limit.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
+* `AZURE_DEVOPS_EXT_PAT`: the commands that use the Azure DevOps API use this
+  Azure DevOps personal access token, which must have the
+  "Build (Read & execute)" scope.  If it is not set, they use the account
+  that `az login` logged in.
+* `CIRCLECI_CLI_TOKEN`: the commands that use the CircleCI API use this
+  CircleCI API token.  If it is not set, they use the `token` in
+  `~/.circleci/cli.yml` or (for the snap package)
+  `~/snap/circleci/current/.circleci/cli.yml`, which `circleci setup` writes.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
   `git-orphaned-branches`, `git-new-branch`, `git-checkout-branch`, and
   `git-push-to` use these standard Git variables to select the SSH command

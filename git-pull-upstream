@@ -8,9 +8,9 @@
 # Usage:
 #   git-pull-upstream [--nocompile] [--llm | --no-llm] [--claude | --codex]
 #
-# By default, this script asks an AI agent to resolve merge conflicts, as
-# `git-push-to` does; the "--llm", "--no-llm", "--claude", and "--codex"
-# options are as for `git-push-to`.
+# By default, this script asks an AI agent to resolve merge conflicts and to
+# fix a failed build, as `git-push-to` does; the "--llm", "--no-llm",
+# "--claude", and "--codex" options are as for `git-push-to`.
 #
 # The upstream repository is the remote named `upstream` if there is one, as
 # in a fork, then `origin`, then the clone's only remote if it has exactly
