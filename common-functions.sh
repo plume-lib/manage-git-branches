@@ -1427,6 +1427,14 @@ merge_build_push() {
     echo "${SCRIPT_NAME}: cannot read HEAD in $(pwd)" >&2
     return 1
   fi
+  # A build of uncommitted changes, such as those that a failed attempt to
+  # fix the build left staged, says nothing about the commit that is pushed.
+  # Check before merging, so that a refusal leaves no merge commit behind.
+  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ] \
+    && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "${SCRIPT_NAME}: the working tree of $(pwd) has uncommitted changes; commit or discard them" >&2
+    return 1
+  fi
   if ! git merge -q --no-edit --no-log -m "${merge_message}" "$1"; then
     echo "${SCRIPT_NAME}: problem merging $3 into $(pwd)" >&2
     # A failed merge without MERGE_HEAD did not start, for example because it
@@ -1446,12 +1454,6 @@ merge_build_push() {
   fi
 
   if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
-    # A build of uncommitted changes, such as those that a failed attempt to
-    # fix the build left staged, says nothing about the commit that is pushed.
-    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-      echo "${SCRIPT_NAME}: the working tree of $(pwd) has uncommitted changes; commit or discard them" >&2
-      return 1
-    fi
     # If the merge changed nothing, it did not cause a failure of the build,
     # which the agent would merely work around.
     if [ -n "${5:-}" ] && [ "$(git rev-parse --verify HEAD)" != "${merge_orig_head}" ]; then

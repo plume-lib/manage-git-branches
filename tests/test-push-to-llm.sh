@@ -396,6 +396,28 @@ if [ -s "${STUB_LOG}" ]; then
   fail "rerun after a bad build fix: an agent ran: $(cat "${STUB_LOG}")"
 fi
 
+## Uncommitted changes are refused before the merge, which leaves no merge
+## commit behind.
+setup_case build-dirty build
+echo "an edit" >> "${feature_dir}/other.txt"
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -eq 0 ]; then
+  fail "uncommitted changes: git-push-to succeeded"
+fi
+if [ "$(git -C "${remote}" rev-parse refs/heads/feature)" != "${feature_head}" ]; then
+  fail "uncommitted changes: pushed to feature"
+fi
+case "${push_output}" in
+  *"has uncommitted changes"*) ;;
+  *) fail "uncommitted changes: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "${feature_head}" ]; then
+  fail "uncommitted changes: a merge commit was made"
+fi
+if [ -s "${STUB_LOG}" ]; then
+  fail "uncommitted changes: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
 ## An agent that creates a file that git ignores is rejected.
 setup_case build-ignored build
 STUB_BUILD=ignored push_to good --llm
