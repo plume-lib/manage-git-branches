@@ -1344,7 +1344,9 @@ pull_resolving() {
     echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
     return 1
   fi
-  if git -C "${pull_dir}" pull "$@"; then
+  # The "diff3" conflict style puts the merge base's text in each conflict
+  # region, which helps whoever resolves it.
+  if git -C "${pull_dir}" -c merge.conflictStyle=diff3 pull "$@"; then
     return 0
   fi
   echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
