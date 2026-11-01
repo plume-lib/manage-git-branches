@@ -1,21 +1,44 @@
 #!/bin/sh
 
 # Prints the lines of each FILE, a CI log, without the formatting that a CI
-# service or a terminal adds.  From each line, it removes a leading byte order
-# mark, a leading timestamp (as in a GitHub Actions or Azure Pipelines log),
-# terminal escape sequences (such as color codes), and carriage returns.
+# service or a terminal adds.  From each line, it removes terminal escape
+# sequences (such as color codes, cursor movements, and hyperlinks), a leading
+# byte order mark, and a leading timestamp (as in a GitHub Actions or Azure
+# Pipelines log).  It also removes carriage returns:  a carriage return at the
+# end of a line is deleted, and so is all text up to and including the last
+# other carriage return in the line.  That text is a progress message that a
+# terminal would overwrite.
 #
 # Usage:
 #   normalize-log [FILE]...
 #
 # With no FILE, this command reads standard input.
 
-# The start of a terminal escape sequence:  ESC [
-csi="$(printf '\033')\\["
+# The C locale makes sed accept arbitrary bytes, and it makes each range
+# expression denote a range of byte values.
+LC_ALL=C
+export LC_ALL
+
+esc="$(printf '\033')"
+bel="$(printf '\007')"
 cr="$(printf '\r')"
 bom="$(printf '\357\273\277')"
 
-exec sed -e "s/^${bom}//" \
+# The escape sequences are removed first, so that they do not hide a carriage
+# return or a leading byte order mark or timestamp.  The sed commands remove:
+#  * an operating system command (OSC), such as a hyperlink:  ESC ] then text
+#    that ends with BEL or with ESC \
+#  * a control sequence (CSI), such as a color code:  ESC [ then parameter
+#    bytes, intermediate bytes, and a final byte, as in "ESC [ 1 ; 3 1 m"
+#  * any other escape sequence:  ESC then intermediate bytes and a final byte,
+#    as in "ESC ( B" or "ESC 7"
+exec sed -e "s|${esc}][^${bel}${esc}]*${bel}||g" \
+  -e "s|${esc}][^${bel}${esc}]*${esc}\\\\||g" \
+  -e "s|${esc}\\[[0-?]*[ -/]*[@-~]||g" \
+  -e "s|${esc}[ -/]*[0-~]||g" \
+  -e "s/${cr}*\$//" \
+  -e "s/.*${cr}//" \
+  -e "s/^${bom}//" \
+  -e 's/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z$//' \
   -e 's/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z //' \
-  -e "s/${csi}[0-9;]*[A-Za-z]//g" \
-  -e "s/${cr}//g" -- "$@"
+  -- "$@"

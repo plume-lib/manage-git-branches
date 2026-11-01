@@ -156,9 +156,11 @@ The commands are:
   changes that have not been merged into the current branch do not appear.
 * [`normalize-log`](normalize-log) `[FILE]...`:
   Prints each CI log (by default, standard input) without the formatting that
-  a CI service or a terminal adds:  a leading byte order mark, a leading
-  timestamp (as in a GitHub Actions or Azure Pipelines log), terminal escape
-  sequences, and carriage returns.
+  a CI service or a terminal adds:  terminal escape sequences, a leading byte
+  order mark, a leading timestamp (as in a GitHub Actions or Azure Pipelines
+  log), and carriage returns.  Of a line that contains a carriage return before
+  its end, it prints only the text after the last such carriage return, as a
+  terminal would show it.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
