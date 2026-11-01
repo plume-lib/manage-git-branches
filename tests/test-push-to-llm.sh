@@ -386,10 +386,10 @@ case "${push_output}" in
 esac
 
 ## A resolution that `git rerere` recorded needs no agent, whether or not
-## rerere stages the files that it resolves, and is used even with --no-llm.
-for rerere_case in false:--llm true:--llm false:--no-llm true:--no-llm; do
-  auto_update="${rerere_case%%:*}"
-  setup_case "rerere-${auto_update}${rerere_case#*:}"
+## rerere stages the files that it resolves.  test-push-to-rerere.sh tests
+## such a resolution with --no-llm.
+for auto_update in false true; do
+  setup_case "rerere-${auto_update}"
   git -C "${feature_dir}" config rerere.enabled true
   git -C "${feature_dir}" config rerere.autoUpdate "${auto_update}"
   git -C "${feature_dir}" fetch -q
@@ -400,8 +400,8 @@ for rerere_case in false:--llm true:--llm false:--no-llm true:--no-llm; do
     -e '/^>>>>>>> /d' file.txt > file.txt.new \
     && mv file.txt.new file.txt && git add file.txt && git commit -q --no-edit) 2> /dev/null
   git -C "${feature_dir}" reset -q --hard "${feature_head}"
-  push_to none "${rerere_case#*:}"
-  check_resolved "" "rerere (autoUpdate ${auto_update}, ${rerere_case#*:})"
+  push_to none --llm
+  check_resolved "" "rerere (autoUpdate ${auto_update})"
 done
 
 ## `git-pull-upstream` resolves conflicts too.

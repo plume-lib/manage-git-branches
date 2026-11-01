@@ -87,6 +87,19 @@
 # branch, with the same content as before.  Its message consists of the
 # messages of the branch's own commits.
 
+# Conflicts
+#
+# When the merge of FROM_DIR's branch into TO_DIR has conflicts that
+# `git rerere` or an AI agent (see below) resolves, this script checks the
+# resolution:  every change relative to AUTO_MERGE, git's automatic merge,
+# must be inside a conflict region, and no conflict marker may remain.  Then
+# it stages the files, commits the merge, and continues.  Only content
+# conflicts are handled, in which every conflicted file contains conflict
+# markers, and only when the working tree has no other changes.  Otherwise,
+# this script stops with the merge still in progress, for the user to finish
+# or to abort with `git merge --abort`.  The merge uses the "diff3" conflict
+# style, which shows the merge base's text in each conflict region.
+
 # Asking an AI agent
 #
 # Unless "--no-llm" is given, this script asks an AI agent for help:  Claude
@@ -97,16 +110,10 @@
 # If the agent cannot be run because its command is not on the PATH, this
 # script acts as it does with "--no-llm".
 #
-# When the merge of FROM_DIR's branch into TO_DIR has conflicts that
-# `git rerere` does not resolve, the agent edits the conflicted files.  This
-# script checks the resolution, whether by the agent or by rerere:  every
-# change relative to AUTO_MERGE, git's automatic merge, must be inside a
-# conflict region, and no conflict marker may remain.  Then it stages the
-# files, commits the merge, and continues.  The agent resolves only content
-# conflicts, in which every conflicted file contains conflict markers, and
-# only when the working tree has no other changes.  If the agent fails, or
-# its resolution fails the checks, this script stops with the merge still in
-# progress, for the user to finish or to abort with `git merge --abort`.
+# When the merge has conflicts that `git rerere` does not resolve, the agent
+# edits the conflicted files, and this script checks its resolution as
+# described above.  If the agent fails, this script stops with the merge
+# still in progress.
 
 # Here is an example of use.
 #
