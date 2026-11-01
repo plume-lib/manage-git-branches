@@ -424,7 +424,7 @@ case "${push_output}" in
 esac
 
 ## A separator is permitted in a file whose sides contain a line "=======".
-setup_case separator-content "======="
+setup_case separator-content "" "======="
 push_to separator --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "separator in a file that contains one: git-push-to failed: ${push_output}"
