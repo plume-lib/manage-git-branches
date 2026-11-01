@@ -48,6 +48,15 @@ The commands are:
   contents are the same as the current directory's, including uncommitted
   changes, untracked files, and build output; `--clean` and `--copy` make
   other kinds of directory.
+  Instead of BRANCHNAME, the argument can be a slug of the form
+  `ORG:BRANCHNAME`, such as `git-new-branch mernst:feature`, in any working
+  tree of the project, such as `PROJECT`, `PROJECT-fork-OTHERORG`, or one of
+  their branch directories.  It does what `git-new-branch --clean BRANCHNAME`
+  does in the sibling clone `PROJECT-fork-ORG`:  it pulls there (only if the
+  pull can fast-forward), then makes the directory
+  `PROJECT-fork-ORG-branch-BRANCHNAME` at the commit of `PROJECT-fork-ORG`,
+  with none of the current directory's changes.  As for `git-push-to`, ORG
+  `-` stands for the clone `PROJECT` itself.
   `git-new-branch --help` (or `-h`) prints a synopsis, which describes the
   modes.  The comments in [`git-new-branch`](git-new-branch) give the
   details, such as when the fast-forward is not made and which copied build
