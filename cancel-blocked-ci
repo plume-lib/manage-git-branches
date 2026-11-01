@@ -290,7 +290,7 @@ def branch_name(branch):
 
 
 def branch_subject(label, branch):
-    """Return the name, for output, of the given branch of the given repository.
+    """Return the name of the given branch of the given repository.  Used for diagnostics.
 
     Args:
         label: a repository's label, its name in output, such as "daikon".
@@ -517,8 +517,9 @@ def check_urls(gh, shas):
     Returns:
         A map from each of shas to the URLs of that commit's commit statuses and check
         runs, omitting each that has no URL.  For a check that ran more than once on the
-        commit, the URLs can include only the most recent check run.  The list of a commit
-        that GitHub does not have is empty.
+        commit, the URLs include only its most recent check run if the commit has at most
+        100 check runs and commit statuses, and all of its check runs otherwise.  The list
+        of a commit that GitHub does not have is empty.
     """
     owner, name = gh.split("/")
     aliases = "".join(
@@ -653,7 +654,8 @@ def azure_projects(urls):
         urls: some URLs, such as those of a commit's check runs and commit statuses.
 
     Returns:
-        A set of the organization and project of each Azure Pipelines build among urls.
+        A set of pairs (org, project), such as ("checkerframework", "checker-framework"),
+        one for each Azure Pipelines project of a build among urls.
     """
     return {parsed[:2] for url in urls if (parsed := ci_build.AzureBuildUrlParts.from_url(url))}
 
@@ -669,7 +671,7 @@ def azure_build_waits(org, project, build):
         build: a build's id, an integer such as 123 in ".../_build/results?buildId=123".
 
     Returns:
-        True if a check of a stage of the build is in progress.
+        True if some check of a stage of the build is in progress.
     """
     api = f"{ci_build.azure_api(org, project, build)}/timeline?api-version=7.1"
     timeline = request_util.json_object(ci_build.azure_get(api) or {}, api)
@@ -834,8 +836,8 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
         workflows = [
             w
             for p in recent_pipelines(project)
-            if p.json["vcs"].get("revision") == sha and branch_name(p.branch) in branches
-            for w in unfinished_workflows(p.json["id"])
+            if p.api_pipeline["vcs"].get("revision") == sha and branch_name(p.branch) in branches
+            for w in unfinished_workflows(p.api_pipeline["id"])
         ]
     except request_util.REQUEST_ERRORS as e:
         print(
@@ -888,13 +890,13 @@ class CircleciPipeline(typing.NamedTuple):
         project: the pipeline's CircleCI project slug, such as "gh/ORG/REPO".
         branch: the pipeline's branch, as circleci_pipeline_dict_branch returns it, such as
             "main" or "pull/123".
-        json: the pipeline, as a dict parsed from the CircleCI API's JSON, with keys such as
-            "id", "number", and "vcs".
+        api_pipeline: the pipeline, as a dict parsed from the CircleCI API's JSON, with keys
+            such as "id", "number", and "vcs".
     """
 
     project: str
     branch: str
-    json: dict
+    api_pipeline: dict
 
 
 class CircleciWorkflow(typing.NamedTuple):
@@ -902,12 +904,12 @@ class CircleciWorkflow(typing.NamedTuple):
 
     Attributes:
         pipeline: the CircleciPipeline of the workflow's pipeline.
-        json: the workflow, as a dict parsed from the CircleCI API's JSON, with keys such as
-            "id", "name", "status", and "created_at".
+        api_workflow: the workflow, as a dict parsed from the CircleCI API's JSON, with
+            keys such as "id", "name", "status", and "created_at".
     """
 
     pipeline: CircleciPipeline
-    json: dict
+    api_workflow: dict
 
 
 @functools.cache
@@ -987,7 +989,7 @@ def redundant_circleci_workflows(label, gh, head_urls):
         CircleciWorkflow(p, w)
         for p, pipeline_workflows in zip(
             pipelines,
-            concurrently(lambda p: unfinished_workflows(p.json["id"]), pipelines),
+            concurrently(lambda p: unfinished_workflows(p.api_pipeline["id"]), pipelines),
             strict=True,
         )
         for w in pipeline_workflows
@@ -995,15 +997,17 @@ def redundant_circleci_workflows(label, gh, head_urls):
     return [
         RedundantBuild(
             branch_subject(label, w.pipeline.branch),
-            Build.from_circleci_workflow(w.json["status"], w.json["id"], w.json["name"]),
-            f", made redundant by workflow {latest.json['id']}",
+            Build.from_circleci_workflow(
+                w.api_workflow["status"], w.api_workflow["id"], w.api_workflow["name"]
+            ),
+            f", made redundant by workflow {latest.api_workflow['id']}",
         )
         for w, latest in superseded(
             workflows,
-            lambda w: (w.pipeline.project, w.pipeline.branch, w.json["name"]),
-            lambda w: (w.pipeline.json["number"], w.json["created_at"]),
-            lambda w: w.pipeline.json["vcs"].get("revision"),
-            lambda w: w.json["status"] in CIRCLECI_SUPERSEDING,
+            lambda w: (w.pipeline.project, w.pipeline.branch, w.api_workflow["name"]),
+            lambda w: (w.pipeline.api_pipeline["number"], w.api_workflow["created_at"]),
+            lambda w: w.pipeline.api_pipeline["vcs"].get("revision"),
+            lambda w: w.api_workflow["status"] in CIRCLECI_SUPERSEDING,
         )
     ]
 
