@@ -7,6 +7,7 @@ the pr-status script that it imports.
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import importlib.machinery
 import importlib.util
 import io
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+from email.message import Message
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest import mock
@@ -63,6 +65,11 @@ BuildState = cancel_blocked_ci.BuildState
 class CancelBlockedCiTest(unittest.TestCase):
     """Tests for cancel-blocked-ci."""
 
+    def setUp(self) -> None:
+        """Forget the CircleCI responses of other tests."""
+        cancel_blocked_ci.recent_pipelines.cache_clear()
+        cancel_blocked_ci.unfinished_workflows.cache_clear()
+
     def test_options(self) -> None:
         """An unknown option is rejected before anything is examined or cancelled."""
         for args in [["--dryrun"], ["extra"]]:
@@ -76,6 +83,274 @@ class CancelBlockedCiTest(unittest.TestCase):
                 cancel_blocked_ci.main()
             self.assertEqual(cm.exception.code, 2)
 
+    def test_azure_projects(self) -> None:
+        """Each Azure Pipelines project comes from a build URL, in either form."""
+        urls = [
+            "https://github.com/org/repo/actions/runs/1",
+            "https://dev.azure.com/org/p/_build/results?buildId=7",
+            "https://dev.azure.com/org/p/_build/results?buildId=9",
+            "https://org2.visualstudio.com/q/_build/results?buildId=8",
+        ]
+        self.assertEqual(cancel_blocked_ci.azure_projects(urls), {("org", "p"), ("org2", "q")})
+
+    def test_check_urls(self) -> None:
+        """One GraphQL request finds the URLs, and a commit with over 100 checks uses REST."""
+        azure = "https://dev.azure.com/org/p/_build/results?buildId=7"
+        circleci = "https://app.circleci.com/pipelines/gh/org/repo/1/workflows/w"
+
+        def contexts(*nodes: dict[str, Any], more: bool = False) -> dict[str, Any]:
+            return {
+                "statusCheckRollup": {
+                    "contexts": {"pageInfo": {"hasNextPage": more}, "nodes": list(nodes)}
+                }
+            }
+
+        response = {
+            "data": {
+                "repository": {
+                    # A check run and a commit status, and a commit status without a URL.
+                    "c0": contexts(
+                        {"detailsUrl": azure}, {"targetUrl": circleci}, {"targetUrl": None}
+                    ),
+                    "c1": contexts({"detailsUrl": azure}, more=True),
+                    # A commit that GitHub does not have.
+                    "c2": None,
+                    # A commit without check runs or commit statuses.
+                    "c3": {"statusCheckRollup": None},
+                }
+            }
+        }
+        queries = []
+
+        def run(cmd: list[str]) -> str:
+            queries.append(cmd)
+            return json.dumps(response)
+
+        rest = [Check("completed", "ci", azure), Check("completed", "ci", circleci)]
+        with (
+            mock.patch.object(request_util, "run", run),
+            mock.patch.object(
+                cancel_blocked_ci, "checks", lambda _gh, sha: rest if sha == "pr1" else []
+            ),
+        ):
+            result = cancel_blocked_ci.check_urls("org/repo", ["HEAD", "pr1", "pr2", "pr3"])
+        self.assertEqual(len(queries), 1)
+        self.assertIn('c0: object(expression: "HEAD")', queries[0][-1])
+        self.assertEqual(
+            result,
+            {"HEAD": [azure, circleci], "pr1": [azure, circleci], "pr2": [], "pr3": []},
+        )
+
+    def test_redundant_azure_builds(self) -> None:
+        """A build that waits for a check of a stage makes no older build redundant.
+
+        Nor does a build of the same commit.
+        """
+
+        def build(n: int) -> dict[str, Any]:
+            return {
+                "id": n,
+                "status": "inProgress",
+                "reason": "individualCI",
+                "sourceBranch": "refs/heads/main",
+                # Builds 0 and 2 test the same commit.
+                "sourceVersion": f"commit{n % 2}" if n != 3 else "commit3",
+                "definition": {"id": 1, "name": "ci"},
+                "_links": {
+                    "web": {"href": f"https://dev.azure.com/org/p/_build/results?buildId={n}"}
+                },
+            }
+
+        def azure_get(url: str) -> Any:
+            if "/timeline" not in url:
+                return {"value": [build(n) for n in (0, 1, 2, 3)]}
+            # Build 3 waits for an approval.
+            state = "inProgress" if "/builds/3/" in url else "completed"
+            return {"records": [{"type": "Checkpoint.Approval", "state": state}]}
+
+        with mock.patch.object(ci_build, "azure_get", azure_get):
+            result = cancel_blocked_ci.redundant_azure_builds("repo", "org/repo", "org", "p")
+        self.assertEqual(
+            [(build.key, reason) for _, build, reason in result],
+            [(("azure", "org", "1"), ", made redundant by build 2")],
+        )
+
+    def test_circleci_pagination(self) -> None:
+        """Every page of recent pipelines and of their workflows is read, and no older page."""
+        now = dt.datetime.now(dt.UTC)
+        recent, old = str(now), str(now - 2 * cancel_blocked_ci.CIRCLECI_WINDOW)
+
+        def pipeline(n: int, created: str, trigger: str = "webhook") -> dict[str, Any]:
+            return {
+                "id": f"p{n}",
+                "number": n,
+                "created_at": created,
+                "vcs": {"branch": "main", "revision": f"commit{n}"},
+                "trigger": {"type": trigger},
+            }
+
+        def workflow(n: int) -> dict[str, Any]:
+            return {"id": f"w{n}", "name": "build", "status": "running", "created_at": recent}
+
+        # Each page token contains characters that must be escaped in a URL.
+        pages = {
+            f"{CIRCLECI}/project/gh/org/repo/pipeline": {
+                # A scheduled pipeline is never redundant, so its workflows are not read.
+                "items": [pipeline(4, recent, "scheduled_pipeline"), pipeline(3, recent)],
+                "next_page_token": "a+b/c=",
+            },
+            f"{CIRCLECI}/project/gh/org/repo/pipeline?page-token=a%2Bb%2Fc%3D": {
+                "items": [pipeline(2, recent), pipeline(1, recent), pipeline(0, old)],
+                "next_page_token": "older",
+            },
+            f"{CIRCLECI}/pipeline/p2/workflow": {"items": [workflow(2)], "next_page_token": None},
+            f"{CIRCLECI}/pipeline/p1/workflow": {"items": [], "next_page_token": "x+y"},
+            f"{CIRCLECI}/pipeline/p1/workflow?page-token=x%2By": {
+                "items": [workflow(1)],
+                "next_page_token": None,
+            },
+        }
+        # Pipeline 3 was deleted after it was listed.
+        deleted = f"{CIRCLECI}/pipeline/p3/workflow"
+        requested = []
+
+        def http(_method: str, url: str, *_: Any, **_kwargs: Any) -> bytes:
+            requested.append(url)
+            if url not in pages:
+                raise urllib.error.HTTPError(url, 404, "Not Found", Message(), io.BytesIO())
+            return json.dumps(pages[url]).encode()
+
+        with (
+            mock.patch.object(request_util, "http", http),
+            mock.patch.object(ci_build, "circleci_token", return_value="token"),
+        ):
+            result = cancel_blocked_ci.redundant_circleci_workflows(
+                "repo", "org/repo", ["https://app.circleci.com/workflow/x"]
+            )
+        self.assertEqual(sorted(requested), sorted([*pages, deleted]))
+        self.assertEqual(
+            [(build.key, reason) for _, build, reason in result],
+            [(("circleci", "w1"), ", made redundant by workflow w2")],
+        )
+
+    def test_redundant_runs(self) -> None:
+        """Only a run that a push or a pull request started can be redundant.
+
+        A run that waits for a concurrency group, or that tests the same commit, makes no
+        older run redundant.
+        """
+
+        def run(n: int, event: str, status: str = "queued", sha: str = "") -> dict[str, Any]:
+            return {
+                "id": n,
+                "name": "build",
+                "status": status,
+                "html_url": f"https://github.com/org/repo/actions/runs/{n}",
+                "workflow_id": 7,
+                "event": event,
+                "head_sha": sha or f"sha{n}",
+                "created_at": f"2026-10-31T00:00:0{n}Z",
+                "head_branch": "main",
+                "head_repository": {"owner": {"login": "org"}},
+            }
+
+        runs = {
+            ("org", "main"): [
+                run(0, "push"),
+                run(1, "push"),
+                run(2, "schedule"),
+                run(3, "schedule"),
+                run(4, "push", "pending"),
+                # Labeling the PR started run 6, which tests the same commit as run 5.
+                run(5, "pull_request", sha="pr"),
+                run(6, "pull_request", sha="pr"),
+            ]
+        }
+        result = cancel_blocked_ci.redundant_runs("repo", "org/repo", runs)
+        self.assertEqual(
+            [(build.key, subject, reason) for subject, build, reason in result],
+            [(("github", 0), "repo main", ", made redundant by run 1")],
+        )
+
+    def test_redundant_runs_in_same_second(self) -> None:
+        """Of two runs created in the same second, the one with the greater id is more recent."""
+        runs = {
+            ("org", "main"): [
+                {
+                    "id": n,
+                    "name": "build",
+                    "status": "queued",
+                    "html_url": f"https://github.com/org/repo/actions/runs/{n}",
+                    "workflow_id": 7,
+                    "event": "push",
+                    "head_sha": f"sha{n}",
+                    "created_at": "2026-10-31T00:00:00Z",
+                }
+                for n in (8, 9)
+            ]
+        }
+        result = cancel_blocked_ci.redundant_runs("repo", "org/repo", runs)
+        self.assertEqual(
+            [(build.key, reason) for _, build, reason in result],
+            [(("github", 8), ", made redundant by run 9")],
+        )
+
+    def test_azure_response_not_object(self) -> None:
+        """A response that is JSON but not an object is reported, and does not crash."""
+
+        def empty_body(_url: str) -> Any:
+            return None
+
+        def timeline_list(url: str) -> Any:
+            if "/timeline" in url:
+                return [{"type": "Checkpoint.Approval", "state": "inProgress"}]
+            build = {
+                "id": 1,
+                "status": "inProgress",
+                "reason": "individualCI",
+                "sourceBranch": "refs/heads/main",
+                "sourceVersion": "commit1",
+                "definition": {"id": 1, "name": "ci"},
+                "_links": {"web": {"href": "https://dev.azure.com/org/p/_build"}},
+            }
+            return {"value": [build, {**build, "id": 2, "sourceVersion": "commit2"}]}
+
+        for azure_get in (empty_body, timeline_list):
+            with self.subTest(azure_get.__name__):
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(cancel_blocked_ci, "check_urls", return_value={"HEAD": []}),
+                    mock.patch.object(
+                        cancel_blocked_ci, "azure_projects", return_value={("org", "p")}
+                    ),
+                    mock.patch.object(ci_build, "azure_get", azure_get),
+                    mock.patch.object(
+                        cancel_blocked_ci, "redundant_circleci_workflows", return_value=[]
+                    ),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    result = cancel_blocked_ci.redundant_builds("repo", "org/repo", {}, [])
+                self.assertEqual(result, [])
+                self.assertIn("instead of a JSON object", stderr.getvalue())
+
+    def test_unreadable_azure_project(self) -> None:
+        """A response that is not JSON is reported, and the other CI services are examined."""
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(cancel_blocked_ci, "check_urls", return_value={"HEAD": []}),
+            mock.patch.object(cancel_blocked_ci, "azure_projects", return_value={("org", "p")}),
+            mock.patch.object(
+                ci_build, "azure_get", side_effect=json.JSONDecodeError("not JSON", "<html>", 0)
+            ),
+            mock.patch.object(
+                cancel_blocked_ci, "redundant_circleci_workflows", return_value=["workflow"]
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = cancel_blocked_ci.redundant_builds("repo", "org/repo", {}, [])
+        self.assertEqual(result, ["workflow"])
+        self.assertIn("repo: failed to find redundant Azure Pipelines builds", stderr.getvalue())
+
     def test_pr_name(self) -> None:
         """A bare "#N" is preceded by the repository's label, and another reference is not."""
         self.assertEqual(cancel_blocked_ci.pr_name("daikon", "#555"), "daikon #555")
@@ -83,16 +358,26 @@ class CancelBlockedCiTest(unittest.TestCase):
         # A reference with a prefix names its repository, even if the prefix is not the label.
         self.assertEqual(cancel_blocked_ci.pr_name("Daikon", "daikon#555"), "daikon#555")
 
+    def test_branch_subject(self) -> None:
+        """A branch that holds a PR is named as pr_name names the PR."""
+        for branch in ("refs/pull/123/merge", "pull/123"):
+            self.assertEqual(cancel_blocked_ci.branch_subject("daikon", branch), "daikon #123")
+        for branch in ("main", "refs/heads/main"):
+            self.assertEqual(cancel_blocked_ci.branch_subject("daikon", branch), "daikon main")
+
     def test_blocked_prs(self) -> None:
         """Open PRs make shared branches:  every base branch, and unblocked PRs' head branches.
 
         The head branch of a blocked PR, or of a PR from a fork, is not made shared.
         """
         prs = {
-            1: {"owner": "org", "headRefName": "feature", "baseRefName": "main"},
-            2: {"owner": "org", "headRefName": "feature", "baseRefName": "develop"},
-            3: {"owner": "org", "headRefName": "blocked-only", "baseRefName": "main"},
-            4: {"owner": "fork", "headRefName": "fix", "baseRefName": "main"},
+            n: {"owner": owner, "headRefName": head, "baseRefName": base, "headRefOid": f"sha{n}"}
+            for n, owner, head, base in [
+                (1, "org", "feature", "main"),
+                (2, "org", "feature", "develop"),
+                (3, "org", "blocked-only", "main"),
+                (4, "fork", "fix", "main"),
+            ]
         }
         model = mock.Mock()
         model.repo.label = "repo"
@@ -112,6 +397,7 @@ class CancelBlockedCiTest(unittest.TestCase):
             ],
         )
         self.assertEqual(repo.pr_shared_branches, {"main", "develop", "feature"})
+        self.assertEqual(repo.pr_shas, ["sha1", "sha2", "sha3", "sha4"])
 
     def test_circleci_workflows_of_jobs(self) -> None:
         """The workflows of jobs whose URLs do not contain workflow ids come from lookups.
