@@ -144,6 +144,26 @@ def request(
     return json.loads(content) if content else None
 
 
+def json_object(response: Any, url: str) -> dict[str, Any]:
+    """Return a response that should be a JSON object, or raise ValueError if it is not.
+
+    Args:
+        response: a response body parsed as JSON, as request returns it, such as a dict or
+            (for an empty body) None.
+        url: the URL that response came from; used for diagnostics.
+
+    Returns:
+        response, if it is a dict.
+
+    Raises:
+        ValueError: if response is not a dict.
+    """
+    if not isinstance(response, dict):
+        msg = f"{url} returned {response!r} instead of a JSON object"
+        raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
+    return response
+
+
 def failure(e: Exception) -> str:
     """Describe a failed command or HTTP request.
 
