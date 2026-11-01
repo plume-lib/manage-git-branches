@@ -25,7 +25,7 @@
 #  * build using `compile-project` (see its documentation),
 #  * push the current branch if the build succeeds.
 # If the build fails, this script asks the AI agent to fix it only if the
-# pull or the merge changed the current branch.
+# pull or the merge made a merge commit.
 # If the current branch already contains the upstream repository's default
 # branch, it skips the merge, and it stops there if the current branch matches
 # the branch that it pushes to (which differs from the branch that it pulls
@@ -171,15 +171,12 @@ fi
 # earlier run of this command made but did not push, as when its build
 # failed, and would copy that merge's commits onto the current branch.
 # `--no-edit` keeps the merge from stopping at an editor.
-# `merge_build_push` asks the agent to fix the build if the pull or the merge
-# changed the current branch.
-if ! pull_orig_head="$(git rev-parse --verify HEAD)"; then
-  echo "${SCRIPT_NAME}: cannot read HEAD in $(pwd)" >&2
-  exit 1
-fi
 if ! pull_resolving "${llm_agent}" "$(pwd)" -q --no-rebase --no-edit; then
   exit 1
 fi
+# `merge_build_push` asks the agent to fix the build if the pull or the merge
+# made a merge commit.
+pulled_merge="${pull_merge}"
 
 # Stop if there is nothing to merge and nothing to push.  If there is nothing
 # to merge, still build and push if the branch has commits that are not
@@ -219,6 +216,6 @@ if ! upstream_head="$(git rev-parse --verify --quiet "${upstream_ref}")"; then
 fi
 if ! merge_build_push "${upstream_head}" \
   "remote-tracking branch '${upstream_ref#refs/remotes/}'" "${upstream_ref}" \
-  "${nocompile}" "${llm_agent}" "${pull_orig_head}"; then
+  "${nocompile}" "${llm_agent}" "${pulled_merge}"; then
   exit 1
 fi

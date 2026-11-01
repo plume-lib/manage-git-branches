@@ -628,4 +628,29 @@ check_resolution_raw reject "CRLF line endings, and a separator remains" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\na\r\n=======\r\nA\r\nb\r\n'
 rm "${WORK_DIR}/ccr/.gitattributes"
 
+## Tests of merge_description.
+git init -q -b main "${WORK_DIR}/md"
+
+## Usage: check_merge_description SUBJECT EXPECTED
+## Checks that `merge_description` prints EXPECTED for a commit whose subject
+## is SUBJECT.  In EXPECTED, "HASH" stands for the commit's abbreviated hash.
+check_merge_description() {
+  git -C "${WORK_DIR}/md" commit -q --allow-empty -m "$1"
+  md_hash="$(git -C "${WORK_DIR}/md" rev-parse --short HEAD)"
+  md_expected="$(printf '%s\n' "$2" | sed -e "s/HASH/${md_hash}/")"
+  md_actual="$(cd "${WORK_DIR}/md" && merge_description HEAD)"
+  if [ "${md_actual}" != "${md_expected}" ]; then
+    fail "merge_description for [$1] printed [${md_actual}], not [${md_expected}]"
+  fi
+}
+
+check_merge_description "Merge branch 'main' into feature" "branch 'main'"
+check_merge_description "Merge remote-tracking branch 'upstream/master'" \
+  "remote-tracking branch 'upstream/master'"
+check_merge_description "Merge branch 'feature' of ../my repo into feature" \
+  "branch 'feature' of ../my repo"
+check_merge_description "Merge branch 'a' into b into c" "branch 'a' into b"
+check_merge_description "Combine the branches" "commit HASH"
+check_merge_description "Merge " "commit HASH"
+
 echo "${SCRIPT_NAME}: OK"
