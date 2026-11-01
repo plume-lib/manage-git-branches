@@ -27,6 +27,19 @@ import request_util  # ruff: ignore[module-import-not-at-top-of-file]
 class CiBuildTest(unittest.TestCase):
     """Tests for ci_build and request_util."""
 
+    def test_azure_build_url_from_url(self) -> None:
+        """The organization, project, and build are found in an Azure Pipelines URL."""
+        for url in [
+            "https://dev.azure.com/org/proj/_build/results?buildId=500&view=logs&jobId=a",
+            "https://org.visualstudio.com/proj/_build/results?buildId=500",
+        ]:
+            with self.subTest(url=url):
+                parsed = ci_build.AzureBuildUrlParts.from_url(url)
+                self.assertEqual(parsed, ci_build.AzureBuildUrlParts("org", "proj", 500))
+                assert parsed is not None
+                self.assertEqual((parsed.org, parsed.project, parsed.build), ("org", "proj", 500))
+        self.assertIsNone(ci_build.AzureBuildUrlParts.from_url("https://example.com/build/1"))
+
     def test_circleci_project_of_url(self) -> None:
         """The project slug is found in each kind of CircleCI URL that contains it."""
         workflow = "ecc46ce8-0000-0000-0000-000000000000"
@@ -47,6 +60,30 @@ class CiBuildTest(unittest.TestCase):
         ]:
             with self.subTest(url=url):
                 self.assertEqual(ci_build.circleci_project_of_url(url), expected)
+
+    def test_circleci_url_parts_from_url(self) -> None:
+        """The workflow, project, and job are found in each kind of CircleCI URL."""
+        workflow = "ecc46ce8-0000-0000-0000-000000000000"
+        for url, expected in [
+            (f"https://app.circleci.com/workflow/{workflow}", (workflow, None, None)),
+            (
+                f"https://app.circleci.com/pipelines/gh/org/repo/7/workflows/{workflow}/jobs/9",
+                (workflow, "gh/org/repo", 9),
+            ),
+            ("https://app.circleci.com/pipelines/github/org/repo/7", (None, "gh/org/repo", None)),
+            (
+                "https://circleci.com/gh/org/repo/230602?utm_campaign=x",
+                (None, "gh/org/repo", 230602),
+            ),
+            ("https://circleci.com/docs/", (None, None, None)),
+            ("https://example.com/build/1", None),
+        ]:
+            with self.subTest(url=url):
+                parsed = ci_build.CircleciUrlParts.from_url(url)
+                self.assertEqual(parsed, expected)
+                if parsed is not None:
+                    self.assertEqual((parsed.workflow, parsed.project, parsed.job), expected)
+        self.assertEqual(ci_build.CircleciUrlParts(workflow, None, 9).lookup_workflow(), workflow)
 
     def test_azure_sign_in_page(self) -> None:
         """A response that is not JSON marks the project private, and credentials are used."""
@@ -147,23 +184,23 @@ class CiBuildTest(unittest.TestCase):
             ):
                 request_util.request_object("GET", url)
 
-    def test_circleci_workflow_of_url_not_object(self) -> None:
+    def test_circleci_lookup_workflow_not_object(self) -> None:
         """A job lookup whose response is not a JSON object raises an error in REQUEST_ERRORS."""
-        url = "https://app.circleci.com/jobs/github/org/repo/123"
+        parts = ci_build.CircleciUrlParts(None, "gh/org/repo", 123)
         for content in [b"", b"[]"]:
             with (
                 self.subTest(content=content),
                 mock.patch.object(request_util, "http", return_value=content),
                 self.assertRaises(request_util.REQUEST_ERRORS),
             ):
-                ci_build.circleci_workflow_of_url(url)
+                parts.lookup_workflow()
 
-    def test_circleci_workflow_of_url_lookup(self) -> None:
+    def test_circleci_lookup_workflow(self) -> None:
         """A job's workflow is looked up when its URL does not name the workflow."""
-        url = "https://app.circleci.com/jobs/github/org/repo/123"
+        parts = ci_build.CircleciUrlParts(None, "gh/org/repo", 123)
         response = b'{"latest_workflow": {"id": "W"}}'
         with mock.patch.object(request_util, "http", return_value=response):
-            self.assertEqual(ci_build.circleci_workflow_of_url(url), ("W", 123))
+            self.assertEqual(parts.lookup_workflow(), "W")
 
     def test_azure_request_refusals(self) -> None:
         """A request of Azure DevOps treats a sign-in page as a refusal; another does not."""
