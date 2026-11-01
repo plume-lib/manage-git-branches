@@ -22,19 +22,20 @@ COMMAND_TIMEOUT = 300
 # How long, in seconds, http waits for the server to connect or to send data.
 HTTP_TIMEOUT = 60
 
-# The errors that a command or an HTTP request can raise.  A
-# subprocess.CalledProcessError or a subprocess.TimeoutExpired indicates a failed
-# command.  An OSError, such as a
-# urllib.error.URLError, a TimeoutError, or a ConnectionResetError, or an
-# http.client.HTTPException, such as an http.client.IncompleteRead, indicates a failed
-# connection.  A ValueError or KeyError indicates a response that is not JSON or that
-# lacks an expected field.
+# The errors that a command or an HTTP request can raise.
 REQUEST_ERRORS = (
+    # A failed connection, such as a urllib.error.URLError, a TimeoutError, or a
+    # ConnectionResetError.
     OSError,
+    # A failed connection, such as an http.client.IncompleteRead.
     HTTPException,
+    # A command that exited with a nonzero status.
     subprocess.CalledProcessError,
+    # A command that ran longer than COMMAND_TIMEOUT seconds.
     subprocess.TimeoutExpired,
+    # A response that is not JSON, or that is JSON of an unexpected form.
     ValueError,
+    # A response that lacks an expected field.
     KeyError,
 )
 
@@ -161,7 +162,7 @@ def failure(e: Exception) -> str:
 
 
 def error_message(text: str) -> str:
-    """Extract the explanation from the body of an HTTP error response.
+    """Extract the explanation part from the body of an HTTP error response.
 
     The body can be a long HTML page.
 
