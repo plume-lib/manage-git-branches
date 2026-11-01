@@ -93,7 +93,7 @@ The commands are:
   has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
   directories form one more chain per PROJECT.
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
-  When a merge has conflicts that `git rerere` does not resolve, it
+  When a merge or a pull has conflicts that `git rerere` does not resolve, it
   asks Claude (or, with `--codex`, Codex) to edit the conflicted hunks.  It
   checks that nothing outside the conflict regions changed and that no
   conflict marker remains, commits the merge, and continues.

@@ -273,6 +273,21 @@ case "${push_output}" in
   *) fail "agent that changes git's configuration: wrong diagnostic: ${push_output}" ;;
 esac
 
+## A rerun does not mistake the merge that an earlier run left in progress
+## for a conflicted pull.
+setup_case rerun
+push_to none --llm
+: > "${STUB_LOG}"
+push_to good --llm
+check_not_resolved "rerun"
+case "${push_output}" in
+  *"a merge is in progress"*) ;;
+  *) fail "rerun: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "rerun: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
 ## A resolution that `git rerere` recorded needs no agent, whether or not
 ## rerere stages the files that it resolves.
 for auto_update in false true; do
@@ -289,6 +304,32 @@ for auto_update in false true; do
   push_to none --llm
   check_resolved "" "rerere (autoUpdate ${auto_update})"
 done
+
+## A conflict in pulling TO_DIR from its remote is resolved too.
+setup_case pull
+git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+printf '%s\n' one two three-remote four five six SEVEN-feature eight nine > "${case_dir}/other-clone/file.txt"
+git -C "${case_dir}/other-clone" commit -q -a -m "Change feature remotely"
+git -C "${case_dir}/other-clone" push -q
+printf '%s\n' one two three-local four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Change feature locally"
+push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "conflict in pulling: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "conflict in pulling: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+expected="$(printf '%s\n' ONE two three-local three-remote four five six SEVEN-feature SEVEN-main eight nine)"
+if [ "$(git -C "${remote}" show refs/heads/feature:file.txt)" != "${expected}" ]; then
+  fail "conflict in pulling: wrong result: $(git -C "${remote}" show refs/heads/feature:file.txt)"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature^1)"
+case "${message}" in
+  *Conflicts*) fail "conflict in pulling: the message lists the conflicts: ${message}" ;;
+  "Merge branch 'feature' of "*) ;;
+  *) fail "conflict in pulling: wrong message for the merge of the pull: ${message}" ;;
+esac
 
 ## `git-pull-upstream` resolves conflicts too.
 setup_case pull-upstream

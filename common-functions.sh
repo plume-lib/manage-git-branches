@@ -1262,6 +1262,50 @@ parse_llm_option() {
   return 0
 }
 
+## Usage: pull_resolving RESOLVER DIRECTORY PULL-ARGUMENT...
+## Runs `git -C DIRECTORY pull PULL-ARGUMENT...`.  If the pull merges, the
+## merge has conflicts, and RESOLVER is not empty, resolves them with
+## `resolve_merge_conflicts` and commits the merge with the message that
+## `git pull` composed.  (A pull that rebases cannot be resolved this way.)
+## Returns 1, after printing a diagnostic, if a merge is already in progress
+## in DIRECTORY, or if the pull fails and its conflicts are not resolved.
+pull_resolving() {
+  pull_resolver="$1"
+  pull_dir="$2"
+  shift 2
+  # Otherwise, `git pull` would refuse to run, and the merge in progress would
+  # seem to be the pull's.
+  if git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
+    return 1
+  fi
+  if git -C "${pull_dir}" pull "$@"; then
+    return 0
+  fi
+  if [ -z "${pull_resolver}" ] \
+    || ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
+    return 1
+  fi
+  # A subshell, so that the current directory does not change.
+  (
+    if ! cd "${pull_dir}"; then
+      echo "${SCRIPT_NAME}: cannot cd to ${pull_dir}" >&2
+      exit 1
+    fi
+    pull_source="$(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null)" \
+      || pull_source="its upstream branch"
+    if ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
+      exit 1
+    fi
+    # MERGE_MSG ends with comment lines that list the conflicts.
+    if ! git commit -q --no-edit --cleanup=strip; then
+      echo "${SCRIPT_NAME}: cannot commit the merge of ${pull_source} in $(pwd)" >&2
+      exit 1
+    fi
+  )
+}
+
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and

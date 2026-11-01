@@ -94,16 +94,19 @@
 # options "--llm", "--claude", and "--codex" each override an earlier
 # "--no-llm", and "--no-llm" overrides any of them that precedes it.
 #
-# When the merge of FROM_DIR's branch into TO_DIR has conflicts that
-# `git rerere` does not resolve, the agent edits the conflicted files.  This
-# script checks the resolution, whether by the agent or by rerere:  every
-# change relative to AUTO_MERGE, git's automatic merge, must be inside a
-# conflict region, and no conflict marker may remain.  Then it stages the
-# files, commits the merge, and continues.  The agent resolves only content
-# conflicts, in which every conflicted file contains conflict markers, and
-# only when the working tree has no other changes.  If the agent fails, or
-# its resolution fails the checks, this script stops with the merge still in
-# progress, for the user to finish or to abort with `git merge --abort`.
+# When a merge has conflicts that `git rerere` does not resolve, the agent
+# edits the conflicted files.  That applies to the merge of FROM_DIR's branch
+# into TO_DIR, and to the merges of the pulls that update FROM_DIR and TO_DIR
+# from their remotes.  This script checks the resolution, whether by the agent
+# or by rerere:  every change relative to AUTO_MERGE, git's automatic merge,
+# must be inside a conflict region, and no conflict marker may remain.  Then
+# it stages the files, commits the merge, and continues.  The agent resolves
+# only content conflicts, in which every conflicted file contains conflict
+# markers, and only when the working tree has no other changes.  A pull that
+# rebases, as `pull.rebase` can make it do, is not resolved.  If the agent
+# fails, or its resolution fails the checks, this script stops with the merge
+# still in progress, for the user to finish or to abort with
+# `git merge --abort`.
 
 # Here is an example of use.
 #
@@ -380,8 +383,7 @@ git_push_to() {
     return 1
   fi
 
-  if ! git -C "$from_absolute" pull -q; then
-    echo "${SCRIPT_NAME}: problem pulling ${from_absolute}" >&2
+  if ! pull_resolving "${llm_agent}" "${from_absolute}" -q; then
     return 1
   fi
 
@@ -400,8 +402,7 @@ git_push_to() {
     return 1
   fi
 
-  if ! git pull -q; then
-    echo "${SCRIPT_NAME}: problem pulling in ${to_absolute}" >&2
+  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q; then
     return 1
   fi
 
