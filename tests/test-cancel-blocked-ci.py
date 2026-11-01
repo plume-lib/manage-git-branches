@@ -101,10 +101,11 @@ class CancelBlockedCiTest(unittest.TestCase):
     def test_redundant_runs(self) -> None:
         """Only a run that a push or a pull request started can be redundant.
 
-        A run that waits for a concurrency group makes no older run redundant.
+        A run that waits for a concurrency group, or that tests the same commit, makes no
+        older run redundant.
         """
 
-        def run(n: int, event: str, status: str = "queued") -> dict[str, Any]:
+        def run(n: int, event: str, status: str = "queued", sha: str = "") -> dict[str, Any]:
             return {
                 "id": n,
                 "name": "build",
@@ -112,6 +113,7 @@ class CancelBlockedCiTest(unittest.TestCase):
                 "html_url": f"https://github.com/org/repo/actions/runs/{n}",
                 "workflow_id": 7,
                 "event": event,
+                "head_sha": sha or f"sha{n}",
                 "created_at": f"2026-10-31T00:00:0{n}Z",
                 "head_branch": "main",
                 "head_repository": {"owner": {"login": "org"}},
@@ -124,6 +126,9 @@ class CancelBlockedCiTest(unittest.TestCase):
                 run(2, "schedule"),
                 run(3, "schedule"),
                 run(4, "push", "pending"),
+                # Labeling the PR started run 6, which tests the same commit as run 5.
+                run(5, "pull_request", sha="pr"),
+                run(6, "pull_request", sha="pr"),
             ]
         }
         result = cancel_blocked_ci.redundant_runs("repo", "org/repo", runs)
@@ -133,7 +138,10 @@ class CancelBlockedCiTest(unittest.TestCase):
         )
 
     def test_redundant_azure_builds(self) -> None:
-        """A build that waits for a check of a stage makes no older build redundant."""
+        """A build that waits for a check of a stage makes no older build redundant.
+
+        Nor does a build of the same commit.
+        """
 
         def build(n: int) -> dict[str, Any]:
             return {
@@ -141,6 +149,8 @@ class CancelBlockedCiTest(unittest.TestCase):
                 "status": "inProgress",
                 "reason": "individualCI",
                 "sourceBranch": "refs/heads/main",
+                # Builds 0 and 2 test the same commit.
+                "sourceVersion": f"commit{n % 2}" if n != 3 else "commit3",
                 "definition": {"id": 1, "name": "ci"},
                 "_links": {
                     "web": {"href": f"https://dev.azure.com/org/p/_build/results?buildId={n}"}
@@ -149,7 +159,7 @@ class CancelBlockedCiTest(unittest.TestCase):
 
         def azure_get(url: str) -> Any:
             if "/timeline" not in url:
-                return {"value": [build(n) for n in (1, 2, 3)]}
+                return {"value": [build(n) for n in (0, 1, 2, 3)]}
             # Build 3 waits for an approval.
             state = "inProgress" if "/builds/3/" in url else "completed"
             return {"records": [{"type": "Checkpoint.Approval", "state": state}]}
@@ -169,7 +179,7 @@ class CancelBlockedCiTest(unittest.TestCase):
                 for n, event in enumerate(["pull_request", "push", "schedule", "workflow_dispatch"])
             ]
         }
-        pr = {"owner": "org", "headRefName": "main"}
+        pr = {"owner": "org", "headRefName": "main", "number": 5}
         for on_default_branch, expected in [(False, [0, 1]), (True, [0])]:
             with self.subTest(on_default_branch=on_default_branch):
                 self.assertEqual(
@@ -184,6 +194,45 @@ class CancelBlockedCiTest(unittest.TestCase):
         self.assertFalse(
             cancel_blocked_ci.is_default_branch("fork/repo", "main", pr | {"owner": "other"})
         )
+        self.assertEqual(cancel_blocked_ci.pr_branches("org/repo", pr, False), {"pull/5", "main"})
+        self.assertEqual(cancel_blocked_ci.pr_branches("org/repo", pr, True), {"pull/5"})
+        self.assertEqual(cancel_blocked_ci.pr_branches("upstream/repo", pr, False), {"pull/5"})
+
+    def test_unfinished_other_builds(self) -> None:
+        """Only the builds of the given branches are a commit's builds."""
+        workflow = "0123456789abcdef0123456789abcdef0123"
+        other_workflow = "fedcba9876543210fedcba9876543210fedc"
+        checks = [
+            ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=1"),
+            ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=2"),
+            ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=3"),
+            ("completed", "ci", "https://dev.azure.com/org/p/_build/results?buildId=4"),
+            ("pending", "build", f"https://app.circleci.com/workflow/{workflow}"),
+            ("pending", "build", f"https://app.circleci.com/workflow/{other_workflow}"),
+        ]
+        azure_branches = {1: "refs/pull/5/merge", 2: "refs/heads/feature", 3: "refs/heads/other"}
+        circleci_branches = {workflow: "feature", other_workflow: "other"}
+        for branches, expected in [
+            (
+                {"pull/5", "feature"},
+                [("azure", "org", "1"), ("azure", "org", "2"), ("circleci", workflow)],
+            ),
+            ({"pull/5"}, [("azure", "org", "1")]),
+        ]:
+            with (
+                self.subTest(branches=branches),
+                mock.patch.object(cancel_blocked_ci, "checks", return_value=checks),
+                mock.patch.object(
+                    cancel_blocked_ci,
+                    "azure_build_branch",
+                    lambda _org, _project, build: azure_branches[build],
+                ),
+                mock.patch.object(
+                    cancel_blocked_ci, "circleci_workflow_branch", circleci_branches.get
+                ),
+            ):
+                result = cancel_blocked_ci.unfinished_other_builds("org/repo", "abc", branches)
+            self.assertEqual([identifier for identifier, _ in result], expected)
 
     def test_circleci_workflows_of_jobs(self) -> None:
         """The workflows of jobs come from the recent pipelines, or else from job lookups."""
@@ -253,7 +302,7 @@ class CancelBlockedCiTest(unittest.TestCase):
                 "id": f"p{n}",
                 "number": n,
                 "created_at": created,
-                "vcs": {"branch": "main"},
+                "vcs": {"branch": "main", "revision": f"commit{n}"},
                 "trigger": {"type": trigger},
             }
 
