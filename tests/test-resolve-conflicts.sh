@@ -85,9 +85,10 @@ EOF
 chmod +x "${WORK_DIR}/test-bin/claude" "${WORK_DIR}/test-bin/pr-status.py"
 
 ## Usage: setup_case NAME
-## Creates ${WORK_DIR}/NAME, the directory that holds the working copies, with
-## a remote whose branches "main" and "feature" conflict, and a clone of each,
-## myrepo-branch-main and myrepo-branch-feature.  Sets ${case_dir}.
+## Creates ${WORK_DIR}/NAME, the directory that holds the working copy
+## directories, with a remote whose branches "main" and "feature" conflict, and
+## a clone of each, myrepo-branch-main and myrepo-branch-feature.
+## Sets ${case_dir}.
 setup_case() {
   case_dir="${WORK_DIR}/$1"
   mkdir "${case_dir}"
