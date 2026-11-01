@@ -1,0 +1,225 @@
+#!/bin/sh
+
+# Updates the dependency chains of pull requests that have merge conflicts,
+# asking an AI agent for help, as `git-push-to` does.
+#
+# Usage:
+#   resolve-conflicts [--nocompile] [--claude | --codex] [-C DIR]
+#
+# Run it in the directory that holds pr-dependencies.md and the working
+# copies, as for `pr-status`, or pass that directory with "-C".
+#
+# This script does the following:
+#  * run `pr-status`, which regenerates pr-dependencies.md,
+#  * run each command in its section "Dependency chains with conflicts", one
+#    `git-push-to` command per chain, adding the "--claude" option (or
+#    "--codex"; see `git-push-to`, under "Asking an AI agent") and any
+#    "--nocompile" option; a chain that fails does not stop the others,
+#  * if every chain succeeded, start over, until the section lists no chain.
+# It fails if a chain fails, or if chains with conflicts remain after
+# ${max_rounds} rounds.
+#
+# The section contains shell commands, but this script does not run them as
+# shell commands.  It accepts only the commands that `pr-status` writes:
+# `cd DIR`, `git-push-to ARGUMENT...`, and `echo "success"`, joined by "&&".
+# It refuses any other command, or an argument that contains a character that
+# the shell would interpret, before running any command.
+#
+# This script finds `pr-status` in its own directory or, as `pr-status.py`, on
+# the PATH.
+
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
+# The number of times to run `pr-status` and the chains that it lists.
+max_rounds=3
+# The document that `pr-status` writes, and its section of chains with
+# conflicts.
+document="pr-dependencies.md"
+section="conflicting-push-commands"
+
+usage() {
+  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--claude | --codex] [-C DIR]" >&2
+  exit 1
+}
+
+## Usage: section_commands
+## Prints the commands of ${section} of ${document}, one per line:  the lines
+## of the section's fenced code block, with continuation lines joined, split
+## at "&&".
+section_commands() {
+  awk -v section="${section}" '
+    $0 == "<!-- BEGIN GENERATED: " section " -->" { in_section = 1; next }
+    $0 == "<!-- END GENERATED: " section " -->" { in_section = 0; next }
+    in_section && /^```/ { in_code = !in_code; next }
+    in_section && in_code {
+      line = $0
+      continued = sub(/[ \t]*\\$/, "", line)
+      text = text " " line
+      if (!continued) text = text " &&"
+    }
+    END {
+      n = split(text, commands, "&&")
+      for (i = 1; i <= n; i++) {
+        command = commands[i]
+        gsub(/^[ \t]+|[ \t]+$/, "", command)
+        if (command != "") print command
+      }
+    }' "${document}"
+}
+
+## Usage: check_command COMMAND
+## Returns 0 if COMMAND, a line printed by `section_commands`, is one that
+## `pr-status` writes.  Otherwise, prints a diagnostic and returns 1.
+check_command() {
+  # shellcheck disable=SC2086 # Split the command into words.
+  set -- $1
+  case "$1" in
+    cd) check_command_ok="$(test "$#" -eq 2 && echo 1)" ;;
+    git-push-to) check_command_ok="$(test "$#" -ge 3 && echo 1)" ;;
+    echo) check_command_ok="$(test "$*" = 'echo "success"' && echo 1)" ;;
+    *) check_command_ok='' ;;
+  esac
+  if [ "$1" != echo ]; then
+    for word; do
+      case "${word}" in
+        *[!A-Za-z0-9._/:@+,=-]*) check_command_ok='' ;;
+      esac
+    done
+  fi
+  if [ -z "${check_command_ok}" ]; then
+    echo "${SCRIPT_NAME}: unexpected command in ${document}: $*" >&2
+    return 1
+  fi
+  return 0
+}
+
+agent_option='--claude'
+nocompile_option=''
+while [ "$#" -ge 1 ]; do
+  case "$1" in
+    --nocompile) nocompile_option='--nocompile' ;;
+    --claude | --codex) agent_option="$1" ;;
+    -C)
+      if [ "$#" -lt 2 ]; then usage; fi
+      if ! cd -- "$2"; then
+        echo "${SCRIPT_NAME}: cannot cd to $2" >&2
+        exit 1
+      fi
+      shift
+      ;;
+    *) usage ;;
+  esac
+  shift
+done
+
+if [ -x "${SCRIPT_DIR}/pr-status" ]; then
+  pr_status="${SCRIPT_DIR}/pr-status"
+elif ! pr_status="$(command -v pr-status.py)"; then
+  echo "${SCRIPT_NAME}: cannot find pr-status or pr-status.py" >&2
+  exit 1
+fi
+
+# The commands are split into words, which must not be expanded as patterns.
+set -f
+
+newline='
+'
+round=1
+while :; do
+  if ! "${pr_status}"; then
+    echo "${SCRIPT_NAME}: ${pr_status} failed in $(pwd)" >&2
+    exit 1
+  fi
+  if ! grep -F -x -q "<!-- BEGIN GENERATED: ${section} -->" "${document}"; then
+    echo "${SCRIPT_NAME}: ${document} in $(pwd) has no section ${section}" >&2
+    exit 1
+  fi
+  commands="$(section_commands)"
+
+  # Check every command before running any.
+  num_chains=0
+  saved_ifs="${IFS}"
+  IFS="${newline}"
+  for command in ${commands}; do
+    IFS="${saved_ifs}"
+    if ! check_command "${command}"; then
+      exit 1
+    fi
+    case "${command}" in git-push-to*) num_chains=$((num_chains + 1)) ;; esac
+  done
+  IFS="${saved_ifs}"
+
+  if [ "${num_chains}" -eq 0 ]; then
+    echo "${SCRIPT_NAME}: no dependency chain has conflicts"
+    exit 0
+  fi
+  if [ "${round}" -gt "${max_rounds}" ]; then
+    echo "${SCRIPT_NAME}: ${num_chains} dependency chains still have conflicts after ${max_rounds} rounds" >&2
+    exit 1
+  fi
+
+  num_failed=0
+  base_dir="$(pwd)"
+  IFS="${newline}"
+  for command in ${commands}; do
+    IFS="${saved_ifs}"
+    # shellcheck disable=SC2086 # Split the command into words.
+    set -- ${command}
+    case "$1" in
+      cd) base_dir="$2" ;;
+      git-push-to)
+        shift
+        echo "${SCRIPT_NAME}: in ${base_dir}: git-push-to ${agent_option} ${nocompile_option} $*"
+        # A subshell, so that the current directory does not change.  The
+        # chain does not read this script's standard input.
+        # shellcheck disable=SC2086 # ${nocompile_option} is empty or one word.
+        if ! (cd -- "${base_dir}" \
+          && "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} "$@" < /dev/null); then
+          echo "${SCRIPT_NAME}: the chain failed: $*" >&2
+          num_failed=$((num_failed + 1))
+        fi
+        ;;
+    esac
+  done
+  IFS="${saved_ifs}"
+
+  if [ "${num_failed}" -ne 0 ]; then
+    echo "${SCRIPT_NAME}: ${num_failed} of ${num_chains} dependency chains failed" >&2
+    exit 1
+  fi
+  round=$((round + 1))
+done
