@@ -448,6 +448,29 @@ case "${out}" in
   *"unrecognized option"*) fail "-- did not end the options: ${out}" ;;
 esac
 check_nothing_left "${modes}" -dash "a branch name that begins with -"
+# `--help` and `-h` print the synopsis at the top of the script, to standard
+# output, and exit 0, even before or after a branch name; they create nothing.
+# The synopsis ends before the details, with no blank line.
+for help_args in '--help helped' '-h helped' 'helped --help' 'helped -h'; do
+  # Command substitution drops trailing newlines, so a final "x" keeps them,
+  # and the exit status follows it.
+  # shellcheck disable=SC2086 # Splitting ${help_args} is intended.
+  out="$(cd "${modes}" && "${GIT_NEW_BRANCH}" ${help_args} 2> /dev/null; echo "x$?")"
+  help_status="${out##*x}"
+  out="${out%x*}"
+  if [ "${help_status}" != 0 ]; then
+    fail "exit status ${help_status} for ${help_args}"
+  fi
+  case "${out}" in
+    "Creates a new branch of the current repository"*"git-new-branch [--clean | --copy] [--verbose] [--allow-upstream] NEWBRANCHNAME"*"--verbose"*"--allow-upstream"*"Nor does this command build.
+") ;;
+    *) fail "unexpected output for ${help_args}: ${out}" ;;
+  esac
+  case "${out}" in
+    *"#"* | *"Details:"*) fail "the output of ${help_args} is not just the synopsis: ${out}" ;;
+  esac
+  check_nothing_left "${modes}" helped "${help_args}"
+done
 
 # A source that holds every kind of local change:  a staged change, an
 # unstaged change, an uncommitted deletion of a tracked file, an untracked
@@ -683,7 +706,7 @@ if out="$(cd "${superproject}" && "${GIT_NEW_BRANCH}" --clean subclean 2>&1)"; t
   fail "zero exit status for --clean in a repository with submodules"
 fi
 case "${out}" in
-  *"has submodules"*"--copy works here"*) ;;
+  *"has submodules"*"--copy subclean\` works in ${superproject}"*) ;;
   *) fail "unexpected message for --clean in a repository with submodules: ${out}" ;;
 esac
 check_nothing_left "${superproject}" subclean "--clean with submodules"
@@ -733,7 +756,7 @@ if out="$(cd "${pullsub}" && "${GIT_NEW_BRANCH}" --clean pullsubclean 2>&1)"; th
   fail "zero exit status for --clean when the pull brings in a submodule"
 fi
 case "${out}" in
-  *"has submodules"*"--copy works here"*) ;;
+  *"has submodules"*"--copy pullsubclean\` works in "*) ;;
   *) fail "unexpected message for --clean when the pull brings in a submodule: ${out}" ;;
 esac
 check_nothing_left "${pullsub}" pullsubclean "--clean when the pull brings in a submodule"
@@ -783,6 +806,21 @@ fi
 if [ -n "$(status_of "${tmpdir}/envindex-branch-fromenvindex")" ]; then
   fail "GIT_INDEX_FILE: the --clean worktree is not clean"
 fi
+
+# Under `branch.autoSetupMerge=always`, the new branch still has no upstream,
+# in every mode.
+tracking="${tmpdir}/tracking-branch-main"
+make_repo "${tracking}" || exit 1
+git -C "${tracking}" config branch.autoSetupMerge always
+for mode in '' --clean --copy; do
+  # shellcheck disable=SC2086 # An empty mode is no argument at all.
+  if ! out="$(cd "${tracking}" && "${GIT_NEW_BRANCH}" ${mode} "tracked${mode}" 2>&1)"; then
+    fail "nonzero exit status under branch.autoSetupMerge=always, mode [${mode}]: ${out}"
+  elif upstream="$(git -C "${tmpdir}/tracking-branch-tracked${mode}" \
+    config --get-regexp "^branch\.tracked${mode}\.(remote|merge)\$")"; then
+    fail "branch.autoSetupMerge=always set up an upstream, mode [${mode}]: ${upstream}"
+  fi
+done
 
 # Under core.splitIndex, the index that the default mode copies names a
 # shared index file, which must be copied too.
@@ -888,6 +926,233 @@ for mode in '' --copy; do
     fail "nested worktree, mode '${mode}': the nested worktree's HEAD or index changed"
   fi
 done
+
+# A clone of an upstream repository is refused when a sibling directory holds a
+# fork of it:  a clone whose remote "upstream" is the repository that the new
+# branch would be pushed to.  The fork's "upstream" is a relative pathname,
+# which is resolved in the fork.
+fork_parent="${tmpdir}/forks"
+mkdir "${fork_parent}"
+fork_parent="$(CDPATH='' cd -- "${fork_parent}" && pwd -P)" || exit 1
+git clone -q --bare "${repo}" "${tmpdir}/proj.git"
+git clone -q --bare "${repo}" "${tmpdir}/proj-fork.git"
+git clone -q "${tmpdir}/proj.git" "${fork_parent}/proj"
+git clone -q "${tmpdir}/proj.git" "${fork_parent}/proj-branch-other"
+git clone -q "${tmpdir}/proj-fork.git" "${fork_parent}/proj-fork-me"
+git -C "${fork_parent}/proj-fork-me" remote add upstream ../../proj.git
+for upstream_clone in proj proj-branch-other; do
+  if out="$(cd "${fork_parent}/${upstream_clone}" && "${GIT_NEW_BRANCH}" --clean inupstream 2>&1)"; then
+    fail "${upstream_clone}: zero exit status in a clone of an upstream repository"
+  fi
+  case "${out}" in
+    *"git-new-branch: ERROR: the new branch would be pushed to origin"*"
+  ${fork_parent}/proj-fork-me
+"*"pass --allow-upstream"*) ;;
+    *) fail "${upstream_clone}: unexpected message in a clone of an upstream repository: ${out}" ;;
+  esac
+  if [ -e "${fork_parent}/proj-branch-inupstream" ] \
+    || git -C "${fork_parent}/${upstream_clone}" rev-parse --verify --quiet refs/heads/inupstream > /dev/null; then
+    fail "${upstream_clone}: a branch was created in a clone of an upstream repository"
+  fi
+done
+
+# `--allow-upstream` creates the branch in the clone of the upstream repository.
+if ! out="$(cd "${fork_parent}/proj" && "${GIT_NEW_BRANCH}" --clean --allow-upstream allowed 2>&1)"; then
+  fail "nonzero exit status with --allow-upstream: ${out}"
+fi
+if [ ! -d "${fork_parent}/proj-branch-allowed" ]; then
+  fail "--allow-upstream did not create ${fork_parent}/proj-branch-allowed"
+fi
+
+# The fork itself is not refused:  it pushes to the fork, not to its upstream.
+if ! out="$(cd "${fork_parent}/proj-fork-me" && "${GIT_NEW_BRANCH}" --clean infork 2>&1)"; then
+  fail "nonzero exit status in a fork: ${out}"
+fi
+if [ ! -d "${fork_parent}/proj-fork-me-branch-infork" ]; then
+  fail "the branch was not created in the fork"
+fi
+
+# A sibling fork that has no remote "upstream" says nothing about this clone,
+# and neither does a sibling whose repository git cannot find.  The latter is
+# the branch directory of a fork that has no main working tree here, so that it
+# is examined.
+nofork_parent="${tmpdir}/noforks"
+mkdir "${nofork_parent}"
+git clone -q "${tmpdir}/proj.git" "${nofork_parent}/proj"
+git clone -q "${tmpdir}/proj-fork.git" "${nofork_parent}/proj-fork-me"
+mkdir "${nofork_parent}/proj-fork-gone-branch-stale"
+echo "gitdir: ${tmpdir}/no-such-gitdir" > "${nofork_parent}/proj-fork-gone-branch-stale/.git"
+if ! out="$(cd "${nofork_parent}/proj" && "${GIT_NEW_BRANCH}" --clean nofork 2>&1)"; then
+  fail "nonzero exit status beside a fork that has no remote upstream: ${out}"
+fi
+case "${out}" in
+  *fatal:*) fail "diagnostic about a sibling whose repository git cannot find: ${out}" ;;
+esac
+
+# Two spellings of one repository's URL are the same repository.  The refusal
+# precedes every query to a remote, so these URLs are never contacted.
+url_parent="${tmpdir}/urls"
+mkdir "${url_parent}"
+git clone -q "${tmpdir}/proj.git" "${url_parent}/proj"
+git -C "${url_parent}/proj" remote set-url origin git@example.invalid:Some-Org/proj.git
+git clone -q "${tmpdir}/proj-fork.git" "${url_parent}/proj-fork-me"
+git -C "${url_parent}/proj-fork-me" remote add upstream https://EXAMPLE.invalid/Some-Org/proj/
+if out="$(cd "${url_parent}/proj" && "${GIT_NEW_BRANCH}" --clean spelled 2>&1)"; then
+  fail "zero exit status for an upstream repository spelled differently by the fork"
+fi
+case "${out}" in
+  *"git-new-branch: ERROR: the new branch would be pushed to origin (git@example.invalid:Some-Org/proj.git)"*) ;;
+  *) fail "unexpected message for an upstream repository spelled differently by the fork: ${out}" ;;
+esac
+
+# GitHub ignores the case of a repository's path, so a fork's spelling of the
+# upstream repository might differ in case.  The fake `ssh` keeps the test
+# offline even if the command were to contact the remote.
+github_parent="${tmpdir}/github"
+mkdir "${github_parent}"
+git clone -q "${tmpdir}/proj.git" "${github_parent}/proj"
+use_fake_ssh "${github_parent}/proj" "${tmpdir}/github-ssh-arguments"
+git -C "${github_parent}/proj" remote set-url origin git@github.com:Some-Org/proj.git
+git clone -q "${tmpdir}/proj-fork.git" "${github_parent}/proj-fork-me"
+git -C "${github_parent}/proj-fork-me" remote add upstream https://github.com/some-org/Proj
+if out="$(cd "${github_parent}/proj" && "${GIT_NEW_BRANCH}" --clean github 2>&1)"; then
+  fail "zero exit status for a GitHub repository spelled in a different case by the fork"
+fi
+if [ -s "${tmpdir}/github-ssh-arguments" ]; then
+  fail "the refusal contacted the remote: $(cat "${tmpdir}/github-ssh-arguments")"
+fi
+
+# A pathname that begins with "~" names one repository in every directory.
+tilde_parent="${tmpdir}/tilde"
+mkdir "${tilde_parent}"
+git clone -q "${tmpdir}/proj.git" "${tilde_parent}/proj"
+# shellcheck disable=SC2088 # Git, not the shell, interprets the "~".
+git -C "${tilde_parent}/proj" remote set-url origin '~/no-such-dir/proj.git'
+git clone -q "${tmpdir}/proj-fork.git" "${tilde_parent}/proj-fork-me"
+# shellcheck disable=SC2088 # Git, not the shell, interprets the "~".
+git -C "${tilde_parent}/proj-fork-me" remote add upstream '~/no-such-dir/proj.git'
+if out="$(cd "${tilde_parent}/proj" && "${GIT_NEW_BRANCH}" --clean tilde 2>&1)"; then
+  fail "zero exit status for an upstream repository named by a pathname that begins with ~"
+fi
+case "${out}" in
+  *"git-new-branch: ERROR: the new branch would be pushed to origin (~/no-such-dir/proj.git)"*) ;;
+  *) fail "unexpected message for an upstream repository named by a pathname that begins with ~: ${out}" ;;
+esac
+
+# A `file://` URL and a pathname that name one directory are one repository.
+file_parent="${tmpdir}/fileurl"
+mkdir "${file_parent}"
+git clone -q "${tmpdir}/proj.git" "${file_parent}/proj"
+git clone -q "${tmpdir}/proj-fork.git" "${file_parent}/proj-fork-me"
+git -C "${file_parent}/proj-fork-me" remote add upstream "file://${tmpdir}/proj.git"
+if out="$(cd "${file_parent}/proj" && "${GIT_NEW_BRANCH}" --clean fileurl 2>&1)"; then
+  fail "zero exit status for an upstream repository named by a file:// URL in the fork: ${out}"
+fi
+
+# A dangling symbolic link that sorts before the fork does not hide the fork.
+dangling_parent="${tmpdir}/dangling"
+mkdir "${dangling_parent}"
+git clone -q "${tmpdir}/proj.git" "${dangling_parent}/proj"
+ln -s "${tmpdir}/nonexistent" "${dangling_parent}/proj-fork-a"
+git clone -q "${tmpdir}/proj-fork.git" "${dangling_parent}/proj-fork-me"
+git -C "${dangling_parent}/proj-fork-me" remote add upstream "${tmpdir}/proj.git"
+if out="$(cd "${dangling_parent}/proj" && "${GIT_NEW_BRANCH}" --clean dangling 2>&1)"; then
+  fail "zero exit status for an upstream clone beside a dangling symbolic link and a fork: ${out}"
+fi
+
+# The URLs that `git push` uses say where the new branch would be pushed, not
+# the remote's URL:  a `pushurl` or a `pushInsteadOf` rewrite that names the
+# fork is not refused, and a `pushurl` that names the upstream repository is.
+push_parent="${tmpdir}/pushurls"
+mkdir "${push_parent}"
+git clone -q "${tmpdir}/proj.git" "${push_parent}/proj"
+git clone -q "${tmpdir}/proj-fork.git" "${push_parent}/proj-fork-me"
+git -C "${push_parent}/proj-fork-me" remote add upstream "${tmpdir}/proj.git"
+git -C "${push_parent}/proj" remote set-url --push origin "${tmpdir}/proj-fork.git"
+if ! out="$(cd "${push_parent}/proj" && "${GIT_NEW_BRANCH}" --clean pushurl 2>&1)"; then
+  fail "refused a clone whose pushurl names the fork: ${out}"
+fi
+git -C "${push_parent}/proj" config --unset remote.origin.pushurl
+git -C "${push_parent}/proj" config "url.${tmpdir}/proj-fork.git.pushInsteadOf" "${tmpdir}/proj.git"
+if ! out="$(cd "${push_parent}/proj" && "${GIT_NEW_BRANCH}" --clean pushinsteadof 2>&1)"; then
+  fail "refused a clone whose pushInsteadOf names the fork: ${out}"
+fi
+git -C "${push_parent}/proj" config --remove-section "url.${tmpdir}/proj-fork.git"
+git -C "${push_parent}/proj" remote set-url origin "${tmpdir}/proj-fork.git"
+git -C "${push_parent}/proj" remote set-url --push origin "${tmpdir}/proj.git"
+if out="$(cd "${push_parent}/proj" && "${GIT_NEW_BRANCH}" --clean pushtoupstream 2>&1)"; then
+  fail "zero exit status for a clone whose pushurl names the upstream repository"
+fi
+case "${out}" in
+  *"git-new-branch: ERROR: the new branch would be pushed to origin (${tmpdir}/proj.git)"*) ;;
+  *) fail "unexpected message for a clone whose pushurl names the upstream repository: ${out}" ;;
+esac
+
+# A branch directory whose pushurl names the fork is not refused, and its new
+# worktree is not registered in the main clone, which pushes to the upstream
+# repository.
+host_parent="${tmpdir}/host"
+mkdir "${host_parent}"
+host_parent="$(CDPATH='' cd -- "${host_parent}" && pwd -P)" || exit 1
+git clone -q "${tmpdir}/proj.git" "${host_parent}/proj"
+git clone -q "${tmpdir}/proj.git" "${host_parent}/proj-branch-other"
+git -C "${host_parent}/proj-branch-other" remote set-url --push origin "${tmpdir}/proj-fork.git"
+git clone -q "${tmpdir}/proj-fork.git" "${host_parent}/proj-fork-me"
+git -C "${host_parent}/proj-fork-me" remote add upstream "${tmpdir}/proj.git"
+if ! out="$(cd "${host_parent}/proj-branch-other" && "${GIT_NEW_BRANCH}" --clean inhost 2>&1)"; then
+  fail "refused a branch directory whose pushurl names the fork: ${out}"
+fi
+inhost_common="$(git -C "${host_parent}/proj-branch-inhost" rev-parse --path-format=absolute --git-common-dir)"
+if [ "${inhost_common}" != "${host_parent}/proj-branch-other/.git" ]; then
+  fail "inhost is registered in ${inhost_common}, not in ${host_parent}/proj-branch-other/.git"
+fi
+if ! out="$(cd "${host_parent}/proj-branch-other" && "${GIT_NEW_BRANCH}" --copy inbranchdir 2>&1)"; then
+  fail "refused a copy of a clone whose pushurl names the fork: ${out}"
+fi
+
+# If git's configuration sets `github.user`, only that user's fork counts, in
+# any case:  another organization's fork of the upstream repository does not
+# make this clone the wrong place for the branch.
+user_parent="${tmpdir}/users"
+mkdir "${user_parent}"
+user_parent="$(CDPATH='' cd -- "${user_parent}" && pwd -P)" || exit 1
+git clone -q "${tmpdir}/proj.git" "${user_parent}/proj"
+git -C "${user_parent}/proj" config github.user Me
+git clone -q "${tmpdir}/proj-fork.git" "${user_parent}/proj-fork-other"
+git -C "${user_parent}/proj-fork-other" remote add upstream "${tmpdir}/proj.git"
+if ! out="$(cd "${user_parent}/proj" && "${GIT_NEW_BRANCH}" --clean otherorg 2>&1)"; then
+  fail "refused beside another organization's fork: ${out}"
+fi
+git clone -q "${tmpdir}/proj-fork.git" "${user_parent}/proj-fork-mE"
+git -C "${user_parent}/proj-fork-mE" remote add upstream "${tmpdir}/proj.git"
+if out="$(cd "${user_parent}/proj" && "${GIT_NEW_BRANCH}" --clean userorg 2>&1)"; then
+  fail "zero exit status beside the fork of github.user"
+fi
+case "${out}" in
+  *"of the fork in each of these directories:
+  ${user_parent}/proj-fork-mE
+git-new-branch: "*) ;;
+  *) fail "unexpected message beside the fork of github.user: ${out}" ;;
+esac
+
+# When the fork has only a branch directory here, the refusal does not suggest
+# running the command in it, which would start the new branch at that
+# directory's branch, without saying so.
+only_parent="${tmpdir}/onlybranch"
+mkdir "${only_parent}"
+only_parent="$(CDPATH='' cd -- "${only_parent}" && pwd -P)" || exit 1
+git clone -q "${tmpdir}/proj.git" "${only_parent}/proj"
+git clone -q "${tmpdir}/proj-fork.git" "${only_parent}/proj-fork-me-branch-feature"
+git -C "${only_parent}/proj-fork-me-branch-feature" remote add upstream "${tmpdir}/proj.git"
+if out="$(cd "${only_parent}/proj" && "${GIT_NEW_BRANCH}" --clean onlybranch 2>&1)"; then
+  fail "zero exit status beside a fork that has only a branch directory"
+fi
+case "${out}" in
+  *"the upstream repository of the fork in this branch directory:
+  ${only_parent}/proj-fork-me-branch-feature
+"*"such as a new one in ${only_parent}/proj-fork-me, or in ${only_parent}/proj-fork-me-branch-feature if the new branch should start at its current commit"*) ;;
+  *) fail "unexpected message beside a fork that has only a branch directory: ${out}" ;;
+esac
 
 # The default mode and `--copy` warn about each untracked or ignored file that
 # contains the source's pathname, such as a build output that refers to the
@@ -1008,11 +1273,11 @@ printf '%s/src\n' "${deleted_top}" > "${deleted}/out/cache/entry"
 for mode in '' --copy; do
   branch="deleted${mode#--}"
   deleted_new="${stale_parent}/deleted-branch-${branch}"
-  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} --verbose "${branch}" 2>&1)"; then
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete: ${out}"
   fi
   case "${out}" in
-    *": 8 files in \`.gradle/\`, \`.ruff_cache/\`, \`build/\`, and \`target/\`."*) ;;
+    *": 8 files in \`.gradle/\`, \`.ruff_cache/\`, \`build/\`, \`target/\`."*) ;;
     *) fail "${mode:-the default mode} did not say that it deleted 8 files: ${out}" ;;
   esac
   for deleted_file in out/cache/entry \
@@ -1049,6 +1314,66 @@ for mode in '' --copy; do
   fi
 done
 
+# Without `--verbose`, the files are deleted silently, but the stale files
+# that are not deleted are still named.
+for mode in '' --copy; do
+  branch="deletedquiet${mode#--}"
+  deleted_new="${stale_parent}/deleted-branch-${branch}"
+  if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+    fail "nonzero exit status for ${mode:-the default mode} without --verbose with build output to delete: ${out}"
+  fi
+  case "${out}" in
+    *"deleted generated files"*) fail "${mode:-the default mode} said that it deleted files without --verbose: ${out}" ;;
+  esac
+  case "${out}" in
+    *"  tools/build/deploy.conf
+"*) ;;
+    *) fail "${mode:-the default mode} did not name tools/build/deploy.conf without --verbose: ${out}" ;;
+  esac
+  if [ -e "${deleted_new}/build/classes/Main.class" ]; then
+    fail "${mode:-the default mode} did not delete build/classes/Main.class without --verbose"
+  fi
+done
+
+# A directory that CMake or autotools configured is named, even without
+# `--verbose`, if files are deleted from it, because it needs to be
+# reconfigured.  Its `CMakeCache.txt` contains the source's pathname, so it is
+# deleted too.
+printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "${deleted_top}" \
+  > "${deleted}/sub/build/CMakeCache.txt"
+if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" deletedcmake 2>&1)"; then
+  fail "nonzero exit status with a configured build directory: ${out}"
+fi
+case "${out}" in
+  *" from \`sub/build/\` in ${stale_parent}/deleted-branch-deletedcmake, which CMake or autotools configured.  Reconfigure it before building there."*) ;;
+  *) fail "did not say that sub/build/ needs to be reconfigured: ${out}" ;;
+esac
+case "${out}" in
+  *"\`build/\`"* | *"\`.gradle/\`"*) fail "named a directory that was not configured: ${out}" ;;
+esac
+if [ -e "${stale_parent}/deleted-branch-deletedcmake/sub/build/CMakeCache.txt" ]; then
+  fail "did not delete sub/build/CMakeCache.txt"
+fi
+rm -f "${deleted}/sub/build/CMakeCache.txt"
+
+# Each configured directory below a `build/` directory is named, not the
+# `build/` directory itself.
+mkdir -p "${deleted}/sub/build/release" "${deleted}/sub/build/debug"
+printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "${deleted_top}" \
+  > "${deleted}/sub/build/release/CMakeCache.txt"
+printf "ac_pwd='%s'\n" "${deleted_top}" > "${deleted}/sub/build/debug/config.status"
+if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" deletednested 2>&1)"; then
+  fail "nonzero exit status with nested configured build directories: ${out}"
+fi
+case "${out}" in
+  *" from \`sub/build/debug/\`, \`sub/build/release/\` in "*"Reconfigure them before building there."*) ;;
+  *) fail "did not say that sub/build/debug/ and sub/build/release/ need to be reconfigured: ${out}" ;;
+esac
+case "${out}" in
+  *"\`sub/build/\`"*) fail "named sub/build/ rather than the configured directories in it: ${out}" ;;
+esac
+rm -rf "${deleted}/sub/build/release" "${deleted}/sub/build/debug"
+
 # Files in a submodule are examined too, and the submodule's `build/` and
 # `.gradle/` directories are treated like the superproject's.  A submodule at
 # `build/` is not a `build/` directory, so a file in it that the submodule
@@ -1076,11 +1401,11 @@ printf '%s/src\n' "${subdeleted}" > "${subdeleted}/sub/notes.txt"
 for mode in '' --copy; do
   branch="subdeleted${mode#--}"
   subdeleted_new="${subdeleted_parent}/super-branch-${branch}"
-  if ! out="$(cd "${subdeleted}" && "${GIT_NEW_BRANCH}" ${mode} "${branch}" 2>&1)"; then
+  if ! out="$(cd "${subdeleted}" && "${GIT_NEW_BRANCH}" ${mode} --verbose "${branch}" 2>&1)"; then
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete in a submodule: ${out}"
   fi
   case "${out}" in
-    *": 2 files in \`.gradle/\` and \`build/\`."*) ;;
+    *": 2 files in \`.gradle/\`, \`build/\`."*) ;;
     *) fail "${mode:-the default mode} did not say that it deleted 2 files in a submodule: ${out}" ;;
   esac
   for named_file in sub/notes.txt build/out/tool.txt; do
@@ -1107,6 +1432,272 @@ for mode in '' --copy; do
     fi
   done
 done
+
+# A slug ORG:BRANCH makes the branch in the clone of ORG's fork, at that
+# clone's commit and with none of the current directory's changes, whichever
+# of the project's directories it is run in.  proj-fork-mernst has no remote,
+# so the `git pull` there fails harmlessly and leaves its commit as it is.  The
+# other clones' remote "origin" is proj-fork-mernst.
+slugs="${tmpdir}/slugs"
+mkdir "${slugs}"
+slugs="$(cd "${slugs}" && pwd -P)"
+make_repo "${slugs}/proj-fork-mernst" || exit 1
+mernst_commit="$(git -C "${slugs}/proj-fork-mernst" rev-parse HEAD)"
+echo "uncommitted in mernst" > "${slugs}/proj-fork-mernst/file.txt"
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-other"
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj"
+for slug_source in proj-fork-other proj; do
+  echo "a change in ${slug_source}" > "${slugs}/${slug_source}/file.txt"
+  git -C "${slugs}/${slug_source}" commit -q -a -m "A commit in ${slug_source}"
+  echo "uncommitted in ${slug_source}" > "${slugs}/${slug_source}/file.txt"
+  echo "untracked" > "${slugs}/${slug_source}/untracked.txt"
+done
+# The branch directory gets the uncommitted and untracked files of
+# proj-fork-other.
+if ! out="$(cd "${slugs}/proj-fork-other" && "${GIT_NEW_BRANCH}" other-branch 2>&1)"; then
+  fail "nonzero exit status for other-branch in proj-fork-other: ${out}"
+fi
+mkdir "${slugs}/proj-fork-other/subdir"
+# A linked worktree that is not a sibling of its main working tree, as in
+# PROJECT/.claude/worktrees/NAME, takes the project's name from the main
+# working tree.
+mkdir "${slugs}/elsewhere"
+git -C "${slugs}/proj" worktree add -q --detach "${slugs}/elsewhere/agent-1"
+# Each case is SOURCE-DIRECTORY:NEW-BRANCH.  A "/" in the branch is "-" in its
+# directory name.
+for slug_case in proj-fork-other/subdir:from-other proj:from-upstream \
+  proj-fork-mernst:from-fork proj-fork-other-branch-other-branch:from/branch-dir \
+  elsewhere/agent-1:from-elsewhere; do
+  slug_source="${slugs}/${slug_case%%:*}"
+  slug_branch="${slug_case#*:}"
+  slug_newdir="${slugs}/proj-fork-mernst-branch-$(printf '%s\n' "${slug_branch}" | sed -e 's:/:-:g')"
+  if ! out="$(cd "${slug_source}" && "${GIT_NEW_BRANCH}" "mernst:${slug_branch}" 2>&1)"; then
+    fail "nonzero exit status for mernst:${slug_branch} in ${slug_source}: ${out}"
+    continue
+  fi
+  case "${out}" in
+    *"making branch ${slug_branch} in ${slugs}/proj-fork-mernst, at commit $(git -C "${slugs}/proj-fork-mernst" rev-parse --short HEAD) of its branch $(git -C "${slugs}/proj-fork-mernst" symbolic-ref --short HEAD)"*) ;;
+    *) fail "mernst:${slug_branch} did not say where it made the branch: ${out}" ;;
+  esac
+  if [ ! -d "${slug_newdir}" ]; then
+    fail "mernst:${slug_branch} did not create ${slug_newdir}: ${out}"
+    continue
+  fi
+  if [ "$(git -C "${slug_newdir}" symbolic-ref --short HEAD)" != "${slug_branch}" ]; then
+    fail "mernst:${slug_branch} did not check out ${slug_branch} in ${slug_newdir}"
+  fi
+  if [ "$(git -C "${slug_newdir}" rev-parse HEAD)" != "${mernst_commit}" ]; then
+    fail "mernst:${slug_branch} did not start at the commit of proj-fork-mernst"
+  fi
+  if ! git -C "${slugs}/proj-fork-mernst" rev-parse --verify --quiet \
+    "refs/heads/${slug_branch}" > /dev/null; then
+    fail "mernst:${slug_branch} did not make the branch in proj-fork-mernst"
+  fi
+  if [ -n "$(git -C "${slug_newdir}" status --porcelain --ignored)" ]; then
+    fail "mernst:${slug_branch} is not a clean checkout: $(git -C "${slug_newdir}" status --porcelain --ignored)"
+  fi
+done
+for slug_source in proj-fork-other proj; do
+  if git -C "${slugs}/${slug_source}" rev-parse --verify --quiet \
+    refs/heads/from-other > /dev/null \
+    || git -C "${slugs}/${slug_source}" rev-parse --verify --quiet \
+      refs/heads/from-upstream > /dev/null; then
+    fail "a slug made a branch in ${slug_source}"
+  fi
+done
+
+# A branch that already exists in the fork's clone is an error that names that
+# clone, and that says nothing about making the branch.
+if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" mernst:from-other 2>&1)"; then
+  fail "zero exit status for a slug whose branch exists in the fork's clone"
+fi
+case "${out}" in
+  *"making branch"*) fail "a refused slug said that it was making the branch: ${out}" ;;
+  *"branch from-other already exists in ${slugs}/proj-fork-mernst."*) ;;
+  *) fail "unexpected message for a slug whose branch exists in the fork's clone: ${out}" ;;
+esac
+
+# A slug given outside any working tree is an error.
+if out="$(cd "${slugs}" && "${GIT_NEW_BRANCH}" mernst:outside 2>&1)"; then
+  fail "zero exit status for a slug given outside a working tree"
+fi
+case "${out}" in
+  *"a slug must be given in a working tree"*) ;;
+  *) fail "unexpected message for a slug given outside a working tree: ${out}" ;;
+esac
+
+# A PROJECT-fork-ORG that is a plain directory inside another repository is
+# refused, rather than given the branch in that repository.
+make_repo "${slugs}/outer" || exit 1
+make_repo "${slugs}/outer/inproj" || exit 1
+mkdir "${slugs}/outer/inproj-fork-mernst"
+if out="$(cd "${slugs}/outer/inproj" && "${GIT_NEW_BRANCH}" mernst:nested 2>&1)"; then
+  fail "zero exit status for a PROJECT-fork-ORG that is not a working tree"
+fi
+case "${out}" in
+  *"not the top level of a working tree: ${slugs}/outer/inproj-fork-mernst"*) ;;
+  *) fail "unexpected message for a PROJECT-fork-ORG that is not a working tree: ${out}" ;;
+esac
+if git -C "${slugs}/outer" rev-parse --verify --quiet refs/heads/nested > /dev/null; then
+  fail "a slug made a branch in the repository that contains PROJECT-fork-ORG"
+fi
+
+# A slug whose fork's clone has submodules is refused, with a message that
+# says where `--copy` works, since `--copy` cannot be used with a slug.
+mkdir "${slugs}/sub"
+make_submodule_superproject "${slugs}/sub" || exit 1
+git -C "${slugs}/sub" clone -q super-branch-main super-fork-mernst
+if out="$(cd "${slugs}/sub/super-branch-main" && "${GIT_NEW_BRANCH}" mernst:subslug 2>&1)"; then
+  fail "zero exit status for a slug whose fork's clone has submodules"
+fi
+case "${out}" in
+  *"the new branch would be a worktree, and the current commit of ${slugs}/sub/super-fork-mernst has submodules"*"--copy subslug\` works in ${slugs}/sub/super-fork-mernst"*) ;;
+  *) fail "unexpected message for a slug whose fork's clone has submodules: ${out}" ;;
+esac
+if [ -e "${slugs}/sub/super-fork-mernst-branch-subslug" ]; then
+  fail "a slug whose fork's clone has submodules created a directory"
+fi
+
+# A slug whose fork has no clone is an error that names the missing directory.
+if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" nosuchorg:feature 2>&1)"; then
+  fail "zero exit status for a slug whose fork has no clone"
+fi
+case "${out}" in
+  *"directory does not exist: ${slugs}/proj-fork-nosuchorg"*) ;;
+  *) fail "unexpected message for a slug whose fork has no clone: ${out}" ;;
+esac
+
+# An ORG that contains "-branch-" is refused even when its fork has a clone,
+# because the clone's name would be read as that of a branch directory.
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-foo-branch-bar"
+if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" foo-branch-bar:feature 2>&1)"; then
+  fail "zero exit status for a slug whose ORG contains -branch-"
+fi
+case "${out}" in
+  *"ERROR: an ORG that "*"contains \"-branch-\" cannot be used in a slug"*) ;;
+  *) fail "unexpected message for a slug whose ORG contains -branch-: ${out}" ;;
+esac
+if [ -e "${slugs}/proj-fork-foo-branch-feature" ] \
+  || git -C "${slugs}/proj-fork-foo-branch-bar" rev-parse --verify --quiet \
+    refs/heads/feature > /dev/null; then
+  fail "a slug whose ORG contains -branch- made a branch"
+fi
+
+# An ORG that contains "-fork-" is refused even when its fork has a clone,
+# because the clone's name would be read as that of a different fork.
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-foo-fork-bar"
+if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" foo-fork-bar:feature 2>&1)"; then
+  fail "zero exit status for a slug whose ORG contains -fork-"
+fi
+case "${out}" in
+  *"ERROR: an ORG that "*"contains \"-fork-\" cannot be used in a slug"*) ;;
+  *) fail "unexpected message for a slug whose ORG contains -fork-: ${out}" ;;
+esac
+if [ -e "${slugs}/proj-fork-foo-fork-bar-branch-feature" ] \
+  || git -C "${slugs}/proj-fork-foo-fork-bar" rev-parse --verify --quiet \
+    refs/heads/feature > /dev/null; then
+  fail "a slug whose ORG contains -fork- made a branch"
+fi
+
+# An ORG whose own hyphens combine with those around it in
+# PROJECT-fork-ORG-branch-BRANCH is refused too, even when its fork has a
+# clone.  Each ORG is followed by the word of the message that refuses it.
+for bad_org_kind in branch-x:branch x-branch:branch branch:branch fork-x:fork; do
+  bad_org="${bad_org_kind%:*}"
+  bad_kind="${bad_org_kind#*:}"
+  git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-${bad_org}"
+  if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" "${bad_org}:feature" 2>&1)"; then
+    fail "zero exit status for a slug whose ORG is ${bad_org}"
+  fi
+  case "${out}" in
+    *"ERROR: an ORG that "*"contains \"-${bad_kind}-\" cannot be used in a slug"*) ;;
+    *) fail "unexpected message for a slug whose ORG is ${bad_org}: ${out}" ;;
+  esac
+  if [ -e "${slugs}/proj-fork-${bad_org}-branch-feature" ] \
+    || git -C "${slugs}/proj-fork-${bad_org}" rev-parse --verify --quiet \
+      refs/heads/feature > /dev/null; then
+    fail "a slug whose ORG is ${bad_org} made a branch"
+  fi
+done
+
+# A slug branches from whatever the fork's clone has checked out, and the
+# message names it.
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-side"
+git -C "${slugs}/proj-fork-side" checkout -q -b feature-x
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-detached"
+git -C "${slugs}/proj-fork-detached" checkout -q --detach
+for slug_case in side:"its branch feature-x" detached:"its detached HEAD"; do
+  slug_org="${slug_case%%:*}"
+  slug_base="${slug_case#*:}"
+  if ! out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" "${slug_org}:feature-y" 2>&1)"; then
+    fail "nonzero exit status for ${slug_org}:feature-y: ${out}"
+    continue
+  fi
+  case "${out}" in
+    *"making branch feature-y in ${slugs}/proj-fork-${slug_org}, at commit $(git -C "${slugs}/proj-fork-${slug_org}" rev-parse --short HEAD) of ${slug_base}"*) ;;
+    *) fail "${slug_org}:feature-y did not name the base ${slug_base}: ${out}" ;;
+  esac
+done
+
+# The slug -:BRANCH makes the branch in the clone PROJECT itself, as ORG "-"
+# does for `git-push-to`.
+if ! out="$(cd "${slugs}/proj-fork-other" && "${GIT_NEW_BRANCH}" -:in-upstream 2>&1)"; then
+  fail "nonzero exit status for -:in-upstream: ${out}"
+fi
+case "${out}" in
+  *"making branch in-upstream in ${slugs}/proj, at commit "*) ;;
+  *) fail "-:in-upstream did not say that it made the branch in proj: ${out}" ;;
+esac
+if [ "$(git -C "${slugs}/proj-branch-in-upstream" symbolic-ref --short HEAD 2> /dev/null)" != in-upstream ]; then
+  fail "-:in-upstream did not make ${slugs}/proj-branch-in-upstream"
+fi
+
+# A slug's pull in a clone whose branch has diverged from its upstream does
+# not merge, which would leave conflicts in a clone other than the current
+# directory.  The new branch starts at that clone's own commit.
+git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-diverged"
+# With `pull.rebase`, a pull that is not restricted to a fast-forward would
+# rebase, and some versions of git let that override `--ff-only`.
+git -C "${slugs}/proj-fork-diverged" config pull.rebase true
+echo "diverged" > "${slugs}/proj-fork-diverged/conflict.txt"
+git -C "${slugs}/proj-fork-diverged" add conflict.txt
+git -C "${slugs}/proj-fork-diverged" commit -q -m "A diverging commit"
+diverged_commit="$(git -C "${slugs}/proj-fork-diverged" rev-parse HEAD)"
+echo "upstream" > "${slugs}/proj-fork-mernst/conflict.txt"
+git -C "${slugs}/proj-fork-mernst" add conflict.txt
+git -C "${slugs}/proj-fork-mernst" commit -q -m "A conflicting commit"
+if ! out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" diverged:after-divergence 2>&1)"; then
+  fail "nonzero exit status for a slug whose clone has diverged: ${out}"
+fi
+if git -C "${slugs}/proj-fork-diverged" rev-parse --verify --quiet MERGE_HEAD > /dev/null \
+  || [ -n "$(git -C "${slugs}/proj-fork-diverged" ls-files --unmerged)" ]; then
+  fail "a slug's pull left a merge in progress in proj-fork-diverged: ${out}"
+fi
+if [ "$(git -C "${slugs}/proj-fork-diverged-branch-after-divergence" rev-parse HEAD 2> /dev/null)" != "${diverged_commit}" ]; then
+  fail "a slug whose clone has diverged did not start at that clone's commit: ${out}"
+fi
+
+# `--copy` cannot be used with a slug, and a malformed slug is an error.
+# Switching branches in proj makes "@{-1}" resolve there, so that
+# `git check-ref-format --branch` rewrites it rather than rejecting it.
+git -C "${slugs}/proj" checkout -q -b previous
+git -C "${slugs}/proj" checkout -q -
+for slug_args in "--copy mernst:copied" ":nobody" "mernst:" "a/b:feature" \
+  "mernst:a:b" "mernst:-x" "mernst:@{-1}" "-x:feature"; do
+  # shellcheck disable=SC2086 # The arguments are split on purpose.
+  if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" ${slug_args} 2>&1)"; then
+    fail "zero exit status for: git-new-branch ${slug_args}"
+  fi
+  case "${out}" in
+    *"git pull"*) fail "git-new-branch ${slug_args} pulled before refusing: ${out}" ;;
+    *"unrecognized option"*) fail "git-new-branch ${slug_args} was not read as a slug: ${out}" ;;
+    *"ERROR"*) ;;
+    *) fail "unexpected message for git-new-branch ${slug_args}: ${out}" ;;
+  esac
+done
+if [ -e "${slugs}/proj-fork-mernst-branch-copied" ]; then
+  fail "--copy with a slug created a directory"
+fi
 
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then
