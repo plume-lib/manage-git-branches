@@ -320,7 +320,7 @@ class CancelBlockedCiTest(unittest.TestCase):
                 cancel_blocked_ci.recent_pipelines.cache_clear()
                 cancel_blocked_ci.unfinished_workflows.cache_clear()
                 result = cancel_blocked_ci.circleci_workflows_of_jobs(
-                    "gh/org/repo", sha, {branch}, jobs
+                    "repo#5", "gh/org/repo", sha, {branch}, jobs
                 )
                 self.assertEqual(result, expected)
                 self.assertEqual(

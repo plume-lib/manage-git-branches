@@ -123,8 +123,6 @@ CIRCLECI_REDUNDANT_TRIGGERS = {"webhook"}
 GITHUB_SUPERSEDING = {"requested", "queued", "in_progress"}
 CIRCLECI_SUPERSEDING = {"running", "failing"}
 
-# The statuses of unfinished CircleCI workflows.
-CIRCLECI_UNFINISHED = {"running", "on_hold", "failing"}
 # How long ago a CircleCI pipeline can have been created and still have an unfinished workflow.
 CIRCLECI_WINDOW = dt.timedelta(days=1)
 # The statuses of unfinished Azure Pipelines builds, and the corresponding GitHub statuses.
@@ -642,7 +640,7 @@ def checks(gh, sha):
 
     Args:
         gh: the repository's GitHub name.
-        sha: the commit.
+        sha: the commit, or "HEAD" for the head commit of the default branch.
 
     Returns:
         A list of the status ("completed" if it has completed), name, and URL of each
@@ -917,7 +915,8 @@ def circleci_build_on(status, workflow, name, branch=None):
         status: the workflow's status, such as "running" or "pending".
         workflow: the id of the workflow.
         name: a name for the workflow, such as its name or the name of one of its jobs.
-        branch: the workflow's branch, or None if it is not known.
+        branch: the workflow's branch, if the workflow is known to be unfinished, or
+            None to look up its branch and whether it has finished.
 
     Returns:
         The workflow, as circleci_build describes it, and a function of no arguments
@@ -961,7 +960,7 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
         ]
     except request_util.REQUEST_ERRORS as e:
         print(
-            f"  failed to list the pipelines of {project}: {request_util.failure(e)}",
+            f"{subject}: failed to list the pipelines of {project}: {request_util.failure(e)}",
             file=sys.stderr,
         )
         workflows = []
@@ -1051,7 +1050,7 @@ def handle(subject, build, dry_run, reason=""):
     """Cancel, or if dry_run is true report, the build of subject.
 
     Args:
-        subject: what the build tests, such as a PR.
+        subject: what the build tests, such as a PR or a branch.
         build: the status, description, URL, and cancelling function of the build.
         dry_run: whether to only report the build.
         reason: text to append to the report.
