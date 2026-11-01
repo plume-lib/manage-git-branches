@@ -309,6 +309,26 @@ setup_case codex-claude
 push_to good --codex --claude
 check_resolved claude "--codex --claude"
 
+## An agent that is not installed is treated as with --no-llm.  The PATH
+## leaves out the stand-ins, so the test is skipped if a real agent is on it.
+no_agent_path="$(dirname -- "$(command -v git)"):/usr/bin:/bin"
+if env PATH="${no_agent_path}" sh -c 'command -v claude' > /dev/null 2>&1; then
+  echo "${SCRIPT_NAME}: skipping the test of a missing agent, because claude is in ${no_agent_path}" >&2
+else
+  setup_case no-agent
+  if push_output="$(PATH="${no_agent_path}" \
+    "${COMMANDS_DIR}/git-push-to" --llm "${main_dir}" "${feature_dir}" 2>&1)"; then
+    push_status=0
+  else
+    push_status=$?
+  fi
+  check_not_resolved "agent not installed"
+  case "${push_output}" in
+    *"cannot run claude, which is not on the PATH"*"conflicted: file.txt"*) ;;
+    *) fail "agent not installed: wrong diagnostic: ${push_output}" ;;
+  esac
+fi
+
 ## A change outside the conflict region is rejected.
 setup_case clean
 push_to clean --llm

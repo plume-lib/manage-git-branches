@@ -1007,7 +1007,8 @@ check_conflict_resolution() {
 ## current directory, the top level of a working tree, and stages the result.
 ## Conflicts that `git rerere` has already resolved need no more work.  For
 ## any others, this function asks an AI agent, RESOLVER ("claude" or
-## "codex"), to edit the conflicted files, or fails if RESOLVER is empty.
+## "codex"), to edit the conflicted files, or fails if RESOLVER is empty or
+## cannot be run.
 ## Either way, it checks every resolution with `check_conflict_resolution`.  SOURCE names COMMIT in
 ## diagnostics and in the agent's instructions.  Returns 1, after printing a
 ## diagnostic, on failure, and leaves the merge in progress.
@@ -1096,7 +1097,7 @@ resolve_merge_conflicts() {
   if [ -z "${resolve_unresolved}" ]; then
     echo "${SCRIPT_NAME}: \`git rerere\` resolved the conflicts in $(pwd)" >&2
     resolve_with="git rerere"
-  elif [ -z "${resolve_with}" ]; then
+  elif [ -z "${resolve_with}" ] || ! agent_available "${resolve_with}"; then
     printf '%s\n' "${resolve_unresolved}" | sed -e "s/^/${SCRIPT_NAME}: conflicted: /" >&2
     echo "${resolve_failed}" >&2
     return 1
@@ -1260,6 +1261,17 @@ resolve_other_changes() {
     git -c core.quotePath=false diff --no-renames --name-only AUTO_MERGE
     git -c core.quotePath=false diff --cached --no-renames --name-only AUTO_MERGE
   } | sort -u | grep -F -x -v -- "${resolve_files}"
+}
+
+## Usage: agent_available AGENT
+## Succeeds if the command AGENT, "claude" or "codex", can be found.
+## Otherwise prints a diagnostic and returns 1.
+agent_available() {
+  if command -v "$1" > /dev/null 2>&1; then
+    return 0
+  fi
+  echo "${SCRIPT_NAME}: cannot run $1, which is not on the PATH" >&2
+  return 1
 }
 
 ## Usage: run_agent AGENT PROMPT
