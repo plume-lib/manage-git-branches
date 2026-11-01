@@ -17,8 +17,12 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+# How long, in seconds, a command can run before run stops it.
+COMMAND_TIMEOUT = 300
+
 # The errors that a command or an HTTP request can raise.  A
-# subprocess.CalledProcessError indicates a failed command.  An OSError, such as a
+# subprocess.CalledProcessError or a subprocess.TimeoutExpired indicates a failed
+# command.  An OSError, such as a
 # urllib.error.URLError, a TimeoutError, or a ConnectionResetError, or an
 # http.client.HTTPException, such as an http.client.IncompleteRead, indicates a failed
 # connection.  A ValueError or KeyError indicates a response that is not JSON or that
@@ -27,13 +31,17 @@ REQUEST_ERRORS = (
     OSError,
     HTTPException,
     subprocess.CalledProcessError,
+    subprocess.TimeoutExpired,
     ValueError,
     KeyError,
 )
 
 
 def run(cmd: list[str]) -> str:
-    """Run a command, raising subprocess.CalledProcessError if it fails.
+    """Run a command.
+
+    If the command fails, this raises subprocess.CalledProcessError.  If it runs longer
+    than COMMAND_TIMEOUT seconds, this stops it and raises subprocess.TimeoutExpired.
 
     Args:
         cmd: the command and its arguments.
@@ -43,7 +51,12 @@ def run(cmd: list[str]) -> str:
         character is replaced.
     """
     return subprocess.run(
-        cmd, check=True, capture_output=True, encoding="utf-8", errors="replace"
+        cmd,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=COMMAND_TIMEOUT,
     ).stdout
 
 
