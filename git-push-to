@@ -18,7 +18,8 @@
 # pushing, and the "--squash" option makes each branch a single commit on top
 # of the previous one; see "Rebasing" below.  `git-rebase-to` is a shorthand
 # for "--rebase".  By default, this script asks an AI agent to resolve merge
-# conflicts; "--no-llm" prevents that.  See "Asking an AI agent" below.
+# conflicts and to fix a failed build; "--no-llm" prevents that.  See "Asking
+# an AI agent" below.
 #
 # Alternately, each argument may be a slug of the form ORG:BRANCH, which names
 # a directory in the current directory:  PROJECT-fork-ORG-branch-BRANCH, or
@@ -111,6 +112,13 @@
 # edits the conflicted files, and this script checks its resolution as
 # described above.  If the agent fails, this script stops with the merge
 # still in progress.
+#
+# When the build of TO_DIR fails after the merge, the agent edits files to fix
+# it, without building; then this script builds again.  The agent gets up to
+# 3 attempts.  When the build succeeds, this script commits the agent's
+# changes on top of the merge, as "Fix the build after merging ...", and
+# pushes.  If the build still fails, this script stops, with the agent's
+# changes staged but not committed.
 
 # Here is an example of use.
 #

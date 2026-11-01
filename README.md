@@ -99,6 +99,8 @@ The commands are:
   resolution, whether from rerere or from the agent:  that nothing outside
   the conflict regions changed and that no conflict marker remains.  Then
   it commits the merge and continues.
+  If the build fails, it asks the agent to fix it, up to 3 times, and
+  commits the fix.
   `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
   on.
   The agent runs in a sandbox, which requires a recent version:  Claude
@@ -121,8 +123,9 @@ The commands are:
   `[--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
-  succeeds.  It handles conflicts as `git-push-to` does, using `git rerere`
-  and an AI agent, and it accepts the same `--llm`, `--no-llm`,
+  succeeds.  It handles conflicts and a failed build as `git-push-to` does,
+  using `git rerere` and an AI agent, and it accepts the same `--llm`,
+  `--no-llm`,
   `--claude`, and `--codex` options.
   OTHER-REPO-DIR and the current directory must both be the top level of a
   working tree and must each have an upstream branch.
@@ -135,8 +138,9 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of `upstream`.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
-  It handles conflicts as `git-push-to` does, using `git rerere` and an AI
-  agent, and it accepts the same `--llm`, `--no-llm`, `--claude`,
+  It handles conflicts and a failed build as `git-push-to` does, using
+  `git rerere` and an AI agent, and it accepts the same `--llm`, `--no-llm`,
+  `--claude`,
   and `--codex` options.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
