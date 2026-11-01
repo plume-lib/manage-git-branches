@@ -8,9 +8,9 @@
 # Usage:
 #   git-pull-from [--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR
 #
-# By default, this script asks an AI agent to resolve merge conflicts, as
-# `git-push-to` does; the "--llm", "--no-llm", "--claude", and "--codex"
-# options are as for `git-push-to`.
+# By default, this script asks an AI agent to resolve merge conflicts and to
+# fix a failed build, as `git-push-to` does; the "--llm", "--no-llm",
+# "--claude", and "--codex" options are as for `git-push-to`.
 #
 # Run this command from the top level of a working tree.  OTHER-REPO-DIR is
 # the top level of another working tree; it may be an absolute or relative

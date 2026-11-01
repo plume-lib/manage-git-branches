@@ -1237,8 +1237,133 @@ git_control_state() {
   fi
 }
 
-## The AI agent that the commands ask to resolve merge conflicts:  "claude",
-## "codex", or empty for none.  `parse_llm_option` sets it.
+## Usage: build_logged LOG
+## Runs `compile-project` in the current directory, writing its output, both
+## standard output and standard error, to standard output and to the file LOG.
+## Returns the exit status of `compile-project`.
+build_logged() {
+  { "${SCRIPT_DIR}"/compile-project 2>&1; echo "$?" > "$1.status"; } | tee "$1"
+  build_logged_status="$(cat "$1.status")"
+  return "${build_logged_status:-1}"
+}
+
+## Usage: build_and_fix AGENT DESCRIPTION ORIG_HEAD
+## Builds the current directory, the top level of a working tree, with
+## `compile-project`, just after merging DESCRIPTION, such as
+## "branch 'feature'", into a branch whose head was ORIG_HEAD.  If the build
+## fails, asks the AI agent AGENT ("claude" or "codex") to fix it, without
+## building, then builds again; it makes up to ${build_fix_attempts} attempts.
+## Once the build succeeds, commits the agent's changes, if any, on top of the
+## merge.  Returns 1, after printing a diagnostic, if the build still fails;
+## the agent's changes then remain, staged but not committed.
+build_fix_attempts=3
+build_and_fix() {
+  fix_with="$1"
+  if ! fix_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-build.log)"; then
+    echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
+    return 1
+  fi
+  if build_logged "${fix_log}"; then
+    return 0
+  fi
+  echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
+  # The agent's changes are committed below, and so would be any change that
+  # the build made to tracked files.
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "${SCRIPT_NAME}: the build changed tracked files in $(pwd); fix the build by hand" >&2
+    return 1
+  fi
+  fix_head="$(git rev-parse --verify HEAD)" || return 1
+  fix_branch="$(git symbolic-ref --quiet --short HEAD)" || fix_branch="HEAD"
+  fix_attempt=1
+  fix_earlier=''
+  while :; do
+    fix_untracked="$(untracked_files)"
+    fix_ignored="$(ignored_files)"
+    if [ "${fix_attempt}" -gt 1 ]; then
+      fix_earlier="
+
+Earlier attempts to fix the build changed files, but the build still failed.  Their changes are staged; \`git diff --cached\` shows them."
+    fi
+    fix_prompt="You are fixing a failed build in the git working tree $(pwd).
+A script merged $2 into branch ${fix_branch}, whose head had been $3, and then built the project, which failed.  \`git diff $3 HEAD\` shows what the merge changed.  The end of the build output is below; the full output is in ${fix_log}.${fix_earlier}
+
+Rules:
+
+* Make the smallest change that fixes the build and that respects the intent of both branches.  Often, the merge combined changes that do not fit together, such as a call to a method that the other branch renamed.
+* Do not disable, delete, or weaken tests, checks, or warnings to make the build pass.
+* Do not run any git command that changes the index, HEAD, or any other ref, such as \`git add\`, \`git commit\`, \`git checkout\`, \`git restore\`, \`git reset\`, \`git merge\`, \`git stash\`, or \`git rebase\`.  The script commits your changes.
+* Run commands in the current directory, which is the working tree, without \`cd\` or \`git -C\`.  A command in another form needs approval, which nobody is present to give.
+* Do not build the project or run its tests; the script builds it after you finish.
+* Do not create another working copy.
+* If you cannot fix the build with confidence, change nothing, and say why.
+
+Finish with a brief summary of the cause of the failure and of your fix.
+
+The end of the build output:
+
+$(tail -n 100 "${fix_log}")"
+    echo "${SCRIPT_NAME}: asking ${fix_with} to fix the build in $(pwd) (attempt ${fix_attempt} of ${build_fix_attempts})" >&2
+    if ! run_agent "${fix_with}" "${fix_prompt}"; then
+      return 1
+    fi
+    if [ "$(git rev-parse --verify HEAD)" != "${fix_head}" ]; then
+      echo "${SCRIPT_NAME}: ${fix_with} changed HEAD in $(pwd)" >&2
+      return 1
+    fi
+    # Stage the agent's changes:  to tracked files, and the files that it
+    # created.  The changes of earlier attempts are already staged.
+    fix_new="$(untracked_files | grep -F -x -v -- "${fix_untracked}")"
+    # A file that git ignores would not be committed, but the build could use
+    # it.
+    fix_new_ignored="$(ignored_files | grep -F -x -v -- "${fix_ignored}")"
+    if [ -n "${fix_new_ignored}" ]; then
+      printf '%s\n' "${fix_new_ignored}" | sed -e "s/^/${SCRIPT_NAME}: ${fix_with} created a file that git ignores: /" >&2
+      return 1
+    fi
+    if git diff --quiet && [ -z "${fix_new}" ]; then
+      echo "${SCRIPT_NAME}: ${fix_with} did not fix the build in $(pwd); it changed nothing" >&2
+      return 1
+    fi
+    if ! git add -u \
+      || ! printf '%s\n' "${fix_new}" | while IFS= read -r fix_file; do
+        if [ -n "${fix_file}" ]; then
+          GIT_LITERAL_PATHSPECS=1 git add -- "${fix_file}" || exit 1
+        fi
+      done; then
+      echo "${SCRIPT_NAME}: cannot stage the changes of ${fix_with} in $(pwd)" >&2
+      return 1
+    fi
+    if git diff --cached --quiet; then
+      echo "${SCRIPT_NAME}: ${fix_with} did not fix the build in $(pwd); its changes undo one another" >&2
+      return 1
+    fi
+    if build_logged "${fix_log}"; then
+      break
+    fi
+    echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
+    # The next attempt's changes are staged with \`git add -u\`, which would
+    # also stage any change that the build made.
+    if ! git diff --quiet; then
+      echo "${SCRIPT_NAME}: the build changed tracked files in $(pwd); fix the build by hand" >&2
+      return 1
+    fi
+    if [ "${fix_attempt}" -ge "${build_fix_attempts}" ]; then
+      echo "${SCRIPT_NAME}: ${fix_with} did not fix the build in $(pwd) in ${build_fix_attempts} attempts; its changes are staged" >&2
+      return 1
+    fi
+    fix_attempt=$((fix_attempt + 1))
+  done
+  if ! git commit -q -m "Fix the build after merging $2"; then
+    echo "${SCRIPT_NAME}: cannot commit the changes of ${fix_with} in $(pwd)" >&2
+    return 1
+  fi
+  return 0
+}
+
+## The AI agent that the commands ask to resolve merge conflicts and to fix a
+## failed build:  "claude", "codex", or empty for none.  `parse_llm_option`
+## sets it.
 llm_agent=claude
 ## The usage of the options that `parse_llm_option` recognizes.
 # shellcheck disable=SC2034 # used by the commands that source this file
@@ -1270,7 +1395,8 @@ parse_llm_option() {
 ## "remote-tracking branch 'upstream/master'".  SOURCE names COMMIT in
 ## diagnostics.  If RESOLVER is given and not empty, and the merge has
 ## conflicts, `resolve_merge_conflicts` resolves them, asking RESOLVER if
-## `git rerere` did not.
+## `git rerere` did not; and if the build fails, `build_and_fix` asks
+## RESOLVER to fix it.
 ## Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
@@ -1297,6 +1423,10 @@ merge_build_push() {
   # `--no-log` prevents a second copy of the commit summaries:  `git merge`
   # appends them to a message given with `-m` when `merge.log` is set, and
   # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
+  if ! merge_orig_head="$(git rev-parse --verify HEAD)"; then
+    echo "${SCRIPT_NAME}: cannot read HEAD in $(pwd)" >&2
+    return 1
+  fi
   if ! git merge -q --no-edit --no-log -m "${merge_message}" "$1"; then
     echo "${SCRIPT_NAME}: problem merging $3 into $(pwd)" >&2
     # A failed merge without MERGE_HEAD did not start, for example because it
@@ -1316,7 +1446,19 @@ merge_build_push() {
   fi
 
   if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
-    if ! "${SCRIPT_DIR}"/compile-project; then
+    # A build of uncommitted changes, such as those that a failed attempt to
+    # fix the build left staged, says nothing about the commit that is pushed.
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+      echo "${SCRIPT_NAME}: the working tree of $(pwd) has uncommitted changes; commit or discard them" >&2
+      return 1
+    fi
+    # If the merge changed nothing, it did not cause a failure of the build,
+    # which the agent would merely work around.
+    if [ -n "${5:-}" ] && [ "$(git rev-parse --verify HEAD)" != "${merge_orig_head}" ]; then
+      if ! build_and_fix "$5" "$2" "${merge_orig_head}"; then
+        return 1
+      fi
+    elif ! "${SCRIPT_DIR}"/compile-project; then
       echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
       return 1
     fi

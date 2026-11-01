@@ -1,14 +1,15 @@
 #!/bin/sh
 
 # Tests that `git-push-to` asks an AI agent to resolve a merge that has
-# conflicts, checks its work, and commits the merge; that `--no-llm` prevents
-# that; and that `git-pull-upstream` does the same.
+# conflicts, checks its work, and commits the merge; that it asks the agent to
+# fix a failed build; that `--no-llm` prevents both; and that
+# `git-pull-upstream` does the same.
 #
 # Usage:
 #   tests/test-push-to-llm.sh
 #
 # Stub `claude` and `codex` commands stand in for the agents.  Environment
-# variable STUB_MODE says what the stubs do.
+# variables STUB_MODE and STUB_BUILD say what the stubs do.
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -41,7 +42,8 @@ fail() {
 }
 
 ## The stub agents.  Each records its name in ${STUB_LOG} and its
-## instructions in ${STUB_PROMPT}, then acts according to ${STUB_MODE}:
+## instructions in ${STUB_PROMPT}.  If file.txt has conflict markers, the stub
+## acts according to ${STUB_MODE}:
 ##   good:   removes the conflict marker lines, keeping both sides
 ##   clean:  as "good", but also changes a line that merged cleanly
 ##   none:   changes nothing
@@ -49,11 +51,31 @@ fail() {
 ##   commit: as "good", but also commits the merge
 ##   create: as "good", but also creates a file
 ##   config: as "good", but also changes git's configuration
+## Otherwise, it is fixing a build, and it acts according to ${STUB_BUILD}:
+##   fix:    removes the lines of other.txt that break the build
+##   bad:    creates or changes notes.txt, which does not fix the build
+##   once:   as "bad" the first time, and as "none" afterward
+##   ignored: creates fix.local, a file that git ignores
+##   none:   changes nothing (the default)
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
 basename -- "$0" >> "${STUB_LOG}"
 cat > "${STUB_PROMPT}"
+if ! grep -q '^<<<<<<< ' file.txt; then
+  case "${STUB_BUILD:-none}" in
+    fix)
+      sed -e '/BROKEN/d' other.txt > other.txt.new
+      mv other.txt.new other.txt
+      ;;
+    bad) echo "an attempt" >> notes.txt ;;
+    once)
+      if [ ! -e notes.txt ]; then echo "an attempt" > notes.txt; fi
+      ;;
+    ignored) echo "a fix" > fix.local ;;
+  esac
+  exit 0
+fi
 if [ "${STUB_MODE}" = fail ]; then exit 3; fi
 if [ "${STUB_MODE}" = none ]; then exit 0; fi
 sed -e '/^<<<<<<< /d' -e '/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new
@@ -80,10 +102,14 @@ STUB_LOG="${WORK_DIR}/stub-log"
 STUB_PROMPT="${WORK_DIR}/stub-prompt"
 export STUB_LOG STUB_PROMPT
 
-## Usage: setup_case NAME
+## Usage: setup_case NAME [build]
 ## Creates a remote under ${WORK_DIR}/NAME with branches "main" and
 ## "feature", whose changes to file.txt conflict, and a clone of each.  Sets
 ## ${main_dir} and ${feature_dir} to the clones and ${remote} to the remote.
+## With "build", the project has a Makefile, whose build fails if other.txt
+## contains "BROKEN", and main adds "BROKEN" to other.txt.  With
+## "build-modifies", the build also changes the tracked file other.txt if
+## notes.txt exists.
 setup_case() {
   case_dir="${WORK_DIR}/$1"
   mkdir "${case_dir}"
@@ -92,6 +118,20 @@ setup_case() {
   git init -q -b main "${case_dir}/seed"
   printf '%s\n' one two three four five six seven eight nine > "${case_dir}/seed/file.txt"
   git -C "${case_dir}/seed" add file.txt
+  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
+    echo 'all:' > "${case_dir}/seed/Makefile"
+  fi
+  if [ "${2:-}" = build-modifies ]; then
+    printf '\t@if [ -e notes.txt ]; then echo "built" >> other.txt; fi\n' \
+      >> "${case_dir}/seed/Makefile"
+  fi
+  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
+    printf '\t@if grep -n BROKEN other.txt; then echo "other.txt is broken" >&2; exit 1; fi\n' \
+      >> "${case_dir}/seed/Makefile"
+    echo "fine" > "${case_dir}/seed/other.txt"
+    echo '*.local' > "${case_dir}/seed/.gitignore"
+    git -C "${case_dir}/seed" add Makefile other.txt .gitignore
+  fi
   git -C "${case_dir}/seed" commit -q -m "Initial commit"
   git -C "${case_dir}/seed" remote add origin "${remote}"
   git -C "${case_dir}/seed" push -q --set-upstream origin main
@@ -105,6 +145,9 @@ setup_case() {
   git -C "${feature_dir}" config pull.rebase false
 
   printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${main_dir}/file.txt"
+  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
+    echo "BROKEN" >> "${main_dir}/other.txt"
+  fi
   git -C "${main_dir}" commit -q -a -m "Change main"
   git -C "${main_dir}" push -q
   printf '%s\n' one two three four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
@@ -117,11 +160,14 @@ setup_case() {
 ## Usage: push_to MODE OPTION...
 ## Runs `git-push-to OPTION... ${main_dir} ${feature_dir}` with the stubs
 ## acting according to MODE.  Sets ${push_status} to its exit status and
-## ${push_output} to its output.
+## ${push_output} to its output.  It builds the project only if ${build} is 1.
+build=0
 push_to() {
   push_mode="$1"
   shift
+  if [ "${build}" -eq 1 ]; then push_skip=''; else push_skip=1; fi
   if push_output="$(STUB_MODE="${push_mode}" PATH="${WORK_DIR}/test-bin:${PATH}" \
+    MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT="${push_skip}" \
     "${COMMANDS_DIR}/git-push-to" "$@" "${main_dir}" "${feature_dir}" 2>&1)"; then
     push_status=0
   else
@@ -289,6 +335,120 @@ for auto_update in false true; do
   push_to none --llm
   check_resolved "" "rerere (autoUpdate ${auto_update})"
 done
+
+## A failed build is fixed, and the fix is committed on top of the merge.
+build=1
+setup_case build-fix build
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "build fix: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "build fix: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q 'other.txt is broken' "${STUB_PROMPT}"; then
+  fail "build fix: the instructions do not contain the build output"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
+  fail "build fix: wrong message for the fix: ${message}"
+fi
+if [ "$(git -C "${remote}" rev-parse refs/heads/feature^1^2)" != "$(git -C "${main_dir}" rev-parse HEAD)" ] \
+  || [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+  fail "build fix: the fix is not on top of the merge"
+fi
+
+## An agent that changes nothing gets one attempt.
+setup_case build-none build
+STUB_BUILD=none push_to good --llm
+check_not_resolved "build not fixed"
+case "${push_output}" in
+  *"claude did not fix the build"*) ;;
+  *) fail "build not fixed: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(wc -l < "${STUB_LOG}")" -ne 2 ]; then
+  fail "build not fixed: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+
+## An agent whose changes do not fix the build gets three attempts.
+setup_case build-bad build
+STUB_BUILD=bad push_to good --llm
+check_not_resolved "bad build fix"
+case "${push_output}" in
+  *"in 3 attempts"*) ;;
+  *) fail "bad build fix: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(wc -l < "${STUB_LOG}")" -ne 4 ]; then
+  fail "bad build fix: expected claude to run 4 times, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! git -C "${feature_dir}" diff --cached --name-only | grep -q -x notes.txt; then
+  fail "bad build fix: the agent's changes are not staged"
+fi
+# A rerun does not build the staged changes, which would not be pushed.
+: > "${STUB_LOG}"
+STUB_BUILD=bad push_to good --llm
+check_not_resolved "rerun after a bad build fix"
+case "${push_output}" in
+  *"has uncommitted changes"*) ;;
+  *) fail "rerun after a bad build fix: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "rerun after a bad build fix: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## An agent that creates a file that git ignores is rejected.
+setup_case build-ignored build
+STUB_BUILD=ignored push_to good --llm
+check_not_resolved "build fix in an ignored file"
+case "${push_output}" in
+  *"created a file that git ignores: fix.local"*) ;;
+  *) fail "build fix in an ignored file: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An attempt that changes nothing ends the attempts, even after an earlier
+## attempt changed files; the later attempt learns of the earlier one.
+setup_case build-once build
+STUB_BUILD=once push_to good --llm
+check_not_resolved "build fix that gives up"
+case "${push_output}" in
+  *"it changed nothing"*) ;;
+  *) fail "build fix that gives up: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(wc -l < "${STUB_LOG}")" -ne 3 ]; then
+  fail "build fix that gives up: expected claude to run 3 times, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q 'git diff --cached' "${STUB_PROMPT}"; then
+  fail "build fix that gives up: the later attempt was not told of the earlier one"
+fi
+
+## A build that changes tracked files ends the attempts, so that its changes
+## are not committed as the agent's.
+setup_case build-modifies build-modifies
+STUB_BUILD=bad push_to good --llm
+check_not_resolved "build that changes tracked files"
+case "${push_output}" in
+  *"the build changed tracked files"*) ;;
+  *) fail "build that changes tracked files: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(wc -l < "${STUB_LOG}")" -ne 2 ]; then
+  fail "build that changes tracked files: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+
+## With --no-llm, a failed build is not given to an agent.
+setup_case build-no-llm build
+STUB_BUILD=fix push_to good --no-llm
+check_not_resolved "build with --no-llm"
+if [ -s "${STUB_LOG}" ]; then
+  fail "build with --no-llm: an agent ran: $(cat "${STUB_LOG}")"
+fi
+# The merge is now committed.  A rerun merges nothing, so the merge did not
+# cause the failure, and no agent is asked to fix it.
+STUB_BUILD=fix push_to good --llm
+check_not_resolved "build failure without a merge"
+if [ -s "${STUB_LOG}" ]; then
+  fail "build failure without a merge: an agent ran: $(cat "${STUB_LOG}")"
+fi
+build=0
 
 ## `git-pull-upstream` resolves conflicts too.
 setup_case pull-upstream
