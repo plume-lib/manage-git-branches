@@ -1987,9 +1987,18 @@ merge_build_push() {
       # oldest first, and the first parent of the oldest of them.  Their
       # subjects are already in the history that is pushed, so the message of
       # the fix reveals nothing new by repeating them.
+      # The shell splits the list on newlines, with globbing off so that no
+      # line is expanded.  The loop body, and the code after the loop, restore
+      # both settings.
       merge_fixed=''
       merge_fix_from="${merge_walk_from}"
-      while IFS= read -r merge_line; do
+      merge_saved_ifs="${IFS}"
+      IFS='
+'
+      set -f
+      for merge_line in ${merge_log}; do
+        set +f
+        IFS="${merge_saved_ifs}"
         merge_parents="${merge_line#* }"
         merge_subject="${merge_parents#*"${merge_tab}"}"
         merge_parents="${merge_parents%%"${merge_tab}"*}"
@@ -1999,9 +2008,9 @@ merge_build_push() {
         esac
         merge_fixed="$(merge_description "${merge_subject}" "${merge_line%% *}")${merge_fixed:+ and ${merge_fixed}}"
         merge_fix_from="${merge_parents%% *}"
-      done << EOF
-${merge_log}
-EOF
+      done
+      set +f
+      IFS="${merge_saved_ifs}"
       if [ -n "${merge_pull_merge}" ]; then
         merge_fixed="${merge_fixed:+${merge_fixed} and }${merge_upstream}"
       fi
