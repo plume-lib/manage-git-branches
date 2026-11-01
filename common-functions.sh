@@ -888,14 +888,18 @@ check_conflict_resolution() {
     echo "${SCRIPT_NAME}: $1: the file was deleted" >&2
     return 1
   fi
-  # Each line of the input is tagged:  "A" for a line of the file in
-  # AUTO_MERGE, which all come first, and "W" for a line of the file in the
-  # working tree.  `awk` ends every line with a newline, even the last line of
-  # a file that lacks one.  `--filters` converts AUTO_MERGE's file as a
+  # The awk program below that checks the resolution reads both versions of
+  # FILE from its standard input.  So that it can tell them apart, the two
+  # `awk` commands that feed it put a tag at the start of each line:  "A" for
+  # a line of FILE in AUTO_MERGE, which all come first, and "W" for a line of
+  # FILE in the working tree.  `--filters` converts AUTO_MERGE's file as a
   # checkout would, such as to CRLF line endings, to match the working tree.
-  # So whether each file ends with a newline is passed to awk separately.
-  # Command substitution removes a final newline, so the last character of a
-  # file that ends with one is empty.
+  #
+  # `awk` ends every line that it prints with a newline, even the last line of
+  # a file that lacks one, so whether each version ends with a newline is
+  # passed to the checking program separately.  Command substitution removes
+  # a final newline, so the last character of a file that ends with one is
+  # empty.
   check_conflict_a_newline=yes
   if [ -n "$(git cat-file --filters "AUTO_MERGE:$1" | tail -c 1)" ]; then
     check_conflict_a_newline=no
