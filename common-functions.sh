@@ -1380,10 +1380,10 @@ parse_llm_option() {
 }
 
 ## Usage: pull_resolving RESOLVER DIRECTORY PULL-ARGUMENT...
-## Runs `git -C DIRECTORY pull PULL-ARGUMENT...`.  If the pull merges, the
-## merge has conflicts, and RESOLVER is not empty, resolves them with
-## `resolve_merge_conflicts` and commits the merge with the message that
-## `git pull` composed.  (A pull that rebases cannot be resolved this way.)
+## Runs `git -C DIRECTORY pull PULL-ARGUMENT...`.  If the pull merges and the
+## merge has conflicts, resolves them with `resolve_merge_conflicts`, asking
+## RESOLVER, if it is not empty, about any that `git rerere` did not resolve,
+## and commits the merge with the message that `git pull` composed.  (A pull that rebases cannot be resolved this way.)
 ## Returns 1, after printing a diagnostic, if a merge is already in progress
 ## in DIRECTORY, or if the pull fails and its conflicts are not resolved.
 pull_resolving() {
@@ -1399,9 +1399,8 @@ pull_resolving() {
   if git -C "${pull_dir}" pull "$@"; then
     return 0
   fi
-  if [ -z "${pull_resolver}" ] \
-    || ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
-    echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
+  echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
+  if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
     return 1
   fi
   # A subshell, so that the current directory does not change.
