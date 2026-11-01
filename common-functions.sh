@@ -1533,7 +1533,9 @@ build_logged() {
 ## Usage: build_and_fix AGENT DESCRIPTION ORIG_HEAD
 ## Builds the current directory, the top level of a working tree, with
 ## `compile-project`, just after merging DESCRIPTION, such as
-## "branch 'feature'", into a branch whose head was ORIG_HEAD.  If the build
+## "branch 'feature'" or
+## "remote-tracking branch 'origin/main' and branch 'feature'", into a branch
+## whose head was ORIG_HEAD before the merges.  If the build
 ## fails, asks the AI agent AGENT ("claude" or "codex"), if it can be run, to
 ## fix it, without building, then builds again; it makes up to ${build_fix_attempts} attempts.
 ## Once the build succeeds, commits the agent's changes, if any, on top of the
@@ -1573,7 +1575,7 @@ build_and_fix() {
 Earlier attempts to fix the build changed files, but the build still failed.  Their changes are staged; \`git diff --cached\` shows them."
     fi
     fix_prompt="You are fixing a failed build in the git working tree $(pwd).
-A script merged $2 into branch ${fix_branch}, whose head had been $3, and then built the project, which failed.  \`git diff $3 HEAD\` shows what the merge changed.  The end of the build output is below; the full output is in ${fix_log}.${fix_earlier}
+A script merged $2 into branch ${fix_branch}, whose head had been $3, and then built the project, which failed.  \`git diff $3 HEAD\` shows what merging changed.  The end of the build output is below; the full output is in ${fix_log}.${fix_earlier}
 
 Rules:
 
@@ -1726,7 +1728,22 @@ pull_resolving() {
   )
 }
 
-## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER]
+## Usage: upstream_description
+## Prints what `git fmt-merge-msg` calls the upstream branch of the current
+## branch, which `git pull` merges:  for example,
+## "remote-tracking branch 'origin/feature'", or "branch 'main'" for a branch
+## of the local repository.  Prints "its upstream branch" if git cannot name
+## that branch.
+upstream_description() {
+  upstream_description_ref="$(git rev-parse --symbolic-full-name '@{upstream}' 2> /dev/null)"
+  case "${upstream_description_ref}" in
+    refs/remotes/*) echo "remote-tracking branch '${upstream_description_ref#refs/remotes/}'" ;;
+    refs/heads/*) echo "branch '${upstream_description_ref#refs/heads/}'" ;;
+    *) echo "its upstream branch" ;;
+  esac
+}
+
+## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [PULL_ORIG_HEAD]]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
 ## pushes the current branch if the build succeeds.  DESCRIPTION is what
@@ -1735,7 +1752,11 @@ pull_resolving() {
 ## diagnostics.  If the merge has conflicts, `resolve_merge_conflicts`
 ## resolves them, asking RESOLVER, if it is given and not empty, about any
 ## that `git rerere` did not resolve; and if the build fails, `build_and_fix`
-## asks RESOLVER, if it is given and not empty, to fix it.
+## asks RESOLVER, if it is given and not empty, to fix it.  PULL_ORIG_HEAD,
+## if it is given, is the head of the current branch before a pull from its
+## upstream branch that preceded this call, such as by `pull_resolving`.  The
+## agent is asked to fix the build only if the pull or the merge changed the
+## head, and it is told about both.
 ## Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
@@ -1805,10 +1826,24 @@ merge_build_push() {
   fi
 
   if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
-    # If the merge changed nothing, it did not cause a failure of the build,
-    # which the agent would merely work around.
-    if [ -n "${5:-}" ] && [ "$(git rev-parse --verify HEAD)" != "${merge_orig_head}" ]; then
-      if ! build_and_fix "$5" "$2" "${merge_orig_head}"; then
+    merge_start="${6:-${merge_orig_head}}"
+    if ! merge_new_head="$(git rev-parse --verify HEAD)"; then
+      echo "${SCRIPT_NAME}: cannot read HEAD in $(pwd)" >&2
+      return 1
+    fi
+    # If neither the pull nor the merge changed anything, neither caused a
+    # failure of the build, which the agent would merely work around.
+    if [ -n "${5:-}" ] && [ "${merge_new_head}" != "${merge_start}" ]; then
+      # What was merged since ${merge_start}:  the upstream branch, if the
+      # pull changed the head, and COMMIT, if the merge did.
+      merge_fixed="$2"
+      if [ "${merge_start}" != "${merge_orig_head}" ]; then
+        merge_fixed="$(upstream_description)"
+        if [ "${merge_new_head}" != "${merge_orig_head}" ]; then
+          merge_fixed="${merge_fixed} and $2"
+        fi
+      fi
+      if ! build_and_fix "$5" "${merge_fixed}" "${merge_start}"; then
         return 1
       fi
     elif ! "${SCRIPT_DIR}"/compile-project; then
