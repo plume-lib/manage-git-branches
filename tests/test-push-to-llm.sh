@@ -47,6 +47,7 @@ fail() {
 ##   clean:  as "good", but also changes a line that merged cleanly
 ##   none:   changes nothing
 ##   fail:   exits with status 3
+##   fail-create: creates a file, then exits with status 3
 ##   commit: as "good", but also commits the merge
 ##   create: as "good", but also creates a file
 ##   config: as "good", but also changes git's configuration
@@ -72,13 +73,19 @@ fail() {
 ##   auto-merge: as "good", but also makes AUTO_MERGE name HEAD's tree
 ##   sandbox-dirs: as "good", but also creates the empty directories that
 ##           Codex's sandbox creates
+##   hang:   runs for 60 seconds, changing nothing
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
 basename -- "$0" >> "${STUB_LOG}"
 cat > "${STUB_PROMPT}"
 if [ "${STUB_MODE}" = fail ]; then exit 3; fi
+if [ "${STUB_MODE}" = fail-create ]; then
+  echo "scratch" > scratch.txt
+  exit 3
+fi
 if [ "${STUB_MODE}" = none ]; then exit 0; fi
+if [ "${STUB_MODE}" = hang ]; then exec sleep 60; fi
 if [ "${STUB_MODE}" = separator-long ]; then
   sed -e '/^<<<<<<</d' -e '/^>>>>>>>/d' file.txt > file.txt.new
   mv file.txt.new file.txt
@@ -361,8 +368,17 @@ setup_case fail
 push_to fail --llm
 check_not_resolved "failing agent"
 case "${push_output}" in
-  *"claude failed with status 3"*) ;;
+  *"claude failed with status 3"*"conflicted: file.txt"*) ;;
   *) fail "failing agent: wrong diagnostic: ${push_output}" ;;
+esac
+
+## The work of an agent that fails is checked too.
+setup_case fail-create
+push_to fail-create --llm
+check_not_resolved "failing agent that creates a file"
+case "${push_output}" in
+  *"claude failed with status 3"*"created a file: scratch.txt"*) ;;
+  *) fail "failing agent that creates a file: wrong diagnostic: ${push_output}" ;;
 esac
 
 ## An agent that commits is rejected.
@@ -454,6 +470,46 @@ for sandbox_dir in .agents .aws .codex; do
     fail "Codex's sandbox directories: ${sandbox_dir} remains"
   fi
 done
+
+## An agent that runs longer than MANAGE_GIT_BRANCHES_LLM_TIMEOUT is stopped.
+setup_case hang
+hang_start="$(date +%s)"
+MANAGE_GIT_BRANCHES_LLM_TIMEOUT=2
+export MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+push_to hang --llm
+unset MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+hang_seconds="$(($(date +%s) - hang_start))"
+check_not_resolved "agent that runs too long"
+case "${push_output}" in
+  *"claude did not finish within 2 seconds"*) ;;
+  *) fail "agent that runs too long: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "${hang_seconds}" -ge 30 ]; then
+  fail "agent that runs too long: took ${hang_seconds} seconds"
+fi
+
+## A time limit that is not a number is rejected.
+setup_case bad-timeout
+MANAGE_GIT_BRANCHES_LLM_TIMEOUT=soon
+export MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+push_to good --llm
+unset MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+check_not_resolved "bad MANAGE_GIT_BRANCHES_LLM_TIMEOUT"
+case "${push_output}" in
+  *"MANAGE_GIT_BRANCHES_LLM_TIMEOUT is not a number of seconds: soon"*) ;;
+  *) fail "bad MANAGE_GIT_BRANCHES_LLM_TIMEOUT: wrong diagnostic: ${push_output}" ;;
+esac
+
+## A hook in the working tree, or a hook that links to a file in it, can be
+## resolved like any other file.
+setup_case hook-in-tree
+git -C "${feature_dir}" config core.hooksPath .
+push_to good --llm
+check_resolved claude "core.hooksPath in the working tree"
+setup_case hook-links-to-conflict
+ln -s ../../file.txt "${feature_dir}/.git/hooks/pre-commit"
+push_to good --llm
+check_resolved claude "hook that links to a conflicted file"
 
 ## An agent that adds a hook that is a symbolic link is rejected.
 setup_case hook-link
