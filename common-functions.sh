@@ -891,37 +891,31 @@ check_conflict_resolution() {
   fi
 
   # The awk program check-conflict-resolution.awk, which checks the
-  # resolution, reads both versions of FILE from its standard input.  So that it can tell them apart, the two
-  # `awk` commands that feed it put a tag at the start of each line:  "A" for
-  # a line of FILE in AUTO_MERGE, which all come first, and "W" for a line of
-  # FILE in the working tree.  `--filters` converts AUTO_MERGE's file as a
-  # checkout would, such as to CRLF line endings, to match the working tree.
+  # resolution, reads both versions of FILE from its standard input.  So that
+  # it can tell them apart, the two `awk` commands that feed it put a tag at
+  # the start of each line:  "A" for a line of FILE in AUTO_MERGE, which all
+  # come first, and "W" for a line of FILE in the working tree.  `--filters`
+  # converts AUTO_MERGE's file as a checkout would, such as to CRLF line
+  # endings, to match the working tree.
   #
   # `awk` ends every line that it prints with a newline, even the last line of
   # a file that lacks one, so whether each version ends with a newline is
-  # passed to the checking program separately.  Command substitution removes
-  # a final newline, so the last character of a file that ends with one is
-  # empty.
+  # passed to the checking program separately.
   check_conflict_a_newline=yes
-  if [ -n "$(git cat-file --filters "AUTO_MERGE:$1" | tail -c 1)" ]; then
+  if ! git cat-file --filters "AUTO_MERGE:$1" | ends_with_newline; then
     check_conflict_a_newline=no
   fi
   check_conflict_w_newline=yes
-  if [ -n "$(tail -c 1 < "$1")" ]; then
+  if ! ends_with_newline < "$1"; then
     check_conflict_w_newline=no
   fi
 
-  # "yes" if FILE contains a line "=======" in HEAD or in MERGE_HEAD, and "no"
-  # otherwise.  If "yes", such a line in the text in place of a conflict
-  # region can be content rather than a leftover separator, so it is
-  # permitted.
+  # "yes" if a line "=======" is permitted in the text in place of a conflict
+  # region, and "no" otherwise.
   check_conflict_separator=no
-  for check_conflict_side in HEAD MERGE_HEAD; do
-    if git cat-file --filters "${check_conflict_side}:$1" 2> /dev/null \
-      | awk '/^=======\r?$/ { found = 1 } END { exit !found }'; then
-      check_conflict_separator=yes
-    fi
-  done
+  if has_separator_line "$1"; then
+    check_conflict_separator=yes
+  fi
 
   # shellcheck disable=SC2016 # awk, not the shell, expands $0 and the like.
   {
@@ -932,6 +926,28 @@ check_conflict_resolution() {
     CHECK_W_NEWLINE="${check_conflict_w_newline}" \
     CHECK_SEPARATOR="${check_conflict_separator}" \
     awk -f "${SCRIPT_DIR}/check-conflict-resolution.awk"
+}
+
+## Usage: ends_with_newline
+## Succeeds if standard input is empty or ends with a newline.
+ends_with_newline() {
+  # Command substitution removes a final newline, so the last character of
+  # input that ends with one is empty.
+  [ -z "$(tail -c 1)" ]
+}
+
+## Usage: has_separator_line FILE
+## Succeeds if FILE contains a line "=======" in HEAD or in MERGE_HEAD.  Then
+## such a line in the resolution of a conflict in FILE can be content, such as
+## a Markdown heading's underline, rather than a leftover separator.
+has_separator_line() {
+  for has_separator_side in HEAD MERGE_HEAD; do
+    if git cat-file --filters "${has_separator_side}:$1" 2> /dev/null \
+      | awk '/^=======\r?$/ { found = 1 } END { exit !found }'; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 ## Usage: resolve_merge_conflicts RESOLVER COMMIT SOURCE
