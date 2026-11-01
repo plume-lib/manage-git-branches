@@ -54,7 +54,8 @@ cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
 echo claude >> "${STUB_LOG}"
 cat > /dev/null
-sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new
+sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^=======$/d' -e '/^>>>>>>> /d' \
+  file.txt > file.txt.new
 mv file.txt.new file.txt
 EOF
 
