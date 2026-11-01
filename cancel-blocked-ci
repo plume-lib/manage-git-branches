@@ -607,7 +607,7 @@ def azure_projects(gh, pr_shas):
         parsed[:2]
         for sha_checks in concurrently(lambda sha: checks(gh, sha), ["HEAD", *pr_shas])
         for check in sha_checks
-        if (parsed := ci_build.AzureBuildUrl.from_url(check.url))
+        if (parsed := ci_build.AzureBuildUrlParts.from_url(check.url))
     }
 
 
@@ -805,11 +805,12 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
     result = []
     failures = []
     for status, name, url in jobs:
-        _, _, number = ci_build.CircleciUrl.from_url(url)
+        parsed = ci_build.CircleciUrlParts.from_url(url)
+        _, _, number = parsed
         if (project, number) in found:
             continue
         try:
-            workflow = ci_build.CircleciWorkflowAndJob.from_url(url).workflow
+            workflow = parsed.lookup_workflow()
         except request_util.REQUEST_ERRORS as e:
             failures.append(e)
             continue
@@ -923,7 +924,7 @@ def redundant_circleci_workflows(label, gh):
         # A URL without a project slug is of the project that GitHub's OAuth app connects.
         ci_build.circleci_project_of_url(check.url) or f"gh/{gh}"
         for check in checks(gh, "HEAD")
-        if ci_build.CircleciUrl.from_url(check.url) is not None
+        if ci_build.CircleciUrlParts.from_url(check.url) is not None
     }
     if projects:
         warn_if_no_circleci_token()
@@ -1096,10 +1097,10 @@ def unfinished_other_builds(subject, gh, sha, branches):
         status, name, url = check
         if status == "completed":
             continue
-        if parsed := ci_build.AzureBuildUrl.from_url(url):
+        if parsed := ci_build.AzureBuildUrlParts.from_url(url):
             org, project, build = parsed
             add(Build.from_azure_pipelines_build(status, org, project, build, name, url))
-        elif (parsed := ci_build.CircleciUrl.from_url(url)) is not None:
+        elif (parsed := ci_build.CircleciUrlParts.from_url(url)) is not None:
             warn_if_no_circleci_token()
             workflow, project, job = parsed
             if workflow is not None:
