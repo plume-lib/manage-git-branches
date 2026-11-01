@@ -167,7 +167,7 @@ The commands are:
   instead.  It does not rerun a workflow that is still running or that has
   been rerun since, nor a job that has already run N times (by default, 3).
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
-  shows a transient failure.  This command needs Python 3 and `gh`.
+  shows a transient failure.  This command needs Python 3.9 or later and `gh`.
 * [`normalize-log`](normalize-log) `[FILE]...`:
   Prints the file (by default, standard input) without formatting that
   affects a terminal:  terminal escape sequences, a leading byte order
