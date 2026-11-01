@@ -238,6 +238,7 @@ class CancelBlockedCiTest(unittest.TestCase):
                 *_: Any,
                 pages: dict[str, Any] = pages,
                 requested: list[str] = requested,
+                **_kwargs: Any,
             ) -> bytes:
                 requested.append(url)
                 return json.dumps(pages[url]).encode()
@@ -265,7 +266,9 @@ class CancelBlockedCiTest(unittest.TestCase):
         url = "https://dev.azure.com/org/project/_apis/build/builds"
         calls = []
 
-        def http(_method: str, _url: str, headers: dict[str, str] | None, *_: Any) -> bytes:
+        def http(
+            _method: str, _url: str, headers: dict[str, str] | None, *_: Any, **_kwargs: Any
+        ) -> bytes:
             calls.append(bool(headers))
             return b"{}" if headers else b"<html>Sign in</html>"
 
@@ -278,12 +281,27 @@ class CancelBlockedCiTest(unittest.TestCase):
             self.assertEqual(ci_build.azure_get(url), {})
         self.assertEqual(calls, [False, True, True])
 
+    def test_azure_request_refusals(self) -> None:
+        """A request of Azure DevOps treats a sign-in page as a refusal; another does not."""
+        refusals = []
+
+        def http(*_: Any, refusals_seen: list[Any] = refusals, **kwargs: Any) -> bytes:
+            refusals_seen.append(kwargs.get("refusals"))
+            return b"{}"
+
+        with mock.patch.object(request_util, "http", http):
+            ci_build.azure_request("GET", "https://dev.azure.com/org/p/_apis/build/builds", {})
+            request_util.request("GET", "https://example.com/")
+        self.assertEqual(refusals, [ci_build.AZURE_SIGN_IN, None])
+
     def test_azure_temporary_failure(self) -> None:
         """A temporary failure of an anonymous request does not mark the project private."""
         url = "https://dev.azure.com/org/project/_apis/build/builds"
         calls = []
 
-        def http(_method: str, url: str, headers: dict[str, str] | None, *_: Any) -> bytes:
+        def http(
+            _method: str, url: str, headers: dict[str, str] | None, *_: Any, **_kwargs: Any
+        ) -> bytes:
             calls.append(bool(headers))
             if len(calls) == 1:
                 raise urllib.error.HTTPError(
@@ -340,7 +358,7 @@ class CancelBlockedCiTest(unittest.TestCase):
         deleted = f"{CIRCLECI}/pipeline/p3/workflow"
         requested = []
 
-        def http(_method: str, url: str, *_: Any) -> bytes:
+        def http(_method: str, url: str, *_: Any, **_kwargs: Any) -> bytes:
             requested.append(url)
             if url not in pages:
                 raise urllib.error.HTTPError(url, 404, "Not Found", Message(), io.BytesIO())

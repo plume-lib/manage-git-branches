@@ -12,7 +12,10 @@ import subprocess
 import urllib.error
 import urllib.request
 from http.client import HTTPException
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 # The errors that a command or an HTTP request can raise.  A
 # subprocess.CalledProcessError indicates a failed command.  An OSError, such as a
@@ -59,7 +62,14 @@ def gh_api(path: str, *, paginate: bool = False) -> Any:
     return json.loads(run(["gh", "api", path]))
 
 
-def http(method: str, url: str, headers: dict[str, str] | None = None, body: Any = None) -> bytes:
+def http(
+    method: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    body: Any = None,
+    *,
+    refusals: Mapping[int, str] | None = None,
+) -> bytes:
     """Make an HTTP request.
 
     Args:
@@ -67,14 +77,15 @@ def http(method: str, url: str, headers: dict[str, str] | None = None, body: Any
         url: the URL.
         headers: the HTTP headers.
         body: the request body, which is sent as JSON, or None for no body.
+        refusals: a map from each successful status with which the server refuses the
+            request, such as one that a sign-in page has, to a description of it.
 
     Returns:
         The response body, decompressed if the server compressed it.
 
     Raises:
-        urllib.error.HTTPError: if the server refuses the request, or if it responds
-            with a sign-in page, as Azure DevOps does to a request that lacks
-            the needed credentials.
+        urllib.error.HTTPError: if the server refuses the request, with an error status
+            or with a status in refusals.
     """
     headers = dict(headers or {})
     data = None
@@ -83,8 +94,8 @@ def http(method: str, url: str, headers: dict[str, str] | None = None, body: Any
         headers.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=60) as response:
-        if response.status == 203:
-            msg = "a sign-in page instead of the requested data"
+        if refusals and response.status in refusals:
+            msg = refusals[response.status]
             raise urllib.error.HTTPError(url, response.status, msg, response.headers, None)
         content = response.read()
         if response.headers.get("Content-Encoding") == "gzip":
@@ -92,7 +103,14 @@ def http(method: str, url: str, headers: dict[str, str] | None = None, body: Any
     return content
 
 
-def request(method: str, url: str, headers: dict[str, str] | None = None, body: Any = None) -> Any:
+def request(
+    method: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    body: Any = None,
+    *,
+    refusals: Mapping[int, str] | None = None,
+) -> Any:
     """Make an HTTP request whose response is JSON.
 
     Args:
@@ -100,11 +118,13 @@ def request(method: str, url: str, headers: dict[str, str] | None = None, body: 
         url: the URL.
         headers: the HTTP headers.
         body: the request body, which is sent as JSON, or None for no body.
+        refusals: a map from each successful status with which the server refuses the
+            request to a description of it, as for http.
 
     Returns:
         The response body, parsed as JSON, or None if it is empty.
     """
-    content = http(method, url, headers, body)
+    content = http(method, url, headers, body, refusals=refusals)
     return json.loads(content) if content else None
 
 
