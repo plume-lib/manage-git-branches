@@ -108,10 +108,13 @@
 # The agent runs in a sandbox, which requires a recent version of it; see
 # the README.
 #
-# When the merge has conflicts that `git rerere` does not resolve, the agent
+# When a merge has conflicts that `git rerere` does not resolve, the agent
 # edits the conflicted files, and this script checks its resolution as
-# described above.  If the agent fails, this script stops with the merge
-# still in progress.
+# described above.  That applies to the merge of FROM_DIR's branch into
+# TO_DIR, and to the merges of the pulls that update FROM_DIR and TO_DIR from
+# their remotes.  A pull that rebases, as `pull.rebase` can make it do, is not
+# resolved.  If the agent fails, this script stops with the merge still in
+# progress.
 #
 # When the build of TO_DIR fails after the merge, the agent edits files to fix
 # it, without building; then this script builds again.  The agent gets up to
@@ -395,8 +398,7 @@ git_push_to() {
     return 1
   fi
 
-  if ! git -C "$from_absolute" pull -q; then
-    echo "${SCRIPT_NAME}: problem pulling ${from_absolute}" >&2
+  if ! pull_resolving "${llm_agent}" "${from_absolute}" -q; then
     return 1
   fi
 
@@ -415,8 +417,7 @@ git_push_to() {
     return 1
   fi
 
-  if ! git pull -q; then
-    echo "${SCRIPT_NAME}: problem pulling in ${to_absolute}" >&2
+  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q; then
     return 1
   fi
 
