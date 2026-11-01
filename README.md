@@ -74,7 +74,8 @@ The commands are:
   directories.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
-  `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
+  `[--nocompile] [--rebase | --squash] [--llm | --no-llm] [--claude | --codex]
+  FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.
   Each directory must be the top level of a working tree and must have an
@@ -92,24 +93,41 @@ The commands are:
   has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
   directories form one more chain per PROJECT.
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
-  When `git rerere` resolves a merge's conflicts, it checks that nothing
-  outside the conflict regions changed and that no conflict marker remains,
-  commits the merge, and continues.
+  When a merge has conflicts, it uses the resolutions that `git rerere`
+  recorded, and it asks an AI agent, Claude (or, with `--codex`, Codex), to
+  edit the conflicted hunks that rerere does not resolve.  It checks every
+  resolution, whether from rerere or from the agent:  that nothing outside
+  the conflict regions changed and that no conflict marker remains.  Then
+  it commits the merge and continues.
+  `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
+  on.
+  The agent runs in a sandbox, which requires a recent version:  Claude
+  Code with the `--restricted` option and the setting
+  `permissions.blockReadsOutsideWorkingDirectories`, or Codex with
+  permission profiles (the setting `default_permissions`).  Claude Code
+  2.1.316 and Codex 0.165.0 work.  The sandbox lets the agent read every
+  file of the working tree, including ignored files such as `.env`, and the
+  repository.
 * [`git-rebase-to`](git-rebase-to)
-  `[--nocompile] [--squash] FROM_DIR TO_DIR ...`:
+  `[--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]
+  FROM_DIR TO_DIR ...`:
   Runs `git-push-to` on the arguments, then rebases each branch onto the
   previous branch, to eliminate merge commits, and force-pushes each
   branch.  This is useful for maintaining a stack of GitHub pull requests,
   each of whose base is the previous one.  With `--squash`, each branch
   becomes a single commit on top of the previous branch.
   The arguments may be slugs, as for `git-push-to`.
-* [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
+* [`git-pull-from`](git-pull-from)
+  `[--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
-  succeeds.
+  succeeds.  It handles conflicts as `git-push-to` does, using `git rerere`
+  and an AI agent, and it accepts the same `--llm`, `--no-llm`,
+  `--claude`, and `--codex` options.
   OTHER-REPO-DIR and the current directory must both be the top level of a
   working tree and must each have an upstream branch.
-* [`git-pull-upstream`](git-pull-upstream) `[--nocompile]`:
+* [`git-pull-upstream`](git-pull-upstream)
+  `[--nocompile] [--llm | --no-llm] [--claude | --codex]`:
   Merges the default branch of the remote `upstream` (or `origin`, if there
   is no `upstream`, or the only remote, if there is neither) into the current
   branch, compiles, then pushes the current branch if compilation succeeds.
@@ -117,7 +135,9 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of `upstream`.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
-  It handles conflicts that `git rerere` resolves, as `git-push-to` does.
+  It handles conflicts as `git-push-to` does, using `git rerere` and an AI
+  agent, and it accepts the same `--llm`, `--no-llm`, `--claude`,
+  and `--codex` options.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but Eclipse `.project`
@@ -200,6 +220,11 @@ takes effect when it is set to a non-empty value.
 * `MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT`: `git-push-to`,
   `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` skip the
   compilation step, and push whenever the merge succeeds.
+* `MANAGE_GIT_BRANCHES_LLM_TIMEOUT`: the number of seconds that `git-push-to`,
+  `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` let an AI agent
+  run when it resolves merge conflicts.  An agent that runs longer is stopped,
+  and the merge is left in progress.  The default is 1800 (30 minutes); 0
+  means no limit.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
 * `AZURE_DEVOPS_EXT_PAT`: the commands that use the Azure DevOps API use this

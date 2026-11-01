@@ -15,11 +15,13 @@
 #    unchanged and in order (but any text can take the place of each
 #    conflict region);
 #  * the text in place of the regions contains no conflict marker, except a
-#    line "=======" when CCR_CONTAINS_SEPARATOR is "yes"; and
+#    separator line when CCR_CONTAINS_SEPARATOR is "yes"; and
 #  * it ends with a newline if and only if the merged file does, unless the
 #    merged file ends with a conflict region.
 # A line can also end with a carriage return, as in a file with CRLF line
-# endings.
+# endings.  A separator line consists of 7 or more "=", such as "=======";
+# git writes more than 7 for a file whose attribute `conflict-marker-size`
+# is larger.
 #
 # The program reads these environment variables:
 #   CCR_FILE                        the file's name; used for diagnostics.
@@ -28,7 +30,7 @@
 #   CCR_RESOLVED_ENDS_WITH_NEWLINE  "yes" if RESOLVED ends with a newline,
 #                                   else "no"
 #   CCR_CONTAINS_SEPARATOR          "yes" if a side of the merge contains a
-#                                   line "=======", which can then be
+#                                   separator line, which can then be
 #                                   content, such as a Markdown heading's
 #                                   underline; else "no"
 #
@@ -130,7 +132,7 @@ END {
   for (k = 1; k <= num_w; k++) {
     if (!clean[k] && (w[k] ~ /^<<<<<<<+( |\r?$)/ || w[k] ~ /^[|][|][|][|][|][|][|]+( |\r?$)/ \
                       || w[k] ~ /^>>>>>>>+( |\r?$)/ \
-                      || (ENVIRON["CCR_CONTAINS_SEPARATOR"] != "yes" && w[k] ~ /^=======\r?$/))) {
+                      || (ENVIRON["CCR_CONTAINS_SEPARATOR"] != "yes" && w[k] ~ /^=======+\r?$/))) {
       problem("line " k " is a conflict marker")
     }
   }
