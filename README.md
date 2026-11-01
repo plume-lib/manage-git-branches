@@ -178,6 +178,14 @@ The commands are:
   whitespace and using the patience diff algorithm.
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
+* [`rerun-failed-ci`](rerun-failed-ci)
+  `[--dry-run] [--max-attempts N] [PR | BRANCH | URL]...`:
+  For each transient failure of a CI job, reruns it.  Works on the given
+  GitHub pull request (by default, the one for the current branch).  A URL
+  names an Azure Pipelines, CircleCI, or GitHub Actions job or workflow.
+  `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
+  shows a transient failure.  This command needs Python 3.9 or later and
+  `gh`.
 * [`normalize-log`](normalize-log) `[FILE]...`:
   Prints the file (by default, standard input) without formatting that
   affects a terminal:  terminal escape sequences, a leading byte order
@@ -219,6 +227,14 @@ takes effect when it is set to a non-empty value.
   means no limit.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
+* `AZURE_DEVOPS_EXT_PAT`: the commands that use the Azure DevOps API use this
+  Azure DevOps personal access token, which must have the
+  "Build (Read & execute)" scope.  If it is not set, they use the account
+  that `az login` logged in.
+* `CIRCLECI_CLI_TOKEN`: the commands that use the CircleCI API use this
+  CircleCI API token.  If it is not set, they use the `token` in
+  `~/.circleci/cli.yml` or (for the snap package)
+  `~/snap/circleci/current/.circleci/cli.yml`, which `circleci setup` writes.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
   `git-orphaned-branches`, `git-new-branch`, `git-checkout-branch`, and
   `git-push-to` use these standard Git variables to select the SSH command

@@ -1,4 +1,4 @@
-"""Access the builds of CI services:  GitHub Actions, Azure Pipelines, and CircleCI.
+"""Access the builds of CI services:  Azure Pipelines, CircleCI, and GitHub Actions.
 
 This module recognizes the URLs of builds and jobs, finds credentials, and makes
 requests of the services' APIs.
@@ -62,12 +62,21 @@ CIRCLECI_JOB = re.compile(
 CIRCLECI_PIPELINE = re.compile(r"app\.circleci\.com/pipelines/([^/?#]+)/([^/?#]+)/([^/?#]+)")
 # The VCS slugs that the API uses in place of the ones in the URLs of the CircleCI web app.
 CIRCLECI_VCS_SLUGS = {"github": "gh", "bitbucket": "bb"}
+# The VCS names, such as "github", that the CircleCI v1.1 API uses in place of the VCS
+# slugs, such as "gh", of the v2 API.
+CIRCLECI_VCS_NAMES = {slug: name for name, slug in CIRCLECI_VCS_SLUGS.items()}
+# Matches the URL of a GitHub Actions workflow run or of one of its jobs, such as
+# "https://github.com/ORG/REPO/actions/runs/123/job/456".  The capturing groups are the
+# repository, the run, and the job.
+GITHUB_ACTIONS_RUN = re.compile(
+    r"https://github\.com/([^/]+/[^/]+)/actions/runs/(\d+)(?:/attempts/\d+)?(?:/job/(\d+))?"
+)
 
-CIRCLECI_API = "https://circleci.com/api"
 # The application ID of Azure DevOps in Microsoft Entra ID, which is the same for every
 # organization.  `az account get-access-token --resource` issues a token for Azure DevOps
 # only when given this ID.
 AZURE_DEVOPS_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
+CIRCLECI_API = "https://circleci.com/api"
 # The configuration files of the CircleCI CLI, which `circleci setup` writes.
 CIRCLECI_CONFIGS = ("~/.circleci/cli.yml", "~/snap/circleci/current/.circleci/cli.yml")
 
@@ -184,7 +193,7 @@ def azure_request(method: str, url: str, headers: dict[str, str], body: Any = No
     return request_util.request(method, url, headers, body, refusals=AZURE_SIGN_IN)
 
 
-def azure_get(url: str) -> Any:
+def azure_get(url: str, *, text: bool = False) -> Any:
     """Get `url` from Azure DevOps, anonymously if the project permits it.
 
     A request is first made anonymously, because Azure DevOps refuses a token for one
@@ -195,15 +204,23 @@ def azure_get(url: str) -> Any:
 
     Args:
         url: the URL, in the Azure DevOps API.
+        text: True if the response is text rather than JSON.
 
     Returns:
-        The response body, parsed as JSON.
+        The response body:  text, or parsed JSON.
     """
+
+    def get(headers: dict[str, str]) -> Any:
+        if text:
+            content = request_util.http("GET", url, headers, refusals=AZURE_SIGN_IN)
+            return content.decode(errors="replace")
+        return azure_request("GET", url, headers)
+
     match = re.match(r"https://dev\.azure\.com/([^/]+/[^/]+)/", url)
     project = match[1] if match else url
     if project not in _azure_private_projects:
         try:
-            return azure_request("GET", url, {})
+            return get({})
         except (urllib.error.HTTPError, ValueError) as e:
             # A response that is not JSON is a sign-in page.  Another failure, such as a
             # 503, can be temporary and does not indicate a private project.
@@ -212,10 +229,10 @@ def azure_get(url: str) -> Any:
                 raise
         # A refusal, such as a 404 for a build that does not exist, can come from a public
         # project, so the project is not known to be private until credentials succeed.
-        result = azure_request("GET", url, azure_headers())
+        result = get(azure_headers())
         _azure_private_projects.add(project)
         return result
-    return azure_request("GET", url, azure_headers())
+    return get(azure_headers())
 
 
 class AzureBuildUrlParts(NamedTuple):
@@ -396,3 +413,41 @@ def circleci_project_of_url(url: str) -> str | None:
     """
     parsed = CircleciUrlParts.from_url(url)
     return parsed.project if parsed else None
+
+
+###########################################################################
+### GitHub Actions
+###
+
+
+class GithubActionsRunUrlParts(NamedTuple):
+    """The parts of the URL of a GitHub Actions workflow run or of one of its jobs.
+
+    For example, "https://github.com/ORG/REPO/actions/runs/123/job/456" shows repository
+    "ORG/REPO", run 123, and job 456.
+
+    Attributes:
+        repo: the repository's GitHub slug, such as "ORG/REPO".
+        run: the id of a workflow run of the repository, an integer such as 123.
+        job: the id of a job of the run, an integer such as 456, or None if the URL
+            names the run.
+    """
+
+    repo: str
+    run: int
+    job: int | None
+
+    @classmethod
+    def from_url(cls, url: str) -> GithubActionsRunUrlParts | None:
+        """Return the parts of the given URL of a GitHub Actions workflow run or job.
+
+        Args:
+            url: any URL.  This method recognizes the URL of a GitHub Actions workflow
+                run or of one of its jobs, as GITHUB_ACTIONS_RUN documents.
+
+        Returns:
+            The parts, or None if url is not the URL of a GitHub Actions run.
+        """
+        if match := GITHUB_ACTIONS_RUN.match(url):
+            return cls(match[1], int(match[2]), int(match[3]) if match[3] else None)
+        return None
