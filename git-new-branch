@@ -4,8 +4,8 @@
 # sibling directory named REPONAME-branch-NEWBRANCHNAME/.
 #
 # Usage:
-#   git-new-branch [--clean | --copy] [--verbose] NEWBRANCHNAME
-#   git-new-branch ORG:NEWBRANCHNAME
+#   git-new-branch [--clean | --copy] [--verbose] [--allow-upstream] NEWBRANCHNAME
+#   git-new-branch [--allow-upstream] ORG:NEWBRANCHNAME
 #   git-new-branch -h | --help
 #
 # The new branch starts at the current commit, after a `git pull` of the
@@ -24,12 +24,14 @@
 #              store rather than holding a copy of it.  Its contents are the
 #              same as the current directory's, including uncommitted
 #              changes, staged changes, untracked files, and ignored files
-#              such as build output.
+#              such as build output, except for nested worktrees and some
+#              build output that refers to the current directory.
 #   --clean    a linked worktree that holds a clean checkout of the new
 #              branch and nothing else.  It is the cheapest mode, in both
 #              time and disk space, for starting fresh work.
-#   --copy     a copy of the whole current directory, `.git` included, so it
-#              is an independent clone that shares nothing with the current
+#   --copy     a copy of the whole current directory, `.git` included, with
+#              the same exceptions as the default mode, so it is an
+#              independent clone that shares nothing with the current
 #              repository.
 #
 # With `--verbose`, the default mode and `--copy` also say how many generated
@@ -46,12 +48,17 @@
 # stands for the clone PROJECT itself, so `-:NEWBRANCHNAME` makes
 # PROJECT-branch-NEWBRANCHNAME.
 #
+# In a clone of an upstream repository whose fork is in a sibling directory,
+# this command refuses, unless `--allow-upstream` is given, because a branch
+# for a pull request belongs in the fork.
+#
 # Every effect is local:  this command never contacts a remote except to
 # read from it, and in particular it does not push the new branch.  It also
 # gives the new branch no upstream branch, even under
 # `branch.autoSetupMerge=always`; `git-push-to` and `git-pull-from` require
 # one.  The first `git push` of the new branch sets its upstream branch if
-# `push.autoSetupRemote` is true (git 2.37 or later); otherwise,
+# `push.autoSetupRemote` is true (git 2.37 or later) and `push.default` is
+# "simple" (the default), "upstream", or "current"; otherwise,
 # `git push -u REMOTE NEWBRANCHNAME` does.  Nor does this command build.
 #
 # Details:
@@ -90,12 +97,23 @@
 # `.claude/worktrees/`, because its copy would share that worktree's HEAD and
 # index; they say which ones they left out.
 #
-# `choose_mode_for_submodules` says why submodules change the mode, or
-# prevent `--clean`.  A repository that has no
+# The documentation of `choose_mode_for_submodules` says why submodules change
+# the mode or prevent `--clean`.  A repository that has no
 # commit is refused, because there is nothing to branch from.  Every mode but
 # `--clean` is refused while a merge, cherry-pick, revert, or rebase is in
 # progress, because the new directory would get the operation's staged
 # changes without the operation itself.
+#
+# A clone of an upstream repository, for which the user has a fork, is
+# refused unless `--allow-upstream` is given, because a branch for a pull
+# request belongs in the fork.  The clone is such a clone if a sibling
+# directory PROJECT-fork-ORG... (where the current directory is PROJECT or
+# PROJECT-fork-OTHER, either of which can be followed by -branch-BRANCH) has a
+# remote named "upstream" that is the repository that the new branch would be
+# pushed to.  If git's configuration sets `github.user`, only a fork whose ORG
+# is that user counts, so that another organization's fork of the same
+# upstream repository does not.  The refusal names the fork's directory, in
+# which to run this command instead.
 #
 # In the worktree modes, this script writes into the current repository:  it
 # creates the new branch there and registers the new worktree in its `.git`.
@@ -172,8 +190,8 @@ fi
 unset_git_location_variables
 
 usage() {
-  echo "Usage: ${SCRIPT_NAME} [--clean | --copy] [--verbose] NEWBRANCHNAME" >&2
-  echo "   or: ${SCRIPT_NAME} ORG:NEWBRANCHNAME" >&2
+  echo "Usage: ${SCRIPT_NAME} [--clean | --copy] [--verbose] [--allow-upstream] NEWBRANCHNAME" >&2
+  echo "   or: ${SCRIPT_NAME} [--allow-upstream] ORG:NEWBRANCHNAME" >&2
   echo "Run \`${SCRIPT_NAME} --help\` for more information." >&2
 }
 
@@ -236,8 +254,10 @@ done
 MODE='worktree'
 # "yes" if --verbose was given, and "no" otherwise.
 VERBOSE='no'
+ALLOW_UPSTREAM=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --allow-upstream) ALLOW_UPSTREAM=1 ;;
     --clean | --copy)
       # The two ask for opposite things, so there is no sensible resolution.
       if [ "${MODE}" != 'worktree' ] && [ "${MODE}" != "${1#--}" ]; then
@@ -520,6 +540,110 @@ if [ -e "${BRANCHDIR}" ]; then
   exit 1
 fi
 
+# Usage: is_fork_sibling DIRECTORY KEYS USER
+# Succeeds if DIRECTORY is a clone, other than this one, of the user's fork
+# whose remote "upstream" has one of the repository keys (see `url_key`) in
+# KEYS, which holds one per line.  DIRECTORY is named PROJECT-fork-ORG or
+# PROJECT-fork-ORG-branch-OTHER.  If USER, which is in lower case, is not
+# empty, only a fork whose ORG is USER, in any case, is the user's fork;
+# otherwise, every fork is.
+is_fork_sibling() {
+  if [ -n "$3" ]; then
+    ifs_org="${1##*/}"
+    ifs_org="${ifs_org#*-fork-}"
+    ifs_org="$(printf '%s\n' "${ifs_org%%-branch-*}" | tr '[:upper:]' '[:lower:]')"
+    if [ "${ifs_org}" != "$3" ]; then
+      return 1
+    fi
+  fi
+  # Testing for `.git` also rejects a glob pattern that matched nothing, and it
+  # keeps `git -C` from finding a repository that contains DIRECTORY.
+  [ -e "$1/.git" ] \
+    && [ "$(physical_path "$1")" != "${TOPLEVEL}" ] \
+    && git -C "$1" config --get remote.upstream.url > /dev/null 2>&1 \
+    && repository_key "$1" upstream | grep -q -x -F -- "$2"
+}
+
+# Usage: check_not_upstream_clone
+# Exits with an explanation if this clone is the clone of an upstream
+# repository whose fork the user has in a sibling directory; see the comment at
+# the top of this file.
+#
+# The repository that the new branch would be pushed to is judged as `git push`
+# would judge it for the new branch, which has no configuration of its own:
+# by this repository's configuration and by the URLs that `git push` uses (see
+# `remote_urls`).  The new branch is pushed to the same repositories wherever it
+# is created:  ${WORKTREE_HOST}, if it is created there, pushes where this
+# repository does (see `main_clone_for`), and a copy has this repository's
+# configuration.
+#
+# Unlike the tests for a collision below, this test ignores the current
+# branch's configuration.  In a fork, the main branch might track the upstream
+# repository, which says nothing about where a branch for a pull request is
+# pushed, and judging by it would refuse in the fork itself.
+#
+# Only the fork's main working tree is named, not each of its branch
+# directories, which share its configuration and so would each match too.  A
+# branch directory is examined only if its fork has no main working tree here.
+check_not_upstream_clone() {
+  cnuc_project="${REPO%%-branch-*}"
+  cnuc_project="${cnuc_project%%-fork-*}"
+  # Most clones have no fork beside them, and finding none is cheaper than
+  # judging where the new branch would be pushed.  A pattern that matches
+  # nothing is left as is, and a lone dangling symbolic link is no fork either.
+  set -- "${PARENTDIR}/${cnuc_project}"-fork-*
+  if [ $# -eq 1 ] && [ ! -e "$1" ]; then
+    return 0
+  fi
+  cnuc_remote="$(push_remote . '')"
+  if [ -z "${cnuc_remote}" ]; then
+    return 0
+  fi
+  cnuc_urls="$(remote_urls . "${cnuc_remote}" --push)"
+  cnuc_keys="$(printf '%s\n' "${cnuc_urls}" | url_keys .)"
+  if [ -z "${cnuc_keys}" ]; then
+    return 0
+  fi
+  cnuc_user="$(git config --get github.user | tr '[:upper:]' '[:lower:]')"
+  cnuc_forks=''
+  for cnuc_sibling in "${PARENTDIR}/${cnuc_project}"-fork-*; do
+    case "${cnuc_sibling##*/}" in
+      *-branch-*) continue ;;
+    esac
+    if is_fork_sibling "${cnuc_sibling}" "${cnuc_keys}" "${cnuc_user}"; then
+      cnuc_forks="${cnuc_forks}  ${cnuc_sibling}
+"
+    fi
+  done
+  cnuc_branch_dir=''
+  if [ -z "${cnuc_forks}" ]; then
+    for cnuc_sibling in "${PARENTDIR}/${cnuc_project}"-fork-*-branch-*; do
+      cnuc_name="${cnuc_sibling##*/}"
+      if [ ! -e "${PARENTDIR}/${cnuc_name%%-branch-*}/.git" ] \
+        && is_fork_sibling "${cnuc_sibling}" "${cnuc_keys}" "${cnuc_user}"; then
+        cnuc_branch_dir="${cnuc_sibling}"
+        break
+      fi
+    done
+  fi
+  if [ -z "${cnuc_forks}" ] && [ -z "${cnuc_branch_dir}" ]; then
+    return 0
+  fi
+  cnuc_url_list="$(printf '%s\n' "${cnuc_urls}" | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')"
+  if [ -n "${cnuc_forks}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: the new branch would be pushed to ${cnuc_remote} (${cnuc_url_list}), which is the upstream repository of the fork in each of these directories:" >&2
+    printf '%s' "${cnuc_forks}" >&2
+    echo "${SCRIPT_NAME}: A branch for a pull request belongs in your fork, so run ${SCRIPT_NAME} there.  To create the branch here anyway, pass --allow-upstream." >&2
+  else
+    # The new branch starts at the current commit, so running this command in a
+    # branch directory would start it on that directory's branch.
+    echo "${SCRIPT_NAME}: ERROR: the new branch would be pushed to ${cnuc_remote} (${cnuc_url_list}), which is the upstream repository of the fork in this branch directory:" >&2
+    echo "  ${cnuc_branch_dir}" >&2
+    echo "${SCRIPT_NAME}: A branch for a pull request belongs in your fork.  Run ${SCRIPT_NAME} in a clone of the fork, such as a new one in ${PARENTDIR}/${cnuc_name%%-branch-*}, or in ${cnuc_branch_dir} if the new branch should start at its current commit.  To create the branch here anyway, pass --allow-upstream." >&2
+  fi
+  exit 1
+}
+
 # In the worktree modes, register the new worktree in the project's main clone
 # rather than in a branch directory, when this repository is a branch
 # directory's; see `main_clone_for`.  A main clone that has its own branch of
@@ -531,6 +655,11 @@ if [ -n "${WORKTREE_HOST}" ] \
   && git -C "${WORKTREE_HOST}" rev-parse --verify --quiet "refs/heads/${BRANCHNAME}" > /dev/null; then
   echo "${SCRIPT_NAME}: ${WORKTREE_HOST} has its own branch ${BRANCHNAME}, so the new worktree is registered in the repository of ${TOPLEVEL}" >&2
   WORKTREE_HOST=''
+fi
+
+# The refusal precedes the pull, so that a refused command changes nothing.
+if [ "${ALLOW_UPSTREAM}" = 0 ]; then
+  check_not_upstream_clone
 fi
 
 # Bring this working tree up to date, so that the branch is based on the most
@@ -1066,25 +1195,12 @@ is_cache_dir() {
   esac
 }
 
-# Usage: english_list
-# Reads names from standard input, one per line, and prints an English list
-# of the distinct ones, in sorted order, each in backquotes and followed by
-# "/".
-english_list() {
-  LC_ALL=C sort -u | awk '
-    { name[NR] = "`" $0 "/`" }
-    END {
-      if (NR == 1) {
-        print name[1]
-      } else if (NR == 2) {
-        print name[1] " and " name[2]
-      } else {
-        for (i = 1; i < NR; i++) {
-          printf "%s, ", name[i]
-        }
-        print "and " name[NR]
-      }
-    }'
+# Usage: dir_list
+# Reads directory names from standard input, one per line, and prints a
+# comma-separated list of the distinct ones, in sorted order, each in
+# backquotes and followed by "/".
+dir_list() {
+  LC_ALL=C sort -u | awk '{ printf "%s`%s/`", sep, $0; sep = ", " } END { print "" }'
 }
 
 # Usage: delete_stale_build_output STALE-FILES
@@ -1322,7 +1438,7 @@ delete_or_warn_about_old_pathname() {
     else
       stale_files="${stale_count} files"
     fi
-    stale_dirs="$(printf '%s' "${stale_names}" | english_list)"
+    stale_dirs="$(printf '%s' "${stale_names}" | dir_list)"
     echo "${SCRIPT_NAME}: deleted generated files in ${BRANCHDIR} that contained the pathname of ${warn_old_names} or were symbolic links into it: ${stale_files} in ${stale_dirs}.  The tools that generated them regenerate them." >&2
   fi
   if [ -n "${stale_configured}" ]; then
@@ -1331,7 +1447,7 @@ delete_or_warn_about_old_pathname() {
 "*) stale_pronoun=them ;;
       *) stale_pronoun=it ;;
     esac
-    echo "${SCRIPT_NAME}: deleted generated files that contained the pathname of ${warn_old_names} from $(printf '%s\n' "${stale_configured#?}" | english_list) in ${BRANCHDIR}, which CMake or autotools configured.  Reconfigure ${stale_pronoun} before building there." >&2
+    echo "${SCRIPT_NAME}: deleted generated files that contained the pathname of ${warn_old_names} from $(printf '%s\n' "${stale_configured#?}" | dir_list) in ${BRANCHDIR}, which CMake or autotools configured.  Reconfigure ${stale_pronoun} before building there." >&2
   fi
   warn_old_files="${stale_kept%?}"
   if [ -z "${warn_old_files}" ]; then
