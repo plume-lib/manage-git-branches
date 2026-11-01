@@ -44,7 +44,8 @@ fail() {
 ## The stub agents.  Each records its name in ${STUB_LOG} and its
 ## instructions in ${STUB_PROMPT}.  If file.txt has conflict markers, the stub
 ## acts according to ${STUB_MODE}:
-##   good:   removes the conflict marker lines, keeping both sides
+##   good:   removes the conflict marker lines and the merge base's text,
+##           keeping both sides
 ##   clean:  as "good", but also changes a line that merged cleanly
 ##   none:   changes nothing
 ##   fail:   exits with status 3
@@ -53,7 +54,7 @@ fail() {
 ##   config: as "good", but also changes git's configuration
 ##   change-untracked: as "good", but also changes the untracked file notes.txt
 ##   delete-untracked: as "good", but also deletes the untracked file notes.txt
-##   separator: removes the conflict marker lines except "======="
+##   separator: as "good", but keeps the line "======="
 ##   hook-link: as "good", but also makes a hook a symbolic link to file.txt
 ## Otherwise, it is fixing a build, and it acts according to ${STUB_BUILD}:
 ##   fix:    removes the lines of other.txt that break the build
@@ -83,11 +84,12 @@ fi
 if [ "${STUB_MODE}" = fail ]; then exit 3; fi
 if [ "${STUB_MODE}" = none ]; then exit 0; fi
 if [ "${STUB_MODE}" = separator ]; then
-  sed -e '/^<<<<<<< /d' -e '/^>>>>>>> /d' file.txt > file.txt.new
+  sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/{' -e '/^=======$/!d' -e '}' \
+    -e '/^>>>>>>> /d' file.txt > file.txt.new
   mv file.txt.new file.txt
   exit 0
 fi
-sed -e '/^<<<<<<< /d' -e '/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new
+sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new
 mv file.txt.new file.txt
 if [ "${STUB_MODE}" = clean ]; then
   sed -e 's/^three$/THREE/' file.txt > file.txt.new
@@ -342,6 +344,9 @@ esac
 setup_case none
 push_to none --llm
 check_not_resolved "remaining conflict markers"
+if ! grep -q '^||||||| ' "${feature_dir}/file.txt"; then
+  fail "remaining conflict markers: the merge did not use the diff3 conflict style"
+fi
 case "${push_output}" in
   *"is a conflict marker"*) ;;
   *) fail "remaining conflict markers: wrong diagnostic: ${push_output}" ;;
@@ -437,7 +442,8 @@ for rerere_case in false:--llm true:--llm false:--no-llm true:--no-llm; do
   if git -C "${feature_dir}" merge -q --no-edit origin/main > /dev/null 2>&1; then
     fail "rerere (autoUpdate ${auto_update}): the merge has no conflicts"
   fi
-  (cd "${feature_dir}" && sed -e '/^<<<<<<< /d' -e '/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new \
+  (cd "${feature_dir}" && sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^=======$/d' \
+    -e '/^>>>>>>> /d' file.txt > file.txt.new \
     && mv file.txt.new file.txt && git add file.txt && git commit -q --no-edit) 2> /dev/null
   git -C "${feature_dir}" reset -q --hard "${feature_head}"
   push_to none "${rerere_case#*:}"

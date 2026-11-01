@@ -6,7 +6,8 @@
 #
 # A script that sources this file must set ${SCRIPT_DIR} to the directory that
 # contains this package's files, because `git_batch_ssh` runs a wrapper script
-# from that directory.  It must also set ${SCRIPT_NAME} to its own name, which
+# from that directory and `check_conflict_resolution` runs an awk program
+# from it.  It must also set ${SCRIPT_NAME} to its own name, which
 # the diagnostics below use.
 
 ## Usage: unset_git_location_variables
@@ -869,16 +870,16 @@ upstream_default_branch_git() {
 
 ## Usage: check_conflict_resolution FILE
 ## Checks the resolution of the conflicts in FILE, a file of the current
-## working tree, against AUTO_MERGE, git's automatic merge, which contains the
-## conflict markers.  A conflict region starts with a line "<<<<<<<" and ends
-## with the matching line ">>>>>>>"; a recursive merge nests regions.  The
-## resolution is acceptable if it consists of the text outside the conflict
-## regions, unchanged and in order, with any text in place of each region,
-## except a line that starts with "<<<<<<<", "|||||||", or ">>>>>>>", or a
-## line "=======".  A line "=======" can be content, such as a Markdown
-## heading's underline, so it is permitted if the file contains one in HEAD or
-## in MERGE_HEAD.  Returns 1, after printing a diagnostic for each problem, if
-## the resolution is not acceptable.
+## working tree, against AUTO_MERGE, the git ref that names git's automatic
+## merge, which contains the conflict markers.  A conflict region starts with
+## a line "<<<<<<<" and ends with the matching line ">>>>>>>"; a recursive
+## merge nests regions.  The resolution is acceptable if it consists of the
+## text outside the conflict regions, unchanged and in order, with any text in
+## place of each region, except a line that starts with "<<<<<<<", "|||||||",
+## or ">>>>>>>", or a line "=======".  A line "=======" can be content, such
+## as a Markdown heading's underline, so it is permitted if the file contains
+## one in HEAD or in MERGE_HEAD.  Returns 1, after printing a diagnostic for
+## each problem, if the resolution is not acceptable.
 ##
 ## This compares content rather than the hunks of `git diff`, which can put a
 ## change on either of two identical lines, one inside a region and one
@@ -889,8 +890,8 @@ check_conflict_resolution() {
     return 1
   fi
 
-  # The awk program below that checks the resolution reads both versions of
-  # FILE from its standard input.  So that it can tell them apart, the two
+  # The awk program check-conflict-resolution.awk, which checks the
+  # resolution, reads both versions of FILE from its standard input.  So that it can tell them apart, the two
   # `awk` commands that feed it put a tag at the start of each line:  "A" for
   # a line of FILE in AUTO_MERGE, which all come first, and "W" for a line of
   # FILE in the working tree.  `--filters` converts AUTO_MERGE's file as a
@@ -929,97 +930,8 @@ check_conflict_resolution() {
   } | CHECK_FILE="$1" CHECK_SCRIPT_NAME="${SCRIPT_NAME}" \
     CHECK_A_NEWLINE="${check_conflict_a_newline}" \
     CHECK_W_NEWLINE="${check_conflict_w_newline}" \
-    CHECK_SEPARATOR="${check_conflict_separator}" awk '
-    function problem(message) {
-      printf "%s: %s: %s\n", ENVIRON["CHECK_SCRIPT_NAME"], ENVIRON["CHECK_FILE"], message > "/dev/stderr"
-      status = 1
-    }
-
-    # Returns 1 if the lines of block B, a clean block of AUTO_MERGE, are the
-    # lines of the working tree that start at line POS.
-    function block_at(b, pos,   k) {
-      if (pos < 1 || pos + block_len[b] - 1 > num_w) return 0
-      for (k = 0; k < block_len[b]; k++) {
-        if (w[pos + k] != a[block_start[b] + k]) return 0
-      }
-      return 1
-    }
-
-    # Describes block B in a diagnostic.
-    function block_lines(b) {
-      if (block_len[b] == 0) return "an empty block"
-      return "lines " block_start[b] "-" (block_start[b] + block_len[b] - 1) " of AUTO_MERGE"
-    }
-
-    /^A/ { a[++num_a] = substr($0, 2); next }
-    /^W/ { w[++num_w] = substr($0, 2); next }
-
-    END {
-      # Split AUTO_MERGE into the clean blocks 0..num_regions, between the
-      # regions.
-      num_regions = 0
-      block_start[0] = 1
-      depth = 0
-      for (i = 1; i <= num_a; i++) {
-        if (a[i] ~ /^<<<<<<<+( |\r?$)/) {
-          if (depth == 0) {
-            block_len[num_regions] = i - block_start[num_regions]
-            num_regions++
-          }
-          depth++
-        } else if (depth > 0 && a[i] ~ /^>>>>>>>+( |\r?$)/) {
-          depth--
-          if (depth == 0) block_start[num_regions] = i + 1
-        }
-      }
-
-      if (depth != 0) { problem("AUTO_MERGE has an unterminated conflict region"); exit 1 }
-      if (num_regions == 0) { problem("AUTO_MERGE has no conflict markers"); exit 1 }
-      block_len[num_regions] = num_a + 1 - block_start[num_regions]
-
-      # The first block is a prefix of the working tree, and the last block
-      # is a suffix that does not overlap it.  Each block between them comes
-      # at the earliest place after the previous one, which leaves the most
-      # room for the blocks that follow.
-      if (!block_at(0, 1)) { problem("the text before the first conflict region changed"); exit 1 }
-      last_pos = num_w - block_len[num_regions] + 1
-      if (last_pos < block_len[0] + 1 || !block_at(num_regions, last_pos)) {
-        problem("the text after the last conflict region changed")
-        exit 1
-      }
-
-      # The final newline belongs to the last line, which is clean unless the
-      # file ends with a conflict region.
-      if (block_len[num_regions] > 0 && ENVIRON["CHECK_A_NEWLINE"] != ENVIRON["CHECK_W_NEWLINE"]) {
-        problem("the final newline was added or removed")
-        exit 1
-      }
-
-      pos = block_len[0] + 1
-      for (b = 1; b < num_regions; b++) {
-        while (pos + block_len[b] <= last_pos && !block_at(b, pos)) pos++
-        if (pos + block_len[b] > last_pos) {
-          problem("the text between conflict regions " b " and " (b + 1) " (" block_lines(b) ") changed")
-          exit 1
-        }
-        for (k = 0; k < block_len[b]; k++) clean[pos + k] = 1
-        pos += block_len[b]
-      }
-
-      for (k = 1; k <= block_len[0]; k++) clean[k] = 1
-      for (k = last_pos; k <= num_w; k++) clean[k] = 1
-
-      # The text in place of the regions has no conflict markers.  A line
-      # in a file with CRLF line endings ends with "\r".
-      for (k = 1; k <= num_w; k++) {
-        if (!clean[k] && (w[k] ~ /^<<<<<<<+( |\r?$)/ || w[k] ~ /^[|][|][|][|][|][|][|]+( |\r?$)/ \
-                          || w[k] ~ /^>>>>>>>+( |\r?$)/ \
-                          || (ENVIRON["CHECK_SEPARATOR"] != "yes" && w[k] ~ /^=======\r?$/))) {
-          problem("line " k " is a conflict marker")
-        }
-      }
-      exit status
-    }'
+    CHECK_SEPARATOR="${check_conflict_separator}" \
+    awk -f "${SCRIPT_DIR}/check-conflict-resolution.awk"
 }
 
 ## Usage: resolve_merge_conflicts RESOLVER COMMIT SOURCE
@@ -1135,7 +1047,7 @@ $(printf '%s\n' "${resolve_unresolved}" | sed -e 's/^/  /')
 
 Resolve every conflict by editing those files.  Rules:
 
-* Edit only the conflict regions, each of which starts with a line \"<<<<<<<\" and ends with a line \">>>>>>>\".  Remove every conflict marker line.  Do not change any other part of any file, even of a file that has conflicts:  git merged the rest cleanly.
+* Edit only the conflict regions, each of which starts with a line \"<<<<<<<\" and ends with a line \">>>>>>>\".  A region holds the text of ${resolve_branch}, then after a line \"|||||||\" the text of the merge base, then after a line \"=======\" the text being merged in.  Remove every conflict marker line.  Do not change any other part of any file, even of a file that has conflicts:  git merged the rest cleanly.
 * Do not resolve a file by taking one side wholesale.  Combine the intent of both sides.  To learn each side's intent, read the history, for example with \`git log --merge -p -- FILE\`, \`git diff HEAD...MERGE_HEAD -- FILE\` (the changes being merged in), and \`git diff MERGE_HEAD...HEAD -- FILE\` (the changes on ${resolve_branch}).
 * Do not run any git command that changes the index, HEAD, or any other ref, such as \`git add\`, \`git commit\`, \`git checkout\`, \`git restore\`, \`git reset\`, \`git merge\`, \`git stash\`, or \`git rebase\`.  A script stages the files and commits the merge after you finish.
 * Run commands in the current directory, which is the working tree, without \`cd\` or \`git -C\`.  A command in another form needs approval, which nobody is present to give.
@@ -1576,7 +1488,10 @@ merge_build_push() {
     echo "${SCRIPT_NAME}: the working tree of $(pwd) has uncommitted changes; commit or discard them" >&2
     return 1
   fi
-  if ! git merge -q --no-edit --no-log -m "${merge_message}" "$1"; then
+  # The "diff3" conflict style puts the merge base's text in each conflict
+  # region, which helps whoever resolves it.
+  if ! git -c merge.conflictStyle=diff3 merge -q --no-edit --no-log \
+    -m "${merge_message}" "$1"; then
     echo "${SCRIPT_NAME}: problem merging $3 into $(pwd)" >&2
     # A failed merge without MERGE_HEAD did not start, for example because it
     # would overwrite a modified file; there are no conflicts to resolve.
