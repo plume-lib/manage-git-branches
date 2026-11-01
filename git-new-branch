@@ -5,7 +5,7 @@
 #
 # Usage:
 #   git-new-branch [--clean | --copy] NEWBRANCHNAME
-#   git-new-branch [--clean] ORG:NEWBRANCHNAME
+#   git-new-branch ORG:NEWBRANCHNAME
 #
 # The new branch starts at the current commit.  There are three modes:
 #
@@ -36,8 +36,9 @@
 # Its directory is PROJECT-fork-ORG-branch-NEWBRANCHNAME, and it holds none of
 # the current directory's changes.  As for `git-push-to`, ORG "-" stands for
 # the clone PROJECT itself, so `-:NEWBRANCHNAME` makes
-# PROJECT-branch-NEWBRANCHNAME.  `--copy` cannot be used with a slug, and
-# neither can an ORG that contains "-branch-" or "-fork-".
+# PROJECT-branch-NEWBRANCHNAME.  `--clean` is accepted with a slug but has no
+# effect.  `--copy` cannot be used with a slug, and neither can an ORG that
+# contains "-branch-" or "-fork-".
 #
 # The default mode and `--copy` copy build output, which can still refer to
 # the current directory's files.  These modes delete such files that a tool
@@ -145,7 +146,7 @@ unset_git_location_variables
 
 usage() {
   echo "Usage: ${SCRIPT_NAME} [--clean | --copy] NEWBRANCHNAME" >&2
-  echo "   or: ${SCRIPT_NAME} [--clean] ORG:NEWBRANCHNAME" >&2
+  echo "   or: ${SCRIPT_NAME} ORG:NEWBRANCHNAME" >&2
 }
 
 # The mode:  "worktree" (the default), "clean", or "copy".  Selected on once,
