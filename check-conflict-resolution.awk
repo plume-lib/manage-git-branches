@@ -1,27 +1,43 @@
-# An awk program that `check_conflict_resolution`, in common-functions.sh,
-# runs to check the resolution of the conflicts in a file.  It reads two
-# versions of the file:  from its standard input, the file in AUTO_MERGE,
-# git's automatic merge, which has the conflict markers, followed by one more
-# newline; and from its second operand, the file in the working tree.  Its
-# first operand is "-", for the standard input.  It reads these environment
-# variables:
-#   CHECK_FILE         the file's name, for diagnostics
-#   CHECK_SCRIPT_NAME  the name of the command, for diagnostics
-#   CHECK_W_NEWLINE    "yes" if the working tree's file ends with a newline,
-#                      else "no"
-#   CHECK_SEPARATOR    "yes" if a line "=======" is permitted in the text in
-#                      place of a conflict region, else "no"
-# It exits with status 1, after printing a diagnostic on standard error for
-# each problem, if the resolution is not acceptable; see
-# `check_conflict_resolution` for what is acceptable.
+# Usage: CHECK_FILE=FILE CHECK_SCRIPT_NAME=NAME CHECK_W_NEWLINE=yes|no \
+#          CHECK_SEPARATOR=yes|no awk -f check-conflict-resolution.awk MERGED RESOLVED
+#
+# Checks the resolution of the conflicts in a file.  Exits with status
+# 0 if the resolution is acceptable, and exits with status 1 if the
+# resolution is not acceptable.  Prints a diagnostic on standard error
+# for each problem that it finds.
+#
+# MERGED holds the merged file, which has the conflict markers, followed by
+# one more newline, by which the program tells whether the merged file ends
+# with a newline.  RESOLVED is the resolution.  The resolution is acceptable
+# if
+#  * it consists of the text outside the merged file's conflict regions,
+#    unchanged and in order, with any text in place of each region;
+#  * the text in place of the regions contains no conflict marker, except a
+#    line "=======" when CHECK_SEPARATOR is "yes"; and
+#  * it ends with a newline if and only if the merged file does, unless the
+#    merged file ends with a conflict region.
+# A line can also end with a carriage return, as in a file with CRLF line
+# endings.
+#
+# The program reads these environment variables:
+#   CHECK_FILE         the file's name; used for diagnostics.
+#   CHECK_SCRIPT_NAME  the name of the command; used for diagnostics.
+#   CHECK_W_NEWLINE    "yes" if RESOLVED ends with a newline, else "no"
+#   CHECK_SEPARATOR    "yes" if a line "=======" can be content, such as a
+#                      Markdown heading's underline, else "no"
+#
+# `check_conflict_resolution`, in common-functions.sh, runs this program.  It
+# passes the file in AUTO_MERGE, git's automatic merge, as MERGED, on
+# standard input, by giving "-" as the first operand; and it passes the file
+# in the working tree as RESOLVED.
 
 function problem(message) {
   printf "%s: %s: %s\n", ENVIRON["CHECK_SCRIPT_NAME"], ENVIRON["CHECK_FILE"], message > "/dev/stderr"
   status = 1
 }
 
-# Returns 1 if the lines of block B, a clean block of AUTO_MERGE, are the
-# lines of the working tree that start at line POS.
+# Returns 1 if the lines of block B, a clean block of the merged file, are
+# the lines of the resolution that start at line POS.
 function block_at(b, pos,   k) {
   if (pos < 1 || pos + block_len[b] - 1 > num_w) return 0
   for (k = 0; k < block_len[b]; k++) {
@@ -33,16 +49,16 @@ function block_at(b, pos,   k) {
 # Describes block B in a diagnostic.
 function block_lines(b) {
   if (block_len[b] == 0) return "an empty block"
-  return "lines " block_start[b] "-" (block_start[b] + block_len[b] - 1) " of AUTO_MERGE"
+  return "lines " block_start[b] "-" (block_start[b] + block_len[b] - 1) " of the merged file"
 }
 
 FILENAME == ARGV[2] { w[++num_w] = $0; next }
 { a[++num_a] = $0 }
 
 END {
-  # The newline that follows AUTO_MERGE's file makes its last line empty if
-  # and only if the file ends with a newline.  An empty file counts as ending
-  # with one.
+  # The newline that follows the merged file makes the last line empty if
+  # and only if the merged file ends with a newline.  An empty file counts as
+  # ending with one.
   a_newline = "no"
   if (a[num_a] == "") {
     a_newline = "yes"
@@ -50,8 +66,8 @@ END {
     num_a--
   }
 
-  # Split AUTO_MERGE into the clean blocks 0..num_regions, between the
-  # regions.
+  # Split the merged file into the clean blocks 0..num_regions, between
+  # the regions.
   num_regions = 0
   block_start[0] = 1
   depth = 0
@@ -68,11 +84,11 @@ END {
     }
   }
 
-  if (depth != 0) { problem("AUTO_MERGE has an unterminated conflict region"); exit 1 }
-  if (num_regions == 0) { problem("AUTO_MERGE has no conflict markers"); exit 1 }
+  if (depth != 0) { problem("the merged file has an unterminated conflict region"); exit 1 }
+  if (num_regions == 0) { problem("the merged file has no conflict markers"); exit 1 }
   block_len[num_regions] = num_a + 1 - block_start[num_regions]
 
-  # The first block is a prefix of the working tree, and the last block
+  # The first block is a prefix of the resolution, and the last block
   # is a suffix that does not overlap it.  Each block between them comes
   # at the earliest place after the previous one, which leaves the most
   # room for the blocks that follow.
