@@ -7,6 +7,7 @@ the pr-status script that it imports.
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import importlib.machinery
 import importlib.util
 import io
@@ -14,6 +15,8 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.error
+from email.message import Message
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest import mock
@@ -60,6 +63,11 @@ cancel_blocked_ci = load_script()
 class CancelBlockedCiTest(unittest.TestCase):
     """Tests for cancel-blocked-ci."""
 
+    def setUp(self) -> None:
+        """Forget the CircleCI responses of other tests."""
+        cancel_blocked_ci.recent_pipelines.cache_clear()
+        cancel_blocked_ci.unfinished_workflows.cache_clear()
+
     def test_options(self) -> None:
         """An unknown option is rejected before anything is examined or cancelled."""
         for args in [["--dryrun"], ["extra"]]:
@@ -72,6 +80,96 @@ class CancelBlockedCiTest(unittest.TestCase):
             ):
                 cancel_blocked_ci.main()
             self.assertEqual(cm.exception.code, 2)
+
+    def test_unreadable_azure_project(self) -> None:
+        """A response that is not JSON is reported, and the other CI services are examined."""
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(cancel_blocked_ci, "azure_projects", return_value={("org", "p")}),
+            mock.patch.object(
+                ci_build, "azure_get", side_effect=json.JSONDecodeError("not JSON", "<html>", 0)
+            ),
+            mock.patch.object(
+                cancel_blocked_ci, "redundant_circleci_workflows", return_value=["workflow"]
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = cancel_blocked_ci.redundant_builds("repo", "org/repo", {}, [])
+        self.assertEqual(result, ["workflow"])
+        self.assertIn("repo: failed to find redundant Azure Pipelines builds", stderr.getvalue())
+
+    def test_redundant_runs(self) -> None:
+        """Only a run that a push or a pull request started can be redundant.
+
+        A run that waits for a concurrency group, or that tests the same commit, makes no
+        older run redundant.
+        """
+
+        def run(n: int, event: str, status: str = "queued", sha: str = "") -> dict[str, Any]:
+            return {
+                "id": n,
+                "name": "build",
+                "status": status,
+                "html_url": f"https://github.com/org/repo/actions/runs/{n}",
+                "workflow_id": 7,
+                "event": event,
+                "head_sha": sha or f"sha{n}",
+                "created_at": f"2026-10-31T00:00:0{n}Z",
+                "head_branch": "main",
+                "head_repository": {"owner": {"login": "org"}},
+            }
+
+        runs = {
+            ("org", "main"): [
+                run(0, "push"),
+                run(1, "push"),
+                run(2, "schedule"),
+                run(3, "schedule"),
+                run(4, "push", "pending"),
+                # Labeling the PR started run 6, which tests the same commit as run 5.
+                run(5, "pull_request", sha="pr"),
+                run(6, "pull_request", sha="pr"),
+            ]
+        }
+        result = cancel_blocked_ci.redundant_runs("repo", "org/repo", runs)
+        self.assertEqual(
+            [(identifier, subject, reason) for identifier, subject, _, reason in result],
+            [(("github", 0), "repo main", ", made redundant by run 1")],
+        )
+
+    def test_redundant_azure_builds(self) -> None:
+        """A build that waits for a check of a stage makes no older build redundant.
+
+        Nor does a build of the same commit.
+        """
+
+        def build(n: int) -> dict[str, Any]:
+            return {
+                "id": n,
+                "status": "inProgress",
+                "reason": "individualCI",
+                "sourceBranch": "refs/heads/main",
+                # Builds 0 and 2 test the same commit.
+                "sourceVersion": f"commit{n % 2}" if n != 3 else "commit3",
+                "definition": {"id": 1, "name": "ci"},
+                "_links": {
+                    "web": {"href": f"https://dev.azure.com/org/p/_build/results?buildId={n}"}
+                },
+            }
+
+        def azure_get(url: str) -> Any:
+            if "/timeline" not in url:
+                return {"value": [build(n) for n in (0, 1, 2, 3)]}
+            # Build 3 waits for an approval.
+            state = "inProgress" if "/builds/3/" in url else "completed"
+            return {"records": [{"type": "Checkpoint.Approval", "state": state}]}
+
+        with mock.patch.object(ci_build, "azure_get", azure_get):
+            result = cancel_blocked_ci.redundant_azure_builds("repo", "org/repo", "org", "p")
+        self.assertEqual(
+            [(identifier, reason) for identifier, _, _, reason in result],
+            [(("azure", "org", "1"), ", made redundant by build 2")],
+        )
 
     def test_blocked_pr_runs(self) -> None:
         """A blocked PR's runs are those that it or a push started on its head branch."""
@@ -137,22 +235,123 @@ class CancelBlockedCiTest(unittest.TestCase):
             self.assertEqual([identifier for identifier, _ in result], expected)
 
     def test_circleci_workflows_of_jobs(self) -> None:
-        """The workflows of jobs whose URLs name no workflow come from job lookups."""
+        """The workflows of jobs come from the recent pipelines, or else from job lookups."""
+        now = str(dt.datetime.now(dt.UTC))
         jobs = [("pending", f"job{n}", f"https://circleci.com/gh/org/repo/{n}") for n in (1, 2)]
+
+        def pipeline(sha: str) -> dict[str, Any]:
+            return {
+                "id": "p1",
+                "number": 1,
+                "created_at": now,
+                "vcs": {"branch": "feature", "revision": sha},
+                "trigger": {"type": "webhook"},
+            }
+
+        workflow = {"id": "w1", "name": "build", "status": "running", "created_at": now}
+        for sha, expected, lookups in [
+            ("abc", [("w1", ("running", "build"))], []),
+            ("def", [("w9", ("pending", "job1")), ("w9", ("pending", "job2"))], [1, 2]),
+        ]:
+            pages = {
+                f"{CIRCLECI}/project/gh/org/repo/pipeline": {"items": [pipeline("abc")]},
+                f"{CIRCLECI}/pipeline/p1/workflow": {"items": [workflow]},
+                **{
+                    f"{CIRCLECI}/project/gh/org/repo/job/{n}": {"latest_workflow": {"id": "w9"}}
+                    for n in (1, 2)
+                },
+            }
+            requested = []
+
+            def http(
+                _method: str,
+                url: str,
+                *_: Any,
+                pages: dict[str, Any] = pages,
+                requested: list[str] = requested,
+                **_kwargs: Any,
+            ) -> bytes:
+                requested.append(url)
+                return json.dumps(pages[url]).encode()
+
+            with (
+                self.subTest(sha=sha),
+                mock.patch.object(request_util, "http", http),
+                mock.patch.object(ci_build, "circleci_token", return_value="token"),
+            ):
+                cancel_blocked_ci.recent_pipelines.cache_clear()
+                cancel_blocked_ci.unfinished_workflows.cache_clear()
+                result = cancel_blocked_ci.circleci_workflows_of_jobs("gh/org/repo", sha, jobs)
+                self.assertEqual(result, expected)
+                self.assertEqual(
+                    sorted(requested),
+                    sorted(
+                        [f"{CIRCLECI}/project/gh/org/repo/pipeline"]
+                        + ([f"{CIRCLECI}/pipeline/p1/workflow"] if sha == "abc" else [])
+                        + [f"{CIRCLECI}/project/gh/org/repo/job/{n}" for n in lookups]
+                    ),
+                )
+
+    def test_circleci_pagination(self) -> None:
+        """Every page of recent pipelines and of their workflows is read, and no older page."""
+        now = dt.datetime.now(dt.UTC)
+        recent, old = str(now), str(now - 2 * cancel_blocked_ci.CIRCLECI_WINDOW)
+
+        def pipeline(n: int, created: str, trigger: str = "webhook") -> dict[str, Any]:
+            return {
+                "id": f"p{n}",
+                "number": n,
+                "created_at": created,
+                "vcs": {"branch": "main", "revision": f"commit{n}"},
+                "trigger": {"type": trigger},
+            }
+
+        def workflow(n: int) -> dict[str, Any]:
+            return {"id": f"w{n}", "name": "build", "status": "running", "created_at": recent}
+
+        # Each page token contains characters that must be escaped in a URL.
         pages = {
-            f"{CIRCLECI}/project/gh/org/repo/job/{n}": {"latest_workflow": {"id": "w9"}}
-            for n in (1, 2)
+            f"{CIRCLECI}/project/gh/org/repo/pipeline": {
+                # A scheduled pipeline is never redundant, so its workflows are not read.
+                "items": [pipeline(4, recent, "scheduled_pipeline"), pipeline(3, recent)],
+                "next_page_token": "a+b/c=",
+            },
+            f"{CIRCLECI}/project/gh/org/repo/pipeline?page-token=a%2Bb%2Fc%3D": {
+                "items": [pipeline(2, recent), pipeline(1, recent), pipeline(0, old)],
+                "next_page_token": "older",
+            },
+            f"{CIRCLECI}/pipeline/p2/workflow": {"items": [workflow(2)], "next_page_token": None},
+            f"{CIRCLECI}/pipeline/p1/workflow": {"items": [], "next_page_token": "x+y"},
+            f"{CIRCLECI}/pipeline/p1/workflow?page-token=x%2By": {
+                "items": [workflow(1)],
+                "next_page_token": None,
+            },
         }
+        # Pipeline 3 was deleted after it was listed.
+        deleted = f"{CIRCLECI}/pipeline/p3/workflow"
+        requested = []
 
         def http(_method: str, url: str, *_: Any, **_kwargs: Any) -> bytes:
+            requested.append(url)
+            if url not in pages:
+                raise urllib.error.HTTPError(url, 404, "Not Found", Message(), io.BytesIO())
             return json.dumps(pages[url]).encode()
 
         with (
             mock.patch.object(request_util, "http", http),
             mock.patch.object(ci_build, "circleci_token", return_value="token"),
+            mock.patch.object(
+                cancel_blocked_ci,
+                "checks",
+                return_value=[("completed", "ci", "https://app.circleci.com/workflow/x")],
+            ),
         ):
-            result = cancel_blocked_ci.circleci_workflows_of_jobs("abc", jobs)
-        self.assertEqual(result, [("w9", ("pending", "job1")), ("w9", ("pending", "job2"))])
+            result = cancel_blocked_ci.redundant_circleci_workflows("repo", "org/repo")
+        self.assertEqual(sorted(requested), sorted([*pages, deleted]))
+        self.assertEqual(
+            [(identifier, reason) for identifier, _, _, reason in result],
+            [(("circleci", "w1"), ", made redundant by workflow w2")],
+        )
 
 
 if __name__ == "__main__":
