@@ -124,10 +124,10 @@
 # build succeeds, this script commits the agent's changes on top of the
 # merges, as "Fix the build after merging ...", and pushes.  If the build
 # still fails, this script stops, with the agent's changes staged but not
-# committed.  The agent is told about every merge commit on TO_DIR's branch
-# that is not pushed, including one that an earlier run made but did not
-# push because its build failed, and about what each side of the pull's
-# merge changed.
+# committed.  The agent is told about those merges, about what each side of
+# the merge commits that the pulls made changed, and about every other merge
+# commit on TO_DIR's branch that is not pushed, such as one that an earlier
+# run made but did not push because its build failed.
 # Otherwise, the pulls and the merge did not cause the failure, so the agent
 # is not asked to fix it.  That is the case in a rerun after a failed build,
 # and when the pull or the merge fast-forwarded to a commit that fails to
@@ -409,7 +409,8 @@ git_push_to() {
     return 1
   fi
 
-  if ! pull_resolving "${llm_agent}" "${from_absolute}" -q; then
+  # `--no-edit` keeps the merge from stopping at an editor.
+  if ! pull_resolving "${llm_agent}" "${from_absolute}" -q --no-edit; then
     return 1
   fi
   # `merge_build_push` asks the agent to fix the build if the merge brings in
@@ -434,12 +435,15 @@ git_push_to() {
   # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
   # that an earlier run of this command made but did not push, as when its
   # build failed, and would copy that merge's commits onto TO_DIR's branch.
-  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase; then
+  # `--no-edit` keeps the merge from stopping at an editor.
+  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase --no-edit; then
     return 1
   fi
   # `merge_build_push` asks the agent to fix a failed build if the pull or
-  # the merge of FROM_DIR's branch made a merge commit.
+  # the merge of FROM_DIR's branch made a merge commit, and it does not
+  # tell the agent about merge commits that the upstream branch contains.
   to_pull_merge="${pull_merge}"
+  to_pull_fetched="${pull_fetched}"
 
   # Note: pwd=to_absolute
   if ! fetch_branch "${from_absolute}" "${from_branch}"; then
@@ -459,7 +463,7 @@ git_push_to() {
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
     "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}" \
-    "${to_pull_merge}" "${from_pull_merge}"; then
+    "${to_pull_merge}" "${to_pull_fetched}" "${from_pull_merge}"; then
     return 1
   fi
 

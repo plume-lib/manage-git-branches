@@ -100,8 +100,10 @@ The commands are:
   agent:  that nothing outside the conflict regions changed and that no
   conflict marker remains.  Then it commits the merge and continues.
   If the build fails, and the pull of TO_DIR or the merge made a merge
-  commit, it asks the agent to fix the build, up to 3 times, and commits the
-  fix.  A pull or merge that fast-forwards makes no merge commit.
+  commit, or the merge brought in, as by fast-forwarding, a merge commit
+  that the pull of FROM_DIR made, it asks the agent to fix the build, up to
+  3 times, and commits the fix.  A pull or merge that fast-forwards makes no
+  merge commit.
   `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
   on.
   The agent runs in a sandbox, which requires a recent version:  Claude

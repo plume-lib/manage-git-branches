@@ -961,7 +961,7 @@ fi
 if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "pull that breaks the build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
 fi
-check_pull_fixed "pull that breaks the build" "branch 'feature' of ${remote%.git}"
+check_pull_fixed "pull that breaks the build" "remote-tracking branch 'origin/feature'"
 
 ## When both the pull and the merge change the branch, the agent is told
 ## about both.
@@ -974,7 +974,7 @@ if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
   fail "pull and merge that break the build: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
 fi
 check_pull_fixed "pull and merge that break the build" \
-  "branch 'feature' of ${remote%.git} and branch 'main'"
+  "remote-tracking branch 'origin/feature' and branch 'main'"
 
 ## A pull merges even if `pull.rebase` is set.
 setup_pull_breaks pull-rebase-build
@@ -986,7 +986,7 @@ fi
 if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "pull with pull.rebase that breaks the build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
 fi
-check_pull_fixed "pull with pull.rebase that breaks the build" "branch 'feature' of ${remote%.git}"
+check_pull_fixed "pull with pull.rebase that breaks the build" "remote-tracking branch 'origin/feature'"
 
 ## A pull that fast-forwards to a commit that breaks the build, followed by a
 ## merge that changes nothing, made no merge commit, so no agent is asked to
@@ -1054,7 +1054,7 @@ if ! grep -q "git diff ${rerun_base} HEAD" "${STUB_PROMPT}"; then
   fail "rerun that pulls: the instructions do not name the head before the earlier run: $(cat "${STUB_PROMPT}")"
 fi
 message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
-if [ "${message}" != "Fix the build after merging branch 'main' and branch 'feature' of ${remote%.git}" ]; then
+if [ "${message}" != "Fix the build after merging branch 'main' and remote-tracking branch 'origin/feature'" ]; then
   fail "rerun that pulls: wrong message for the fix: ${message}"
 fi
 if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
@@ -1062,7 +1062,8 @@ if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
 fi
 
 ## When the merge fast-forwards to a merge commit that the pull of FROM_DIR
-## made, the agent is asked to fix the build, and is told about that merge.
+## made, the agent is asked to fix the build, and is told what the merge
+## changed on feature and what each side of the pull's merge changed.
 setup_case pull-from-ff-build build
 git -C "${main_dir}" reset -q --hard HEAD^
 git -C "${main_dir}" push -q --force
@@ -1073,6 +1074,7 @@ git clone -q -b main "${remote}" "${case_dir}/other-clone"
 echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
 git -C "${case_dir}/other-clone" commit -q -a -m "Break the build remotely"
 git -C "${case_dir}/other-clone" push -q
+from_remote="$(git -C "${remote}" rev-parse refs/heads/main)"
 echo "local" > "${main_dir}/local.txt"
 git -C "${main_dir}" add local.txt
 git -C "${main_dir}" commit -q -m "Add local.txt"
@@ -1084,15 +1086,44 @@ fi
 if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "fast-forward to a merge of FROM_DIR's pull: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
 fi
-if ! grep -q "git diff ${from_local} HEAD" "${STUB_PROMPT}"; then
-  fail "fast-forward to a merge of FROM_DIR's pull: the instructions do not name FROM_DIR's head before its pull: $(cat "${STUB_PROMPT}")"
+if ! grep -q "git diff ${feature_head} HEAD" "${STUB_PROMPT}"; then
+  fail "fast-forward to a merge of FROM_DIR's pull: the instructions do not name feature's head before the merge: $(cat "${STUB_PROMPT}")"
+fi
+# feature's head is where main's two sides diverged.
+if ! grep -q "git diff ${feature_head} ${from_local}" "${STUB_PROMPT}" \
+  || ! grep -q "git diff ${feature_head} ${from_remote}" "${STUB_PROMPT}"; then
+  fail "fast-forward to a merge of FROM_DIR's pull: the instructions do not show what each side of that pull changed: $(cat "${STUB_PROMPT}")"
 fi
 message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
-if [ "${message}" != "Fix the build after merging branch 'main' of ${remote%.git}" ]; then
+if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
   fail "fast-forward to a merge of FROM_DIR's pull: wrong message for the fix: ${message}"
 fi
 if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
   fail "fast-forward to a merge of FROM_DIR's pull: the build is not fixed"
+fi
+
+## A merge commit that is pushed is not reported to the agent, even if no
+## remote-tracking branch records it, as in a clone that fetches only main.
+setup_case pull-untracked-merge build
+untracked_merge="$(git -C "${feature_dir}" commit-tree -p HEAD -p HEAD^ \
+  -m "Merge branch 'side' into feature" "HEAD^{tree}")"
+git -C "${feature_dir}" reset -q --hard "${untracked_merge}"
+git -C "${feature_dir}" push -q
+git -C "${feature_dir}" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+git -C "${feature_dir}" update-ref -d refs/remotes/origin/feature
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "untracked merge: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "untracked merge: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q "git diff ${untracked_merge} HEAD" "${STUB_PROMPT}"; then
+  fail "untracked merge: the instructions do not name the pushed merge: $(cat "${STUB_PROMPT}")"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
+  fail "untracked merge: wrong message for the fix: ${message}"
 fi
 
 ## A merge commit in the branch that the current branch pushes to is pushed,
@@ -1116,7 +1147,7 @@ if ! grep -q "git diff ${pushed_merge} HEAD" "${STUB_PROMPT}"; then
   fail "merge in the push branch: the instructions do not name the pushed merge: $(cat "${STUB_PROMPT}")"
 fi
 message="$(git -C "${case_dir}/fork.git" log -1 --format=%B refs/heads/feature)"
-if [ "${message}" != "Fix the build after merging branch 'feature' of ${remote%.git}" ]; then
+if [ "${message}" != "Fix the build after merging remote-tracking branch 'origin/feature'" ]; then
   fail "merge in the push branch: wrong message for the fix: ${message}"
 fi
 
@@ -1140,7 +1171,7 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "git-pull-upstream after a pull that breaks the build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
 fi
 check_pull_fixed "git-pull-upstream after a pull that breaks the build" \
-  "branch 'feature' of ${remote%.git}"
+  "remote-tracking branch 'origin/feature'"
 build=0
 
 ## An agent that is not installed is not asked to fix the build.  The merge
