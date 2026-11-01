@@ -24,9 +24,13 @@
 #  * merge the upstream repository's default branch into the current branch,
 #  * build using `compile-project` (see its documentation),
 #  * push the current branch if the build succeeds.
-# If the build fails, this script asks the AI agent to fix it only if the
-# merge, or a merge that the pull made, changed the current branch.  A pull
-# that fast-forwards the current branch makes no merge.
+# If the build fails, this script asks the AI agent to fix it only if a merge
+# on the current branch might have broken it:  the branch has a merge commit
+# that is in none of the remote branch that it pushes to, the one that it
+# pulls from, and the history of the upstream repository's default branch,
+# and its tree differs from those remote branches'.  That merge commit can
+# be the merge of the upstream repository's default branch, a merge that the
+# pull made, or a merge that an earlier run made but did not push.
 # If the current branch already contains the upstream repository's default
 # branch, it skips the merge, and it stops there if the current branch matches
 # the branch that it pushes to (which differs from the branch that it pulls
@@ -175,10 +179,6 @@ fi
 if ! pull_resolving "${llm_agent}" "$(pwd)" -q --no-rebase --no-edit; then
   exit 1
 fi
-# `merge_build_push` asks the agent to fix a failed build if the pull's merge
-# or the merge of the upstream repository's default branch changed the
-# current branch.
-pull_merge="${pull_merge_commit}"
 
 # Stop if there is nothing to merge and nothing to push.  If there is nothing
 # to merge, still build and push if the branch has commits that are not
@@ -218,6 +218,6 @@ if ! upstream_head="$(git rev-parse --verify --quiet "${upstream_ref}")"; then
 fi
 if ! merge_build_push "${upstream_head}" \
   "remote-tracking branch '${upstream_ref#refs/remotes/}'" "${upstream_ref}" \
-  "${nocompile}" "${llm_agent}" "${pull_merge}"; then
+  "${nocompile}" "${llm_agent}"; then
   exit 1
 fi

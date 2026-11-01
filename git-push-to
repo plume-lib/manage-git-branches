@@ -113,22 +113,25 @@
 # described above.  That applies to the merge of FROM_DIR's branch into
 # TO_DIR, and to the merges of the pulls that update FROM_DIR and TO_DIR from
 # their remotes.  A pull of FROM_DIR that rebases, as `pull.rebase` can make
-# it do, is not resolved; the pull of TO_DIR always merges.  If the agent fails, this script stops with the merge still in
-# progress.
+# it do, is not resolved; the pull of TO_DIR always merges.  If the agent
+# fails, this script stops with the merge still in progress.
 #
-# When the build of TO_DIR fails, and a merge that this script made changed
-# TO_DIR's branch -- the merge of FROM_DIR's branch, or the merge that the
-# pull of TO_DIR made -- the agent edits files to fix it, without building;
-# then this script builds again.  The agent gets up to 3 attempts.  When the
-# build succeeds, this script commits the agent's changes on top of the
-# merges, as "Fix the build after merging ...", and pushes.  If the build
-# still fails, this script stops, with the agent's changes staged but not
-# committed.  If no merge changed TO_DIR's branch, as in a rerun after a
-# failed build, no merge caused the failure, so the agent is not asked to
-# fix it.  A pull that fast-forwards TO_DIR's branch makes no merge:  the
-# commits that it brings were already on the remote.  (The pull of FROM_DIR
-# is not considered:  any change that it makes reaches TO_DIR through the
-# merge.)
+# When the build of TO_DIR fails, and a merge on TO_DIR's branch might have
+# broken it, the agent edits files to fix it, without building; then this
+# script builds again.  The agent gets up to 3 attempts.  When the build
+# succeeds, this script commits the agent's changes on top of the merges, as
+# "Fix the build after merging ...", and pushes.  If the build still fails,
+# this script stops, with the agent's changes staged but not committed.
+# A merge might have broken the build if TO_DIR's branch has a merge commit
+# that is in none of the remote branch that it pushes to, the one that it
+# pulls from, and the history of FROM_DIR's branch, and its tree differs
+# from those remote branches'.  That merge commit can be the merge of
+# FROM_DIR's branch, the merge that the pull of TO_DIR made, or a merge that
+# an earlier run made but did not push, as when its build failed; so a rerun
+# after a failed build asks the agent too.  If there is no such merge
+# commit, as after a pull that only fast-forwarded TO_DIR's branch, the
+# agent would merely work around a failure that no merge caused, so it is
+# not asked.
 
 # Here is an example of use.
 #
@@ -427,12 +430,10 @@ git_push_to() {
   # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
   # that an earlier run of this command made but did not push, as when its
   # build failed, and would copy that merge's commits onto TO_DIR's branch.
-  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase; then
+  # `--no-edit` keeps the merge from stopping at an editor.
+  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase --no-edit; then
     return 1
   fi
-  # `merge_build_push` asks the agent to fix a failed build if the pull's
-  # merge or the merge of FROM_DIR's branch changed TO_DIR's branch.
-  to_pull_merge="${pull_merge_commit}"
 
   # Note: pwd=to_absolute
   if ! fetch_branch "${from_absolute}" "${from_branch}"; then
@@ -451,8 +452,7 @@ git_push_to() {
   # `merge_build_push` describes the commit as a branch of this repository.
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
-    "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}" \
-    "${to_pull_merge}"; then
+    "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}"; then
     return 1
   fi
 
