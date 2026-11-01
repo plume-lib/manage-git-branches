@@ -892,11 +892,24 @@ check_conflict_resolution() {
   # working tree.  `awk` ends every line with a newline, even the last line of
   # a file that lacks one.  `--filters` converts AUTO_MERGE's file as a
   # checkout would, such as to CRLF line endings, to match the working tree.
+  # So whether each file ends with a newline is passed to awk separately.
+  # Command substitution removes a final newline, so the last character of a
+  # file that ends with one is empty.
+  check_conflict_a_newline=yes
+  if [ -n "$(git cat-file --filters "AUTO_MERGE:$1" | tail -c 1)" ]; then
+    check_conflict_a_newline=no
+  fi
+  check_conflict_w_newline=yes
+  if [ -n "$(tail -c 1 < "$1")" ]; then
+    check_conflict_w_newline=no
+  fi
   # shellcheck disable=SC2016 # awk, not the shell, expands $0 and the like.
   {
     git cat-file --filters "AUTO_MERGE:$1" | awk '{ print "A" $0 }'
     awk '{ print "W" $0 }' < "$1"
-  } | CHECK_FILE="$1" CHECK_SCRIPT_NAME="${SCRIPT_NAME}" awk '
+  } | CHECK_FILE="$1" CHECK_SCRIPT_NAME="${SCRIPT_NAME}" \
+    CHECK_A_NEWLINE="${check_conflict_a_newline}" \
+    CHECK_W_NEWLINE="${check_conflict_w_newline}" awk '
     function problem(message) {
       printf "%s: %s: %s\n", ENVIRON["CHECK_SCRIPT_NAME"], ENVIRON["CHECK_FILE"], message > "/dev/stderr"
       status = 1
@@ -946,6 +959,12 @@ check_conflict_resolution() {
       last_pos = num_w - block_len[num_regions] + 1
       if (last_pos < block_len[0] + 1 || !block_at(num_regions, last_pos)) {
         problem("the text after the last conflict region changed")
+        exit 1
+      }
+      # The final newline belongs to the last line, which is clean unless the
+      # file ends with a conflict region.
+      if (block_len[num_regions] > 0 && ENVIRON["CHECK_A_NEWLINE"] != ENVIRON["CHECK_W_NEWLINE"]) {
+        problem("the final newline was added or removed")
         exit 1
       }
       pos = block_len[0] + 1
@@ -1025,11 +1044,23 @@ resolve_merge_conflicts() {
     echo "${resolve_failed}" >&2
     return 1
   fi
+  # `check_conflict_resolution` cannot tell a conflict marker from a line of
+  # the file that looks like one, as in a test of merging, so such a file is
+  # refused.  The merge bases matter too, because a merge with
+  # `merge.conflictStyle` "diff3" puts their text in the conflict regions.
+  resolve_sides="HEAD MERGE_HEAD $(git merge-base --all HEAD MERGE_HEAD)"
   if ! printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
     if ! git show "AUTO_MERGE:${resolve_file}" 2> /dev/null | grep -q '^<<<<<<<'; then
       echo "${SCRIPT_NAME}: ${resolve_file} has a conflict other than a content conflict; resolve it by hand" >&2
       exit 1
     fi
+    for resolve_side in ${resolve_sides}; do
+      if git cat-file blob "${resolve_side}:${resolve_file}" 2> /dev/null \
+        | grep -q -E '^(<<<<<<<|[|]{7}|>>>>>>>)'; then
+        echo "${SCRIPT_NAME}: ${resolve_file} contains lines that look like conflict markers; resolve its conflicts by hand" >&2
+        exit 1
+      fi
+    done
   done; then
     echo "${resolve_failed}" >&2
     return 1
@@ -1240,23 +1271,27 @@ git_control_state() {
 ## The AI agent that the commands ask to resolve merge conflicts:  "claude",
 ## "codex", or empty for none.  `parse_llm_option` sets it.
 llm_agent=claude
+## The AI agent that "--llm" turns on.  `parse_llm_option` sets it.
+llm_choice=claude
 ## The usage of the options that `parse_llm_option` recognizes.
 # shellcheck disable=SC2034 # used by the commands that source this file
 llm_options_usage='[--llm | --no-llm] [--claude | --codex]'
 
 ## Usage: parse_llm_option OPTION
 ## Returns 0, after setting ${llm_agent}, if OPTION chooses the AI agent:
-## "--llm" turns it on (Claude, unless an earlier option chose Codex),
-## "--no-llm" turns it off, and "--claude" and "--codex" choose it.  Returns 1
-## if OPTION is not one of those.
+## "--claude" and "--codex" choose it and turn it on, "--no-llm" turns it off,
+## and "--llm" turns it on.  The agent that "--llm" turns on is the one that
+## the last "--claude" or "--codex" chose, or Claude if neither was given.
+## Returns 1 if OPTION is not one of those.
+# shellcheck disable=SC2034 # llm_agent is used by the commands that source this file
 parse_llm_option() {
   case "$1" in
-    --llm)
-      if [ -z "${llm_agent}" ]; then llm_agent=claude; fi
-      ;;
+    --llm) llm_agent="${llm_choice}" ;;
     --no-llm) llm_agent='' ;;
-    --claude) llm_agent=claude ;;
-    --codex) llm_agent=codex ;;
+    --claude | --codex)
+      llm_choice="${1#--}"
+      llm_agent="${llm_choice}"
+      ;;
     *) return 1 ;;
   esac
   return 0
