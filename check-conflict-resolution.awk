@@ -1,9 +1,10 @@
 # An awk program that `check_conflict_resolution`, in common-functions.sh,
 # runs to check the resolution of the conflicts in a file.  Its standard input
-# holds two versions of the file, each line tagged with a first character:
-# "A" for a line of the file in AUTO_MERGE, git's automatic merge, which has
-# the conflict markers, and then "W" for a line of the file in the working
-# tree.  It reads these environment variables:
+# holds two versions of the file, one after the other:  first every line of
+# the file in AUTO_MERGE, git's automatic merge, which has the conflict
+# markers, each with "A" prepended; then every line of the file in the
+# working tree, each with "W" prepended.  It reads these environment
+# variables:
 #   CHECK_FILE         the file's name, for diagnostics
 #   CHECK_SCRIPT_NAME  the name of the command, for diagnostics
 #   CHECK_A_NEWLINE    "yes" if AUTO_MERGE's file ends with a newline, else "no"
