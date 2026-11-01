@@ -808,55 +808,106 @@ def circleci_pipeline_dict_branch(p):
     return vcs.get("branch") or vcs.get("tag")
 
 
-def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
-    """Return the CircleCI workflows that contain the given unfinished jobs of commit sha.
+def circleci_pipeline_workflows(subject, project, sha, branches):
+    """Return the unfinished workflows of the given CircleCI project's pipelines of commit sha.
 
-    A job's URL, such as "https://circleci.com/gh/ORG/REPO/123", gives the job's project
-    and number but not the id of the workflow that contains the job.
-
-    If the project has pipelines from the past day of commit sha on the branches, started
-    by a push or a pull request, and those pipelines have unfinished workflows, then the
-    result is those workflows, whether or not they contain the jobs.  Otherwise, the
-    result is the workflows that contain the jobs, which can be on any branch.  So the
-    workflow of a job in another pipeline of commit sha, such as one that the API
-    started, is in the result only if there are no such pipelines.
+    Only the pipelines that recent_pipelines returns count:  those from the past day that
+    a push or a pull request started.  Of those, only the ones on the branches count.  If
+    listing the project's pipelines, or a pipeline's workflows, fails, this prints a
+    warning and omits the workflows that it could not list.
 
     Args:
-        subject: what the jobs test, such as a PR; used for diagnostics.
+        subject: what the commit's builds test, such as a PR; used for diagnostics.
         project: a CircleCI project slug, such as "gh/ORG/REPO".
-        sha: a commit.
+        sha: the SHA of a commit in the project's repository, 40 hexadecimal digits such
+            as "441626b0c1d5e8f2a3b4c5d6e7f8091a2b3c4d5e".
         branches: branches, named as branch_name names them.
-        jobs: Checks of CircleCI jobs of project whose URLs do not contain their workflows'
-            ids.
 
     Returns:
-        The unfinished Builds.
+        The unfinished workflows, each as a dict parsed from the CircleCI API's JSON, with
+        keys such as "id", "name", and "status".
     """
     try:
-        workflows = [
-            w
+        pipelines = [
+            p
             for p in recent_pipelines(project)
             if p.api_pipeline["vcs"].get("revision") == sha and branch_name(p.branch) in branches
-            for w in unfinished_workflows(p.api_pipeline["id"])
         ]
     except request_util.REQUEST_ERRORS as e:
         print(
             f"{subject}: failed to list the pipelines of {project}: {request_util.failure(e)}",
             file=sys.stderr,
         )
-        workflows = []
-    if workflows:
-        return [Build.from_circleci_workflow(w["status"], w["id"], w["name"]) for w in workflows]
+        return []
 
-    # Looking up one job's workflow and then listing the workflow's jobs takes two
-    # requests per workflow, rather than one request per job.
-    found = set()  # (project, job number) of each job whose workflow is in result
+    def workflows(p):
+        """Return the unfinished workflows of the given pipeline.
+
+        Args:
+            p: a CircleciPipeline.
+
+        Returns:
+            The unfinished workflows, or the empty list if listing them fails.
+        """
+        try:
+            return unfinished_workflows(p.api_pipeline["id"])
+        except request_util.REQUEST_ERRORS as e:
+            print(
+                f"{subject}: failed to list the workflows of pipeline"
+                f" {p.api_pipeline['number']} of {project}: {request_util.failure(e)}",
+                file=sys.stderr,
+            )
+            return []
+
+    return [w for p in pipelines for w in workflows(p)]
+
+
+def circleci_workflows_of_jobs(subject, jobs, known):
+    """Return the CircleCI workflows that contain the given jobs, except the known workflows.
+
+    A job's URL, such as "https://circleci.com/gh/ORG/REPO/123", gives the job's project
+    and number but not the id of the workflow that contains the job.  Looking up one job's
+    workflow and then listing the workflow's jobs takes two requests per workflow, rather
+    than one request per job.  A job of a known workflow is not looked up, which costs one
+    request per known workflow.
+
+    Args:
+        subject: what the jobs test, such as a PR; used for diagnostics.
+        jobs: Checks of CircleCI jobs of one project, whose URLs do not contain their
+            workflows' ids.
+        known: the ids of workflows of the jobs' project, UUIDs such as
+            "5034460f-c7c4-4c43-9457-de07e2029e7b", that the result omits.
+
+    Returns:
+        The Build of each workflow that contains one of the jobs and is not known.
+    """
+    known = set(known)
+    found = set()  # the number of each job whose workflow is known or in the result
+
+    def add_jobs(workflow):
+        """Add the numbers of the jobs of the given workflow to found.
+
+        If listing the workflow's jobs fails, this adds nothing, so the workflow's jobs are
+        looked up one by one.
+
+        Args:
+            workflow: a workflow's id, a UUID such as
+                "5034460f-c7c4-4c43-9457-de07e2029e7b".
+        """
+        with contextlib.suppress(request_util.REQUEST_ERRORS):
+            found.update(
+                j["job_number"]
+                for j in ci_build.circleci_items(f"/v2/workflow/{workflow}/job")
+                if "job_number" in j
+            )
+
+    for workflow in known:
+        add_jobs(workflow)
     result = []
     failures = []
     for status, name, url in jobs:
         parsed = ci_build.CircleciUrlParts.from_url(url)
-        _, _, number = parsed
-        if (project, number) in found:
+        if parsed is None or parsed.job in found:
             continue
         try:
             workflow = parsed.lookup_workflow()
@@ -866,15 +917,11 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
         if workflow is None:
             report_failure(f"{subject}: no CircleCI workflow found for {url}")
             continue
+        if workflow in known:
+            continue
+        known.add(workflow)
         result.append(Build.from_circleci_workflow(status, workflow, name))
-        # If listing the workflow's jobs fails, its other jobs are looked up one by one,
-        # and unfinished_other_builds discards the duplicate Builds.
-        with contextlib.suppress(request_util.REQUEST_ERRORS):
-            found.update(
-                (project, j["job_number"])
-                for j in ci_build.circleci_items(f"/v2/workflow/{workflow}/job")
-                if "job_number" in j
-            )
+        add_jobs(workflow)
     if failures:
         report_failure(
             f"{subject}: failed to look up {len(failures)} CircleCI job(s):"
@@ -1164,7 +1211,13 @@ def unfinished_other_builds(subject, gh, sha, branches):
             else:
                 report_failure(f"{subject}: no CircleCI workflow found for {url}")
     for project, project_jobs in jobs.items():
-        for build in circleci_workflows_of_jobs(subject, project, sha, branches, project_jobs):
+        # The pipelines' workflows can include workflows that GitHub does not show as
+        # unfinished.
+        pipeline_workflows = circleci_pipeline_workflows(subject, project, sha, branches)
+        for w in pipeline_workflows:
+            add(Build.from_circleci_workflow(w["status"], w["id"], w["name"]))
+        known = [w["id"] for w in pipeline_workflows]
+        for build in circleci_workflows_of_jobs(subject, project_jobs, known):
             add(build)
     # The Build of each build that GitHub shows as unfinished, before its state is checked.
     candidates: list[Build] = list(builds.values())

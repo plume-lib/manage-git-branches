@@ -399,61 +399,105 @@ class CancelBlockedCiTest(unittest.TestCase):
         self.assertEqual(repo.pr_shared_branches, {"main", "develop", "feature"})
         self.assertEqual(repo.pr_shas, ["sha1", "sha2", "sha3", "sha4"])
 
-    def test_circleci_workflows_of_jobs(self) -> None:
-        """The workflows of jobs come from the recent pipelines, or else from job lookups.
+    def test_circleci_pipeline_workflows(self) -> None:
+        """The workflows come from the recent pipelines of the commit on the branches.
 
-        Only the recent pipelines of the given branches count.  Once a job's workflow is
-        looked up, the workflow's other jobs are not looked up.
+        If listing one pipeline's workflows fails, the other pipelines' workflows are still
+        in the result.
         """
         now = str(dt.datetime.now(dt.UTC))
-        jobs = [
-            Check("pending", f"job{n}", f"https://circleci.com/gh/org/repo/{n}") for n in (1, 2, 3)
-        ]
 
-        def pipeline(sha: str) -> dict[str, Any]:
+        def pipeline(number: int, sha: str, branch: str) -> dict[str, Any]:
             return {
-                "id": "p1",
-                "number": 1,
+                "id": f"p{number}",
+                "number": number,
                 "created_at": now,
-                "vcs": {"branch": "feature", "revision": sha},
+                "vcs": {"branch": branch, "revision": sha},
                 "trigger": {"type": "webhook"},
             }
 
-        workflow = {"id": "w1", "name": "build", "status": "running", "created_at": now}
-        # Job 2 is not looked up, because it is in job 1's workflow.
-        lookup_pages = {
+        def workflow(number: int) -> dict[str, Any]:
+            return {"id": f"w{number}", "name": "build", "status": "running", "created_at": now}
+
+        pages = {
+            f"{CIRCLECI}/project/gh/org/repo/pipeline": {
+                "items": [
+                    pipeline(1, "abc", "feature"),
+                    pipeline(2, "abc", "feature"),
+                    pipeline(3, "abc", "other"),
+                ]
+            },
+            f"{CIRCLECI}/pipeline/p1/workflow": {"items": [workflow(1)]},
+            # Listing the workflows of pipeline 2 fails.
+            f"{CIRCLECI}/pipeline/p3/workflow": {"items": [workflow(3)]},
+        }
+
+        def http(_method: str, url: str, *_: Any, **_kwargs: Any) -> bytes:
+            if url not in pages:
+                raise urllib.error.HTTPError(url, 500, "Server Error", Message(), io.BytesIO())
+            return json.dumps(pages[url]).encode()
+
+        for sha, branch, expected, warning in [
+            ("abc", "feature", ["w1"], "repo#5: failed to list the workflows of pipeline 2"),
+            ("abc", "other", ["w3"], ""),
+            ("def", "feature", [], ""),
+        ]:
+            with (
+                self.subTest(sha=sha, branch=branch),
+                mock.patch.object(request_util, "http", http),
+                mock.patch.object(ci_build, "circleci_token", return_value="token"),
+                mock.patch.object(cancel_blocked_ci, "failed", new=False),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                result = cancel_blocked_ci.circleci_pipeline_workflows(
+                    "repo#5", "gh/org/repo", sha, {branch}
+                )
+                self.assertFalse(cancel_blocked_ci.failed)
+            self.assertEqual([w["id"] for w in result], expected)
+            self.assertIn(warning, stderr.getvalue())
+
+    def test_circleci_workflows_of_jobs(self) -> None:
+        """A job is looked up only if its workflow is neither known nor already found.
+
+        Once a job's workflow is looked up, the workflow's other jobs are not looked up.
+        """
+        jobs = [
+            Check("pending", f"job{n}", f"https://circleci.com/gh/org/repo/{n}")
+            for n in (1, 2, 3, 4)
+        ]
+        pages = {
             f"{CIRCLECI}/project/gh/org/repo/job/1": {"latest_workflow": {"id": "w9"}},
+            f"{CIRCLECI}/project/gh/org/repo/job/2": {"latest_workflow": {"id": "w9"}},
             f"{CIRCLECI}/project/gh/org/repo/job/3": {"latest_workflow": {"id": "w8"}},
+            f"{CIRCLECI}/project/gh/org/repo/job/4": {"latest_workflow": {"id": "w7"}},
             f"{CIRCLECI}/workflow/w9/job": {"items": [{"job_number": 1}, {"job_number": 2}]},
             f"{CIRCLECI}/workflow/w8/job": {"items": [{"job_number": 3}, {"name": "approval"}]},
+            f"{CIRCLECI}/workflow/w7/job": {"items": [{"job_number": 4}]},
         }
-        looked_up = [
-            (("circleci", "w9"), "pending", "CircleCI workflow w9 (job1)"),
-            (("circleci", "w8"), "pending", "CircleCI workflow w8 (job3)"),
-        ]
-        for sha, branch, expected, lookups in [
+
+        def build(workflow: str, job: int) -> tuple[Any, ...]:
+            return (("circleci", workflow), "pending", f"CircleCI workflow {workflow} (job{job})")
+
+        for known, expected, requested_urls in [
             (
-                "abc",
-                "feature",
-                [(("circleci", "w1"), "running", "CircleCI workflow w1 (build)")],
-                False,
+                [],
+                [build("w9", 1), build("w8", 3), build("w7", 4)],
+                # Job 2 is not looked up, because it is in job 1's workflow.
+                [url for url in pages if not url.endswith("/job/2")],
             ),
-            # The pipeline of commit abc is on another branch.
-            ("abc", "other", looked_up, True),
-            ("def", "feature", looked_up, True),
+            (
+                # The jobs of known workflow w8 are not looked up.
+                ["w8"],
+                [build("w9", 1), build("w7", 4)],
+                [url for url in pages if not url.endswith(("/job/2", "/job/3"))],
+            ),
         ]:
-            pages = {
-                f"{CIRCLECI}/project/gh/org/repo/pipeline": {"items": [pipeline("abc")]},
-                f"{CIRCLECI}/pipeline/p1/workflow": {"items": [workflow]},
-                **lookup_pages,
-            }
             requested = []
 
             def http(
                 _method: str,
                 url: str,
                 *_: Any,
-                pages: dict[str, Any] = pages,
                 requested: list[str] = requested,
                 **_kwargs: Any,
             ) -> bytes:
@@ -461,25 +505,15 @@ class CancelBlockedCiTest(unittest.TestCase):
                 return json.dumps(pages[url]).encode()
 
             with (
-                self.subTest(sha=sha, branch=branch),
+                self.subTest(known=known),
                 mock.patch.object(request_util, "http", http),
                 mock.patch.object(ci_build, "circleci_token", return_value="token"),
                 mock.patch.object(cancel_blocked_ci, "failed", new=False),
             ):
-                cancel_blocked_ci.recent_pipelines.cache_clear()
-                cancel_blocked_ci.unfinished_workflows.cache_clear()
-                result = cancel_blocked_ci.circleci_workflows_of_jobs(
-                    "repo#5", "gh/org/repo", sha, {branch}, jobs
-                )
+                result = cancel_blocked_ci.circleci_workflows_of_jobs("repo#5", jobs, known)
                 self.assertFalse(cancel_blocked_ci.failed)
-                self.assertEqual([(b.key, b.status, b.description) for b in result], expected)
-                self.assertEqual(
-                    sorted(requested),
-                    sorted(
-                        [f"{CIRCLECI}/project/gh/org/repo/pipeline"]
-                        + (list(lookup_pages) if lookups else [f"{CIRCLECI}/pipeline/p1/workflow"])
-                    ),
-                )
+            self.assertEqual([(b.key, b.status, b.description) for b in result], expected)
+            self.assertEqual(sorted(requested), sorted(requested_urls))
 
     def test_state_of_empty_response(self) -> None:
         """An empty response for a build's state raises an error in REQUEST_ERRORS."""
