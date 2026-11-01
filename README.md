@@ -155,7 +155,7 @@ The commands are:
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
 * [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:  Cancels certain
-  CI builds: for blocked pull requests (one that depends on another open
+  CI builds: for blocked pull requests (ones that depend on another open
   pull request), and ones that are redundant because of a more recent build
   of the same branch.  Run it in a directory that holds the working copy
   directories.  Works for Azure Pipelines, CircleCI, and GitHub Actions.
