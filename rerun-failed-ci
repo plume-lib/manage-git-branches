@@ -447,7 +447,7 @@ class Rerunner:
         """
         api = f"{ci_build.CIRCLECI_API}/v2"
         try:
-            wf = request_util.request(
+            wf = request_util.request_object(
                 "GET", f"{api}/workflow/{workflow}", ci_build.circleci_headers()
             )
         except request_util.REQUEST_ERRORS as e:
@@ -538,10 +538,10 @@ class Rerunner:
             body, what = {"jobs": rerun_ids}, "the transiently failed jobs"
 
         def rerunning() -> str | None:
-            result = request_util.request(
+            result = request_util.request_object(
                 "POST", f"{api}/workflow/{workflow}/rerun", ci_build.circleci_headers(), body
             )
-            new_workflow = (result or {}).get("workflow_id")
+            new_workflow = result.get("workflow_id")
             return f"{pipeline}/workflows/{new_workflow}" if new_workflow else None
 
         try:
@@ -849,7 +849,7 @@ def circleci_job_log(slug: str, job: int) -> str:
     if v1_vcs is None:
         msg = f"cannot read the log of a job of CircleCI project {slug}"
         raise ValueError(msg)
-    details = request_util.request(
+    details = request_util.request_object(
         "GET",
         f"{ci_build.CIRCLECI_API}/v1.1/project/{v1_vcs}/{project}/{job}",
         ci_build.circleci_headers(),

@@ -144,6 +144,50 @@ def request(
     return json.loads(content) if content else None
 
 
+def json_object(response: Any, url: str) -> dict[str, Any]:
+    """Return the given response if it is a JSON object, or raise ValueError if it is not.
+
+    Args:
+        response: a response body parsed as JSON, as request returns it, such as a dict or
+            (for an empty body) None.
+        url: the URL that response came from; used for diagnostics.
+
+    Returns:
+        response, if it is a dict.
+
+    Raises:
+        ValueError: if response is not a dict.
+    """
+    if not isinstance(response, dict):
+        msg = f"{url} returned {response!r} instead of a JSON object"
+        raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
+    return response
+
+
+def request_object(
+    method: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    body: Any = None,
+    *,
+    refusals: Mapping[int, str] | None = None,
+) -> dict[str, Any]:
+    """Return the given HTTP request's response, or raise ValueError if it is not a JSON object.
+
+    Args:
+        method: the HTTP method, such as "GET".
+        url: a URL.
+        headers: the HTTP headers.
+        body: the request body, which is sent as JSON, or None for no body.
+        refusals: a map from each successful status with which the server refuses the
+            request to a description of it, as for http.
+
+    Returns:
+        The response body, parsed as JSON.
+    """
+    return json_object(request(method, url, headers, body, refusals=refusals), url)
+
+
 def failure(e: Exception) -> str:
     """Return a description of the given failed command or HTTP request.
 
