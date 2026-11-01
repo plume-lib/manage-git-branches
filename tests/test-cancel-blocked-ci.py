@@ -25,6 +25,7 @@ TOPLEVEL = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(TOPLEVEL))
 
 import ci_build  # ruff: ignore[module-import-not-at-top-of-file]
+import request_util  # ruff: ignore[module-import-not-at-top-of-file]
 
 if TYPE_CHECKING:
     import types
@@ -243,7 +244,7 @@ class CancelBlockedCiTest(unittest.TestCase):
 
             with (
                 self.subTest(sha=sha),
-                mock.patch.object(ci_build, "http", http),
+                mock.patch.object(request_util, "http", http),
                 mock.patch.object(ci_build, "circleci_token", return_value="token"),
             ):
                 cancel_blocked_ci.recent_pipelines.cache_clear()
@@ -269,7 +270,7 @@ class CancelBlockedCiTest(unittest.TestCase):
             return b"{}" if headers else b"<html>Sign in</html>"
 
         with (
-            mock.patch.object(ci_build, "http", http),
+            mock.patch.object(request_util, "http", http),
             mock.patch.object(ci_build, "azure_headers", return_value={"Authorization": "x"}),
             mock.patch.object(ci_build, "_azure_private_projects", set()),
         ):
@@ -291,7 +292,7 @@ class CancelBlockedCiTest(unittest.TestCase):
             return b"{}"
 
         with (
-            mock.patch.object(ci_build, "http", http),
+            mock.patch.object(request_util, "http", http),
             mock.patch.object(ci_build, "azure_headers", return_value={"Authorization": "x"}),
             mock.patch.object(ci_build, "_azure_private_projects", set()),
         ):
@@ -346,7 +347,7 @@ class CancelBlockedCiTest(unittest.TestCase):
             return json.dumps(pages[url]).encode()
 
         with (
-            mock.patch.object(ci_build, "http", http),
+            mock.patch.object(request_util, "http", http),
             mock.patch.object(ci_build, "circleci_token", return_value="token"),
             mock.patch.object(
                 cancel_blocked_ci,

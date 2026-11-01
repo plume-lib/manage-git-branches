@@ -154,14 +154,12 @@ The commands are:
   whitespace and using the patience diff algorithm.
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
-* [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:
-  Cancels the unfinished GitHub Actions, Azure Pipelines, and CircleCI builds
-  of each blocked pull request (one that depends on another open pull
-  request), and each build, started by a push or a pull request, that a more
-  recent build of the same branch makes redundant.  Run it in the directory
-  that holds the documents that `pr-status.py` generates; it uses
-  `pr-status.py` to find the blocked pull requests.  This command needs
-  Python 3.11 or later and `gh`.
+* [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:  Cancels certain
+  CI builds: for blocked pull requests (one that depends on another open
+  pull request), and ones that are redundant because of a more recent build
+  of the same branch.  Run it in a directory that holds the working copy
+  directories.  Works for Azure Pipelines, CircleCI, and GitHub Actions.
+  This command needs Python 3.11 or later and `gh`.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
