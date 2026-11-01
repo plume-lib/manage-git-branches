@@ -83,6 +83,14 @@
 # branch, with the same content as before.  Its message consists of the
 # messages of the branch's own commits.
 
+# Conflicts
+#
+# When the merge of FROM_DIR's branch into TO_DIR has conflicts that `git
+# rerere` resolves, this script checks the resolution;
+# `resolve_merge_conflicts` in common-functions.sh describes the check.
+# Otherwise, this script stops with the merge still in progress, for the
+# user to finish or to abort with `git merge --abort`.
+
 # Here is an example of use.
 #
 # Suppose you have 3 branches named "part1", "part2", and "part3".  Each one
