@@ -520,15 +520,15 @@ git init -q "${WORK_DIR}/ccr"
 ## Makes AUTO_MERGE a tree whose file f.txt is ${WORK_DIR}/ccr-auto, and checks
 ## that `check_conflict_resolution` accepts (EXPECTED "accept") or rejects
 ## (EXPECTED "reject") the resolution in ${WORK_DIR}/ccr/f.txt.  It passes
-## ${ccr_separator} as the argument that says whether a line "=======" is
-## permitted.
-ccr_separator=no
+## ${ccr_contains_separator} as the argument that says whether a side of the
+## merge contains a line "=======".
+ccr_contains_separator=no
 check_resolution_files() {
   check_resolution_blob="$(git -C "${WORK_DIR}/ccr" hash-object --no-filters -w "${WORK_DIR}/ccr-auto")"
   check_resolution_tree="$(printf '100644 blob %s\tf.txt\n' "${check_resolution_blob}" \
     | git -C "${WORK_DIR}/ccr" mktree)"
   git -C "${WORK_DIR}/ccr" update-ref AUTO_MERGE "${check_resolution_tree}"
-  if (cd "${WORK_DIR}/ccr" && check_conflict_resolution f.txt "${ccr_separator}" 2> /dev/null); then
+  if (cd "${WORK_DIR}/ccr" && check_conflict_resolution f.txt "${ccr_contains_separator}" 2> /dev/null); then
     check_resolution_actual=accept
   else
     check_resolution_actual=reject
@@ -565,11 +565,11 @@ check_resolution accept "blank lines at the end of the region and after it" \
   a '<<<<<<< HEAD' b '' '=======' c '' '>>>>>>> other' '' d -- a b '' c '' d
 check_resolution reject "a separator remains" \
   a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- a b '=======' c d
-ccr_separator=yes
-check_resolution accept "a heading underline that looks like a separator, when permitted" \
+ccr_contains_separator=yes
+check_resolution accept "a heading underline that looks like a separator, when a side contains one" \
   intro '<<<<<<< HEAD' 'Title A' '=======' '=======' 'Title B' '=======' '>>>>>>> other' text \
   -- intro 'Title B' '=======' text
-ccr_separator=no
+ccr_contains_separator=no
 check_resolution accept "diff3 style" \
   a '<<<<<<< HEAD' b '||||||| base' x '=======' c '>>>>>>> other' d -- a bc d
 check_resolution accept "two regions" \

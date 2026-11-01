@@ -868,17 +868,17 @@ upstream_default_branch_git() {
   fi
 }
 
-## Usage: check_conflict_resolution FILE SEPARATOR
+## Usage: check_conflict_resolution FILE CONTAINS_SEPARATOR
 ## Checks the resolution of the conflicts in FILE against AUTO_MERGE, the git
 ## ref that names git's automatic merge, which contains the conflict markers:
 ## returns 0 if the text outside the conflict regions is unchanged and no
-## conflict marker remains, and returns 1, after printing a diagnostic for
-## each problem, otherwise.  check-conflict-resolution.awk states exactly
+## conflict marker remains, and returns 1 otherwise.  Prints a diagnostic for
+## each problem.  check-conflict-resolution.awk states exactly
 ## what is acceptable.  FILE is a pathname relative to the top level of the
-## working tree, which must be the current directory.  SEPARATOR is "yes" if
-## a line "=======" in place of a conflict region is content, such as a
-## Markdown heading's underline, rather than a conflict marker, and "no"
-## otherwise.
+## working tree, which must be the current directory.  CONTAINS_SEPARATOR is
+## "yes" if HEAD's or MERGE_HEAD's version of FILE contains a line "=======",
+## which can then be content in the resolution, such as a Markdown heading's
+## underline, rather than a conflict marker; and "no" otherwise.
 ##
 ## This compares content rather than the hunks of `git diff`, which can put a
 ## change on either of two identical lines, one inside a region and one
@@ -901,17 +901,17 @@ check_conflict_resolution() {
   # reads it is then empty if and only if the file ends with a newline.
   # Whether the working tree's file ends with a newline is passed to the
   # checking program separately.
-  check_conflict_w_newline=yes
+  check_conflict_ends_with_newline=yes
   if ! ends_with_newline < "$1"; then
-    check_conflict_w_newline=no
+    check_conflict_ends_with_newline=no
   fi
 
   {
     git cat-file --filters "AUTO_MERGE:$1"
     echo
-  } | CHECK_FILE="$1" CHECK_SCRIPT_NAME="${SCRIPT_NAME}" \
-    CHECK_W_NEWLINE="${check_conflict_w_newline}" \
-    CHECK_SEPARATOR="$2" \
+  } | CCR_FILE="$1" CCR_SCRIPT_NAME="${SCRIPT_NAME}" \
+    CCR_RESOLVED_ENDS_WITH_NEWLINE="${check_conflict_ends_with_newline}" \
+    CCR_CONTAINS_SEPARATOR="$2" \
     awk -f "${SCRIPT_DIR}/check-conflict-resolution.awk" - "./$1"
 }
 
@@ -939,7 +939,9 @@ ends_with_newline() {
 ## Only content conflicts are resolved, in which every conflicted file
 ## contains conflict markers.  For any other conflict, such as a file that one
 ## side modified and the other deleted, no check could tell whether the agent
-## chose well.
+## chose well.  Also refused are a file whose versions contain lines that look
+## like conflict markers, and a working tree with changes other than the
+## conflicted files, which would be committed with them.
 resolve_merge_conflicts() {
   resolve_with="$1"
   resolve_commit="$2"
@@ -1015,7 +1017,7 @@ resolve_merge_conflicts() {
         resolve_status=1
         continue
       fi
-      resolve_separator=no
+      resolve_contains_separator=no
       for resolve_stage in 1 2 3; do
         case "$(git cat-file blob ":${resolve_stage}:${resolve_file}" 2> /dev/null \
           | awk "${resolve_scan}")" in
@@ -1026,15 +1028,15 @@ resolve_merge_conflicts() {
             ;;
           separator)
             if [ "${resolve_stage}" -ne 1 ]; then
-              resolve_separator=yes
+              resolve_contains_separator=yes
             fi
             ;;
         esac
       done
-      if [ "${resolve_separator}" = yes ]; then
+      if [ "${resolve_contains_separator}" = yes ]; then
         printf 'separator %s\n' "${resolve_file}"
       fi
-      if ! check_conflict_resolution "${resolve_file}" "${resolve_separator}" 2> /dev/null; then
+      if ! check_conflict_resolution "${resolve_file}" "${resolve_contains_separator}" 2> /dev/null; then
         printf 'unresolved %s\n' "${resolve_file}"
       fi
     done
