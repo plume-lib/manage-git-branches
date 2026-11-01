@@ -169,7 +169,7 @@ case "${output}" in
   *ERROR*) fail "git-new-branch treated the unreachable remote as an error: ${output}" ;;
 esac
 case "${output}" in
-  *"continuing, using the current commit"*) ;;
+  *"continuing without the pull."*) ;;
   *) fail "git-new-branch did not say that it continued anyway: ${output}" ;;
 esac
 
