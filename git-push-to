@@ -85,11 +85,11 @@
 
 # Conflicts
 #
-# When the merge of FROM_DIR's branch into TO_DIR has conflicts that
-# `git rerere` resolves, this script checks the resolution, commits the
-# merge, and continues; `resolve_merge_conflicts` in common-functions.sh
-# describes the check.  Otherwise, this script stops with the merge still in
-# progress, for the user to finish or to abort with `git merge --abort`.
+# When the merge of FROM_DIR's branch into TO_DIR has conflicts that `git
+# rerere` resolves, this script checks the resolution;
+# `resolve_merge_conflicts` in common-functions.sh describes the check.
+# Otherwise, this script stops with the merge still in progress, for the
+# user to finish or to abort with `git merge --abort`.
 
 # Here is an example of use.
 #

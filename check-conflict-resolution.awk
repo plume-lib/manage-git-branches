@@ -33,9 +33,8 @@
 #                                   underline; else "no"
 #
 # `check_conflict_resolution`, in common-functions.sh, runs this program.  It
-# passes the file in AUTO_MERGE, git's automatic merge, as MERGED, on
-# standard input, by giving "-" as the first operand; and it passes the file
-# in the working tree as RESOLVED.
+# passes the file in AUTO_MERGE, git's automatic merge, as MERGED; and it passes
+# the file in the working tree as RESOLVED.
 
 function problem(message) {
   printf "%s: %s: %s\n", ENVIRON["CCR_SCRIPT_NAME"], ENVIRON["CCR_FILE"], message > "/dev/stderr"

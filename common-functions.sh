@@ -872,8 +872,8 @@ upstream_default_branch_git() {
 ## Checks the resolution of the conflicts in FILE against AUTO_MERGE, the git
 ## ref that names git's automatic merge, which contains the conflict markers:
 ## returns 0 if the text outside the conflict regions is unchanged and no
-## conflict marker remains, and returns 1, after printing a diagnostic for
-## each problem, otherwise.  check-conflict-resolution.awk states exactly
+## conflict marker remains, and returns 1 otherwise.  Prints a diagnostic for
+## each problem.  check-conflict-resolution.awk states exactly
 ## what is acceptable.  FILE is a pathname relative to the top level of the
 ## working tree, which must be the current directory.  CONTAINS_SEPARATOR is
 ## "yes" if HEAD's or MERGE_HEAD's version of FILE contains a line "=======",
