@@ -1,26 +1,42 @@
 #!/bin/sh
 
-# Creates a new branch of the current repository,
-# in a sibling directory named REPONAME-branch-NEWBRANCHNAME/.
+# Creates a new branch of the current repository, and checks it out in a new
+# sibling directory named REPONAME-branch-NEWBRANCHNAME/.
 #
 # Usage:
 #   git-new-branch [--clean | --copy] NEWBRANCHNAME
 #   git-new-branch ORG:NEWBRANCHNAME
+#   git-new-branch -h | --help
 #
-# The new branch starts at the current commit.  There are three modes:
+# The new branch starts at the current commit, after a `git pull` of the
+# current branch.
 #
-#  * By default, the new directory is a linked worktree of the current
-#    repository, made by `git worktree add`, so that it shares the
-#    repository's object store rather than holding a copy of it.  Its
-#    contents are the same as the current directory's, including uncommitted
-#    changes, staged changes, untracked files, and ignored files such as build
-#    output.
-#  * With `--clean`, the new directory is a linked worktree that holds a clean
-#    checkout of the current commit and nothing else.  It is the cheapest
-#    mode, in both time and disk space.
-#  * With `--copy`, the new directory is a copy of the whole current
-#    directory, `.git` included, so it is an independent clone that shares
-#    nothing with the current repository.
+# The new directory is:
+#   (default)  a linked worktree of the current repository, made by
+#              `git worktree add`, so that it shares the repository's object
+#              store rather than holding a copy of it.  Its contents are the
+#              same as the current directory's, including uncommitted
+#              changes, staged changes, untracked files, and ignored files
+#              such as build output.
+#   --clean    a linked worktree that holds a clean checkout of the current
+#              commit and nothing else.  It is the cheapest mode, in both
+#              time and disk space, for starting fresh work.
+#   --copy     a copy of the whole current directory, `.git` included, so it
+#              is an independent clone that shares nothing with the current
+#              repository.
+#
+# A working tree that has submodules gets `--copy` automatically, and
+# `--clean` is refused when the current commit has submodules.
+#
+# Every effect is local:  this command never contacts a remote except to
+# read from it, and in particular it does not push the new branch.  It also
+# gives the new branch no upstream branch, even under
+# `branch.autoSetupMerge=always`; `git-push-to` and `git-pull-from` require
+# one.  The first `git push` of the new branch sets its upstream branch if
+# `push.autoSetupRemote` is true (git 2.37 or later); otherwise,
+# `git push -u REMOTE NEWBRANCHNAME` does.  Nor does this command build.
+#
+# Details:
 #
 # The argument can instead be a slug ORG:NEWBRANCHNAME, such as
 # `mernst:feature`, which makes the branch in ORG's fork of the project.  It
@@ -51,9 +67,8 @@
 # `.claude/worktrees/`, because its copy would share that worktree's HEAD and
 # index; they say which ones they left out.
 #
-# A working tree that has submodules gets `--copy` automatically, because git
-# does not support a submodule in more than one worktree, and `--clean` is
-# refused when the current commit has submodules.  A repository that has no
+# `choose_mode_for_submodules` says why submodules change the mode, or
+# prevent `--clean`.  A repository that has no
 # commit is refused, because there is nothing to branch from.  Every mode but
 # `--clean` is refused while a merge, cherry-pick, revert, or rebase is in
 # progress, because the new directory would get the operation's staged
@@ -61,31 +76,20 @@
 #
 # In the worktree modes, this script writes into the current repository:  it
 # creates the new branch there and registers the new worktree in its `.git`.
-# There is one exception.  If the current repository is a branch directory's,
-# REPONAME-branch-OTHER/, and a sibling REPONAME/ is a clone of the same
-# project, the branch and the worktree are created in REPONAME/ instead, after
-# the commit and staged files that they need are copied there, if they can be
-# and if REPONAME/ has no branch of that name; otherwise, the new worktree would
-# prevent the removal of
-# REPONAME-branch-OTHER/.  Then the test for a branch of the same name on a
-# remote consults REPONAME/'s remotes, because REPONAME/'s configuration says
-# where the new branch would be pushed.
-# Every effect of this script is local, all the same:  it never contacts a
-# remote except to read from it, and in particular it does not push the new
-# branch.  Therefore, the new branch has no upstream branch, which
-# `git-push-to` and `git-pull-from` require.
+# If the current repository is a branch directory's, REPONAME-branch-OTHER/,
+# they are created instead in the sibling REPONAME/ that `main_clone_for`
+# chooses, if there is one, so that the new worktree does not prevent the
+# removal of REPONAME-branch-OTHER/.  That happens only if REPONAME/ has no
+# branch of the new branch's name, and if the commit and staged files that the
+# new worktree needs can be copied there.  Then the test for a branch of the
+# same name on a remote consults REPONAME/'s remotes, because REPONAME/'s
+# configuration says where the new branch would be pushed.
 #
-# Do not remove or move a worktree that this script created with file-system
-# commands.  This applies to the default mode and `--clean`, not to `--copy`,
-# whose directory is an independent clone.
-#  * Do not `rm -rf` it.  That leaves the branch, so the branch name stays
-#    taken, and a stale registration in the repository.  Use
-#    `git-remove-branch-directory` instead.
-#  * Do not `mv` it.  It keeps working, so nothing looks wrong, but its
-#    registration still names the old path, and the `git worktree prune` that
-#    `git gc` eventually runs then deletes the registration, after which the
-#    directory is no longer a working tree.  Use `git worktree move` instead,
-#    or run `git worktree repair` in a directory that was already moved.
+# Remove a worktree that this script created with
+# `git-remove-branch-directory`, and move it with `git worktree move`, never
+# with file-system commands; the "Worktrees" section of README.md says why.
+# This applies to the default mode and `--clean`, not to `--copy`, whose
+# directory is an independent clone.
 #
 # This command requires git 2.31 or later, and its default mode requires git
 # 2.36 or later in a sparse checkout or with per-worktree configuration.
@@ -147,7 +151,61 @@ unset_git_location_variables
 usage() {
   echo "Usage: ${SCRIPT_NAME} [--clean | --copy] NEWBRANCHNAME" >&2
   echo "   or: ${SCRIPT_NAME} ORG:NEWBRANCHNAME" >&2
+  echo "Run \`${SCRIPT_NAME} --help\` for more information." >&2
 }
+
+# Usage: print_synopsis
+# Prints the synopsis at the top of this file, without the comment characters.
+# The synopsis is the part of the first comment block, after the shebang line,
+# that precedes the line "# Details:".  Reading it from this file keeps
+# `--help` and the file's documentation from disagreeing.  A blank line is
+# printed only between lines that are not blank, so that the output neither
+# begins nor ends with one.  Prints nothing, and fails, if this file has no
+# line "# Details:" in a comment block.
+print_synopsis() {
+  awk '
+    NR == 1 { next }
+    !/^#/ {
+      text = ""
+      blanks = 0
+      next
+    }
+    $0 == "# Details:" {
+      found = 1
+      exit
+    }
+    {
+      sub(/^# ?/, "")
+      if ($0 == "") {
+        blanks++
+        next
+      }
+      if (text != "") {
+        for (; blanks > 0; blanks--) text = text "\n"
+      }
+      blanks = 0
+      text = text $0 "\n"
+    }
+    END {
+      if (!found) exit 1
+      printf "%s", text
+    }' "${script_path}"
+}
+
+# `--help` and `-h` print the synopsis wherever they appear before `--`, even
+# after the branch name, where the loop below stops looking for options.
+for arg in "$@"; do
+  case "${arg}" in
+    --) break ;;
+    -h | --help)
+      if ! print_synopsis; then
+        echo "${SCRIPT_NAME}: ERROR: cannot find the synopsis in ${script_path}" >&2
+        exit 1
+      fi
+      exit
+      ;;
+  esac
+done
 
 # The mode:  "worktree" (the default), "clean", or "copy".  Selected on once,
 # where the three implementations diverge, so that every check before that
@@ -438,7 +496,8 @@ fi
 
 # In the worktree modes, register the new worktree in the project's main clone
 # rather than in a branch directory, when this repository is a branch
-# directory's; see `main_clone_for`.
+# directory's; see `main_clone_for`.  A main clone that has its own branch of
+# the new branch's name cannot host it.
 if [ "${MODE}" != 'copy' ]; then
   WORKTREE_HOST="$(main_clone_for "${TOPLEVEL}")"
 fi
@@ -455,10 +514,9 @@ fi
 # no upstream, but it is reported: the branch will be based on a possibly stale
 # commit.
 #
-# `git_batch_ssh` disables the interactive prompts that git and SSH would
-# otherwise issue, as it does for the query below.  This pull's output is
-# captured rather than shown, so a prompt would be invisible and would block
-# this script forever; a failure that says why is better than a silent hang.
+# The pull runs under `git_batch_ssh`, because its output is captured rather
+# than shown, so a prompt would be invisible and would block this script
+# forever; a failure that says why is better than a silent hang.
 #
 # A slug pulls in a clone other than the current directory, where a merge or
 # rebase that stopped on conflicts would be left for the user to find, so
@@ -573,9 +631,9 @@ done
 # Asking the remote does not change it.  In particular, this script does not
 # push the new branch.
 #
-# `git_batch_ssh` disables the interactive prompts that would otherwise block
-# this query forever when this script is run from another script or a CI job,
-# as `is-deleted-branch` does for its own queries.
+# The query runs under `git_batch_ssh`, as `is-deleted-branch` runs its own
+# queries, because a prompt would otherwise block this query forever when this
+# script is run from another script or a CI job.
 # A remote that this script cannot ask is not an error; the branch is created.
 if [ -n "${REMOTE}" ] \
   && git_batch_ssh "${COLLISION_REPO}" ls-remote --exit-code "${REMOTE}" \
@@ -639,8 +697,11 @@ case "${MODE}" in
     # with `mv` is safe.
     make_tmpdir
     copy_repository "${BRANCH_TMPDIR}"
-    if ! (cd -- "${BRANCH_TMPDIR}" && git checkout -b "${BRANCHNAME}" -q); then
-      echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)" >&2
+    # `--no-track` sets up no upstream for the new branch even under
+    # `branch.autoSetupMerge=always`, which would otherwise make the current
+    # branch its upstream.
+    if ! (cd -- "${BRANCH_TMPDIR}" && git checkout --no-track -b "${BRANCHNAME}" -q); then
+      echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout --no-track -b \"${BRANCHNAME}\" -q)" >&2
       exit 1
     fi
     if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then
