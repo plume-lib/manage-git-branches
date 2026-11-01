@@ -6,8 +6,10 @@ The tests contact no server:  fakes replace the HTTP requests that the modules m
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import sys
+import time
 import unittest
 import urllib.error
 from email.message import Message
@@ -38,6 +40,9 @@ class CiBuildTest(unittest.TestCase):
                 "circleci/AbC/dEf",
             ),
             ("https://circleci.com/gh/org/repo/230602?utm_campaign=x", "gh/org/repo"),
+            ("https://circleci.com/gh/org/repo/230602/", "gh/org/repo"),
+            ("http://circleci.com/bitbucket/org/repo/230602", "bb/org/repo"),
+            ("https://app.circleci.com/jobs/github/org/repo/123", "gh/org/repo"),
             (f"https://app.circleci.com/workflow/{workflow}", None),
         ]:
             with self.subTest(url=url):
@@ -63,12 +68,78 @@ class CiBuildTest(unittest.TestCase):
             self.assertEqual(ci_build.azure_get(url), {})
         self.assertEqual(calls, [False, True, True])
 
+    def test_azure_not_found(self) -> None:
+        """A 404 that credentials do not fix does not mark the project private."""
+        url = "https://dev.azure.com/org/project/_apis/build/builds/1"
+        calls = []
+
+        def http(
+            _method: str, url: str, headers: dict[str, str] | None, *_: Any, **_kwargs: Any
+        ) -> bytes:
+            calls.append(bool(headers))
+            status = 401 if headers else 404
+            raise urllib.error.HTTPError(url, status, "Refused", Message(), io.BytesIO())
+
+        with (
+            mock.patch.object(request_util, "http", http),
+            mock.patch.object(ci_build, "azure_headers", return_value={"Authorization": "x"}),
+            mock.patch.object(ci_build, "_azure_private_projects", set()),
+        ):
+            for _ in range(2):
+                with self.assertRaises(urllib.error.HTTPError):
+                    ci_build.azure_get(url)
+        self.assertEqual(calls, [False, True, False, True])
+
+    def test_azure_token_expiration(self) -> None:
+        """A token from `az` is replaced before it expires, and a failed `az` is retried."""
+        now = time.time()
+        soon = now + ci_build.AZURE_TOKEN_MARGIN - 1  # too soon to use the token
+        later = now + ci_build.AZURE_TOKEN_MARGIN + 3600
+        outputs: list[Any] = [
+            json.dumps({"accessToken": "t1", "expires_on": soon}),
+            json.dumps({"accessToken": "t2", "expires_on": later}),
+            subprocess.CalledProcessError(1, "az"),
+            subprocess.CalledProcessError(1, "az"),
+            json.dumps({"accessToken": "t3", "expires_on": later}),
+        ]
+
+        def run(_cmd: list[str]) -> str:
+            output = outputs.pop(0)
+            if isinstance(output, Exception):
+                raise output
+            return output
+
+        with (
+            mock.patch.dict(ci_build.os.environ, {"AZURE_DEVOPS_EXT_PAT": ""}),
+            mock.patch.object(request_util, "run", run),
+            mock.patch.object(ci_build, "_azure_token_headers", None),
+        ):
+            self.assertEqual(ci_build.azure_headers(), {"Authorization": "Bearer t1"})
+            self.assertEqual(ci_build.azure_headers(), {"Authorization": "Bearer t2"})
+            self.assertEqual(ci_build.azure_headers(), {"Authorization": "Bearer t2"})
+            self.assertEqual(len(outputs), 3)
+            # Force the token to be replaced, and retry each failed `az` at once.
+            ci_build._azure_token_headers = None  # ruff: ignore[private-member-access]
+            with mock.patch.object(ci_build, "AZURE_TOKEN_RETRY", 0):
+                self.assertEqual(ci_build.azure_headers(), {})
+                self.assertEqual(ci_build.azure_headers(), {})
+                self.assertEqual(ci_build.azure_headers(), {"Authorization": "Bearer t3"})
+        self.assertEqual(outputs, [])
+
+    def test_circleci_items_empty_response(self) -> None:
+        """An empty response for a page of items raises an error in REQUEST_ERRORS."""
+        with (
+            mock.patch.object(request_util, "http", return_value=b""),
+            self.assertRaises(request_util.REQUEST_ERRORS),
+        ):
+            list(ci_build.circleci_items("/v2/workflow/ID/job"))
+
     def test_azure_request_refusals(self) -> None:
         """A request of Azure DevOps treats a sign-in page as a refusal; another does not."""
         refusals = []
 
-        def http(*_: Any, refusals_seen: list[Any] = refusals, **kwargs: Any) -> bytes:
-            refusals_seen.append(kwargs.get("refusals"))
+        def http(*_: Any, **kwargs: Any) -> bytes:
+            refusals.append(kwargs.get("refusals"))
             return b"{}"
 
         with mock.patch.object(request_util, "http", http):

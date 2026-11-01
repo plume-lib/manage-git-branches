@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 # How long, in seconds, a command can run before run stops it.
 COMMAND_TIMEOUT = 300
+# How long, in seconds, http waits for the server to connect or to send data.
+HTTP_TIMEOUT = 60
 
 # The errors that a command or an HTTP request can raise.  A
 # subprocess.CalledProcessError or a subprocess.TimeoutExpired indicates a failed
@@ -106,7 +108,7 @@ def http(
         data = json.dumps(body).encode()
         headers.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
-    with urllib.request.urlopen(req, timeout=60) as response:
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
         if refusals and response.status in refusals:
             msg = refusals[response.status]
             raise urllib.error.HTTPError(url, response.status, msg, response.headers, None)

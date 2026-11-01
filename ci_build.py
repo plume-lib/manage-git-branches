@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import base64
 import functools
+import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 from pathlib import Path
@@ -44,10 +46,14 @@ CIRCLECI_WORKFLOW = re.compile(
 # Matches the number of a CircleCI job, in the URL of a job of a workflow, such as
 # ".../workflows/ecc46ce8-.../jobs/230602" or ".../details?...&buildNumber=230602".
 CIRCLECI_JOB_OF_WORKFLOW = re.compile(r"circleci\.com/.*(?:/jobs/|[?&]buildNumber=)(\d+)")
-# Matches the URL of a CircleCI job in a GitHub commit status, such as
-# "https://circleci.com/gh/circleci/circleci-docs/230602?utm_campaign=...".
-# The groups are the project slug and the job number.
-CIRCLECI_JOB = re.compile(r"https://circleci\.com/((?:gh|bb)/[^/]+/[^/?#]+)/(\d+)(?:[?#]|$)")
+# Matches the URL of a CircleCI job that names its project but not its workflow, such as
+# "https://circleci.com/gh/circleci/circleci-docs/230602?utm_campaign=..." (in a GitHub
+# commit status) or "https://app.circleci.com/jobs/github/circleci/circleci-docs/230602".
+# The groups are the VCS, the organization, the repository, and the job number.
+CIRCLECI_JOB = re.compile(
+    r"https?://(?:app\.)?circleci\.com/(?:jobs/)?(gh|bb|github|bitbucket)/([^/?#]+)/([^/?#]+)"
+    r"/(\d+)/?(?:[?#]|$)"
+)
 # Matches the URL of a CircleCI pipeline, or of one of its workflows or jobs, such as
 # "https://app.circleci.com/pipelines/github/ORG/REPO/7/workflows/ecc46ce8-..." or, for a
 # project that the CircleCI GitHub App connects,
@@ -71,33 +77,48 @@ CIRCLECI_CONFIGS = ("~/.circleci/cli.yml", "~/snap/circleci/current/.circleci/cl
 ###
 
 
-@functools.cache
+# How long before a token from `az` expires that azure_headers replaces it, in seconds.
+AZURE_TOKEN_MARGIN = 300
+# How long after a failed `az` call that azure_headers calls `az` again, in seconds.
+AZURE_TOKEN_RETRY = 300
+# The headers that azure_headers made from the output of `az`, and the time (as from
+# time.time()) until which azure_headers returns them.
+_azure_token_headers: tuple[dict[str, str], float] | None = None
+
+
 def azure_headers() -> dict[str, str]:
     """Return the HTTP headers that authenticate to Azure DevOps.
 
     Returns:
         The headers, or no headers if there are no credentials.
     """
+    global _azure_token_headers
     pat = os.environ.get("AZURE_DEVOPS_EXT_PAT")
     if pat:
         return {"Authorization": "Basic " + base64.b64encode(f":{pat}".encode()).decode()}
+    if _azure_token_headers is None or time.time() >= _azure_token_headers[1]:
+        _azure_token_headers = azure_cli_headers()
+    return _azure_token_headers[0]
+
+
+def azure_cli_headers() -> tuple[dict[str, str], float]:
+    """Make the HTTP headers that authenticate to Azure DevOps as the account of `az login`.
+
+    Returns:
+        The headers (or no headers if `az` issues no token) and the time (as from
+        time.time()) until which to use them.
+    """
     try:
-        token = request_util.run(
-            [
-                "az",
-                "account",
-                "get-access-token",
-                "--resource",
-                AZURE_DEVOPS_RESOURCE,
-                "--query",
-                "accessToken",
-                "-o",
-                "tsv",
-            ]
-        ).strip()
-    except (OSError, subprocess.SubprocessError):  # no `az`, no login, or a timeout
-        return {}
-    return {"Authorization": f"Bearer {token}"} if token else {}
+        token = json.loads(
+            request_util.run(
+                ["az", "account", "get-access-token", "--resource", AZURE_DEVOPS_RESOURCE]
+            )
+        )
+        headers = {"Authorization": f"Bearer {token['accessToken']}"}
+        return headers, float(token["expires_on"]) - AZURE_TOKEN_MARGIN
+    # No `az`, no login, a timeout, or output without a token.
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return {}, time.time() + AZURE_TOKEN_RETRY
 
 
 def azure_api(org: str, project: str, build: str | int | None = None) -> str:
@@ -117,10 +138,12 @@ def azure_api(org: str, project: str, build: str | int | None = None) -> str:
     return api if build is None else f"{api}/{build}"
 
 
-# The Azure DevOps projects, as "ORG/PROJECT", that refused an anonymous request.
+# The Azure DevOps projects, as "ORG/PROJECT", that refused an anonymous request and
+# granted the same request with credentials.
 _azure_private_projects: set[str] = set()
-# The HTTP statuses with which Azure DevOps refuses an anonymous request to a private
-# project.  203 is a sign-in page, as azure_request reports it.
+# The HTTP statuses with which Azure DevOps can refuse an anonymous request to a private
+# project.  203 is a sign-in page, which azure_request reports as an HTTPError.  404 is
+# also the status of a request for something that does not exist.
 AZURE_REFUSALS = {203, 401, 403, 404}
 # The successful status with which Azure DevOps responds to a request that lacks the
 # needed credentials, with a sign-in page, and a description of it.
@@ -130,8 +153,9 @@ AZURE_SIGN_IN = {203: "a sign-in page instead of the requested data"}
 def azure_request(method: str, url: str, headers: dict[str, str], body: Any = None) -> Any:
     """Make an HTTP request of Azure DevOps whose response is JSON.
 
-    If Azure DevOps refuses the request, including with a sign-in page, this raises
-    urllib.error.HTTPError.
+    If Azure DevOps refuses the request with an error status or with a sign-in page whose
+    status is 203, this raises urllib.error.HTTPError.  If the response is not JSON, such
+    as a sign-in page with another successful status, this raises ValueError.
 
     Args:
         method: the HTTP method, such as "GET".
@@ -149,8 +173,10 @@ def azure_get(url: str) -> Any:
     """Get url from Azure DevOps, anonymously if the project permits it.
 
     A request is first made anonymously, because Azure DevOps refuses a token for one
-    organization even when reading a public project of another.  After a project
-    refuses an anonymous request, later requests to it are made with credentials only.
+    organization even when reading a public project of another.  If Azure DevOps refuses
+    the anonymous request, the request is repeated with credentials.  After a project
+    refuses an anonymous request and grants the same request with credentials, later
+    requests to it are made with credentials only.
 
     Args:
         url: the URL, in the Azure DevOps API.
@@ -169,7 +195,11 @@ def azure_get(url: str) -> Any:
             refused = not isinstance(e, urllib.error.HTTPError) or e.code in AZURE_REFUSALS
             if not refused or not azure_headers():
                 raise
-            _azure_private_projects.add(project)
+        # A refusal, such as a 404 for a build that does not exist, can come from a public
+        # project, so the project is not known to be private until credentials succeed.
+        result = azure_request("GET", url, azure_headers())
+        _azure_private_projects.add(project)
+        return result
     return azure_request("GET", url, azure_headers())
 
 
@@ -238,6 +268,9 @@ def circleci_items(path: str) -> Iterator[Any]:
     while True:
         query = f"?page-token={urllib.parse.quote(page_token, safe='')}" if page_token else ""
         page = request_util.request("GET", f"{CIRCLECI_API}{path}{query}", circleci_headers())
+        if not isinstance(page, dict):
+            msg = f"CircleCI returned {page!r} instead of a page of items for {path}"
+            raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
         yield from page["items"]
         page_token = page.get("next_page_token")
         if not page_token:
@@ -258,7 +291,8 @@ def parse_circleci_url(url: str) -> tuple[str | None, str | None, int | None] | 
     if "circleci.com/" not in url:
         return None
     if match := CIRCLECI_JOB.match(url):
-        return None, match[1], int(match[2])
+        vcs = CIRCLECI_VCS_SLUGS.get(match[1], match[1])
+        return None, f"{vcs}/{match[2]}/{match[3]}", int(match[4])
     workflow = match[1] if (match := CIRCLECI_WORKFLOW.search(url)) else None
     job = int(match[1]) if (match := CIRCLECI_JOB_OF_WORKFLOW.search(url)) else None
     return workflow, None, job
