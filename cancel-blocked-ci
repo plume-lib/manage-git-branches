@@ -423,8 +423,9 @@ def redundant_azure_builds_or_report(label, gh, org, project):
         project: the Azure DevOps project.
 
     Returns:
-        A list of the subject, Build, and reason of each redundant build, or
-        the empty list if finding them fails.
+        A list of the subject, Build, and reason of each redundant build, or the
+        empty list if Azure Pipelines does not provide them, in which case this function
+        reports the failure.
     """
     try:
         return redundant_azure_builds(label, gh, org, project)
@@ -893,37 +894,38 @@ def unfinished_other_builds(subject, gh, sha, branches):
     Returns:
         A list of the Build of each build.
     """
-    # A map from the key of each build to a pair:  the build's Build, and a function of no
-    # arguments that returns the build's branch (None if it has none) and whether the build
-    # has finished.
+    # A map from the key of each build to a pair:  the build's Build and its state function.
+    # A state function takes no arguments and returns the build's state:  its branch (None
+    # if it has none) and whether it has finished.
     builds = {}
 
-    def add(build, state_of):
-        builds.setdefault(build.key, (build, state_of))
+    def add(build, state_function):
+        builds.setdefault(build.key, (build, state_function))
 
-    jobs = {}  # project slug -> the Check of each job whose URL names no workflow
-    for state, name, url in checks(gh, sha):
-        if state == "completed":
+    # project slug -> the Check of each job whose URL does not contain its workflow's id
+    jobs = {}
+    for status, name, url in checks(gh, sha):
+        if status == "completed":
             continue
         if parsed := ci_build.parse_azure_url(url):
             org, project, build = parsed
             add(
-                Build.from_azure_pipelines_build(state, org, project, build, name, url),
+                Build.from_azure_pipelines_build(status, org, project, build, name, url),
                 functools.partial(azure_build_state, org, project, build),
             )
         elif (parsed := ci_build.parse_circleci_url(url)) is not None:
             workflow, project, job = parsed
             if workflow is not None:
-                add(*circleci_build_on(state, workflow, name))
+                add(*circleci_build_on(status, workflow, name))
             elif project is not None and job is not None:
-                jobs.setdefault(project, []).append(Check(state, name, url))
+                jobs.setdefault(project, []).append(Check(status, name, url))
             else:
                 print(f"{subject}: no CircleCI workflow found for {url}", file=sys.stderr)
     for project, project_jobs in jobs.items():
-        for workflow, (state, name), branch in circleci_workflows_of_jobs(
+        for workflow, (status, name), branch in circleci_workflows_of_jobs(
             subject, project, sha, branches, project_jobs
         ):
-            add(*circleci_build_on(state, workflow, name, branch))
+            add(*circleci_build_on(status, workflow, name, branch))
     pairs = list(builds.values())
     result = []
     for (build, _), found in zip(
@@ -945,20 +947,22 @@ def unfinished_other_builds(subject, gh, sha, branches):
     return result
 
 
-def build_state(subject, build_and_state_of):
-    """Return the branch of a build and whether it has finished, reporting any failure.
+def build_state(subject, build_and_state_function):
+    """Return the state of a build:  its branch and whether it has finished.
 
     Args:
         subject: what the build tests, such as a PR; used for diagnostics.
-        build_and_state_of: the Build and a function of no arguments that returns the
-            build's branch (None if it has none) and whether it has finished.
+        build_and_state_function: a Build and its state function, which takes no
+            arguments and returns the build's branch (None if it has none) and whether
+            it has finished.
 
     Returns:
-        The build's branch and whether it has finished, or None if finding them fails.
+        The build's branch and whether it has finished, or None if the CI service does
+        not provide them, in which case this function reports the failure.
     """
-    build, state_of = build_and_state_of
+    build, state_function = build_and_state_function
     try:
-        return state_of()
+        return state_function()
     except request_util.REQUEST_ERRORS as e:
         report_failure(
             f"{subject}: failed to find the branch of {build.url}: {request_util.failure(e)}"
@@ -967,7 +971,7 @@ def build_state(subject, build_and_state_of):
 
 
 def circleci_build_on(status, workflow, name, branch=None):
-    """Describe a CircleCI workflow, and how to find its branch and whether it has finished.
+    """Return the Build of a CircleCI workflow and the workflow's state function.
 
     Args:
         status: the workflow's status, such as "running" or "pending".
@@ -977,8 +981,8 @@ def circleci_build_on(status, workflow, name, branch=None):
             None to look up its branch and whether it has finished.
 
     Returns:
-        The Build of the workflow, and a function of no arguments that returns its
-        branch and whether it has finished.
+        The Build of the workflow, and its state function, which takes no arguments and
+        returns the workflow's branch and whether it has finished.
     """
     return (
         Build.from_circleci_workflow(status, workflow, name),
@@ -989,25 +993,28 @@ def circleci_build_on(status, workflow, name, branch=None):
 
 
 def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
-    """Return the CircleCI workflows of unfinished jobs of commit sha, whose URLs name no workflow.
+    """Return the CircleCI workflows that contain unfinished jobs of commit sha.
 
-    The workflows are the unfinished workflows of the project's recent pipelines of
-    commit sha on the branches that a push or a pull request started; finding redundant
-    workflows has usually already read the list of those pipelines.  Only if there is
-    no such pipeline with an unfinished workflow is each job looked up.  So a job of
-    another pipeline of commit sha, such as one that the API started, is found only if
-    there is no such pipeline.
+    A job's URL, such as "https://circleci.com/gh/ORG/REPO/123", can give the job's project
+    and number but not the id of the workflow that contains the job.
+
+    If the project has pipelines from the past day of commit sha on the branches, started
+    by a push or a pull request, and those pipelines have unfinished workflows, then the
+    result is those workflows, whether or not they contain the jobs.  Otherwise, the
+    result is the workflows that contain the jobs, which can be on any branch.  So the
+    workflow of a job in another pipeline of commit sha, such as one that the API
+    started, is in the result only if there are no such pipelines.
 
     Args:
         subject: what the jobs test, such as a PR; used for diagnostics.
         project: the project slug of the jobs.
         sha: the commit.
         branches: the branches, named as branch_name names them.
-        jobs: the Check of each job.
+        jobs: the Check of each job, whose URL does not contain its workflow's id.
 
     Returns:
         A list of the id, the status and name, and the branch (None if it is not known)
-        of each workflow.  A workflow that a job lookup found can be on any branch.
+        of each workflow.
     """
     try:
         workflows = [
@@ -1042,7 +1049,7 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
 
     result = []
     failures = []
-    for (state, name, url), (workflow, error) in zip(
+    for (status, name, url), (workflow, error) in zip(
         jobs, concurrently(lookup, [job.url for job in jobs]), strict=True
     ):
         if error is not None:
@@ -1050,7 +1057,7 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
         elif workflow is None:
             print(f"{subject}: no CircleCI workflow found for {url}", file=sys.stderr)
         else:
-            result.append((workflow, (state, name), None))
+            result.append((workflow, (status, name), None))
     if failures:
         report_failure(
             f"{subject}: failed to look up {len(failures)} CircleCI job(s):"
