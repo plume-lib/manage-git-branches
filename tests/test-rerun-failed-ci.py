@@ -794,10 +794,17 @@ class GithubActionsTest(RerunTestCase):
         self.assertIn("Its status is in_progress.", output)
 
     def test_attempts_of_each_job(self) -> None:
-        """The attempt limit counts each job's runs, not the run's attempts."""
+        """The attempt limit counts each job's runs, not the run's attempts or job ids."""
+
+        def job(job_id: int, name: str, started: str) -> dict[str, Any]:
+            return {"id": job_id, "name": name, "conclusion": "failure", "started_at": started}
+
+        # Each of three attempts reran only job a.  Each attempt lists job c too, with a
+        # new id but with the start time of its only run.
         self.server.gh["repos/org/repo/actions/runs/100/jobs?filter=all&per_page=100"] = [
-            {"jobs": [{"id": i, "name": "a", "conclusion": "failure"} for i in (1, 2, 101)]},
-            {"jobs": [{"id": 103, "name": "c", "conclusion": "failure"}]},
+            {"jobs": [job(1, "a", "T1"), job(3, "c", "T1")]},
+            {"jobs": [job(2, "a", "T2"), job(4, "c", "T1")]},
+            {"jobs": [job(101, "a", "T3"), job(103, "c", "T1")]},
         ]
         output = self.assert_reruns(["gh run rerun --repo org/repo --job 103"], self.RUN)
         self.assertIn("Not rerunning a:  it has already been run 3 times.", output)

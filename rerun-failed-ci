@@ -602,8 +602,7 @@ class Rerunner:
             print(f"  Its conclusion is {run_json['conclusion']}.")
             return
 
-        # The jobs of the latest attempt of the run, in which a job that the attempt did
-        # not rerun keeps its id, and the jobs of every attempt.
+        # The jobs of the latest attempt of the run, and the jobs of every attempt.
         try:
             latest_jobs = gha_jobs(repo, run, "latest")
             all_jobs = gha_jobs(repo, run, "all")
@@ -623,10 +622,13 @@ class Rerunner:
                 return
 
         # How many times each job has been run.  Rerunning one job starts a new attempt
-        # of the whole run, so the run's attempt count is not the job's.
-        runs_of_job: dict[str, set[int]] = {}
+        # of the whole run, so the run's attempt count is not the job's.  Each attempt
+        # lists every job of the run, with a new id even for a job that the attempt did
+        # not rerun; such a job keeps the start time of the run that it repeats.  So a
+        # job's runs are its distinct start times, not its ids.
+        runs_of_job: dict[str, set[str]] = {}
         for j in all_jobs:
-            runs_of_job.setdefault(j["name"], set()).add(j["id"])
+            runs_of_job.setdefault(j["name"], set()).add(j.get("started_at") or str(j["id"]))
 
         rerun_ids = []
         all_transient = True
