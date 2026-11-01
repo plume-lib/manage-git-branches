@@ -44,8 +44,9 @@ The commands are:
   The new branch starts at the current commit, after a `git pull`.
   By default, the new directory is a worktree (see [below](#worktrees)) whose
   contents are the same as the current directory's, including uncommitted
-  changes, untracked files, and build output; `--clean` and `--copy` make
-  other kinds of directory.
+  changes, untracked files, and build output, except for nested worktrees
+  and some build output that refers to the current directory; `--clean` and
+  `--copy` make other kinds of directory.
   `git-new-branch --help` (or `-h`) prints a synopsis, which describes the
   modes.  The comments in [`git-new-branch`](git-new-branch) give the
   details, such as which copied build output this command deletes, and which
