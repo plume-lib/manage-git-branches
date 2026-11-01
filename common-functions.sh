@@ -936,7 +936,9 @@ ends_with_newline() {
 ## Only content conflicts are handled, in which every conflicted file contains
 ## conflict markers.  For any other conflict, such as a file that one side
 ## modified and the other deleted, no check could tell whether a resolution
-## is right.
+## is right.  Also refused are a file whose versions contain lines that look
+## like conflict markers, and a working tree with changes other than the
+## conflicted files, which would be committed with them.
 resolve_merge_conflicts() {
   resolve_commit="$1"
   resolve_source="$2"
