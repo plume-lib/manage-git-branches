@@ -36,7 +36,8 @@ The commands are:
   submodules gets a copy of the whole directory instead, which is an
   independent clone.
   Below is a definition for an alias `gcb`.
-* [`git-new-branch`](git-new-branch) `[--clean | --copy] [--allow-upstream] BRANCHNAME`:
+* [`git-new-branch`](git-new-branch)
+  `[--clean | --copy] [--verbose] [--allow-upstream] BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
@@ -67,6 +68,10 @@ The commands are:
   modes.  The comments in [`git-new-branch`](git-new-branch) give the
   details, such as when the fast-forward is not made and which copied build
   output this command deletes, and which it warns about.
+  It says which of the directories that it deleted files from CMake or
+  autotools configured, because such a directory needs to be reconfigured.
+  With `--verbose`, it also says how many files it deleted and from which
+  directories.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
