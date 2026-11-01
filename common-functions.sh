@@ -871,15 +871,15 @@ upstream_default_branch_git() {
 ## Usage: check_conflict_resolution FILE
 ## Checks the resolution of the conflicts in FILE, a file of the current
 ## working tree, against AUTO_MERGE, the git ref that names git's automatic
-## merge, which contains the conflict markers.  A conflict region starts with a line "<<<<<<<" and ends
-## with the matching line ">>>>>>>"; a recursive merge nests regions.  The
-## resolution is acceptable if it consists of the text outside the conflict
-## regions, unchanged and in order, with any text in place of each region,
-## except a line that starts with "<<<<<<<", "|||||||", or ">>>>>>>", or a
-## line "=======".  A line "=======" can be content, such as a Markdown
-## heading's underline, so it is permitted if the file contains one in HEAD or
-## in MERGE_HEAD.  Returns 1, after printing a diagnostic for each problem, if
-## the resolution is not acceptable.
+## merge, which contains the conflict markers.  A conflict region starts with
+## a line "<<<<<<<" and ends with the matching line ">>>>>>>"; a recursive
+## merge nests regions.  The resolution is acceptable if it consists of the
+## text outside the conflict regions, unchanged and in order, with any text in
+## place of each region, except a line that starts with "<<<<<<<", "|||||||",
+## or ">>>>>>>", or a line "=======".  A line "=======" can be content, such
+## as a Markdown heading's underline, so it is permitted if the file contains
+## one in HEAD or in MERGE_HEAD.  Returns 1, after printing a diagnostic for
+## each problem, if the resolution is not acceptable.
 ##
 ## This compares content rather than the hunks of `git diff`, which can put a
 ## change on either of two identical lines, one inside a region and one
