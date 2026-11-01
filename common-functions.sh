@@ -6,8 +6,9 @@
 #
 # A script that sources this file must set ${SCRIPT_DIR} to the directory that
 # contains this package's files, because `git_batch_ssh` runs a wrapper script
-# from that directory.  It must also set ${SCRIPT_NAME} to its own name, which
-# the diagnostics below use.
+# from that directory and `check_conflict_resolution` runs an awk program
+# from it.  It must also set ${SCRIPT_NAME} to its own name, which the
+# diagnostics below use.
 
 ## Usage: unset_git_location_variables
 ## Unsets $GIT_DIR, $GIT_WORK_TREE, $GIT_INDEX_FILE, $GIT_COMMON_DIR, and
@@ -867,13 +868,230 @@ upstream_default_branch_git() {
   fi
 }
 
+## Usage: check_conflict_resolution FILE
+## Checks the resolution of the conflicts in FILE, a file of the current
+## working tree, against AUTO_MERGE, the git ref that names git's automatic
+## merge, which contains the conflict markers.  A conflict region starts with
+## a line "<<<<<<<" and ends with the matching line ">>>>>>>"; a recursive
+## merge nests regions.  The resolution is acceptable if it consists of the
+## text outside the conflict regions, unchanged and in order, with any text in
+## place of each region, except a line that starts with "<<<<<<<", "|||||||",
+## or ">>>>>>>", or a line "=======".  A line "=======" can be content, such
+## as a Markdown heading's underline, so it is permitted if the file contains
+## one in HEAD or in MERGE_HEAD.  Returns 1, after printing a diagnostic for
+## each problem, if the resolution is not acceptable.
+##
+## This compares content rather than the hunks of `git diff`, which can put a
+## change on either of two identical lines, one inside a region and one
+## outside it.
+check_conflict_resolution() {
+  if [ ! -f "$1" ]; then
+    echo "${SCRIPT_NAME}: $1: the file was deleted" >&2
+    return 1
+  fi
+
+  # The awk program check-conflict-resolution.awk, which checks the
+  # resolution, reads both versions of FILE from its standard input.  So that
+  # it can tell them apart, the two `awk` commands that feed it put a tag at
+  # the start of each line:  "A" for a line of FILE in AUTO_MERGE, which all
+  # come first, and "W" for a line of FILE in the working tree.  `--filters`
+  # converts AUTO_MERGE's file as a checkout would, such as to CRLF line
+  # endings, to match the working tree.
+  #
+  # `awk` ends every line that it prints with a newline, even the last line of
+  # a file that lacks one, so whether each version ends with a newline is
+  # passed to the checking program separately.
+  check_conflict_a_newline=yes
+  if ! git cat-file --filters "AUTO_MERGE:$1" | ends_with_newline; then
+    check_conflict_a_newline=no
+  fi
+  check_conflict_w_newline=yes
+  if ! ends_with_newline < "$1"; then
+    check_conflict_w_newline=no
+  fi
+
+  # "yes" if a line "=======" is permitted in the text in place of a conflict
+  # region, and "no" otherwise.
+  check_conflict_separator=no
+  if has_separator_line "$1"; then
+    check_conflict_separator=yes
+  fi
+
+  # shellcheck disable=SC2016 # awk, not the shell, expands $0 and the like.
+  {
+    git cat-file --filters "AUTO_MERGE:$1" | awk '{ print "A" $0 }'
+    awk '{ print "W" $0 }' < "$1"
+  } | CHECK_FILE="$1" CHECK_SCRIPT_NAME="${SCRIPT_NAME}" \
+    CHECK_A_NEWLINE="${check_conflict_a_newline}" \
+    CHECK_W_NEWLINE="${check_conflict_w_newline}" \
+    CHECK_SEPARATOR="${check_conflict_separator}" \
+    awk -f "${SCRIPT_DIR}/check-conflict-resolution.awk"
+}
+
+## Usage: ends_with_newline
+## Succeeds if standard input is empty or ends with a newline.
+ends_with_newline() {
+  # Command substitution removes a final newline, so the last character of
+  # input that ends with one is empty.
+  [ -z "$(tail -c 1)" ]
+}
+
+## Usage: has_separator_line FILE
+## Succeeds if FILE contains a line "=======" in HEAD or in MERGE_HEAD.  Then
+## such a line in the resolution of a conflict in FILE can be content, such as
+## a Markdown heading's underline, rather than a leftover separator.
+has_separator_line() {
+  for has_separator_side in HEAD MERGE_HEAD; do
+    if git cat-file --filters "${has_separator_side}:$1" 2> /dev/null \
+      | awk '/^=======\r?$/ { found = 1 } END { exit !found }'; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+## Usage: resolve_merge_conflicts COMMIT SOURCE
+## Finishes the merge of COMMIT that is in progress in the current directory,
+## the top level of a working tree, if `git rerere` has resolved its
+## conflicts:  checks every resolution with `check_conflict_resolution`, and
+## stages the result.  SOURCE names COMMIT in diagnostics.  Returns 1, after
+## printing a diagnostic, on failure, and leaves the merge in progress.
+##
+## Only content conflicts are handled, in which every conflicted file contains
+## conflict markers.  For any other conflict, such as a file that one side
+## modified and the other deleted, no check could tell whether a resolution
+## is right.
+resolve_merge_conflicts() {
+  resolve_commit="$1"
+  resolve_source="$2"
+  resolve_failed="${SCRIPT_NAME}: the merge of ${resolve_source} is still in progress in $(pwd)"
+
+  if ! git rev-parse --verify --quiet AUTO_MERGE > /dev/null; then
+    echo "${SCRIPT_NAME}: no AUTO_MERGE, which git 2.42 and later write, in $(pwd)" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  if ! resolve_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)" \
+    || [ "${resolve_merge_head}" != "$(git rev-parse --verify --quiet "${resolve_commit}^{commit}")" ]; then
+    echo "${SCRIPT_NAME}: no merge of ${resolve_source} is in progress in $(pwd)" >&2
+    return 1
+  fi
+
+  # Recompute the merge to list the conflicted files.  The index does not
+  # list them all:  `git rerere` with `rerere.autoUpdate` stages the files
+  # that it resolves.  `git merge-tree` exits with status 1 if the merge has
+  # conflicts.  Its first line is the merged tree.
+  #
+  # The pathnames are newline-separated.  Git quotes a pathname that contains
+  # a newline, a double quote, or a backslash, even with `core.quotePath`
+  # false; such a pathname is refused.
+  resolve_merge_tree="$(git -c core.quotePath=false merge-tree --write-tree \
+    --name-only --no-messages HEAD MERGE_HEAD)"
+  resolve_files="$(printf '%s\n' "${resolve_merge_tree}" | sed -e 1d)"
+  if [ -z "${resolve_files}" ]; then
+    echo "${SCRIPT_NAME}: cannot list the conflicted files in $(pwd)" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  if printf '%s\n' "${resolve_files}" | grep -q '^"'; then
+    echo "${SCRIPT_NAME}: a conflicted file has an unusual name; resolve the conflicts by hand" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  # `check_conflict_resolution` cannot tell a conflict marker from a line of
+  # the file that looks like one, as in a test of merging, so such a file is
+  # refused.  The merge bases matter too, because a merge with
+  # `merge.conflictStyle` "diff3" puts their text in the conflict regions.
+  resolve_sides="HEAD MERGE_HEAD $(git merge-base --all HEAD MERGE_HEAD)"
+  if ! printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
+    if ! git show "AUTO_MERGE:${resolve_file}" 2> /dev/null | grep -q '^<<<<<<<'; then
+      echo "${SCRIPT_NAME}: ${resolve_file} has a conflict other than a content conflict; resolve it by hand" >&2
+      exit 1
+    fi
+    for resolve_side in ${resolve_sides}; do
+      if git cat-file blob "${resolve_side}:${resolve_file}" 2> /dev/null \
+        | grep -q -E '^(<<<<<<<|[|]{7}|>>>>>>>)'; then
+        echo "${SCRIPT_NAME}: ${resolve_file} contains lines that look like conflict markers; resolve its conflicts by hand" >&2
+        exit 1
+      fi
+    done
+  done; then
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  # Any other change would be committed.
+  resolve_other="$(resolve_other_changes)"
+  if [ -n "${resolve_other}" ]; then
+    printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: changed, but not conflicted: /" >&2
+    echo "${SCRIPT_NAME}: the working tree has changes that are not part of the merge; resolve the conflicts by hand" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+
+  # The files that `git rerere` did not resolve.
+  resolve_unresolved="$(printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
+    if ! check_conflict_resolution "${resolve_file}" 2> /dev/null; then
+      printf '%s\n' "${resolve_file}"
+    fi
+  done)"
+
+  if [ -n "${resolve_unresolved}" ]; then
+    report_unresolved "${resolve_unresolved}"
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  echo "${SCRIPT_NAME}: \`git rerere\` resolved the conflicts in $(pwd)" >&2
+
+  # `xargs` would split pathnames at blanks, so stage them one at a time.
+  if ! printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
+    GIT_LITERAL_PATHSPECS=1 git add -A -- "${resolve_file}" || exit 1
+  done; then
+    echo "${SCRIPT_NAME}: cannot stage the resolved files in $(pwd)" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  if [ -n "$(git ls-files -u)" ] || [ -n "$(resolve_other_changes)" ]; then
+    echo "${SCRIPT_NAME}: the index of $(pwd) has changes other than the resolved conflicts" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  return 0
+}
+
+## Usage: report_unresolved FILES
+## Says why each of FILES, a list of conflicted files one per line, is not
+## acceptably resolved:  that it still has conflict markers, or else what
+## `check_conflict_resolution` finds wrong with its resolution.
+report_unresolved() {
+  printf '%s\n' "$1" | while IFS= read -r report_unresolved_file; do
+    if grep -q '^<<<<<<<' "${report_unresolved_file}" 2> /dev/null; then
+      echo "${SCRIPT_NAME}: conflicted: ${report_unresolved_file}" >&2
+    else
+      check_conflict_resolution "${report_unresolved_file}" || true
+    fi
+  done
+}
+
+## Usage: resolve_other_changes
+## Prints, one per line, each file that differs from AUTO_MERGE in the working
+## tree or in the index and is not in ${resolve_files}, the conflicted files.
+resolve_other_changes() {
+  {
+    git -c core.quotePath=false diff --no-renames --name-only AUTO_MERGE
+    git -c core.quotePath=false diff --cached --no-renames --name-only AUTO_MERGE
+  } | sort -u | grep -F -x -v -- "${resolve_files}"
+}
+
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
 ## pushes the current branch if the build succeeds.  DESCRIPTION is what
 ## `git fmt-merge-msg` says that COMMIT is, such as "branch 'feature'" or
 ## "remote-tracking branch 'upstream/master'".  SOURCE names COMMIT in
-## diagnostics.  Returns 1, after printing a diagnostic, on failure.
+## diagnostics.  If the merge has conflicts that `git rerere` resolved,
+## `resolve_merge_conflicts` checks the resolution, and the merge is
+## committed.
+## Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
   # Let git compose the message, as it does for `git merge`, rather than
@@ -899,9 +1117,25 @@ merge_build_push() {
   # `--no-log` prevents a second copy of the commit summaries:  `git merge`
   # appends them to a message given with `-m` when `merge.log` is set, and
   # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
-  if ! git merge -q --no-edit --no-log -m "${merge_message}" "$1"; then
+  # The "diff3" conflict style puts the merge base's text in each conflict
+  # region, which helps whoever resolves it.
+  if ! git -c merge.conflictStyle=diff3 merge -q --no-edit --no-log \
+    -m "${merge_message}" "$1"; then
     echo "${SCRIPT_NAME}: problem merging $3 into $(pwd)" >&2
-    return 1
+    # A failed merge without MERGE_HEAD did not start, for example because it
+    # would overwrite a modified file; there are no conflicts to resolve.
+    if ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+      return 1
+    fi
+    if ! resolve_merge_conflicts "$1" "$3"; then
+      return 1
+    fi
+    # `-F` supplies the message, rather than MERGE_MSG, to which `git merge`
+    # appended a list of the conflicts.
+    if ! printf '%s\n' "${merge_message}" | git commit -q --cleanup=whitespace -F -; then
+      echo "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd)" >&2
+      return 1
+    fi
   fi
 
   if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then

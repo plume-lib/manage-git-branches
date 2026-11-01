@@ -92,6 +92,9 @@ The commands are:
   has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
   directories form one more chain per PROJECT.
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
+  When `git rerere` resolves a merge's conflicts, it checks that nothing
+  outside the conflict regions changed and that no conflict marker remains,
+  commits the merge, and continues.
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--squash] FROM_DIR TO_DIR ...`:
   Runs `git-push-to` on the arguments, then rebases each branch onto the
@@ -114,6 +117,7 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of `upstream`.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
+  It handles conflicts that `git rerere` resolves, as `git-push-to` does.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but Eclipse `.project`
