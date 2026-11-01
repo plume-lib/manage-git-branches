@@ -56,6 +56,7 @@ def load_script() -> types.ModuleType:
 
 
 cancel_blocked_ci = load_script()
+Check = cancel_blocked_ci.Check
 
 
 class CancelBlockedCiTest(unittest.TestCase):
@@ -99,10 +100,10 @@ class CancelBlockedCiTest(unittest.TestCase):
                     ],
                     expected,
                 )
-        self.assertTrue(cancel_blocked_ci.is_default_branch("Org/repo", "main", pr))
-        self.assertFalse(cancel_blocked_ci.is_default_branch("org/repo", "master", pr))
+        self.assertTrue(cancel_blocked_ci.is_on_default_branch("Org/repo", "main", pr))
+        self.assertFalse(cancel_blocked_ci.is_on_default_branch("org/repo", "master", pr))
         self.assertFalse(
-            cancel_blocked_ci.is_default_branch("fork/repo", "main", pr | {"owner": "other"})
+            cancel_blocked_ci.is_on_default_branch("fork/repo", "main", pr | {"owner": "other"})
         )
         self.assertEqual(cancel_blocked_ci.pr_branches("org/repo", pr, False), {"pull/5", "main"})
         self.assertEqual(cancel_blocked_ci.pr_branches("org/repo", pr, True), {"pull/5"})
@@ -118,17 +119,17 @@ class CancelBlockedCiTest(unittest.TestCase):
         other_workflow = "fedcba9876543210fedcba9876543210fedc"
         tag_workflow = "abcdefabcdefabcdefabcdefabcdefabcdef"
         checks = [
-            ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=1"),
-            ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=2"),
-            ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=3"),
-            ("completed", "ci", "https://dev.azure.com/org/p/_build/results?buildId=4"),
+            Check("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=1"),
+            Check("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=2"),
+            Check("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=3"),
+            Check("completed", "ci", "https://dev.azure.com/org/p/_build/results?buildId=4"),
             # Finding the branch of build 5 fails.
-            ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=5"),
+            Check("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=5"),
             # GitHub shows build 6 as unfinished, but it has finished.
-            ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=6"),
-            ("pending", "build", f"https://app.circleci.com/workflow/{workflow}"),
-            ("pending", "build", f"https://app.circleci.com/workflow/{other_workflow}"),
-            ("pending", "build", f"https://app.circleci.com/workflow/{tag_workflow}"),
+            Check("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=6"),
+            Check("pending", "build", f"https://app.circleci.com/workflow/{workflow}"),
+            Check("pending", "build", f"https://app.circleci.com/workflow/{other_workflow}"),
+            Check("pending", "build", f"https://app.circleci.com/workflow/{tag_workflow}"),
         ]
         azure_states = {
             1: ("refs/pull/5/merge", False),
@@ -178,7 +179,9 @@ class CancelBlockedCiTest(unittest.TestCase):
 
     def test_circleci_workflows_of_jobs(self) -> None:
         """The workflows of jobs whose URLs name no workflow come from job lookups."""
-        jobs = [("pending", f"job{n}", f"https://circleci.com/gh/org/repo/{n}") for n in (1, 2)]
+        jobs = [
+            Check("pending", f"job{n}", f"https://circleci.com/gh/org/repo/{n}") for n in (1, 2)
+        ]
         pages = {
             f"{CIRCLECI}/project/gh/org/repo/job/{n}": {"latest_workflow": {"id": "w9"}}
             for n in (1, 2)
