@@ -1,867 +1,901 @@
-#!/bin/sh
+#!/usr/bin/env python3
+"""Rerun each failed CI job whose failure appears to be transient.
 
-# Reruns each failed CI job whose failure appears to be transient, such as a
-# network error or a rate limit, rather than a problem with the code.
-#
-# Usage:
-#   rerun-failed-ci [--dry-run] [--max-attempts N] [PR | BRANCH | URL]...
-#   rerun-failed-ci --classify [LOG-FILE]...
-#
-# With no PR, BRANCH, or URL, this command examines the GitHub pull request
-# for the current branch.  A PR (a number or URL) or BRANCH names a pull
-# request, as for `gh pr checks`; this command examines every failed check of
-# that pull request.  A URL of a CircleCI job or workflow, or of a GitHub
-# Actions job or workflow run, names the failed jobs to examine:  the given
-# job, or every failed job of the given workflow or run.  A URL of an Azure
-# Pipelines build or of one of its jobs names every failed job of the build.
-#
-# The supported CI services are CircleCI, GitHub Actions, and Azure Pipelines.
-# A failed check from any other service is reported and skipped.
-#
-# A job's failure is transient if the log of its failed steps contains a
-# message about a network problem (such as a timeout, a refused or reset
-# connection, or a failed DNS lookup), an HTTP status code that indicates an
-# overloaded or rate-limited server (such as 429 or 503), or a lost CI runner.
-# The `transient_patterns` variable below lists the messages.  Shell trace
-# lines, which start with `+ `, are ignored, because a script that itself
-# looks for such messages, in order to retry a command, prints them in its
-# trace.  A CircleCI job whose status is `infrastructure_fail` is transient.
-#
-# For each workflow (CircleCI), workflow run (GitHub Actions), or build (Azure
-# Pipelines) that has a job that failed transiently, this command reruns:
-#  * every failed job, if every failed job failed transiently, or
-#  * otherwise, only the jobs that failed transiently.  GitHub Actions does not
-#    permit a job to be rerun while its workflow run is in progress, so
-#    this command reruns only one of them; run this command again after the
-#    workflow run completes.  Azure Pipelines reruns only all the failed jobs
-#    of a stage together, so this command reruns a stage only if every failed
-#    job of the stage failed transiently, and it reruns only one stage at a
-#    time.
-# Rerunning a job also reruns the jobs that depend on it.
-# This command does nothing to a workflow, workflow run, or build that is still
-# in progress, that has been rerun since the failure, or that has already been
-# run N times in total, where N is given by `--max-attempts` (default 3).
-# The limit keeps this command, when it is run repeatedly, from rerunning a
-# job forever whose failure resembles a transient one but is not.
-#
-# With `--dry-run`, this command reports what it would rerun but does not
-# rerun anything.
-#
-# With `--classify`, this command reruns nothing and contacts no server.
-# It reads each LOG-FILE (or standard input), and for each one that
-# shows a transient failure, it prints the line that shows it.  The exit
-# status is 0 if every LOG-FILE shows a transient failure, and 1 otherwise.
-#
-# This command requires `gh` (authenticated to GitHub), `jq`, and `curl`.
-# Rerunning a CircleCI job requires a CircleCI API token:  the value of
-# environment variable `CIRCLECI_CLI_TOKEN` or, if it is unset or empty, the
-# `token` in `~/.circleci/cli.yml`, which `circleci setup` writes.  Rerunning an
-# Azure Pipelines build requires an Azure DevOps personal access token with the
-# "Build (Read & execute)" scope, in environment variable `AZURE_DEVOPS_EXT_PAT`.
-# Reading the logs of a public project's jobs does not require a token.
+A transient failure is one such as a network error or a rate limit, rather than a
+problem with the code.
 
-# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
-# directory that contains this package's other files even when this script is
-# invoked through a symbolic link from elsewhere, such as ~/bin.
-script_path="$0"
-case "${script_path}" in
-  */*) ;;
-  *)
-    # The shell found this script on the PATH, so "${script_path}" is a bare
-    # command name.  Interpreting it as a file name would resolve it relative
-    # to the current directory and make ${SCRIPT_DIR} the current directory.
-    script_path="$(command -v -- "${script_path}")"
-    case "${script_path}" in
-      */*) ;;
-      *)
-        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
-        exit 1
-        ;;
-    esac
-    ;;
-esac
-script_links=0
-while [ -L "${script_path}" ]; do
-  script_links=$((script_links + 1))
-  if [ "${script_links}" -gt 40 ]; then
-    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
-    exit 1
-  fi
-  if ! script_link="$(readlink -- "${script_path}")"; then
-    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
-    exit 1
-  fi
-  case "${script_link}" in
-    /*) script_path="${script_link}" ;;
-    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
-  esac
-done
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
-SCRIPT_NAME="$(basename -- "$0")"
+Usage:
+  rerun-failed-ci [--dry-run] [--max-attempts N] [PR | BRANCH | URL]...
+  rerun-failed-ci --classify [LOG-FILE]...
 
-# Prints an error message and exits with a failure status.
-die() {
-  echo "${SCRIPT_NAME}: $*" >&2
-  exit 1
-}
+With no PR, BRANCH, or URL, this command examines the GitHub pull request for the
+current branch.  A PR (a number or URL) or BRANCH names a pull request, as for
+`gh pr checks`; for each failed check of that pull request, this command examines
+every failed job of the check's workflow, workflow run, or build, so that the jobs of
+one workflow are rerun together.  A URL of a CircleCI job or workflow, or of a GitHub
+Actions job or workflow run, names the failed jobs to examine:  the given job, or
+every failed job of the given workflow or run.  A URL of an Azure Pipelines build or
+of one of its jobs names every failed job of the build.
 
-# Without this check, a missing `normalize-log` would make every log look
-# like a non-transient failure.
-if [ ! -x "${SCRIPT_DIR}/normalize-log" ]; then
-  die "cannot run ${SCRIPT_DIR}/normalize-log"
-fi
+The supported CI services are CircleCI, GitHub Actions, and Azure Pipelines.  A failed
+check from any other service is reported and skipped.
 
-# Extended regular expressions, one per line, that match a line of a log that
-# shows a transient failure.  They are matched without regard to case.
-transient_patterns='(status|response) code:? (403|408|429|5[0-9][0-9])([^0-9]|$)
-HTTP[/0-9.]*( error| status)?:? (408|429|500|502|503|504)([^0-9]|$)
-The requested URL returned error: (408|429|5[0-9][0-9])
-Too Many Requests
-toomanyrequests
-rate limit (exceeded|reached)
-exceeded (a |the )?(secondary )?rate limit
-Service Unavailable
-Bad Gateway
-Gateway Time-?out
-Connect(ion)? timed out
-Connection (reset|refused)
-Read timed out
-SocketTimeoutException
-Network is unreachable
-UnknownHostException
-Temporary failure in name resolution
-Could not resolve host
-Premature end of Content-Length
-Remote host terminated the handshake
-TLS handshake timeout
-i/o timeout
-early EOF
-RPC failed
-remote end hung up unexpectedly
-gnutls_handshake\(\) failed
-SSL_ERROR_SYSCALL
-runner has received a shutdown signal
-lost communication with the server
-We stopped hearing from agent'
+A job's failure is transient if the log of its failed steps contains a message about a
+network problem (such as a timeout, a refused or reset connection, or a failed DNS
+lookup), an HTTP status code that indicates an overloaded or rate-limited server (such
+as 429 or 503), or a lost CI runner.  TRANSIENT_PATTERNS below lists the messages.  The
+log of a GitHub Actions or Azure Pipelines job also contains the errors that the CI
+service reports for the job, which describe failures, such as a lost runner, that
+leave no log.  Shell trace lines, which start with `+ `, and the scripts that GitHub
+Actions and Azure Pipelines echo before running a step, are ignored, because a script
+that itself looks for such messages, in order to retry a command, contains them.  A
+CircleCI job whose status is `infrastructure_fail` is transient.
 
-# Usage: transient_reason FILE
-# If FILE, a log of the failed steps of a job, shows a transient failure,
-# prints the first line that shows it and succeeds.  Otherwise, fails.
-# Shell trace lines in FILE are ignored.
-transient_reason() {
-  log_file="$1"
-  reason="$("${SCRIPT_DIR}/normalize-log" "${log_file}" \
-    | grep -v '^++* ' \
-    | grep -E -i -e "${transient_patterns}" \
-    | head -n 1)"
-  if [ -z "${reason}" ]; then
-    return 1
-  fi
-  # Removes leading whitespace and shortens a long line.
-  printf '%s\n' "${reason}" | sed -e 's/^[[:space:]]*//' | cut -c 1-200
-}
+For each workflow (CircleCI), workflow run (GitHub Actions), or build (Azure
+Pipelines) that has a job that failed transiently, this command reruns:
+ * every failed job, if every failed job failed transiently, or
+ * otherwise, only the jobs that failed transiently.  GitHub Actions does not permit a
+   job to be rerun while its workflow run is in progress, so this command reruns only
+   one of them; run this command again after the workflow run completes.  Azure
+   Pipelines reruns only all the failed jobs of a stage together, so this command
+   reruns a stage only if every failed job of the stage failed transiently, and it
+   reruns only one stage at a time.
+Rerunning a job also reruns the jobs that depend on it.
 
-if [ "${1-}" = "--classify" ]; then
-  shift
-  if [ "$#" -eq 0 ]; then
-    set -- -
-  fi
-  tmpdir="$(mktemp -d)" || exit 1
-  trap 'rm -rf "${tmpdir}"' EXIT
-  status=0
-  for file in "$@"; do
-    if [ "${file}" = "-" ]; then
-      cat > "${tmpdir}/stdin" || exit 1
-      file="${tmpdir}/stdin"
-      name="(standard input)"
-    else
-      if [ ! -r "${file}" ]; then
-        die "cannot read ${file}"
-      fi
-      name="${file}"
-    fi
-    if reason="$(transient_reason "${file}")"; then
-      printf '%s: %s\n' "${name}" "${reason}"
-    else
-      status=1
-    fi
-  done
-  exit "${status}"
-fi
+This command does nothing to a workflow, workflow run, or build that is still in
+progress or that has been rerun since the failure.  It also does not rerun a CircleCI
+workflow, a GitHub Actions job, or an Azure Pipelines stage that has already been run
+N times in total, where N is given by `--max-attempts` (default 3).  The limit keeps
+this command, when it is run repeatedly, from rerunning a job forever whose failure
+resembles a transient one but is not.
 
-dry_run=
-max_attempts=3
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -n | --dry-run) dry_run=1 ;;
-    --max-attempts)
-      if [ "$#" -lt 2 ]; then die "--max-attempts requires a number"; fi
-      max_attempts="$2"
-      shift
-      ;;
-    --max-attempts=*) max_attempts="${1#--max-attempts=}" ;;
-    --classify) die "--classify must be the first argument" ;;
-    --)
-      shift
-      break
-      ;;
-    -*) die "unknown option: $1" ;;
-    *) break ;;
-  esac
-  shift
-done
-case "${max_attempts}" in
-  '' | *[!0-9]*) die "--max-attempts requires a positive number: ${max_attempts}" ;;
-esac
-if [ "${max_attempts}" -lt 1 ]; then
-  die "--max-attempts requires a positive number: ${max_attempts}"
-fi
+With `--dry-run`, this command reports what it would rerun but does not rerun anything.
 
-for command in gh jq curl base64; do
-  if ! command -v "${command}" > /dev/null 2>&1; then
-    die "requires the ${command} command"
-  fi
-done
+With `--classify`, this command reruns nothing and contacts no server.  It reads each
+LOG-FILE (or standard input), and for each one that shows a transient failure, it
+prints the line that shows it.  The exit status is 0 if every LOG-FILE shows a
+transient failure, and 1 otherwise.
 
-# No command in this script uses filename expansion, and the unquoted
-# expansions that split a list into lines must not expand a "?" in a URL.
-set -f
+This command requires `gh`, authenticated to GitHub.  Rerunning a CircleCI job or an
+Azure Pipelines build requires credentials, as described in `ci_build.py`.  The Azure
+DevOps token needs the "Build (Read & execute)" scope.  Reading the logs of a public
+project's jobs does not require credentials.
+"""
 
-tab="$(printf '\t')"
-newline='
-'
+from __future__ import annotations
 
-# Usage: field N LINE
-# Prints the Nth tab-separated field of LINE, or with "N-", the Nth and later
-# fields.
-field() {
-  printf '%s\n' "$2" | cut -f "$1"
-}
+import argparse
+import json
+import operator
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+from pathlib import Path
+from typing import Any
 
-tmpdir="$(mktemp -d)" || exit 1
-trap 'rm -rf "${tmpdir}"' EXIT
-trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
-trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
+import ci_build
 
-# The exit status:  1 if some workflow could not be examined or rerun.
-status=0
+PROGRAM = Path(sys.argv[0]).name
 
-# Prints a warning and makes the exit status a failure.
-warn() {
-  echo "${SCRIPT_NAME}: $*" >&2
-  status=1
-}
+# The `normalize-log` command, which is in the same directory as this script.
+NORMALIZE_LOG = Path(__file__).resolve().parent / "normalize-log"
 
-# Workflows and workflow runs that have already been examined, one per line.
-# A pull request can have several failed checks for one workflow run.
-examined=
+# Regular expressions, each of which matches a line of a log that shows a transient
+# failure.  They are matched without regard to case.  A 403 status is transient
+# because GitHub responds with 403 to a client that exceeds its rate limit.
+TRANSIENT_PATTERNS = [
+    r"(status|response) code:? (403|408|429|5[0-9][0-9])([^0-9]|$)",
+    r"HTTP[/0-9.]*( error| status)?:? (408|429|500|502|503|504)([^0-9]|$)",
+    r"The requested URL returned error: (408|429|5[0-9][0-9])",
+    r"Too Many Requests",
+    r"toomanyrequests",
+    r"rate limit (exceeded|reached)",
+    r"exceeded (a |the )?(secondary )?rate limit",
+    r"Service Unavailable",
+    r"Bad Gateway",
+    r"Gateway Time-?out",
+    r"Connect(ion)? timed out",
+    r"Connection (reset|refused)",
+    r"Read timed out",
+    r"SocketTimeoutException",
+    r"Network is unreachable",
+    r"UnknownHostException",
+    r"Temporary failure in name resolution",
+    r"Could not resolve host",
+    r"Premature end of Content-Length",
+    r"Remote host terminated the handshake",
+    r"TLS handshake timeout",
+    r"i/o timeout",
+    r"early EOF",
+    r"RPC failed",
+    r"remote end hung up unexpectedly",
+    r"gnutls_handshake\(\) failed",
+    r"SSL_ERROR_SYSCALL",
+    r"runner has received a shutdown signal",
+    r"lost communication with the server",
+    r"We stopped hearing from agent",
+]
+TRANSIENT = re.compile("|".join(f"(?:{p})" for p in TRANSIENT_PATTERNS), re.IGNORECASE)
 
-# Usage: first_time KEY
-# Succeeds the first time it is called with KEY.
-first_time() {
-  case "
-${examined}" in
-    *"
-$1
-"*) return 1 ;;
-  esac
-  examined="${examined}$1
-"
-}
+# A shell trace line, as `set -x` prints it.
+TRACE_LINE = re.compile(r"\++ ")
+# The start and the end of the script that a CI service echoes before running a step,
+# for GitHub Actions and for Azure Pipelines.
+ECHOED_SCRIPTS = [
+    (re.compile(r"##\[group\]Run "), re.compile(r"##\[endgroup\]")),
+    (re.compile(r"Script contents:"), re.compile(r".*Starting Command Output")),
+]
+
+# The statuses of a failed CircleCI job.
+CIRCLECI_FAILED = ("failed", "infrastructure_fail", "timedout")
+# The conclusions of a failed GitHub Actions job.
+GITHUB_FAILED = ("failure", "timed_out")
+
+# The errors that a request to a CI service can raise.
+REQUEST_ERRORS = (urllib.error.URLError, subprocess.CalledProcessError, ValueError, KeyError)
+
 
 ###########################################################################
-### CircleCI
+### Classifying logs
 ###
 
-# The file of HTTP headers for CircleCI API requests.  Putting the token in a
-# file keeps it out of the process list.
-circleci_headers="${tmpdir}/circleci-headers"
-(
-  umask 077
-  token="${CIRCLECI_CLI_TOKEN-}"
-  if [ -z "${token}" ] && [ -r "${HOME}/.circleci/cli.yml" ]; then
-    token="$(sed -n -e 's/^token:[[:space:]]*//p' -- "${HOME}/.circleci/cli.yml" | head -n 1)"
-  fi
-  if [ -n "${token}" ]; then
-    printf 'Circle-Token: %s\n' "${token}"
-  fi
-  printf 'Accept: application/json\n'
-) > "${circleci_headers}" || exit 1
 
-# Usage: circleci_api PATH [JSON-BODY]
-# Prints the result of a CircleCI API request:  a GET request, or a POST
-# request if JSON-BODY is given.  PATH starts with "/api/".
-circleci_api() {
-  if [ "$#" -ge 2 ]; then
-    curl -sS -f -X POST -H @"${circleci_headers}" \
-      -H 'Content-Type: application/json' -d "$2" "https://circleci.com$1"
-  else
-    curl -sS -f -H @"${circleci_headers}" "https://circleci.com$1"
-  fi
-}
+def normalize_log(log: str) -> str:
+    """Remove the formatting that a CI service or a terminal adds to a log.
 
-# Usage: circleci_workflow_of_job PROJECT-SLUG JOB-NUMBER
-# Prints the ID of the workflow of a CircleCI job.
-circleci_workflow_of_job() {
-  circleci_api "/api/v2/project/$1/job/$2" | jq -r -e '.latest_workflow.id'
-}
+    Returns:
+        The log, as `normalize-log` prints it.
+    """
+    return subprocess.run(
+        [NORMALIZE_LOG],
+        input=log,
+        capture_output=True,
+        check=True,
+        encoding="utf-8",
+        errors="replace",
+    ).stdout
 
-# Usage: circleci_job_log PROJECT-SLUG JOB-NUMBER
-# Prints the output of the failed steps of a CircleCI job.
-circleci_job_log() {
-  case "$1" in
-    gh/*) v1_project="github/${1#gh/}" ;;
-    bb/*) v1_project="bitbucket/${1#bb/}" ;;
-    *)
-      echo "${SCRIPT_NAME}: cannot read the log of a job of CircleCI project $1" >&2
-      return 1
-      ;;
-  esac
-  output_urls="$(circleci_api "/api/v1.1/project/${v1_project}/$2" \
-    | jq -r '.steps[].actions[]
-        | select(.status == "failed" or .status == "timedout")
-        | .output_url // empty')" || return 1
-  for output_url in ${output_urls}; do
-    curl -sS -f --compressed "${output_url}" | jq -r '.[].message' || return 1
-  done
-}
 
-# Usage: circleci_rerun_failed WORKFLOW-ID [JOB-NUMBER]
-# Reruns the failed jobs of the CircleCI workflow, or only the given job,
-# that failed transiently.
-circleci_rerun_failed() {
-  wf_id="$1"
-  only_job="${2-}"
-  if ! wf_json="$(circleci_api "/api/v2/workflow/${wf_id}")"; then
-    warn "cannot read CircleCI workflow ${wf_id}"
-    return
-  fi
-  wf_name="$(printf '%s' "${wf_json}" | jq -r '.name')"
-  wf_status="$(printf '%s' "${wf_json}" | jq -r '.status')"
-  slug="$(printf '%s' "${wf_json}" | jq -r '.project_slug')"
-  pipeline_id="$(printf '%s' "${wf_json}" | jq -r '.pipeline_id')"
-  pipeline_number="$(printf '%s' "${wf_json}" | jq -r '.pipeline_number')"
-  wf_url="https://app.circleci.com/pipelines/${slug}/${pipeline_number}/workflows/${wf_id}"
-  echo "CircleCI workflow ${wf_name}: ${wf_url}"
+def transient_reason(log: str) -> str | None:
+    """Determine whether log, a log of the failed steps of a job, shows a transient failure.
 
-  # The workflows of the pipeline that have the same name, oldest first.
-  # Rerunning a workflow creates another one in the same pipeline.
-  if ! same_name="$(circleci_api "/api/v2/pipeline/${pipeline_id}/workflow" \
-    | jq -r --arg name "${wf_name}" \
-      '[.items[] | select(.name == $name)] | sort_by(.created_at) | .[].id')"; then
-    warn "cannot read the workflows of CircleCI pipeline ${pipeline_id}"
-    return
-  fi
-  latest="$(printf '%s\n' "${same_name}" | tail -n 1)"
-  if [ "${latest}" != "${wf_id}" ]; then
-    echo "  It has been rerun, as https://app.circleci.com/pipelines/${slug}/${pipeline_number}/workflows/${latest}"
-    return
-  fi
-  attempts="$(printf '%s\n' "${same_name}" | grep -c .)"
+    Shell trace lines in the log are ignored, as are the scripts that GitHub Actions
+    (between "##[group]Run" and "##[endgroup]") and Azure Pipelines (between
+    "Script contents:" and "Starting Command Output") echo before running a step.
 
-  case "${wf_status}" in
-    failed | error) ;;
-    success | canceled | unauthorized | not_run)
-      echo "  Its status is ${wf_status}."
-      return
-      ;;
-    *)
-      echo "  Its status is ${wf_status}.  Run ${SCRIPT_NAME} again after it finishes."
-      return
-      ;;
-  esac
+    Returns:
+        The first line that shows a transient failure, without leading whitespace and
+        shortened if it is long, or None if there is none.
+    """
+    end_of_echo = None
+    for line in normalize_log(log).splitlines():
+        if end_of_echo:
+            if end_of_echo.match(line):
+                end_of_echo = None
+            continue
+        end_of_echo = next((end for start, end in ECHOED_SCRIPTS if start.match(line)), None)
+        if end_of_echo or TRACE_LINE.match(line):
+            continue
+        if TRANSIENT.search(line):
+            return line.lstrip()[:200]
+    return None
 
-  if ! failed_jobs="$(circleci_api "/api/v2/workflow/${wf_id}/job" \
-    | jq -r '.items[]
-        | select(.status == "failed" or .status == "infrastructure_fail"
-                 or .status == "timedout")
-        | [.job_number, .id, .status, .name] | @tsv')"; then
-    warn "cannot read the jobs of CircleCI workflow ${wf_id}"
-    return
-  fi
 
-  # The IDs of the jobs to rerun, separated by commas.
-  rerun_ids=
-  all_transient=1
-  IFS="${newline}"
-  for line in ${failed_jobs}; do
-    unset IFS
-    job_number="$(field 1 "${line}")"
-    job_id="$(field 2 "${line}")"
-    job_status="$(field 3 "${line}")"
-    job_name="$(field 4- "${line}")"
-    if [ -n "${only_job}" ] && [ "${job_number}" != "${only_job}" ]; then
-      continue
-    fi
-    if [ "${job_status}" = "infrastructure_fail" ]; then
-      reason="CircleCI infrastructure failure"
-    elif ! circleci_job_log "${slug}" "${job_number}" > "${tmpdir}/log"; then
-      warn "cannot read the log of CircleCI job ${job_name} (${job_number})"
-      all_transient=
-      continue
-    elif ! reason="$(transient_reason "${tmpdir}/log")"; then
-      echo "  ${job_name}: not transient"
-      all_transient=
-      continue
-    fi
-    echo "  ${job_name}: transient: ${reason}"
-    rerun_ids="${rerun_ids:+${rerun_ids},}\"${job_id}\""
-  done
-  unset IFS
+def classify(files: list[str]) -> int:
+    """Print the line of each log file that shows a transient failure.
 
-  if [ -z "${rerun_ids}" ]; then
-    return
-  fi
-  if [ "${attempts}" -ge "${max_attempts}" ]; then
-    echo "  Not rerunning:  the workflow has already been run ${attempts} times."
-    return
-  fi
-  if [ -n "${all_transient}" ] && [ -z "${only_job}" ]; then
-    body='{"from_failed": true}'
-    what="the failed jobs"
-  else
-    body="{\"jobs\": [${rerun_ids}]}"
-    what="the transiently failed jobs"
-  fi
-  if [ -n "${dry_run}" ]; then
-    echo "  Would rerun ${what}."
-    return
-  fi
-  if ! new_json="$(circleci_api "/api/v2/workflow/${wf_id}/rerun" "${body}")"; then
-    warn "cannot rerun CircleCI workflow ${wf_id}; is CIRCLECI_CLI_TOKEN set?"
-    return
-  fi
-  new_id="$(printf '%s' "${new_json}" | jq -r '.workflow_id // empty')"
-  echo "  Reran ${what}: https://app.circleci.com/pipelines/${slug}/${pipeline_number}/workflows/${new_id}"
-}
+    Args:
+        files: the log files; "-", or no files, means standard input.
 
-# Usage: circleci_rerun_failed_url URL
-# Reruns the transiently failed jobs that a CircleCI URL names:  the jobs of a
-# workflow, or one job.
-circleci_rerun_failed_url() {
-  url="${1%%#*}"
-  wf_id=
-  job_number=
-  case "${url}" in
-    *workflowId=*)
-      wf_id="$(printf '%s\n' "${url}" | sed -e 's/.*[?&]workflowId=\([^&]*\).*/\1/')"
-      ;;
-    */workflow/* | */workflows/*)
-      wf_id="$(printf '%s\n' "${url}" | sed -e 's|.*/workflows*/\([^/?]*\).*|\1|')"
-      ;;
-  esac
-  case "${url}" in
-    *buildNumber=*)
-      job_number="$(printf '%s\n' "${url}" | sed -e 's/.*[?&]buildNumber=\([0-9]*\).*/\1/')"
-      ;;
-    */jobs/[0-9]*)
-      job_number="$(printf '%s\n' "${url}" | sed -e 's|.*/jobs/\([0-9]*\).*|\1|')"
-      ;;
-    https://circleci.com/gh/*/*/[0-9]* | https://circleci.com/bb/*/*/[0-9]*)
-      # A URL in a GitHub commit status, such as
-      # https://circleci.com/gh/ORG/REPO/123?utm_campaign=...
-      path="${url#https://circleci.com/}"
-      path="${path%%\?*}"
-      job_number="${path##*/}"
-      if ! wf_id="$(circleci_workflow_of_job "${path%/*}" "${job_number}")"; then
-        warn "cannot read CircleCI job ${url}"
-        return
-      fi
-      ;;
-  esac
-  if [ -z "${wf_id}" ]; then
-    warn "cannot find a CircleCI workflow in ${url}"
-    return
-  fi
-  if [ -n "${job_number}" ]; then
-    circleci_rerun_failed "${wf_id}" "${job_number}"
-  elif first_time "circleci ${wf_id}"; then
-    circleci_rerun_failed "${wf_id}"
-  fi
-}
+    Returns:
+        The exit status:  0 if every log shows a transient failure, and 1 otherwise.
+    """
+    status = 0
+    for file in files or ["-"]:
+        if file == "-":
+            name, log = "(standard input)", sys.stdin.buffer.read()
+        else:
+            name = file
+            try:
+                log = Path(file).read_bytes()
+            except OSError as e:
+                sys.exit(f"{PROGRAM}: cannot read {file}: {e.strerror}")
+        reason = transient_reason(log.decode(errors="replace"))
+        if reason is None:
+            status = 1
+        else:
+            print(f"{name}: {reason}")
+    return status
+
 
 ###########################################################################
-### GitHub Actions
+### Rerunning
 ###
 
-# Usage: gha_job_log REPO JOB-ID
-# Prints the log of the failed steps of a GitHub Actions job, followed by the
-# job's annotations, which describe failures, such as a lost runner, that
-# leave no log.
-gha_job_log() {
-  # Each line of `--log-failed` output starts with the job name and the step
-  # name, each followed by a tab.
-  gh run view --repo "$1" --job "$2" --log-failed > "${tmpdir}/gh-log" || return 1
-  sed -e "s/^[^${tab}]*${tab}[^${tab}]*${tab}//" -- "${tmpdir}/gh-log" || return 1
-  gh api "repos/$1/check-runs/$2/annotations" --jq '.[].message' || return 1
-}
 
-# Usage: gha_rerun_failed REPO RUN-ID [JOB-ID]
-# Reruns the failed jobs of the GitHub Actions workflow run, or only the given
-# job, that failed transiently.
-gha_rerun_failed() {
-  repo="$1"
-  run_id="$2"
-  only_job="${3-}"
-  if ! run_json="$(gh api "repos/${repo}/actions/runs/${run_id}")"; then
-    warn "cannot read GitHub Actions workflow run ${run_id}"
-    return
-  fi
-  run_name="$(printf '%s' "${run_json}" | jq -r '.name')"
-  run_status="$(printf '%s' "${run_json}" | jq -r '.status')"
-  run_conclusion="$(printf '%s' "${run_json}" | jq -r '.conclusion')"
-  attempts="$(printf '%s' "${run_json}" | jq -r '.run_attempt')"
-  echo "GitHub Actions workflow run ${run_name}: https://github.com/${repo}/actions/runs/${run_id}"
+class Rerunner:
+    """Reruns the transiently failed jobs of CI builds.
 
-  # The failed jobs of the latest attempt of the run.  A job that the latest
-  # attempt did not rerun keeps its ID.
-  if ! failed_jobs="$(gh api --paginate \
-    "repos/${repo}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-    --jq '.jobs[]
-        | select(.conclusion == "failure" or .conclusion == "timed_out")
-        | [.id, .name] | @tsv')"; then
-    warn "cannot read the jobs of GitHub Actions workflow run ${run_id}"
-    return
-  fi
-  if [ -n "${only_job}" ]; then
-    if ! printf '%s\n' "${failed_jobs}" | grep -q "^${only_job}${tab}"; then
-      echo "  Job ${only_job} is not a failed job of the latest attempt."
-      return
-    fi
-  fi
+    Attributes:
+        dry_run: whether to report the reruns rather than to make them.
+        max_attempts: the most times that a job can have been run before this reruns it.
+        status: the exit status:  1 if some build could not be examined or rerun.
+        examined: the builds that have been examined, so that a build that a pull
+            request has several failed checks for is examined only once.
+    """
 
-  if [ "${run_status}" != "completed" ]; then
-    echo "  Its status is ${run_status}.  Run ${SCRIPT_NAME} again after it finishes."
-    return
-  fi
-  if [ "${run_conclusion}" != "failure" ]; then
-    echo "  Its conclusion is ${run_conclusion}."
-    return
-  fi
+    def __init__(self, dry_run: bool, max_attempts: int) -> None:
+        """Create a Rerunner."""
+        self.dry_run = dry_run
+        self.max_attempts = max_attempts
+        self.status = 0
+        self.examined: set[tuple[Any, ...]] = set()
 
-  # The IDs of the jobs to rerun, one per line.
-  rerun_ids=
-  all_transient=1
-  IFS="${newline}"
-  for line in ${failed_jobs}; do
-    unset IFS
-    job_id="$(field 1 "${line}")"
-    job_name="$(field 2- "${line}")"
-    if [ -n "${only_job}" ] && [ "${job_id}" != "${only_job}" ]; then
-      continue
-    fi
-    if ! gha_job_log "${repo}" "${job_id}" > "${tmpdir}/log"; then
-      warn "cannot read the log of GitHub Actions job ${job_name} (${job_id})"
-      all_transient=
-      continue
-    fi
-    if ! reason="$(transient_reason "${tmpdir}/log")"; then
-      echo "  ${job_name}: not transient"
-      all_transient=
-      continue
-    fi
-    echo "  ${job_name}: transient: ${reason}"
-    rerun_ids="${rerun_ids}${job_id}
-"
-  done
-  unset IFS
+    def warn(self, message: str) -> None:
+        """Print a warning and make the exit status a failure."""
+        print(f"{PROGRAM}: {message}", file=sys.stderr)
+        self.status = 1
 
-  if [ -z "${rerun_ids}" ]; then
-    return
-  fi
-  if [ "${attempts}" -ge "${max_attempts}" ]; then
-    echo "  Not rerunning:  the workflow run has already been run ${attempts} times."
-    return
-  fi
-  if [ -n "${all_transient}" ] && [ -z "${only_job}" ]; then
-    set -- --failed "${run_id}"
-    what="the failed jobs"
-  else
-    first_id="$(printf '%s' "${rerun_ids}" | head -n 1)"
-    set -- --job "${first_id}"
-    what="job ${first_id}"
-    if [ "$(printf '%s' "${rerun_ids}" | grep -c .)" -gt 1 ]; then
-      what="${what} (rerun the other transiently failed jobs after the workflow run finishes)"
-    fi
-  fi
-  if [ -n "${dry_run}" ]; then
-    echo "  Would rerun ${what}."
-    return
-  fi
-  if ! gh run rerun --repo "${repo}" "$@" > /dev/null; then
-    warn "cannot rerun GitHub Actions workflow run ${run_id}"
-    return
-  fi
-  echo "  Reran ${what}."
-}
+    def first_time(self, key: tuple[Any, ...]) -> bool:
+        """Record that the build with the given key has been examined.
 
-# Usage: gha_rerun_failed_url URL
-# Reruns the transiently failed jobs that a GitHub Actions URL names:  the jobs
-# of a workflow run, or one job.
-gha_rerun_failed_url() {
-  path="${1#https://github.com/}"
-  path="${path%%[?#]*}"
-  repo="$(printf '%s\n' "${path}" | cut -d / -f 1-2)"
-  run_id="$(printf '%s\n' "${path}" | sed -n -e 's|^[^/]*/[^/]*/actions/runs/\([0-9]*\).*|\1|p')"
-  job_id="$(printf '%s\n' "${path}" | sed -n -e 's|.*/job/\([0-9]*\).*|\1|p')"
-  if [ -z "${run_id}" ]; then
-    warn "cannot find a GitHub Actions workflow run in $1"
-    return
-  fi
-  if [ -n "${job_id}" ]; then
-    gha_rerun_failed "${repo}" "${run_id}" "${job_id}"
-  elif first_time "gha ${repo} ${run_id}"; then
-    gha_rerun_failed "${repo}" "${run_id}"
-  fi
-}
+        Returns:
+            Whether this is the first time that it is called with key.
+        """
+        if key in self.examined:
+            return False
+        self.examined.add(key)
+        return True
+
+    def rerun(self, what: str, rerunning: Any) -> Any:
+        """Rerun, or with --dry-run report, jobs.
+
+        Args:
+            what: a description of the jobs, such as "the failed jobs".
+            rerunning: a function of no arguments that reruns the jobs.
+
+        Returns:
+            The result of rerunning, or None if this did not rerun the jobs.
+        """
+        if self.dry_run:
+            print(f"  Would rerun {what}.")
+            return None
+        return rerunning()
+
+    ###########################################################################
+    ### CircleCI
+    ###
+
+    def circleci_rerun_failed(self, workflow: str, only_job: int | None = None) -> None:
+        """Rerun the jobs of a CircleCI workflow, or only the given job, that failed transiently.
+
+        Args:
+            workflow: the id of the workflow.
+            only_job: the number of the job to examine, or None to examine every job.
+        """
+        api = f"{ci_build.CIRCLECI_API}/v2"
+        try:
+            wf = ci_build.request("GET", f"{api}/workflow/{workflow}", ci_build.circleci_headers())
+        except REQUEST_ERRORS as e:
+            self.warn(f"cannot read CircleCI workflow {workflow}: {ci_build.failure(e)}")
+            return
+        pipeline = (
+            f"https://app.circleci.com/pipelines/{wf['project_slug']}/{wf['pipeline_number']}"
+        )
+        print(f"CircleCI workflow {wf['name']}: {pipeline}/workflows/{workflow}")
+
+        # The workflows of the pipeline that have the same name, oldest first.
+        # Rerunning a workflow creates another one in the same pipeline.
+        try:
+            same_name = sorted(
+                (
+                    w
+                    for w in ci_build.circleci_items(f"/v2/pipeline/{wf['pipeline_id']}/workflow")
+                    if w["name"] == wf["name"]
+                ),
+                key=operator.itemgetter("created_at"),
+            )
+        except REQUEST_ERRORS as e:
+            self.warn(
+                f"cannot read the workflows of CircleCI pipeline {wf['pipeline_id']}:"
+                f" {ci_build.failure(e)}"
+            )
+            return
+        if same_name and same_name[-1]["id"] != workflow:
+            print(f"  It has been rerun, as {pipeline}/workflows/{same_name[-1]['id']}")
+            return
+        attempts = len(same_name)
+
+        if wf["status"] in {"success", "canceled", "unauthorized", "not_run"}:
+            print(f"  Its status is {wf['status']}.")
+            return
+        if wf["status"] not in {"failed", "error"}:
+            print(f"  Its status is {wf['status']}.  Run {PROGRAM} again after it finishes.")
+            return
+
+        try:
+            failed_jobs = [
+                j
+                for j in ci_build.circleci_items(f"/v2/workflow/{workflow}/job")
+                if j["status"] in CIRCLECI_FAILED
+            ]
+        except REQUEST_ERRORS as e:
+            self.warn(
+                f"cannot read the jobs of CircleCI workflow {workflow}: {ci_build.failure(e)}"
+            )
+            return
+        if only_job is not None:
+            failed_jobs = [j for j in failed_jobs if j.get("job_number") == only_job]
+            if not failed_jobs:
+                print(f"  Job {only_job} is not a failed job of the workflow.")
+                return
+
+        rerun_ids = []
+        all_transient = True
+        for job in failed_jobs:
+            if job["status"] == "infrastructure_fail":
+                reason = "CircleCI infrastructure failure"
+            else:
+                try:
+                    log = circleci_job_log(wf["project_slug"], job["job_number"])
+                except REQUEST_ERRORS as e:
+                    self.warn(
+                        f"cannot read the log of CircleCI job {job['name']}"
+                        f" ({job['job_number']}): {ci_build.failure(e)}"
+                    )
+                    all_transient = False
+                    continue
+                reason = transient_reason(log)
+                if reason is None:
+                    print(f"  {job['name']}: not transient")
+                    all_transient = False
+                    continue
+            print(f"  {job['name']}: transient: {reason}")
+            rerun_ids.append(job["id"])
+
+        if not rerun_ids:
+            return
+        if attempts >= self.max_attempts:
+            print(f"  Not rerunning:  the workflow has already been run {attempts} times.")
+            return
+        if all_transient and only_job is None:
+            body, what = {"from_failed": True}, "the failed jobs"
+        else:
+            body, what = {"jobs": rerun_ids}, "the transiently failed jobs"
+
+        def rerunning() -> Any:
+            return ci_build.request(
+                "POST", f"{api}/workflow/{workflow}/rerun", ci_build.circleci_headers(), body
+            )
+
+        try:
+            result = self.rerun(what, rerunning)
+        except REQUEST_ERRORS as e:
+            hint = "" if ci_build.circleci_token() else "; there is no CircleCI token"
+            self.warn(f"cannot rerun CircleCI workflow {workflow}: {ci_build.failure(e)}{hint}")
+            return
+        if result is not None:
+            print(f"  Reran {what}: {pipeline}/workflows/{result.get('workflow_id', '')}")
+
+    def circleci_rerun_failed_url(self, url: str, whole_workflow: bool = False) -> None:
+        """Rerun the transiently failed jobs that a CircleCI URL names.
+
+        Args:
+            url: the URL of a workflow, or of a job.
+            whole_workflow: whether a URL that names a job names the jobs of its workflow.
+        """
+        workflow, slug, job = ci_build.parse_circleci_url(url) or (None, None, None)
+        if workflow is None and slug is not None and job is not None:
+            try:
+                workflow = ci_build.circleci_workflow_of_job(slug, job)
+            except REQUEST_ERRORS as e:
+                self.warn(f"cannot read CircleCI job {url}: {ci_build.failure(e)}")
+                return
+        if workflow is None:
+            self.warn(f"cannot find a CircleCI workflow in {url}")
+            return
+        if whole_workflow:
+            job = None
+        if job is not None:
+            self.circleci_rerun_failed(workflow, job)
+        elif self.first_time(("circleci", workflow)):
+            self.circleci_rerun_failed(workflow)
+
+    ###########################################################################
+    ### GitHub Actions
+    ###
+
+    def gha_rerun_failed(self, repo: str, run: int, only_job: int | None = None) -> None:
+        """Rerun the jobs of a GitHub Actions run, or only the given job, that failed transiently.
+
+        Args:
+            repo: the repository, as ORG/REPO.
+            run: the id of the workflow run.
+            only_job: the id of the job to examine, or None to examine every job.
+        """
+        try:
+            run_json = ci_build.gh_api(f"repos/{repo}/actions/runs/{run}")
+        except REQUEST_ERRORS as e:
+            self.warn(f"cannot read GitHub Actions workflow run {run}: {ci_build.failure(e)}")
+            return
+        print(
+            f"GitHub Actions workflow run {run_json['name']}:"
+            f" https://github.com/{repo}/actions/runs/{run}"
+        )
+
+        # The jobs of the latest attempt of the run, in which a job that the attempt did
+        # not rerun keeps its id, and the jobs of every attempt.
+        try:
+            latest_jobs = gha_jobs(repo, run, "latest")
+            all_jobs = gha_jobs(repo, run, "all")
+        except REQUEST_ERRORS as e:
+            self.warn(
+                f"cannot read the jobs of GitHub Actions workflow run {run}: {ci_build.failure(e)}"
+            )
+            return
+        failed_jobs = [j for j in latest_jobs if j["conclusion"] in GITHUB_FAILED]
+        if only_job is not None:
+            failed_jobs = [j for j in failed_jobs if j["id"] == only_job]
+            if not failed_jobs:
+                print(f"  Job {only_job} is not a failed job of the latest attempt.")
+                return
+
+        if run_json["status"] != "completed":
+            print(f"  Its status is {run_json['status']}.  Run {PROGRAM} again after it finishes.")
+            return
+        if run_json["conclusion"] != "failure":
+            print(f"  Its conclusion is {run_json['conclusion']}.")
+            return
+
+        # How many times each job has been run.  Rerunning one job starts a new attempt
+        # of the whole run, so the run's attempt count is not the job's.
+        runs_of_job: dict[str, set[int]] = {}
+        for j in all_jobs:
+            runs_of_job.setdefault(j["name"], set()).add(j["id"])
+
+        rerun_ids = []
+        all_transient = True
+        for job in failed_jobs:
+            log, log_read = gha_job_log(repo, job["id"])
+            reason = transient_reason(log)
+            if reason is None:
+                if log_read:
+                    print(f"  {job['name']}: not transient")
+                else:
+                    self.warn(
+                        f"cannot read the log of GitHub Actions job {job['name']} ({job['id']})"
+                    )
+                all_transient = False
+                continue
+            print(f"  {job['name']}: transient: {reason}")
+            attempts = len(runs_of_job.get(job["name"], ()))
+            if attempts >= self.max_attempts:
+                print(f"  Not rerunning {job['name']}:  it has already been run {attempts} times.")
+                all_transient = False
+                continue
+            rerun_ids.append(job["id"])
+
+        if not rerun_ids:
+            return
+        if all_transient and only_job is None:
+            args, what = ["--failed", str(run)], "the failed jobs"
+        else:
+            args, what = ["--job", str(rerun_ids[0])], f"job {rerun_ids[0]}"
+            if len(rerun_ids) > 1:
+                what += " (rerun the other transiently failed jobs after the workflow run finishes)"
+        try:
+            if (
+                self.rerun(
+                    what, lambda: ci_build.run(["gh", "run", "rerun", "--repo", repo, *args])
+                )
+                is not None
+            ):
+                print(f"  Reran {what}.")
+        except REQUEST_ERRORS as e:
+            self.warn(f"cannot rerun GitHub Actions workflow run {run}: {ci_build.failure(e)}")
+
+    def gha_rerun_failed_url(self, url: str, whole_run: bool = False) -> None:
+        """Rerun the transiently failed jobs that a GitHub Actions URL names.
+
+        Args:
+            url: the URL of a workflow run, or of a job.
+            whole_run: whether a URL that names a job names the jobs of its run.
+        """
+        parsed = ci_build.parse_github_actions_url(url)
+        if parsed is None:
+            self.warn(f"cannot find a GitHub Actions workflow run in {url}")
+            return
+        repo, run, job = parsed
+        if whole_run:
+            job = None
+        if job is not None:
+            self.gha_rerun_failed(repo, run, job)
+        elif self.first_time(("gha", repo, run)):
+            self.gha_rerun_failed(repo, run)
+
+    ###########################################################################
+    ### Azure Pipelines
+    ###
+
+    def azure_rerun_failed(self, org: str, project: str, build: int) -> None:
+        """Rerun the failed jobs of an Azure Pipelines build that failed transiently.
+
+        Args:
+            org: the Azure DevOps organization.
+            project: the Azure DevOps project.
+            build: the build number.
+        """
+        build_url = f"https://dev.azure.com/{org}/{project}/_build/results?buildId={build}"
+        api = ci_build.azure_api(org, project, build)
+        try:
+            build_json = ci_build.azure_get(f"{api}?api-version=7.1")
+        except REQUEST_ERRORS as e:
+            self.warn(f"cannot read Azure Pipelines build {build_url}: {ci_build.failure(e)}")
+            return
+        print(f"Azure Pipelines build {build_json['definition']['name']}: {build_url}")
+        if build_json["status"] != "completed":
+            print(
+                f"  Its status is {build_json['status']}.  Run {PROGRAM} again after it finishes."
+            )
+            return
+        if build_json["result"] != "failed":
+            print(f"  Its result is {build_json['result']}.")
+            return
+
+        try:
+            records = ci_build.azure_get(f"{api}/timeline?api-version=7.1")["records"]
+        except REQUEST_ERRORS as e:
+            self.warn(
+                f"cannot read the timeline of Azure Pipelines build {build_url}:"
+                f" {ci_build.failure(e)}"
+            )
+            return
+
+        # For each stage that has a failed job:  whether each of its failed jobs failed
+        # transiently, could not be read, or did not fail transiently.
+        stage_results: dict[str, set[str]] = {}
+        stage_attempts: dict[str, int] = {}
+        for job in (r for r in records if r["type"] == "Job" and r["result"] == "failed"):
+            stage = azure_stage(job, records)
+            name = stage.get("identifier") or ""
+            stage_attempts[name] = max(
+                stage_attempts.get(name, 0), stage.get("attempt") or job.get("attempt") or 1
+            )
+            log, log_read = azure_job_log(api, job, records)
+            reason = transient_reason(log)
+            if reason is not None:
+                print(f"  {job['name']}: transient: {reason}")
+                result = "transient"
+            elif log_read:
+                print(f"  {job['name']}: not transient")
+                result = "not transient"
+            else:
+                self.warn(f"cannot read the log of Azure Pipelines job {job['name']} ({job['id']})")
+                result = "unreadable"
+            stage_results.setdefault(name, set()).add(result)
+
+        if not any("transient" in results for results in stage_results.values()):
+            return
+        if all(results == {"transient"} for results in stage_results.values()):
+            attempts = max(stage_attempts.values())
+            if attempts >= self.max_attempts:
+                print(f"  Not rerunning:  the build has already been run {attempts} times.")
+                return
+            url, body, what = f"{api}?retry=true&api-version=7.1", {}, "the failed jobs"
+        else:
+            stages = []
+            for name, results in sorted(stage_results.items()):
+                if "transient" not in results:
+                    continue
+                if "not transient" in results:
+                    print(
+                        f"  Not rerunning stage {name or 'of the build'}:  it has a failed job"
+                        " that did not fail transiently, and Azure Pipelines reruns all the"
+                        " failed jobs of a stage."
+                    )
+                elif "unreadable" in results:
+                    print(
+                        f"  Not rerunning stage {name or 'of the build'}:  it has a failed job"
+                        " whose log could not be read, and Azure Pipelines reruns all the"
+                        " failed jobs of a stage."
+                    )
+                elif stage_attempts[name] >= self.max_attempts:
+                    print(
+                        f"  Not rerunning stage {name}:  it has already been run"
+                        f" {stage_attempts[name]} times."
+                    )
+                else:
+                    stages.append(name)
+            if not stages:
+                return
+            url = f"{api}/stages/{stages[0]}?api-version=7.1"
+            body = {"state": "retry", "forceRetryAllJobs": False}
+            what = f"the failed jobs of stage {stages[0]}"
+            if len(stages) > 1:
+                what += " (rerun the other stages after the build finishes)"
+
+        def rerunning() -> bool:
+            headers = ci_build.azure_headers()
+            if not headers:
+                self.warn(
+                    f"cannot rerun Azure Pipelines build {build_url}:  AZURE_DEVOPS_EXT_PAT is"
+                    " not set and `az login` has not been run"
+                )
+                return False
+            ci_build.request("PATCH", url, headers, body)
+            return True
+
+        try:
+            if self.rerun(what, rerunning):
+                print(f"  Reran {what}.")
+        except REQUEST_ERRORS as e:
+            self.warn(
+                f"cannot rerun Azure Pipelines build {build_url}: {ci_build.failure(e)};"
+                " do the credentials have the Build (Read & execute) scope?"
+            )
+
+    def azure_rerun_failed_url(self, url: str) -> None:
+        """Rerun the transiently failed jobs of the Azure Pipelines build that a URL names.
+
+        Args:
+            url: the URL of a build, or of one of its jobs.
+        """
+        parsed = ci_build.parse_azure_url(url)
+        if parsed is None:
+            self.warn(f"cannot find an Azure Pipelines build in {url}")
+            return
+        if self.first_time(("azure", *parsed)):
+            self.azure_rerun_failed(*parsed)
+
+    ###########################################################################
+    ### Dispatching
+    ###
+
+    def url_rerun_failed(self, url: str, whole_workflow: bool = False) -> bool:
+        """Rerun the transiently failed jobs that a CI URL names.
+
+        Args:
+            url: the URL of a workflow, workflow run, build, or job.
+            whole_workflow: whether a URL that names a job names the jobs of its
+                workflow, workflow run, or build.
+
+        Returns:
+            Whether url is the URL of a supported CI service.
+        """
+        if ci_build.parse_circleci_url(url) is not None:
+            self.circleci_rerun_failed_url(url, whole_workflow)
+        elif ci_build.parse_github_actions_url(url) is not None:
+            self.gha_rerun_failed_url(url, whole_workflow)
+        elif ci_build.parse_azure_url(url) is not None:
+            self.azure_rerun_failed_url(url)
+        else:
+            return False
+        return True
+
+    def pr_rerun_failed(self, pr: str | None = None) -> None:
+        """Rerun the transiently failed checks of a pull request.
+
+        Args:
+            pr: the pull request (a number, URL, or branch), or None for the pull
+                request of the current branch.
+        """
+        description = pr or "for the current branch"
+        try:
+            checks = ci_build.run(
+                ["gh", "pr", "checks", *([pr] if pr else []), "--json", "name,bucket,link"]
+            )
+            failed = [c for c in json.loads(checks) if c["bucket"] == "fail"]
+        except REQUEST_ERRORS as e:
+            self.warn(
+                f"cannot read the checks of pull request {description}: {ci_build.failure(e)}"
+            )
+            return
+        if not failed:
+            print(f"No failed checks for pull request {description}.")
+            return
+        for check in failed:
+            # A check's link can name one job.  Examine the whole workflow, workflow run,
+            # or build, so that its failed jobs are rerun together:  rerunning one job
+            # of a CircleCI workflow creates a new workflow, so a later job of the old
+            # workflow would appear to have been rerun already.
+            if not self.url_rerun_failed(check["link"], whole_workflow=True):
+                print(
+                    f"{check['name']}: skipping a check from an unsupported CI service:"
+                    f" {check['link']}"
+                )
+
 
 ###########################################################################
-### Azure Pipelines
+### Reading logs
 ###
 
-# The file of HTTP headers for Azure DevOps API requests.  Putting the token in
-# a file keeps it out of the process list.  It is empty if there is no token.
-azure_headers="${tmpdir}/azure-headers"
-(
-  umask 077
-  if [ -n "${AZURE_DEVOPS_EXT_PAT-}" ]; then
-    printf 'Authorization: Basic %s\n' \
-      "$(printf ':%s' "${AZURE_DEVOPS_EXT_PAT}" | base64 | tr -d '\n')"
-  fi
-) > "${azure_headers}" || exit 1
 
-# Usage: azure_api URL [JSON-BODY]
-# Prints the result of an Azure DevOps API request:  a GET request, or a PATCH
-# request if JSON-BODY is given.  If a GET request with the token fails, this
-# makes it again without the token, because Azure DevOps refuses a token for
-# one organization even when reading a public project of another.
-azure_api() {
-  if [ "$#" -ge 2 ]; then
-    curl -sS -f -X PATCH -H @"${azure_headers}" \
-      -H 'Content-Type: application/json' -d "$2" "$1"
-  elif ! curl -sS -f -H @"${azure_headers}" "$1" 2> "${tmpdir}/azure-error"; then
-    if [ ! -s "${azure_headers}" ] || ! curl -sS -f "$1" 2> /dev/null; then
-      cat -- "${tmpdir}/azure-error" >&2
-      return 1
-    fi
-  fi
-}
+def circleci_job_log(slug: str, job: int) -> str:
+    """Read the output of the failed steps of a CircleCI job.
 
-# Usage: azure_job_log BUILD-API-URL JOB-ID
-# Prints the logs of the failed tasks of an Azure Pipelines job, followed by
-# the errors that the job and those tasks report, which describe failures,
-# such as a lost agent, that leave no log.  The file ${tmpdir}/timeline holds
-# the timeline of the job's build.
-azure_job_log() {
-  log_ids="$(jq -r --arg job "$2" '.records[]
-      | select(.parentId == $job and .result == "failed")
-      | .log.id // empty' -- "${tmpdir}/timeline")" || return 1
-  for log_id in ${log_ids}; do
-    azure_api "$1/logs/${log_id}?api-version=7.1" || return 1
-  done
-  jq -r --arg job "$2" '.records[]
-      | select(.id == $job or (.parentId == $job and .result == "failed"))
-      | .issues[]?.message' -- "${tmpdir}/timeline"
-}
+    Args:
+        slug: the job's project slug, such as "gh/ORG/REPO".
+        job: the job number.
 
-# Usage: azure_rerun_failed PROJECT-URL BUILD-ID
-# Reruns the failed jobs of the Azure Pipelines build that failed transiently.
-# PROJECT-URL is of the form https://dev.azure.com/ORGANIZATION/PROJECT.
-azure_rerun_failed() {
-  build_url="$1/_build/results?buildId=$2"
-  api="$1/_apis/build/builds/$2"
-  if ! build_json="$(azure_api "${api}?api-version=7.1")" \
-    || ! build_name="$(printf '%s' "${build_json}" | jq -r '.definition.name')"; then
-    warn "cannot read Azure Pipelines build ${build_url}"
-    return
-  fi
-  build_status="$(printf '%s' "${build_json}" | jq -r '.status')"
-  build_result="$(printf '%s' "${build_json}" | jq -r '.result')"
-  echo "Azure Pipelines build ${build_name}: ${build_url}"
+    Returns:
+        The output.
+    """
+    vcs, _, project = slug.partition("/")
+    v1_vcs = {"gh": "github", "bb": "bitbucket"}.get(vcs)
+    if v1_vcs is None:
+        msg = f"cannot read the log of a job of CircleCI project {slug}"
+        raise ValueError(msg)
+    details = ci_build.request(
+        "GET",
+        f"{ci_build.CIRCLECI_API}/v1.1/project/{v1_vcs}/{project}/{job}",
+        ci_build.circleci_headers(),
+    )
+    output = []
+    for step in details["steps"]:
+        for action in step["actions"]:
+            if action.get("status") in {"failed", "timedout"} and action.get("output_url"):
+                output.extend(m["message"] for m in ci_build.request("GET", action["output_url"]))
+    return "\n".join(output)
 
-  if [ "${build_status}" != "completed" ]; then
-    echo "  Its status is ${build_status}.  Run ${SCRIPT_NAME} again after it finishes."
-    return
-  fi
-  if [ "${build_result}" != "failed" ]; then
-    echo "  Its result is ${build_result}."
-    return
-  fi
 
-  # The failed jobs of the latest attempt, each with the identifier and the
-  # number of attempts of its stage.  A record's parent is a stage, a phase,
-  # or a job.
-  if ! azure_api "${api}/timeline?api-version=7.1" > "${tmpdir}/timeline" \
-    || ! failed_jobs="$(jq -r '
-        (reduce .records[] as $r ({}; .[$r.id] = $r)) as $by_id
-        | def stage:
-            if .type == "Stage" then .
-            elif .parentId == null or $by_id[.parentId] == null then null
-            else $by_id[.parentId] | stage end;
-          .records[]
-          | select(.type == "Job" and .result == "failed")
-          | (stage // {}) as $stage
-          | [.id, ($stage.identifier // ""), ($stage.attempt // .attempt), .name]
-          | @tsv' -- "${tmpdir}/timeline")"; then
-    warn "cannot read the timeline of Azure Pipelines build ${build_url}"
-    return
-  fi
+def gha_jobs(repo: str, run: int, which: str) -> list[dict[str, Any]]:
+    """Find the jobs of a GitHub Actions workflow run.
 
-  # The stages of the jobs that failed transiently, each with its number of
-  # attempts, one per line.
-  transient_stages=
-  # The stages of the jobs that did not fail transiently, one per line.
-  other_stages=
-  max_attempt=0
-  all_transient=1
-  IFS="${newline}"
-  for line in ${failed_jobs}; do
-    unset IFS
-    job_id="$(field 1 "${line}")"
-    stage="$(field 2 "${line}")"
-    attempt="$(field 3 "${line}")"
-    job_name="$(field 4- "${line}")"
-    if ! azure_job_log "${api}" "${job_id}" > "${tmpdir}/log"; then
-      warn "cannot read the log of Azure Pipelines job ${job_name} (${job_id})"
-    elif ! reason="$(transient_reason "${tmpdir}/log")"; then
-      echo "  ${job_name}: not transient"
-    else
-      echo "  ${job_name}: transient: ${reason}"
-      transient_stages="${transient_stages}${stage}${tab}${attempt}${newline}"
-      if [ "${attempt}" -gt "${max_attempt}" ]; then
-        max_attempt="${attempt}"
-      fi
-      continue
-    fi
-    all_transient=
-    other_stages="${other_stages}${stage}${newline}"
-  done
-  unset IFS
+    Args:
+        repo: the repository, as ORG/REPO.
+        run: the id of the workflow run.
+        which: "latest" for the jobs of the latest attempt, or "all" for the jobs of
+            every attempt.
 
-  if [ -z "${transient_stages}" ]; then
-    return
-  fi
-  if [ -n "${all_transient}" ]; then
-    if [ "${max_attempt}" -ge "${max_attempts}" ]; then
-      echo "  Not rerunning:  the build has already been run ${max_attempt} times."
-      return
-    fi
-    set -- "${api}?retry=true&api-version=7.1" '{}'
-    what="the failed jobs"
-  else
-    # The stage to rerun, and whether there are others.
-    rerun_stage=
-    more_stages=
-    IFS="${newline}"
-    for line in $(printf '%s' "${transient_stages}" | sort -u -t "${tab}" -k 1,1); do
-      unset IFS
-      stage="$(field 1 "${line}")"
-      attempt="$(field 2 "${line}")"
-      case "${newline}${other_stages}" in
-        *"${newline}${stage}${newline}"*)
-          echo "  Not rerunning stage ${stage:-of the build}:  it has a failed job that did not fail transiently, and Azure Pipelines reruns all the failed jobs of a stage."
-          ;;
-        *)
-          if [ "${attempt}" -ge "${max_attempts}" ]; then
-            echo "  Not rerunning stage ${stage}:  it has already been run ${attempt} times."
-          elif [ -z "${rerun_stage}" ]; then
-            rerun_stage="${stage}"
-          else
-            more_stages=1
-          fi
-          ;;
-      esac
-    done
-    unset IFS
-    if [ -z "${rerun_stage}" ]; then
-      return
-    fi
-    set -- "${api}/stages/${rerun_stage}?api-version=7.1" \
-      '{"state": "retry", "forceRetryAllJobs": false}'
-    what="the failed jobs of stage ${rerun_stage}"
-    if [ -n "${more_stages}" ]; then
-      what="${what} (rerun the other stages after the build finishes)"
-    fi
-  fi
-  if [ -n "${dry_run}" ]; then
-    echo "  Would rerun ${what}."
-    return
-  fi
-  if [ ! -s "${azure_headers}" ]; then
-    warn "cannot rerun Azure Pipelines build ${build_url}:  AZURE_DEVOPS_EXT_PAT is not set"
-    return
-  fi
-  if ! azure_api "$@" > /dev/null; then
-    warn "cannot rerun Azure Pipelines build ${build_url}; does AZURE_DEVOPS_EXT_PAT have the Build (Read & execute) scope?"
-    return
-  fi
-  echo "  Reran ${what}."
-}
+    Returns:
+        The jobs.
+    """
+    pages = ci_build.gh_api(
+        f"repos/{repo}/actions/runs/{run}/jobs?filter={which}&per_page=100", paginate=True
+    )
+    return [job for page in pages for job in page["jobs"]]
 
-# Usage: azure_rerun_failed_url URL
-# Reruns the transiently failed jobs of the Azure Pipelines build that a URL
-# names; the URL can name the build or one of its jobs.
-azure_rerun_failed_url() {
-  project_url="${1%%/_build*}"
-  build_id="$(printf '%s\n' "$1" | sed -n -e 's/.*[?&]buildId=\([0-9]*\).*/\1/p')"
-  if [ -z "${build_id}" ] || [ "${project_url}" = "$1" ]; then
-    warn "cannot find an Azure Pipelines build in $1"
-    return
-  fi
-  if first_time "azure ${project_url} ${build_id}"; then
-    azure_rerun_failed "${project_url}" "${build_id}"
-  fi
-}
+
+def gha_job_log(repo: str, job: int) -> tuple[str, bool]:
+    """Read the log of the failed steps of a GitHub Actions job, and its annotations.
+
+    The annotations describe failures, such as a lost runner, that leave no log.
+
+    Args:
+        repo: the repository, as ORG/REPO.
+        job: the id of the job.
+
+    Returns:
+        The log, followed by the annotations, and whether both could be read.  If one
+        could not be read, the log contains only the other.
+    """
+    parts = []
+    read = True
+    try:
+        log = ci_build.run(["gh", "run", "view", "--repo", repo, "--job", str(job), "--log-failed"])
+        # Each line starts with the job name and the step name, each followed by a tab.
+        parts.extend(line.split("\t", 2)[-1] for line in log.splitlines())
+    except REQUEST_ERRORS:
+        read = False
+    try:
+        pages = ci_build.gh_api(
+            f"repos/{repo}/check-runs/{job}/annotations?per_page=100", paginate=True
+        )
+        parts.extend(a["message"] for page in pages for a in page)
+    except REQUEST_ERRORS:
+        read = False
+    return "\n".join(parts), read
+
+
+def azure_stage(record: dict[str, Any], records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Find the stage that contains a record of an Azure Pipelines timeline.
+
+    A record's parent is a stage, a phase, or a job.
+
+    Returns:
+        The stage's record, or an empty dict if there is none.
+    """
+    by_id = {r["id"]: r for r in records}
+    while record.get("type") != "Stage":
+        record = by_id.get(record.get("parentId"), {})
+        if not record:
+            return {}
+    return record
+
+
+def azure_job_log(api: str, job: dict[str, Any], records: list[dict[str, Any]]) -> tuple[str, bool]:
+    """Read the logs of the failed tasks of an Azure Pipelines job, and its errors.
+
+    The errors that the job and its tasks report describe failures, such as a lost
+    agent, that leave no log.
+
+    Args:
+        api: the URL of the job's build in the Azure DevOps API.
+        job: the timeline record of the job.
+        records: the timeline of the job's build.
+
+    Returns:
+        The logs, followed by the errors, and whether every log could be read.
+    """
+    failed_tasks = [
+        r for r in records if r.get("parentId") == job["id"] and r["result"] == "failed"
+    ]
+    parts = []
+    read = True
+    for task in failed_tasks:
+        if (task.get("log") or {}).get("id") is None:
+            continue
+        try:
+            parts.append(
+                ci_build.azure_get(f"{api}/logs/{task['log']['id']}?api-version=7.1", text=True)
+            )
+        except REQUEST_ERRORS:
+            read = False
+    parts.extend(
+        issue["message"]
+        for r in [job, *failed_tasks]
+        for issue in r.get("issues") or []
+        if issue.get("message")
+    )
+    return "\n".join(parts), read
+
 
 ###########################################################################
 ### Main routine
 ###
 
-# Usage: pr_rerun_failed [PR-OR-BRANCH]
-# Reruns the transiently failed checks of a pull request.
-pr_rerun_failed() {
-  if ! checks="$(gh pr checks "$@" --json name,bucket,link)" \
-    || ! links="$(printf '%s' "${checks}" \
-      | jq -r '.[] | select(.bucket == "fail") | [.link, .name] | @tsv')"; then
-    warn "cannot read the checks of pull request ${1-for the current branch}"
-    return
-  fi
-  if [ -z "${links}" ]; then
-    echo "No failed checks for pull request ${1-for the current branch}."
-    return
-  fi
-  IFS="${newline}"
-  for line in ${links}; do
-    unset IFS
-    link="$(field 1 "${line}")"
-    name="$(field 2- "${line}")"
-    case "${link}" in
-      https://app.circleci.com/* | https://circleci.com/*)
-        circleci_rerun_failed_url "${link}"
-        ;;
-      https://github.com/*/actions/runs/*)
-        # Examine the whole run, so that its failed jobs are rerun together.
-        gha_rerun_failed_url "${link%%/job/*}"
-        ;;
-      https://dev.azure.com/*/_build/* | https://*.visualstudio.com/*/_build/*)
-        azure_rerun_failed_url "${link}"
-        ;;
-      *) echo "${name}: skipping a check from an unsupported CI service: ${link}" ;;
-    esac
-  done
-  unset IFS
-}
 
-if [ "$#" -eq 0 ]; then
-  pr_rerun_failed
-fi
-for arg in "$@"; do
-  case "${arg}" in
-    https://app.circleci.com/* | https://circleci.com/*) circleci_rerun_failed_url "${arg}" ;;
-    https://github.com/*/actions/runs/*) gha_rerun_failed_url "${arg}" ;;
-    https://dev.azure.com/*/_build/* | https://*.visualstudio.com/*/_build/*) azure_rerun_failed_url "${arg}" ;;
-    *) pr_rerun_failed "${arg}" ;;
-  esac
-done
+def positive_integer(text: str) -> int:
+    """Parse a positive integer, for argparse.
 
-exit "${status}"
+    Returns:
+        The integer.
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        msg = f"requires a positive number: {text}"
+        raise argparse.ArgumentTypeError(msg)
+    return value
+
+
+def main() -> int:
+    """Rerun, or with --classify classify, according to the command line.
+
+    Returns:
+        The exit status.
+    """
+    parser = argparse.ArgumentParser(
+        prog=PROGRAM,
+        description=__doc__.splitlines()[0] if __doc__ else None,
+    )
+    parser.add_argument("-n", "--dry-run", action="store_true", help="report but do not rerun")
+    parser.add_argument(
+        "--max-attempts", type=positive_integer, default=3, help="the most runs of a job"
+    )
+    parser.add_argument(
+        "--classify", action="store_true", help="classify log files; contact no server"
+    )
+    parser.add_argument("args", nargs="*", metavar="PR | BRANCH | URL | LOG-FILE")
+    args = parser.parse_args()
+
+    if args.classify:
+        return classify(args.args)
+
+    if shutil.which("gh") is None:
+        sys.exit(f"{PROGRAM}: requires the gh command")
+    rerunner = Rerunner(args.dry_run, args.max_attempts)
+    if not args.args:
+        rerunner.pr_rerun_failed()
+    for arg in args.args:
+        if not rerunner.url_rerun_failed(arg):
+            rerunner.pr_rerun_failed(arg)
+    return rerunner.status
+
+
+if __name__ == "__main__":
+    sys.exit(main())

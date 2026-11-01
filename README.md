@@ -141,11 +141,17 @@ The commands are:
   the current branch) whose log shows a transient failure, such as a network
   error or a rate limit, rather than a problem with the code.  A URL names a
   CircleCI, GitHub Actions, or Azure Pipelines job or workflow to examine
-  instead.  It does not
-  rerun a workflow that is still running, that has been rerun since, or that
-  has already run N times (by default, 3).
+  instead.  It does not rerun a workflow that is still running or that has
+  been rerun since, nor a job that has already run N times (by default, 3).
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
-  shows a transient failure.  This command needs `gh`, `jq`, and `curl`.
+  shows a transient failure.  This command needs Python 3 and `gh`.
+* [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:
+  Cancels the unfinished GitHub Actions, Azure Pipelines, and CircleCI builds
+  of each blocked pull request (one that depends on another open pull
+  request), and each build that a more recent build of the same branch makes
+  redundant.  Run it in the directory that holds the documents that
+  `pr-status.py` generates; it uses `pr-status.py` to find the blocked pull
+  requests.  This command needs Python 3.11 or later and `gh`.
 * [`normalize-log`](normalize-log) `[FILE]...`:
   Prints each CI log (by default, standard input) without the formatting that
   a CI service or a terminal adds:  a leading byte order mark, a leading
@@ -180,12 +186,16 @@ takes effect when it is set to a non-empty value.
   compilation step, and push whenever the merge succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
-* `CIRCLECI_CLI_TOKEN`: `rerun-failed-ci` uses this CircleCI API token, which
-  rerunning a CircleCI job requires.  If it is not set, `rerun-failed-ci` uses
-  the `token` in `~/.circleci/cli.yml`, which `circleci setup` writes.
-* `AZURE_DEVOPS_EXT_PAT`: `rerun-failed-ci` uses this Azure DevOps personal
-  access token, which rerunning an Azure Pipelines build requires.  The token
-  needs the "Build (Read & execute)" scope.
+* `CIRCLECI_CLI_TOKEN`: `rerun-failed-ci` and `cancel-blocked-ci` use this
+  CircleCI API token, which rerunning or cancelling a CircleCI workflow
+  requires.  If it is not set, they use the `token` in `~/.circleci/cli.yml`
+  or (for the snap package) `~/snap/circleci/current/.circleci/cli.yml`,
+  which `circleci setup` writes.
+* `AZURE_DEVOPS_EXT_PAT`: `rerun-failed-ci` and `cancel-blocked-ci` use this
+  Azure DevOps personal access token, which rerunning or cancelling an Azure
+  Pipelines build, or reading a private project, requires.  The token needs the
+  "Build (Read & execute)" scope.  If it is not set, they use the account that
+  `az login` logged in.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
   `git-orphaned-branches`, `git-new-branch`, `git-checkout-branch`, and
   `git-push-to` use these standard Git variables to select the SSH command
