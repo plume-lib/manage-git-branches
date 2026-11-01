@@ -92,12 +92,8 @@
 #
 # When the merge of FROM_DIR's branch into TO_DIR has conflicts that
 # `git rerere` or an AI agent (see below) resolves, this script checks the
-# resolution:  every change relative to AUTO_MERGE, git's automatic merge,
-# must be inside a conflict region, and the resolution must contain no
-# conflict markers.  Then it stages the files, commits the merge, and
-# continues.  Only content conflicts are handled, in which every conflicted
-# file contains conflict markers, and only when the working tree has no other
-# changes.  Otherwise, this script stops with the merge still in progress, for
+# resolution; `resolve_merge_conflicts` in common-functions.sh describes the
+# check.  Otherwise, this script stops with the merge still in progress, for
 # the user to finish or to abort with `git merge --abort`.
 
 # Asking an AI agent
