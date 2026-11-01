@@ -24,12 +24,14 @@
 #              store rather than holding a copy of it.  Its contents are the
 #              same as the current directory's, including uncommitted
 #              changes, staged changes, untracked files, and ignored files
-#              such as build output.
+#              such as build output, except for nested worktrees and some
+#              build output that refers to the current directory.
 #   --clean    a linked worktree that holds a clean checkout of the new
 #              branch and nothing else.  It is the cheapest mode, in both
 #              time and disk space, for starting fresh work.
-#   --copy     a copy of the whole current directory, `.git` included, so it
-#              is an independent clone that shares nothing with the current
+#   --copy     a copy of the whole current directory, `.git` included, with
+#              the same exceptions as the default mode, so it is an
+#              independent clone that shares nothing with the current
 #              repository.
 #
 # A working tree that has submodules gets `--copy` automatically, and
@@ -48,7 +50,8 @@
 # gives the new branch no upstream branch, even under
 # `branch.autoSetupMerge=always`; `git-push-to` and `git-pull-from` require
 # one.  The first `git push` of the new branch sets its upstream branch if
-# `push.autoSetupRemote` is true (git 2.37 or later); otherwise,
+# `push.autoSetupRemote` is true (git 2.37 or later) and `push.default` is
+# "simple" (the default), "upstream", or "current"; otherwise,
 # `git push -u REMOTE NEWBRANCHNAME` does.  Nor does this command build.
 #
 # Details:
@@ -84,8 +87,8 @@
 # `.claude/worktrees/`, because its copy would share that worktree's HEAD and
 # index; they say which ones they left out.
 #
-# `choose_mode_for_submodules` says why submodules change the mode, or
-# prevent `--clean`.  A repository that has no
+# The documentation of `choose_mode_for_submodules` says why submodules change
+# the mode or prevent `--clean`.  A repository that has no
 # commit is refused, because there is nothing to branch from.  Every mode but
 # `--clean` is refused while a merge, cherry-pick, revert, or rebase is in
 # progress, because the new directory would get the operation's staged

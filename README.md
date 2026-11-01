@@ -46,8 +46,9 @@ The commands are:
   fast-forwards `master` to `upstream/master`.
   By default, the new directory is a worktree (see [below](#worktrees)) whose
   contents are the same as the current directory's, including uncommitted
-  changes, untracked files, and build output; `--clean` and `--copy` make
-  other kinds of directory.
+  changes, untracked files, and build output, except for nested worktrees
+  and some build output that refers to the current directory; `--clean` and
+  `--copy` make other kinds of directory.
   Instead of BRANCHNAME, the argument can be a slug of the form
   `ORG:BRANCHNAME`, such as `git-new-branch mernst:feature`, in any working
   tree of the project, such as `PROJECT`, `PROJECT-fork-OTHERORG`, or one of
