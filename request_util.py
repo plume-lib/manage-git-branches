@@ -68,7 +68,7 @@ def gh_api(path: str, *, paginate: bool = False) -> Any:
 
     Args:
         path: the request, such as "repos/ORG/REPO/actions/runs/123".
-        paginate: whether to read every page of the response.
+        paginate: True if every page of the response should be read.
 
     Returns:
         The response, parsed as JSON; with paginate, a list of the pages.
