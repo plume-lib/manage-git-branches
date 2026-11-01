@@ -2,8 +2,8 @@
 
 # Tests that `git-push-to` asks an AI agent to resolve a merge that has
 # conflicts, checks its work, and commits the merge; that it asks the agent to
-# fix a failed build; that `--no-llm` prevents both; and that
-# `git-pull-upstream` does the same.
+# fix a failed build, including one that a pull broke; that `--no-llm`
+# prevents both; and that `git-pull-upstream` does the same.
 #
 # Usage:
 #   tests/test-push-to-llm.sh
@@ -898,6 +898,97 @@ check_not_pushed "build failure without a merge"
 if [ -s "${STUB_LOG}" ]; then
   fail "build failure without a merge: an agent ran: $(cat "${STUB_LOG}")"
 fi
+
+## Usage: setup_pull_breaks NAME [MAIN]
+## Creates a case of kind "build" (see `setup_case`) in which pulling feature
+## merges a local commit, which changes file.txt, with a commit of the remote
+## that adds "BROKEN" to other.txt.  Unless MAIN is "main", main is reset to
+## the initial commit, which feature already contains, so that merging main
+## changes nothing.  Sets ${feature_head} to the remote's feature and
+## ${local_head} to the local feature before the pull.
+setup_pull_breaks() {
+  setup_case "$1" build
+  if [ "${2:-}" != main ]; then
+    git -C "${main_dir}" reset -q --hard HEAD^
+    git -C "${main_dir}" push -q --force
+  fi
+  git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+  echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
+  git -C "${case_dir}/other-clone" commit -q -a -m "Break the build remotely"
+  git -C "${case_dir}/other-clone" push -q
+  feature_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
+  write_file "${feature_dir}/file.txt" one two three-local four five six SEVEN-feature eight nine
+  git -C "${feature_dir}" commit -q -a -m "Change feature locally"
+  local_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+}
+
+## Usage: check_pull_fixed DESCRIPTION MERGED
+## Checks that the fix of the build, whose message names MERGED, was
+## committed on top of the merge of the pull of feature, and was pushed, and
+## that the agent was told what changed since ${local_head}.
+check_pull_fixed() {
+  if ! grep -q "git diff ${local_head} HEAD" "${STUB_PROMPT}"; then
+    fail "$1: the instructions do not name the head before the pull: $(cat "${STUB_PROMPT}")"
+  fi
+  message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+  if [ "${message}" != "Fix the build after merging $2" ]; then
+    fail "$1: wrong message for the fix: ${message}"
+  fi
+  if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+    fail "$1: the build is not fixed"
+  fi
+  if ! git -C "${remote}" merge-base --is-ancestor "${local_head}" refs/heads/feature \
+    || ! git -C "${remote}" merge-base --is-ancestor "${feature_head}" refs/heads/feature; then
+    fail "$1: the fix is not on top of the merge of the pull"
+  fi
+}
+
+## A pull that breaks the build, followed by a merge that changes nothing, is
+## fixed too.
+setup_pull_breaks pull-build
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "pull that breaks the build: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "pull that breaks the build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+check_pull_fixed "pull that breaks the build" "remote-tracking branch 'origin/feature'"
+
+## When both the pull and the merge change the branch, the agent is told
+## about both.
+setup_pull_breaks pull-build-merge main
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "pull and merge that break the build: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "pull and merge that break the build: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+check_pull_fixed "pull and merge that break the build" \
+  "remote-tracking branch 'origin/feature' and branch 'main'"
+
+## With --no-llm, a pull that breaks the build is not given to an agent.
+setup_pull_breaks pull-build-no-llm
+STUB_BUILD=fix push_to good --no-llm
+check_not_pushed "pull that breaks the build, with --no-llm"
+if [ -s "${STUB_LOG}" ]; then
+  fail "pull that breaks the build, with --no-llm: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## `git-pull-upstream` fixes a build that its pull breaks, even when merging
+## the upstream repository's default branch changes nothing.
+setup_pull_breaks pull-upstream-build
+git -C "${feature_dir}" remote set-head origin main
+if ! pull_upstream_output="$(cd "${feature_dir}" && STUB_BUILD=fix PATH="${WORK_DIR}/test-bin:${PATH}" \
+  MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT='' "${COMMANDS_DIR}/git-pull-upstream" --llm 2>&1)"; then
+  fail "git-pull-upstream after a pull that breaks the build failed: ${pull_upstream_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "git-pull-upstream after a pull that breaks the build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+check_pull_fixed "git-pull-upstream after a pull that breaks the build" \
+  "remote-tracking branch 'origin/feature'"
 build=0
 
 ## An agent that is not installed is not asked to fix the build.  The merge
