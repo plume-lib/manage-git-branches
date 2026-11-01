@@ -1831,10 +1831,9 @@ has_unbuilt_merge() {
     fi
   done
   # The merge commits that the remote branches and BUILT's histories lack,
-  # oldest first, one per line:  the commit, its abbreviation, its parents,
-  # its tree, and its subject, separated by tabs.
+  # oldest first.
   # shellcheck disable=SC2086 # the variables are lists of commits
-  if ! merge_fix_log="$(git log --reverse --merges --format='%H%x09%h%x09%P%x09%T%x09%s' \
+  if ! merge_fix_log="$(git log --reverse --merges --format=%H \
     HEAD --not ${merge_fix_remotes} ${merge_fix_built} --)"; then
     echo "${SCRIPT_NAME}: cannot list the merge commits in $(pwd), so no AI agent is asked to fix the build" >&2
     return 1
@@ -1843,10 +1842,11 @@ has_unbuilt_merge() {
   # "* ABBREVIATION SUBJECT", one per merge.
   merge_fix_subjects=''
   merge_fix_list=''
-  merge_fix_tab="$(printf '\t')"
-  while IFS="${merge_fix_tab}" read -r merge_fix_commit merge_fix_abbrev merge_fix_parents merge_fix_merge_tree merge_fix_subject; do
-    if [ -z "${merge_fix_commit}" ]; then
-      continue
+  for merge_fix_commit in ${merge_fix_log}; do
+    if ! merge_fix_merge_tree="$(git rev-parse --verify --quiet "${merge_fix_commit}^{tree}")" \
+      || ! merge_fix_parents="$(git rev-parse "${merge_fix_commit}^@")"; then
+      echo "${SCRIPT_NAME}: cannot read commit ${merge_fix_commit} in $(pwd), so no AI agent is asked to fix the build" >&2
+      return 1
     fi
     merge_fix_combined=1
     for merge_fix_parent in ${merge_fix_parents}; do
@@ -1859,12 +1859,17 @@ has_unbuilt_merge() {
       fi
     done
     if [ "${merge_fix_combined}" -eq 1 ]; then
+      if ! merge_fix_subject="$(git log -1 --format=%s "${merge_fix_commit}")" \
+        || ! merge_fix_abbrev="$(git rev-parse --short "${merge_fix_commit}")"; then
+        echo "${SCRIPT_NAME}: cannot read commit ${merge_fix_commit} in $(pwd), so no AI agent is asked to fix the build" >&2
+        return 1
+      fi
       merge_fix_subjects="${merge_fix_subjects:+${merge_fix_subjects}
 }${merge_fix_subject}"
       merge_fix_list="${merge_fix_list:+${merge_fix_list}
 }* ${merge_fix_abbrev} ${merge_fix_subject}"
     fi
-  done << EOF
+  done
 ${merge_fix_log}
 EOF
   if [ -z "${merge_fix_subjects}" ]; then
