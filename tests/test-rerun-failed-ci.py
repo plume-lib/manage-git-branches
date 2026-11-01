@@ -30,6 +30,7 @@ import request_util  # ruff: ignore[module-import-not-at-top-of-file]
 
 if TYPE_CHECKING:
     import types
+    from collections.abc import Mapping
 
 
 def load_script() -> types.ModuleType:
@@ -94,6 +95,8 @@ class FakeServer:
         url: str,
         headers: dict[str, str] | None = None,  # ruff: ignore[unused-method-argument]
         body: Any = None,
+        *,
+        refusals: Mapping[int, str] | None = None,  # ruff: ignore[unused-method-argument]
     ) -> bytes:
         """Serve an HTTP request, as request_util.http does.
 

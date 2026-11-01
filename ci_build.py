@@ -168,8 +168,9 @@ def azure_get(url: str, *, text: bool = False) -> Any:
 
     def get(headers: dict[str, str]) -> Any:
         if text:
-            return request_util.http("GET", url, headers).decode(errors="replace")
-        return request_util.request("GET", url, headers)
+            content = request_util.http("GET", url, headers, refusals=AZURE_SIGN_IN)
+            return content.decode(errors="replace")
+        return azure_request("GET", url, headers)
 
     match = re.match(r"https://dev\.azure\.com/([^/]+/[^/]+)/", url)
     project = match[1] if match else url

@@ -622,7 +622,7 @@ class Rerunner:
                     " not set and `az login` has not been run"
                 )
                 return False
-            request_util.request("PATCH", url, headers, body)
+            ci_build.azure_request("PATCH", url, headers, body)
             return True
 
         try:
