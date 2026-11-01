@@ -11,7 +11,10 @@ The builds of a blocked PR are those of its head branch that the PR or a push
 started.  If the head branch is a shared branch, they are only the builds that the
 PR started.  A shared branch is the repository's default branch (as for a PR that
 merges the default branch into a release branch), a protected branch, the base branch
-of an open PR, or the head branch of an open PR that is not blocked.
+of an open PR, or the head branch of an open PR that is not blocked.  A base branch is
+shared because it can be a long-lived branch, such as "develop", whose push builds are
+its own CI.  So in a stack of PRs that target each other, the push builds of a blocked
+PR whose head branch is the base of another open PR are not cancelled.
 
 A build is redundant if a push or a pull request started it, and a more recent
 build of the same workflow (for Azure Pipelines, of the same pipeline), for the
@@ -960,7 +963,8 @@ def unfinished_runs(gh):
         gh: a repository's GitHub slug, such as "ORG/REPO".
 
     Returns:
-        A map from (head repository owner, branch) to the unfinished runs of that branch.
+        A map from (head repository owner, in lower case, branch) to the unfinished runs of
+        that branch.  The owner is None for a run whose head repository is gone.
     """
     # GitHub's API takes one status per query.  A run whose status changes between the
     # queries can appear in the results of two of them, so the runs are keyed by run id.
@@ -977,7 +981,10 @@ def unfinished_runs(gh):
                 runs[r["id"]] = r
     result = {}
     for r in runs.values():
-        result.setdefault((run_owner(r), r["head_branch"]), []).append(r)
+        owner = run_owner(r)
+        # GitHub logins are case-insensitive.
+        key = (owner and owner.lower(), r["head_branch"])
+        result.setdefault(key, []).append(r)
     return result
 
 
@@ -1013,7 +1020,8 @@ def blocked_pr_runs(pr, runs, on_shared_branch):
         A list of the runs.
     """
     events = {"pull_request"} if on_shared_branch else GITHUB_REDUNDANT_EVENTS
-    return [r for r in runs.get((pr["owner"], pr["headRefName"]), []) if r["event"] in events]
+    branch_runs = runs.get((pr["owner"].lower(), pr["headRefName"]), [])
+    return [r for r in branch_runs if r["event"] in events]
 
 
 def redundant_runs(label, gh, runs):
