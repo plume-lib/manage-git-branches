@@ -1050,7 +1050,7 @@ for mode in '' --copy; do
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete: ${out}"
   fi
   case "${out}" in
-    *": 8 files in \`.gradle/\`, \`.ruff_cache/\`, \`build/\`, and \`target/\`."*) ;;
+    *": 8 files in \`.gradle/\`, \`.ruff_cache/\`, \`build/\`, \`target/\`."*) ;;
     *) fail "${mode:-the default mode} did not say that it deleted 8 files: ${out}" ;;
   esac
   for deleted_file in out/cache/entry \
@@ -1139,7 +1139,7 @@ if ! out="$(cd "${deleted}" && "${GIT_NEW_BRANCH}" deletednested 2>&1)"; then
   fail "nonzero exit status with nested configured build directories: ${out}"
 fi
 case "${out}" in
-  *" from \`sub/build/debug/\` and \`sub/build/release/\` in "*"Reconfigure them before building there."*) ;;
+  *" from \`sub/build/debug/\`, \`sub/build/release/\` in "*"Reconfigure them before building there."*) ;;
   *) fail "did not say that sub/build/debug/ and sub/build/release/ need to be reconfigured: ${out}" ;;
 esac
 case "${out}" in
@@ -1178,7 +1178,7 @@ for mode in '' --copy; do
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete in a submodule: ${out}"
   fi
   case "${out}" in
-    *": 2 files in \`.gradle/\` and \`build/\`."*) ;;
+    *": 2 files in \`.gradle/\`, \`build/\`."*) ;;
     *) fail "${mode:-the default mode} did not say that it deleted 2 files in a submodule: ${out}" ;;
   esac
   for named_file in sub/notes.txt build/out/tool.txt; do
