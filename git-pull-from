@@ -78,8 +78,9 @@ fi
 # shellcheck source=common-functions.sh
 . "${SCRIPT_DIR}/common-functions.sh"
 
-# The options to pass to `git-push-to`.  Git forbids whitespace in the
-# options, so they can be kept in a whitespace-separated string.
+# The options to pass to `git-push-to`.  Each is one of the fixed words that
+# this loop accepts, none of which contains whitespace, so they can be kept in
+# a whitespace-separated string.
 push_to_options=''
 while [ "$#" -ge 1 ]; do
   case "$1" in

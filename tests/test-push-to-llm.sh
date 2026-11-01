@@ -51,6 +51,10 @@ fail() {
 ##   commit: as "good", but also commits the merge
 ##   create: as "good", but also creates a file
 ##   config: as "good", but also changes git's configuration
+##   change-untracked: as "good", but also changes the untracked file notes.txt
+##   delete-untracked: as "good", but also deletes the untracked file notes.txt
+##   separator: removes the conflict marker lines except "======="
+##   hook-link: as "good", but also makes a hook a symbolic link to file.txt
 ## Otherwise, it is fixing a build, and it acts according to ${STUB_BUILD}:
 ##   fix:    removes the lines of other.txt that break the build
 ##   bad:    creates or changes notes.txt, which does not fix the build
@@ -78,6 +82,11 @@ if ! grep -q '^<<<<<<< ' file.txt; then
 fi
 if [ "${STUB_MODE}" = fail ]; then exit 3; fi
 if [ "${STUB_MODE}" = none ]; then exit 0; fi
+if [ "${STUB_MODE}" = separator ]; then
+  sed -e '/^<<<<<<< /d' -e '/^>>>>>>> /d' file.txt > file.txt.new
+  mv file.txt.new file.txt
+  exit 0
+fi
 sed -e '/^<<<<<<< /d' -e '/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new
 mv file.txt.new file.txt
 if [ "${STUB_MODE}" = clean ]; then
@@ -86,6 +95,15 @@ if [ "${STUB_MODE}" = clean ]; then
 fi
 if [ "${STUB_MODE}" = create ]; then
   echo "scratch" > scratch.txt
+fi
+if [ "${STUB_MODE}" = change-untracked ]; then
+  echo "changed" >> notes.txt
+fi
+if [ "${STUB_MODE}" = delete-untracked ]; then
+  rm notes.txt
+fi
+if [ "${STUB_MODE}" = hook-link ]; then
+  ln -s ../../file.txt .git/hooks/pre-commit
 fi
 if [ "${STUB_MODE}" = config ]; then
   git config core.fsmonitor "echo pwned"
@@ -102,21 +120,23 @@ STUB_LOG="${WORK_DIR}/stub-log"
 STUB_PROMPT="${WORK_DIR}/stub-prompt"
 export STUB_LOG STUB_PROMPT
 
-## Usage: setup_case NAME [build]
+## Usage: setup_case NAME [KIND [LAST-LINE]]
 ## Creates a remote under ${WORK_DIR}/NAME with branches "main" and
-## "feature", whose changes to file.txt conflict, and a clone of each.  Sets
+## "feature", whose changes to file.txt conflict, and a clone of each.  Every
+## version of file.txt ends with the line LAST-LINE, if it is given.  Sets
 ## ${main_dir} and ${feature_dir} to the clones and ${remote} to the remote.
-## With "build", the project has a Makefile, whose build fails if other.txt
+## With KIND "build", the project has a Makefile, whose build fails if other.txt
 ## contains "BROKEN", and main adds "BROKEN" to other.txt.  With
 ## "build-modifies", the build also changes the tracked file other.txt if
 ## notes.txt exists.
 setup_case() {
+  case_last_line="${3-}"
   case_dir="${WORK_DIR}/$1"
   mkdir "${case_dir}"
   remote="${case_dir}/myrepo.git"
   git init -q --bare -b main "${remote}"
   git init -q -b main "${case_dir}/seed"
-  printf '%s\n' one two three four five six seven eight nine > "${case_dir}/seed/file.txt"
+  write_file "${case_dir}/seed/file.txt" one two three four five six seven eight nine
   git -C "${case_dir}/seed" add file.txt
   if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
     echo 'all:' > "${case_dir}/seed/Makefile"
@@ -144,17 +164,28 @@ setup_case() {
   git -C "${main_dir}" config pull.rebase false
   git -C "${feature_dir}" config pull.rebase false
 
-  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${main_dir}/file.txt"
+  write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
   if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
     echo "BROKEN" >> "${main_dir}/other.txt"
   fi
   git -C "${main_dir}" commit -q -a -m "Change main"
   git -C "${main_dir}" push -q
-  printf '%s\n' one two three four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
+  write_file "${feature_dir}/file.txt" one two three four five six SEVEN-feature eight nine
   git -C "${feature_dir}" commit -q -a -m "Change feature"
   git -C "${feature_dir}" push -q
   feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
   : > "${STUB_LOG}"
+}
+
+## Usage: write_file FILE LINE...
+## Writes the LINEs, and then ${case_last_line} if it is not empty, to FILE.
+write_file() {
+  write_file_name="$1"
+  shift
+  printf '%s\n' "$@" > "${write_file_name}"
+  if [ -n "${case_last_line}" ]; then
+    printf '%s\n' "${case_last_line}" >> "${write_file_name}"
+  fi
 }
 
 ## Usage: push_to MODE OPTION...
@@ -206,18 +237,26 @@ check_resolved() {
   fi
 }
 
-## Usage: check_not_resolved DESCRIPTION
-## Checks that git-push-to failed, pushed nothing, and left the merge in
-## progress.
-check_not_resolved() {
+## Usage: check_not_pushed DESCRIPTION
+## Checks that git-push-to failed and pushed nothing.
+check_not_pushed() {
   if [ "${push_status}" -eq 0 ]; then
     fail "$1: git-push-to succeeded"
   fi
   if [ "$(git -C "${remote}" rev-parse refs/heads/feature)" != "${feature_head}" ]; then
     fail "$1: pushed to feature"
   fi
-  if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null \
-    && [ "$(git -C "${feature_dir}" rev-parse HEAD)" = "${feature_head}" ]; then
+}
+
+## Usage: check_not_resolved DESCRIPTION
+## Checks that git-push-to failed, pushed nothing, committed nothing, and left
+## the merge in progress.
+check_not_resolved() {
+  check_not_pushed "$1"
+  if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "${feature_head}" ]; then
+    fail "$1: HEAD changed"
+  fi
+  if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
     fail "$1: the merge is not in progress"
   fi
 }
@@ -260,6 +299,11 @@ setup_case codex-resolve
 push_to good --codex --llm
 check_resolved codex "--codex --llm"
 
+## --llm turns on the agent that was chosen before --no-llm.
+setup_case codex-no-llm-llm
+push_to good --codex --no-llm --llm
+check_resolved codex "--codex --no-llm --llm"
+
 ## The last of --claude and --codex wins.
 setup_case codex-claude
 push_to good --codex --claude
@@ -295,7 +339,7 @@ esac
 ## An agent that commits is rejected.
 setup_case commit
 push_to commit --llm
-check_not_resolved "agent that commits"
+check_not_pushed "agent that commits"
 case "${push_output}" in
   *"changed HEAD or MERGE_HEAD"*) ;;
   *) fail "agent that commits: wrong diagnostic: ${push_output}" ;;
@@ -310,6 +354,49 @@ case "${push_output}" in
   *) fail "agent that creates a file: wrong diagnostic: ${push_output}" ;;
 esac
 
+## An agent that changes or deletes an untracked file is rejected.
+for untracked_mode in change-untracked delete-untracked; do
+  setup_case "${untracked_mode}"
+  echo "notes" > "${feature_dir}/notes.txt"
+  push_to "${untracked_mode}" --llm
+  check_not_resolved "${untracked_mode}"
+  case "${untracked_mode}:${push_output}" in
+    change-untracked:*"changed an untracked file: notes.txt"*) ;;
+    delete-untracked:*"deleted an untracked file: notes.txt"*) ;;
+    *) fail "${untracked_mode}: wrong diagnostic: ${push_output}" ;;
+  esac
+done
+
+## A file that contains a line that looks like a conflict marker is refused.
+setup_case marker-like '' '>>>>>>> fixture'
+push_to good --llm
+check_not_resolved "marker-like line"
+case "${push_output}" in
+  *"contains lines that look like conflict markers"*) ;;
+  *) fail "marker-like line: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "marker-like line: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## A remaining separator is rejected.
+setup_case separator
+push_to separator --llm
+check_not_resolved "remaining separator"
+case "${push_output}" in
+  *"is a conflict marker"*) ;;
+  *) fail "remaining separator: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that adds a hook that is a symbolic link is rejected.
+setup_case hook-link
+push_to hook-link --llm
+check_not_resolved "agent that adds a linked hook"
+case "${push_output}" in
+  *"changed git's configuration or hooks"*) ;;
+  *) fail "agent that adds a linked hook: wrong diagnostic: ${push_output}" ;;
+esac
+
 ## An agent that changes git's configuration is rejected.
 setup_case config
 push_to config --llm
@@ -320,9 +407,10 @@ case "${push_output}" in
 esac
 
 ## A resolution that `git rerere` recorded needs no agent, whether or not
-## rerere stages the files that it resolves.
-for auto_update in false true; do
-  setup_case "rerere-${auto_update}"
+## rerere stages the files that it resolves, and is used even with --no-llm.
+for rerere_case in false:--llm true:--llm false:--no-llm true:--no-llm; do
+  auto_update="${rerere_case%%:*}"
+  setup_case "rerere-${auto_update}${rerere_case#*:}"
   git -C "${feature_dir}" config rerere.enabled true
   git -C "${feature_dir}" config rerere.autoUpdate "${auto_update}"
   git -C "${feature_dir}" fetch -q
@@ -332,8 +420,8 @@ for auto_update in false true; do
   (cd "${feature_dir}" && sed -e '/^<<<<<<< /d' -e '/^=======$/d' -e '/^>>>>>>> /d' file.txt > file.txt.new \
     && mv file.txt.new file.txt && git add file.txt && git commit -q --no-edit) 2> /dev/null
   git -C "${feature_dir}" reset -q --hard "${feature_head}"
-  push_to none --llm
-  check_resolved "" "rerere (autoUpdate ${auto_update})"
+  push_to none "${rerere_case#*:}"
+  check_resolved "" "rerere (autoUpdate ${auto_update}, ${rerere_case#*:})"
 done
 
 ## A failed build is fixed, and the fix is committed on top of the merge.
@@ -361,7 +449,7 @@ fi
 ## An agent that changes nothing gets one attempt.
 setup_case build-none build
 STUB_BUILD=none push_to good --llm
-check_not_resolved "build not fixed"
+check_not_pushed "build not fixed"
 case "${push_output}" in
   *"claude did not fix the build"*) ;;
   *) fail "build not fixed: wrong diagnostic: ${push_output}" ;;
@@ -373,7 +461,7 @@ fi
 ## An agent whose changes do not fix the build gets three attempts.
 setup_case build-bad build
 STUB_BUILD=bad push_to good --llm
-check_not_resolved "bad build fix"
+check_not_pushed "bad build fix"
 case "${push_output}" in
   *"in 3 attempts"*) ;;
   *) fail "bad build fix: wrong diagnostic: ${push_output}" ;;
@@ -387,7 +475,7 @@ fi
 # A rerun does not build the staged changes, which would not be pushed.
 : > "${STUB_LOG}"
 STUB_BUILD=bad push_to good --llm
-check_not_resolved "rerun after a bad build fix"
+check_not_pushed "rerun after a bad build fix"
 case "${push_output}" in
   *"has uncommitted changes"*) ;;
   *) fail "rerun after a bad build fix: wrong diagnostic: ${push_output}" ;;
@@ -421,7 +509,7 @@ fi
 ## An agent that creates a file that git ignores is rejected.
 setup_case build-ignored build
 STUB_BUILD=ignored push_to good --llm
-check_not_resolved "build fix in an ignored file"
+check_not_pushed "build fix in an ignored file"
 case "${push_output}" in
   *"created a file that git ignores: fix.local"*) ;;
   *) fail "build fix in an ignored file: wrong diagnostic: ${push_output}" ;;
@@ -431,7 +519,7 @@ esac
 ## attempt changed files; the later attempt learns of the earlier one.
 setup_case build-once build
 STUB_BUILD=once push_to good --llm
-check_not_resolved "build fix that gives up"
+check_not_pushed "build fix that gives up"
 case "${push_output}" in
   *"it changed nothing"*) ;;
   *) fail "build fix that gives up: wrong diagnostic: ${push_output}" ;;
@@ -447,7 +535,7 @@ fi
 ## are not committed as the agent's.
 setup_case build-modifies build-modifies
 STUB_BUILD=bad push_to good --llm
-check_not_resolved "build that changes tracked files"
+check_not_pushed "build that changes tracked files"
 case "${push_output}" in
   *"the build changed tracked files"*) ;;
   *) fail "build that changes tracked files: wrong diagnostic: ${push_output}" ;;
@@ -459,14 +547,14 @@ fi
 ## With --no-llm, a failed build is not given to an agent.
 setup_case build-no-llm build
 STUB_BUILD=fix push_to good --no-llm
-check_not_resolved "build with --no-llm"
+check_not_pushed "build with --no-llm"
 if [ -s "${STUB_LOG}" ]; then
   fail "build with --no-llm: an agent ran: $(cat "${STUB_LOG}")"
 fi
 # The merge is now committed.  A rerun merges nothing, so the merge did not
 # cause the failure, and no agent is asked to fix it.
 STUB_BUILD=fix push_to good --llm
-check_not_resolved "build failure without a merge"
+check_not_pushed "build failure without a merge"
 if [ -s "${STUB_LOG}" ]; then
   fail "build failure without a merge: an agent ran: $(cat "${STUB_LOG}")"
 fi
