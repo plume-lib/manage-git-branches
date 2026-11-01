@@ -876,7 +876,8 @@ upstream_default_branch_git() {
 ## each problem.  check-conflict-resolution.awk states exactly
 ## what is acceptable.  FILE is a pathname relative to the top level of the
 ## working tree, which must be the current directory.  CONTAINS_SEPARATOR is
-## "yes" if HEAD's or MERGE_HEAD's version of FILE contains a line "=======",
+## "yes" if HEAD's or MERGE_HEAD's version of FILE contains a line of 7 or
+## more "=", such as "=======",
 ## which can then be content in the resolution, such as a Markdown heading's
 ## underline, rather than a conflict marker; and "no" otherwise.
 ##
@@ -948,7 +949,9 @@ resolve_merge_conflicts() {
   resolve_source="$3"
   resolve_failed="${SCRIPT_NAME}: the merge of ${resolve_source} is still in progress in $(pwd)"
 
-  if ! git rev-parse --verify --quiet AUTO_MERGE > /dev/null; then
+  # The checks compare the working tree with AUTO_MERGE, so an agent that
+  # changed it would defeat them; `resolve_with_agent` checks that it did not.
+  if ! resolve_auto_merge="$(git rev-parse --verify --quiet AUTO_MERGE)"; then
     echo "${SCRIPT_NAME}: no AUTO_MERGE, which git 2.42 and later write, in $(pwd)" >&2
     echo "${resolve_failed}" >&2
     return 1
@@ -998,17 +1001,20 @@ resolve_merge_conflicts() {
   # base matters too, because a merge with `merge.conflictStyle` "diff3" puts
   # its text in the conflict regions.  With several merge bases, stage 1 is
   # their merge, which can itself contain conflict markers; then the file is
-  # refused.  A line "=======" in HEAD's or MERGE_HEAD's version is content,
-  # so `check_conflict_resolution` permits such a line in the resolution.
+  # refused.  A line of 7 or more "=", such as "=======", in HEAD's or
+  # MERGE_HEAD's version is content, so `check_conflict_resolution` permits
+  # such a line in the resolution.  (Git writes a separator of more than 7
+  # "=" for a file whose attribute `conflict-marker-size` is larger.)
   #
   # For one stage, the awk program prints "marker" if a line looks like a
-  # conflict marker, or else "separator" if a line is "=======".
+  # conflict marker, or else "separator" if a line consists of 7 or more "=".
   resolve_scan='/^(<<<<<<<|[|][|][|][|][|][|][|]|>>>>>>>)/ { marker = 1; exit }
-    /^=======\r?$/ { separator = 1 }
+    /^=======+\r?$/ { separator = 1 }
     END { if (marker) print "marker"; else if (separator) print "separator" }'
   # ${resolve_checks} has a line "separator FILE" for each conflicted file
-  # in which a line "=======" is permitted, and a line "unresolved FILE" for
-  # each one that `git rerere` did not resolve acceptably.
+  # in which a line of 7 or more "=" is permitted, and a line
+  # "unresolved FILE" for each one that `git rerere` did not resolve
+  # acceptably.
   if ! resolve_checks="$(printf '%s\n' "${resolve_files}" | {
     resolve_status=0
     while IFS= read -r resolve_file; do
@@ -1047,7 +1053,7 @@ resolve_merge_conflicts() {
     echo "${resolve_failed}" >&2
     return 1
   fi
-  # The files in which a line "=======" is permitted, one per line;
+  # The files in which a line of 7 or more "=" is permitted, one per line;
   # `separator_permitted` reads it.
   resolve_separators="$(printf '%s\n' "${resolve_checks}" | sed -n -e 's/^separator //p')"
   # The files that `git rerere` did not resolve, one per line.
@@ -1137,8 +1143,9 @@ Finish with a brief summary of how you resolved each conflict."
 
   # Check the agent's work.
   if [ "$(git rev-parse --verify HEAD)" != "${resolve_head}" ] \
-    || [ "$(git rev-parse --verify --quiet MERGE_HEAD)" != "${resolve_merge_head}" ]; then
-    echo "${SCRIPT_NAME}: ${resolve_with} changed HEAD or MERGE_HEAD in $(pwd)" >&2
+    || [ "$(git rev-parse --verify --quiet MERGE_HEAD)" != "${resolve_merge_head}" ] \
+    || [ "$(git rev-parse --verify --quiet AUTO_MERGE)" != "${resolve_auto_merge}" ]; then
+    echo "${SCRIPT_NAME}: ${resolve_with} changed HEAD, MERGE_HEAD, or AUTO_MERGE in $(pwd)" >&2
     return 1
   fi
   resolve_ok=1
@@ -1236,8 +1243,8 @@ report_unresolved() {
 }
 
 ## Usage: separator_permitted FILE
-## Prints "yes" if a line "=======" is permitted in the resolution of FILE,
-## because FILE is in ${resolve_separators}, and "no" otherwise.
+## Prints "yes" if a line of 7 or more "=" is permitted in the resolution of
+## FILE, because FILE is in ${resolve_separators}, and "no" otherwise.
 separator_permitted() {
   if printf '%s\n' "${resolve_separators}" | grep -F -x -q -- "$1"; then
     echo yes
@@ -1308,6 +1315,7 @@ run_agent() {
         --tools 'Read,Edit,Write,Grep,Glob,Bash' --permission-mode acceptEdits \
         --allowedTools 'Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git merge-base:*)' \
         --disallowedTools 'Bash(git diff *--output*),Bash(git log *--output*),Bash(git show *--output*)'
+      run_agent_status=$?
       ;;
     codex)
       if ! run_agent_repository="$(git rev-parse --path-format=absolute --git-common-dir)" \
@@ -1315,16 +1323,31 @@ run_agent() {
         echo "${SCRIPT_NAME}: cannot find the files that codex needs to read" >&2
         return 1
       fi
+      # Codex's sandbox protects some names in the working tree, even absent
+      # ones, by creating an empty directory to mount over.  Each such
+      # directory that did not exist before is removed afterwards.
+      run_agent_absent=''
+      for run_agent_name in .agents .aws .codex; do
+        if [ ! -e "${run_agent_name}" ] && [ ! -L "${run_agent_name}" ]; then
+          run_agent_absent="${run_agent_absent} ${run_agent_name}"
+        fi
+      done
       printf '%s\n' "$2" | codex exec -c 'default_permissions="resolve_conflicts"' \
         -c "permissions.resolve_conflicts.filesystem={\":minimal\" = \"read\", \":project_roots\" = {\".\" = \"write\"}, $(toml_string "${run_agent_repository}") = \"read\", $(toml_string "${run_agent_codex}") = \"read\"}" \
         -
+      run_agent_status=$?
+      for run_agent_name in ${run_agent_absent}; do
+        if [ -d "${run_agent_name}" ] && [ ! -L "${run_agent_name}" ]; then
+          # `rmdir` removes only an empty directory.
+          rmdir -- "${run_agent_name}" 2> /dev/null || true
+        fi
+      done
       ;;
     *)
       echo "${SCRIPT_NAME}: unknown AI agent: $1" >&2
       return 1
       ;;
   esac
-  run_agent_status=$?
   if [ "$(git_control_state)" != "${run_agent_git_state}" ]; then
     echo "${SCRIPT_NAME}: $1 changed git's configuration, attributes, or hooks in $(pwd); check them before running git there" >&2
     return 1

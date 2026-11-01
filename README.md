@@ -98,6 +98,11 @@ The commands are:
   checks that nothing outside the conflict regions changed and that no
   conflict marker remains, commits the merge, and continues.
   `--no-llm` turns this off; `--llm`, `--claude`, and `--codex` turn it on.
+  The agent runs in a sandbox, which requires a recent version:  Claude
+  Code with the `--restricted` option and the setting
+  `permissions.blockReadsOutsideWorkingDirectories`, or Codex with
+  permission profiles (the setting `default_permissions`).  Claude Code
+  2.1.316 and Codex 0.165.0 work.
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]
   FROM_DIR TO_DIR ...`:

@@ -67,6 +67,11 @@ fail() {
 ##   change-quoted: as "good", but also changes the untracked file a"b\c
 ##   change-nested: as "good", but also changes nested/file.txt in an
 ##           untracked nested repository
+##   separator-long: removes the conflict marker lines other than separators
+##           of any length
+##   auto-merge: as "good", but also makes AUTO_MERGE name HEAD's tree
+##   sandbox-dirs: as "good", but also creates the empty directories that
+##           Codex's sandbox creates
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
@@ -74,6 +79,11 @@ basename -- "$0" >> "${STUB_LOG}"
 cat > "${STUB_PROMPT}"
 if [ "${STUB_MODE}" = fail ]; then exit 3; fi
 if [ "${STUB_MODE}" = none ]; then exit 0; fi
+if [ "${STUB_MODE}" = separator-long ]; then
+  sed -e '/^<<<<<<</d' -e '/^>>>>>>>/d' file.txt > file.txt.new
+  mv file.txt.new file.txt
+  exit 0
+fi
 if [ "${STUB_MODE}" = separator ]; then
   sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/{' -e '/^=======$/!d' -e '}' \
     -e '/^>>>>>>> /d' file.txt > file.txt.new
@@ -97,6 +107,8 @@ case "${STUB_MODE}" in
   change-rerere) echo "agent" >> other.txt ;;
   change-quoted) echo "changed" >> 'a"b\c' ;;
   change-nested) echo "changed" >> nested/file.txt ;;
+  auto-merge) git update-ref AUTO_MERGE "$(git rev-parse 'HEAD^{tree}')" ;;
+  sandbox-dirs) mkdir .agents .aws .codex ;;
 esac
 if [ "${STUB_MODE}" = clean ]; then
   sed -e 's/^three$/THREE/' file.txt > file.txt.new
@@ -358,7 +370,7 @@ setup_case commit
 push_to commit --llm
 check_not_pushed "agent that commits"
 case "${push_output}" in
-  *"changed HEAD or MERGE_HEAD"*) ;;
+  *"changed HEAD, MERGE_HEAD, or AUTO_MERGE"*) ;;
   *) fail "agent that commits: wrong diagnostic: ${push_output}" ;;
 esac
 
@@ -411,6 +423,37 @@ push_to separator --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "separator in a file that contains one: git-push-to failed: ${push_output}"
 fi
+
+## A remaining separator that is longer than 7 "=" is rejected.  Git writes
+## one for a file whose attribute `conflict-marker-size` is larger.
+setup_case separator-long
+echo 'file.txt conflict-marker-size=10' > "${feature_dir}/.git/info/attributes"
+push_to separator-long --llm
+check_not_resolved "remaining long separator"
+case "${push_output}" in
+  *"is a conflict marker"*) ;;
+  *) fail "remaining long separator: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that changes AUTO_MERGE is rejected.
+setup_case auto-merge
+push_to auto-merge --llm
+check_not_pushed "agent that changes AUTO_MERGE"
+case "${push_output}" in
+  *"changed HEAD, MERGE_HEAD, or AUTO_MERGE"*) ;;
+  *) fail "agent that changes AUTO_MERGE: wrong diagnostic: ${push_output}" ;;
+esac
+
+## The empty directories that Codex's sandbox creates are removed, and do
+## not keep the resolution from being committed.
+setup_case sandbox-dirs
+push_to sandbox-dirs --codex
+check_resolved codex "Codex's sandbox directories"
+for sandbox_dir in .agents .aws .codex; do
+  if [ -e "${feature_dir}/${sandbox_dir}" ]; then
+    fail "Codex's sandbox directories: ${sandbox_dir} remains"
+  fi
+done
 
 ## An agent that adds a hook that is a symbolic link is rejected.
 setup_case hook-link
