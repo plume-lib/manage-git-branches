@@ -10,8 +10,8 @@ A blocked PR is one that depends on another open PR.
 The builds of a blocked PR are those of its head branch that the PR or a push
 started.  If the head branch is a shared branch, they are only the builds that the
 PR started.  A shared branch is the repository's default branch (as for a PR that
-merges the default branch into a release branch), a protected branch, or the base
-branch of an open PR.
+merges the default branch into a release branch), a protected branch, the base branch
+of an open PR, or the head branch of an open PR that is not blocked.
 
 A build is redundant if a push or a pull request started it, and a more recent
 build of the same workflow (for Azure Pipelines, of the same pipeline), for the
@@ -171,14 +171,17 @@ class RepoBlockedPrs(typing.NamedTuple):
         label: the name of the repository in output, such as "daikon".
         gh: a repository's GitHub slug, such as "ORG/REPO".
         prs: the BlockedPr of each of the repository's blocked PRs.
-        base_branches: the base branches of the repository's open PRs, such as "main".
+        pr_shared_branches: the branches of the repository that its open PRs make
+            shared:  the base branch of each open PR, such as "main", and the head branch
+            of each open PR that is not blocked and whose head branch is in the
+            repository.
         pr_shas: the head commits of the repository's 5 most recently created open PRs.
     """
 
     label: str
     gh: str
     prs: list[BlockedPr]
-    base_branches: set[str]
+    pr_shared_branches: set[str]
     pr_shas: list[str]
 
 
@@ -192,16 +195,25 @@ def blocked_prs(cfg):
     Returns:
         A list of the RepoBlockedPrs of each repository.
     """
-    return [
-        RepoBlockedPrs(
-            m.repo.label,
-            m.repo.gh,
-            [BlockedPr(pr_name(m.repo.label, m.repo.ref(n)), m.repo.prs[n]) for n in m.blocked()],
-            {pr["baseRefName"] for pr in m.repo.prs.values()},
-            [m.repo.prs[n]["headRefOid"] for n in sorted(m.repo.prs)[-5:]],
+    result = []
+    for m in pr_status.load_models(cfg, pairwise=False):
+        repo = m.repo
+        blocked = list(m.blocked())
+        result.append(
+            RepoBlockedPrs(
+                repo.label,
+                repo.gh,
+                [BlockedPr(pr_name(repo.label, repo.ref(n)), repo.prs[n]) for n in blocked],
+                {pr["baseRefName"] for pr in repo.prs.values()}
+                | {
+                    pr["headRefName"]
+                    for n, pr in repo.prs.items()
+                    if n not in blocked and is_from_repo(repo.gh, pr)
+                },
+                [repo.prs[n]["headRefOid"] for n in sorted(repo.prs)[-5:]],
+            )
         )
-        for m in pr_status.load_models(cfg, pairwise=False)
-    ]
+    return result
 
 
 def concurrently(f, items):
@@ -1217,7 +1229,11 @@ def main():
         gh, prs = repo.gh, repo.prs
         try:
             shared_branches = (
-                {github_default_branch(gh), *github_protected_branches(gh), *repo.base_branches}
+                {
+                    github_default_branch(gh),
+                    *github_protected_branches(gh),
+                    *repo.pr_shared_branches,
+                }
                 if prs
                 else set()
             )
