@@ -263,10 +263,13 @@ class CancelBlockedCiTest(unittest.TestCase):
         The head branch of a blocked PR, or of a PR from a fork, is not made shared.
         """
         prs = {
-            1: {"owner": "org", "headRefName": "feature", "baseRefName": "main"},
-            2: {"owner": "org", "headRefName": "feature", "baseRefName": "develop"},
-            3: {"owner": "org", "headRefName": "blocked-only", "baseRefName": "main"},
-            4: {"owner": "fork", "headRefName": "fix", "baseRefName": "main"},
+            n: {"owner": owner, "headRefName": head, "baseRefName": base, "headRefOid": f"sha{n}"}
+            for n, owner, head, base in [
+                (1, "org", "feature", "main"),
+                (2, "org", "feature", "develop"),
+                (3, "org", "blocked-only", "main"),
+                (4, "fork", "fix", "main"),
+            ]
         }
         model = mock.Mock()
         model.repo.label = "repo"
@@ -286,6 +289,7 @@ class CancelBlockedCiTest(unittest.TestCase):
             ],
         )
         self.assertEqual(repo.pr_shared_branches, {"main", "develop", "feature"})
+        self.assertEqual(repo.pr_shas, ["sha1", "sha2", "sha3", "sha4"])
 
     def test_circleci_workflows_of_jobs(self) -> None:
         """The workflows of jobs come from the recent pipelines, or else from job lookups.
