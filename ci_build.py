@@ -323,10 +323,9 @@ def circleci_items(path: str) -> Iterator[Any]:
     page_token = None
     while True:
         query = f"?page-token={urllib.parse.quote(page_token, safe='')}" if page_token else ""
-        page = request_util.request("GET", f"{CIRCLECI_API}{path}{query}", circleci_headers())
-        if not isinstance(page, dict):
-            msg = f"CircleCI returned {page!r} instead of a page of items for {path}"
-            raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
+        page = request_util.request_object(
+            "GET", f"{CIRCLECI_API}{path}{query}", circleci_headers()
+        )
         yield from page["items"]
         page_token = page.get("next_page_token")
         if not page_token:
@@ -395,10 +394,10 @@ class CircleciUrlParts(NamedTuple):
         """
         if self.workflow is not None or self.project is None or self.job is None:
             return self.workflow
-        result = request_util.request(
+        result = request_util.request_object(
             "GET", f"{CIRCLECI_API}/v2/project/{self.project}/job/{self.job}", circleci_headers()
         )
-        return ((result or {}).get("latest_workflow") or {}).get("id")
+        return (result.get("latest_workflow") or {}).get("id")
 
 
 def circleci_project_of_url(url: str) -> str | None:
