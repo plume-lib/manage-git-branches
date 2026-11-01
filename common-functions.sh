@@ -867,13 +867,429 @@ upstream_default_branch_git() {
   fi
 }
 
-## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE
+## Usage: check_conflict_resolution FILE
+## Checks the resolution of the conflicts in FILE, a file of the current
+## working tree, against AUTO_MERGE, git's automatic merge, which contains the
+## conflict markers.  The resolution is acceptable if every change between
+## AUTO_MERGE and the working tree is inside a conflict region, and every
+## conflict marker line of AUTO_MERGE is gone.  A conflict region starts with
+## a line "<<<<<<<" and ends with the matching line ">>>>>>>"; a recursive
+## merge nests regions.  Returns 1, after printing a diagnostic for each
+## problem, if the resolution is not acceptable.
+check_conflict_resolution() {
+  # Each line of the input is tagged:  "A" for a line of the file in
+  # AUTO_MERGE, which all come first, and "D" for a line of the diff.  The
+  # options of `git diff` override configuration that would change its
+  # output.  With `-U0`, each hunk contains only changed lines.
+  # shellcheck disable=SC2016 # awk, not the shell, expands $0 and the like.
+  {
+    git show "AUTO_MERGE:$1" | sed -e 's/^/A/'
+    git diff --no-ext-diff --no-textconv --no-color --no-renames -U0 \
+      AUTO_MERGE -- "$1" | sed -e 's/^/D/'
+  } | CHECK_FILE="$1" CHECK_SCRIPT_NAME="${SCRIPT_NAME}" awk '
+    function problem(message) {
+      printf "%s: %s: %s\n", ENVIRON["CHECK_SCRIPT_NAME"], ENVIRON["CHECK_FILE"], message > "/dev/stderr"
+      status = 1
+    }
+    function in_region(lo, hi,   r) {
+      for (r = 1; r <= num_regions; r++) {
+        if (region_start[r] <= lo && hi <= region_end[r]) return 1
+      }
+      return 0
+    }
+    /^A/ {
+      n++
+      line = substr($0, 2)
+      if (line ~ /^<<<<<<<+( |$)/) {
+        if (depth == 0) { num_regions++; region_start[num_regions] = n }
+        depth++
+      }
+      if (depth > 0 && (line ~ /^<<<<<<<+( |$)/ || line ~ /^[|][|][|][|][|][|][|]+( |$)/ \
+                        || line ~ /^=======+$/ || line ~ /^>>>>>>>+( |$)/)) {
+        num_markers++
+        marker[num_markers] = n
+      }
+      if (depth > 0 && line ~ /^>>>>>>>+( |$)/) {
+        depth--
+        if (depth == 0) region_end[num_regions] = n
+      }
+      next
+    }
+    /^D@@ / {
+      # The hunk header is "@@ -START[,COUNT] +START[,COUNT] @@"; COUNT
+      # defaults to 1.
+      split(substr($2, 2), old, ",")
+      start = old[1] + 0
+      count = (index($2, ",") ? old[2] + 0 : 1)
+      if (count == 0) {
+        # Lines inserted after line START.
+        if (!in_region(start, start + 1)) problem("lines inserted after line " start " of AUTO_MERGE, outside every conflict region")
+      } else {
+        if (!in_region(start, start + count - 1)) {
+          lines = (count == 1 ? "line " start : "lines " start "-" (start + count - 1))
+          problem(lines " of AUTO_MERGE changed, outside every conflict region")
+        }
+        for (m = 1; m <= num_markers; m++) {
+          if (start <= marker[m] && marker[m] <= start + count - 1) removed[m] = 1
+        }
+      }
+    }
+    END {
+      if (depth != 0) problem("AUTO_MERGE has an unterminated conflict region")
+      if (num_regions == 0) problem("AUTO_MERGE has no conflict markers")
+      for (m = 1; m <= num_markers; m++) {
+        if (!removed[m]) problem("conflict marker at line " marker[m] " of AUTO_MERGE remains")
+      }
+      exit status
+    }'
+}
+
+## Usage: resolve_merge_conflicts RESOLVER COMMIT SOURCE
+## Resolves the conflicts of the merge of COMMIT that is in progress in the
+## current directory, the top level of a working tree, and stages the result.
+## Conflicts that `git rerere` has already resolved need no more work.  For
+## any others, this function asks an AI agent, RESOLVER ("claude" or
+## "codex"), to edit the conflicted files.  Either way, it checks every
+## resolution with `check_conflict_resolution`.  SOURCE names COMMIT in
+## diagnostics and in the agent's instructions.  Returns 1, after printing a
+## diagnostic, on failure, and leaves the merge in progress.
+##
+## Only content conflicts are resolved, in which every conflicted file
+## contains conflict markers.  For any other conflict, such as a file that one
+## side modified and the other deleted, no check could tell whether the agent
+## chose well.
+resolve_merge_conflicts() {
+  resolve_with="$1"
+  resolve_commit="$2"
+  resolve_source="$3"
+  resolve_failed="${SCRIPT_NAME}: the merge of ${resolve_source} is still in progress in $(pwd)"
+
+  if ! git rev-parse --verify --quiet AUTO_MERGE > /dev/null; then
+    echo "${SCRIPT_NAME}: no AUTO_MERGE, which git 2.42 and later write, in $(pwd)" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  if ! resolve_head="$(git rev-parse --verify HEAD)" \
+    || ! resolve_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)" \
+    || [ "${resolve_merge_head}" != "$(git rev-parse --verify --quiet "${resolve_commit}^{commit}")" ]; then
+    echo "${SCRIPT_NAME}: no merge of ${resolve_source} is in progress in $(pwd)" >&2
+    return 1
+  fi
+
+  # Recompute the merge to list the conflicted files.  The index does not
+  # list them all:  `git rerere` with `rerere.autoUpdate` stages the files
+  # that it resolves.  `git merge-tree` exits with status 1 if the merge has
+  # conflicts.  Its first line is the merged tree.
+  #
+  # The pathnames are newline-separated.  Git quotes a pathname that contains
+  # a newline, a double quote, or a backslash, even with `core.quotePath`
+  # false; such a pathname is refused.
+  resolve_merge_tree="$(git -c core.quotePath=false merge-tree --write-tree \
+    --name-only --no-messages HEAD MERGE_HEAD)"
+  resolve_files="$(printf '%s\n' "${resolve_merge_tree}" | sed -e 1d)"
+  if [ -z "${resolve_files}" ]; then
+    echo "${SCRIPT_NAME}: cannot list the conflicted files in $(pwd)" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  if printf '%s\n' "${resolve_files}" | grep -q '^"'; then
+    echo "${SCRIPT_NAME}: a conflicted file has an unusual name; resolve the conflicts by hand" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
+    if ! git show "AUTO_MERGE:${resolve_file}" 2> /dev/null | grep -q '^<<<<<<<'; then
+      echo "${SCRIPT_NAME}: ${resolve_file} has a conflict other than a content conflict; resolve it by hand" >&2
+      exit 1
+    fi
+  done; then
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  # Any other change would be blamed on the agent below, or committed.
+  resolve_other="$(resolve_other_changes)"
+  if [ -n "${resolve_other}" ]; then
+    printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: changed, but not conflicted: /" >&2
+    echo "${SCRIPT_NAME}: the working tree has changes that are not part of the merge; resolve the conflicts by hand" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+
+  # The files that `git rerere` did not resolve.
+  resolve_unresolved="$(printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
+    if ! check_conflict_resolution "${resolve_file}" 2> /dev/null; then
+      printf '%s\n' "${resolve_file}"
+    fi
+  done)"
+
+  if [ -z "${resolve_unresolved}" ]; then
+    echo "${SCRIPT_NAME}: \`git rerere\` resolved the conflicts in $(pwd)" >&2
+    resolve_with="git rerere"
+  else
+    resolve_branch="$(git symbolic-ref --quiet --short HEAD)" || resolve_branch="HEAD"
+    resolve_prompt="You are resolving merge conflicts in the git working tree $(pwd).
+\`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts in these files:
+
+$(printf '%s\n' "${resolve_unresolved}" | sed -e 's/^/  /')
+
+Resolve every conflict by editing those files.  Rules:
+
+* Edit only the conflict regions, each of which starts with a line \"<<<<<<<\" and ends with a line \">>>>>>>\".  Remove every conflict marker line.  Do not change any other part of any file, even of a file that has conflicts:  git merged the rest cleanly.
+* Do not resolve a file by taking one side wholesale.  Combine the intent of both sides.  To learn each side's intent, read the history, for example with \`git log --merge -p -- FILE\`, \`git diff HEAD...MERGE_HEAD -- FILE\` (the changes being merged in), and \`git diff MERGE_HEAD...HEAD -- FILE\` (the changes on ${resolve_branch}).
+* Do not run any git command that changes the index, HEAD, or any other ref, such as \`git add\`, \`git commit\`, \`git checkout\`, \`git restore\`, \`git reset\`, \`git merge\`, \`git stash\`, or \`git rebase\`.  A script stages the files and commits the merge after you finish.
+* Run commands in the current directory, which is the working tree, without \`cd\` or \`git -C\`.  A command in another form needs approval, which nobody is present to give.
+* Do not build the project or run its tests; the script does that.
+* Do not create another working copy, and do not change any file other than those listed above.
+* The script rejects the resolution if \`git diff AUTO_MERGE\` shows a change outside a conflict region, or if a conflict marker line remains.  AUTO_MERGE is git's automatic merge, which contains the conflict markers.
+* If you cannot resolve a conflict with confidence, leave its conflict markers in place, and say why.
+
+Finish with a brief summary of how you resolved each conflict."
+
+    echo "${SCRIPT_NAME}: asking ${resolve_with} to resolve the conflicts in $(pwd)" >&2
+    if ! run_agent "${resolve_with}" "${resolve_prompt}"; then
+      echo "${resolve_failed}" >&2
+      return 1
+    fi
+  fi
+
+  # Check the resolution.
+  if [ "$(git rev-parse --verify HEAD)" != "${resolve_head}" ] \
+    || [ "$(git rev-parse --verify --quiet MERGE_HEAD)" != "${resolve_merge_head}" ]; then
+    echo "${SCRIPT_NAME}: ${resolve_with} changed HEAD or MERGE_HEAD in $(pwd)" >&2
+    return 1
+  fi
+  resolve_ok=1
+  resolve_other="$(resolve_other_changes)"
+  if [ -n "${resolve_other}" ]; then
+    printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} changed a file that had no conflict: /" >&2
+    resolve_ok=0
+  fi
+  # Every conflicted file is checked, including one that the agent did not
+  # change, whose conflict markers remain.
+  if ! printf '%s\n' "${resolve_files}" | {
+    resolve_loop_ok=1
+    while IFS= read -r resolve_file; do
+      if ! check_conflict_resolution "${resolve_file}"; then
+        resolve_loop_ok=0
+      fi
+    done
+    [ "${resolve_loop_ok}" -eq 1 ]
+  }; then
+    resolve_ok=0
+  fi
+  if [ "${resolve_ok}" -eq 0 ]; then
+    echo "${SCRIPT_NAME}: ${resolve_with} did not resolve the conflicts acceptably" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+
+  # `xargs` would split pathnames at blanks, so stage them one at a time.
+  if ! printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
+    GIT_LITERAL_PATHSPECS=1 git add -A -- "${resolve_file}" || exit 1
+  done; then
+    echo "${SCRIPT_NAME}: cannot stage the resolved files in $(pwd)" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  if [ -n "$(git ls-files -u)" ] || [ -n "$(resolve_other_changes)" ]; then
+    echo "${SCRIPT_NAME}: the index of $(pwd) has changes other than the resolved conflicts" >&2
+    echo "${resolve_failed}" >&2
+    return 1
+  fi
+  return 0
+}
+
+## Usage: resolve_other_changes
+## Prints, one per line, each file that differs from AUTO_MERGE in the working
+## tree or in the index and is not in ${resolve_files}, the conflicted files.
+resolve_other_changes() {
+  {
+    git -c core.quotePath=false diff --no-renames --name-only AUTO_MERGE
+    git -c core.quotePath=false diff --cached --no-renames --name-only AUTO_MERGE
+  } | sort -u | grep -F -x -v -- "${resolve_files}"
+}
+
+## Usage: run_agent AGENT PROMPT
+## Runs the AI agent AGENT, "claude" or "codex", in the current directory, with
+## the instructions PROMPT.  The agent may edit files and read the repository;
+## Claude may run only the git commands that read the repository, and Codex's
+## sandbox confines its writes to the working tree.  Returns 1, after
+## printing a diagnostic, if the agent fails.
+run_agent() {
+  # Each agent reads its instructions from standard input.
+  case "$1" in
+    claude)
+      printf '%s\n' "$2" | claude -p --permission-mode acceptEdits \
+        --allowedTools 'Read,Edit,Write,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git merge-base:*)'
+      ;;
+    codex)
+      printf '%s\n' "$2" | codex exec --sandbox workspace-write -
+      ;;
+    *)
+      echo "${SCRIPT_NAME}: unknown AI agent: $1" >&2
+      return 1
+      ;;
+  esac
+  run_agent_status=$?
+  if [ "${run_agent_status}" -ne 0 ]; then
+    echo "${SCRIPT_NAME}: $1 failed with status ${run_agent_status}" >&2
+    return 1
+  fi
+  return 0
+}
+
+## Usage: build_logged LOG
+## Runs `compile-project` in the current directory, writing its output, both
+## standard output and standard error, to standard output and to the file LOG.
+## Returns the exit status of `compile-project`.
+build_logged() {
+  { "${SCRIPT_DIR}"/compile-project 2>&1; echo "$?" > "$1.status"; } | tee "$1"
+  build_logged_status="$(cat "$1.status")"
+  return "${build_logged_status:-1}"
+}
+
+## Usage: build_and_fix AGENT DESCRIPTION ORIG_HEAD
+## Builds the current directory, the top level of a working tree, with
+## `compile-project`, just after merging DESCRIPTION, such as
+## "branch 'feature'", into a branch whose head was ORIG_HEAD.  If the build
+## fails, asks the AI agent AGENT ("claude" or "codex") to fix it, without
+## building, then builds again; it makes up to ${build_fix_attempts} attempts.
+## Once the build succeeds, commits the agent's changes, if any, on top of the
+## merge.  Returns 1, after printing a diagnostic, if the build still fails;
+## the agent's changes then remain, staged but not committed.
+build_fix_attempts=3
+build_and_fix() {
+  fix_with="$1"
+  if ! fix_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-build.log)"; then
+    echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
+    return 1
+  fi
+  if build_logged "${fix_log}"; then
+    return 0
+  fi
+  echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
+  # The agent's changes are committed below, and so would be any other
+  # change.  A build might also modify tracked files.
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "${SCRIPT_NAME}: the working tree has uncommitted changes; fix the build by hand" >&2
+    return 1
+  fi
+  fix_head="$(git rev-parse --verify HEAD)" || return 1
+  fix_branch="$(git symbolic-ref --quiet --short HEAD)" || fix_branch="HEAD"
+  fix_attempt=1
+  while :; do
+    fix_untracked="$(git -c core.quotePath=false ls-files --others --exclude-standard)"
+    fix_prompt="You are fixing a failed build in the git working tree $(pwd).
+A script merged $2 into branch ${fix_branch}, whose head had been $3, and then built the project, which failed.  \`git diff $3 HEAD\` shows what the merge changed.  The end of the build output is below; the full output is in ${fix_log}.
+
+Rules:
+
+* Make the smallest change that fixes the build and that respects the intent of both branches.  Often, the merge combined changes that do not fit together, such as a call to a method that the other branch renamed.
+* Do not disable, delete, or weaken tests, checks, or warnings to make the build pass.
+* Do not run any git command that changes the index, HEAD, or any other ref, such as \`git add\`, \`git commit\`, \`git checkout\`, \`git restore\`, \`git reset\`, \`git merge\`, \`git stash\`, or \`git rebase\`.  The script commits your changes.
+* Run commands in the current directory, which is the working tree, without \`cd\` or \`git -C\`.  A command in another form needs approval, which nobody is present to give.
+* Do not build the project or run its tests; the script builds it after you finish.
+* Do not create another working copy.
+* If you cannot fix the build with confidence, change nothing, and say why.
+
+Finish with a brief summary of the cause of the failure and of your fix.
+
+The end of the build output:
+
+$(tail -n 100 "${fix_log}")"
+    echo "${SCRIPT_NAME}: asking ${fix_with} to fix the build in $(pwd) (attempt ${fix_attempt} of ${build_fix_attempts})" >&2
+    if ! run_agent "${fix_with}" "${fix_prompt}"; then
+      return 1
+    fi
+    if [ "$(git rev-parse --verify HEAD)" != "${fix_head}" ]; then
+      echo "${SCRIPT_NAME}: ${fix_with} changed HEAD in $(pwd)" >&2
+      return 1
+    fi
+    # Stage the agent's changes:  to tracked files, and the files that it
+    # created.
+    fix_new="$(git -c core.quotePath=false ls-files --others --exclude-standard \
+      | grep -F -x -v -- "${fix_untracked}")"
+    if ! git add -u \
+      || ! printf '%s\n' "${fix_new}" | while IFS= read -r fix_file; do
+        if [ -n "${fix_file}" ]; then
+          GIT_LITERAL_PATHSPECS=1 git add -- "${fix_file}" || exit 1
+        fi
+      done; then
+      echo "${SCRIPT_NAME}: cannot stage the changes of ${fix_with} in $(pwd)" >&2
+      return 1
+    fi
+    if git diff --cached --quiet; then
+      echo "${SCRIPT_NAME}: ${fix_with} did not fix the build in $(pwd)" >&2
+      return 1
+    fi
+    if build_logged "${fix_log}"; then
+      break
+    fi
+    echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
+    if [ "${fix_attempt}" -ge "${build_fix_attempts}" ]; then
+      echo "${SCRIPT_NAME}: ${fix_with} did not fix the build in $(pwd) in ${build_fix_attempts} attempts; its changes are staged" >&2
+      return 1
+    fi
+    fix_attempt=$((fix_attempt + 1))
+  done
+  if ! git commit -q -m "Fix the build after merging $2"; then
+    echo "${SCRIPT_NAME}: cannot commit the changes of ${fix_with} in $(pwd)" >&2
+    return 1
+  fi
+  return 0
+}
+
+## Usage: pull_resolving RESOLVER DIRECTORY PULL-ARGUMENT...
+## Runs `git -C DIRECTORY pull PULL-ARGUMENT...`.  If the pull merges, the
+## merge has conflicts, and RESOLVER is not empty, resolves them with
+## `resolve_merge_conflicts` and commits the merge with the message that
+## `git pull` composed.  (A pull that rebases cannot be resolved this way.)
+## Returns 1, after printing a diagnostic, if the pull fails and its conflicts
+## are not resolved.
+pull_resolving() {
+  pull_resolver="$1"
+  pull_dir="$2"
+  shift 2
+  if git -C "${pull_dir}" pull "$@"; then
+    return 0
+  fi
+  if [ -z "${pull_resolver}" ] \
+    || ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
+    return 1
+  fi
+  # A subshell, so that the current directory does not change.
+  (
+    if ! cd "${pull_dir}"; then
+      echo "${SCRIPT_NAME}: cannot cd to ${pull_dir}" >&2
+      exit 1
+    fi
+    pull_source="$(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null)" \
+      || pull_source="its upstream branch"
+    if ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
+      exit 1
+    fi
+    # MERGE_MSG ends with comment lines that list the conflicts.
+    if ! pull_message_file="$(git rev-parse --git-path MERGE_MSG)" \
+      || ! git stripspace --strip-comments < "${pull_message_file}" \
+        | git commit -q --cleanup=whitespace -F -; then
+      echo "${SCRIPT_NAME}: cannot commit the merge of ${pull_source} in $(pwd)" >&2
+      exit 1
+    fi
+  )
+}
+
+## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
 ## pushes the current branch if the build succeeds.  DESCRIPTION is what
 ## `git fmt-merge-msg` says that COMMIT is, such as "branch 'feature'" or
 ## "remote-tracking branch 'upstream/master'".  SOURCE names COMMIT in
-## diagnostics.  Returns 1, after printing a diagnostic, on failure.
+## diagnostics.  If RESOLVER is given and not empty, and the merge has
+## conflicts, `resolve_merge_conflicts` resolves them, asking RESOLVER if
+## `git rerere` did not; and if the build fails, `build_and_fix` asks
+## RESOLVER to fix it.
+## Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
   # Let git compose the message, as it does for `git merge`, rather than
@@ -899,13 +1315,34 @@ merge_build_push() {
   # `--no-log` prevents a second copy of the commit summaries:  `git merge`
   # appends them to a message given with `-m` when `merge.log` is set, and
   # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
+  if ! merge_orig_head="$(git rev-parse --verify HEAD)"; then
+    echo "${SCRIPT_NAME}: cannot read HEAD in $(pwd)" >&2
+    return 1
+  fi
   if ! git merge -q --no-edit --no-log -m "${merge_message}" "$1"; then
     echo "${SCRIPT_NAME}: problem merging $3 into $(pwd)" >&2
-    return 1
+    # A failed merge without MERGE_HEAD did not start, for example because it
+    # would overwrite a modified file; there are no conflicts to resolve.
+    if [ -z "${5:-}" ] || ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+      return 1
+    fi
+    if ! resolve_merge_conflicts "$5" "$1" "$3"; then
+      return 1
+    fi
+    # `-F` supplies the message, rather than MERGE_MSG, to which `git merge`
+    # appended a list of the conflicts.
+    if ! printf '%s\n' "${merge_message}" | git commit -q --cleanup=whitespace -F -; then
+      echo "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd)" >&2
+      return 1
+    fi
   fi
 
   if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
-    if ! "${SCRIPT_DIR}"/compile-project; then
+    if [ -n "${5:-}" ]; then
+      if ! build_and_fix "$5" "$2" "${merge_orig_head}"; then
+        return 1
+      fi
+    elif ! "${SCRIPT_DIR}"/compile-project; then
       echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
       return 1
     fi

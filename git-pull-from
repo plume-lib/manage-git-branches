@@ -6,7 +6,11 @@
 # MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set.)
 #
 # Usage:
-#   git-pull-from [--nocompile] OTHER-REPO-DIR
+#   git-pull-from [--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR
+#
+# By default, this script asks an AI agent to resolve merge conflicts and to
+# fix a failed build, as `git-push-to` does; the "--llm", "--no-llm",
+# "--claude", and "--codex" options are as for `git-push-to`.
 #
 # Run this command from the top level of a working tree.  OTHER-REPO-DIR is
 # the top level of another working tree; it may be an absolute or relative
@@ -67,15 +71,21 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
-nocompile=0
-
-if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
-  nocompile=1
+# The options to pass to `git-push-to`.  Git forbids whitespace in the
+# options, so they can be kept in a whitespace-separated string.
+push_to_options=''
+while [ "$#" -ge 1 ]; do
+  case "$1" in
+    --nocompile | --llm | --no-llm | --claude | --codex)
+      push_to_options="${push_to_options} $1"
+      ;;
+    *) break ;;
+  esac
   shift
-fi
+done
 
 if [ "$#" -ne 1 ]; then
-  echo "Usage: ${SCRIPT_NAME} [--nocompile] OTHER-REPO-DIR" >&2
+  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR" >&2
   exit 1
 fi
 
@@ -142,8 +152,5 @@ if [ "${other_physical}" != "$(absolute_path "${other_toplevel}")" ]; then
   exit 1
 fi
 
-if [ "$nocompile" -eq 1 ]; then
-  exec "${SCRIPT_DIR}"/git-push-to --nocompile "$1" .
-else
-  exec "${SCRIPT_DIR}"/git-push-to "$1" .
-fi
+# shellcheck disable=SC2086 # Split ${push_to_options} into options.
+exec "${SCRIPT_DIR}"/git-push-to ${push_to_options} "$1" .

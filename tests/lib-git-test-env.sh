@@ -64,5 +64,20 @@ sanitize_git_env() {
   export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
   : > "${GIT_CONFIG_GLOBAL}" || return 1
 
+  # By default, the commands under test run an AI agent, `claude` or `codex`,
+  # when a merge has conflicts or a build fails.  A test must never run a real
+  # agent, which would be slow and costly and would make the result depend on
+  # the agent.  These stand-ins fail.  A test that wants an agent puts its own
+  # stand-in earlier on the PATH.
+  mkdir -p "${sanitize_git_env_dir}/no-ai-agent" || return 1
+  for sanitize_git_env_agent in claude codex; do
+    printf '#!/bin/sh\necho "%s: a test must not run an AI agent" >&2\nexit 1\n' \
+      "${sanitize_git_env_agent}" > "${sanitize_git_env_dir}/no-ai-agent/${sanitize_git_env_agent}" \
+      && chmod +x "${sanitize_git_env_dir}/no-ai-agent/${sanitize_git_env_agent}" || return 1
+  done
+  unset sanitize_git_env_agent
+  PATH="${sanitize_git_env_dir}/no-ai-agent:${PATH}"
+  export PATH
+
   unset sanitize_git_env_dir
 }

@@ -6,7 +6,11 @@
 # variable MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set.)
 #
 # Usage:
-#   git-pull-upstream [--nocompile]
+#   git-pull-upstream [--nocompile] [--llm | --no-llm] [--claude | --codex]
+#
+# By default, this script asks an AI agent to resolve merge conflicts and to
+# fix a failed build, as `git-push-to` does; the "--llm", "--no-llm",
+# "--claude", and "--codex" options are as for `git-push-to`.
 #
 # The upstream repository is the remote named `upstream` if there is one, as
 # in a fork, then `origin`, then the clone's only remote if it has exactly
@@ -85,13 +89,24 @@ fi
 . "${SCRIPT_DIR}/common-functions.sh"
 
 nocompile=0
-if [ "$#" -ge 1 ] && [ "$1" = "--nocompile" ]; then
-  nocompile=1
+# The AI agent that resolves conflicts and fixes the build, or empty for none.
+resolver=claude
+while [ "$#" -ge 1 ]; do
+  case "$1" in
+    --nocompile) nocompile=1 ;;
+    --llm)
+      if [ -z "${resolver}" ]; then resolver=claude; fi
+      ;;
+    --no-llm) resolver='' ;;
+    --claude) resolver=claude ;;
+    --codex) resolver=codex ;;
+    *) break ;;
+  esac
   shift
-fi
+done
 
 if [ "$#" -ne 0 ]; then
-  echo "Usage: ${SCRIPT_NAME} [--nocompile]" >&2
+  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--llm | --no-llm] [--claude | --codex]" >&2
   exit 1
 fi
 
@@ -160,8 +175,7 @@ fi
 # earlier run of this command made but did not push, as when its build
 # failed, and would copy that merge's commits onto the current branch.
 # `--no-edit` keeps the merge from stopping at an editor.
-if ! git pull -q --no-rebase --no-edit; then
-  echo "${SCRIPT_NAME}: problem pulling in $(pwd)" >&2
+if ! pull_resolving "${resolver}" "$(pwd)" -q --no-rebase --no-edit; then
   exit 1
 fi
 
@@ -203,6 +217,6 @@ if ! upstream_head="$(git rev-parse --verify --quiet "${upstream_ref}")"; then
 fi
 if ! merge_build_push "${upstream_head}" \
   "remote-tracking branch '${upstream_ref#refs/remotes/}'" "${upstream_ref}" \
-  "${nocompile}"; then
+  "${nocompile}" "${resolver}"; then
   exit 1
 fi

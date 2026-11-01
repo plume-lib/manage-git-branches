@@ -74,7 +74,8 @@ The commands are:
   directories.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
-  `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
+  `[--nocompile] [--rebase | --squash] [--llm | --no-llm] [--claude | --codex]
+  FROM_DIR TO_DIR ...`:
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.
   Each directory must be the top level of a working tree and must have an
@@ -92,21 +93,32 @@ The commands are:
   has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
   directories form one more chain per PROJECT.
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
+  When a merge or a pull has conflicts that `git rerere` does not resolve, it
+  asks Claude (or, with `--codex`, Codex) to edit the conflicted hunks.  It
+  checks that nothing outside the conflict regions changed and that no
+  conflict marker remains, commits the merge, and continues.  If the build
+  fails, it asks the agent to fix it, up to 3 times, and commits the fix.
+  `--no-llm` turns this off; `--llm`, `--claude`, and `--codex` turn it on.
 * [`git-rebase-to`](git-rebase-to)
-  `[--nocompile] [--squash] FROM_DIR TO_DIR ...`:
+  `[--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]
+  FROM_DIR TO_DIR ...`:
   Runs `git-push-to` on the arguments, then rebases each branch onto the
   previous branch, to eliminate merge commits, and force-pushes each
   branch.  This is useful for maintaining a stack of GitHub pull requests,
   each of whose base is the previous one.  With `--squash`, each branch
   becomes a single commit on top of the previous branch.
   The arguments may be slugs, as for `git-push-to`.
-* [`git-pull-from`](git-pull-from) `[--nocompile] OTHER-REPO-DIR`:
+* [`git-pull-from`](git-pull-from)
+  `[--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, compiles the current
   directory, then pushes the current directory to its remote if compilation
-  succeeds.
+  succeeds.  It asks an AI agent to resolve conflicts and to fix a failed
+  build, as `git-push-to` does, and it accepts the same `--llm`, `--no-llm`,
+  `--claude`, and `--codex` options.
   OTHER-REPO-DIR and the current directory must both be the top level of a
   working tree and must each have an upstream branch.
-* [`git-pull-upstream`](git-pull-upstream) `[--nocompile]`:
+* [`git-pull-upstream`](git-pull-upstream)
+  `[--nocompile] [--llm | --no-llm] [--claude | --codex]`:
   Merges the default branch of the remote `upstream` (or `origin`, if there
   is no `upstream`, or the only remote, if there is neither) into the current
   branch, compiles, then pushes the current branch if compilation succeeds.
@@ -114,6 +126,17 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of `upstream`.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
+  It asks an AI agent to resolve conflicts and to fix a failed build, as
+  `git-push-to` does, and it accepts the same `--llm`, `--no-llm`, `--claude`,
+  and `--codex` options.
+* [`resolve-conflicts`](resolve-conflicts)
+  `[--nocompile] [--claude | --codex] [-C DIR]`:
+  Runs `pr-status`, which regenerates `pr-dependencies.md`, then runs each
+  `git-push-to` command in its section "Dependency chains with conflicts",
+  with `--claude` (or `--codex`) so that an AI agent resolves the conflicts
+  and fixes failed builds.  Repeats until no chain has conflicts, for up to 3
+  rounds; stops after a round in which a chain fails.  It runs only the
+  commands that `pr-status` writes, and refuses any other.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but Eclipse `.project`

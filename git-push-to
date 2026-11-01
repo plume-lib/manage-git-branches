@@ -5,8 +5,11 @@
 # each is pushed into the next in turn.
 #
 # Usage:
-#   git-push-to [--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...
-#   git-push-to [--nocompile] [--rebase | --squash] [ORG:]BRANCH [ORG:]BRANCH ...
+#   git-push-to [OPTIONS] FROM_DIR TO_DIR ...
+#   git-push-to [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ...
+#
+# OPTIONS are [--nocompile] [--rebase | --squash] [--llm | --no-llm]
+# [--claude | --codex].
 #
 # Each argument names the top level of a working tree.
 # Each may be absolute directory names or relative to the current directory.
@@ -14,7 +17,9 @@
 # The "--rebase" option rebases each branch onto the previous one after
 # pushing, and the "--squash" option makes each branch a single commit on top
 # of the previous one; see "Rebasing" below.  `git-rebase-to` is a shorthand
-# for "--rebase".
+# for "--rebase".  By default, this script asks an AI agent to resolve merge
+# conflicts and to fix a failed build; "--no-llm" prevents that.  See "Asking
+# an AI agent" below.
 #
 # Alternately, each argument may be a slug of the form ORG:BRANCH, which names
 # a directory in the current directory:  PROJECT-fork-ORG-branch-BRANCH, or
@@ -83,6 +88,34 @@
 # branch, with the same content as before.  Its message consists of the
 # messages of the branch's own commits.
 
+# Asking an AI agent
+#
+# Unless "--no-llm" is given, this script asks an AI agent for help:  Claude
+# (`claude -p`) by default, or Codex (`codex exec`) with "--codex".  The
+# options "--llm", "--claude", and "--codex" each override an earlier
+# "--no-llm", and "--no-llm" overrides any of them that precedes it.
+#
+# When a merge has conflicts that `git rerere` does not resolve, the agent
+# edits the conflicted files.  That applies to the merge of FROM_DIR's branch
+# into TO_DIR, and to the merges of the pulls that update FROM_DIR and TO_DIR
+# from their remotes.  This script checks the resolution, whether by the agent
+# or by rerere:  every change relative to AUTO_MERGE, git's automatic merge,
+# must be inside a conflict region, and no conflict marker may remain.  Then
+# it stages the files, commits the merge, and continues.  The agent resolves
+# only content conflicts, in which every conflicted file contains conflict
+# markers, and only when the working tree has no other changes.  A pull that
+# rebases, as `pull.rebase` can make it do, is not resolved.  If the agent
+# fails, or its resolution fails the checks, this script stops with the merge
+# still in progress, for the user to finish or to abort with
+# `git merge --abort`.
+#
+# When the build of TO_DIR fails after the merge, the agent edits files to fix
+# it, without building; then this script builds again.  The agent gets up to
+# 3 attempts.  When the build succeeds, this script commits the agent's
+# changes on top of the merge, as "Fix the build after merging ...", and
+# pushes.  If the build still fails, this script stops, with the agent's
+# changes staged but not committed.
+
 # Here is an example of use.
 #
 # Suppose you have 3 branches named "part1", "part2", and "part3".  Each one
@@ -143,6 +176,8 @@
 nocompile=0
 rebase=0
 squash=0
+# The AI agent that resolves conflicts and fixes the build, or empty for none.
+resolver=claude
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other scripts even when this script
@@ -358,8 +393,7 @@ git_push_to() {
     return 1
   fi
 
-  if ! git -C "$from_absolute" pull -q; then
-    echo "${SCRIPT_NAME}: problem pulling ${from_absolute}" >&2
+  if ! pull_resolving "${resolver}" "${from_absolute}" -q; then
     return 1
   fi
 
@@ -378,8 +412,7 @@ git_push_to() {
     return 1
   fi
 
-  if ! git pull -q; then
-    echo "${SCRIPT_NAME}: problem pulling in ${to_absolute}" >&2
+  if ! pull_resolving "${resolver}" "${to_absolute}" -q; then
     return 1
   fi
 
@@ -400,7 +433,7 @@ git_push_to() {
   # `merge_build_push` describes the commit as a branch of this repository.
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
-    "${from_branch} of ${from_absolute}" "${nocompile}"; then
+    "${from_branch} of ${from_absolute}" "${nocompile}" "${resolver}"; then
     return 1
   fi
 
@@ -848,6 +881,12 @@ while [ "$#" -ge 1 ]; do
       rebase=1
       squash=1
       ;;
+    --llm)
+      if [ -z "${resolver}" ]; then resolver=claude; fi
+      ;;
+    --no-llm) resolver='' ;;
+    --claude) resolver=claude ;;
+    --codex) resolver=codex ;;
     *) break ;;
   esac
   shift
@@ -855,8 +894,9 @@ done
 
 if [ "$#" -lt 2 ]; then
   echo "${SCRIPT_NAME}: not enough arguments" >&2
-  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ..." >&2
-  echo "   or: ${SCRIPT_NAME} [--nocompile] [--rebase | --squash] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
+  echo "Usage: ${SCRIPT_NAME} [OPTIONS] FROM_DIR TO_DIR ..." >&2
+  echo "   or: ${SCRIPT_NAME} [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
+  echo "OPTIONS: [--nocompile] [--rebase | --squash] [--llm | --no-llm] [--claude | --codex]" >&2
   exit 1
 fi
 
