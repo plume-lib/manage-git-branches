@@ -174,6 +174,37 @@ class CiBuildTest(unittest.TestCase):
         ):
             list(ci_build.circleci_items("/v2/workflow/ID/job"))
 
+    def test_request_object(self) -> None:
+        """A JSON object is returned; an empty body or other JSON raises ValueError."""
+        url = "https://example.com/"
+        with mock.patch.object(request_util, "http", return_value=b'{"a": 1}'):
+            self.assertEqual(request_util.request_object("GET", url), {"a": 1})
+        for content in [b"", b"[]", b'[{"a": 1}]', b'"a"', b"null", b"1"]:
+            with (
+                self.subTest(content=content),
+                mock.patch.object(request_util, "http", return_value=content),
+                self.assertRaises(ValueError),
+            ):
+                request_util.request_object("GET", url)
+
+    def test_circleci_workflow_and_job_from_url_not_object(self) -> None:
+        """A job lookup whose response is not a JSON object raises an error in REQUEST_ERRORS."""
+        url = "https://app.circleci.com/jobs/github/org/repo/123"
+        for content in [b"", b"[]"]:
+            with (
+                self.subTest(content=content),
+                mock.patch.object(request_util, "http", return_value=content),
+                self.assertRaises(request_util.REQUEST_ERRORS),
+            ):
+                ci_build.CircleciWorkflowAndJob.from_url(url)
+
+    def test_circleci_workflow_and_job_from_url_lookup(self) -> None:
+        """A job's workflow is looked up when its URL does not name the workflow."""
+        url = "https://app.circleci.com/jobs/github/org/repo/123"
+        response = b'{"latest_workflow": {"id": "W"}}'
+        with mock.patch.object(request_util, "http", return_value=response):
+            self.assertEqual(ci_build.CircleciWorkflowAndJob.from_url(url), ("W", 123))
+
     def test_azure_request_refusals(self) -> None:
         """A request of Azure DevOps treats a sign-in page as a refusal; another does not."""
         refusals = []

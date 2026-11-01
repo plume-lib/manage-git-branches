@@ -720,8 +720,9 @@ def circleci_workflow_state(workflow):
         The BuildState of the workflow, whose branch is that of the workflow's pipeline,
         as circleci_pipeline_branch returns it.
     """
-    api = f"{ci_build.CIRCLECI_API}/v2/workflow/{workflow}"
-    w = request_util.json_object(request_util.request("GET", api, ci_build.circleci_headers()), api)
+    w = request_util.request_object(
+        "GET", f"{ci_build.CIRCLECI_API}/v2/workflow/{workflow}", ci_build.circleci_headers()
+    )
     finished = w["status"] not in CIRCLECI_UNFINISHED_STATUSES
     return BuildState(circleci_pipeline_branch(w["pipeline_id"]), finished)
 
@@ -737,9 +738,10 @@ def circleci_pipeline_branch(pipeline):
     Returns:
         The pipeline's branch, as circleci_pipeline_dict_branch returns it.
     """
-    api = f"{ci_build.CIRCLECI_API}/v2/pipeline/{pipeline}"
     return circleci_pipeline_dict_branch(
-        request_util.json_object(request_util.request("GET", api, ci_build.circleci_headers()), api)
+        request_util.request_object(
+            "GET", f"{ci_build.CIRCLECI_API}/v2/pipeline/{pipeline}", ci_build.circleci_headers()
+        )
     )
 
 
