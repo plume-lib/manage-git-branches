@@ -49,9 +49,11 @@ fail() {
 ##   none:   changes nothing
 ##   fail:   exits with status 3
 ##   commit: as "good", but also commits the merge
+##   create: as "good", but also creates a file
 ## Otherwise, it is fixing a build, and it acts according to ${STUB_BUILD}:
 ##   fix:    removes the lines of other.txt that break the build
 ##   bad:    creates or changes notes.txt, which does not fix the build
+##   once:   as "bad" the first time, and as "none" afterward
 ##   none:   changes nothing (the default)
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
@@ -65,6 +67,9 @@ if ! grep -q '^<<<<<<< ' file.txt; then
       mv other.txt.new other.txt
       ;;
     bad) echo "an attempt" >> notes.txt ;;
+    once)
+      if [ ! -e notes.txt ]; then echo "an attempt" > notes.txt; fi
+      ;;
   esac
   exit 0
 fi
@@ -75,6 +80,9 @@ mv file.txt.new file.txt
 if [ "${STUB_MODE}" = clean ]; then
   sed -e 's/^three$/THREE/' file.txt > file.txt.new
   mv file.txt.new file.txt
+fi
+if [ "${STUB_MODE}" = create ]; then
+  echo "scratch" > scratch.txt
 fi
 if [ "${STUB_MODE}" = commit ]; then
   git add file.txt
@@ -93,7 +101,9 @@ export STUB_LOG STUB_PROMPT
 ## "feature", whose changes to file.txt conflict, and a clone of each.  Sets
 ## ${main_dir} and ${feature_dir} to the clones and ${remote} to the remote.
 ## With "build", the project has a Makefile, whose build fails if other.txt
-## contains "BROKEN", and main adds "BROKEN" to other.txt.
+## contains "BROKEN", and main adds "BROKEN" to other.txt.  With
+## "build-modifies", the build also changes the tracked file other.txt if
+## notes.txt exists.
 setup_case() {
   case_dir="${WORK_DIR}/$1"
   mkdir "${case_dir}"
@@ -102,9 +112,16 @@ setup_case() {
   git init -q -b main "${case_dir}/seed"
   printf '%s\n' one two three four five six seven eight nine > "${case_dir}/seed/file.txt"
   git -C "${case_dir}/seed" add file.txt
-  if [ "${2:-}" = build ]; then
-    printf 'all:\n\t@if grep -n BROKEN other.txt; then echo "other.txt is broken" >&2; exit 1; fi\n' \
-      > "${case_dir}/seed/Makefile"
+  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
+    echo 'all:' > "${case_dir}/seed/Makefile"
+  fi
+  if [ "${2:-}" = build-modifies ]; then
+    printf '\t@if [ -e notes.txt ]; then echo "built" >> other.txt; fi\n' \
+      >> "${case_dir}/seed/Makefile"
+  fi
+  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
+    printf '\t@if grep -n BROKEN other.txt; then echo "other.txt is broken" >&2; exit 1; fi\n' \
+      >> "${case_dir}/seed/Makefile"
     echo "fine" > "${case_dir}/seed/other.txt"
     git -C "${case_dir}/seed" add Makefile other.txt
   fi
@@ -121,7 +138,7 @@ setup_case() {
   git -C "${feature_dir}" config pull.rebase false
 
   printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${main_dir}/file.txt"
-  if [ "${2:-}" = build ]; then
+  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
     echo "BROKEN" >> "${main_dir}/other.txt"
   fi
   git -C "${main_dir}" commit -q -a -m "Change main"
@@ -246,7 +263,7 @@ setup_case clean
 push_to clean --llm
 check_not_resolved "change outside a conflict region"
 case "${push_output}" in
-  *"outside every conflict region"*) ;;
+  *"the text before the first conflict region changed"*) ;;
   *) fail "change outside a conflict region: wrong diagnostic: ${push_output}" ;;
 esac
 
@@ -255,7 +272,7 @@ setup_case none
 push_to none --llm
 check_not_resolved "remaining conflict markers"
 case "${push_output}" in
-  *"conflict marker at line"*) ;;
+  *"is a conflict marker"*) ;;
   *) fail "remaining conflict markers: wrong diagnostic: ${push_output}" ;;
 esac
 
@@ -276,6 +293,30 @@ case "${push_output}" in
   *"changed HEAD or MERGE_HEAD"*) ;;
   *) fail "agent that commits: wrong diagnostic: ${push_output}" ;;
 esac
+
+## An agent that creates a file is rejected.
+setup_case create
+push_to create --llm
+check_not_resolved "agent that creates a file"
+case "${push_output}" in
+  *"created a file: scratch.txt"*) ;;
+  *) fail "agent that creates a file: wrong diagnostic: ${push_output}" ;;
+esac
+
+## A rerun does not mistake the merge that an earlier run left in progress
+## for a conflicted pull.
+setup_case rerun
+push_to none --llm
+: > "${STUB_LOG}"
+push_to good --llm
+check_not_resolved "rerun"
+case "${push_output}" in
+  *"a merge is in progress"*) ;;
+  *) fail "rerun: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "rerun: an agent ran: $(cat "${STUB_LOG}")"
+fi
 
 ## A resolution that `git rerere` recorded needs no agent, whether or not
 ## rerere stages the files that it resolves.
@@ -366,6 +407,35 @@ if [ "$(wc -l < "${STUB_LOG}")" -ne 4 ]; then
 fi
 if ! git -C "${feature_dir}" diff --cached --name-only | grep -q -x notes.txt; then
   fail "bad build fix: the agent's changes are not staged"
+fi
+
+## An attempt that changes nothing ends the attempts, even after an earlier
+## attempt changed files; the later attempt learns of the earlier one.
+setup_case build-once build
+STUB_BUILD=once push_to good --llm
+check_not_resolved "build fix that gives up"
+case "${push_output}" in
+  *"it changed nothing"*) ;;
+  *) fail "build fix that gives up: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(wc -l < "${STUB_LOG}")" -ne 3 ]; then
+  fail "build fix that gives up: expected claude to run 3 times, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q 'git diff --cached' "${STUB_PROMPT}"; then
+  fail "build fix that gives up: the later attempt was not told of the earlier one"
+fi
+
+## A build that changes tracked files ends the attempts, so that its changes
+## are not committed as the agent's.
+setup_case build-modifies build-modifies
+STUB_BUILD=bad push_to good --llm
+check_not_resolved "build that changes tracked files"
+case "${push_output}" in
+  *"the build changed tracked files"*) ;;
+  *) fail "build that changes tracked files: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(wc -l < "${STUB_LOG}")" -ne 2 ]; then
+  fail "build that changes tracked files: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
 fi
 
 ## With --no-llm, a failed build is not given to an agent.

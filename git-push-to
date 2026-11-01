@@ -176,8 +176,6 @@
 nocompile=0
 rebase=0
 squash=0
-# The AI agent that resolves conflicts and fixes the build, or empty for none.
-resolver=claude
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other scripts even when this script
@@ -393,7 +391,7 @@ git_push_to() {
     return 1
   fi
 
-  if ! pull_resolving "${resolver}" "${from_absolute}" -q; then
+  if ! pull_resolving "${llm_agent}" "${from_absolute}" -q; then
     return 1
   fi
 
@@ -412,7 +410,7 @@ git_push_to() {
     return 1
   fi
 
-  if ! pull_resolving "${resolver}" "${to_absolute}" -q; then
+  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q; then
     return 1
   fi
 
@@ -433,7 +431,7 @@ git_push_to() {
   # `merge_build_push` describes the commit as a branch of this repository.
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
-    "${from_branch} of ${from_absolute}" "${nocompile}" "${resolver}"; then
+    "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}"; then
     return 1
   fi
 
@@ -881,13 +879,9 @@ while [ "$#" -ge 1 ]; do
       rebase=1
       squash=1
       ;;
-    --llm)
-      if [ -z "${resolver}" ]; then resolver=claude; fi
+    *)
+      if ! parse_llm_option "$1"; then break; fi
       ;;
-    --no-llm) resolver='' ;;
-    --claude) resolver=claude ;;
-    --codex) resolver=codex ;;
-    *) break ;;
   esac
   shift
 done
@@ -896,7 +890,7 @@ if [ "$#" -lt 2 ]; then
   echo "${SCRIPT_NAME}: not enough arguments" >&2
   echo "Usage: ${SCRIPT_NAME} [OPTIONS] FROM_DIR TO_DIR ..." >&2
   echo "   or: ${SCRIPT_NAME} [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
-  echo "OPTIONS: [--nocompile] [--rebase | --squash] [--llm | --no-llm] [--claude | --codex]" >&2
+  echo "OPTIONS: [--nocompile] [--rebase | --squash] ${llm_options_usage}" >&2
   exit 1
 fi
 

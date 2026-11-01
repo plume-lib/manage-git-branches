@@ -511,4 +511,74 @@ if ! git -C "${uwa_main}" config --get branch.movedbranch.merge > /dev/null; the
   fail "undo_worktree_add removed the configuration of a branch that it left"
 fi
 
+## Tests of check_conflict_resolution.  Each case makes AUTO_MERGE a tree
+## whose file f.txt has given contents, with conflict markers, and writes the
+## resolution to f.txt in the working tree.
+git init -q "${WORK_DIR}/ccr"
+
+## Usage: check_resolution EXPECTED DESCRIPTION AUTO_MERGE_LINES -- RESOLUTION_LINES
+## Checks that `check_conflict_resolution` accepts (EXPECTED "accept") or
+## rejects (EXPECTED "reject") the resolution.
+check_resolution() {
+  check_resolution_expected="$1"
+  check_resolution_description="$2"
+  shift 2
+  : > "${WORK_DIR}/ccr-auto"
+  while [ "$1" != "--" ]; do
+    printf '%s\n' "$1" >> "${WORK_DIR}/ccr-auto"
+    shift
+  done
+  shift
+  : > "${WORK_DIR}/ccr/f.txt"
+  for check_resolution_line; do
+    printf '%s\n' "${check_resolution_line}" >> "${WORK_DIR}/ccr/f.txt"
+  done
+  check_resolution_blob="$(git -C "${WORK_DIR}/ccr" hash-object -w "${WORK_DIR}/ccr-auto")"
+  check_resolution_tree="$(printf '100644 blob %s\tf.txt\n' "${check_resolution_blob}" \
+    | git -C "${WORK_DIR}/ccr" mktree)"
+  git -C "${WORK_DIR}/ccr" update-ref AUTO_MERGE "${check_resolution_tree}"
+  if (cd "${WORK_DIR}/ccr" && check_conflict_resolution f.txt 2> /dev/null); then
+    check_resolution_actual=accept
+  else
+    check_resolution_actual=reject
+  fi
+  if [ "${check_resolution_actual}" != "${check_resolution_expected}" ]; then
+    fail "check_conflict_resolution: ${check_resolution_description}: expected ${check_resolution_expected}, got ${check_resolution_actual}"
+  fi
+}
+
+check_resolution accept "both sides kept" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- a b c d
+# `git diff -U0` puts the deletion of the blank line on the one after the
+# region, outside it.
+check_resolution accept "blank lines at the end of the region and after it" \
+  a '<<<<<<< HEAD' b '' '=======' c '' '>>>>>>> other' '' d -- a b '' c '' d
+check_resolution accept "a heading underline that looks like a separator" \
+  intro '<<<<<<< HEAD' 'Title A' '=======' '=======' 'Title B' '=======' '>>>>>>> other' text \
+  -- intro 'Title B' '=======' text
+check_resolution accept "diff3 style" \
+  a '<<<<<<< HEAD' b '||||||| base' x '=======' c '>>>>>>> other' d -- a bc d
+check_resolution accept "two regions" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' m '<<<<<<< HEAD' e '=======' f '>>>>>>> other' z \
+  -- a b m e f z
+check_resolution accept "two adjacent regions" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' '<<<<<<< HEAD' e '=======' f '>>>>>>> other' z \
+  -- a b f z
+check_resolution accept "a resolution that repeats the text between regions" \
+  a '<<<<<<< HEAD' m '=======' c '>>>>>>> other' m '<<<<<<< HEAD' e '=======' f '>>>>>>> other' z \
+  -- a m m f z
+check_resolution reject "the text before the region changed" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- A b c d
+check_resolution reject "the text after the region changed" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- a b c
+check_resolution reject "the text between regions changed" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' m '<<<<<<< HEAD' e '=======' f '>>>>>>> other' z \
+  -- a b M e f z
+check_resolution reject "nothing resolved" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d
+check_resolution reject "a marker remains" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- a b c '>>>>>>> other' d
+check_resolution reject "no conflict markers in AUTO_MERGE" \
+  a b c -- a b c
+
 echo "${SCRIPT_NAME}: OK"

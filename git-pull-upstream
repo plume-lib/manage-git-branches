@@ -89,24 +89,18 @@ fi
 . "${SCRIPT_DIR}/common-functions.sh"
 
 nocompile=0
-# The AI agent that resolves conflicts and fixes the build, or empty for none.
-resolver=claude
 while [ "$#" -ge 1 ]; do
   case "$1" in
     --nocompile) nocompile=1 ;;
-    --llm)
-      if [ -z "${resolver}" ]; then resolver=claude; fi
+    *)
+      if ! parse_llm_option "$1"; then break; fi
       ;;
-    --no-llm) resolver='' ;;
-    --claude) resolver=claude ;;
-    --codex) resolver=codex ;;
-    *) break ;;
   esac
   shift
 done
 
 if [ "$#" -ne 0 ]; then
-  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--llm | --no-llm] [--claude | --codex]" >&2
+  echo "Usage: ${SCRIPT_NAME} [--nocompile] ${llm_options_usage}" >&2
   exit 1
 fi
 
@@ -175,7 +169,7 @@ fi
 # earlier run of this command made but did not push, as when its build
 # failed, and would copy that merge's commits onto the current branch.
 # `--no-edit` keeps the merge from stopping at an editor.
-if ! pull_resolving "${resolver}" "$(pwd)" -q --no-rebase --no-edit; then
+if ! pull_resolving "${llm_agent}" "$(pwd)" -q --no-rebase --no-edit; then
   exit 1
 fi
 
@@ -217,6 +211,6 @@ if ! upstream_head="$(git rev-parse --verify --quiet "${upstream_ref}")"; then
 fi
 if ! merge_build_push "${upstream_head}" \
   "remote-tracking branch '${upstream_ref#refs/remotes/}'" "${upstream_ref}" \
-  "${nocompile}" "${resolver}"; then
+  "${nocompile}" "${llm_agent}"; then
   exit 1
 fi

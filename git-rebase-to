@@ -66,6 +66,13 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+
 # Check the arguments here, so that the usage message names this command
 # rather than `git-push-to`.  As in `git-push-to`, options precede the other
 # arguments.  `git-push-to` would treat a later option as a directory, but only
@@ -73,7 +80,7 @@ SCRIPT_NAME="$(basename -- "$0")"
 usage() {
   echo "Usage: ${SCRIPT_NAME} [OPTIONS] FROM_DIR TO_DIR ..." >&2
   echo "   or: ${SCRIPT_NAME} [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
-  echo "OPTIONS: [--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]" >&2
+  echo "OPTIONS: [--nocompile] [--squash] ${llm_options_usage}" >&2
   exit 1
 }
 num_args=0
@@ -81,8 +88,9 @@ in_options=1
 for arg; do
   if [ "${in_options}" -eq 1 ]; then
     case "${arg}" in
-      --nocompile | --rebase | --squash | --llm | --no-llm | --claude | --codex) continue ;;
+      --nocompile | --rebase | --squash) continue ;;
     esac
+    if parse_llm_option "${arg}"; then continue; fi
     in_options=0
   fi
   case "${arg}" in

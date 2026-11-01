@@ -870,75 +870,101 @@ upstream_default_branch_git() {
 ## Usage: check_conflict_resolution FILE
 ## Checks the resolution of the conflicts in FILE, a file of the current
 ## working tree, against AUTO_MERGE, git's automatic merge, which contains the
-## conflict markers.  The resolution is acceptable if every change between
-## AUTO_MERGE and the working tree is inside a conflict region, and every
-## conflict marker line of AUTO_MERGE is gone.  A conflict region starts with
-## a line "<<<<<<<" and ends with the matching line ">>>>>>>"; a recursive
-## merge nests regions.  Returns 1, after printing a diagnostic for each
-## problem, if the resolution is not acceptable.
+## conflict markers.  A conflict region starts with a line "<<<<<<<" and ends
+## with the matching line ">>>>>>>"; a recursive merge nests regions.  The
+## resolution is acceptable if it consists of the text outside the conflict
+## regions, unchanged and in order, with any text in place of each region,
+## except a line that starts with "<<<<<<<", "|||||||", or ">>>>>>>".  (A line
+## "=======" can be content, such as a Markdown heading's underline.)  Returns
+## 1, after printing a diagnostic for each problem, if the resolution is not
+## acceptable.
+##
+## This compares content rather than the hunks of `git diff`, which can put a
+## change on either of two identical lines, one inside a region and one
+## outside it.
 check_conflict_resolution() {
+  if [ ! -f "$1" ]; then
+    echo "${SCRIPT_NAME}: $1: the file was deleted" >&2
+    return 1
+  fi
   # Each line of the input is tagged:  "A" for a line of the file in
-  # AUTO_MERGE, which all come first, and "D" for a line of the diff.  The
-  # options of `git diff` override configuration that would change its
-  # output.  With `-U0`, each hunk contains only changed lines.
+  # AUTO_MERGE, which all come first, and "W" for a line of the file in the
+  # working tree.
   # shellcheck disable=SC2016 # awk, not the shell, expands $0 and the like.
   {
     git show "AUTO_MERGE:$1" | sed -e 's/^/A/'
-    git diff --no-ext-diff --no-textconv --no-color --no-renames -U0 \
-      AUTO_MERGE -- "$1" | sed -e 's/^/D/'
+    sed -e 's/^/W/' < "$1"
   } | CHECK_FILE="$1" CHECK_SCRIPT_NAME="${SCRIPT_NAME}" awk '
     function problem(message) {
       printf "%s: %s: %s\n", ENVIRON["CHECK_SCRIPT_NAME"], ENVIRON["CHECK_FILE"], message > "/dev/stderr"
       status = 1
     }
-    function in_region(lo, hi,   r) {
-      for (r = 1; r <= num_regions; r++) {
-        if (region_start[r] <= lo && hi <= region_end[r]) return 1
+    # Returns 1 if the lines of block B, a clean block of AUTO_MERGE, are the
+    # lines of the working tree that start at line POS.
+    function block_at(b, pos,   k) {
+      if (pos < 1 || pos + block_len[b] - 1 > num_w) return 0
+      for (k = 0; k < block_len[b]; k++) {
+        if (w[pos + k] != a[block_start[b] + k]) return 0
       }
-      return 0
+      return 1
     }
-    /^A/ {
-      n++
-      line = substr($0, 2)
-      if (line ~ /^<<<<<<<+( |$)/) {
-        if (depth == 0) { num_regions++; region_start[num_regions] = n }
-        depth++
-      }
-      if (depth > 0 && (line ~ /^<<<<<<<+( |$)/ || line ~ /^[|][|][|][|][|][|][|]+( |$)/ \
-                        || line ~ /^=======+$/ || line ~ /^>>>>>>>+( |$)/)) {
-        num_markers++
-        marker[num_markers] = n
-      }
-      if (depth > 0 && line ~ /^>>>>>>>+( |$)/) {
-        depth--
-        if (depth == 0) region_end[num_regions] = n
-      }
-      next
+    function block_lines(b) {
+      if (block_len[b] == 0) return "an empty block"
+      return "lines " block_start[b] "-" (block_start[b] + block_len[b] - 1) " of AUTO_MERGE"
     }
-    /^D@@ / {
-      # The hunk header is "@@ -START[,COUNT] +START[,COUNT] @@"; COUNT
-      # defaults to 1.
-      split(substr($2, 2), old, ",")
-      start = old[1] + 0
-      count = (index($2, ",") ? old[2] + 0 : 1)
-      if (count == 0) {
-        # Lines inserted after line START.
-        if (!in_region(start, start + 1)) problem("lines inserted after line " start " of AUTO_MERGE, outside every conflict region")
-      } else {
-        if (!in_region(start, start + count - 1)) {
-          lines = (count == 1 ? "line " start : "lines " start "-" (start + count - 1))
-          problem(lines " of AUTO_MERGE changed, outside every conflict region")
-        }
-        for (m = 1; m <= num_markers; m++) {
-          if (start <= marker[m] && marker[m] <= start + count - 1) removed[m] = 1
-        }
-      }
-    }
+    /^A/ { a[++num_a] = substr($0, 2); next }
+    /^W/ { w[++num_w] = substr($0, 2); next }
     END {
-      if (depth != 0) problem("AUTO_MERGE has an unterminated conflict region")
-      if (num_regions == 0) problem("AUTO_MERGE has no conflict markers")
-      for (m = 1; m <= num_markers; m++) {
-        if (!removed[m]) problem("conflict marker at line " marker[m] " of AUTO_MERGE remains")
+      # Split AUTO_MERGE into the clean blocks 0..num_regions, between the
+      # regions.
+      num_regions = 0
+      block_start[0] = 1
+      depth = 0
+      for (i = 1; i <= num_a; i++) {
+        if (a[i] ~ /^<<<<<<<+( |$)/) {
+          if (depth == 0) {
+            block_len[num_regions] = i - block_start[num_regions]
+            num_regions++
+          }
+          depth++
+        } else if (depth > 0 && a[i] ~ /^>>>>>>>+( |$)/) {
+          depth--
+          if (depth == 0) block_start[num_regions] = i + 1
+        }
+      }
+      if (depth != 0) { problem("AUTO_MERGE has an unterminated conflict region"); exit 1 }
+      if (num_regions == 0) { problem("AUTO_MERGE has no conflict markers"); exit 1 }
+      block_len[num_regions] = num_a + 1 - block_start[num_regions]
+
+      # The first block is a prefix of the working tree, and the last block
+      # is a suffix that does not overlap it.  Each block between them comes
+      # at the earliest place after the previous one, which leaves the most
+      # room for the blocks that follow.
+      if (!block_at(0, 1)) { problem("the text before the first conflict region changed"); exit 1 }
+      last_pos = num_w - block_len[num_regions] + 1
+      if (last_pos < block_len[0] + 1 || !block_at(num_regions, last_pos)) {
+        problem("the text after the last conflict region changed")
+        exit 1
+      }
+      pos = block_len[0] + 1
+      for (b = 1; b < num_regions; b++) {
+        while (pos + block_len[b] <= last_pos && !block_at(b, pos)) pos++
+        if (pos + block_len[b] > last_pos) {
+          problem("the text between conflict regions " b " and " (b + 1) " (" block_lines(b) ") changed")
+          exit 1
+        }
+        for (k = 0; k < block_len[b]; k++) clean[pos + k] = 1
+        pos += block_len[b]
+      }
+      for (k = 1; k <= block_len[0]; k++) clean[k] = 1
+      for (k = last_pos; k <= num_w; k++) clean[k] = 1
+
+      # The text in place of the regions has no conflict markers.
+      for (k = 1; k <= num_w; k++) {
+        if (!clean[k] && (w[k] ~ /^<<<<<<<+( |$)/ || w[k] ~ /^[|][|][|][|][|][|][|]+( |$)/ \
+                          || w[k] ~ /^>>>>>>>+( |$)/)) {
+          problem("line " k " is a conflict marker")
+        }
       }
       exit status
     }'
@@ -1015,6 +1041,10 @@ resolve_merge_conflicts() {
     return 1
   fi
 
+  # The agent must not create files, which would not be committed but which
+  # a later build could use.
+  resolve_untracked="$(untracked_files)"
+
   # The files that `git rerere` did not resolve.
   resolve_unresolved="$(printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
     if ! check_conflict_resolution "${resolve_file}" 2> /dev/null; then
@@ -1039,8 +1069,8 @@ Resolve every conflict by editing those files.  Rules:
 * Do not run any git command that changes the index, HEAD, or any other ref, such as \`git add\`, \`git commit\`, \`git checkout\`, \`git restore\`, \`git reset\`, \`git merge\`, \`git stash\`, or \`git rebase\`.  A script stages the files and commits the merge after you finish.
 * Run commands in the current directory, which is the working tree, without \`cd\` or \`git -C\`.  A command in another form needs approval, which nobody is present to give.
 * Do not build the project or run its tests; the script does that.
-* Do not create another working copy, and do not change any file other than those listed above.
-* The script rejects the resolution if \`git diff AUTO_MERGE\` shows a change outside a conflict region, or if a conflict marker line remains.  AUTO_MERGE is git's automatic merge, which contains the conflict markers.
+* Do not create another working copy, do not create any file, and do not change any file other than those listed above.
+* The script rejects the resolution if any text outside the conflict regions changed, or if a conflict marker line remains.  \`git diff AUTO_MERGE\` shows your changes; AUTO_MERGE is git's automatic merge, which contains the conflict markers.
 * If you cannot resolve a conflict with confidence, leave its conflict markers in place, and say why.
 
 Finish with a brief summary of how you resolved each conflict."
@@ -1062,6 +1092,11 @@ Finish with a brief summary of how you resolved each conflict."
   resolve_other="$(resolve_other_changes)"
   if [ -n "${resolve_other}" ]; then
     printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} changed a file that had no conflict: /" >&2
+    resolve_ok=0
+  fi
+  resolve_created="$(untracked_files | grep -F -x -v -- "${resolve_untracked}")"
+  if [ -n "${resolve_created}" ]; then
+    printf '%s\n' "${resolve_created}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} created a file: /" >&2
     resolve_ok=0
   fi
   # Every conflicted file is checked, including one that the agent did not
@@ -1099,6 +1134,13 @@ Finish with a brief summary of how you resolved each conflict."
   return 0
 }
 
+## Usage: untracked_files
+## Prints, one per line, the files of the working tree that git does not track
+## and does not ignore.
+untracked_files() {
+  git -c core.quotePath=false ls-files --others --exclude-standard
+}
+
 ## Usage: resolve_other_changes
 ## Prints, one per line, each file that differs from AUTO_MERGE in the working
 ## tree or in the index and is not in ${resolve_files}, the conflicted files.
@@ -1111,16 +1153,28 @@ resolve_other_changes() {
 
 ## Usage: run_agent AGENT PROMPT
 ## Runs the AI agent AGENT, "claude" or "codex", in the current directory, with
-## the instructions PROMPT.  The agent may edit files and read the repository;
-## Claude may run only the git commands that read the repository, and Codex's
-## sandbox confines its writes to the working tree.  Returns 1, after
-## printing a diagnostic, if the agent fails.
+## the instructions PROMPT.  The agent may edit files of the working tree and
+## read the repository, but nothing else; PROMPT can contain text from other
+## people, such as conflicting changes, which might try to make the agent do
+## more.  Returns 1, after printing a diagnostic, if the agent fails.
 run_agent() {
   # Each agent reads its instructions from standard input.
+  #
+  # Claude's restricted mode confines the file tools to the current
+  # directory, and it ignores the settings files, whose rules, such as a
+  # user's "Write(*)", would otherwise permit edits anywhere; a project's
+  # settings file could come from the merged branch.  `--strict-mcp-config`
+  # leaves out MCP servers, whose tools could act elsewhere.  Of the git
+  # commands that Claude may run, which read the repository, `git diff`,
+  # `git log`, and `git show` can write a file named by `--output`.
+  #
+  # Codex's sandbox confines its writes to the working tree.
   case "$1" in
     claude)
-      printf '%s\n' "$2" | claude -p --permission-mode acceptEdits \
-        --allowedTools 'Read,Edit,Write,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git merge-base:*)'
+      printf '%s\n' "$2" | claude -p --restricted --strict-mcp-config \
+        --tools 'Read,Edit,Write,Grep,Glob,Bash' --permission-mode acceptEdits \
+        --allowedTools 'Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git merge-base:*)' \
+        --disallowedTools 'Bash(git diff *--output*),Bash(git log *--output*),Bash(git show *--output*)'
       ;;
     codex)
       printf '%s\n' "$2" | codex exec --sandbox workspace-write -
@@ -1177,10 +1231,16 @@ build_and_fix() {
   fix_head="$(git rev-parse --verify HEAD)" || return 1
   fix_branch="$(git symbolic-ref --quiet --short HEAD)" || fix_branch="HEAD"
   fix_attempt=1
+  fix_earlier=''
   while :; do
-    fix_untracked="$(git -c core.quotePath=false ls-files --others --exclude-standard)"
+    fix_untracked="$(untracked_files)"
+    if [ "${fix_attempt}" -gt 1 ]; then
+      fix_earlier="
+
+Earlier attempts to fix the build changed files, but the build still failed.  Their changes are staged; \`git diff --cached\` shows them."
+    fi
     fix_prompt="You are fixing a failed build in the git working tree $(pwd).
-A script merged $2 into branch ${fix_branch}, whose head had been $3, and then built the project, which failed.  \`git diff $3 HEAD\` shows what the merge changed.  The end of the build output is below; the full output is in ${fix_log}.
+A script merged $2 into branch ${fix_branch}, whose head had been $3, and then built the project, which failed.  \`git diff $3 HEAD\` shows what the merge changed.  The end of the build output is below; the full output is in ${fix_log}.${fix_earlier}
 
 Rules:
 
@@ -1206,9 +1266,12 @@ $(tail -n 100 "${fix_log}")"
       return 1
     fi
     # Stage the agent's changes:  to tracked files, and the files that it
-    # created.
-    fix_new="$(git -c core.quotePath=false ls-files --others --exclude-standard \
-      | grep -F -x -v -- "${fix_untracked}")"
+    # created.  The changes of earlier attempts are already staged.
+    fix_new="$(untracked_files | grep -F -x -v -- "${fix_untracked}")"
+    if git diff --quiet && [ -z "${fix_new}" ]; then
+      echo "${SCRIPT_NAME}: ${fix_with} did not fix the build in $(pwd); it changed nothing" >&2
+      return 1
+    fi
     if ! git add -u \
       || ! printf '%s\n' "${fix_new}" | while IFS= read -r fix_file; do
         if [ -n "${fix_file}" ]; then
@@ -1219,13 +1282,19 @@ $(tail -n 100 "${fix_log}")"
       return 1
     fi
     if git diff --cached --quiet; then
-      echo "${SCRIPT_NAME}: ${fix_with} did not fix the build in $(pwd)" >&2
+      echo "${SCRIPT_NAME}: ${fix_with} did not fix the build in $(pwd); its changes undo one another" >&2
       return 1
     fi
     if build_logged "${fix_log}"; then
       break
     fi
     echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
+    # The next attempt's changes are staged with \`git add -u\`, which would
+    # also stage any change that the build made.
+    if ! git diff --quiet; then
+      echo "${SCRIPT_NAME}: the build changed tracked files in $(pwd); fix the build by hand" >&2
+      return 1
+    fi
     if [ "${fix_attempt}" -ge "${build_fix_attempts}" ]; then
       echo "${SCRIPT_NAME}: ${fix_with} did not fix the build in $(pwd) in ${build_fix_attempts} attempts; its changes are staged" >&2
       return 1
@@ -1239,17 +1308,49 @@ $(tail -n 100 "${fix_log}")"
   return 0
 }
 
+## The AI agent that the commands ask to resolve merge conflicts and to fix a
+## failed build:  "claude", "codex", or empty for none.  `parse_llm_option`
+## sets it.
+llm_agent=claude
+## The usage of the options that `parse_llm_option` recognizes.
+# shellcheck disable=SC2034 # used by the commands that source this file
+llm_options_usage='[--llm | --no-llm] [--claude | --codex]'
+
+## Usage: parse_llm_option OPTION
+## Returns 0, after setting ${llm_agent}, if OPTION chooses the AI agent:
+## "--llm" turns it on (Claude, unless an earlier option chose Codex),
+## "--no-llm" turns it off, and "--claude" and "--codex" choose it.  Returns 1
+## if OPTION is not one of those.
+parse_llm_option() {
+  case "$1" in
+    --llm)
+      if [ -z "${llm_agent}" ]; then llm_agent=claude; fi
+      ;;
+    --no-llm) llm_agent='' ;;
+    --claude) llm_agent=claude ;;
+    --codex) llm_agent=codex ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
 ## Usage: pull_resolving RESOLVER DIRECTORY PULL-ARGUMENT...
 ## Runs `git -C DIRECTORY pull PULL-ARGUMENT...`.  If the pull merges, the
 ## merge has conflicts, and RESOLVER is not empty, resolves them with
 ## `resolve_merge_conflicts` and commits the merge with the message that
 ## `git pull` composed.  (A pull that rebases cannot be resolved this way.)
-## Returns 1, after printing a diagnostic, if the pull fails and its conflicts
-## are not resolved.
+## Returns 1, after printing a diagnostic, if a merge is already in progress
+## in DIRECTORY, or if the pull fails and its conflicts are not resolved.
 pull_resolving() {
   pull_resolver="$1"
   pull_dir="$2"
   shift 2
+  # Otherwise, `git pull` would refuse to run, and the merge in progress would
+  # seem to be the pull's.
+  if git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
+    return 1
+  fi
   if git -C "${pull_dir}" pull "$@"; then
     return 0
   fi
