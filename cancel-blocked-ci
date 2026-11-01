@@ -5,9 +5,7 @@ Usage (run in the directory that holds the working copy directories):
   cancel-blocked-ci             # cancel the builds
   cancel-blocked-ci --dry-run   # report the builds that would be cancelled (alias: -n)
 
-A PR is blocked if it depends on another open PR, as pr-status computes it from
-pr-status-config.json or, if there is no pr-status-config.json, from the config that
-pr-status constructs by default.  Excluded PRs are never blocked.
+A PR is blocked if it depends on another open PR.
 
 The builds of a blocked PR are those of its head branch that the PR or a push
 started.  If the head branch is the repository's default branch (as for a PR that
@@ -38,9 +36,6 @@ redundant.
 Cancelling a build requires credentials, as described in `ci_build.py`.
 
 The exit status is 1 if finding or cancelling any build failed, and 0 otherwise.
-
-This script uses the `pr-status` script, which it finds in its own directory or, as
-`pr-status.py`, on the PATH.
 """
 
 import argparse
@@ -222,7 +217,7 @@ def unfinished_runs(gh):
 
 
 def run_owner(r):
-    """Return the owner of the repository whose branch the GitHub Actions run r tests.
+    """Return the owner of the repository that is tested by run r.
 
     Args:
         r: the run, as a dict parsed from the GitHub API's JSON, with keys such as "id",
@@ -807,7 +802,7 @@ def blocked_pr_runs(pr, runs, on_default_branch):
 
 
 def pr_branches(gh, default_branch, pr):
-    """Return the branches whose builds are a PR's builds.
+    """Return the branches whose builds are for a given PR.
 
     Args:
         gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
@@ -835,8 +830,8 @@ def azure_build_state(org, project, build):
         build: the build's id, an integer such as 123 in ".../_build/results?buildId=123".
 
     Returns:
-        The build's source branch, such as "refs/heads/main" or "refs/pull/123/merge",
-        and whether the build has finished or is being cancelled.
+        A pair of the build's source branch (such as "refs/heads/main" or "refs/pull/123/merge")
+        and a boolean (true if the build has finished or is being cancelled).
     """
     record = ci_build.azure_get(f"{ci_build.azure_api(org, project, build)}?api-version=7.1")
     return record["sourceBranch"], record["status"] in AZURE_FINISHED_STATUSES
@@ -995,10 +990,10 @@ def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
         return [Build.from_circleci_workflow(w["status"], w["id"], w["name"]) for w in workflows]
 
     def lookup(url):
-        """Return the workflow of a CircleCI job.
+        """Return the workflow id of a CircleCI job.
 
         Args:
-            url: the URL of the job.
+            url: the URL of a CircleCI job.
 
         Returns:
             The workflow id (None if there is none) and None, or None and the exception
