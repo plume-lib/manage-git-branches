@@ -211,10 +211,6 @@ while [ "$#" -gt 0 ]; do
       MODE="${1#--}"
       ;;
     --verbose) VERBOSE='yes' ;;
-    -h | --help)
-      print_synopsis
-      exit
-      ;;
     --)
       shift
       break
