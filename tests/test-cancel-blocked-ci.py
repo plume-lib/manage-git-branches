@@ -59,6 +59,7 @@ def load_script() -> types.ModuleType:
 
 cancel_blocked_ci = load_script()
 Check = cancel_blocked_ci.Check
+BuildState = cancel_blocked_ci.BuildState
 
 
 class CancelBlockedCiTest(unittest.TestCase):
@@ -179,40 +180,64 @@ class CancelBlockedCiTest(unittest.TestCase):
         # A reference with a prefix names its repository, even if the prefix is not the label.
         self.assertEqual(cancel_blocked_ci.pr_name("Daikon", "daikon#555"), "daikon#555")
 
-    def test_blocked_pr_runs(self) -> None:
-        """A blocked PR's runs are those that it or a push started on its head branch."""
-        runs = {
-            ("org", "main"): [
-                {"id": n, "event": event}
-                for n, event in enumerate(["pull_request", "push", "schedule", "workflow_dispatch"])
-            ]
+    def test_circleci_workflows_of_jobs(self) -> None:
+        """The workflows of jobs whose URLs do not contain workflow ids come from lookups.
+
+        Once a job's workflow is found, the workflow's other jobs are not looked up.
+        """
+        jobs = [
+            Check("pending", f"job{n}", f"https://circleci.com/gh/org/repo/{n}") for n in (1, 2, 3)
+        ]
+        # Job 2 is not looked up, because it is in job 1's workflow.
+        pages = {
+            f"{CIRCLECI}/project/gh/org/repo/job/1": {"latest_workflow": {"id": "w9"}},
+            f"{CIRCLECI}/project/gh/org/repo/job/3": {"latest_workflow": {"id": "w8"}},
+            f"{CIRCLECI}/workflow/w9/job": {"items": [{"job_number": 1}, {"job_number": 2}]},
+            f"{CIRCLECI}/workflow/w8/job": {"items": [{"job_number": 3}, {"name": "approval"}]},
         }
-        pr = {"owner": "org", "headRefName": "main", "number": 5}
-        for on_default_branch, expected in [(False, [0, 1]), (True, [0])]:
-            with self.subTest(on_default_branch=on_default_branch):
-                self.assertEqual(
-                    [
-                        r["id"]
-                        for r in cancel_blocked_ci.blocked_pr_runs(pr, runs, on_default_branch)
-                    ],
-                    expected,
-                )
-        self.assertTrue(cancel_blocked_ci.is_on_default_branch("Org/repo", "main", pr))
-        self.assertFalse(cancel_blocked_ci.is_on_default_branch("org/repo", "master", pr))
-        self.assertFalse(
-            cancel_blocked_ci.is_on_default_branch("fork/repo", "main", pr | {"owner": "other"})
-        )
+        requested = []
+
+        def http(_method: str, url: str, *_: Any, **_kwargs: Any) -> bytes:
+            requested.append(url)
+            return json.dumps(pages[url]).encode()
+
+        with (
+            mock.patch.object(request_util, "http", http),
+            mock.patch.object(ci_build, "circleci_token", return_value="token"),
+            mock.patch.object(cancel_blocked_ci, "failed", new=False),
+        ):
+            result = cancel_blocked_ci.circleci_workflows_of_jobs("repo#5", jobs)
+            self.assertFalse(cancel_blocked_ci.failed)
         self.assertEqual(
-            cancel_blocked_ci.pr_branches("org/repo", "master", pr), {"pull/5", "main"}
+            [(b.key, b.status, b.description) for b in result],
+            [
+                (("circleci", "w9"), "pending", "CircleCI workflow w9 (job1)"),
+                (("circleci", "w8"), "pending", "CircleCI workflow w8 (job3)"),
+            ],
         )
-        self.assertEqual(cancel_blocked_ci.pr_branches("org/repo", "main", pr), {"pull/5"})
-        self.assertEqual(cancel_blocked_ci.pr_branches("upstream/repo", "master", pr), {"pull/5"})
+        self.assertEqual(sorted(requested), sorted(pages))
+
+    def test_state_of_empty_response(self) -> None:
+        """An empty response for a build's state raises an error in REQUEST_ERRORS."""
+        with (
+            mock.patch.object(request_util, "http", return_value=b""),
+            mock.patch.object(ci_build, "circleci_token", return_value="token"),
+            mock.patch.object(ci_build, "azure_headers", return_value={}),
+            self.assertRaises(request_util.REQUEST_ERRORS),
+        ):
+            cancel_blocked_ci.circleci_workflow_state("w9")
+        with (
+            mock.patch.object(request_util, "http", return_value=b""),
+            mock.patch.object(ci_build, "azure_headers", return_value={}),
+            self.assertRaises(request_util.REQUEST_ERRORS),
+        ):
+            cancel_blocked_ci.azure_build_state("org", "p", 1)
 
     def test_unfinished_other_builds(self) -> None:
         """Only the unfinished builds of the given branches are a commit's builds.
 
-        A build whose branch cannot be found is reported, and the exit status becomes 1.
-        A build that has no branch is reported.
+        A build whose branch cannot be found, or that has no branch, is reported, and the
+        exit status becomes 1.
         """
         workflow = "0123456789abcdef0123456789abcdef0123"
         other_workflow = "fedcba9876543210fedcba9876543210fedc"
@@ -231,21 +256,21 @@ class CancelBlockedCiTest(unittest.TestCase):
             Check("pending", "build", f"https://app.circleci.com/workflow/{tag_workflow}"),
         ]
         azure_states = {
-            1: ("refs/pull/5/merge", False),
-            2: ("refs/heads/feature", False),
-            3: ("refs/heads/other", False),
-            6: ("refs/pull/5/merge", True),
+            1: BuildState("refs/pull/5/merge", False),
+            2: BuildState("refs/heads/feature", False),
+            3: BuildState("refs/heads/other", False),
+            6: BuildState("refs/pull/5/merge", True),
         }
 
-        def azure_build_state(_org: str, _project: str, build: int) -> tuple[str, bool]:
+        def azure_build_state(_org: str, _project: str, build: int) -> BuildState:
             if build not in azure_states:
                 raise urllib.error.URLError("unreachable")
             return azure_states[build]
 
         circleci_states = {
-            workflow: ("feature", False),
-            other_workflow: ("other", False),
-            tag_workflow: (None, False),
+            workflow: BuildState("feature", False),
+            other_workflow: BuildState("other", False),
+            tag_workflow: BuildState(None, False),
         }
         for branches, expected in [
             (
@@ -276,81 +301,35 @@ class CancelBlockedCiTest(unittest.TestCase):
                 stderr.getvalue(),
             )
 
-    def test_circleci_workflows_of_jobs(self) -> None:
-        """The workflows of jobs come from the recent pipelines, or else from job lookups.
+    def test_blocked_pr_runs(self) -> None:
+        """A blocked PR's runs are those that it or a push started on its head branch.
 
-        Only the recent pipelines of the given branches count.
+        If the head branch is a shared branch, they are only those that the PR started.
         """
-        now = str(dt.datetime.now(dt.UTC))
-        jobs = [
-            Check("pending", f"job{n}", f"https://circleci.com/gh/org/repo/{n}") for n in (1, 2)
-        ]
-
-        def pipeline(sha: str) -> dict[str, Any]:
-            return {
-                "id": "p1",
-                "number": 1,
-                "created_at": now,
-                "vcs": {"branch": "feature", "revision": sha},
-                "trigger": {"type": "webhook"},
-            }
-
-        workflow = {"id": "w1", "name": "build", "status": "running", "created_at": now}
-        looked_up = [
-            (("circleci", "w9"), "pending", "CircleCI workflow w9 (job1)"),
-            (("circleci", "w9"), "pending", "CircleCI workflow w9 (job2)"),
-        ]
-        for sha, branch, expected, lookups in [
-            (
-                "abc",
-                "feature",
-                [(("circleci", "w1"), "running", "CircleCI workflow w1 (build)")],
-                [],
-            ),
-            # The pipeline of commit abc is on another branch.
-            ("abc", "other", looked_up, [1, 2]),
-            ("def", "feature", looked_up, [1, 2]),
-        ]:
-            pages = {
-                f"{CIRCLECI}/project/gh/org/repo/pipeline": {"items": [pipeline("abc")]},
-                f"{CIRCLECI}/pipeline/p1/workflow": {"items": [workflow]},
-                **{
-                    f"{CIRCLECI}/project/gh/org/repo/job/{n}": {"latest_workflow": {"id": "w9"}}
-                    for n in (1, 2)
-                },
-            }
-            requested = []
-
-            def http(
-                _method: str,
-                url: str,
-                *_: Any,
-                pages: dict[str, Any] = pages,
-                requested: list[str] = requested,
-                **_kwargs: Any,
-            ) -> bytes:
-                requested.append(url)
-                return json.dumps(pages[url]).encode()
-
-            with (
-                self.subTest(sha=sha, branch=branch),
-                mock.patch.object(request_util, "http", http),
-                mock.patch.object(ci_build, "circleci_token", return_value="token"),
-            ):
-                cancel_blocked_ci.recent_pipelines.cache_clear()
-                cancel_blocked_ci.unfinished_workflows.cache_clear()
-                result = cancel_blocked_ci.circleci_workflows_of_jobs(
-                    "repo#5", "gh/org/repo", sha, {branch}, jobs
-                )
-                self.assertEqual([(b.key, b.status, b.description) for b in result], expected)
+        runs = {
+            ("org", "main"): [
+                {"id": n, "event": event}
+                for n, event in enumerate(["pull_request", "push", "schedule", "workflow_dispatch"])
+            ]
+        }
+        pr = {"owner": "org", "headRefName": "main", "number": 5}
+        for on_shared_branch, expected in [(False, [0, 1]), (True, [0])]:
+            with self.subTest(on_shared_branch=on_shared_branch):
                 self.assertEqual(
-                    sorted(requested),
-                    sorted(
-                        [f"{CIRCLECI}/project/gh/org/repo/pipeline"]
-                        + ([f"{CIRCLECI}/pipeline/p1/workflow"] if not lookups else [])
-                        + [f"{CIRCLECI}/project/gh/org/repo/job/{n}" for n in lookups]
-                    ),
+                    [
+                        r["id"]
+                        for r in cancel_blocked_ci.blocked_pr_runs(pr, runs, on_shared_branch)
+                    ],
+                    expected,
                 )
+        is_on_shared_branch = cancel_blocked_ci.is_on_shared_branch
+        self.assertTrue(is_on_shared_branch("Org/repo", {"master", "main"}, pr))
+        self.assertFalse(is_on_shared_branch("org/repo", {"master", "develop"}, pr))
+        self.assertFalse(is_on_shared_branch("fork/repo", {"main"}, pr | {"owner": "other"}))
+        pr_branches = cancel_blocked_ci.pr_branches
+        self.assertEqual(pr_branches("org/repo", {"master"}, pr), {"pull/5", "main"})
+        self.assertEqual(pr_branches("org/repo", {"master", "main"}, pr), {"pull/5"})
+        self.assertEqual(pr_branches("upstream/repo", {"master"}, pr), {"pull/5"})
 
     def test_azure_projects(self) -> None:
         """The Azure Pipelines projects come from the checks of the default branch and of PRs."""
@@ -435,12 +414,12 @@ class CancelBlockedCiTest(unittest.TestCase):
         def cancelling() -> None:
             raise urllib.error.URLError("refused")
 
-        def state_fails() -> tuple[str, bool]:
+        def state_fails() -> BuildState:
             raise urllib.error.URLError("unreachable")
 
         for state_function, reported in [
-            (lambda: ("main", True), False),
-            (lambda: ("main", False), True),
+            (lambda: BuildState("main", True), False),
+            (lambda: BuildState("main", False), True),
             (state_fails, True),
         ]:
             build = cancel_blocked_ci.Build(
