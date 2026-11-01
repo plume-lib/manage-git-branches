@@ -111,8 +111,9 @@ def blocked_prs(cfg):
             constructs it by default.
 
     Returns:
-        For each repository, a tuple of its label, its GitHub name, its default branch,
-        and a list of the reference and gh JSON of each of its blocked PRs.
+        For each repository, a tuple of its label, its GitHub slug (such as "ORG/REPO"),
+        its default branch, and a list of the reference and gh JSON of each of its
+        blocked PRs.
     """
     return [
         (
@@ -128,16 +129,18 @@ def blocked_prs(cfg):
 def concurrently(f, items):
     """Call f on each of the items, concurrently.
 
-    If a call raises an exception, this raises the first such exception, in the order of
-    the items.
-
     Args:
         f: a function of one argument.
         items: the arguments for f.
 
     Returns:
         A list of the results, in the order of the items.
-    """
+
+    Raises:
+        Exception: if a call raises an exception; the first such exception, in the order
+            of the items.  It is raised after the calls that have started have finished.
+            The calls that have not started are cancelled.
+    """  # ruff: ignore[docstring-extraneous-exception]  -- executor.map re-raises f's exceptions
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         return list(executor.map(f, items))
 
@@ -146,7 +149,7 @@ def unfinished_runs(gh):
     """Find the runs in the GitHub repository gh that have not completed.
 
     Args:
-        gh: the repository's GitHub name, such as "ORG/REPO".
+        gh: the repository's GitHub slug, such as "ORG/REPO".
 
     Returns:
         A map from (head repository owner, branch) to the unfinished runs of that branch.
@@ -211,7 +214,7 @@ def github_build(gh, r):
     """Describe the GitHub Actions run r in the GitHub repository gh.
 
     Args:
-        gh: the repository's GitHub name.
+        gh: the repository's GitHub slug, such as "ORG/REPO".
         r: the run, as the GitHub API describes it.
 
     Returns:
@@ -277,7 +280,7 @@ def checks(gh, sha):
     """Find the check runs and commit statuses of commit sha in the GitHub repository gh.
 
     Args:
-        gh: the repository's GitHub name.
+        gh: the repository's GitHub slug, such as "ORG/REPO".
         sha: the commit.
 
     Returns:
@@ -361,7 +364,7 @@ def is_default_branch(gh, default_branch, pr):
     """Return True if a PR's head branch is the default branch of its repository.
 
     Args:
-        gh: the GitHub name of the PR's repository.
+        gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
         default_branch: the repository's default branch.
         pr: the gh JSON of the PR.
 
@@ -395,7 +398,7 @@ def pr_branches(gh, pr, on_default_branch):
     """Find the branches whose builds are a PR's builds.
 
     Args:
-        gh: the GitHub name of the PR's repository.
+        gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
         pr: the gh JSON of the PR.
         on_default_branch: True if the PR's head branch is the repository's default branch.
 
@@ -465,7 +468,7 @@ def unfinished_other_builds(subject, gh, sha, branches):
 
     Args:
         subject: what the builds test, such as a PR, which a report of a problem names.
-        gh: the repository's GitHub name.
+        gh: the repository's GitHub slug, such as "ORG/REPO".
         sha: the commit.
         branches: the branches, named as branch_name names them.
 
@@ -610,7 +613,7 @@ def blocked_pr_builds(label, gh, default_branch, runs, blocked):
 
     Args:
         label: the label of the PR's repository.
-        gh: the GitHub name of the PR's repository.
+        gh: the GitHub slug of the PR's repository, such as "ORG/REPO".
         default_branch: the repository's default branch.
         runs: the unfinished GitHub Actions runs, as unfinished_runs returns them.
         blocked: the reference to the PR, such as "#555", and the gh JSON of the PR.
