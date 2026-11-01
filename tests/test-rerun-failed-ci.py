@@ -216,14 +216,23 @@ class FakeServer:
         self.gh["repos/org/repo/actions/runs/100/jobs?filter=latest&per_page=100"] = page
         self.gh["repos/org/repo/actions/runs/100/jobs?filter=all&per_page=100"] = page
 
-    def gha_job(self, job: int, log: str | None, annotation: str = "Exit code 1.") -> None:
-        """Serve the log (None for none) and the annotation of a GitHub Actions job."""
+    def gha_job(
+        self, job: int, log: str | None, annotation: str = "Exit code 1.", level: str = "failure"
+    ) -> None:
+        """Serve the log (None for none) and the annotation of a GitHub Actions job.
+
+        Args:
+            job: the job's id.
+            log: the log of the job's failed steps, or None for none.
+            annotation: the message of the job's annotation.
+            level: the level of the annotation, such as "failure" or "warning".
+        """
         if log is not None:
             self.gh_logs[job] = "".join(
                 f"job\tstep\t﻿2026-10-31T13:39:57.3265176Z {line}\n" for line in log.splitlines()
             )
         self.gh[f"repos/org/repo/check-runs/{job}/annotations?per_page=100"] = [
-            [{"message": annotation}]
+            [{"message": annotation, "annotation_level": level}]
         ]
 
     ###########################################################################
@@ -238,7 +247,12 @@ class FakeServer:
             "result": result,
         }
 
-    def azure_timeline(self, build: int, *jobs: tuple[str, int, str, str, str | None]) -> None:
+    def azure_timeline(
+        self,
+        build: int,
+        *jobs: tuple[str, int, str, str, str | None],
+        issue: dict[str, str] | None = None,
+    ) -> None:
         """Serve the timeline of an Azure Pipelines build.
 
         Args:
@@ -246,6 +260,7 @@ class FakeServer:
             jobs: for each job, its stage, the stage's attempts, the job's name, the
                 job's result, and the log of its only task (None for an unreadable log).
                 A job's id is its name.
+            issue: an issue that each job's task reports, in addition to an error.
         """
         self.urls = {
             url: response
@@ -287,7 +302,10 @@ class FakeServer:
                     "type": "Task",
                     "result": result,
                     "log": {"id": n},
-                    "issues": [{"type": "error", "message": "Bash exited with code '1'."}],
+                    "issues": [
+                        {"type": "error", "message": "Bash exited with code '1'."},
+                        *([issue] if issue else []),
+                    ],
                 },
             ]
             if log is not None:
@@ -581,6 +599,20 @@ class GithubActionsTest(RerunTestCase):
         output = self.assert_reruns(["gh run rerun --repo org/repo --job 101"], self.RUN, status=1)
         self.assertIn("cannot read the log of GitHub Actions job c", output)
 
+    def test_warning_annotation(self) -> None:
+        """A warning annotation does not make a job transient."""
+        self.server.gha_job(
+            103, "Test failed", "Failed to save: 503 Service Unavailable", "warning"
+        )
+        self.assert_reruns(["gh run rerun --repo org/repo --job 101"], self.RUN)
+
+    def test_unreadable_annotations(self) -> None:
+        """A job whose log can be read is classified even if its annotations cannot be read."""
+        self.server.gha_job(103, "Test failed")
+        del self.server.gh["repos/org/repo/check-runs/103/annotations?per_page=100"]
+        output = self.assert_reruns(["gh run rerun --repo org/repo --job 101"], self.RUN)
+        self.assertIn("c: not transient", output)
+
     def test_echoed_script(self) -> None:
         """A message in the script that GitHub Actions echoes does not make a job transient."""
         self.server.gha_job(
@@ -592,8 +624,10 @@ class GithubActionsTest(RerunTestCase):
 
     def test_not_rerun(self) -> None:
         """A run that is in progress is not rerun."""
-        self.server.gha_run("in_progress", None, [(101, "a", "failure")])
+        self.server.gha_run("in_progress", None, [(101, "a", "")])
         self.assert_reruns([], self.RUN)
+        output = self.assert_reruns([], f"{self.RUN}/job/101")
+        self.assertIn("Its status is in_progress.", output)
 
     def test_attempts_of_each_job(self) -> None:
         """The attempt limit counts each job's runs, not the run's attempts."""
@@ -672,6 +706,16 @@ class AzureTest(RerunTestCase):
         output = self.assert_reruns([self.stage_retry("s2")], self.BUILD, status=1)
         self.assertIn("Not rerunning stage s1:  it has a failed job whose log could not", output)
 
+    def test_warning_issue(self) -> None:
+        """A warning that a task reports does not make a job transient."""
+        self.server.azure_timeline(
+            500,
+            ("s1", 1, "a", "failed", "Test failed"),
+            issue={"type": "warning", "message": "Retrying after 503 Service Unavailable"},
+        )
+        output = self.assert_reruns([], self.BUILD)
+        self.assertIn("a: not transient", output)
+
     def test_visualstudio_url(self) -> None:
         """A URL whose host is ORGANIZATION.visualstudio.com is supported."""
         self.server.urls = {
@@ -735,6 +779,7 @@ class PullRequestTest(RerunTestCase):
             {"name": "p1", "bucket": "fail", "link": f"{azure}p"},
             {"name": "p2", "bucket": "fail", "link": f"{azure}q"},
             {"name": "other", "bucket": "fail", "link": "https://example.com/build/1"},
+            {"name": "approve", "bucket": "fail", "state": "ACTION_REQUIRED", "link": "https://github.com/org/repo/pull/5"},
         ]  # fmt: skip
         output = self.assert_reruns(
             [
@@ -745,6 +790,7 @@ class PullRequestTest(RerunTestCase):
             "5",
         )
         self.assertIn("other: skipping a check from an unsupported CI service", output)
+        self.assertIn("approve: skipping a check that requires action, such as approval", output)
 
 
 if __name__ == "__main__":

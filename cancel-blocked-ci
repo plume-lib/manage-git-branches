@@ -30,6 +30,7 @@ This script uses the `pr-status` script, which it finds in its own directory or,
 `pr-status.py`, on the PATH.
 """
 
+import argparse
 import datetime as dt
 import functools
 import importlib.machinery
@@ -39,7 +40,6 @@ import operator
 import pathlib
 import re
 import shutil
-import subprocess
 import sys
 import types
 import urllib.error
@@ -187,16 +187,8 @@ def unfinished_runs(gh):
     """
     runs = {}  # id -> run; a run whose status changes between queries appears in two
     for status in UNFINISHED:
-        pages = json.loads(
-            ci_build.run(
-                [
-                    "gh",
-                    "api",
-                    "--paginate",
-                    "--slurp",
-                    f"repos/{gh}/actions/runs?status={status}&per_page=100",
-                ]
-            )
+        pages = ci_build.gh_api(
+            f"repos/{gh}/actions/runs?status={status}&per_page=100", paginate=True
         )
         for page in pages:
             for r in page["workflow_runs"]:
@@ -290,9 +282,7 @@ def azure_projects(gh):
         created open PRs, or the empty set if the Azure Pipelines app has no check suite
         for the head commit of the default branch.
     """
-    suites = json.loads(
-        ci_build.run(["gh", "api", f"repos/{gh}/commits/HEAD/check-suites?per_page=100"])
-    )
+    suites = ci_build.gh_api(f"repos/{gh}/commits/HEAD/check-suites?per_page=100")
     if not any(s["app"]["slug"] == "azure-pipelines" for s in suites["check_suites"]):
         return set()
     shas = ["HEAD"] + [
@@ -323,8 +313,7 @@ def redundant_azure_builds(label, gh, org, project):
         A list of the identifier, subject, build, and reason of each redundant build.
     """
     builds = ci_build.azure_get(
-        f"https://dev.azure.com/{org}/{project}/_apis/build/builds"
-        f"?statusFilter={','.join(AZURE_UNFINISHED)}"
+        f"{ci_build.azure_api(org, project)}?statusFilter={','.join(AZURE_UNFINISHED)}"
         f"&repositoryId={urllib.parse.quote(gh, safe='')}&repositoryType=GitHub"
         "&api-version=7.1"
     )["value"]
@@ -360,37 +349,26 @@ def redundant_circleci_workflows(label, gh):
     Returns:
         A list of the identifier, subject, build, and reason of each redundant workflow.
     """
-    api = f"{ci_build.CIRCLECI_API}/v2"
     cutoff = dt.datetime.now(dt.UTC) - CIRCLECI_WINDOW
     workflows = []  # the branch, pipeline, and workflow of each unfinished workflow
-    token = None
-    while True:
-        query = f"?page-token={token}" if token else ""
-        try:
-            page = ci_build.request(
-                "GET", f"{api}/project/gh/{gh}/pipeline{query}", circleci_headers()
-            )
-        except urllib.error.HTTPError as e:
-            if e.code == 404:  # not a CircleCI project
-                return []
-            raise
-        recent = [p for p in page["items"] if dt.datetime.fromisoformat(p["created_at"]) >= cutoff]
-        for p in recent:
+    try:
+        # The pipelines are listed most recent first.
+        for p in ci_build.circleci_items(f"/v2/project/gh/{gh}/pipeline"):
+            if dt.datetime.fromisoformat(p["created_at"]) < cutoff:
+                break
             vcs = p.get("vcs") or {}
             branch = vcs.get("branch") or vcs.get("tag")
             if not branch:
                 continue
-            page_workflows = ci_build.request(
-                "GET", f"{api}/pipeline/{p['id']}/workflow", circleci_headers()
-            )
             workflows.extend(
                 (branch, p, w)
-                for w in page_workflows["items"]
+                for w in ci_build.circleci_items(f"/v2/pipeline/{p['id']}/workflow")
                 if w["status"] in CIRCLECI_UNFINISHED
             )
-        token = page["next_page_token"]
-        if not token or len(recent) < len(page["items"]):
-            break
+    except urllib.error.HTTPError as e:
+        if e.code == 404:  # not a CircleCI project
+            return []
+        raise
     return [
         (
             ("circleci", w["id"]),
@@ -421,14 +399,14 @@ def redundant_builds(label, gh, runs):
     try:
         for org, project in azure_projects(gh):
             result += redundant_azure_builds(label, gh, org, project)
-    except (urllib.error.URLError, subprocess.CalledProcessError) as e:
+    except ci_build.REQUEST_ERRORS as e:
         print(
             f"{label}: failed to find redundant Azure Pipelines builds: {ci_build.failure(e)}",
             file=sys.stderr,
         )
     try:
         result += redundant_circleci_workflows(label, gh)
-    except urllib.error.URLError as e:
+    except ci_build.REQUEST_ERRORS as e:
         print(
             f"{label}: failed to find redundant CircleCI workflows: {ci_build.failure(e)}",
             file=sys.stderr,
@@ -471,21 +449,6 @@ def circleci_headers():
     return ci_build.circleci_headers()
 
 
-def circleci_workflow(url):
-    """Find the CircleCI workflow that url shows, which is a workflow's or a job's URL.
-
-    Returns:
-        The id of the workflow, or None if there is none.
-    """
-    workflow, slug, job = ci_build.parse_circleci_url(url) or (None, None, None)
-    if workflow is None and slug is not None and job is not None:
-        try:
-            return ci_build.circleci_workflow_of_job(slug, job)
-        except urllib.error.URLError as e:
-            print(f"  failed to look up {url}: {ci_build.failure(e)}", file=sys.stderr)
-    return workflow
-
-
 @functools.cache
 def checks(gh, sha):
     """Find the check runs and commit statuses of commit sha in the GitHub repository gh.
@@ -495,23 +458,13 @@ def checks(gh, sha):
         check run and commit status that has a URL.
     """
     result = []
-    for page in json.loads(
-        ci_build.run(
-            [
-                "gh",
-                "api",
-                "--paginate",
-                "--slurp",
-                f"repos/{gh}/commits/{sha}/check-runs?per_page=100",
-            ]
-        )
-    ):
+    for page in ci_build.gh_api(f"repos/{gh}/commits/{sha}/check-runs?per_page=100", paginate=True):
         result.extend(
             (c["status"], c["name"], c["details_url"])
             for c in page["check_runs"]
             if c["details_url"]
         )
-    status = json.loads(ci_build.run(["gh", "api", f"repos/{gh}/commits/{sha}/status"]))
+    status = ci_build.gh_api(f"repos/{gh}/commits/{sha}/status")
     result.extend(
         ("pending" if s["state"] == "pending" else "completed", s["context"], s["target_url"])
         for s in status["statuses"]
@@ -543,12 +496,13 @@ def circleci_build(status, workflow, name):
         The status, description, URL, and cancelling function of the workflow.
         The cancelling function takes no arguments.
     """
-    api = f"https://circleci.com/api/v2/workflow/{workflow}/cancel"
+    api = f"{ci_build.CIRCLECI_API}/v2/workflow/{workflow}/cancel"
+    headers = circleci_headers()
     return (
         status,
         f"CircleCI workflow {workflow} ({name})",
         f"https://app.circleci.com/workflow/{workflow}",
-        lambda: ci_build.request("POST", api, circleci_headers()),
+        lambda: ci_build.request("POST", api, headers),
     )
 
 
@@ -568,8 +522,12 @@ def unfinished_other_builds(gh, sha):
             builds.setdefault(
                 ("azure", org, str(build)), azure_build(state, org, project, build, name, url)
             )
-        elif "circleci.com" in url:
-            workflow = circleci_workflow(url)
+        elif ci_build.parse_circleci_url(url) is not None:
+            try:
+                workflow, _ = ci_build.circleci_workflow_of_url(url)
+            except ci_build.REQUEST_ERRORS as e:
+                print(f"  failed to look up {url}: {ci_build.failure(e)}", file=sys.stderr)
+                continue
             if workflow is None:
                 print(f"  no CircleCI workflow found for {url}", file=sys.stderr)
                 continue
@@ -581,7 +539,7 @@ def cancel(cancelling, url):
     """Call the cancelling function, reporting any failure, with the URL of the build."""
     try:
         cancelling()
-    except (urllib.error.URLError, subprocess.CalledProcessError) as e:
+    except ci_build.REQUEST_ERRORS as e:
         print(f"  failed to cancel {url}: {ci_build.failure(e)}", file=sys.stderr)
 
 
@@ -604,7 +562,13 @@ def handle(subject, build, dry_run, reason=""):
 
 def main():
     """Cancel, or with --dry-run report, the builds of blocked PRs and redundant builds."""
-    dry_run = bool({"--dry-run", "-n"} & set(sys.argv[1:]))
+    parser = argparse.ArgumentParser(
+        prog=PROGRAM, description=__doc__.splitlines()[0] if __doc__ else None
+    )
+    parser.add_argument(
+        "-n", "--dry-run", action="store_true", help="report the builds but do not cancel them"
+    )
+    dry_run = parser.parse_args().dry_run
     if pathlib.Path(pr_status.CONFIG).exists():
         repos = blocked_from_config()
     else:

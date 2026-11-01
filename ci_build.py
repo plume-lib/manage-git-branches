@@ -25,7 +25,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 # The URL of an Azure Pipelines build or of one of its jobs, such as
 # "https://dev.azure.com/checkerframework/4dcb7892-.../_build/results?buildId=24267&view=logs".
@@ -60,6 +63,10 @@ AZURE_DEVOPS_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
 # The configuration files of the CircleCI CLI, which `circleci setup` writes.
 CIRCLECI_CONFIGS = ("~/.circleci/cli.yml", "~/snap/circleci/current/.circleci/cli.yml")
 
+# The errors that a request to a CI service can raise.  A ValueError or KeyError
+# indicates a response that is not JSON or that lacks an expected field.
+REQUEST_ERRORS = (urllib.error.URLError, subprocess.CalledProcessError, ValueError, KeyError)
+
 
 ###########################################################################
 ### Commands and HTTP requests
@@ -70,9 +77,12 @@ def run(cmd: list[str]) -> str:
     """Run a command, which must succeed.
 
     Returns:
-        The command's standard output.
+        The command's standard output, in which any byte that is not part of a UTF-8
+        character is replaced.
     """
-    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    return subprocess.run(
+        cmd, check=True, capture_output=True, encoding="utf-8", errors="replace"
+    ).stdout
 
 
 def gh_api(path: str, *, paginate: bool = False) -> Any:
@@ -202,20 +212,27 @@ def azure_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-def azure_api(org: str, project: str, build: str | int) -> str:
-    """Name the API of an Azure Pipelines build.
+def azure_api(org: str, project: str, build: str | int | None = None) -> str:
+    """Name the API of an Azure Pipelines build, or of all the builds of a project.
 
     Returns:
-        The URL of the build in the Azure DevOps API, without a query string.
+        The URL of the build (or, if build is None, of the project's builds) in the
+        Azure DevOps API, without a query string.
     """
-    return f"https://dev.azure.com/{org}/{project}/_apis/build/builds/{build}"
+    api = f"https://dev.azure.com/{org}/{project}/_apis/build/builds"
+    return api if build is None else f"{api}/{build}"
+
+
+# The Azure DevOps projects, as "ORG/PROJECT", that refused an anonymous request.
+_azure_private_projects: set[str] = set()
 
 
 def azure_get(url: str, *, text: bool = False) -> Any:
     """Get url from Azure DevOps, anonymously if the project permits it.
 
     A request is first made anonymously, because Azure DevOps refuses a token for one
-    organization even when reading a public project of another.
+    organization even when reading a public project of another.  After a project
+    refuses an anonymous request, later requests to it are made with credentials only.
 
     Args:
         url: the URL.
@@ -230,14 +247,17 @@ def azure_get(url: str, *, text: bool = False) -> Any:
             return http("GET", url, headers).decode(errors="replace")
         return request("GET", url, headers)
 
-    try:
-        return get({})
-    except (urllib.error.HTTPError, ValueError):
-        # A private project refuses the request or responds with a sign-in page.
-        headers = azure_headers()
-        if not headers:
-            raise
-        return get(headers)
+    match = re.match(r"https://dev\.azure\.com/([^/]+/[^/]+)/", url)
+    project = match[1] if match else url
+    if project not in _azure_private_projects:
+        try:
+            return get({})
+        except (urllib.error.HTTPError, ValueError):
+            # A private project refuses the request or responds with a sign-in page.
+            if not azure_headers():
+                raise
+            _azure_private_projects.add(project)
+    return get(azure_headers())
 
 
 def parse_azure_url(url: str) -> tuple[str, str, int] | None:
@@ -287,24 +307,26 @@ def circleci_headers() -> dict[str, str]:
     return {"Circle-Token": token} if token else {}
 
 
-def circleci_items(path: str) -> list[Any]:
-    """Get every page of a paginated response from the CircleCI v2 API.
+def circleci_items(path: str) -> Iterator[Any]:
+    """Get the items of a paginated response from the CircleCI v2 API.
+
+    Each page is requested only when the caller reaches its items, so a caller that
+    stops early does not request the remaining pages.
 
     Args:
         path: the request, such as "/v2/workflow/ID/job", with no query string.
 
-    Returns:
-        The items of every page.
+    Yields:
+        The items of every page, in order.
     """
-    items = []
     page_token = None
     while True:
         query = f"?page-token={urllib.parse.quote(page_token, safe='')}" if page_token else ""
         page = request("GET", f"{CIRCLECI_API}{path}{query}", circleci_headers())
-        items.extend(page["items"])
+        yield from page["items"]
         page_token = page.get("next_page_token")
         if not page_token:
-            return items
+            return
 
 
 def parse_circleci_url(url: str) -> tuple[str | None, str | None, int | None] | None:
@@ -324,18 +346,22 @@ def parse_circleci_url(url: str) -> tuple[str | None, str | None, int | None] | 
     return workflow, None, job
 
 
-def circleci_workflow_of_job(slug: str, job: int) -> str | None:
-    """Find the workflow of a CircleCI job.
+def circleci_workflow_of_url(url: str) -> tuple[str | None, int | None]:
+    """Find the CircleCI workflow and job that url shows.
 
-    Args:
-        slug: the job's project slug, such as "gh/ORG/REPO".
-        job: the job number.
+    If url names a job but not its workflow, as the URL of a job in a GitHub commit
+    status does, this looks up the job's workflow; if the lookup fails, this raises an
+    exception in REQUEST_ERRORS.
 
     Returns:
-        The id of the job's workflow, or None if there is none.
+        The workflow id (None if there is none) and the job number (None if url names
+        a workflow).
     """
-    result = request("GET", f"{CIRCLECI_API}/v2/project/{slug}/job/{job}", circleci_headers())
-    return ((result or {}).get("latest_workflow") or {}).get("id")
+    workflow, slug, job = parse_circleci_url(url) or (None, None, None)
+    if workflow is None and slug is not None and job is not None:
+        result = request("GET", f"{CIRCLECI_API}/v2/project/{slug}/job/{job}", circleci_headers())
+        workflow = ((result or {}).get("latest_workflow") or {}).get("id")
+    return workflow, job
 
 
 ###########################################################################
