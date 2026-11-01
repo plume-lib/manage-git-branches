@@ -23,7 +23,7 @@ import time
 import urllib.error
 import urllib.parse
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import request_util
 
@@ -62,6 +62,9 @@ CIRCLECI_JOB = re.compile(
 CIRCLECI_PIPELINE = re.compile(r"app\.circleci\.com/pipelines/([^/?#]+)/([^/?#]+)/([^/?#]+)")
 # The VCS slugs that the API uses in place of the ones in the URLs of the CircleCI web app.
 CIRCLECI_VCS_SLUGS = {"github": "gh", "bitbucket": "bb"}
+# The VCS names, such as "github", that the CircleCI v1.1 API uses in place of the VCS
+# slugs, such as "gh", of the v2 API.
+CIRCLECI_VCS_NAMES = {slug: name for name, slug in CIRCLECI_VCS_SLUGS.items()}
 # The URL of a GitHub Actions workflow run or of one of its jobs, such as
 # "https://github.com/ORG/REPO/actions/runs/123/job/456".  The groups are the
 # repository, the run, and the job.
@@ -367,13 +370,34 @@ def circleci_workflow_of_url(url: str) -> tuple[str | None, int | None]:
 ###
 
 
-def parse_github_actions_url(url: str) -> tuple[str, int, int | None] | None:
-    """Return the GitHub Actions workflow run and job that url shows.
+class GithubActionsRunUrl(NamedTuple):
+    """The workflow run and job that the URL of a GitHub Actions run or job shows.
 
-    Returns:
-        The repository's GitHub slug (such as "ORG/REPO"), the run id, and the job id
-        (None if url names a run), or None if url is not the URL of a GitHub Actions run.
+    For example, "https://github.com/ORG/REPO/actions/runs/123/job/456" shows repository
+    "ORG/REPO", run 123, and job 456.
+
+    Attributes:
+        repo: the repository's GitHub slug, such as "ORG/REPO".
+        run: the id of a workflow run of the repository, an integer such as 123.
+        job: the id of a job of the run, an integer such as 456, or None if the URL
+            names the run.
     """
-    if match := GITHUB_ACTIONS_RUN.match(url):
-        return match[1], int(match[2]), int(match[3]) if match[3] else None
-    return None
+
+    repo: str
+    run: int
+    job: int | None
+
+    @classmethod
+    def from_url(cls, url: str) -> GithubActionsRunUrl | None:
+        """Return the GitHub Actions workflow run and job that url shows.
+
+        Args:
+            url: any URL.  This method recognizes the URL of a GitHub Actions workflow
+                run or of one of its jobs, as GITHUB_ACTIONS_RUN documents.
+
+        Returns:
+            The run and job, or None if url is not the URL of a GitHub Actions run.
+        """
+        if match := GITHUB_ACTIONS_RUN.match(url):
+            return cls(match[1], int(match[2]), int(match[3]) if match[3] else None)
+        return None

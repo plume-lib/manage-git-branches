@@ -93,17 +93,21 @@ class FakeServer:
         self,
         method: str,
         url: str,
-        headers: dict[str, str] | None = None,  # ruff: ignore[unused-method-argument]
+        headers: dict[str, str] | None = None,
         body: Any = None,
         *,
         refusals: Mapping[int, str] | None = None,  # ruff: ignore[unused-method-argument]
     ) -> bytes:
         """Serve an HTTP request, as request_util.http does.
 
+        A request other than a GET, which reruns jobs, requires credentials.
+
         Returns:
             The response body.
         """
         if method != "GET":
+            if not headers:
+                raise urllib.error.HTTPError(url, 401, "Unauthorized", Message(), None)
             self.reruns.append(f"{method} {url} {json.dumps(body)}")
             return b'{"workflow_id": "new-workflow"}' if "circleci" in url else b"{}"
         path, _, query = url.partition("?")
@@ -260,7 +264,7 @@ class FakeServer:
         """Serve the timeline of an Azure Pipelines build.
 
         Args:
-            build: the build number.
+            build: the id of a build.
             jobs: for each job, its stage, the stage's attempts, the job's name, the
                 job's result, and the log of its only task (None for an unreadable log).
                 A job's id is its name.
@@ -492,7 +496,11 @@ class CircleciTest(RerunTestCase):
         """If every failed job failed transiently, the failed jobs are rerun."""
         rerun = f'POST {CIRCLECI}/v2/workflow/{uuid(1)}/rerun {{"from_failed": true}}'
         url = f"https://app.circleci.com/workflow/{uuid(1)}?utm_source=github-checks-link"
-        self.assert_reruns([rerun], url)
+        output = self.assert_reruns([rerun], url)
+        self.assertIn(
+            "Reran the failed jobs: https://app.circleci.com/pipelines/gh/org/repo/7/workflows/new-workflow",
+            output,
+        )
         output = self.assert_reruns([], "--dry-run", url)
         self.assertIn("Would rerun the failed jobs", output)
 
@@ -598,10 +606,40 @@ class GithubActionsTest(RerunTestCase):
         self.server.gh_logs.pop(103)
         self.server.gha_job(103, None, "The runner has received a shutdown signal.")
         self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
-        # Without such an annotation, the log is reported as unreadable.
-        self.server.gha_job(103, None)
-        output = self.assert_reruns(["gh run rerun --repo org/repo --job 101"], self.RUN, status=1)
-        self.assertIn("cannot read the log of GitHub Actions job c", output)
+        # Without such an annotation, the log is reported as unreadable, as is an empty log.
+        for log in [None, ""]:
+            with self.subTest(log=log):
+                self.server.gha_job(103, log)
+                output = self.assert_reruns(
+                    ["gh run rerun --repo org/repo --job 101"], self.RUN, status=1
+                )
+                self.assertIn(
+                    "cannot read the log of the failed steps of GitHub Actions job c", output
+                )
+
+    def test_cancelled(self) -> None:
+        """A cancelled job is rerun if it failed transiently, and is ignored otherwise."""
+        s = self.server
+        s.gha_run("completed", "cancelled", [(101, "a", "failure"), (103, "c", "cancelled")])
+        s.gh_logs.pop(103)
+        s.gha_job(103, None, "The runner has received a shutdown signal.")
+        self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
+        self.assert_reruns(["gh run rerun --repo org/repo --job 103"], f"{self.RUN}/job/103")
+        # A job that a user or the failure of another job cancelled.
+        s.gha_job(103, None, "The operation was canceled.")
+        output = self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
+        self.assertIn("c: cancelled, not transient", output)
+        s.gha_run("completed", "cancelled", [(103, "c", "cancelled")])
+        self.assert_reruns([], self.RUN)
+
+    def test_normalize_log_failure(self) -> None:
+        """If normalize-log cannot be run, the command reports it and exits."""
+        with (
+            mock.patch.object(rerun_failed_ci, "NORMALIZE_LOG", TOPLEVEL / "no-such-command"),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            self.rerun(self.RUN)
+        self.assertIn("cannot run", str(cm.exception.code))
 
     def test_warning_annotation(self) -> None:
         """A warning annotation does not make a job transient."""
@@ -676,7 +714,8 @@ class AzureTest(RerunTestCase):
 
     def test_all_transient(self) -> None:
         """If every failed job failed transiently, the build's failed jobs are rerun."""
-        self.assert_reruns([self.RETRY], f"{self.BUILD}&view=logs&jobId=a")
+        output = self.assert_reruns([self.RETRY], f"{self.BUILD}&view=logs&jobId=a")
+        self.assertIn("Reran the failed jobs.", output)
         output = self.assert_reruns([], "--dry-run", self.BUILD)
         self.assertIn("Would rerun the failed jobs", output)
 
@@ -795,6 +834,16 @@ class PullRequestTest(RerunTestCase):
         )
         self.assertIn("other: skipping a check from an unsupported CI service", output)
         self.assertIn("approve: skipping a check that requires action, such as approval", output)
+
+    def test_cancelled_check(self) -> None:
+        """A cancelled check is examined, because its runner might have shut down."""
+        s = self.server
+        s.gha_run("completed", "cancelled", [(101, "a", "cancelled")])
+        s.gha_job(101, None, "The runner has received a shutdown signal.")
+        s.pr_checks["6"] = [
+            {"name": "a", "bucket": "cancel", "link": "https://github.com/org/repo/actions/runs/100/job/101"},
+        ]  # fmt: skip
+        self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], "6")
 
 
 if __name__ == "__main__":

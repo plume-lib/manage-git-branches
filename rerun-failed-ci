@@ -29,7 +29,10 @@ service reports for the job, which describe failures, such as a lost runner, tha
 leave no log.  Shell trace lines, which start with `+ `, and the scripts that GitHub
 Actions and Azure Pipelines echo before running a step, are ignored, because a script
 that itself looks for such messages, in order to retry a command, contains them.  A
-CircleCI job whose status is `infrastructure_fail` is transient.
+CircleCI job whose status is `infrastructure_fail` is transient.  A cancelled GitHub
+Actions job is examined too, because GitHub Actions cancels a job whose runner shuts
+down; a cancelled job that did not fail transiently, such as one that a user or the
+failure of another job cancelled, is ignored.
 
 For each workflow (CircleCI), workflow run (GitHub Actions), or build (Azure
 Pipelines) that has a job that failed transiently, this command reruns:
@@ -72,10 +75,13 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import ci_build
 import request_util
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 PROGRAM = Path(sys.argv[0]).name
 
@@ -132,6 +138,10 @@ ECHOED_SCRIPTS = [
 CIRCLECI_FAILED = ("failed", "infrastructure_fail", "timedout")
 # The conclusions of a failed GitHub Actions job.
 GITHUB_FAILED = ("failure", "timed_out")
+# The conclusion of a cancelled GitHub Actions job, such as one whose runner shut down.
+GITHUB_CANCELLED = "cancelled"
+# The `gh pr checks` buckets of a check that failed or was cancelled.
+PR_CHECK_FAILED = ("fail", "cancel")
 
 
 ###########################################################################
@@ -140,19 +150,28 @@ GITHUB_FAILED = ("failure", "timed_out")
 
 
 def normalize_log(log: str) -> str:
-    """Remove the formatting that a CI service or a terminal adds to a log.
+    """Return a log without the formatting that a CI service or a terminal adds to it.
+
+    If `normalize-log` cannot be run or fails, this exits the program, because then it
+    would fail for every log.
+
+    Args:
+        log: a log of a CI job.
 
     Returns:
         The log, as `normalize-log` prints it.
     """
-    return subprocess.run(
-        [NORMALIZE_LOG],
-        input=log,
-        capture_output=True,
-        check=True,
-        encoding="utf-8",
-        errors="replace",
-    ).stdout
+    try:
+        return subprocess.run(
+            [NORMALIZE_LOG],
+            input=log,
+            capture_output=True,
+            check=True,
+            encoding="utf-8",
+            errors="replace",
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        sys.exit(f"{PROGRAM}: cannot run {NORMALIZE_LOG}: {request_util.failure(e)}")
 
 
 def transient_reason(log: str) -> str | None:
@@ -239,27 +258,28 @@ class Rerunner:
         """Record that the build with the given key has been examined.
 
         Returns:
-            Whether this is the first time that it is called with key.
+            True if this is the first time that it is called with key.
         """
         if key in self.examined:
             return False
         self.examined.add(key)
         return True
 
-    def rerun(self, what: str, rerunning: Any) -> Any:
-        """Rerun, or with --dry-run report, jobs.
+    def rerun(self, what: str, rerunning: Callable[[], str | None]) -> None:
+        """Rerun jobs and report the rerun, or with --dry-run report what would be rerun.
+
+        If rerunning raises an exception, this raises it too.
 
         Args:
-            what: a description of the jobs, such as "the failed jobs".
-            rerunning: a function of no arguments that reruns the jobs.
-
-        Returns:
-            The result of rerunning, or None if this did not rerun the jobs.
+            what: a description of some jobs, such as "the failed jobs".
+            rerunning: a function of no arguments that reruns the jobs, and that returns
+                the URL of the rerun jobs, or None if it does not know it.
         """
         if self.dry_run:
             print(f"  Would rerun {what}.")
-            return None
-        return rerunning()
+            return
+        url = rerunning()
+        print(f"  Reran {what}: {url}" if url else f"  Reran {what}.")
 
     ###########################################################################
     ### CircleCI
@@ -269,8 +289,11 @@ class Rerunner:
         """Rerun the jobs of a CircleCI workflow, or only the given job, that failed transiently.
 
         Args:
-            workflow: the id of the workflow.
-            only_job: the number of the job to examine, or None to examine every job.
+            workflow: a workflow's id, a UUID such as "ecc46ce8-..." in
+                "https://app.circleci.com/workflow/ecc46ce8-...".
+            only_job: the number of a job of the workflow to examine, an integer such as
+                230602 in ".../workflows/ecc46ce8-.../jobs/230602", or None to examine
+                every job.
         """
         api = f"{ci_build.CIRCLECI_API}/v2"
         try:
@@ -364,19 +387,18 @@ class Rerunner:
         else:
             body, what = {"jobs": rerun_ids}, "the transiently failed jobs"
 
-        def rerunning() -> Any:
-            return request_util.request(
+        def rerunning() -> str | None:
+            result = request_util.request(
                 "POST", f"{api}/workflow/{workflow}/rerun", ci_build.circleci_headers(), body
             )
+            new_workflow = (result or {}).get("workflow_id")
+            return f"{pipeline}/workflows/{new_workflow}" if new_workflow else None
 
         try:
-            result = self.rerun(what, rerunning)
+            self.rerun(what, rerunning)
         except request_util.REQUEST_ERRORS as e:
             hint = "" if ci_build.circleci_token() else "; there is no CircleCI token"
             self.warn(f"cannot rerun CircleCI workflow {workflow}: {request_util.failure(e)}{hint}")
-            return
-        if result is not None:
-            print(f"  Reran {what}: {pipeline}/workflows/{result.get('workflow_id', '')}")
 
     def circleci_rerun_failed_url(self, url: str, whole_workflow: bool = False) -> None:
         """Rerun the transiently failed jobs that a CircleCI URL names.
@@ -408,9 +430,11 @@ class Rerunner:
         """Rerun the jobs of a GitHub Actions run, or only the given job, that failed transiently.
 
         Args:
-            repo: the repository's GitHub slug, such as "ORG/REPO".
-            run: the id of the workflow run.
-            only_job: the id of the job to examine, or None to examine every job.
+            repo: a repository's GitHub slug, such as "ORG/REPO".
+            run: the id of a workflow run of the repository, an integer such as 123 in
+                "https://github.com/ORG/REPO/actions/runs/123".
+            only_job: the id of a job of the run to examine, an integer such as 456 in
+                ".../actions/runs/123/job/456", or None to examine every job.
         """
         try:
             run_json = request_util.gh_api(f"repos/{repo}/actions/runs/{run}")
@@ -424,7 +448,7 @@ class Rerunner:
         if run_json["status"] != "completed":
             print(f"  Its status is {run_json['status']}.  Run {PROGRAM} again after it finishes.")
             return
-        if run_json["conclusion"] != "failure":
+        if run_json["conclusion"] not in {"failure", GITHUB_CANCELLED}:
             print(f"  Its conclusion is {run_json['conclusion']}.")
             return
 
@@ -439,7 +463,9 @@ class Rerunner:
                 f" {request_util.failure(e)}"
             )
             return
-        failed_jobs = [j for j in latest_jobs if j["conclusion"] in GITHUB_FAILED]
+        failed_jobs = [
+            j for j in latest_jobs if j["conclusion"] in {*GITHUB_FAILED, GITHUB_CANCELLED}
+        ]
         if only_job is not None:
             failed_jobs = [j for j in failed_jobs if j["id"] == only_job]
             if not failed_jobs:
@@ -455,14 +481,20 @@ class Rerunner:
         rerun_ids = []
         all_transient = True
         for job in failed_jobs:
-            log, log_read = gha_job_log(repo, job["id"])
-            reason = transient_reason(log)
+            log = gha_job_log(repo, job["id"])
+            reason = transient_reason(log.text)
             if reason is None:
-                if log_read:
+                if job["conclusion"] == GITHUB_CANCELLED:
+                    # A cancelled job has no failed steps, so the only part of its log
+                    # is its failure annotations, and an empty log is not a problem.
+                    print(f"  {job['name']}: cancelled, not transient")
+                    continue
+                if log.read:
                     print(f"  {job['name']}: not transient")
                 else:
                     self.warn(
-                        f"cannot read the log of GitHub Actions job {job['name']} ({job['id']})"
+                        f"cannot read the log of the failed steps of GitHub Actions job"
+                        f" {job['name']} ({job['id']})"
                     )
                 all_transient = False
                 continue
@@ -482,14 +514,12 @@ class Rerunner:
             args, what = ["--job", str(rerun_ids[0])], f"job {rerun_ids[0]}"
             if len(rerun_ids) > 1:
                 what += " (rerun the other transiently failed jobs after the workflow run finishes)"
+
+        def rerunning() -> None:
+            request_util.run(["gh", "run", "rerun", "--repo", repo, *args])
+
         try:
-            if (
-                self.rerun(
-                    what, lambda: request_util.run(["gh", "run", "rerun", "--repo", repo, *args])
-                )
-                is not None
-            ):
-                print(f"  Reran {what}.")
+            self.rerun(what, rerunning)
         except request_util.REQUEST_ERRORS as e:
             self.warn(f"cannot rerun GitHub Actions workflow run {run}: {request_util.failure(e)}")
 
@@ -500,17 +530,15 @@ class Rerunner:
             url: the URL of a workflow run, or of a job.
             whole_run: True if a URL that names a job names the jobs of its run.
         """
-        parsed = ci_build.parse_github_actions_url(url)
+        parsed = ci_build.GithubActionsRunUrl.from_url(url)
         if parsed is None:
             self.warn(f"cannot find a GitHub Actions workflow run in {url}")
             return
-        repo, run, job = parsed
-        if whole_run:
-            job = None
+        job = None if whole_run else parsed.job
         if job is not None:
-            self.gha_rerun_failed(repo, run, job)
-        elif self.first_time(("gha", repo, run)):
-            self.gha_rerun_failed(repo, run)
+            self.gha_rerun_failed(parsed.repo, parsed.run, job)
+        elif self.first_time(("gha", parsed.repo, parsed.run)):
+            self.gha_rerun_failed(parsed.repo, parsed.run)
 
     ###########################################################################
     ### Azure Pipelines
@@ -520,9 +548,11 @@ class Rerunner:
         """Rerun the failed jobs of an Azure Pipelines build that failed transiently.
 
         Args:
-            org: the Azure DevOps organization.
-            project: the Azure DevOps project.
-            build: the build number.
+            org: an Azure DevOps organization.
+            project: a project of the organization.
+            build: the id of a build of the project, an integer such as 24267 in
+                ".../_build/results?buildId=24267" (not its build number, such as
+                "20261031.1").
         """
         build_url = f"https://dev.azure.com/{org}/{project}/_build/results?buildId={build}"
         api = ci_build.azure_api(org, project, build)
@@ -561,12 +591,12 @@ class Rerunner:
             stage_attempts[name] = max(
                 stage_attempts.get(name, 0), stage.get("attempt") or job.get("attempt") or 1
             )
-            log, log_read = azure_job_log(api, job, records)
-            reason = transient_reason(log)
+            log = azure_job_log(api, job, records)
+            reason = transient_reason(log.text)
             if reason is not None:
                 print(f"  {job['name']}: transient: {reason}")
                 result = "transient"
-            elif log_read:
+            elif log.read:
                 print(f"  {job['name']}: not transient")
                 result = "not transient"
             else:
@@ -614,24 +644,19 @@ class Rerunner:
             if len(stages) > 1:
                 what += " (rerun the other stages after the build finishes)"
 
-        def rerunning() -> bool:
-            headers = ci_build.azure_headers()
-            if not headers:
-                self.warn(
-                    f"cannot rerun Azure Pipelines build {build_url}:  AZURE_DEVOPS_EXT_PAT is"
-                    " not set and `az login` has not been run"
-                )
-                return False
-            ci_build.azure_request("PATCH", url, headers, body)
-            return True
+        def rerunning() -> None:
+            ci_build.azure_request("PATCH", url, ci_build.azure_headers(), body)
 
         try:
-            if self.rerun(what, rerunning):
-                print(f"  Reran {what}.")
+            self.rerun(what, rerunning)
         except request_util.REQUEST_ERRORS as e:
+            hint = (
+                "do the credentials have the Build (Read & execute) scope?"
+                if ci_build.azure_headers()
+                else "AZURE_DEVOPS_EXT_PAT is not set and `az login` has not been run"
+            )
             self.warn(
-                f"cannot rerun Azure Pipelines build {build_url}: {request_util.failure(e)};"
-                " do the credentials have the Build (Read & execute) scope?"
+                f"cannot rerun Azure Pipelines build {build_url}: {request_util.failure(e)}; {hint}"
             )
 
     def azure_rerun_failed_url(self, url: str) -> None:
@@ -660,11 +685,11 @@ class Rerunner:
                 workflow, workflow run, or build.
 
         Returns:
-            Whether url is the URL of a supported CI service.
+            True if url is the URL of a supported CI service.
         """
         if ci_build.parse_circleci_url(url) is not None:
             self.circleci_rerun_failed_url(url, whole_workflow)
-        elif ci_build.parse_github_actions_url(url) is not None:
+        elif ci_build.GithubActionsRunUrl.from_url(url) is not None:
             self.gha_rerun_failed_url(url, whole_workflow)
         elif ci_build.parse_azure_url(url) is not None:
             self.azure_rerun_failed_url(url)
@@ -684,7 +709,7 @@ class Rerunner:
             checks = request_util.run(
                 ["gh", "pr", "checks", *([pr] if pr else []), "--json", "name,bucket,state,link"]
             )
-            failed = [c for c in json.loads(checks) if c["bucket"] == "fail"]
+            failed = [c for c in json.loads(checks) if c["bucket"] in PR_CHECK_FAILED]
         except request_util.REQUEST_ERRORS as e:
             self.warn(
                 f"cannot read the checks of pull request {description}: {request_util.failure(e)}"
@@ -716,18 +741,32 @@ class Rerunner:
 ###
 
 
+class JobLog(NamedTuple):
+    """The log of the failed steps of a CI job, and the errors that the CI service reports.
+
+    Attributes:
+        text: the log, followed by the errors that the CI service reports for the job.
+            The errors describe failures, such as a lost runner, that leave no log.
+        read: True if the log could be read.  If it could not, text contains only the
+            errors.
+    """
+
+    text: str
+    read: bool
+
+
 def circleci_job_log(slug: str, job: int) -> str:
-    """Read the output of the failed steps of a CircleCI job.
+    """Return the output of the failed steps of a CircleCI job.
 
     Args:
         slug: the job's project slug, such as "gh/ORG/REPO".
-        job: the job number.
+        job: a job's number, an integer such as 230602 in ".../jobs/230602".
 
     Returns:
         The output.
     """
     vcs, _, project = slug.partition("/")
-    v1_vcs = {"gh": "github", "bb": "bitbucket"}.get(vcs)
+    v1_vcs = ci_build.CIRCLECI_VCS_NAMES.get(vcs)
     if v1_vcs is None:
         msg = f"cannot read the log of a job of CircleCI project {slug}"
         raise ValueError(msg)
@@ -750,13 +789,15 @@ def gha_jobs(repo: str, run: int, which: str) -> list[dict[str, Any]]:
     """Return the jobs of a GitHub Actions workflow run.
 
     Args:
-        repo: the repository's GitHub slug, such as "ORG/REPO".
-        run: the id of the workflow run.
+        repo: a repository's GitHub slug, such as "ORG/REPO".
+        run: the id of a workflow run of the repository, an integer such as 123 in
+            "https://github.com/ORG/REPO/actions/runs/123".
         which: "latest" for the jobs of the latest attempt, or "all" for the jobs of
             every attempt.
 
     Returns:
-        The jobs.
+        The jobs, each a dict parsed from the GitHub API's JSON, with keys such as "id",
+        "name", and "conclusion".
     """
     pages = request_util.gh_api(
         f"repos/{repo}/actions/runs/{run}/jobs?filter={which}&per_page=100", paginate=True
@@ -764,32 +805,32 @@ def gha_jobs(repo: str, run: int, which: str) -> list[dict[str, Any]]:
     return [job for page in pages for job in page["jobs"]]
 
 
-def gha_job_log(repo: str, job: int) -> tuple[str, bool]:
-    """Read the log of the failed steps of a GitHub Actions job, and its failure annotations.
+def gha_job_log(repo: str, job: int) -> JobLog:
+    """Return the log of the failed steps of a GitHub Actions job, and its failure annotations.
 
-    The failure annotations describe failures, such as a lost runner, that leave no
-    log.  Warning and notice annotations are omitted, because a step that succeeded can
-    produce them.
+    The errors in the result are the job's failure annotations.  Warning and notice
+    annotations are omitted, because a step that succeeded can produce them.  The log is
+    unreadable if `gh` fails or prints nothing, as it does for a job that has no failed
+    step or whose log it cannot find.  If the annotations cannot be read, the result
+    contains only the log.
 
     Args:
-        repo: the repository's GitHub slug, such as "ORG/REPO".
-        job: the id of the job.
+        repo: a repository's GitHub slug, such as "ORG/REPO".
+        job: the id of a job of the repository, an integer such as 456 in
+            "https://github.com/ORG/REPO/actions/runs/123/job/456".
 
     Returns:
-        The log, followed by the failure annotations, and whether the log could be
-        read.  If the log or the annotations could not be read, the result contains
-        only the other.
+        The log and the failure annotations.
     """
-    parts = []
-    read = True
     try:
         log = request_util.run(
             ["gh", "run", "view", "--repo", repo, "--job", str(job), "--log-failed"]
         )
-        # Each line starts with the job name and the step name, each followed by a tab.
-        parts.extend(line.split("\t", 2)[-1] for line in log.splitlines())
     except request_util.REQUEST_ERRORS:
-        read = False
+        log = ""
+    # Each line starts with the job name and the step name, each followed by a tab.
+    parts = [line.split("\t", 2)[-1] for line in log.splitlines()]
+    read = any(part.strip() for part in parts)
     try:
         pages = request_util.gh_api(
             f"repos/{repo}/check-runs/{job}/annotations?per_page=100", paginate=True
@@ -799,16 +840,18 @@ def gha_job_log(repo: str, job: int) -> tuple[str, bool]:
         )
     except request_util.REQUEST_ERRORS:
         pass
-    return "\n".join(parts), read
+    return JobLog("\n".join(parts), read)
 
 
 def azure_stage(record: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Return the stage that contains a record of an Azure Pipelines timeline.
+    """Return the stage that contains the given record of an Azure Pipelines timeline.
 
     A record's parent is a stage, a phase, or a job.
 
     Args:
-        record: the record.
+        record: a record of a timeline, as a dict parsed from the Azure DevOps API's
+            JSON, with keys such as "id", "type" (such as "Stage" or "Job"), and
+            "parentId".
         by_id: a map from the id of each record of the timeline to the record.
 
     Returns:
@@ -821,20 +864,20 @@ def azure_stage(record: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> dic
     return record
 
 
-def azure_job_log(api: str, job: dict[str, Any], records: list[dict[str, Any]]) -> tuple[str, bool]:
-    """Read the logs of the failed tasks of an Azure Pipelines job, and its errors.
+def azure_job_log(api: str, job: dict[str, Any], records: list[dict[str, Any]]) -> JobLog:
+    """Return the logs of the failed tasks of an Azure Pipelines job, and its errors.
 
-    The errors that the job and its tasks report describe failures, such as a lost
-    agent, that leave no log.  Warnings are omitted, because a task that succeeded can
-    report them.
+    The errors in the result are the ones that the job and its tasks report.  Warnings
+    are omitted, because a task that succeeded can report them.  The result's log is
+    unreadable if the log of some failed task cannot be read.
 
     Args:
         api: the URL of the job's build in the Azure DevOps API.
-        job: the timeline record of the job.
-        records: the timeline of the job's build.
+        job: a job's record in the timeline, as for azure_stage.
+        records: the timeline of the job's build, a list of records.
 
     Returns:
-        The logs, followed by the errors, and whether every log could be read.
+        The logs and the errors.
     """
     failed_tasks = [
         r for r in records if r.get("parentId") == job["id"] and r["result"] == "failed"
@@ -856,7 +899,7 @@ def azure_job_log(api: str, job: dict[str, Any], records: list[dict[str, Any]]) 
         for issue in r.get("issues") or []
         if issue.get("type") == "error" and issue.get("message")
     )
-    return "\n".join(parts), read
+    return JobLog("\n".join(parts), read)
 
 
 ###########################################################################
