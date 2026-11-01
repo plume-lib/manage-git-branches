@@ -51,6 +51,14 @@ CIRCLECI_JOB_OF_WORKFLOW = re.compile(r"circleci\.com/.*(?:/jobs/|[?&]buildNumbe
 # "https://circleci.com/gh/circleci/circleci-docs/230602?utm_campaign=...".
 # The groups are the project slug and the job number.
 CIRCLECI_JOB = re.compile(r"https://circleci\.com/((?:gh|bb)/[^/]+/[^/?#]+)/(\d+)(?:[?#]|$)")
+# The URL of a CircleCI pipeline, or of one of its workflows or jobs, such as
+# "https://app.circleci.com/pipelines/github/ORG/REPO/7/workflows/ecc46ce8-..." or, for a
+# project that the CircleCI GitHub App connects,
+# "https://app.circleci.com/pipelines/circleci/ORG-ID/PROJECT-ID/7/workflows/ecc46ce8-...".
+# The groups are the VCS, the organization, and the project.
+CIRCLECI_PIPELINE = re.compile(r"app\.circleci\.com/pipelines/([^/?#]+)/([^/?#]+)/([^/?#]+)")
+# The VCS slugs that the API uses in place of the ones in the URLs of the CircleCI web app.
+CIRCLECI_VCS_SLUGS = {"github": "gh", "bitbucket": "bb"}
 
 CIRCLECI_API = "https://circleci.com/api"
 # The Azure DevOps resource, for which `az` issues access tokens.
@@ -234,38 +242,29 @@ _azure_private_projects: set[str] = set()
 AZURE_REFUSALS = {203, 401, 403, 404}
 
 
-def azure_get(url: str, *, text: bool = False) -> Any:
+def azure_get(url: str) -> Any:
     """Get url from Azure DevOps, anonymously if the project permits it.
 
     A request is first made anonymously, because Azure DevOps refuses a token for one
     organization even when reading a public project of another.  After a project
     refuses an anonymous request, later requests to it are made with credentials only.
 
-    Args:
-        url: the URL.
-        text: whether the response is text rather than JSON.
-
     Returns:
-        The response body:  text, or parsed JSON.
+        The response body, parsed as JSON.
     """
-
-    def get(headers: dict[str, str]) -> Any:
-        if text:
-            return http("GET", url, headers).decode(errors="replace")
-        return request("GET", url, headers)
-
     match = re.match(r"https://dev\.azure\.com/([^/]+/[^/]+)/", url)
     project = match[1] if match else url
     if project not in _azure_private_projects:
         try:
-            return get({})
-        except urllib.error.HTTPError as e:
-            # Another failure, such as a 503, can be temporary and does not indicate a
-            # private project.
-            if e.code not in AZURE_REFUSALS or not azure_headers():
+            return request("GET", url, {})
+        except (urllib.error.HTTPError, ValueError) as e:
+            # A response that is not JSON is a sign-in page.  Another failure, such as a
+            # 503, can be temporary and does not indicate a private project.
+            refused = not isinstance(e, urllib.error.HTTPError) or e.code in AZURE_REFUSALS
+            if not refused or not azure_headers():
                 raise
             _azure_private_projects.add(project)
-    return get(azure_headers())
+    return request("GET", url, azure_headers())
 
 
 def parse_azure_url(url: str) -> tuple[str, str, int] | None:
@@ -352,6 +351,19 @@ def parse_circleci_url(url: str) -> tuple[str | None, str | None, int | None] | 
     workflow = match[1] if (match := CIRCLECI_WORKFLOW.search(url)) else None
     job = int(match[1]) if (match := CIRCLECI_JOB_OF_WORKFLOW.search(url)) else None
     return workflow, None, job
+
+
+def circleci_project_of_url(url: str) -> str | None:
+    """Find the CircleCI project of the pipeline, workflow, or job that url shows.
+
+    Returns:
+        The project slug, such as "gh/ORG/REPO" or "circleci/ORG-ID/PROJECT-ID", or None
+        if url does not contain it.
+    """
+    if match := CIRCLECI_PIPELINE.search(url):
+        return f"{CIRCLECI_VCS_SLUGS.get(match[1], match[1])}/{match[2]}/{match[3]}"
+    parsed = parse_circleci_url(url)
+    return parsed[1] if parsed else None
 
 
 def circleci_workflow_of_url(url: str) -> tuple[str | None, int | None]:
