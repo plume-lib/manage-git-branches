@@ -134,7 +134,7 @@ class CancelBlockedCiTest(unittest.TestCase):
         }
         result = cancel_blocked_ci.redundant_runs("repo", "org/repo", runs)
         self.assertEqual(
-            [(identifier, subject, reason) for identifier, subject, _, reason in result],
+            [(build.key, subject, reason) for subject, build, reason in result],
             [(("github", 0), "repo main", ", made redundant by run 1")],
         )
 
@@ -168,7 +168,7 @@ class CancelBlockedCiTest(unittest.TestCase):
         with mock.patch.object(ci_build, "azure_get", azure_get):
             result = cancel_blocked_ci.redundant_azure_builds("repo", "org/repo", "org", "p")
         self.assertEqual(
-            [(identifier, reason) for identifier, _, _, reason in result],
+            [(build.key, reason) for _, build, reason in result],
             [(("azure", "org", "1"), ", made redundant by build 2")],
         )
 
@@ -266,7 +266,7 @@ class CancelBlockedCiTest(unittest.TestCase):
                     "repo#5", "org/repo", "abc", branches
                 )
                 self.assertTrue(cancel_blocked_ci.failed)
-            self.assertEqual([identifier for identifier, _ in result], expected)
+            self.assertEqual([build.key for build in result], expected)
             self.assertIn("repo#5: failed to find the branch of", stderr.getvalue())
             self.assertIn("buildId=5", stderr.getvalue())
             self.assertIn(
@@ -415,7 +415,7 @@ class CancelBlockedCiTest(unittest.TestCase):
             result = cancel_blocked_ci.redundant_circleci_workflows("repo", "org/repo")
         self.assertEqual(sorted(requested), sorted([*pages, deleted]))
         self.assertEqual(
-            [(identifier, reason) for identifier, _, _, reason in result],
+            [(build.key, reason) for _, build, reason in result],
             [(("circleci", "w1"), ", made redundant by workflow w2")],
         )
 
