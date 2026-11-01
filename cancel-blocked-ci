@@ -115,14 +115,13 @@ def blocked_prs(cfg):
 
     Returns:
         For each repository, a tuple of its label, its GitHub slug (such as "ORG/REPO"),
-        its default branch, and a list of the name (as pr_name makes it) and dict (as
+        and a list of the name (as pr_name makes it) and dict (as
         pr-status makes it) of each of its blocked PRs.
     """
     return [
         (
             m.repo.label,
             m.repo.gh,
-            m.repo.default_branch,
             [(pr_name(m.repo.label, m.repo.ref(n)), m.repo.prs[n]) for n in m.blocked()],
         )
         for m in pr_status.load_models(cfg, pairwise=False)
@@ -304,24 +303,23 @@ class Build:
         """
         api = f"{ci_build.CIRCLECI_API}/v2/workflow/{workflow}/cancel"
 
-        def cancelling():
-            warn_if_no_circleci_token()
-            request_util.request("POST", api, ci_build.circleci_headers())
-
         return cls(
             ("circleci", workflow),
             status,
             f"CircleCI workflow {workflow} ({name})",
             f"https://app.circleci.com/workflow/{workflow}",
-            cancelling,
+            lambda: request_util.request("POST", api, ci_build.circleci_headers()),
             functools.partial(circleci_workflow_state, workflow),
         )
 
-    def cancel(self):
+    def cancel(self, subject):
         """Cancel the build, reporting any failure.
 
         A build can finish after it is found and before it is cancelled.  Failing to cancel
         a build that has finished is not a failure.
+
+        Args:
+            subject: what the build tests, such as a PR; used for diagnostics.
         """
         try:
             self.cancelling()
@@ -331,17 +329,18 @@ class Build:
             except request_util.REQUEST_ERRORS:
                 finished = False
             if not finished:
-                report_failure(f"  failed to cancel {self.url}: {request_util.failure(e)}")
+                report_failure(f"{subject}: failed to cancel {self.url}: {request_util.failure(e)}")
 
 
 @functools.cache
 def warn_if_no_circleci_token():
-    """If there is no CircleCI token, warn (only once) that CircleCI will refuse to cancel."""
+    """If there is no CircleCI token, warn (only once) that CircleCI will refuse requests."""
     if not ci_build.circleci_token():
         print(
             f"{PROGRAM}: no CircleCI token found in $CIRCLECI_CLI_TOKEN or in "
             + " or ".join(ci_build.CIRCLECI_CONFIGS)
-            + ", so CircleCI will refuse to cancel workflows;"
+            + ", so CircleCI will refuse to cancel workflows and to describe those of a"
+            " private project;"
             " create a personal API token and run `circleci setup`",
             file=sys.stderr,
         )
@@ -391,6 +390,21 @@ def checks(gh, sha):
             if s["target_url"]
         )
     return result
+
+
+def github_default_branch(gh):
+    """Return the default branch of the GitHub repository gh.
+
+    A pr-status config need not name a repository's default branch, so this function asks
+    GitHub.
+
+    Args:
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+
+    Returns:
+        The default branch, such as "main".
+    """
+    return request_util.gh_api(f"repos/{gh}")["default_branch"]
 
 
 def is_from_repo(gh, pr):
@@ -532,18 +546,20 @@ def unfinished_other_builds(subject, gh, sha, branches):
         builds.setdefault(build.key, build)
 
     jobs = []  # the Check of each job whose URL does not contain its workflow's id
-    for status, name, url in checks(gh, sha):
+    for check in checks(gh, sha):
+        status, name, url = check
         if status == "completed":
             continue
         if parsed := ci_build.parse_azure_url(url):
             org, project, build = parsed
             add(Build.from_azure_pipelines_build(status, org, project, build, name, url))
         elif (parsed := ci_build.parse_circleci_url(url)) is not None:
+            warn_if_no_circleci_token()
             workflow, project, job = parsed
             if workflow is not None:
                 add(Build.from_circleci_workflow(status, workflow, name))
             elif project is not None and job is not None:
-                jobs.append(Check(status, name, url))
+                jobs.append(check)
             else:
                 print(f"{subject}: no CircleCI workflow found for {url}", file=sys.stderr)
     for build in circleci_workflows_of_jobs(subject, jobs):
@@ -679,7 +695,7 @@ def handle(subject, build, dry_run):
     action = "would cancel" if dry_run else "cancelling"
     print(f"{subject}: {action} {build.status} {build.description}")
     if not dry_run:
-        build.cancel()
+        build.cancel(subject)
 
 
 def main():
@@ -713,7 +729,14 @@ def main():
         repos = blocked_prs(cfg)
     except request_util.REQUEST_ERRORS as e:
         sys.exit(f"{PROGRAM}: failed to find the blocked PRs: {request_util.failure(e)}")
-    for label, gh, default_branch, blocked in repos:
+    for label, gh, blocked in repos:
+        if not blocked:
+            continue
+        try:
+            default_branch = github_default_branch(gh)
+        except request_util.REQUEST_ERRORS as e:
+            report_failure(f"{label}: failed to find the default branch: {request_util.failure(e)}")
+            continue
         try:
             runs = unfinished_runs(gh)
         except request_util.REQUEST_ERRORS as e:
