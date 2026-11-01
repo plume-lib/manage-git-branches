@@ -41,7 +41,9 @@ The commands are:
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
   new branch, and it does not build.
-  The new branch starts at the current commit, after a `git pull`.
+  The new branch starts at the current commit, after a `git pull`.  On a
+  fork's `master` that lags behind `upstream/master`, this command first
+  fast-forwards `master` to `upstream/master`.
   By default, the new directory is a worktree (see [below](#worktrees)) whose
   contents are the same as the current directory's, including uncommitted
   changes, untracked files, and build output; `--clean` and `--copy` make
@@ -57,8 +59,8 @@ The commands are:
   `-` stands for the clone `PROJECT` itself.
   `git-new-branch --help` (or `-h`) prints a synopsis, which describes the
   modes.  The comments in [`git-new-branch`](git-new-branch) give the
-  details, such as which copied build output this command deletes, and which
-  it warns about.
+  details, such as when the fast-forward is not made and which copied build
+  output this command deletes, and which it warns about.
   It says which of the directories that it deleted files from CMake or
   autotools configured, because such a directory needs to be reconfigured.
   With `--verbose`, it also says how many files it deleted and from which

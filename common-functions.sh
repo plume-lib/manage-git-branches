@@ -804,7 +804,7 @@ upstream_remote() {
   printf '%s\n' "${remote_result}"
 }
 
-## Usage: upstream_default_branch REMOTE FETCH
+## Usage: upstream_default_branch REMOTE FETCH [BATCH]
 ## Prints the full name of the remote-tracking branch for the default branch of
 ## the remote REMOTE, such as `refs/remotes/upstream/master`.  If FETCH is 1,
 ## fetches REMOTE first and updates `REMOTE/HEAD` to name the remote's default
@@ -812,8 +812,12 @@ upstream_remote() {
 ## sets `REMOTE/HEAD` with `git remote set-head REMOTE --auto` only if it does
 ## not exist or names a branch that does not exist.  Returns 1, after printing
 ## a diagnostic, on failure.
+##
+## If BATCH is 1, the git commands that contact REMOTE run under
+## `git_batch_ssh`, so that they fail rather than prompt.
 upstream_default_branch() {
   upstream_default_branch_remote="$1"
+  upstream_default_branch_batch="${3:-0}"
   # `REMOTE/HEAD` does not exist after `git remote add`.  After the remote
   # renames its default branch, `REMOTE/HEAD` still names the old branch.  A
   # fetch without `--prune` keeps that remote-tracking branch, frozen at its
@@ -828,7 +832,8 @@ upstream_default_branch() {
   upstream_default_branch_head="refs/remotes/${upstream_default_branch_remote}/HEAD"
   upstream_default_branch_ask=0
   if [ "$2" -eq 1 ]; then
-    if ! git -c "remote.${upstream_default_branch_remote}.followRemoteHEAD=always" \
+    if ! upstream_default_branch_git "${upstream_default_branch_batch}" \
+      -c "remote.${upstream_default_branch_remote}.followRemoteHEAD=always" \
       fetch --quiet "${upstream_default_branch_remote}"; then
       echo "${SCRIPT_NAME}: problem fetching ${upstream_default_branch_remote}" >&2
       return 1
@@ -840,13 +845,26 @@ upstream_default_branch() {
   if [ "${upstream_default_branch_ask}" -eq 1 ] \
     || ! upstream_default_branch_branch="$(git symbolic-ref --quiet "${upstream_default_branch_head}")" \
     || ! git rev-parse --verify --quiet "${upstream_default_branch_branch}" > /dev/null; then
-    if ! git remote set-head "${upstream_default_branch_remote}" --auto > /dev/null \
+    if ! upstream_default_branch_git "${upstream_default_branch_batch}" remote set-head "${upstream_default_branch_remote}" --auto > /dev/null \
       || ! upstream_default_branch_branch="$(git symbolic-ref --quiet "${upstream_default_branch_head}")"; then
       echo "${SCRIPT_NAME}: cannot determine the default branch of ${upstream_default_branch_remote}" >&2
       return 1
     fi
   fi
   printf '%s\n' "${upstream_default_branch_branch}"
+}
+
+## Usage: upstream_default_branch_git BATCH GIT-ARGUMENT...
+## A helper for `upstream_default_branch`:  runs `git GIT-ARGUMENT...` in the
+## current directory, under `git_batch_ssh` if BATCH is 1.
+upstream_default_branch_git() {
+  upstream_default_branch_git_batch="$1"
+  shift
+  if [ "${upstream_default_branch_git_batch}" -eq 1 ]; then
+    git_batch_ssh . "$@"
+  else
+    git "$@"
+  fi
 }
 
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE
