@@ -145,14 +145,15 @@ def azure_cli_headers() -> AzureTokenHeaders:
 
 
 def azure_api(org: str, project: str, build: str | int | None = None) -> str:
-    """Return the Azure DevOps API URL of a build, or of all the builds of a project.
+    """Return the Azure DevOps API URL of the given build, or of the given project's builds.
 
     Args:
         org: an Azure DevOps organization's name, such as "checkerframework".
         project: a project of the organization, by name, such as "checker-framework", or
             by id, a UUID such as "4dcb7892-...".
-        build: the ID of the build, such as 24267 (the buildId in the URL of the build, not
-            its build number, such as "20261031.1"), or None for all of the project's builds.
+        build: the ID of a build of the project, such as 24267 (the buildId in the URL of
+            the build, not its build number, such as "20261031.1"), or None for all of the
+            project's builds.
 
     Returns:
         The URL of `build` (or, if build is None, of the project's builds) in the
@@ -175,17 +176,17 @@ AZURE_SIGN_IN = {203: "a sign-in page instead of the requested data"}
 
 
 def azure_request(method: str, url: str, headers: dict[str, str], body: Any = None) -> Any:
-    """Make an HTTP request of Azure DevOps whose response is JSON.
+    """Make the given HTTP request of Azure DevOps, and return the response parsed as JSON.
 
     If Azure DevOps refuses the request with an error status or with a sign-in page whose
     status is 203, this raises urllib.error.HTTPError.  If the response is not JSON, such
     as a sign-in page with another successful status, this raises ValueError.
 
     Args:
-        method: the HTTP method, such as "GET".
-        url: the URL, in the Azure DevOps API.
-        headers: the HTTP headers.
-        body: the request body, which is sent as JSON, or None for no body.
+        method: an HTTP method, such as "GET".
+        url: a URL in the Azure DevOps API.
+        headers: HTTP headers.
+        body: a request body, which is sent as JSON, or None for no body.
 
     Returns:
         The response body, parsed as JSON, or None if it is empty.
@@ -194,7 +195,7 @@ def azure_request(method: str, url: str, headers: dict[str, str], body: Any = No
 
 
 def azure_get(url: str, *, text: bool = False) -> Any:
-    """Get `url` from Azure DevOps, anonymously if the project permits it.
+    """Get the given URL from Azure DevOps, and return the response as text or parsed JSON.
 
     A request is first made anonymously, because Azure DevOps refuses a token for one
     organization even when reading a public project of another.  If Azure DevOps refuses
@@ -203,7 +204,7 @@ def azure_get(url: str, *, text: bool = False) -> Any:
     requests to it are made with credentials only.
 
     Args:
-        url: the URL, in the Azure DevOps API.
+        url: a URL in the Azure DevOps API.
         text: True if the response is text rather than JSON.
 
     Returns:
@@ -308,13 +309,13 @@ def circleci_headers() -> dict[str, str]:
 
 
 def circleci_items(path: str) -> Iterator[Any]:
-    """Get the items of a paginated response from the CircleCI v2 API.
+    """Yield the items of the CircleCI v2 API's paginated response to the given request.
 
     Each page is requested only when the caller reaches its items, so a caller that
     stops early does not request the remaining pages.
 
     Args:
-        path: the request, such as "/v2/workflow/ID/job", with no query string.
+        path: a request, such as "/v2/workflow/ID/job", with no query string.
 
     Yields:
         The items of every page, in order.
