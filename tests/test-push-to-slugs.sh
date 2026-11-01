@@ -140,6 +140,21 @@ if grep -q "third proj line" "${WORK_DIR}/work/proj-fork-me-branch-part1/file.tx
   fail "git-push-to pushed despite a slug that names no directory"
 fi
 
+# An ORG that would make directory names ambiguous is an error that says why,
+# as it is for `git-new-branch`, and nothing is pushed.
+for bad_org in me-fork-x me-branch-x fork-x branch-x x-branch branch; do
+  if (cd "${WORK_DIR}/work" \
+    && "${COMMANDS_DIR}/git-push-to" upstream:main me:part1 "${bad_org}:part2") 2> "${WORK_DIR}/stderr"; then
+    fail "git-push-to succeeded on the slug ${bad_org}:part2"
+  fi
+  if ! grep -q "an ORG that .* cannot be used in a slug" "${WORK_DIR}/stderr"; then
+    fail "git-push-to did not say why ${bad_org}:part2 is refused: $(cat "${WORK_DIR}/stderr")"
+  fi
+done
+if grep -q "third proj line" "${WORK_DIR}/work/proj-fork-me-branch-part1/file.txt"; then
+  fail "git-push-to pushed despite a slug whose ORG cannot be used"
+fi
+
 # Slugs and directories cannot be mixed.
 if (cd "${WORK_DIR}/work" \
   && "${COMMANDS_DIR}/git-push-to" upstream:main proj-fork-me-branch-part1) 2> /dev/null; then
@@ -274,6 +289,26 @@ fi
 # The clone PROJECT does not stand for a branch it does not have checked out.
 if (cd "${WORK_DIR}/work4" && "${COMMANDS_DIR}/git-push-to" other-branch feature) 2> "${WORK_DIR}/stderr"; then
   fail "git-push-to succeeded on a slug that names no directory"
+fi
+
+# The slug -:BRANCH names a directory whose name has no ORG, and no other.
+make_clone solo main ../work4/solo-fork-me-branch-main
+make_clone solo feature ../work4/solo-fork-me-branch-feature
+add_line solo "dash line"
+git -C "${WORK_DIR}/work4/solo-branch-main" pull -q
+git -C "${WORK_DIR}/work4/solo-fork-me-branch-main" pull -q
+if ! (cd "${WORK_DIR}/work4" && "${COMMANDS_DIR}/git-push-to" -:main -:feature) 2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to failed on slugs -:BRANCH: $(cat "${WORK_DIR}/stderr")"
+fi
+check_contains ../work4/solo-branch-feature "dash line"
+if grep -q "dash line" "${WORK_DIR}/work4/solo-fork-me-branch-feature/file.txt"; then
+  fail "solo-fork-me-branch-feature was changed, but the slugs -:BRANCH name no fork"
+fi
+if (cd "${WORK_DIR}/work4" && "${COMMANDS_DIR}/git-push-to" -:main -:nosuch) 2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to succeeded on a slug -:BRANCH that names no directory"
+fi
+if ! grep -q "whose name has no ORG" "${WORK_DIR}/stderr"; then
+  fail "git-push-to did not report the missing directory for -:nosuch: $(cat "${WORK_DIR}/stderr")"
 fi
 
 echo "${SCRIPT_NAME}: OK"

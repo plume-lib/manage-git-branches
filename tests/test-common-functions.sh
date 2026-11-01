@@ -285,6 +285,47 @@ if [ "${remote}" != 'elsewhere' ]; then
   fail "push_remote reported [${remote}] for a clone whose sole remote is elsewhere"
 fi
 
+## Usage: check_url_key URL EXPECTED
+## Checks that `url_key`, in ${WORK_DIR}, prints EXPECTED for URL.
+check_url_key() {
+  check_url_key_actual="$(url_key "${WORK_DIR}" "$1")"
+  if [ "${check_url_key_actual}" != "$2" ]; then
+    fail "url_key [$1] printed [${check_url_key_actual}], not [$2]"
+  fi
+}
+
+# Spellings of one repository's URL have one key.
+check_url_key 'git@github.com:Org/Proj.git' 'github.com/org/proj'
+check_url_key 'https://GitHub.com/org/proj/' 'github.com/org/proj'
+# A scheme's default port is the same as no port.
+check_url_key 'ssh://git@github.com:22/org/proj.git' 'github.com/org/proj'
+check_url_key 'https://github.com:443/org/proj' 'github.com/org/proj'
+# Any other port is part of the key, so a server on another port is a different
+# repository.  An scp-style path that begins with digits is not a port.
+check_url_key 'https://example.com:8443/org/proj' 'example.com:8443/org/proj'
+check_url_key 'https://example.com/org/proj' 'example.com/org/proj'
+check_url_key 'example.com:8443/org/proj' 'example.com/8443/org/proj'
+# Only a host that ignores the case of its paths has its path in lower case.
+check_url_key 'https://example.com/Org/Proj' 'example.com/Org/Proj'
+
+# A `file://` URL and the pathname of one directory are one repository, but
+# they reach it through different transports, so one answer to
+# `git ls-remote` does not serve both.
+git init -q --bare "${WORK_DIR}/heads.git"
+for heads_dir in heads-by-url heads-by-path; do
+  git init -q "${WORK_DIR}/${heads_dir}"
+done
+git -C "${WORK_DIR}/heads-by-url" remote add origin "file://${WORK_DIR}/heads.git"
+git -C "${WORK_DIR}/heads-by-path" remote add origin "${WORK_DIR}/heads.git"
+by_url="$(repository_key "${WORK_DIR}/heads-by-url" origin)"
+if [ -z "${by_url}" ] || [ "${by_url}" != "$(repository_key "${WORK_DIR}/heads-by-path" origin)" ]; then
+  fail "repository_key does not equate a file:// URL with its pathname"
+fi
+by_url="$(remote_heads_key "${WORK_DIR}/heads-by-url" origin)"
+if [ -z "${by_url}" ] || [ "${by_url}" = "$(remote_heads_key "${WORK_DIR}/heads-by-path" origin)" ]; then
+  fail "remote_heads_key [${by_url}] does not distinguish a file:// URL from its pathname"
+fi
+
 ## Usage: check_is_deleted_branch DIRECTORY EXPECTED DESCRIPTION
 ## Checks that `is_deleted_branch DIRECTORY` returns status EXPECTED.
 check_is_deleted_branch() {

@@ -261,7 +261,9 @@ if [ "$(host_of "${work}/proj-branch-solo-only")" != "${other}" ]; then
 fi
 
 # git-new-branch asks the remote that the main clone would push the new
-# branch to.
+# branch to, which is the main clone's name for the repository that the branch
+# directory pushes to.
+git -C "${other}" config remote.pushDefault fork
 git -C "${work}/proj" config remote.pushDefault mine
 if out="$(cd "${other}" && "${GIT_NEW_BRANCH}" --clean fork-taken 2>&1)"; then
   fail "git-new-branch fork-taken succeeded, though ${work}/proj pushes to mine, which has it"
@@ -270,7 +272,36 @@ case "${out}" in
   *"registering the new worktree"*) fail "git-new-branch fork-taken said that it registered a worktree: ${out}" ;;
 esac
 [ ! -e "${work}/proj-branch-fork-taken" ] || fail "proj-branch-fork-taken was created"
+git -C "${other}" config --unset remote.pushDefault
 git -C "${work}/proj" config --unset remote.pushDefault
+
+# A main clone that has a remote in common with the branch directory, but that
+# pushes elsewhere, is not used.  Here the branch directory is a clone of a
+# fork, and the main clone pushes to the fork's upstream repository, so a
+# branch registered in the main clone would be pushed there.
+git clone -q -b fork-only "${work}/fork.git" "${work}/proj-branch-forked"
+git -C "${work}/proj-branch-forked" remote add upstream "${work}/remote.git"
+if ! out="$(cd "${work}/proj-branch-forked" && "${GIT_NEW_BRANCH}" --clean new6 2>&1)"; then
+  fail "git-new-branch --clean new6 failed: ${out}"
+fi
+if [ "$(host_of "${work}/proj-branch-new6")" != "${work}/proj-branch-forked" ]; then
+  fail "new6 is registered in $(host_of "${work}/proj-branch-new6"), not in ${work}/proj-branch-forked"
+fi
+
+# A main clone and a branch directory that determine no remote for a new
+# branch -- no "origin", no `remote.pushDefault`, and two remotes -- say nothing
+# about where it would be pushed, so having a remote in common is enough.
+git clone -q -o upstream "${work}/remote.git" "${work}/noorigin"
+git clone -q -o upstream -b other "${work}/remote.git" "${work}/noorigin-branch-other"
+for repo in "${work}/noorigin" "${work}/noorigin-branch-other"; do
+  git -C "${repo}" remote add mine "${work}/fork.git"
+done
+if ! out="$(cd "${work}/noorigin-branch-other" && "${GIT_NEW_BRANCH}" --clean new7 2>&1)"; then
+  fail "git-new-branch --clean new7 failed: ${out}"
+fi
+if [ "$(host_of "${work}/noorigin-branch-new7")" != "${work}/noorigin" ]; then
+  fail "new7 is registered in $(host_of "${work}/noorigin-branch-new7"), not in ${work}/noorigin"
+fi
 
 # A sparse main clone is not used.
 git -C "${work}/proj" config core.sparseCheckout true
