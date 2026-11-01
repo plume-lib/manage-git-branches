@@ -1,5 +1,6 @@
-# Usage: CHECK_FILE=FILE CHECK_SCRIPT_NAME=NAME CHECK_W_NEWLINE=yes|no \
-#          CHECK_SEPARATOR=yes|no awk -f check-conflict-resolution.awk MERGED RESOLVED
+# Usage: CCR_FILE=FILE CCR_SCRIPT_NAME=NAME CCR_RESOLVED_ENDS_WITH_NEWLINE=yes|no \
+#          CCR_CONTAINS_SEPARATOR=yes|no \
+#          awk -f check-conflict-resolution.awk MERGED RESOLVED
 #
 # Checks the resolution of the conflicts in a file.  Exits with status
 # 0 if the resolution is acceptable, and exits with status 1 if the
@@ -11,20 +12,25 @@
 # with a newline.  RESOLVED is the resolution.  The resolution is acceptable
 # if
 #  * it consists of the text outside the merged file's conflict regions,
-#    unchanged and in order, with any text in place of each region;
+#    unchanged and in order (but any text can take the place of each
+#    conflict region);
 #  * the text in place of the regions contains no conflict marker, except a
-#    line "=======" when CHECK_SEPARATOR is "yes"; and
+#    line "=======" when CCR_CONTAINS_SEPARATOR is "yes"; and
 #  * it ends with a newline if and only if the merged file does, unless the
 #    merged file ends with a conflict region.
 # A line can also end with a carriage return, as in a file with CRLF line
 # endings.
 #
 # The program reads these environment variables:
-#   CHECK_FILE         the file's name; used for diagnostics.
-#   CHECK_SCRIPT_NAME  the name of the command; used for diagnostics.
-#   CHECK_W_NEWLINE    "yes" if RESOLVED ends with a newline, else "no"
-#   CHECK_SEPARATOR    "yes" if a line "=======" can be content, such as a
-#                      Markdown heading's underline, else "no"
+#   CCR_FILE                        the file's name; used for diagnostics.
+#   CCR_SCRIPT_NAME                 the name of the command; used for
+#                                   diagnostics.
+#   CCR_RESOLVED_ENDS_WITH_NEWLINE  "yes" if RESOLVED ends with a newline,
+#                                   else "no"
+#   CCR_CONTAINS_SEPARATOR          "yes" if a side of the merge contains a
+#                                   line "=======", which can then be
+#                                   content, such as a Markdown heading's
+#                                   underline; else "no"
 #
 # `check_conflict_resolution`, in common-functions.sh, runs this program.  It
 # passes the file in AUTO_MERGE, git's automatic merge, as MERGED, on
@@ -32,7 +38,7 @@
 # in the working tree as RESOLVED.
 
 function problem(message) {
-  printf "%s: %s: %s\n", ENVIRON["CHECK_SCRIPT_NAME"], ENVIRON["CHECK_FILE"], message > "/dev/stderr"
+  printf "%s: %s: %s\n", ENVIRON["CCR_SCRIPT_NAME"], ENVIRON["CCR_FILE"], message > "/dev/stderr"
   status = 1
 }
 
@@ -101,7 +107,7 @@ END {
 
   # The final newline belongs to the last line, which is clean unless the
   # file ends with a conflict region.
-  if (block_len[num_regions] > 0 && a_newline != ENVIRON["CHECK_W_NEWLINE"]) {
+  if (block_len[num_regions] > 0 && a_newline != ENVIRON["CCR_RESOLVED_ENDS_WITH_NEWLINE"]) {
     problem("the final newline was added or removed")
     exit 1
   }
@@ -125,7 +131,7 @@ END {
   for (k = 1; k <= num_w; k++) {
     if (!clean[k] && (w[k] ~ /^<<<<<<<+( |\r?$)/ || w[k] ~ /^[|][|][|][|][|][|][|]+( |\r?$)/ \
                       || w[k] ~ /^>>>>>>>+( |\r?$)/ \
-                      || (ENVIRON["CHECK_SEPARATOR"] != "yes" && w[k] ~ /^=======\r?$/))) {
+                      || (ENVIRON["CCR_CONTAINS_SEPARATOR"] != "yes" && w[k] ~ /^=======\r?$/))) {
       problem("line " k " is a conflict marker")
     }
   }
