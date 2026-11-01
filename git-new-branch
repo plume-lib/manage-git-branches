@@ -5,7 +5,7 @@
 #
 # Usage:
 #   git-new-branch [--clean | --copy] [--allow-upstream] NEWBRANCHNAME
-#   git-new-branch --help
+#   git-new-branch -h | --help
 #
 # The new branch starts at the current commit, after a `git pull` of the
 # current branch.
@@ -24,15 +24,19 @@
 #              is an independent clone that shares nothing with the current
 #              repository.
 #
+# A working tree that has submodules gets `--copy` automatically, and
+# `--clean` is refused when the current commit has submodules.
+#
 # In a clone of an upstream repository whose fork is in a sibling directory,
 # this command refuses, unless `--allow-upstream` is given, because a branch
 # for a pull request belongs in the fork.
 #
 # Every effect is local:  this command never contacts a remote except to
-# read from it, and in particular it does not push the new branch.
-# Therefore, the new branch has no upstream branch, which `git-push-to` and
-# `git-pull-from` require.  The first `git push` of the new branch sets its
-# upstream branch if `push.autoSetupRemote` is true; otherwise,
+# read from it, and in particular it does not push the new branch.  It also
+# gives the new branch no upstream branch, even under
+# `branch.autoSetupMerge=always`; `git-push-to` and `git-pull-from` require
+# one.  The first `git push` of the new branch sets its upstream branch if
+# `push.autoSetupRemote` is true (git 2.37 or later); otherwise,
 # `git push -u REMOTE NEWBRANCHNAME` does.  Nor does this command build.
 #
 # Details:
@@ -48,9 +52,8 @@
 # `.claude/worktrees/`, because its copy would share that worktree's HEAD and
 # index; they say which ones they left out.
 #
-# A working tree that has submodules gets `--copy` automatically, and
-# `--clean` is refused when the current commit has submodules;
-# `choose_mode_for_submodules` says why.  A repository that has no
+# `choose_mode_for_submodules` says why submodules change the mode, or
+# prevent `--clean`.  A repository that has no
 # commit is refused, because there is nothing to branch from.  Every mode but
 # `--clean` is refused while a merge, cherry-pick, revert, or rebase is in
 # progress, because the new directory would get the operation's staged
@@ -72,7 +75,11 @@
 # If the current repository is a branch directory's, REPONAME-branch-OTHER/,
 # they are created instead in the sibling REPONAME/ that `main_clone_for`
 # chooses, if there is one, so that the new worktree does not prevent the
-# removal of REPONAME-branch-OTHER/.
+# removal of REPONAME-branch-OTHER/.  That happens only if REPONAME/ has no
+# branch of the new branch's name, and if the commit and staged files that the
+# new worktree needs can be copied there.  Then the test for a branch of the
+# same name on a remote consults REPONAME/'s remotes, because REPONAME/'s
+# configuration says where the new branch would be pushed.
 #
 # Remove a worktree that this script created with
 # `git-remove-branch-directory`, and move it with `git worktree move`, never
@@ -143,26 +150,57 @@ usage() {
 }
 
 # Usage: print_synopsis
-# Prints the synopsis at the top of this file, which ends before the line
-# "# Details:", without the comment characters.  Reading it from this file
-# keeps `--help` and the file's documentation from disagreeing.  A blank line
-# is printed only if a line that is not blank follows it, so that the output
-# does not end with the blank line that precedes "# Details:".
+# Prints the synopsis at the top of this file, without the comment characters.
+# The synopsis is the part of the first comment block, after the shebang line,
+# that precedes the line "# Details:".  Reading it from this file keeps
+# `--help` and the file's documentation from disagreeing.  A blank line is
+# printed only between lines that are not blank, so that the output neither
+# begins nor ends with one.  Prints nothing, and fails, if this file has no
+# line "# Details:" in a comment block.
 print_synopsis() {
   awk '
-    NR <= 2 { next }
-    $0 == "# Details:" { exit }
+    NR == 1 { next }
+    !/^#/ {
+      text = ""
+      blanks = 0
+      next
+    }
+    $0 == "# Details:" {
+      found = 1
+      exit
+    }
     {
-      sub(/^# /, "")
-      sub(/^#$/, "")
+      sub(/^# ?/, "")
       if ($0 == "") {
         blanks++
         next
       }
-      for (; blanks > 0; blanks--) print ""
-      print
+      if (text != "") {
+        for (; blanks > 0; blanks--) text = text "\n"
+      }
+      blanks = 0
+      text = text $0 "\n"
+    }
+    END {
+      if (!found) exit 1
+      printf "%s", text
     }' "${script_path}"
 }
+
+# `--help` and `-h` print the synopsis wherever they appear before `--`, even
+# after the branch name, where the loop below stops looking for options.
+for arg in "$@"; do
+  case "${arg}" in
+    --) break ;;
+    -h | --help)
+      if ! print_synopsis; then
+        echo "${SCRIPT_NAME}: ERROR: cannot find the synopsis in ${script_path}" >&2
+        exit 1
+      fi
+      exit
+      ;;
+  esac
+done
 
 # The mode:  "worktree" (the default), "clean", or "copy".  Selected on once,
 # where the three implementations diverge, so that every check before that
@@ -180,10 +218,6 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       MODE="${1#--}"
-      ;;
-    -h | --help)
-      print_synopsis
-      exit
       ;;
     --)
       shift
@@ -613,7 +647,8 @@ done
 # push the new branch.
 #
 # The query runs under `git_batch_ssh`, as `is-deleted-branch` runs its own
-# queries.
+# queries, because a prompt would otherwise block this query forever when this
+# script is run from another script or a CI job.
 # A remote that this script cannot ask is not an error; the branch is created.
 if [ -n "${REMOTE}" ] \
   && git_batch_ssh "${COLLISION_REPO}" ls-remote --exit-code "${REMOTE}" \
@@ -666,8 +701,11 @@ case "${MODE}" in
     # with `mv` is safe.
     make_tmpdir
     copy_repository "${BRANCH_TMPDIR}"
-    if ! (cd -- "${BRANCH_TMPDIR}" && git checkout -b "${BRANCHNAME}" -q); then
-      echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout -b \"${BRANCHNAME}\" -q)" >&2
+    # `--no-track` sets up no upstream for the new branch even under
+    # `branch.autoSetupMerge=always`, which would otherwise make the current
+    # branch its upstream.
+    if ! (cd -- "${BRANCH_TMPDIR}" && git checkout --no-track -b "${BRANCHNAME}" -q); then
+      echo "${SCRIPT_NAME}: ERROR in: (cd -- \"${BRANCH_TMPDIR}\" && git checkout --no-track -b \"${BRANCHNAME}\" -q)" >&2
       exit 1
     fi
     if ! mv -- "${BRANCH_TMPDIR}" "${BRANCHDIR}"; then

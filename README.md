@@ -51,9 +51,10 @@ The commands are:
   request belongs in the fork; `--allow-upstream` overrides the refusal.
   If git's configuration sets `github.user`, only a fork whose ORG is that
   user counts.
-  `git-new-branch --help` prints a synopsis, which describes the modes.  The
-  comments in [`git-new-branch`](git-new-branch) give the details, such as
-  which copied build output this command deletes, and which it warns about.
+  `git-new-branch --help` (or `-h`) prints a synopsis, which describes the
+  modes.  The comments in [`git-new-branch`](git-new-branch) give the
+  details, such as which copied build output this command deletes, and which
+  it warns about.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
@@ -281,9 +282,10 @@ Do not remove or move a worktree with file-system commands:
   removes the repository that all of them use, and moving it breaks them
   until you run `git worktree repair` in it.
 
-None of this applies to a directory made by `git-new-branch --copy`:  each of
-those is an independent clone, which you can remove or move like any other
-directory.
+None of this applies to a directory made by `git-new-branch --copy`, or to
+the copy that `git-new-branch` or `git-checkout-branch` makes for a working
+tree or branch that has submodules:  each of those is an independent clone,
+which you can remove or move like any other directory.
 
 `git-new-branch`, `git-checkout-branch`, `git-remove-branch-directory`, and
 `git-orphaned-branches` require git 2.31 or later.  The default mode of
