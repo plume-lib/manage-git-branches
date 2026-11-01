@@ -142,6 +142,14 @@ The commands are:
   `git rerere` and an AI agent, and it accepts the same `--llm`, `--no-llm`,
   `--claude`,
   and `--codex` options.
+* [`resolve-conflicts`](resolve-conflicts)
+  `[--nocompile] [--claude | --codex] [-C DIR]`:
+  Runs `pr-status`, which regenerates `pr-dependencies.md`, then runs each
+  `git-push-to` command in its section "Dependency chains with conflicts",
+  with `--claude` (or `--codex`), which asks an AI agent for help.  Repeats
+  until no chain has conflicts, for up to 3 rounds; stops after a round in
+  which a chain fails.  It runs only the commands that `pr-status` writes,
+  and refuses any other.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but Eclipse `.project`
