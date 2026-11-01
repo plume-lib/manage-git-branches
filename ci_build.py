@@ -195,7 +195,7 @@ def azure_request(method: str, url: str, headers: dict[str, str], body: Any = No
 
 
 def azure_get(url: str, *, text: bool = False) -> Any:
-    """Get the given URL from Azure DevOps, and return the response as text or parsed JSON.
+    """Return the response to a GET of the given Azure DevOps URL, as text or parsed JSON.
 
     A request is first made anonymously, because Azure DevOps refuses a token for one
     organization even when reading a public project of another.  If Azure DevOps refuses
