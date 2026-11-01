@@ -157,10 +157,11 @@ The commands are:
 * [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:
   Cancels the unfinished GitHub Actions, Azure Pipelines, and CircleCI builds
   of each blocked pull request (one that depends on another open pull
-  request), and each build that a more recent build of the same branch makes
-  redundant.  Run it in the directory that holds the documents that
-  `pr-status.py` generates; it uses `pr-status.py` to find the blocked pull
-  requests.  This command needs Python 3.11 or later and `gh`.
+  request), and each build, started by a push or a pull request, that a more
+  recent build of the same branch makes redundant.  Run it in the directory
+  that holds the documents that `pr-status.py` generates; it uses
+  `pr-status.py` to find the blocked pull requests.  This command needs
+  Python 3.11 or later and `gh`.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.

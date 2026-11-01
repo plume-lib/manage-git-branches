@@ -68,9 +68,7 @@ class CancelBlockedCiTest(unittest.TestCase):
             with (
                 self.subTest(args=args),
                 mock.patch.object(sys, "argv", ["cancel-blocked-ci", *args]),
-                mock.patch.object(
-                    cancel_blocked_ci, "blocked_from_document", side_effect=AssertionError
-                ),
+                mock.patch.object(cancel_blocked_ci, "blocked_prs", side_effect=AssertionError),
                 contextlib.redirect_stderr(io.StringIO()),
                 self.assertRaises(SystemExit) as cm,
             ):
@@ -94,18 +92,71 @@ class CancelBlockedCiTest(unittest.TestCase):
         self.assertEqual(result, ["workflow"])
         self.assertIn("repo: failed to find redundant Azure Pipelines builds", stderr.getvalue())
 
+    def test_redundant_runs(self) -> None:
+        """Only a run that a push or a pull request started can be redundant."""
+
+        def run(n: int, event: str) -> dict[str, Any]:
+            return {
+                "id": n,
+                "name": "build",
+                "status": "queued",
+                "html_url": f"https://github.com/org/repo/actions/runs/{n}",
+                "workflow_id": 7,
+                "event": event,
+                "created_at": f"2026-10-31T00:00:0{n}Z",
+                "head_branch": "main",
+                "head_repository": {"owner": {"login": "org"}},
+            }
+
+        runs = {
+            ("org", "main"): [
+                run(0, "push"),
+                run(1, "push"),
+                run(2, "schedule"),
+                run(3, "schedule"),
+            ]
+        }
+        result = cancel_blocked_ci.redundant_runs("repo", "org/repo", runs)
+        self.assertEqual(
+            [(identifier, subject, reason) for identifier, subject, _, reason in result],
+            [(("github", 0), "repo main", ", made redundant by run 1")],
+        )
+
+    def test_azure_temporary_failure(self) -> None:
+        """A temporary failure of an anonymous request does not mark the project private."""
+        url = "https://dev.azure.com/org/project/_apis/build/builds"
+        calls = []
+
+        def http(_method: str, url: str, headers: dict[str, str] | None, *_: Any) -> bytes:
+            calls.append(bool(headers))
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(
+                    url, 503, "Service Unavailable", Message(), io.BytesIO()
+                )
+            return b"{}"
+
+        with (
+            mock.patch.object(ci_build, "http", http),
+            mock.patch.object(ci_build, "azure_headers", return_value={"Authorization": "x"}),
+            mock.patch.object(ci_build, "_azure_private_projects", set()),
+        ):
+            with self.assertRaises(urllib.error.HTTPError):
+                ci_build.azure_get(url)
+            self.assertEqual(ci_build.azure_get(url), {})
+        self.assertEqual(calls, [False, False])
+
     def test_circleci_pagination(self) -> None:
         """Every page of recent pipelines and of their workflows is read, and no older page."""
         now = dt.datetime.now(dt.UTC)
         recent, old = str(now), str(now - 2 * cancel_blocked_ci.CIRCLECI_WINDOW)
 
-        def pipeline(n: int, created: str) -> dict[str, Any]:
+        def pipeline(n: int, created: str, trigger: str = "webhook") -> dict[str, Any]:
             return {
                 "id": f"p{n}",
                 "number": n,
                 "created_at": created,
                 "vcs": {"branch": "main"},
-                "trigger": {"type": "webhook"},
+                "trigger": {"type": trigger},
             }
 
         def workflow(n: int) -> dict[str, Any]:
@@ -114,11 +165,12 @@ class CancelBlockedCiTest(unittest.TestCase):
         # Each page token contains characters that must be escaped in a URL.
         pages = {
             f"{CIRCLECI}/project/gh/org/repo/pipeline": {
-                "items": [pipeline(2, recent)],
+                # A scheduled pipeline is never redundant, so its workflows are not read.
+                "items": [pipeline(4, recent, "scheduled_pipeline"), pipeline(3, recent)],
                 "next_page_token": "a+b/c=",
             },
             f"{CIRCLECI}/project/gh/org/repo/pipeline?page-token=a%2Bb%2Fc%3D": {
-                "items": [pipeline(1, recent), pipeline(0, old)],
+                "items": [pipeline(2, recent), pipeline(1, recent), pipeline(0, old)],
                 "next_page_token": "older",
             },
             f"{CIRCLECI}/pipeline/p2/workflow": {"items": [workflow(2)], "next_page_token": None},
@@ -128,20 +180,27 @@ class CancelBlockedCiTest(unittest.TestCase):
                 "next_page_token": None,
             },
         }
+        # Pipeline 3 was deleted after it was listed.
+        deleted = f"{CIRCLECI}/pipeline/p3/workflow"
         requested = []
 
         def http(_method: str, url: str, *_: Any) -> bytes:
             requested.append(url)
             if url not in pages:
-                raise urllib.error.HTTPError(url, 404, "Not Found", Message(), None)
+                raise urllib.error.HTTPError(url, 404, "Not Found", Message(), io.BytesIO())
             return json.dumps(pages[url]).encode()
 
         with (
             mock.patch.object(ci_build, "http", http),
             mock.patch.object(ci_build, "circleci_token", return_value="token"),
+            mock.patch.object(
+                cancel_blocked_ci,
+                "checks",
+                return_value=[("completed", "ci", "https://app.circleci.com/workflow/x")],
+            ),
         ):
             result = cancel_blocked_ci.redundant_circleci_workflows("repo", "org/repo")
-        self.assertEqual(sorted(requested), sorted(pages))
+        self.assertEqual(sorted(requested), sorted([*pages, deleted]))
         self.assertEqual(
             [(identifier, reason) for identifier, _, _, reason in result],
             [(("circleci", "w1"), ", made redundant by workflow w2")],

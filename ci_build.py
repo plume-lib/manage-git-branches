@@ -24,6 +24,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.client import HTTPException
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -57,9 +58,18 @@ AZURE_DEVOPS_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
 # The configuration files of the CircleCI CLI, which `circleci setup` writes.
 CIRCLECI_CONFIGS = ("~/.circleci/cli.yml", "~/snap/circleci/current/.circleci/cli.yml")
 
-# The errors that a request to a CI service can raise.  A ValueError or KeyError
-# indicates a response that is not JSON or that lacks an expected field.
-REQUEST_ERRORS = (urllib.error.URLError, subprocess.CalledProcessError, ValueError, KeyError)
+# The errors that a request to a CI service can raise.  An OSError, such as a
+# urllib.error.URLError, a TimeoutError, or a ConnectionResetError, or an
+# http.client.HTTPException, such as an http.client.IncompleteRead, indicates a failed
+# connection.  A ValueError or KeyError indicates a response that is not JSON or that
+# lacks an expected field.
+REQUEST_ERRORS = (
+    OSError,
+    HTTPException,
+    subprocess.CalledProcessError,
+    ValueError,
+    KeyError,
+)
 
 
 ###########################################################################
@@ -219,6 +229,9 @@ def azure_api(org: str, project: str, build: str | int | None = None) -> str:
 
 # The Azure DevOps projects, as "ORG/PROJECT", that refused an anonymous request.
 _azure_private_projects: set[str] = set()
+# The HTTP statuses with which Azure DevOps refuses an anonymous request to a private
+# project.  203 is a sign-in page, as http reports it.
+AZURE_REFUSALS = {203, 401, 403, 404}
 
 
 def azure_get(url: str, *, text: bool = False) -> Any:
@@ -246,9 +259,10 @@ def azure_get(url: str, *, text: bool = False) -> Any:
     if project not in _azure_private_projects:
         try:
             return get({})
-        except (urllib.error.HTTPError, ValueError):
-            # A private project refuses the request or responds with a sign-in page.
-            if not azure_headers():
+        except urllib.error.HTTPError as e:
+            # Another failure, such as a 503, can be temporary and does not indicate a
+            # private project.
+            if e.code not in AZURE_REFUSALS or not azure_headers():
                 raise
             _azure_private_projects.add(project)
     return get(azure_headers())
