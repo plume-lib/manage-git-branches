@@ -54,7 +54,9 @@
 # the clone PROJECT itself, so `-:NEWBRANCHNAME` makes
 # PROJECT-branch-NEWBRANCHNAME.  `--clean` is accepted with a slug but has no
 # effect.  `--copy` cannot be used with a slug, and neither can an ORG that
-# contains "-branch-" or "-fork-".
+# would make directory names ambiguous:  one that is "branch", starts with
+# "branch-" or "fork-", ends with "-branch", or contains "-branch-" or
+# "-fork-".
 #
 # The default mode and `--copy` copy build output, which can still refer to
 # the current directory's files.  These modes delete such files that a tool

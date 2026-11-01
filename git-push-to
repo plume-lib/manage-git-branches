@@ -36,9 +36,9 @@
 # directory whose name has no ORG, as `git-new-branch` creates from a clone
 # PROJECT, or the clone PROJECT itself if it has BRANCH checked out and the
 # former does not exist; those directories form one more chain for each
-# PROJECT.  For example, `git-push-to main feature` pushes
-# PROJECT-fork-ORG-branch-main into PROJECT-fork-ORG-branch-feature for each
-# PROJECT and ORG.  A slug ORG:BRANCH in the same command belongs to every
+# PROJECT.  The slug -:BRANCH, whose ORG is "-", names only such a directory.
+# For example, `git-push-to main feature` pushes PROJECT-fork-ORG-branch-main
+# into PROJECT-fork-ORG-branch-feature for each PROJECT and ORG.  A slug ORG:BRANCH in the same command belongs to every
 # chain of its PROJECT:  `git-push-to typetools:master master feature` pushes
 # typetools's master into each ORG's master, then that into ORG's feature.
 # An argument without ":" that is not a directory is a slug BRANCH only if
@@ -777,7 +777,7 @@ check_branch_dir() {
 ## Prints, one per line, PROJECT:ORG for each directory in the current
 ## directory that the slug names.  If the slug has no ORG, every ORG matches,
 ## and so do PROJECT-branch-BRANCH and a clone PROJECT that has BRANCH
-## checked out, for which ORG is "-".
+## checked out, for which ORG is "-".  ORG "-" matches only those two.
 ## Returns 1, after printing an error message, if a directory
 ## PROJECT[-fork-ORG]-branch-BRANCH that the slug names has some other branch
 ## checked out, because merging into that directory would merge into the wrong
@@ -786,7 +786,7 @@ slug_matches() {
   parse_slug "$1"
   match_status=0
   for dir in ./*-fork-*-branch-"${slug_branch_dir}"; do
-    if [ ! -d "${dir}" ]; then continue; fi
+    if [ ! -d "${dir}" ] || [ "${slug_org}" = '-' ]; then continue; fi
     name="${dir#./}"
     name="${name%-branch-"${slug_branch_dir}"}"
     parse_clone_name "${name}"
@@ -800,7 +800,7 @@ slug_matches() {
     fi
     printf '%s:%s\n' "${clone_project}" "${clone_org}"
   done
-  if [ -z "${slug_org}" ]; then
+  if [ -z "${slug_org}" ] || [ "${slug_org}" = '-' ]; then
     for dir in ./*-branch-"${slug_branch_dir}"; do
       if [ ! -d "${dir}" ]; then continue; fi
       name="${dir#./}"
@@ -824,7 +824,7 @@ slug_matches() {
     done
   fi
   for dir in ./*-fork-*; do
-    if [ ! -d "${dir}" ]; then continue; fi
+    if [ ! -d "${dir}" ] || [ "${slug_org}" = '-' ]; then continue; fi
     name="${dir#./}"
     parse_clone_name "${name}"
     case "${clone_org}" in *-branch-*) continue ;; esac
@@ -907,7 +907,9 @@ for arg; do
   fi
   parse_slug "$arg"
   if [ -z "${arg_matches}" ]; then
-    if [ -n "${slug_org}" ]; then
+    if [ "${slug_org}" = '-' ]; then
+      echo "${SCRIPT_NAME}: no directory *-branch-${slug_branch_dir} (or a clone on branch ${slug_branch}) whose name has no ORG in $(pwd) for $arg" >&2
+    elif [ -n "${slug_org}" ]; then
       echo "${SCRIPT_NAME}: no directory *-fork-${slug_org}-branch-${slug_branch_dir} (or *-fork-${slug_org} on branch ${slug_branch}) in $(pwd) for $arg" >&2
     else
       echo "${SCRIPT_NAME}: no directory *-branch-${slug_branch_dir} (or *-fork-* or a clone on branch ${slug_branch}) in $(pwd) for $arg" >&2

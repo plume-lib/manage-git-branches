@@ -1030,7 +1030,7 @@ branch_dir_name() {
 ## Sets ${clone_project} and ${clone_org} from NAME, the name of a clone,
 ## PROJECT-fork-ORG or PROJECT, without a -branch-BRANCH suffix.  ORG starts
 ## after the last "-fork-" in NAME, so PROJECT can contain "-fork-" but ORG
-## cannot; see `check_slug_org`.  ${clone_org} is "-" for a NAME that has no
+## cannot, nor can ORG start with "fork-"; see `check_slug_org`.  ${clone_org} is "-" for a NAME that has no
 ## "-fork-", as ORG "-" stands for PROJECT in a slug.
 parse_clone_name() {
   case "$1" in
@@ -1077,11 +1077,14 @@ parse_slug() {
 ## starts with "." is not one.
 ##
 ## Every directory name that contains "-branch-" is read as that of a branch
-## directory, PREFIX-branch-BRANCH, so a clone named PROJECT-fork-ORG, where
-## ORG contains "-branch-", would be taken for a branch directory.  A
+## directory, PREFIX-branch-BRANCH, and some commands take PREFIX to end at
+## the first "-branch-".  So if ORG is "branch", starts with "branch-", ends
+## with "-branch", or contains "-branch-", then the name of the clone
+## PROJECT-fork-ORG or of its branch directory PROJECT-fork-ORG-branch-BRANCH
+## would be read as that of a branch directory of a different clone.  A
 ## directory name is read as PROJECT-fork-ORG with ORG starting after its last
-## "-fork-", so where ORG contains "-fork-", PROJECT-fork-ORG would be read as
-## the clone of a different fork.
+## "-fork-", so if ORG starts with "fork-" or contains "-fork-", then
+## PROJECT-fork-ORG would be read as the clone of a different fork.
 check_slug_org() {
   parse_slug "$1"
   case "$1" in
@@ -1094,13 +1097,17 @@ check_slug_org() {
       esac
       ;;
   esac
-  case "${slug_org}" in
+  # The hyphens added around ${slug_org} stand for those that surround ORG in
+  # PROJECT-fork-ORG-branch-BRANCH.
+  case "-${slug_org}-" in
     *-branch-*)
-      echo "${SCRIPT_NAME}: ERROR: an ORG that contains \"-branch-\" cannot be used in a slug, because the name of its fork's clone, PROJECT-fork-ORG, would be read as that of a branch directory: $1" >&2
+      echo "${SCRIPT_NAME}: ERROR: an ORG that is \"branch\", starts with \"branch-\", ends with \"-branch\", or contains \"-branch-\" cannot be used in a slug, because the name of its fork's clone, PROJECT-fork-ORG, or of a branch directory of that clone would be read as that of a branch directory of a different clone: $1" >&2
       return 1
       ;;
+  esac
+  case "-${slug_org}" in
     *-fork-*)
-      echo "${SCRIPT_NAME}: ERROR: an ORG that contains \"-fork-\" cannot be used in a slug, because the name of its fork's clone, PROJECT-fork-ORG, would be read as that of a different fork: $1" >&2
+      echo "${SCRIPT_NAME}: ERROR: an ORG that starts with \"fork-\" or contains \"-fork-\" cannot be used in a slug, because the name of its fork's clone, PROJECT-fork-ORG, would be read as that of a different fork: $1" >&2
       return 1
       ;;
   esac

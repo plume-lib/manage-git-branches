@@ -1287,7 +1287,7 @@ if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" foo-branch-bar:feature 2>&1)
   fail "zero exit status for a slug whose ORG contains -branch-"
 fi
 case "${out}" in
-  *"ERROR: an ORG that contains \"-branch-\" cannot be used in a slug"*) ;;
+  *"ERROR: an ORG that "*"contains \"-branch-\" cannot be used in a slug"*) ;;
   *) fail "unexpected message for a slug whose ORG contains -branch-: ${out}" ;;
 esac
 if [ -e "${slugs}/proj-fork-foo-branch-feature" ] \
@@ -1303,7 +1303,7 @@ if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" foo-fork-bar:feature 2>&1)";
   fail "zero exit status for a slug whose ORG contains -fork-"
 fi
 case "${out}" in
-  *"ERROR: an ORG that contains \"-fork-\" cannot be used in a slug"*) ;;
+  *"ERROR: an ORG that "*"contains \"-fork-\" cannot be used in a slug"*) ;;
   *) fail "unexpected message for a slug whose ORG contains -fork-: ${out}" ;;
 esac
 if [ -e "${slugs}/proj-fork-foo-fork-bar-branch-feature" ] \
@@ -1311,6 +1311,27 @@ if [ -e "${slugs}/proj-fork-foo-fork-bar-branch-feature" ] \
     refs/heads/feature > /dev/null; then
   fail "a slug whose ORG contains -fork- made a branch"
 fi
+
+# An ORG whose own hyphens combine with those around it in
+# PROJECT-fork-ORG-branch-BRANCH is refused too, even when its fork has a
+# clone.  Each ORG is followed by the word of the message that refuses it.
+for bad_org_kind in branch-x:branch x-branch:branch branch:branch fork-x:fork; do
+  bad_org="${bad_org_kind%:*}"
+  bad_kind="${bad_org_kind#*:}"
+  git clone -q "${slugs}/proj-fork-mernst" "${slugs}/proj-fork-${bad_org}"
+  if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" "${bad_org}:feature" 2>&1)"; then
+    fail "zero exit status for a slug whose ORG is ${bad_org}"
+  fi
+  case "${out}" in
+    *"ERROR: an ORG that "*"contains \"-${bad_kind}-\" cannot be used in a slug"*) ;;
+    *) fail "unexpected message for a slug whose ORG is ${bad_org}: ${out}" ;;
+  esac
+  if [ -e "${slugs}/proj-fork-${bad_org}-branch-feature" ] \
+    || git -C "${slugs}/proj-fork-${bad_org}" rev-parse --verify --quiet \
+      refs/heads/feature > /dev/null; then
+    fail "a slug whose ORG is ${bad_org} made a branch"
+  fi
+done
 
 # A slug branches from whatever the fork's clone has checked out, and the
 # message names it.
