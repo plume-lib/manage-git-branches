@@ -1503,6 +1503,23 @@ git_control_state() {
     -o -print | sort
 }
 
+## Usage: untracked_files
+## Prints, one per line, the files of the working tree that git does not track
+## and does not ignore.
+untracked_files() {
+  git -c core.quotePath=false ls-files --others --exclude-standard
+}
+
+## Usage: ignored_files
+## Prints, one per line, the files of the working tree that git ignores, with
+## each directory that git ignores entirely as a single line.  A file that is
+## created in such a directory does not change the output, but listing every
+## file of a directory of build output would be slow.  So a caller checks
+## only the names of ignored files, not their contents.
+ignored_files() {
+  git -c core.quotePath=false ls-files --others --ignored --exclude-standard --directory
+}
+
 ## Usage: build_logged LOG
 ## Runs `compile-project` in the current directory, writing its output, both
 ## standard output and standard error, to standard output and to the file LOG.
