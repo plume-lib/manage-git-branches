@@ -89,8 +89,8 @@
 # directories that they deleted files from CMake or autotools configured,
 # because such a directory needs to be reconfigured.  With `--verbose`, they
 # also say how many files they deleted and from which directories.
-# `delete_or_warn_about_old_pathname` says which files those are, and
-# `delete_stale_build_output` says which of them are deleted.
+# `delete_or_warn_about_old_pathname` finds those files and prints the
+# messages, and `delete_stale_build_output` decides which of them are deleted.
 #
 # The default mode and `--copy` leave out a worktree of this repository that
 # is nested in the current directory, such as an ignored one in
@@ -1207,8 +1207,10 @@ dir_list() {
 # STALE-FILES lists the pathnames of stale files, relative to ${BRANCHDIR},
 # one per line.  Deletes each stale file that a tool presumably
 # regenerates, and sets these variables:
-#  * ${stale_kept} lists the pathname of each other stale file, including
-#    each one that cannot be deleted, each followed by a newline.
+#  * ${stale_kept_count} is the number of other stale files, including each
+#    one that cannot be deleted.
+#  * ${stale_kept} lists the pathnames of the first 5 of those other stale
+#    files, each preceded by a newline.
 #  * ${stale_count} is the number of files that it deleted.
 #  * ${stale_names} lists the names of the directories that it deleted files
 #    from, each followed by a newline.
@@ -1235,20 +1237,19 @@ dir_list() {
 #    `.gradle/`, or cache directory of the submodule's own repository.
 delete_stale_build_output() {
   stale_kept=''
+  stale_kept_count=0
   stale_count=0
   stale_names=''
   stale_configured=''
   stale_last_dir=''
-  stale_unread="$1
-"
-  while [ -n "${stale_unread}" ]; do
-    stale_file="${stale_unread%%
-*}"
-    stale_unread="${stale_unread#*
-}"
-    if [ -z "${stale_file}" ]; then
-      continue
-    fi
+  # The loop splits STALE-FILES at newlines rather than reading it from a pipe,
+  # because a pipe would run the loop in a subshell, which would lose the
+  # variables that the loop sets.
+  stale_saved_ifs="${IFS}"
+  IFS='
+'
+  set -f
+  for stale_file in $1; do
     # ${stale_dir} is the outermost `build/`, `.gradle/`, or cache directory
     # that contains the file, or is empty if there is none, and
     # ${stale_owner} is the directory that contains ${stale_dir}, or is empty
@@ -1275,17 +1276,14 @@ delete_stale_build_output() {
           ;;
       esac
     done
-    if [ -z "${stale_dir}" ]; then
-      stale_kept="${stale_kept}${stale_file}
-"
-      continue
-    fi
     # ${stale_delete} is "yes" if the files in ${stale_dir} are deleted and
     # "no" if they are not.  It is computed again only when ${stale_dir}
-    # differs from the previous file's, which saves the `git check-ignore`
-    # processes.  The order of the input affects only how often it is
-    # computed, not its value.
-    if [ "${stale_dir}" != "${stale_last_dir}" ]; then
+    # differs from the previous non-empty one, which saves the
+    # `git check-ignore` processes.  The order of the input affects only how
+    # often it is computed, not its value.
+    if [ -z "${stale_dir}" ]; then
+      stale_delete=no
+    elif [ "${stale_dir}" != "${stale_last_dir}" ]; then
       stale_last_dir="${stale_dir}"
       if [ -e "${BRANCHDIR}/${stale_dir}/.git" ]; then
         stale_delete=no
@@ -1346,9 +1344,14 @@ ${stale_marker}" ;;
       done
       continue
     fi
-    stale_kept="${stale_kept}${stale_file}
-"
+    stale_kept_count=$((stale_kept_count + 1))
+    if [ "${stale_kept_count}" -le 5 ]; then
+      stale_kept="${stale_kept}
+${stale_file}"
+    fi
   done
+  set +f
+  IFS="${stale_saved_ifs}"
 }
 
 # Usage: delete_or_warn_about_old_pathname
@@ -1434,30 +1437,28 @@ delete_or_warn_about_old_pathname() {
   delete_stale_build_output "${warn_old_files}"
   if [ "${VERBOSE}" = yes ] && [ "${stale_count}" -gt 0 ]; then
     if [ "${stale_count}" -eq 1 ]; then
-      stale_files='1 file'
+      warn_old_deleted='1 file'
     else
-      stale_files="${stale_count} files"
+      warn_old_deleted="${stale_count} files"
     fi
-    stale_dirs="$(printf '%s' "${stale_names}" | dir_list)"
-    echo "${SCRIPT_NAME}: deleted generated files in ${BRANCHDIR} that contained the pathname of ${warn_old_names} or were symbolic links into it: ${stale_files} in ${stale_dirs}.  The tools that generated them regenerate them." >&2
+    warn_old_dirs="$(printf '%s' "${stale_names}" | dir_list)"
+    echo "${SCRIPT_NAME}: deleted generated files in ${BRANCHDIR} that contained the pathname of ${warn_old_names} or were symbolic links into it: ${warn_old_deleted} in ${warn_old_dirs}.  The tools that generated them regenerate them." >&2
   fi
   if [ -n "${stale_configured}" ]; then
     case "${stale_configured#?}" in
       *"
-"*) stale_pronoun=them ;;
-      *) stale_pronoun=it ;;
+"*) warn_old_pronoun=them ;;
+      *) warn_old_pronoun=it ;;
     esac
-    echo "${SCRIPT_NAME}: deleted generated files that contained the pathname of ${warn_old_names} from $(printf '%s\n' "${stale_configured#?}" | dir_list) in ${BRANCHDIR}, which CMake or autotools configured.  Reconfigure ${stale_pronoun} before building there." >&2
+    echo "${SCRIPT_NAME}: deleted generated files that contained the pathname of ${warn_old_names} from $(printf '%s\n' "${stale_configured#?}" | dir_list) in ${BRANCHDIR}, which CMake or autotools configured.  Reconfigure ${warn_old_pronoun} before building there." >&2
   fi
-  warn_old_files="${stale_kept%?}"
-  if [ -z "${warn_old_files}" ]; then
+  if [ "${stale_kept_count}" -eq 0 ]; then
     return
   fi
   echo "${SCRIPT_NAME}: warning: these files in ${BRANCHDIR}, which git does not track, contain the pathname of ${warn_old_names} or are symbolic links into it:" >&2
-  printf '%s\n' "${warn_old_files}" | head -n 5 | sed 's/^/  /' >&2
-  warn_old_count="$(printf '%s\n' "${warn_old_files}" | wc -l | tr -d ' ')"
-  if [ "${warn_old_count}" -gt 5 ]; then
-    echo "  and $((warn_old_count - 5)) more" >&2
+  printf '%s\n' "${stale_kept#?}" | sed 's/^/  /' >&2
+  if [ "${stale_kept_count}" -gt 5 ]; then
+    echo "  and $((stale_kept_count - 5)) more" >&2
   fi
   echo "${SCRIPT_NAME}: They are probably build output that still refers to the files in ${TOPLEVEL}, and a build might not recompile them, even after a reconfiguration.  Delete the build output and rebuild." >&2
   # `--clean` is refused when the current commit has submodules.
