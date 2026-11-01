@@ -169,8 +169,7 @@ fi
 # earlier run of this command made but did not push, as when its build
 # failed, and would copy that merge's commits onto the current branch.
 # `--no-edit` keeps the merge from stopping at an editor.
-if ! git pull -q --no-rebase --no-edit; then
-  echo "${SCRIPT_NAME}: problem pulling in $(pwd)" >&2
+if ! pull_resolving "${llm_agent}" "$(pwd)" -q --no-rebase --no-edit; then
   exit 1
 fi
 

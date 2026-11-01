@@ -575,6 +575,21 @@ case "${push_output}" in
   *) fail "agent that changes git's configuration: wrong diagnostic: ${push_output}" ;;
 esac
 
+## A rerun does not mistake the merge that an earlier run left in progress
+## for a conflicted pull.
+setup_case rerun
+push_to none --llm
+: > "${STUB_LOG}"
+push_to good --llm
+check_not_resolved "rerun"
+case "${push_output}" in
+  *"a merge is in progress"*) ;;
+  *) fail "rerun: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "rerun: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
 ## An agent that stages a file is rejected, even if the working tree holds an
 ## acceptable resolution.
 setup_case stage
@@ -691,6 +706,63 @@ for auto_update in false true; do
   push_to none --llm
   check_resolved "" "rerere (autoUpdate ${auto_update})"
 done
+
+## A conflict in pulling TO_DIR from its remote is resolved too.
+setup_case pull
+git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+printf '%s\n' one two three-remote four five six SEVEN-feature eight nine > "${case_dir}/other-clone/file.txt"
+git -C "${case_dir}/other-clone" commit -q -a -m "Change feature remotely"
+git -C "${case_dir}/other-clone" push -q
+printf '%s\n' one two three-local four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Change feature locally"
+push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "conflict in pulling: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "conflict in pulling: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+expected="$(printf '%s\n' ONE two three-local three-remote four five six SEVEN-feature SEVEN-main eight nine)"
+if [ "$(git -C "${remote}" show refs/heads/feature:file.txt)" != "${expected}" ]; then
+  fail "conflict in pulling: wrong result: $(git -C "${remote}" show refs/heads/feature:file.txt)"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature^1)"
+case "${message}" in
+  *Conflicts*) fail "conflict in pulling: the message lists the conflicts: ${message}" ;;
+  "Merge branch 'feature' of "*) ;;
+  *) fail "conflict in pulling: wrong message for the merge of the pull: ${message}" ;;
+esac
+
+## A conflict in pulling that `git rerere` resolves needs no agent, even when
+## rerere stages the files that it resolves.
+setup_case pull-rerere
+git -C "${feature_dir}" config rerere.enabled true
+git -C "${feature_dir}" config rerere.autoUpdate true
+git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+printf '%s\n' one two three-remote four five six SEVEN-feature eight nine > "${case_dir}/other-clone/file.txt"
+git -C "${case_dir}/other-clone" commit -q -a -m "Change feature remotely"
+git -C "${case_dir}/other-clone" push -q
+printf '%s\n' one two three-local four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Change feature locally"
+local_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+if git -C "${feature_dir}" pull -q --no-rebase --no-edit > /dev/null 2>&1; then
+  fail "pull-rerere: the pull has no conflicts"
+fi
+printf '%s\n' one two three-local three-remote four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" add file.txt
+git -C "${feature_dir}" commit -q --no-edit 2> /dev/null
+git -C "${feature_dir}" reset -q --hard "${local_head}"
+push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "pull-rerere: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "pull-rerere: expected claude to run once, for the merge of main, but ran: $(cat "${STUB_LOG}")"
+fi
+expected="$(printf '%s\n' ONE two three-local three-remote four five six SEVEN-feature SEVEN-main eight nine)"
+if [ "$(git -C "${remote}" show refs/heads/feature:file.txt)" != "${expected}" ]; then
+  fail "pull-rerere: wrong result: $(git -C "${remote}" show refs/heads/feature:file.txt)"
+fi
 
 ## A failed build is fixed, and the fix is committed on top of the merge.
 build=1
