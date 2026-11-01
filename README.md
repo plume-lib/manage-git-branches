@@ -46,6 +46,15 @@ The commands are:
   contents are the same as the current directory's, including uncommitted
   changes, untracked files, and build output; `--clean` and `--copy` make
   other kinds of directory.
+  Instead of BRANCHNAME, the argument can be a slug of the form
+  `ORG:BRANCHNAME`, such as `git-new-branch mernst:feature`, in any working
+  tree of the project, such as `PROJECT`, `PROJECT-fork-OTHERORG`, or one of
+  their branch directories.  It does what `git-new-branch --clean BRANCHNAME`
+  does in the sibling clone `PROJECT-fork-ORG`:  it pulls there (only if the
+  pull can fast-forward), then makes the directory
+  `PROJECT-fork-ORG-branch-BRANCHNAME` at the commit of `PROJECT-fork-ORG`,
+  with none of the current directory's changes.  As for `git-push-to`, ORG
+  `-` stands for the clone `PROJECT` itself.
   In a clone of an upstream repository whose fork is in a sibling directory
   `PROJECT-fork-ORG`, the command refuses, because a branch for a pull
   request belongs in the fork; `--allow-upstream` overrides the refusal.
@@ -244,13 +253,12 @@ linked worktree of the repository that you ran them in, made by
 directory's own clone, `REPONAME-branch-OTHER`, and a sibling `REPONAME` is a
 clone that would push a new branch to the same repositories, the new worktree
 belongs to `REPONAME` instead, so that `REPONAME-branch-OTHER` can still be
-removed once OTHER is done.  (A clone of your fork and a clone of its upstream
+removed once OTHER is done.  A clone of your fork and a clone of its upstream
 repository push to different repositories, so neither hosts the other's
-worktrees.)  (The
-commands fall back to the repository that you ran them in when `REPONAME`
-cannot host the worktree without a difference, such as when either repository
-is a sparse checkout.)  All the branch
-directories of one repository share one object store, so the repository is
+worktrees.  (The commands fall back to the repository that you ran them in
+when `REPONAME` cannot host the worktree without a difference, such as when
+either repository is a sparse checkout.)  All the branch directories of one
+repository share one object store, so the repository is
 not copied.  This has some consequences:
 
 * A branch directory's `.git` is a file, not a directory.  A tool that tests
