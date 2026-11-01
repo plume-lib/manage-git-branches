@@ -1039,6 +1039,92 @@ if [ -s "${STUB_LOG}" ]; then
   fail "build with an out-of-date push remote: an agent ran: $(cat "${STUB_LOG}")"
 fi
 
+## If git cannot name a remote branch that the current branch pushes to or
+## pulls from, as when the branch's remote is a URL, a merge on the branch
+## still counts as one that might have broken the build.
+setup_case build-url-remote build
+git -C "${feature_dir}" config branch.feature.remote "${remote}"
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "build fix with a URL remote: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "build fix with a URL remote: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q 'Git cannot name a remote branch' "${STUB_PROMPT}"; then
+  fail "build fix with a URL remote: the instructions do not say that git cannot name a remote branch: $(cat "${STUB_PROMPT}")"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
+  fail "build fix with a URL remote: wrong message for the fix: ${message}"
+fi
+
+## A build that succeeds, or a run with --no-llm, does not fetch the remote
+## that FROM_DIR's branch pushes to.  Main pushes to a fork, whose main then
+## changes, and main's build succeeds.  Feature makes main's change to
+## file.txt too, so that the merge has no conflicts, which --no-llm would
+## leave unresolved.
+for llm_option in --llm --no-llm; do
+  setup_case "build-no-fetch${llm_option}" build
+  echo "fine" > "${main_dir}/other.txt"
+  git -C "${main_dir}" commit -q -a -m "Fix the build on main"
+  git -C "${main_dir}" push -q
+  fork="${case_dir}/fork.git"
+  git clone -q --bare "${remote}" "${fork}"
+  git -C "${main_dir}" remote add fork "${fork}"
+  git -C "${main_dir}" fetch -q fork
+  fork_head="$(git -C "${main_dir}" rev-parse refs/remotes/fork/main)"
+  git -C "${case_dir}/seed" push -q --force "${fork}" main:main
+  git -C "${main_dir}" config branch.main.pushRemote fork
+  git -C "${main_dir}" config push.default current
+  write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
+  git -C "${feature_dir}" commit -q -a -m "Change feature as main does"
+  git -C "${feature_dir}" push -q
+  STUB_BUILD=fix push_to good "${llm_option}"
+  if [ "${push_status}" -ne 0 ]; then
+    fail "successful build with ${llm_option}: git-push-to failed: ${push_output}"
+  fi
+  if [ "$(git -C "${main_dir}" rev-parse refs/remotes/fork/main)" != "${fork_head}" ]; then
+    fail "successful build with ${llm_option}: fetched the push remote of main"
+  fi
+  if [ -s "${STUB_LOG}" ]; then
+    fail "successful build with ${llm_option}: an agent ran: $(cat "${STUB_LOG}")"
+  fi
+done
+
+## A local branch that the current branch pulls from was not built
+## elsewhere, so its unpushed merges might have broken the build.  Feature
+## pulls from the local branch "base", whose merge of a side branch adds
+## "BROKEN" to other.txt; the pull fast-forwards feature to base.  Main is
+## reset to the initial commit, which feature already contains, so that
+## merging main changes nothing.
+setup_case build-local-upstream build
+git -C "${main_dir}" reset -q --hard HEAD^
+git -C "${main_dir}" push -q --force
+git -C "${feature_dir}" switch -q -c side
+echo "BROKEN" >> "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Break the build on side"
+git -C "${feature_dir}" switch -q -c base feature
+echo "base" > "${feature_dir}/base.txt"
+git -C "${feature_dir}" add base.txt
+git -C "${feature_dir}" commit -q -m "Change base"
+git -C "${feature_dir}" merge -q --no-ff --no-edit side
+git -C "${feature_dir}" switch -q feature
+git -C "${feature_dir}" config branch.feature.remote .
+git -C "${feature_dir}" config branch.feature.merge refs/heads/base
+git -C "${feature_dir}" config branch.feature.pushRemote origin
+git -C "${feature_dir}" config push.default current
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "build fix after a pull from a local branch: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "build fix after a pull from a local branch: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+  fail "build fix after a pull from a local branch: the build is not fixed"
+fi
+
 ## Usage: set_pull_subject
 ## Sets ${pull_subject} to the subject of the merge that pulling feature from
 ## ${remote} makes, and ${pull_description} to what it says was merged.
