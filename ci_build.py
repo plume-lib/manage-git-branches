@@ -264,7 +264,7 @@ def circleci_items(path: str) -> Iterator[Any]:
     stops early does not request the remaining pages.
 
     Args:
-        path: the request, such as "/v2/workflow/ID/job", with no query string.
+        path: a request, such as "/v2/workflow/ID/job", with no query string.
 
     Yields:
         The items of every page, in order.
