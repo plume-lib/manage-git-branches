@@ -169,7 +169,7 @@ class CancelBlockedCiTest(unittest.TestCase):
                     "repo#5", "org/repo", "abc", branches
                 )
                 self.assertTrue(cancel_blocked_ci.failed)
-            self.assertEqual([identifier for identifier, _ in result], expected)
+            self.assertEqual([build.key for build in result], expected)
             self.assertIn("repo#5: failed to find the branch of", stderr.getvalue())
             self.assertIn("buildId=5", stderr.getvalue())
             self.assertIn(
