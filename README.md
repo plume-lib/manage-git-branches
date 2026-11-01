@@ -41,16 +41,27 @@ The commands are:
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
   new branch, and it does not build.
-  The new branch starts at the current commit, after a `git pull`.
+  The new branch starts at the current commit, after a `git pull`.  On a
+  fork's `master` that lags behind `upstream/master`, this command first
+  fast-forwards `master` to `upstream/master`.
   By default, the new directory is a worktree (see [below](#worktrees)) whose
   contents are the same as the current directory's, including uncommitted
   changes, untracked files, and build output, except for nested worktrees
   and some build output that refers to the current directory; `--clean` and
   `--copy` make other kinds of directory.
+  Instead of BRANCHNAME, the argument can be a slug of the form
+  `ORG:BRANCHNAME`, such as `git-new-branch mernst:feature`, in any working
+  tree of the project, such as `PROJECT`, `PROJECT-fork-OTHERORG`, or one of
+  their branch directories.  It does what `git-new-branch --clean BRANCHNAME`
+  does in the sibling clone `PROJECT-fork-ORG`:  it pulls there (only if the
+  pull can fast-forward), then makes the directory
+  `PROJECT-fork-ORG-branch-BRANCHNAME` at the commit of `PROJECT-fork-ORG`,
+  with none of the current directory's changes.  As for `git-push-to`, ORG
+  `-` stands for the clone `PROJECT` itself.
   `git-new-branch --help` (or `-h`) prints a synopsis, which describes the
   modes.  The comments in [`git-new-branch`](git-new-branch) give the
-  details, such as which copied build output this command deletes, and which
-  it warns about.
+  details, such as when the fast-forward is not made and which copied build
+  output this command deletes, and which it warns about.
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...`:
@@ -238,12 +249,14 @@ main branch.
 linked worktree of the repository that you ran them in, made by
 `git worktree add`.  There is one exception:  if that repository is a branch
 directory's own clone, `REPONAME-branch-OTHER`, and a sibling `REPONAME` is a
-clone of the same project, the new worktree belongs to `REPONAME` instead, so
-that `REPONAME-branch-OTHER` can still be removed once OTHER is done.  (The
-commands fall back to the repository that you ran them in when `REPONAME`
-cannot host the worktree without a difference, such as when either repository
-is a sparse checkout.)  All the branch
-directories of one repository share one object store, so the repository is
+clone that would push a new branch to the same repositories, the new worktree
+belongs to `REPONAME` instead, so that `REPONAME-branch-OTHER` can still be
+removed once OTHER is done.  A clone of your fork and a clone of its upstream
+repository push to different repositories, so neither hosts the other's
+worktrees.  (The commands fall back to the repository that you ran them in
+when `REPONAME` cannot host the worktree without a difference, such as when
+either repository is a sparse checkout.)  All the branch directories of one
+repository share one object store, so the repository is
 not copied.  This has some consequences:
 
 * A branch directory's `.git` is a file, not a directory.  A tool that tests
