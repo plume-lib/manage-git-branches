@@ -9,11 +9,12 @@
 # The new directory is a linked worktree of the current repository, made by
 # `git worktree add`, so that it shares the repository's object store.  (If
 # the current repository is a branch directory's, REPONAME-branch-OTHER/, and
-# a sibling REPONAME/ is a clone of the same project, the new worktree is
-# registered in REPONAME/ instead when REPONAME/ can check out the same
-# branch, so that it does not prevent the removal of REPONAME-branch-OTHER/;
-# see `choose_worktree_host` below.)  It
-# holds a fresh checkout of the branch:  none of the current directory's
+# a sibling REPONAME/ is a clone that would push a new branch to the same
+# repositories, as `main_clone_for` in common-functions.sh judges them, the new
+# worktree is registered in REPONAME/ instead when REPONAME/ can check out
+# the same branch, so that it does not prevent the removal of
+# REPONAME-branch-OTHER/; see `choose_worktree_host` below.)  It holds a fresh
+# checkout of the branch:  none of the current directory's
 # uncommitted changes, untracked files, or ignored files such as build output
 # are carried into it, because checking out an existing branch starts from
 # what that branch contains.  (`git-new-branch`, which continues the work in
@@ -126,7 +127,7 @@ fi
 
 REPO=$(basename "$(pwd)")
 BRANCHNAME="$1"
-BRANCHNOSLASH=$(printf '%s\n' "${BRANCHNAME}" | sed -e "s:/:-:g")
+BRANCHNOSLASH="$(branch_dir_name "${BRANCHNAME}")"
 # Canonicalize the parent directory, because ${BRANCHDIR} does not exist yet.
 if ! PARENTDIR="$(realpath ..)" || [ -z "${PARENTDIR}" ]; then
   echo "${SCRIPT_NAME}: Cannot canonicalize the parent directory of $(pwd)" >&2
@@ -344,19 +345,6 @@ branch_settings() {
   printf 'push %s\n' "$(remote_urls "$1" "${branch_settings_push}" --push)"
   printf 'push_remote %s\n' \
     "$(remote_urls "$1" "$(push_remote "$1" "${BRANCHNAME}")" --push)"
-}
-
-# Usage: remote_urls DIRECTORY REMOTE [--push]
-# Prints the URLs, one per line, that the repository of the working tree
-# DIRECTORY fetches from, or with --push pushes to, for REMOTE, which is the
-# name of a remote, a URL, a pathname, or empty.  A URL or a pathname is its
-# own URL.
-remote_urls() {
-  if is_remote_name "$1" "$2"; then
-    git -C "$1" remote get-url ${3:+"$3"} --all "$2"
-  elif [ -n "$2" ]; then
-    printf '%s\n' "$2"
-  fi
 }
 
 # Usage: choose_worktree_host
