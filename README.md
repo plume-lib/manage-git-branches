@@ -36,7 +36,8 @@ The commands are:
   submodules gets a copy of the whole directory instead, which is an
   independent clone.
   Below is a definition for an alias `gcb`.
-* [`git-new-branch`](git-new-branch) `[--clean | --copy] [--verbose] BRANCHNAME`:
+* [`git-new-branch`](git-new-branch)
+  `[--clean | --copy] [--verbose] [--allow-upstream] BRANCHNAME`:
   Creates and checks out the given branch of the repository in a new working
   tree directory.  Run this command from within a working tree; the new
   directory is a sibling of the working tree.  This command does not push the
@@ -46,8 +47,9 @@ The commands are:
   fast-forwards `master` to `upstream/master`.
   By default, the new directory is a worktree (see [below](#worktrees)) whose
   contents are the same as the current directory's, including uncommitted
-  changes, untracked files, and build output; `--clean` and `--copy` make
-  other kinds of directory.
+  changes, untracked files, and build output, except for nested worktrees
+  and some build output that refers to the current directory; `--clean` and
+  `--copy` make other kinds of directory.
   Instead of BRANCHNAME, the argument can be a slug of the form
   `ORG:BRANCHNAME`, such as `git-new-branch mernst:feature`, in any working
   tree of the project, such as `PROJECT`, `PROJECT-fork-OTHERORG`, or one of
@@ -57,6 +59,11 @@ The commands are:
   `PROJECT-fork-ORG-branch-BRANCHNAME` at the commit of `PROJECT-fork-ORG`,
   with none of the current directory's changes.  As for `git-push-to`, ORG
   `-` stands for the clone `PROJECT` itself.
+  In a clone of an upstream repository whose fork is in a sibling directory
+  `PROJECT-fork-ORG`, the command refuses, because a branch for a pull
+  request belongs in the fork; `--allow-upstream` overrides the refusal.
+  If git's configuration sets `github.user`, only a fork whose ORG is that
+  user counts.
   `git-new-branch --help` (or `-h`) prints a synopsis, which describes the
   modes.  The comments in [`git-new-branch`](git-new-branch) give the
   details, such as when the fast-forward is not made and which copied build
