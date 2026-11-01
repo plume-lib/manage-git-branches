@@ -188,12 +188,14 @@ takes effect when it is set to a non-empty value.
   compilation step, and push whenever the merge succeeds.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
-* `CIRCLECI_CLI_TOKEN`: `cancel-blocked-ci` uses this CircleCI API token,
-  or the `token` in `~/.circleci/cli.yml` or (for the snap package)
+* `CIRCLECI_CLI_TOKEN`: the commands that use the CircleCI API use this
+  CircleCI API token.  If it is not set, they use the `token` in
+  `~/.circleci/cli.yml` or (for the snap package)
   `~/snap/circleci/current/.circleci/cli.yml`, which `circleci setup` writes.
-* `AZURE_DEVOPS_EXT_PAT`: `cancel-blocked-ci` uses this Azure DevOps personal
-  access token, which must have the "Build (Read & execute)" scope.
-  If it is not set, the script uses the account that `az login` logged in.
+* `AZURE_DEVOPS_EXT_PAT`: the commands that use the Azure DevOps API use this
+  Azure DevOps personal access token, which must have the
+  "Build (Read & execute)" scope.  If it is not set, they use the account
+  that `az login` logged in.
 * `GIT_SSH_COMMAND` and `GIT_SSH`: `is-deleted-branch`,
   `git-orphaned-branches`, `git-new-branch`, `git-checkout-branch`, and
   `git-push-to` use these standard Git variables to select the SSH command
