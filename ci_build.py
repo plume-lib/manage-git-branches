@@ -337,7 +337,7 @@ def circleci_workflow_of_url(url: str) -> tuple[str | None, int | None]:
 
     Returns:
         The workflow id (None if there is none) and the job number (None if url names
-        a workflow).
+        a workflow or is not a CircleCI URL).
     """
     workflow, slug, job = parse_circleci_url(url) or (None, None, None)
     if workflow is None and slug is not None and job is not None:
