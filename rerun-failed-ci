@@ -156,7 +156,7 @@ def normalize_log(log: str) -> str:
 
 
 def transient_reason(log: str) -> str | None:
-    """Determine whether log, a log of the failed steps of a job, shows a transient failure.
+    """Find a line of log, a log of the failed steps of a job, that shows a transient failure.
 
     Shell trace lines in the log are ignored, as are the scripts that GitHub Actions
     (between "##[group]Run" and "##[endgroup]") and Azure Pipelines (between
@@ -216,7 +216,7 @@ class Rerunner:
     """Reruns the transiently failed jobs of CI builds.
 
     Attributes:
-        dry_run: whether to report the reruns rather than to make them.
+        dry_run: True if the reruns should be reported rather than made.
         max_attempts: the most times that a job can have been run before this reruns it.
         status: the exit status:  1 if some build could not be examined or rerun.
         examined: the builds that have been examined, so that a build that a pull
@@ -383,7 +383,7 @@ class Rerunner:
 
         Args:
             url: the URL of a workflow, or of a job.
-            whole_workflow: whether a URL that names a job names the jobs of its workflow.
+            whole_workflow: True if a URL that names a job names the jobs of its workflow.
         """
         try:
             workflow, job = ci_build.circleci_workflow_of_url(url)
@@ -498,7 +498,7 @@ class Rerunner:
 
         Args:
             url: the URL of a workflow run, or of a job.
-            whole_run: whether a URL that names a job names the jobs of its run.
+            whole_run: True if a URL that names a job names the jobs of its run.
         """
         parsed = ci_build.parse_github_actions_url(url)
         if parsed is None:
@@ -656,7 +656,7 @@ class Rerunner:
 
         Args:
             url: the URL of a workflow, workflow run, build, or job.
-            whole_workflow: whether a URL that names a job names the jobs of its
+            whole_workflow: True if a URL that names a job names the jobs of its
                 workflow, workflow run, or build.
 
         Returns:

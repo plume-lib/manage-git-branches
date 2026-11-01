@@ -186,7 +186,7 @@ def azure_get(url: str, *, text: bool = False) -> Any:
 
     Args:
         url: the URL, in the Azure DevOps API.
-        text: whether the response is text rather than JSON.
+        text: True if the response is text rather than JSON.
 
     Returns:
         The response body:  text, or parsed JSON.
