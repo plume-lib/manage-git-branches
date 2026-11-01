@@ -199,12 +199,14 @@ class CancelBlockedCiTest(unittest.TestCase):
         self.assertEqual(cancel_blocked_ci.pr_branches("upstream/repo", pr, False), {"pull/5"})
 
     def test_unfinished_other_builds(self) -> None:
-        """Only the builds of the given branches are a commit's builds.
+        """Only the unfinished builds of the given branches are a commit's builds.
 
         A build whose branch cannot be found is reported, and the exit status becomes 1.
+        A build that has no branch is reported.
         """
         workflow = "0123456789abcdef0123456789abcdef0123"
         other_workflow = "fedcba9876543210fedcba9876543210fedc"
+        tag_workflow = "abcdefabcdefabcdefabcdefabcdefabcdef"
         checks = [
             ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=1"),
             ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=2"),
@@ -212,17 +214,29 @@ class CancelBlockedCiTest(unittest.TestCase):
             ("completed", "ci", "https://dev.azure.com/org/p/_build/results?buildId=4"),
             # Finding the branch of build 5 fails.
             ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=5"),
+            # GitHub shows build 6 as unfinished, but it has finished.
+            ("in_progress", "ci", "https://dev.azure.com/org/p/_build/results?buildId=6"),
             ("pending", "build", f"https://app.circleci.com/workflow/{workflow}"),
             ("pending", "build", f"https://app.circleci.com/workflow/{other_workflow}"),
+            ("pending", "build", f"https://app.circleci.com/workflow/{tag_workflow}"),
         ]
-        azure_branches = {1: "refs/pull/5/merge", 2: "refs/heads/feature", 3: "refs/heads/other"}
+        azure_states = {
+            1: ("refs/pull/5/merge", False),
+            2: ("refs/heads/feature", False),
+            3: ("refs/heads/other", False),
+            6: ("refs/pull/5/merge", True),
+        }
 
-        def azure_build_branch(_org: str, _project: str, build: int) -> str:
-            if build not in azure_branches:
+        def azure_build_state(_org: str, _project: str, build: int) -> tuple[str, bool]:
+            if build not in azure_states:
                 raise urllib.error.URLError("unreachable")
-            return azure_branches[build]
+            return azure_states[build]
 
-        circleci_branches = {workflow: "feature", other_workflow: "other"}
+        circleci_states = {
+            workflow: ("feature", False),
+            other_workflow: ("other", False),
+            tag_workflow: (None, False),
+        }
         for branches, expected in [
             (
                 {"pull/5", "feature"},
@@ -233,22 +247,24 @@ class CancelBlockedCiTest(unittest.TestCase):
             with (
                 self.subTest(branches=branches),
                 mock.patch.object(cancel_blocked_ci, "checks", return_value=checks),
+                mock.patch.object(cancel_blocked_ci, "azure_build_state", azure_build_state),
                 mock.patch.object(
-                    cancel_blocked_ci,
-                    "azure_build_branch",
-                    azure_build_branch,
-                ),
-                mock.patch.object(
-                    cancel_blocked_ci, "circleci_workflow_branch", circleci_branches.get
+                    cancel_blocked_ci, "circleci_workflow_state", circleci_states.get
                 ),
                 mock.patch.object(cancel_blocked_ci, "failed", new=False),
                 contextlib.redirect_stderr(io.StringIO()) as stderr,
             ):
-                result = cancel_blocked_ci.unfinished_other_builds("org/repo", "abc", branches)
+                result = cancel_blocked_ci.unfinished_other_builds(
+                    "repo#5", "org/repo", "abc", branches
+                )
                 self.assertTrue(cancel_blocked_ci.failed)
             self.assertEqual([identifier for identifier, _ in result], expected)
-            self.assertIn("failed to find the branch of", stderr.getvalue())
+            self.assertIn("repo#5: failed to find the branch of", stderr.getvalue())
             self.assertIn("buildId=5", stderr.getvalue())
+            self.assertIn(
+                f"repo#5: not cancelling https://app.circleci.com/workflow/{tag_workflow}",
+                stderr.getvalue(),
+            )
 
     def test_circleci_workflows_of_jobs(self) -> None:
         """The workflows of jobs come from the recent pipelines, or else from job lookups.
@@ -392,6 +408,25 @@ class CancelBlockedCiTest(unittest.TestCase):
             [(identifier, reason) for identifier, _, _, reason in result],
             [(("circleci", "w1"), ", made redundant by workflow w2")],
         )
+
+    def test_unless_finished(self) -> None:
+        """A failure to cancel a build is raised unless the build has finished."""
+        error = urllib.error.URLError("refused")
+
+        def cancelling() -> None:
+            raise error
+
+        def lookup_fails() -> bool:
+            raise urllib.error.URLError("unreachable")
+
+        cancel_blocked_ci.unless_finished(cancelling, lambda: True)()
+        for finished in [lambda: False, lookup_fails]:
+            with (
+                self.subTest(finished=finished),
+                self.assertRaises(urllib.error.URLError) as cm,
+            ):
+                cancel_blocked_ci.unless_finished(cancelling, finished)()
+            self.assertIs(cm.exception, error)
 
 
 if __name__ == "__main__":

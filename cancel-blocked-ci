@@ -106,6 +106,10 @@ pr_status = load_pr_status()
 
 
 UNFINISHED = ["queued", "in_progress", "waiting", "requested", "pending"]
+# The statuses of Azure Pipelines builds that have finished or are being cancelled.
+AZURE_FINISHED = {"completed", "cancelling"}
+# The statuses of unfinished CircleCI workflows.
+CIRCLECI_UNFINISHED = {"running", "on_hold", "failing"}
 
 # The events, reasons, and trigger types of the GitHub Actions runs, Azure Pipelines
 # builds, and CircleCI pipelines that a more recent build can make redundant:  those
@@ -582,8 +586,41 @@ def github_build(gh, r):
         r["status"],
         f"run {r['id']} ({r['name']})",
         r["html_url"],
-        lambda: request_util.run(["gh", "run", "cancel", "-R", gh, str(r["id"])]),
+        unless_finished(
+            lambda: request_util.run(["gh", "run", "cancel", "-R", gh, str(r["id"])]),
+            lambda: (
+                request_util.gh_api(f"repos/{gh}/actions/runs/{r['id']}")["status"] == "completed"
+            ),
+        ),
     )
+
+
+def unless_finished(cancelling, finished):
+    """Make a cancelling function that does not fail for a build that has finished.
+
+    A build can finish after it is found and before it is cancelled.
+
+    Args:
+        cancelling: a function of no arguments that cancels the build.
+        finished: a function of no arguments that returns whether the build has finished.
+
+    Returns:
+        A function of no arguments that calls cancelling.  If cancelling fails, the
+        function raises the failure unless finished returns true.
+    """
+
+    def cancel():
+        try:
+            cancelling()
+        except request_util.REQUEST_ERRORS:
+            try:
+                done = finished()
+            except request_util.REQUEST_ERRORS:
+                done = False
+            if not done:
+                raise
+
+    return cancel
 
 
 @functools.cache
@@ -605,7 +642,7 @@ def checks(gh, sha):
 
     Args:
         gh: the repository's GitHub name.
-        sha: the commit, or "HEAD" for the head commit of the default branch.
+        sha: the commit.
 
     Returns:
         A list of the status ("completed" if it has completed), name, and URL of each
@@ -649,8 +686,11 @@ def azure_build(status, org, project, build, name, url):
         status,
         f"Azure Pipelines build {build} ({name})",
         url,
-        lambda: ci_build.azure_request(
-            "PATCH", api, ci_build.azure_headers(), {"status": "cancelling"}
+        unless_finished(
+            lambda: ci_build.azure_request(
+                "PATCH", api, ci_build.azure_headers(), {"status": "cancelling"}
+            ),
+            lambda: azure_build_state(org, project, build)[1],
         ),
     )
 
@@ -677,7 +717,7 @@ def circleci_build(status, workflow, name):
         status,
         f"CircleCI workflow {workflow} ({name})",
         f"https://app.circleci.com/workflow/{workflow}",
-        cancelling,
+        unless_finished(cancelling, lambda: circleci_workflow_state(workflow)[1]),
     )
 
 
@@ -734,8 +774,8 @@ def pr_branches(gh, pr, on_default_branch):
     return result
 
 
-def azure_build_branch(org, project, build):
-    """Find the branch of an Azure Pipelines build.
+def azure_build_state(org, project, build):
+    """Find the branch of an Azure Pipelines build, and whether it has finished.
 
     Args:
         org: the Azure DevOps organization.
@@ -743,25 +783,27 @@ def azure_build_branch(org, project, build):
         build: the ID of the build.
 
     Returns:
-        The build's source branch, such as "refs/heads/main" or "refs/pull/123/merge".
+        The build's source branch, such as "refs/heads/main" or "refs/pull/123/merge",
+        and whether the build has finished or is being cancelled.
     """
-    api = f"{ci_build.azure_api(org, project, build)}?api-version=7.1"
-    return ci_build.azure_get(api)["sourceBranch"]
+    record = ci_build.azure_get(f"{ci_build.azure_api(org, project, build)}?api-version=7.1")
+    return record["sourceBranch"], record["status"] in AZURE_FINISHED
 
 
-def circleci_workflow_branch(workflow):
-    """Find the branch of a CircleCI workflow.
+def circleci_workflow_state(workflow):
+    """Find the branch of a CircleCI workflow, and whether it has finished.
 
     Args:
         workflow: the id of the workflow.
 
     Returns:
-        The branch of the workflow's pipeline, as pipeline_branch returns it.
+        The branch of the workflow's pipeline, as pipeline_branch returns it, and
+        whether the workflow has finished.
     """
     w = request_util.request(
         "GET", f"{ci_build.CIRCLECI_API}/v2/workflow/{workflow}", ci_build.circleci_headers()
     )
-    return circleci_pipeline_branch(w["pipeline_id"])
+    return circleci_pipeline_branch(w["pipeline_id"]), w["status"] not in CIRCLECI_UNFINISHED
 
 
 @functools.cache
@@ -781,10 +823,11 @@ def circleci_pipeline_branch(pipeline):
     )
 
 
-def unfinished_other_builds(gh, sha, branches):
+def unfinished_other_builds(subject, gh, sha, branches):
     """Find the unfinished Azure Pipelines and CircleCI builds of commit sha on some branches.
 
     Args:
+        subject: what the builds test, such as a PR, which a report of a problem names.
         gh: the repository's GitHub name.
         sha: the commit.
         branches: the branches, named as branch_name names them.
@@ -794,6 +837,7 @@ def unfinished_other_builds(gh, sha, branches):
         description, URL, and cancelling function, which takes no arguments.
     """
     # identifier -> build, and a function of no arguments that returns the build's branch
+    # and whether the build has finished
     builds = {}
     jobs = {}  # project slug -> status, name, and URL of each job whose URL names no workflow
     for state, name, url in checks(gh, sha):
@@ -805,7 +849,7 @@ def unfinished_other_builds(gh, sha, branches):
                 ("azure", org, str(build)),
                 (
                     azure_build(state, org, project, build, name, url),
-                    functools.partial(azure_build_branch, org, project, build),
+                    functools.partial(azure_build_state, org, project, build),
                 ),
             )
         elif (parsed := ci_build.parse_circleci_url(url)) is not None:
@@ -815,45 +859,59 @@ def unfinished_other_builds(gh, sha, branches):
             elif project is not None and job is not None:
                 jobs.setdefault(project, []).append((state, name, url))
             else:
-                print(f"  no CircleCI workflow found for {url}", file=sys.stderr)
+                print(f"{subject}: no CircleCI workflow found for {url}", file=sys.stderr)
     for project, project_jobs in jobs.items():
         for workflow, (state, name), branch in circleci_workflows_of_jobs(
-            project, sha, branches, project_jobs
+            subject, project, sha, branches, project_jobs
         ):
             builds.setdefault(
                 ("circleci", workflow), circleci_build_on(state, workflow, name, branch)
             )
-    # Other branches can be at commit sha too.
     items = list(builds.items())
-    return [
-        (identifier, build)
-        for (identifier, (build, _)), branch in zip(
-            items, concurrently(build_branch, list(builds.values())), strict=True
-        )
-        if branch is not None and branch_name(branch) in branches
-    ]
+    result = []
+    for (identifier, (build, _)), found in zip(
+        items,
+        concurrently(functools.partial(build_state, subject), list(builds.values())),
+        strict=True,
+    ):
+        if found is None:  # build_state reported the failure.
+            continue
+        branch, finished = found
+        # GitHub can show a build as unfinished after it finishes.
+        if finished:
+            continue
+        if branch is None:
+            print(f"{subject}: not cancelling {build[2]}, whose branch is unknown", file=sys.stderr)
+        # Other branches can be at commit sha too.
+        elif branch_name(branch) in branches:
+            result.append((identifier, build))
+    return result
 
 
-def build_branch(build_and_branch_of):
-    """Find the branch of a build, reporting any failure.
+def build_state(subject, build_and_state_of):
+    """Find the branch of a build and whether it has finished, reporting any failure.
 
     Args:
-        build_and_branch_of: the build (its status, description, URL, and cancelling
-            function) and a function of no arguments that returns its branch.
+        subject: what the build tests, such as a PR, which a report of a failure names.
+        build_and_state_of: the build (its status, description, URL, and cancelling
+            function) and a function of no arguments that returns its branch (None if it
+            has none) and whether it has finished.
 
     Returns:
-        The build's branch, or None if it has none or finding it fails.
+        The build's branch and whether it has finished, or None if finding them fails.
     """
-    build, branch_of = build_and_branch_of
+    build, state_of = build_and_state_of
     try:
-        return branch_of()
+        return state_of()
     except request_util.REQUEST_ERRORS as e:
-        report_failure(f"  failed to find the branch of {build[2]}: {request_util.failure(e)}")
+        report_failure(
+            f"{subject}: failed to find the branch of {build[2]}: {request_util.failure(e)}"
+        )
         return None
 
 
 def circleci_build_on(status, workflow, name, branch=None):
-    """Describe a CircleCI workflow, and how to find its branch.
+    """Describe a CircleCI workflow, and how to find its branch and whether it has finished.
 
     Args:
         status: the workflow's status, such as "running" or "pending".
@@ -863,15 +921,17 @@ def circleci_build_on(status, workflow, name, branch=None):
 
     Returns:
         The workflow, as circleci_build describes it, and a function of no arguments
-        that returns its branch.
+        that returns its branch and whether it has finished.
     """
     return (
         circleci_build(status, workflow, name),
-        functools.partial(circleci_workflow_branch, workflow) if branch is None else lambda: branch,
+        functools.partial(circleci_workflow_state, workflow)
+        if branch is None
+        else lambda: (branch, False),
     )
 
 
-def circleci_workflows_of_jobs(project, sha, branches, jobs):
+def circleci_workflows_of_jobs(subject, project, sha, branches, jobs):
     """Find the CircleCI workflows of unfinished jobs of commit sha, whose URLs name no workflow.
 
     The workflows are the unfinished workflows of the project's recent pipelines of
@@ -882,6 +942,7 @@ def circleci_workflows_of_jobs(project, sha, branches, jobs):
     there is no such pipeline.
 
     Args:
+        subject: what the jobs test, such as a PR, which a report of a problem names.
         project: the project slug of the jobs.
         sha: the commit.
         branches: the branches, named as branch_name names them.
@@ -930,12 +991,12 @@ def circleci_workflows_of_jobs(project, sha, branches, jobs):
         if error is not None:
             failures.append(error)
         elif workflow is None:
-            print(f"  no CircleCI workflow found for {url}", file=sys.stderr)
+            print(f"{subject}: no CircleCI workflow found for {url}", file=sys.stderr)
         else:
             result.append((workflow, (state, name), None))
     if failures:
         report_failure(
-            f"  failed to look up {len(failures)} CircleCI job(s) of {sha}:"
+            f"{subject}: failed to look up {len(failures)} CircleCI job(s):"
             f" {request_util.failure(failures[0])}"
         )
     return result
@@ -963,7 +1024,7 @@ def blocked_pr_builds(label, gh, default_branch, runs, blocked):
     ]
     try:
         builds += unfinished_other_builds(
-            gh, pr["headRefOid"], pr_branches(gh, pr, on_default_branch)
+            pr_name(label, ref), gh, pr["headRefOid"], pr_branches(gh, pr, on_default_branch)
         )
     except request_util.REQUEST_ERRORS as e:
         report_failure(
@@ -990,7 +1051,7 @@ def handle(subject, build, dry_run, reason=""):
     """Cancel, or if dry_run is true report, the build of subject.
 
     Args:
-        subject: what the build tests, such as a PR or a branch.
+        subject: what the build tests, such as a PR.
         build: the status, description, URL, and cancelling function of the build.
         dry_run: whether to only report the build.
         reason: text to append to the report.
