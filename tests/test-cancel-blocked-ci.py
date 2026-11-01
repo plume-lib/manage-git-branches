@@ -202,9 +202,11 @@ class CancelBlockedCiTest(unittest.TestCase):
         self.assertFalse(
             cancel_blocked_ci.is_on_default_branch("fork/repo", "main", pr | {"owner": "other"})
         )
-        self.assertEqual(cancel_blocked_ci.pr_branches("org/repo", pr, False), {"pull/5", "main"})
-        self.assertEqual(cancel_blocked_ci.pr_branches("org/repo", pr, True), {"pull/5"})
-        self.assertEqual(cancel_blocked_ci.pr_branches("upstream/repo", pr, False), {"pull/5"})
+        self.assertEqual(
+            cancel_blocked_ci.pr_branches("org/repo", "master", pr), {"pull/5", "main"}
+        )
+        self.assertEqual(cancel_blocked_ci.pr_branches("org/repo", "main", pr), {"pull/5"})
+        self.assertEqual(cancel_blocked_ci.pr_branches("upstream/repo", "master", pr), {"pull/5"})
 
     def test_unfinished_other_builds(self) -> None:
         """Only the unfinished builds of the given branches are a commit's builds.
@@ -294,9 +296,17 @@ class CancelBlockedCiTest(unittest.TestCase):
             }
 
         workflow = {"id": "w1", "name": "build", "status": "running", "created_at": now}
-        looked_up = [("w9", ("pending", "job1"), None), ("w9", ("pending", "job2"), None)]
+        looked_up = [
+            (("circleci", "w9"), "pending", "CircleCI workflow w9 (job1)"),
+            (("circleci", "w9"), "pending", "CircleCI workflow w9 (job2)"),
+        ]
         for sha, branch, expected, lookups in [
-            ("abc", "feature", [("w1", ("running", "build"), "feature")], []),
+            (
+                "abc",
+                "feature",
+                [(("circleci", "w1"), "running", "CircleCI workflow w1 (build)")],
+                [],
+            ),
             # The pipeline of commit abc is on another branch.
             ("abc", "other", looked_up, [1, 2]),
             ("def", "feature", looked_up, [1, 2]),
@@ -332,7 +342,7 @@ class CancelBlockedCiTest(unittest.TestCase):
                 result = cancel_blocked_ci.circleci_workflows_of_jobs(
                     "repo#5", "gh/org/repo", sha, {branch}, jobs
                 )
-                self.assertEqual(result, expected)
+                self.assertEqual([(b.key, b.status, b.description) for b in result], expected)
                 self.assertEqual(
                     sorted(requested),
                     sorted(
@@ -419,24 +429,31 @@ class CancelBlockedCiTest(unittest.TestCase):
             [(("circleci", "w1"), ", made redundant by workflow w2")],
         )
 
-    def test_unless_finished(self) -> None:
-        """A failure to cancel a build is raised unless the build has finished."""
-        error = urllib.error.URLError("refused")
+    def test_cancel(self) -> None:
+        """A failure to cancel a build is reported unless the build has finished."""
 
         def cancelling() -> None:
-            raise error
+            raise urllib.error.URLError("refused")
 
-        def lookup_fails() -> bool:
+        def state_fails() -> tuple[str, bool]:
             raise urllib.error.URLError("unreachable")
 
-        cancel_blocked_ci.unless_finished(cancelling, lambda: True)()
-        for finished in [lambda: False, lookup_fails]:
+        for state_function, reported in [
+            (lambda: ("main", True), False),
+            (lambda: ("main", False), True),
+            (state_fails, True),
+        ]:
+            build = cancel_blocked_ci.Build(
+                ("github", 1), "queued", "run 1 (ci)", "https://x/1", cancelling, state_function
+            )
             with (
-                self.subTest(finished=finished),
-                self.assertRaises(urllib.error.URLError) as cm,
+                self.subTest(state_function=state_function),
+                mock.patch.object(cancel_blocked_ci, "failed", new=False),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
             ):
-                cancel_blocked_ci.unless_finished(cancelling, finished)()
-            self.assertIs(cm.exception, error)
+                build.cancel()
+                self.assertEqual(cancel_blocked_ci.failed, reported)
+            self.assertEqual("failed to cancel https://x/1" in stderr.getvalue(), reported)
 
 
 if __name__ == "__main__":
