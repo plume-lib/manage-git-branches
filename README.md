@@ -160,14 +160,12 @@ The commands are:
   changes that have not been merged into the current branch do not appear.
 * [`rerun-failed-ci`](rerun-failed-ci)
   `[--dry-run] [--max-attempts N] [PR | BRANCH | URL]...`:
-  Reruns each failed CI job of a GitHub pull request (by default, the one for
-  the current branch) whose log shows a transient failure, such as a network
-  error or a rate limit, rather than a problem with the code.  A URL names an
-  Azure Pipelines, CircleCI, or GitHub Actions job or workflow to examine
-  instead.  It does not rerun a workflow that is still running or that has
-  been rerun since, nor a job that has already run N times (by default, 3).
+  For each transient failure of a CI job, reruns it.  Works on the given a
+  GitHub pull request (by default, the one for the current branch).  A URL
+  names a Azure Pipelines, CircleCI, or GitHub Actions job or workflow.
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
-  shows a transient failure.  This command needs Python 3.9 or later and `gh`.
+  shows a transient failure.  This command needs Python 3.9 or later and
+  `gh`.
 * [`normalize-log`](normalize-log) `[FILE]...`:
   Prints the file (by default, standard input) without formatting that
   affects a terminal:  terminal escape sequences, a leading byte order
@@ -175,7 +173,6 @@ The commands are:
   progress messages that a terminal would overwrite or erase:  the text
   before a carriage return that is not at the end of a line, and the text
   before an escape sequence that erases the whole line.
-  `rerun-failed-ci` uses it.
 * [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
