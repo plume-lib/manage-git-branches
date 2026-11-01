@@ -239,13 +239,12 @@ linked worktree of the repository that you ran them in, made by
 directory's own clone, `REPONAME-branch-OTHER`, and a sibling `REPONAME` is a
 clone that would push a new branch to the same repositories, the new worktree
 belongs to `REPONAME` instead, so that `REPONAME-branch-OTHER` can still be
-removed once OTHER is done.  (A clone of your fork and a clone of its upstream
+removed once OTHER is done.  A clone of your fork and a clone of its upstream
 repository push to different repositories, so neither hosts the other's
-worktrees.)  (The
-commands fall back to the repository that you ran them in when `REPONAME`
-cannot host the worktree without a difference, such as when either repository
-is a sparse checkout.)  All the branch
-directories of one repository share one object store, so the repository is
+worktrees.  (The commands fall back to the repository that you ran them in
+when `REPONAME` cannot host the worktree without a difference, such as when
+either repository is a sparse checkout.)  All the branch directories of one
+repository share one object store, so the repository is
 not copied.  This has some consequences:
 
 * A branch directory's `.git` is a file, not a directory.  A tool that tests
