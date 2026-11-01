@@ -5,8 +5,11 @@
 # each is pushed into the next in turn.
 #
 # Usage:
-#   git-push-to [--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ...
-#   git-push-to [--nocompile] [--rebase | --squash] [ORG:]BRANCH [ORG:]BRANCH ...
+#   git-push-to [OPTIONS] FROM_DIR TO_DIR ...
+#   git-push-to [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ...
+#
+# OPTIONS are [--nocompile] [--rebase | --squash] [--llm | --no-llm]
+# [--claude | --codex].
 #
 # Each argument names the top level of a working tree.
 # Each may be absolute directory names or relative to the current directory.
@@ -14,7 +17,8 @@
 # The "--rebase" option rebases each branch onto the previous one after
 # pushing, and the "--squash" option makes each branch a single commit on top
 # of the previous one; see "Rebasing" below.  `git-rebase-to` is a shorthand
-# for "--rebase".
+# for "--rebase".  By default, this script asks an AI agent to resolve merge
+# conflicts; "--no-llm" prevents that.  See "Asking an AI agent" below.
 #
 # Alternately, each argument may be a slug of the form ORG:BRANCH, which names
 # a directory in the current directory:  PROJECT-fork-ORG-branch-BRANCH, or
@@ -85,11 +89,28 @@
 
 # Conflicts
 #
-# When the merge of FROM_DIR's branch into TO_DIR has conflicts that `git
-# rerere` resolves, this script checks the resolution;
-# `resolve_merge_conflicts` in common-functions.sh describes the check.
-# Otherwise, this script stops with the merge still in progress, for the
-# user to finish or to abort with `git merge --abort`.
+# When the merge of FROM_DIR's branch into TO_DIR has conflicts that
+# `git rerere` or an AI agent (see below) resolves, this script checks the
+# resolution; `resolve_merge_conflicts` in common-functions.sh describes the
+# check.  Otherwise, this script stops with the merge still in progress, for
+# the user to finish or to abort with `git merge --abort`.
+
+# Asking an AI agent
+#
+# Unless "--no-llm" is given, this script asks an AI agent for help:  Claude
+# (`claude -p`) by default, or Codex (`codex exec`) with "--codex".  The
+# options "--llm", "--claude", and "--codex" each override an earlier
+# "--no-llm", and "--no-llm" overrides any of them that precedes it.
+# "--llm" turns on the agent that the last "--claude" or "--codex" chose.
+# If the agent cannot be run because its command is not on the PATH, this
+# script acts as it does with "--no-llm".
+# The agent runs in a sandbox, which requires a recent version of it; see
+# the README.
+#
+# When the merge has conflicts that `git rerere` does not resolve, the agent
+# edits the conflicted files, and this script checks its resolution as
+# described above.  If the agent fails, this script stops with the merge
+# still in progress.
 
 # Here is an example of use.
 #
@@ -408,7 +429,7 @@ git_push_to() {
   # `merge_build_push` describes the commit as a branch of this repository.
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
-    "${from_branch} of ${from_absolute}" "${nocompile}"; then
+    "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}"; then
     return 1
   fi
 
@@ -856,15 +877,18 @@ while [ "$#" -ge 1 ]; do
       rebase=1
       squash=1
       ;;
-    *) break ;;
+    *)
+      if ! parse_llm_option "$1"; then break; fi
+      ;;
   esac
   shift
 done
 
 if [ "$#" -lt 2 ]; then
   echo "${SCRIPT_NAME}: not enough arguments" >&2
-  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--rebase | --squash] FROM_DIR TO_DIR ..." >&2
-  echo "   or: ${SCRIPT_NAME} [--nocompile] [--rebase | --squash] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
+  echo "Usage: ${SCRIPT_NAME} [OPTIONS] FROM_DIR TO_DIR ..." >&2
+  echo "   or: ${SCRIPT_NAME} [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
+  echo "OPTIONS: [--nocompile] [--rebase | --squash] ${llm_options_usage}" >&2
   exit 1
 fi
 
