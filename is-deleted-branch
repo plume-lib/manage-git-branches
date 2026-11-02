@@ -39,9 +39,10 @@
 # `.bzr`.  A container that runs as root creates such a directory's contents
 # owned by root, and the user's `rm -rf` cannot remove them; and
 # `pip install -e git+URL#egg=NAME` clones a repository into `.venv/src/`,
-# where it can hold unpushed work.  Nothing of the branch survives in a directory of leftovers, so it is as removable as a
-# working tree whose branch was deleted in its remote, which is the question
-# that callers ask this command.
+# where it can hold unpushed work.  Nothing of the branch survives in a
+# directory of leftovers, so it is as removable as a working tree whose branch
+# was deleted in its remote, which is the question that callers ask this
+# command.
 #
 # The criterion applies to the whole tree below the directory:  every entry is
 # either a leftover or a directory that itself holds nothing but leftovers.  An
