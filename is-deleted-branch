@@ -33,16 +33,22 @@
 #  * Python package metadata, which is a directory whose name ends in
 #    `.egg-info`, such as `myproject.egg-info`.
 # A `.venv` or `*.egg-info` directory is a leftover whatever build output it
-# holds, but only if the user can remove it and it holds no version-control
-# checkout:  the user owns everything in it and can read, write, and search
-# every directory in it, and nothing in it is named `.git`, `.hg`, `.svn`, or
-# `.bzr`.  A container that runs as root creates such a directory's contents
-# owned by root, and the user's `rm -rf` cannot remove them; and
+# holds and whoever owns that output, but only if it holds no version-control
+# checkout:  the user can read every directory in it, and nothing in it is
+# named `.git`, `.hg`, `.svn`, or `.bzr`.  A container that runs as root
+# creates such a directory's contents owned by root, and they are what remains
+# when the user's `rm -rf` of a branch directory cannot remove them; and
 # `pip install -e git+URL#egg=NAME` clones a repository into `.venv/src/`,
 # where it can hold unpushed work.  Nothing of the branch survives in a
 # directory of leftovers, so it is as removable as a working tree whose branch
 # was deleted in its remote, which is the question that callers ask this
 # command.
+#
+# A directory of leftovers is status 0 only if no working tree claims it:  git
+# can use no repository at it, or it is in a working tree that tracks none of
+# its files, such as a home directory that is a repository of configuration
+# files.  A directory in a working tree that tracks a file in it is part of
+# that working tree, and it is status 2 like any other subdirectory.
 #
 # The criterion applies to the whole tree below the directory:  every entry is
 # either a leftover or a directory that itself holds nothing but leftovers.  An

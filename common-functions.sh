@@ -3073,7 +3073,7 @@ remote_heads() {
 ## the name of a directory of Python build output:  `.venv`, a virtual
 ## environment, or a name that ends in `.egg-info`, such as
 ## `myproject.egg-info`, which holds package metadata.  Such a directory holds
-## no branch directory and no work, except as `removable_build_output` tests.
+## no branch directory and no work, except as `holds_no_checkout` tests.
 is_build_output_name() {
   case "$1" in
     '.venv' | *.egg-info) return 0 ;;
@@ -3081,21 +3081,19 @@ is_build_output_name() {
   return 1
 }
 
-## Usage: removable_build_output DIRECTORY
-## Returns 0 (true) if `rm -rf` can remove DIRECTORY, a directory of build
-## output, and DIRECTORY holds no version-control checkout:  that is, if the
-## user owns DIRECTORY and everything in it, can read, write, and search every
-## directory among them, and nothing in it is named `.git`, `.hg`, `.svn`, or
-## `.bzr`.  Returns 1 if `find` cannot examine all of DIRECTORY.
+## Usage: holds_no_checkout DIRECTORY
+## Returns 0 (true) if a directory DIRECTORY holds no version-control
+## checkout:  that is, if nothing in DIRECTORY, at any depth, is named `.git`,
+## `.hg`, `.svn`, or `.bzr`.  Returns 1 (false) if the user cannot read some
+## directory in DIRECTORY, which might hold a checkout.
 ##
 ## `find` writes newline-separated text, which cannot represent a file name
 ## that contains a newline, but this function needs only whether `find` wrote
 ## anything, which such a name does not obscure.
-removable_build_output() {
-  removable_build_output_found="$(find "$1" \( ! -user "$(id -u)" \
-    -o -type d ! -perm -u+rwx -o -name .git -o -name .hg -o -name .svn \
+holds_no_checkout() {
+  holds_no_checkout_found="$(find "$1" \( -name .git -o -name .hg -o -name .svn \
     -o -name .bzr \) -prune -print 2> /dev/null)" || return 1
-  [ -z "${removable_build_output_found}" ]
+  [ -z "${holds_no_checkout_found}" ]
 }
 
 ## Usage: only_leftovers DIRECTORY
@@ -3103,9 +3101,8 @@ removable_build_output() {
 ## directories that tools other than git create in a working tree and that
 ## remain after the working tree itself is gone.  A leftover is one of these:
 ##  * an Eclipse `.project` file, which is a regular file;
-##  * a directory of Python build output that `rm -rf` can remove and that
-##    holds no version-control checkout, as `removable_build_output` tests:
-##    either a Python virtual environment, which is a directory named `.venv`,
+##  * a directory of Python build output that holds no version-control
+##    checkout, as `holds_no_checkout` tests:  either a Python virtual environment, which is a directory named `.venv`,
 ##    or Python package metadata, which is a directory whose name ends in
 ##    `.egg-info`, such as `myproject.egg-info`.
 ## That is, every entry of DIRECTORY is a leftover or is a directory that
@@ -3114,11 +3111,11 @@ removable_build_output() {
 ## `bin` that Eclipse makes for a project's build output -- count as nothing.
 ##
 ## Such a directory's contents are build output, which a build re-creates, so
-## they need not be leftovers themselves.  Two exceptions keep a `.venv` or
-## `*.egg-info` directory from being a leftover.  First, a container that runs
-## as root creates its contents owned by root, and the user's `rm -rf` cannot
-## remove them; treating it as a leftover would offer for removal a directory
-## that every removal fails on.  Second, `pip install -e git+URL#egg=NAME`
+## they need not be leftovers themselves.  Nor need they belong to the user:
+## a container that runs as root creates them owned by root, and they are
+## what remains when the user's `rm -rf` of a branch directory cannot remove
+## them.  A `.venv` or `*.egg-info` directory that holds a version-control
+## checkout is not a leftover, because `pip install -e git+URL#egg=NAME`
 ## clones a repository into `.venv/src/`, and that clone can hold unpushed
 ## work.
 ##
@@ -3127,7 +3124,7 @@ removable_build_output() {
 ## variable `only_leftovers_found` is set to a nonempty value if at least one
 ## leftover was seen, and is left alone otherwise.  A caller that
 ## distinguishes a tree of leftovers from a tree of nothing -- as
-## `is_deleted_branch` does -- sets that variable to the empty string before
+## `is_leftover_tree` does -- sets that variable to the empty string before
 ## the call and tests it after.  A shell function has no local variables, so
 ## the recursive calls below all set the one variable, and it therefore
 ## reports about the whole tree.
@@ -3173,7 +3170,7 @@ only_leftovers() {
     # A *file* with the name of a directory of build output can hold anything,
     # so leave it to the test below, which treats it as content.
     if is_build_output_name "${1##*/}" && [ -d "$1" ] && [ ! -L "$1" ]; then
-      if ! removable_build_output "$1"; then
+      if ! holds_no_checkout "$1"; then
         return 1
       fi
       only_leftovers_found=1
@@ -3192,6 +3189,21 @@ only_leftovers() {
     shift
   done
   return 0
+}
+
+## Usage: is_leftover_tree DIRECTORY
+## Returns 0 (true) if a directory DIRECTORY holds nothing but leftovers, as
+## `only_leftovers` tests, and holds at least one leftover.
+##
+## `only_leftovers` is satisfied by a directory that holds nothing at all, and
+## a tree of nothing but empty directories is not evidence of a working tree
+## that a branch directory once held.  The leftover need not be in DIRECTORY
+## itself:  a branch whose Eclipse projects were all below its top level, such
+## as a `java/lib` that Eclipse knew as a project, leaves its metadata there
+## and none at the top.
+is_leftover_tree() {
+  only_leftovers_found=
+  only_leftovers "$1" && [ -n "${only_leftovers_found}" ]
 }
 
 ## Usage: is_deleted_branch DIRECTORY
@@ -3237,26 +3249,19 @@ is_deleted_branch() {
   # whose working tree is gone:  what remains is what other tools made, and
   # none of the branch itself.  Such a directory is as removable as one whose
   # branch was deleted in its remote, so answer 0 for it.  `only_leftovers`
-  # says which files and directories are leftovers.
+  # says which files and directories are leftovers.  The tests below would
+  # call such a directory "not the top level of a working tree" (status 2):
+  # that is true, and it would leave the caller's question -- may this
+  # directory be removed? -- unanswered when it has an answer.
   #
-  # Answer it before the tests below, which would call such a directory "not
-  # the top level of a working tree" (status 2):  that is true, and it would
-  # leave the caller's question -- may this directory be removed? -- unanswered
-  # when it has an answer.  The tests below still decide every directory that
-  # holds anything else, including a working tree, whose `.git` is not a
-  # leftover and which `only_leftovers` therefore rejects.
-  #
-  # Require a leftover somewhere in the tree.  `only_leftovers` is satisfied
-  # by a directory that holds nothing at all, and a tree of nothing but empty
-  # directories is not evidence of a working tree that a branch directory once
-  # held.  The leftover need not be in DIRECTORY itself:  a branch whose
-  # Eclipse projects were all below its top level, such as a `java/lib` that
-  # Eclipse knew as a project, leaves its metadata there and none at the top.
-  only_leftovers_found=
-  if only_leftovers "${is_deleted_branch_dir}" \
-    && [ -n "${only_leftovers_found}" ]; then
-    return 0
-  fi
+  # Answer 0 only for a directory of leftovers that no working tree claims:
+  # one at which git can use no repository, or one in a working tree that
+  # tracks none of its files, such as a leftover in a home directory that is a
+  # repository of configuration files.  A directory in a working tree that
+  # tracks a file in it, such as a test fixture that holds a `*.egg-info`
+  # directory, is part of that working tree, and removing it would delete
+  # tracked files.  The top level of a working tree holds its `.git`, which is
+  # not a leftover.
 
   # `git -C DIR rev-parse` succeeds for every directory within a working tree,
   # so also require that DIRECTORY is that working tree's top level.  A
@@ -3272,6 +3277,9 @@ is_deleted_branch() {
   if ! is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
     --is-bare-repository --show-toplevel 2> /dev/null)"; then
     if [ -z "${is_deleted_branch_toplevel}" ]; then
+      if is_leftover_tree "${is_deleted_branch_dir}"; then
+        return 0
+      fi
       # shellcheck disable=SC2034 # Callers read it; see the documentation above.
       is_deleted_branch_no_usable_repository=1
     fi
@@ -3305,7 +3313,15 @@ is_deleted_branch() {
   fi
   if [ "${is_deleted_branch_dir_real}" != "${is_deleted_branch_top_real}" ]; then
     # Not the top level of a working tree, so it is not on any branch, deleted
-    # or otherwise.
+    # or otherwise.  It is a leftover if the working tree tracks no file in it,
+    # which is status 1 of `git ls-files --error-unmatch`.
+    if is_leftover_tree "${is_deleted_branch_dir}"; then
+      git -C "${is_deleted_branch_dir}" ls-files --error-unmatch -- . \
+        > /dev/null 2>&1
+      if [ "$?" -eq 1 ]; then
+        return 0
+      fi
+    fi
     return 2
   fi
 

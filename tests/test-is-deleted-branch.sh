@@ -396,10 +396,9 @@ mkdir -p "${testdir}/dotproject-nested-only/sub"
 ## anywhere and is the leftover of nothing.
 mkdir -p "${testdir}/dotproject-empty-tree/sub/deeper"
 
-## Python build output, which is what remains when `rm -rf` of a branch
-## directory cannot remove files that a container running as root created:  a
-## `.venv` directory and a `*.egg-info` directory.  Their contents are not
-## examined, so the file inside each would otherwise be content.
+## Python build output:  a `.venv` directory and a `*.egg-info` directory.
+## Their contents are not examined, so the file inside each would otherwise be
+## content.
 mkdir -p "${testdir}/python-leftover/.venv/bin" \
   "${testdir}/python-leftover/myproject.egg-info"
 : > "${testdir}/python-leftover/.venv/bin/python"
@@ -430,8 +429,9 @@ mkdir -p "${testdir}/python-venv-checkout/.venv/src/mylib/.git"
 : > "${testdir}/python-venv-checkout/.venv/src/mylib/setup.py"
 
 ## A `.venv` directory that holds a directory that the user cannot write, as
-## when a container running as root created it, so that `rm -rf` cannot
-## remove it.  The superuser can write any directory, so skip this case when
+## when a container running as root created it.  This is what remains when
+## `rm -rf` of a branch directory cannot remove such files, and it is a
+## leftover.  The superuser can write any directory, so skip this case when
 ## running as root.
 unwritable=0
 if [ "$(id -u)" -ne 0 ]; then
@@ -440,6 +440,18 @@ if [ "$(id -u)" -ne 0 ]; then
   : > "${testdir}/python-venv-unwritable/.venv/lib/module.py"
   chmod 555 "${testdir}/python-venv-unwritable/.venv/lib"
 fi
+
+## Directories of leftovers in a working tree.  One holds a `*.egg-info`
+## directory whose file the working tree tracks, as a test fixture can, so it
+## is part of the working tree.  The other holds a `.venv` directory that the
+## working tree does not track, as in a home directory that is a repository
+## of configuration files, so it is a leftover.
+git init -q -b main "${testdir}/python-in-repo"
+mkdir -p "${testdir}/python-in-repo/pkg-tracked/pkg.egg-info" \
+  "${testdir}/python-in-repo/pkg-untracked/.venv"
+: > "${testdir}/python-in-repo/pkg-tracked/pkg.egg-info/PKG-INFO"
+git -C "${testdir}/python-in-repo" add pkg-tracked
+git -C "${testdir}/python-in-repo" commit -q -m 'Track a fixture'
 
 ## A working tree that holds a `.project` file, as an Eclipse project's clone
 ## does.  Its branch still exists in the remote, and the `.git` directory
@@ -534,9 +546,13 @@ expect_status 2 "${testdir}/python-venv-symlink" \
 expect_status 2 "${testdir}/python-venv-checkout" \
   'directory that holds a .venv directory that holds a git clone'
 if [ "${unwritable}" -eq 1 ]; then
-  expect_status 2 "${testdir}/python-venv-unwritable" \
+  expect_status 0 "${testdir}/python-venv-unwritable" \
     'directory that holds a .venv directory that rm -rf cannot remove'
 fi
+expect_status 2 "${testdir}/python-in-repo/pkg-tracked" \
+  'directory that holds a *.egg-info directory whose file a working tree tracks'
+expect_status 0 "${testdir}/python-in-repo/pkg-untracked" \
+  'directory that holds a .venv directory that a working tree does not track'
 expect_status 1 "${testdir}/myrepo-live-project" \
   'working tree that holds a .project file and whose branch exists in the remote'
 expect_status 2 "${nonexistent}" 'path that does not exist'
