@@ -493,9 +493,10 @@ warn_if_not_in_working_tree() {
         # repository that git refuses.
         wnwt_newline='
 '
+        wnwt_refused="dubious ownership in repository at '"
         case "${wnwt_git_error}" in
-          *"dubious ownership in repository at '"*)
-            wnwt_ancestor="${wnwt_git_error#*"dubious ownership in repository at '"}"
+          *"${wnwt_refused}"*)
+            wnwt_ancestor="${wnwt_git_error#*"${wnwt_refused}"}"
             wnwt_ancestor="${wnwt_ancestor%%"${wnwt_newline}"*}"
             wnwt_ancestor="${wnwt_ancestor%\'}"
             ;;
