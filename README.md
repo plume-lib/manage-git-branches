@@ -179,7 +179,8 @@ The commands are:
   If `rm -rf` cannot remove everything, as when a container running as root
   created files in the directory, it moves what remains to a new directory in
   `/tmp`, whose cleanup runs as root, provided that `/tmp` is on the same
-  file system.
+  file system, or else to a new directory beneath `~/tmp/DELETEME`, under the
+  same condition.
   Given a worktree whose directory was already removed with `rm -rf`, it
   removes what that left behind:  the worktree's registration and, under the
   same conditions, its branch, in the repository that `--repository` names

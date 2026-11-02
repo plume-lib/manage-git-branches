@@ -143,8 +143,10 @@ check_gone 'a directory that is no repository' "${project}"
 # A directory that `rm -rf` cannot remove entirely, because it holds a file in
 # a directory that the user cannot write, as when a container running as root
 # created a `.venv`.  What remains is moved to a new directory in /tmp if /tmp
-# is on the same file system; otherwise the directory is kept.  The superuser
-# can delete any file, so skip this case when running as root.
+# is on the same file system, and otherwise beneath ~/tmp/DELETEME.  HOME is
+# under ${work}, so the second destination is always on the same file system,
+# and the test never writes in the real ~/tmp.  The superuser can delete any
+# file, so skip this case when running as root.
 if [ "$(id -u)" -ne 0 ]; then
   undeletable="${work}/myrepo-branch-undeletable"
   mkdir -p "${undeletable}/.venv/bin"
@@ -152,38 +154,38 @@ if [ "$(id -u)" -ne 0 ]; then
   chmod 555 "${undeletable}/.venv/bin"
   same_fs="$(df -P -- "${work}" /tmp | awk 'NR > 1 { $2 = $3 = $4 = $5 = ""; print }' | sort -u | wc -l)"
   if [ "${same_fs}" -eq 1 ]; then
-    run_command 'a directory that rm -rf cannot remove entirely' 0 "${undeletable}"
-    check_gone 'a directory that rm -rf cannot remove entirely' "${undeletable}"
-    case "${out}" in
-      *"so moved what remains to /tmp/"*)
-        moved="${out##*so moved what remains to }"
-        if [ ! -e "${moved}/myrepo-branch-undeletable/.venv/bin/python" ]; then
-          fail "a directory that rm -rf cannot remove entirely: not in ${moved}: ${out}"
-        fi
-        if [ -e "${moved}/myrepo-branch-undeletable/other" ]; then
-          fail "a directory that rm -rf cannot remove entirely: moved a file that rm -rf can remove"
-        fi
-        case "${out}" in
-          *'Permission denied'*)
-            fail "a directory that rm -rf cannot remove entirely: printed rm's messages: ${out}"
-            ;;
-        esac
-        chmod -R u+w "${moved}"
-        rm -rf -- "${moved}"
-        ;;
-      *)
-        fail "a directory that rm -rf cannot remove entirely: did not say where it moved it: ${out}"
-        ;;
-    esac
+    expected_dest=/tmp
   else
-    run_command 'a directory that rm -rf cannot remove entirely' 1 "${undeletable}"
-    check_present 'a directory that rm -rf cannot remove entirely' "${undeletable}"
-    case "${out}" in
-      *'on another file system'*) ;;
-      *) fail "a directory that rm -rf cannot remove entirely: did not say why: ${out}" ;;
-    esac
-    chmod -R u+w "${undeletable}"
+    expected_dest="${work}/home/tmp/DELETEME"
   fi
+  saved_home="${HOME}"
+  HOME="${work}/home"
+  export HOME
+  run_command 'a directory that rm -rf cannot remove entirely' 0 "${undeletable}"
+  HOME="${saved_home}"
+  check_gone 'a directory that rm -rf cannot remove entirely' "${undeletable}"
+  case "${out}" in
+    *"so moved what remains to ${expected_dest}/"*)
+      moved="${out##*so moved what remains to }"
+      if [ ! -e "${moved}/myrepo-branch-undeletable/.venv/bin/python" ]; then
+        fail "a directory that rm -rf cannot remove entirely: not in ${moved}: ${out}"
+      fi
+      if [ -e "${moved}/myrepo-branch-undeletable/other" ]; then
+        fail "a directory that rm -rf cannot remove entirely: moved a file that rm -rf can remove"
+      fi
+      case "${out}" in
+        *'Permission denied'*)
+          fail "a directory that rm -rf cannot remove entirely: printed rm's messages: ${out}"
+          ;;
+      esac
+      chmod -R u+w "${moved}"
+      rm -rf -- "${moved}"
+      ;;
+    *)
+      fail "a directory that rm -rf cannot remove entirely: did not say that it moved it to ${expected_dest}: ${out}"
+      chmod -R u+w "${undeletable}"
+      ;;
+  esac
 fi
 
 # Several directories in one invocation, since a caller passes a whole list.
