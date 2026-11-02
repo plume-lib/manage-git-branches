@@ -112,9 +112,10 @@
 # edits the conflicted files, and this script checks its resolution as
 # described above.  That applies to the merge of FROM_DIR's branch into
 # TO_DIR, and to the merges of the pulls that update FROM_DIR and TO_DIR from
-# their remotes.  A pull of FROM_DIR that rebases, as `pull.rebase` can make
-# it do, is not resolved; the pull of TO_DIR always merges.  If the agent
-# fails, this script stops with the merge still in progress.
+# their remotes.  The pull of TO_DIR merges even if `pull.rebase` is set; a
+# pull of FROM_DIR that rebases, as `pull.rebase` can make it do, is not
+# resolved.  If the agent fails, this script stops with the merge still in
+# progress.
 #
 # When the build of TO_DIR fails, and a merge on TO_DIR's branch might have
 # broken it, the agent edits files to fix it, without building; then this

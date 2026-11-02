@@ -1569,7 +1569,7 @@ $4  A script then built the project, which failed.  The end of the build output 
 
 Rules:
 
-* Make the smallest change that fixes the build and that respects the intent of every branch that was merged.  Often, a merge combined changes that do not fit together, such as a call to a method that another branch renamed.
+* Make the smallest change that fixes the build and that respects the intent of the current branch and of every branch merged into it.  Often, merging combined changes that do not fit together, such as a call to a method that another branch renamed.
 * Do not disable, delete, or weaken tests, checks, or warnings to make the build pass.
 * Do not run any git command that changes the index, HEAD, or any other ref, such as \`git add\`, \`git commit\`, \`git checkout\`, \`git restore\`, \`git reset\`, \`git merge\`, \`git stash\`, or \`git rebase\`.  The script commits your changes.
 * Run commands in the current directory, which is the working tree, without \`cd\` or \`git -C\`.  A command in another form needs approval, which nobody is present to give.
