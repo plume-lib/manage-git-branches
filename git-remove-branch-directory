@@ -233,12 +233,13 @@ line_count() {
 }
 
 # Usage: count_unlanded DIRECTORY LANDABLE REV-LIST-ARGS...
-# Prints the number of commits that `git rev-list REV-LIST-ARGS` lists in the
-# repository of DIRECTORY, other than those on a local branch whose changes
-# have landed in a remote's default branch.  LANDABLE names the local branches
-# that may have landed:  `--all` for every one, a branch name for that one
-# alone, or the empty string for none.  Prints nothing if `git rev-list`
-# fails.
+# Prints a line "LOST LISTED":  LISTED is the number of commits that
+# `git rev-list REV-LIST-ARGS` lists in the repository of DIRECTORY, such as
+# 5, and LOST is the number of them whose changes would be lost, such as 2:
+# those that are not on a local branch whose changes have landed in a
+# remote's default branch.  LANDABLE names the local branches that may have
+# landed:  `--all` for every one, a branch name for that one alone, or the
+# empty string for none.  Prints nothing if `git rev-list` fails.
 #
 # A squash-merged pull request is the reason:  its commits are on no remote,
 # because the squash commit replaces them, and its remote branch is deleted,
@@ -262,7 +263,7 @@ count_unlanded() {
     || [ "${outgoing_works}" -eq 0 ] \
     || ! git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
       refs/remotes 2> /dev/null | grep -q '/HEAD$'; then
-    echo "${count_unlanded_count}"
+    echo "${count_unlanded_count} ${count_unlanded_count}"
     return 0
   fi
   if [ "${count_unlanded_landable}" = --all ]; then
@@ -273,19 +274,22 @@ count_unlanded() {
   if ! count_unlanded_omitted="$(cd -- "${count_unlanded_dir}" \
     && "${SCRIPT_DIR}"/git-outgoing ${count_unlanded_only:+"${count_unlanded_only}"} --omitted)"; then
     echo "${SCRIPT_NAME}: cannot tell whether the changes of the commits in ${count_unlanded_dir} have landed, so counting them all" >&2
-    echo "${count_unlanded_count}"
+    echo "${count_unlanded_count} ${count_unlanded_count}"
     return 0
   fi
   if [ -z "${count_unlanded_omitted}" ]; then
-    echo "${count_unlanded_count}"
+    echo "${count_unlanded_count} ${count_unlanded_count}"
     return 0
   fi
   # A `--not` in REV-LIST-ARGS does not apply to the revisions that git reads
   # from standard input, so each omitted branch is negated by its `^`.  The
   # branches are passed that way rather than as arguments, which might exceed
   # the limit on a command line's size.
-  printf '%s\n' "${count_unlanded_omitted}" | sed 's/^/^/' \
-    | git -C "${count_unlanded_dir}" rev-list --count --stdin "$@" 2> /dev/null
+  count_unlanded_lost="$(printf '%s\n' "${count_unlanded_omitted}" \
+    | sed 's/^/^/' \
+    | git -C "${count_unlanded_dir}" rev-list --count --stdin "$@" 2> /dev/null)" \
+    || return 0
+  echo "${count_unlanded_lost} ${count_unlanded_count}"
 }
 
 # Prints the number of live linked worktrees of the repository in directory
@@ -399,17 +403,21 @@ check_worktree_unpushed() {
     set -- "$1" "$2" "$3" "$4"
   fi
   check_worktree_unpushed_dir="$4"
-  check_worktree_unpushed_count="$(count_unlanded "$1" "$3" "$2" ${5:+"$5"} \
+  check_worktree_unpushed_counts="$(count_unlanded "$1" "$3" "$2" ${5:+"$5"} \
     --not ${6:+"$6"} --branches --tags --remotes)"
-  if [ -z "${check_worktree_unpushed_count}" ]; then
+  if [ -z "${check_worktree_unpushed_counts}" ]; then
     echo "${SCRIPT_NAME}: refusing to remove ${check_worktree_unpushed_dir}: cannot tell whether it holds commits that no other ref holds" >&2
     remove_refusals=1
-  elif [ "${check_worktree_unpushed_count}" -gt 0 ]; then
+    return
+  fi
+  check_worktree_unpushed_lost="${check_worktree_unpushed_counts% *}"
+  check_worktree_unpushed_listed="${check_worktree_unpushed_counts#* }"
+  if [ "${check_worktree_unpushed_lost}" -gt 0 ]; then
     if [ "${force_unpushed}" -eq 0 ]; then
-      echo "${SCRIPT_NAME}: refusing to remove ${check_worktree_unpushed_dir}: ${check_worktree_unpushed_count} commit(s) are on no other branch, remote-tracking ref, or tag; re-run with --force-unpushed" >&2
+      echo "${SCRIPT_NAME}: refusing to remove ${check_worktree_unpushed_dir}: ${check_worktree_unpushed_lost} commit(s) have changes that are on no other branch, remote-tracking ref, or tag; re-run with --force-unpushed" >&2
       remove_refusals=1
     else
-      echo "${SCRIPT_NAME}: ${check_worktree_unpushed_dir}: --force-unpushed: deleting ${check_worktree_unpushed_count} commit(s) that are on no other branch, remote-tracking ref, or tag; until \`git gc\` runs, \`git fsck --lost-found\` can recover them" >&2
+      echo "${SCRIPT_NAME}: ${check_worktree_unpushed_dir}: --force-unpushed: deleting ${check_worktree_unpushed_listed} commit(s) that are on no other branch, remote-tracking ref, or tag, ${check_worktree_unpushed_lost} of them with changes that are on none; until \`git gc\` runs, \`git fsck --lost-found\` can recover them" >&2
     fi
   fi
 }
@@ -925,12 +933,12 @@ remove_branch_directory() {
     if [ -z "${remove_unpushed}" ]; then
       echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot tell whether it holds commits that no other ref holds" >&2
       remove_refusals=1
-    elif [ "${remove_unpushed}" -gt 0 ]; then
+    elif [ "${remove_unpushed% *}" -gt 0 ]; then
       if [ "${force_unpushed}" -eq 0 ]; then
-        echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: ${remove_unpushed} commit(s) are on no remote-tracking ref or tag; re-run with --force-unpushed" >&2
+        echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: ${remove_unpushed% *} commit(s) have changes that are on no remote-tracking ref or tag; re-run with --force-unpushed" >&2
         remove_refusals=1
       else
-        echo "${SCRIPT_NAME}: ${remove_dir}: --force-unpushed: deleting ${remove_unpushed} commit(s) that are on no remote-tracking ref or tag" >&2
+        echo "${SCRIPT_NAME}: ${remove_dir}: --force-unpushed: deleting ${remove_unpushed#* } commit(s) that are on no remote-tracking ref or tag, ${remove_unpushed% *} of them with changes that are on none" >&2
       fi
     fi
   fi

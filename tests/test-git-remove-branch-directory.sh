@@ -88,7 +88,7 @@ git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
   stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost \
-  squashed empty; do
+  squashed empty landedwaived; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -195,7 +195,7 @@ add_unpushed_commit "${unpushed}"
 run_command 'unpushed commits' 1 "${unpushed}"
 check_present 'unpushed commits' "${unpushed}"
 check_message 'unpushed commits' \
-  "refusing to remove ${unpushed}: 1 commit(s) are on no remote-tracking ref or tag; re-run with --force-unpushed"
+  "refusing to remove ${unpushed}: 1 commit(s) have changes that are on no remote-tracking ref or tag; re-run with --force-unpushed"
 
 # Each flag waives exactly one check.
 run_command 'unpushed commits, with the other flag' 1 \
@@ -204,7 +204,7 @@ check_present 'unpushed commits, with the other flag' "${unpushed}"
 run_command 'unpushed commits waived' 0 --force-unpushed "${unpushed}"
 check_gone 'unpushed commits waived' "${unpushed}"
 check_message 'unpushed commits waived' \
-  "--force-unpushed: deleting 1 commit(s) that are on no remote-tracking ref or tag"
+  "--force-unpushed: deleting 1 commit(s) that are on no remote-tracking ref or tag, 1 of them with changes that are on none"
 
 # A directory that fails both checks needs both waivers, which is what
 # `--force` is.
@@ -237,10 +237,27 @@ git -C "${squashed}" commit -q -a -m "Work after the squash-merge"
 run_command 'work after a squash-merge' 1 "${squashed}"
 check_present 'work after a squash-merge' "${squashed}"
 check_message 'work after a squash-merge' \
-  "refusing to remove ${squashed}: 3 commit(s) are on no remote-tracking ref or tag"
+  "refusing to remove ${squashed}: 3 commit(s) have changes that are on no remote-tracking ref or tag"
 git -C "${squashed}" reset -q --hard HEAD~1
 run_command 'a squash-merged branch' 0 "${squashed}"
 check_gone 'a squash-merged branch' "${squashed}"
+
+# A waiver reports every commit that it deletes, including those whose
+# changes have landed.
+landedwaived="$(make_clone landedwaived)"
+add_unpushed_commit "${landedwaived}"
+echo "landed work" > "${landedwaived}/landed.txt"
+git -C "${landedwaived}" add landed.txt
+git -C "${landedwaived}" commit -q -m "Work to squash-merge"
+squash_merge "${landedwaived}"
+run_command 'a landed branch and an unpushed one' 1 "${landedwaived}"
+check_message 'a landed branch and an unpushed one' \
+  "refusing to remove ${landedwaived}: 1 commit(s) have changes that are on no remote-tracking ref or tag"
+run_command 'a landed branch and an unpushed one, waived' 0 --force-unpushed \
+  "${landedwaived}"
+check_gone 'a landed branch and an unpushed one, waived' "${landedwaived}"
+check_message 'a landed branch and an unpushed one, waived' \
+  "--force-unpushed: deleting 2 commit(s) that are on no remote-tracking ref or tag, 1 of them with changes that are on none"
 
 # A branch that changes no file has nothing to land, so merging it into the
 # remote's default branch changes nothing, but its commits have not landed.
@@ -249,7 +266,7 @@ git -C "${empty}" commit -q --allow-empty -m 'Empty commit'
 run_command 'an empty commit' 1 "${empty}"
 check_present 'an empty commit' "${empty}"
 check_message 'an empty commit' \
-  "refusing to remove ${empty}: 1 commit(s) are on no remote-tracking ref or tag"
+  "refusing to remove ${empty}: 1 commit(s) have changes that are on no remote-tracking ref or tag"
 run_command 'an empty commit, waived' 0 --force-unpushed "${empty}"
 check_gone 'an empty commit, waived' "${empty}"
 
@@ -509,7 +526,7 @@ run_command 'a linked worktree with an unpushed commit' 1 \
 check_present 'a linked worktree with an unpushed commit' \
   "${work}/myrepo-branch-wtmine"
 check_message 'a linked worktree with an unpushed commit' \
-  "1 commit(s) are on no other branch, remote-tracking ref, or tag; re-run with --force-unpushed"
+  "1 commit(s) have changes that are on no other branch, remote-tracking ref, or tag; re-run with --force-unpushed"
 if ! git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtmine > /dev/null; then
   fail "a linked worktree with an unpushed commit: its branch was deleted"
 fi
