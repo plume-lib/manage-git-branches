@@ -1786,10 +1786,11 @@ pull_merge_message() {
       pull_message_source="${pull_message_rest#*"	"}"
       case "${pull_message_source}" in
         "branch '"*"' of "*)
-          pull_message_branch="${pull_message_source#"branch '"}"
-          pull_message_branch="${pull_message_branch%%"' of "*}"
-          if pull_message_tracking="$(tracking_branch_of "${pull_message_branch}" \
-            "${pull_message_source#*"' of "}")"; then
+          pull_message_branch="$(printf '%s\n' "${pull_message_source}" \
+            | sed -e "s/^branch '//" -e "s/' of .*//")"
+          pull_message_url="$(printf '%s\n' "${pull_message_source}" \
+            | sed -e "s/^branch '[^']*' of //")"
+          if pull_message_tracking="$(tracking_branch_of "${pull_message_branch}" "${pull_message_url}")"; then
             pull_message_source="remote-tracking branch '${pull_message_tracking}' of ."
           fi
           ;;
