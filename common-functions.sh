@@ -1103,20 +1103,22 @@ resolve_with_agent() {
   # file's modification time, an unprivileged process cannot set its ctime.
   # A file changed after the marker file was written, so the marker is in
   # the git directory, which neither agent can write.  The agent starts only
-  # once the file system records a later time than the marker's, so that a
-  # file that it changes has a later time.
+  # once the working tree's file system records a later time than the
+  # marker's, so that a file that it changes has a later time.  The working
+  # tree and the git directory can be on different file systems.  The
+  # working tree's pathnames are listed after the wait, which writes a file
+  # in the working tree and then removes it.
   resolve_index="$(git ls-files --stage -z | cksum)"
-  resolve_paths="$(working_tree_paths)"
   if ! resolve_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-start)" \
     || ! : > "${resolve_marker}"; then
     echo "${SCRIPT_NAME}: cannot write a file in the git directory of $(pwd)" >&2
     return 1
   fi
-  if ! wait_for_later_time "${resolve_marker}"; then
+  if ! wait_for_later_time "${resolve_marker}" "$(pwd)"; then
     rm -f -- "${resolve_marker}"
-    echo "${SCRIPT_NAME}: the file system's time does not advance in the git directory of $(pwd)" >&2
     return 1
   fi
+  resolve_paths="$(working_tree_paths)"
   resolve_branch="$(git symbolic-ref --quiet --short HEAD)" || resolve_branch="HEAD"
   resolve_prompt="You are resolving merge conflicts in the git working tree $(pwd).
 \`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts in these files:
@@ -1245,32 +1247,44 @@ working_tree_changes() {
     }' | LC_ALL=C sort
 }
 
-## Usage: wait_for_later_time FILE
-## Returns 0 once every file that changes from now on has a later
-## status-change time (ctime) than FILE's modification time, as
-## `find -cnewer` compares them; returns 1 if that does not happen within
-## about 10 seconds.  A file system can record times to the second, or it
-## can record finer times but advance its clock only every few milliseconds.
-## Writes, and then removes, the file FILE-probe, such as
-## ".git/manage-git-branches-agent-start-probe" for FILE
-## ".git/manage-git-branches-agent-start".
+## Usage: wait_for_later_time FILE DIR
+## Returns 0 once every file in DIR, an absolute pathname of a directory,
+## that changes from now on has a later status-change time (ctime) than the
+## modification time of FILE, an absolute pathname, as `find -cnewer`
+## compares them.  A file system can record times to the second, or it can
+## record finer times but advance its clock only every few milliseconds.
+## DIR and FILE can be on different file systems.
+##
+## Writes, and then removes, the file DIR/.manage-git-branches-time-probe,
+## which must not already exist.  Returns 1, after printing a diagnostic, if
+## it cannot write that file, or if the time does not advance within about
+## 10 seconds.
 wait_for_later_time() {
-  wait_probe="$1-probe"
-  wait_tries=0
-  while [ "${wait_tries}" -lt 20 ]; do
-    if ! touch -- "${wait_probe}"; then break; fi
-    if [ -n "$(find "${wait_probe}" -cnewer "$1" -print)" ]; then
+  wait_probe="$2/.manage-git-branches-time-probe"
+  # `set -C` keeps the redirection from overwriting an existing file.
+  if ! (set -C && : > "${wait_probe}"); then
+    echo "${SCRIPT_NAME}: cannot create the file ${wait_probe}, which must not already exist" >&2
+    return 1
+  fi
+  wait_tries=1
+  until [ -n "$(find "${wait_probe}" -cnewer "$1" -print)" ]; do
+    if [ "${wait_tries}" -ge 20 ]; then
       rm -f -- "${wait_probe}"
-      return 0
+      echo "${SCRIPT_NAME}: after ${wait_tries} tries, the time that the file system records in $2 is not later than the modification time of $1" >&2
+      return 1
     fi
-    wait_tries=$((wait_tries + 1))
     # A file system whose clock advances every few milliseconds needs no
     # sleep:  each try takes about that long.  POSIX `sleep` accepts only a
     # whole number of seconds.
     if [ "${wait_tries}" -ge 10 ]; then sleep 1; fi
+    if ! touch -- "${wait_probe}"; then
+      rm -f -- "${wait_probe}"
+      echo "${SCRIPT_NAME}: cannot change the time of the file ${wait_probe}" >&2
+      return 1
+    fi
+    wait_tries=$((wait_tries + 1))
   done
   rm -f -- "${wait_probe}"
-  return 1
 }
 
 ## Usage: report_unresolved FILES
