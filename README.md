@@ -176,6 +176,10 @@ The commands are:
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
+  If `rm -rf` cannot remove everything, as when a container running as root
+  created files in the directory, it moves what remains to a new directory in
+  `/tmp`, whose cleanup runs as root, provided that `/tmp` is on the same
+  file system.
   Given a worktree whose directory was already removed with `rm -rf`, it
   removes what that left behind:  the worktree's registration and, under the
   same conditions, its branch, in the repository that `--repository` names

@@ -24,6 +24,11 @@
 #    afterward.
 #  * A directory that is no repository at all.  It is removed with `rm -rf`.
 #
+# If `rm -rf` cannot remove everything, as when a container running as root
+# created files in the directory, what remains is moved to a new directory in
+# /tmp, whose cleanup runs as root, and a note says where.  That happens only
+# if /tmp is on the same file system, so that the move is a rename.
+#
 # Two checks therefore ask, first, whether anything would be lost:
 #
 #  * Uncommitted changes to tracked files, waived by `--force-uncommitted`.
@@ -104,7 +109,7 @@
 # The exit status is 0 if every DIRECTORY was removed and 1 if any was not; a
 # refusal for one DIRECTORY does not stop the others, since a caller passes a
 # whole list.  This command says nothing when it succeeds, except to note a
-# branch that it kept.
+# branch that it kept or a directory that it moved to /tmp.
 #
 # This command requires git 2.31 or later.  Before git 2.40, which
 # `git-outgoing` requires, a commit counts as held only if a ref holds it.
@@ -665,6 +670,60 @@ remove_missing_worktree() {
     "${missing_head}" "${missing_kept}"
 }
 
+# Prints the file system that holds directory $1, and its mount point, as one
+# line of `df -P` with its four numeric columns removed, or prints nothing if
+# `df` fails.  Two directories for which this prints the same line are on the
+# same mounted file system, so `mv` from one to the other is a rename.
+mounted_file_system() {
+  df -P -- "$1" 2> /dev/null | awk 'NR == 2 { $2 = $3 = $4 = $5 = ""; print }'
+}
+
+# Removes directory $1 and everything in it.  If `rm -rf` cannot remove all of
+# it, moves what remains into a new directory in /tmp, and says so on standard
+# error.  Prints a diagnostic and returns 1 if neither works, so that $1 is
+# still there.
+#
+# `rm -rf` fails, for example, on a `.venv` directory that a container running
+# as root created inside a branch directory:  the user cannot delete files in
+# a directory that the user does not own.  The user can still rename the
+# branch directory itself, which carries those files along, and the system's
+# cleanup of /tmp, which runs as root, usually removes them eventually.  That
+# is why the destination is /tmp, rather than ${TMPDIR}, which need not be
+# cleaned at all.
+#
+# The move happens only if $1 and /tmp are on the same mounted file system.
+# Otherwise `mv` would copy what remains, which can be large, and then fail to
+# delete the original for the same reason that `rm -rf` did.  If `mv` fails
+# anyway, the partial copy is deleted:  it belongs to the user, who made it.
+remove_tree() {
+  # Each file that `rm` cannot delete gets a message, and a `.venv` holds
+  # thousands of files, so print the messages only if the move fails too.
+  if remove_tree_errors="$(rm -rf -- "$1" 2>&1)"; then
+    return 0
+  fi
+  remove_tree_fs="$(mounted_file_system "$1")"
+  if [ -z "${remove_tree_fs}" ] \
+    || [ "${remove_tree_fs}" != "$(mounted_file_system /tmp)" ]; then
+    printf '%s\n' "${remove_tree_errors}" >&2
+    echo "${SCRIPT_NAME}: cannot remove: $1 (and cannot move it to /tmp, which is on another file system)" >&2
+    return 1
+  fi
+  if ! remove_tree_dest="$(mktemp -d /tmp/"${SCRIPT_NAME}".XXXXXX)" \
+    || [ -z "${remove_tree_dest}" ]; then
+    printf '%s\n' "${remove_tree_errors}" >&2
+    echo "${SCRIPT_NAME}: cannot remove: $1 (and cannot create a directory in /tmp)" >&2
+    return 1
+  fi
+  if ! mv -- "$1" "${remove_tree_dest}/"; then
+    printf '%s\n' "${remove_tree_errors}" >&2
+    rm -rf -- "${remove_tree_dest}"
+    echo "${SCRIPT_NAME}: cannot remove: $1 (and cannot move it to /tmp)" >&2
+    return 1
+  fi
+  echo "${SCRIPT_NAME}: cannot remove everything in $1, so moved what remains to ${remove_tree_dest}" >&2
+  return 0
+}
+
 # Removes directory $1, unless one of the checks refuses.  Prints a diagnostic
 # and returns 1 if it does not remove the directory.
 remove_branch_directory() {
@@ -973,8 +1032,11 @@ remove_branch_directory() {
     # shellcheck disable=SC2119 # has_gitlinks asks about the index.
     if [ "${remove_moved}" -eq 1 ] || [ -d "${remove_gitdir}/modules" ] \
       || (cd -- "${remove_dir}" && has_gitlinks); then
-      if ! rm -rf -- "${remove_dir}" || ! rm -rf -- "${remove_gitdir}"; then
-        echo "${SCRIPT_NAME}: cannot remove: ${remove_dir}" >&2
+      if ! remove_tree "${remove_dir}"; then
+        return 1
+      fi
+      if ! rm -rf -- "${remove_gitdir}"; then
+        echo "${SCRIPT_NAME}: cannot remove: ${remove_gitdir}" >&2
         return 1
       fi
     elif ! git --git-dir="${remove_common}" worktree remove --force \
@@ -988,11 +1050,7 @@ remove_branch_directory() {
   fi
 
   # A clone's refs, and a non-repository's nothing, go with the directory.
-  if ! rm -rf -- "${remove_dir}"; then
-    echo "${SCRIPT_NAME}: cannot remove: ${remove_dir}" >&2
-    return 1
-  fi
-  return 0
+  remove_tree "${remove_dir}"
 }
 
 status=0
