@@ -9,11 +9,13 @@
 # requests are all closed or merged, is not listed; instead, a warning about
 # it is printed on standard error.  (This needs the `gh` command.)
 # Also lists directories that hold nothing but Eclipse `.project` files,
-# which is what a branch directory leaves behind when its working tree is gone.
-# A directory named *-branch-* that holds anything else and is in no git
-# working tree, such as one whose removal failed on files owned by another
-# user, is not listed; instead, a warning about it is printed on standard
-# error.
+# which is what a branch directory leaves behind when its working tree is gone,
+# and directories that are in no git working tree and hold nothing but empty
+# directories.  A directory named *-branch-* that holds anything else and is
+# in no git working tree, such as one whose removal failed on files owned by
+# another user, is not listed; instead, a warning about it is printed on
+# standard error.  So is a directory in a working tree that git cannot use,
+# such as a linked worktree whose main working tree was moved.
 #
 # A directory that another live working tree depends on -- one that hosts a
 # linked worktree, or one that is a submodule of a superproject -- is never
@@ -473,23 +475,68 @@ rest_pr_states() {
 }
 
 # Warns, on standard error, about directory $1, whose name matches
-# `*-branch-*`, if it is in no git working tree.  Says nothing about a
+# `*-branch-*`, for which `is_deleted_branch` has just returned status 2, if
+# git reports that the directory is in no working tree.  Says nothing about a
 # directory that is in one, such as a subdirectory of a source tree that
-# happens to be named `*-branch-*`.
+# happens to be named `*-branch-*`, nor about a bare repository.  Sets
+# `status` to 1 if the directory's absolute path cannot be determined.
 #
 # Such a directory is usually what a failed removal of a branch directory left
 # behind.  For example, `rm -rf` removes the `.git` directory and every file
 # that the user can delete, but not the contents of a directory that another
 # user owns, such as a `.venv` that a container running as root created.
-# `is_deleted_branch` recognizes only one kind of leftover, a tree of Eclipse
-# `.project` files, so without this warning any other kind would go
+# `is_deleted_branch` recognizes only some kinds of leftover, such as a tree of
+# Eclipse `.project` files, so without this warning any other kind would go
 # unmentioned.  The directory is not listed, because with no repository,
 # nothing tells whether it holds work.
+#
+# A directory can also be in a working tree that git cannot use, because a
+# `.git` in it or in an ancestor names a git directory that does not exist (as
+# for a linked worktree whose main working tree was moved) or belongs to
+# another user (which git refuses unless `safe.directory` allows it).  The
+# warning then quotes git, because such a directory is a repository that can
+# hold work, not a leftover.
+#
+# The walk of `examine_directory` visits every directory below a directory
+# before any directory outside it, so ${warned_dir}, the directory that this
+# function last warned about, is the only one that can contain $1.  A
+# directory within it is part of its contents, which the user has to inspect
+# anyway, so the warning about it covers them.
+warned_dir=
 warn_if_not_in_working_tree() {
-  if git -C "$1" rev-parse --git-dir > /dev/null 2>&1; then
+  if [ -z "${is_deleted_branch_no_working_tree}" ]; then
     return 0
   fi
-  wnwt_dir="$(absolute_path "$1")" || wnwt_dir="$1"
+  if [ -n "${warned_dir}" ]; then
+    case "$1" in
+      "${warned_dir}"/*) return 0 ;;
+    esac
+  fi
+  # `rev-parse --show-toplevel` failed, which it also does in a bare
+  # repository.
+  if wnwt_git_error="$(git -C "$1" rev-parse --git-dir 2>&1 > /dev/null)"; then
+    return 0
+  fi
+  # `cd` prints its own diagnostic on failure.
+  if ! wnwt_dir="$(absolute_path "$1")"; then
+    status=1
+    return 0
+  fi
+  warned_dir="$1"
+  wnwt_ancestor="${wnwt_dir}"
+  while :; do
+    if [ -e "${wnwt_ancestor}/.git" ] || [ -L "${wnwt_ancestor}/.git" ]; then
+      # Git's diagnostic about `safe.directory` continues with advice on
+      # further lines; the first line says what is wrong.
+      echo "${SCRIPT_NAME}: warning: not listing ${wnwt_dir}, which git cannot use as a working tree although ${wnwt_ancestor}/.git exists: ${wnwt_git_error%%
+*}" >&2
+      return 0
+    fi
+    if [ -z "${wnwt_ancestor}" ]; then
+      break
+    fi
+    wnwt_ancestor="${wnwt_ancestor%/*}"
+  done
   # Files that the user does not own are the likeliest reason that the
   # directory is still here, so name one.  `-prune` keeps `find` out of a
   # directory that another user owns:  that directory is itself the example.
@@ -505,8 +552,9 @@ warn_if_not_in_working_tree() {
 }
 
 # Reports directory $1, whose name matches `*-branch-*`, if its branch was
-# deleted in the remote or if it holds nothing but Eclipse `.project` files.
-# Warns about it if it is in no git working tree.
+# deleted in the remote or if it is the leftover of a branch directory, such as
+# one that holds nothing but Eclipse `.project` files.  Warns about it if it
+# is in no git working tree but is not such a leftover.
 #
 # `is_deleted_branch` answers about both:  it reports a directory that holds
 # nothing but `.project` files as deleted (status 0), which is why this
