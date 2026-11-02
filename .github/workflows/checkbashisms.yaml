@@ -1,17 +1,16 @@
 name: checkbashisms
 
-# Pushes to branches other than `main` are tested by the `pull_request` event.
-# Running on every push would test each pull request commit twice.
-"on":
-  push:
-    branches: [main]
-  pull_request:
+"on": [push, pull_request]
 
 permissions:
   contents: read
 
 jobs:
   lint:
+    # A commit pushed to a branch of this repository triggers both a `push` and
+    # a `pull_request` event.  Skip the `pull_request` run, which would duplicate
+    # the `push` run.  A pull request from a fork has no `push` run here.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
