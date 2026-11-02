@@ -1679,14 +1679,13 @@ parse_llm_option() {
 ## pull that rebases cannot be resolved this way.)
 ## Sets ${pull_fetched} to the head of the upstream branch that the pull
 ## fetched, which it merged, fast-forwarded to, rebased onto, or found already
-## in the branch, as a full hash such as the 40 hexadecimal digits that
-## `git rev-parse HEAD` prints.  That commit's history was built where it
-## was pushed, even if no remote-tracking branch records it, as when
-## `branch.BRANCH.remote` is a URL.  Sets ${pull_fetched} to the empty string
-## instead if the upstream branch is in the local repository or in a non-bare
-## repository in the local file system, such as another working clone, whose
-## branches need not have been pushed, or if the pull did not record the head
-## in FETCH_HEAD.
+## in the branch, as a full hash such as
+## "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b".  That commit's history was
+## built where it was pushed, even if no remote-tracking branch records it,
+## as when `branch.BRANCH.remote` is a URL.  Sets ${pull_fetched} to the empty
+## string instead if the branches of the upstream branch's repository need
+## not have been built (see `is_built_remote`), or if the pull did not record
+## the head in FETCH_HEAD.
 ## Returns 1, after printing a diagnostic, if a merge is already in progress
 ## in DIRECTORY, or if the pull fails and its conflicts are not resolved, or
 ## if the pull's merge cannot be committed.
@@ -1738,19 +1737,12 @@ pull_resolving() {
     fi
   fi
   # FETCH_HEAD names first the commit that `git pull` merges, fast-forwards
-  # to, or rebases onto.  The remote "." is the local repository.
+  # to, or rebases onto.
   if pull_branch="$(git -C "${pull_dir}" symbolic-ref --quiet --short HEAD)" \
     && pull_remote="$(git -C "${pull_dir}" config --get "branch.${pull_branch}.remote")" \
-    && [ "${pull_remote}" != . ]; then
-    pull_key="$(repository_key "${pull_dir}" "${pull_remote}")"
-    case "${pull_key}" in
-      /*) pull_bare="$(git -C "${pull_key}" rev-parse --is-bare-repository 2> /dev/null)" ;;
-      *) pull_bare=true ;;
-    esac
-    if [ "${pull_bare}" = true ]; then
-      # shellcheck disable=SC2034 # used by the commands that source this file
-      pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
-    fi
+    && is_built_remote "${pull_dir}" "${pull_remote}"; then
+    # shellcheck disable=SC2034 # used by the commands that source this file
+    pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
   fi
   if [ "${pull_merging}" -eq 0 ]; then
     return 0
@@ -1922,19 +1914,55 @@ tracking_branch_of() {
   return 1
 }
 
+## Usage: is_built_remote DIRECTORY REMOTE
+## Returns 0 if the branches of the repository that REMOTE names in the clone
+## in DIRECTORY were built where they were pushed, and returns 1 otherwise.
+## REMOTE is a remote's name, such as "origin", or a URL or a pathname, which
+## git accepts in place of a remote's name.  The branches of a repository that
+## is not in the local file system, such as one on GitHub, were built where
+## they were pushed, and so were those of a bare repository in the local file
+## system that has no linked worktree.  The branches of any other repository
+## need not have been pushed:  of the local repository, which the remote "."
+## names; of a non-bare repository, such as another working clone; of a bare
+## repository with a linked worktree, where commits are made; and of a
+## repository whose location is not known, as when its pathname names no
+## directory or begins with "~".
+is_built_remote() {
+  if [ "$2" = . ]; then
+    return 1
+  fi
+  # Git resolves a relative pathname in the top level of the working tree,
+  # not in a subdirectory such as DIRECTORY.
+  built_remote_top="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" \
+    || built_remote_top="$1"
+  built_remote_key="$(repository_key "${built_remote_top}" "$2")"
+  case "${built_remote_key}" in
+    '' | '~'*) return 1 ;;
+    /*) ;;
+    *) return 0 ;;
+  esac
+  [ "$(git -C "${built_remote_key}" rev-parse --is-bare-repository 2> /dev/null)" = true ] \
+    && [ "$(git -C "${built_remote_key}" worktree list --porcelain 2> /dev/null | grep -c '^worktree ')" -eq 1 ]
+}
+
 ## Usage: remote_branch_refs DIRECTORY
 ## Prints the full names, separated by spaces, of the remote-tracking branches
 ## that the branch checked out in DIRECTORY pushes to and pulls from, such as
-## "refs/remotes/origin/feature".  Omits any that does not exist or that is a
-## local branch rather than a remote-tracking branch, and prints each only
-## once.  If the branch pushes to a remote other than the one that it pulls
-## from, first fetches the branch that it pushes to, because `git pull`
-## fetches only the remote that it pulls from; if that fetch fails, prints a
-## warning and uses the remote-tracking branch as it is.
+## "refs/remotes/origin/feature", and whose histories were built where they
+## were pushed.  Omits any that does not exist, that is a local branch rather
+## than a remote-tracking branch, or whose remote's branches need not have
+## been built (see `is_built_remote`), and prints each only once.  If the
+## branch pushes to a remote other than the one that it pulls from, first
+## fetches the branch that it pushes to, because `git pull` fetches only the
+## remote that it pulls from; if that fetch fails, prints a warning and uses
+## the remote-tracking branch as it is.
 remote_branch_refs() {
   remote_refs_list=''
-  if remote_refs_branch="$(git -C "$1" symbolic-ref --quiet HEAD)" \
-    && remote_refs_push="$(git -C "$1" rev-parse --symbolic-full-name '@{push}' 2> /dev/null)" \
+  if ! remote_refs_branch="$(git -C "$1" symbolic-ref --quiet HEAD)"; then
+    printf '\n'
+    return 0
+  fi
+  if remote_refs_push="$(git -C "$1" rev-parse --symbolic-full-name '@{push}' 2> /dev/null)" \
     && git -C "$1" rev-parse --verify --quiet "${remote_refs_push}" > /dev/null; then
     remote_refs_push_remote="$(git -C "$1" for-each-ref --format='%(push:remotename)' "${remote_refs_branch}")"
     # `%(push:remoteref)` is empty unless the remote has push refspecs; then
@@ -1944,6 +1972,7 @@ remote_branch_refs() {
       refs/remotes/*)
         if [ -n "${remote_refs_push_remote}" ] \
           && [ "${remote_refs_push_remote}" != "$(git -C "$1" for-each-ref --format='%(upstream:remotename)' "${remote_refs_branch}")" ] \
+          && is_built_remote "$1" "${remote_refs_push_remote}" \
           && ! git -C "$1" fetch -q "${remote_refs_push_remote}" \
             "+${remote_refs_push_branch:-${remote_refs_branch}}:${remote_refs_push}" < /dev/null; then
           echo "${SCRIPT_NAME}: cannot fetch ${remote_refs_push#refs/remotes/} in $1; it might be out of date" >&2
@@ -1958,7 +1987,12 @@ remote_branch_refs() {
         *" ${remote_refs_ref} "*) ;;
         *)
           case "${remote_refs_ref}" in
-            refs/remotes/*) remote_refs_list="${remote_refs_list:+${remote_refs_list} }${remote_refs_ref}" ;;
+            refs/remotes/*)
+              if is_built_remote "$1" "$(git -C "$1" for-each-ref \
+                --format="%(${remote_refs_kind}:remotename)" "${remote_refs_branch}")"; then
+                remote_refs_list="${remote_refs_list:+${remote_refs_list} }${remote_refs_ref}"
+              fi
+              ;;
           esac
           ;;
       esac
@@ -2008,26 +2042,46 @@ built_commits() {
 ## that fast-forwarded the branch brought only commits that the remote
 ## already had.  Prints a diagnostic if it returns 1 because git fails.
 ## The account in ${merge_fix_account} omits each commit in BUILT that is in
-## the history of a remote branch or of an earlier commit in BUILT, because it
-## excludes no more commits, but that commit's tree still counts.
+## the history of a remote branch or of another commit in BUILT, because it
+## excludes no more commits, but that commit's tree still counts.  Of commits
+## in BUILT that are the same commit, the account keeps the first.
 has_unbuilt_merge() {
   merge_fix_remotes="$(remote_branch_refs .)"
-  merge_fix_built=''
   # Every commit in BUILT that is in the repository, for the comparison of
   # trees below.
-  merge_fix_trees=''
+  merge_fix_present=''
   for merge_fix_commit in $1; do
-    if ! git rev-parse --verify --quiet "${merge_fix_commit}^{commit}" > /dev/null; then
-      continue
+    if git rev-parse --verify --quiet "${merge_fix_commit}^{commit}" > /dev/null; then
+      merge_fix_present="${merge_fix_present:+${merge_fix_present} }${merge_fix_commit}"
     fi
-    merge_fix_trees="${merge_fix_trees:+${merge_fix_trees} }${merge_fix_commit}"
-    # A commit in a remote branch's history, such as the head that a pull
-    # fetched, excludes nothing more, and would only lengthen the account.
+  done
+  # A commit in the history of a remote branch or of another commit in BUILT,
+  # such as the head that a pull fetched, excludes nothing more, and would
+  # only lengthen the account.  Each commit has a position in
+  # ${merge_fix_present}, so that of two names of one commit, such as a ref
+  # and a hash, only the later is omitted.
+  merge_fix_built=''
+  merge_fix_position=0
+  for merge_fix_commit in ${merge_fix_present}; do
+    merge_fix_position=$((merge_fix_position + 1))
     merge_fix_redundant=0
-    for merge_fix_remote in ${merge_fix_remotes} ${merge_fix_built}; do
+    for merge_fix_remote in ${merge_fix_remotes}; do
       if git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_remote}"; then
         merge_fix_redundant=1
         break
+      fi
+    done
+    merge_fix_other_position=0
+    for merge_fix_other in ${merge_fix_present}; do
+      merge_fix_other_position=$((merge_fix_other_position + 1))
+      if [ "${merge_fix_redundant}" -eq 1 ]; then
+        break
+      fi
+      if [ "${merge_fix_other_position}" -ne "${merge_fix_position}" ] \
+        && git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_other}" \
+        && { [ "${merge_fix_other_position}" -lt "${merge_fix_position}" ] \
+          || ! git merge-base --is-ancestor "${merge_fix_other}" "${merge_fix_commit}"; }; then
+        merge_fix_redundant=1
       fi
     done
     if [ "${merge_fix_redundant}" -eq 0 ]; then
@@ -2040,7 +2094,7 @@ has_unbuilt_merge() {
   fi
   # The build of a tree that a remote branch, or a commit in BUILT, has is
   # not a merge's doing.
-  for merge_fix_commit in ${merge_fix_remotes} ${merge_fix_trees}; do
+  for merge_fix_commit in ${merge_fix_remotes} ${merge_fix_present}; do
     if [ "$(git rev-parse --verify --quiet "${merge_fix_commit}^{tree}")" = "${merge_fix_tree}" ]; then
       return 1
     fi
@@ -2142,9 +2196,9 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
 ## such as "refs/remotes/upstream/main" or the head that a pull of the
 ## current branch fetched (see `pull_resolving`), together with the
 ## `built_commits` of DIRECTORY, a working tree such as the one that COMMIT
-## comes from, if DIRECTORY is given and not empty.  The merge commit can be the one that
-## this call made, one that a pull made, or one that an earlier call made
-## but did not push, as when its build failed.
+## comes from, if DIRECTORY is given and not empty.  The merge commit can be
+## the one that this call made, one that a pull made, or one that an earlier
+## call made but did not push, as when its build failed.
 ## Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
