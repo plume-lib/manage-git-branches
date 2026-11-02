@@ -135,16 +135,18 @@
 # TO_DIR's branch, the agent would merely work around a failure that no
 # merge caused, so it is not asked.
 #
-# When Claude fails to resolve the conflicts or to fix the build, or when this
-# script rejects its work, this script prints a command such as
+# When the agent fails to resolve the conflicts or to fix the build, or when
+# this script rejects its work, this script prints a command such as
 #   cd DIR && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b
-# that continues Claude's session interactively.  There, you can ask Claude
-# about its work, or tell it to finish in a way that its instructions forbade,
-# such as by changing text outside a conflict region.  Then commit the merge
-# or the fix yourself, and run this script again.  The resumed session runs
-# with your usual permissions, not in the sandbox, and it contains the text
-# of the merged changes, which can include instructions from other people.
-# No such command is printed for Codex.
+# or
+#   cd DIR && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093
+# that continues the agent's session interactively.  There, you can ask the
+# agent about its work, or tell it to finish in a way that its instructions
+# forbade, such as by changing text outside a conflict region.  Then commit
+# the merge or the fix yourself, and run this script again.  The resumed
+# session runs with your usual permissions, not in the sandbox, and it
+# contains the text of the merged changes, which can include instructions
+# from other people.
 
 # Here is an example of use.
 #

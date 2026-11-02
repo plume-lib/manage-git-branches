@@ -1301,11 +1301,13 @@ agent_available() {
 ## command should run in the current directory.  Otherwise returns 1, after
 ## printing a diagnostic, if the agent fails.
 ##
-## Sets ${agent_session_id} and ${agent_session_dir}, which
-## `report_agent_session` reads:  for Claude, a UUID such as
-## "1e55b89c-cfb5-468f-a783-cb104201809b" that names the agent's session, and
-## the current directory, in which `claude --resume` finds that session.
-## ${agent_session_id} is empty for Codex, or if no UUID could be made.
+## Sets ${agent_session_id}, ${agent_session_command}, and
+## ${agent_session_dir}, which `report_agent_session` reads:  a UUID such as
+## "1e55b89c-cfb5-468f-a783-cb104201809b" that names the agent's session; the
+## command that continues a session given its UUID, "claude --resume" or
+## "codex resume"; and the current directory.  ${agent_session_id} is empty if
+## the session has no UUID:  for Claude, if this system cannot make one, and
+## for Codex, if Codex does not print the one that it chose.
 ##
 ## The agent can read every file of the working tree, including files that
 ## git ignores, such as a ".env" file, and the repository, including its
@@ -1327,6 +1329,7 @@ run_agent() {
   esac
   run_agent_start="$(date +%s)"
   agent_session_id=''
+  agent_session_command="$1 resume"
   agent_session_dir="$(pwd)"
   # Each agent reads its instructions from standard input.
   #
@@ -1350,6 +1353,7 @@ run_agent() {
   # own installation, which its sandbox runs.
   case "$1" in
     claude)
+      agent_session_command="claude --resume"
       agent_session_id="$(new_uuid)"
       # The UUID contains no character that field splitting or globbing
       # would change, so the unquoted expansion is one option and its value.
@@ -1377,10 +1381,35 @@ run_agent() {
           run_agent_absent="${run_agent_absent} ${run_agent_name}"
         fi
       done
-      printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" codex exec -c 'default_permissions="resolve_conflicts"' \
-        -c "permissions.resolve_conflicts.filesystem={\":minimal\" = \"read\", \":project_roots\" = {\".\" = \"write\"}, $(toml_string "${run_agent_repository}") = \"read\", $(toml_string "${run_agent_codex}") = \"read\"}" \
-        -
-      run_agent_status=$?
+      # Codex chooses its session's UUID and prints it on standard error, in
+      # a header line such as "session id: 01a19ac9-dab5-7570-93b6-6ba41bf65093".
+      # `tee` copies standard error to a file, from which the first such line
+      # is read, and still shows it to the user.  The file and the file that
+      # holds Codex's exit status are in the git directory, which Codex
+      # cannot write.
+      if ! run_agent_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-stderr)" \
+        || ! run_agent_status_file="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-status)"; then
+        echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
+        return 1
+      fi
+      rm -f -- "${run_agent_status_file}"
+      {
+        {
+          printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" codex exec -c 'default_permissions="resolve_conflicts"' \
+            -c "permissions.resolve_conflicts.filesystem={\":minimal\" = \"read\", \":project_roots\" = {\".\" = \"write\"}, $(toml_string "${run_agent_repository}") = \"read\", $(toml_string "${run_agent_codex}") = \"read\"}" \
+            - 2>&1 1>&3 3>&-
+          echo "$?" > "${run_agent_status_file}"
+        } | tee -- "${run_agent_log}" >&2
+      } 3>&1
+      run_agent_status="$(cat -- "${run_agent_status_file}" 2> /dev/null)"
+      case "${run_agent_status}" in
+        "" | *[!0-9]*) run_agent_status=1 ;;
+      esac
+      agent_session_id="$(sed -n -e 's/^session id: //p' "${run_agent_log}" 2> /dev/null | head -n 1)"
+      if ! is_uuid "${agent_session_id}"; then
+        agent_session_id=''
+      fi
+      rm -f -- "${run_agent_log}" "${run_agent_status_file}"
       for run_agent_name in ${run_agent_absent}; do
         if [ -d "${run_agent_name}" ] && [ ! -L "${run_agent_name}" ]; then
           # `rmdir` removes only an empty directory.
@@ -1415,11 +1444,11 @@ run_agent() {
 ## "cd /home/me/myrepo && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b".
 ## The user can then ask the agent about its work, or tell it to finish the
 ## work in a way that its instructions forbade, such as by changing text
-## outside a conflict region.  Prints nothing if there is no such session, as
-## for Codex.
+## outside a conflict region.  Prints nothing if the session has no known
+## UUID.
 report_agent_session() {
   if [ -n "${agent_session_id:-}" ]; then
-    echo "${SCRIPT_NAME}: to continue the session of claude:  cd $(shell_word "${agent_session_dir}") && claude --resume ${agent_session_id}" >&2
+    echo "${SCRIPT_NAME}: to continue the session of ${agent_session_command%% *}:  cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${agent_session_id}" >&2
   fi
 }
 
@@ -1433,10 +1462,17 @@ new_uuid() {
   else
     new_uuid_value="$(cat /proc/sys/kernel/random/uuid 2> /dev/null)"
   fi
-  if printf '%s\n' "${new_uuid_value}" \
-    | grep -x -q '[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}'; then
+  if is_uuid "${new_uuid_value}"; then
     printf '%s\n' "${new_uuid_value}"
   fi
+}
+
+## Usage: is_uuid STRING
+## Succeeds if STRING is a UUID in lowercase, such as
+## "1e55b89c-cfb5-468f-a783-cb104201809b".
+is_uuid() {
+  printf '%s\n' "$1" \
+    | grep -x -q '[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}'
 }
 
 ## Usage: shell_word STRING

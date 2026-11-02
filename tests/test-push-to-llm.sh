@@ -87,6 +87,9 @@ cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
 basename -- "$0" >> "${STUB_LOG}"
 printf '%s\n' "$@" > "${STUB_ARGS}"
+if [ "$(basename -- "$0")" = codex ]; then
+  echo "session id: 01a19ac9-dab5-7570-93b6-6ba41bf65093" >&2
+fi
 cat > "${STUB_PROMPT}"
 if ! grep -q '^<<<<<<< ' file.txt; then
   case "${STUB_BUILD:-none}" in
@@ -434,16 +437,14 @@ case "${push_output}" in
   *) fail "failing agent: wrong diagnostic: ${push_output}" ;;
 esac
 
-## No command to continue a session is printed for Codex.
+## The command that continues Codex's session names the session that Codex
+## printed.
 setup_case fail-codex
 push_to fail --codex
 check_not_resolved "failing codex"
 case "${push_output}" in
-  *"codex failed with status 3"*) ;;
+  *"codex failed with status 3"*"to continue the session of codex:  cd "*" && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093"*) ;;
   *) fail "failing codex: wrong diagnostic: ${push_output}" ;;
-esac
-case "${push_output}" in
-  *"to continue the session"*) fail "failing codex: printed a command to continue a session: ${push_output}" ;;
 esac
 
 ## The work of an agent that fails is checked too.

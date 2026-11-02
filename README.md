@@ -103,9 +103,9 @@ The commands are:
   remote branches nor those of FROM_DIR's branch contain, such as the one
   that it just made, it asks the agent to fix the build, up to 3 times, and
   commits the fix.
-  If Claude fails, or if `git-push-to` rejects its work, `git-push-to` prints
-  a command, `cd DIR && claude --resume ID`, that continues Claude's session
-  interactively.
+  If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
+  prints a command, such as `cd DIR && claude --resume ID`, that continues
+  the agent's session interactively.
   `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
   on.
   The agent runs in a sandbox, which requires a recent version:  Claude
