@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Report, for the open pull requests of a GitHub repository:
 #  * which PRs conflict with master,
 #  * which PRs contain all the non-merge commits of another PR, and
@@ -22,8 +22,9 @@
 #     (SHA1 < SHA2, so the order of the two branches does not matter)
 #   contains<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>yes|no
 #
-# Requires Git 2.38 or later, gh, and Bash 4 or later as /bin/bash.  On macOS,
-# /bin/bash is Bash 3.2, so this script does not work there.
+# Requires Git 2.38 or later, gh, and Bash 4 or later as the first "bash" on
+# the PATH.  On macOS, /bin/bash is Bash 3.2, so put a newer Bash, such as
+# Homebrew's, earlier on the PATH.
 
 set -o pipefail
 PAIRWISE=yes
