@@ -18,7 +18,9 @@
 #
 # It parses FILE as a Bash script if FILE's first line is a "#!" line that
 # names bash, as in "#!/usr/bin/env bash", and as a POSIX shell script
-# otherwise.  The two differ in how they quote within a parameter expansion.
+# otherwise.  The two differ only in whether a "'" begins a quotation in the
+# word of a double-quoted "${VAR-word}", "${VAR=word}", "${VAR?word}", or
+# "${VAR+word}".
 #
 # This splits the script into words the way a shell does, so that a value that
 # contains whitespace, quotation marks, or a command substitution does not
@@ -272,6 +274,13 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
       pos += 2
       continue
     }
+    if (c == "$" && substr(line, pos + 1, 1) == "$") {
+      # The special parameter "$$".  A "{" or "(" that follows it is not part
+      # of an expansion, as in "$${".
+      add_word("$$")
+      pos += 2
+      continue
+    }
     if (c == "$" && substr(line, pos + 1, 2) == "((") {
       # An arithmetic expansion.  Its contents are not a command, and the
       # "))" that ends it is not two operators.  Parentheses nest within
@@ -322,19 +331,6 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
       pos += 2
       continue
     }
-    if (context() == "param") {
-      if (c == "}") { pop_context(); add_word(c); pos++; continue }
-      if (c == "\"") { push_context("double"); add_word(c); pos++; continue }
-      if (c == "'" && !param_literal_quote[depth]) {
-        push_context("single")
-        add_word(c)
-        pos++
-        continue
-      }
-      add_word(c)
-      pos++
-      continue
-    }
     if (context() == "arith") {
       if (c == "(") { arith_parens[depth]++; add_word(c); pos++; continue }
       if (c == ")") {
@@ -361,8 +357,15 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
       pos++
       continue
     }
+    if (context() == "param") {
+      if (c == "}") { pop_context(); add_word(c); pos++; continue }
+      if (c == "'" && param_literal_quote[depth]) { add_word(c); pos++; continue }
+    }
     if (c == "'") { push_context("single"); add_word(c); pos++; continue }
     if (c == "\"") { push_context("double"); add_word(c); pos++; continue }
+    # Within a parameter expansion, every other character is part of the
+    # word.
+    if (context() == "param") { add_word(c); pos++; continue }
     if (context() == "subst" || context() == "backtick") {
       # A command substitution becomes part of a word, so a here-document
       # operator within one is not a token that "is_heredoc" can find.
