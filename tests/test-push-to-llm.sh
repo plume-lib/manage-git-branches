@@ -1392,6 +1392,68 @@ if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
   fail "fast-forward to a merge of FROM_DIR's pull: the build is not fixed"
 fi
 
+## Usage: push_remote_commit
+## Pushes a commit to feature that adds the file remote.txt, which does not
+## affect the build, from a clone other than ${feature_dir}.  Sets
+## ${feature_head} to it.
+push_remote_commit() {
+  git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+  echo "remote" > "${case_dir}/other-clone/remote.txt"
+  git -C "${case_dir}/other-clone" add remote.txt
+  git -C "${case_dir}/other-clone" commit -q -m "Add remote.txt"
+  git -C "${case_dir}/other-clone" push -q
+  feature_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
+}
+
+## A pull that fast-forwards makes no merge commit, so after it the fix's
+## message names only the merge of main, which broke the build.
+setup_case pull-ff-merge-build build
+push_remote_commit
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "fast-forward pull and a merge that breaks the build: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "fast-forward pull and a merge that breaks the build: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
+  fail "fast-forward pull and a merge that breaks the build: wrong message for the fix: ${message}"
+fi
+
+## When the merge fast-forwards to a merge commit that the pull of FROM_DIR
+## made, the agent is asked to fix the build:  no remote branch of main or of
+## feature contains that merge commit.
+setup_case pull-from-ff-build build
+git -C "${main_dir}" reset -q --hard HEAD^
+git -C "${main_dir}" push -q --force
+git -C "${feature_dir}" reset -q --hard "$(git -C "${main_dir}" rev-parse HEAD)"
+git -C "${feature_dir}" push -q --force
+git clone -q -b main "${remote}" "${case_dir}/other-clone"
+echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
+git -C "${case_dir}/other-clone" commit -q -a -m "Break the build remotely"
+git -C "${case_dir}/other-clone" push -q
+echo "local" > "${main_dir}/local.txt"
+git -C "${main_dir}" add local.txt
+git -C "${main_dir}" commit -q -m "Add local.txt"
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "fast-forward to a merge of FROM_DIR's pull: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "fast-forward to a merge of FROM_DIR's pull: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q 'just fast-forwarded branch feature' "${STUB_PROMPT}"; then
+  fail "fast-forward to a merge of FROM_DIR's pull: the instructions do not say that the merge fast-forwarded: $(cat "${STUB_PROMPT}")"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'main' of ${remote%.git}" ]; then
+  fail "fast-forward to a merge of FROM_DIR's pull: wrong message for the fix: ${message}"
+fi
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+  fail "fast-forward to a merge of FROM_DIR's pull: the build is not fixed"
+fi
+
 ## With --no-llm, a pull that breaks the build is not given to an agent.
 setup_pull_breaks pull-build-no-llm
 STUB_BUILD=fix push_to good --no-llm
