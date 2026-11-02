@@ -174,8 +174,11 @@ The commands are:
   Commits on a branch whose changes have landed in a remote's default branch,
   as after a squash-merge, do not count as work that would be lost.
   Nor does a commit or an uncommitted change each of whose resulting files,
-  with its pathname, mode, and contents, is in the commit that a ref that the
-  removal leaves names, such as a remote-tracking ref.
+  with its pathname, mode, and contents, is in a commit that some ref that the
+  removal leaves names, such as a remote-tracking ref; the ref can differ from
+  file to file.  A commit's resulting files are as the last unpushed commit
+  of its branch has them, so a branch whose final result has landed loses no
+  work, even if the branch changes a file more than once.
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.

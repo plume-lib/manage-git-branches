@@ -89,7 +89,8 @@ git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
   stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost \
   squashed empty savedchange partlysaved deletion savedcommit reverted copied \
-  chmodded; do
+  chmodded overwritten partlysavedcommits stashsaved stashuntracked \
+  subignored; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -274,7 +275,7 @@ add_unpushed_commit "${unpushed}"
 run_command 'unpushed commits' 1 "${unpushed}"
 check_present 'unpushed commits' "${unpushed}"
 check_message 'unpushed commits' \
-  "refusing to remove ${unpushed}: 1 commit(s) are on no remote-tracking ref or tag; re-run with --force-unpushed"
+  "refusing to remove ${unpushed}: 1 commit(s) have changes that are on no remote-tracking ref or tag; re-run with --force-unpushed"
 
 # Each flag waives exactly one check.
 run_command 'unpushed commits, with the other flag' 1 \
@@ -283,7 +284,7 @@ check_present 'unpushed commits, with the other flag' "${unpushed}"
 run_command 'unpushed commits waived' 0 --force-unpushed "${unpushed}"
 check_gone 'unpushed commits waived' "${unpushed}"
 check_message 'unpushed commits waived' \
-  "--force-unpushed: deleting 1 commit(s) that are on no remote-tracking ref or tag"
+  "--force-unpushed: deleting 1 commit(s) that are on no remote-tracking ref or tag, 1 of them with changes that are on none"
 
 # A directory that fails both checks needs both waivers, which is what
 # `--force` is.
@@ -310,15 +311,14 @@ echo "more squashed work" >> "${squashed}/squashed.txt"
 git -C "${squashed}" commit -q -a -m "More work to squash-merge"
 squash_merge "${squashed}"
 # Work after the squash-merge has not landed, and neither, then, has the
-# branch.  Of the branch's three commits, the second is still counted as held,
-# because the remote's default branch has the contents that it gives
-# squashed.txt; the first gives squashed.txt contents that no remote holds.
+# branch.  None of the branch's three commits is saved, because the branch's
+# last commit gives squashed.txt contents that no remote holds.
 echo "work after the squash-merge" >> "${squashed}/squashed.txt"
 git -C "${squashed}" commit -q -a -m "Work after the squash-merge"
 run_command 'work after a squash-merge' 1 "${squashed}"
 check_present 'work after a squash-merge' "${squashed}"
 check_message 'work after a squash-merge' \
-  "refusing to remove ${squashed}: 2 commit(s) are on no remote-tracking ref or tag"
+  "refusing to remove ${squashed}: 3 commit(s) have changes that are on no remote-tracking ref or tag"
 git -C "${squashed}" reset -q --hard HEAD~1
 run_command 'a squash-merged branch' 0 "${squashed}"
 check_gone 'a squash-merged branch' "${squashed}"
@@ -333,6 +333,83 @@ git -C "${savedcommit}" commit -q -a -m 'A commit that is saved'
 run_command 'a saved commit' 0 "${savedcommit}"
 check_gone 'a saved commit' "${savedcommit}"
 
+# A commit whose changes a later commit replaces is saved if the later
+# commit's changes are, as when a branch's final result lands by way of
+# another branch.
+overwritten="$(make_clone overwritten)"
+push_elsewhere overwritten 'a final version'
+git -C "${overwritten}" fetch -q origin
+echo 'a first draft' >> "${overwritten}/file.txt"
+git -C "${overwritten}" commit -q -a -m 'A first draft'
+git -C "${overwritten}" show origin/overwritten-elsewhere:file.txt \
+  > "${overwritten}/file.txt"
+git -C "${overwritten}" commit -q -a -m 'A final version'
+run_command 'a saved commit after one that it replaces' 0 "${overwritten}"
+check_gone 'a saved commit after one that it replaces' "${overwritten}"
+
+# A waiver reports the saved commits that it deletes, too.
+partlysavedcommits="$(make_clone partlysavedcommits)"
+push_elsewhere partlysavedcommits 'a commit that is saved'
+git -C "${partlysavedcommits}" fetch -q origin
+echo 'a commit that is saved' >> "${partlysavedcommits}/file.txt"
+git -C "${partlysavedcommits}" commit -q -a -m 'A commit that is saved'
+echo 'unsaved' > "${partlysavedcommits}/unsaved.txt"
+git -C "${partlysavedcommits}" add unsaved.txt
+git -C "${partlysavedcommits}" commit -q -m 'A commit that is not saved'
+run_command 'a partly saved branch' 1 "${partlysavedcommits}"
+check_message 'a partly saved branch' \
+  "refusing to remove ${partlysavedcommits}: 1 commit(s) have changes that are on no remote-tracking ref or tag"
+run_command 'a partly saved branch, waived' 0 --force-unpushed \
+  "${partlysavedcommits}"
+check_message 'a partly saved branch, waived' \
+  "--force-unpushed: deleting 2 commit(s) that are on no remote-tracking ref or tag, 1 of them with changes that are on none"
+
+# A stash entry whose changes to tracked files are saved is saved, but the
+# untracked files that it holds are not.
+stashsaved="$(make_clone stashsaved)"
+push_elsewhere stashsaved 'a stashed change'
+git -C "${stashsaved}" fetch -q origin
+echo 'a stashed change' >> "${stashsaved}/file.txt"
+git -C "${stashsaved}" add file.txt
+git -C "${stashsaved}" stash push -q
+run_command 'a saved stash entry' 0 "${stashsaved}"
+check_gone 'a saved stash entry' "${stashsaved}"
+stashuntracked="$(make_clone stashuntracked)"
+push_elsewhere stashuntracked 'another stashed change'
+git -C "${stashuntracked}" fetch -q origin
+echo 'another stashed change' >> "${stashuntracked}/file.txt"
+git -C "${stashuntracked}" add file.txt
+echo 'an untracked file' > "${stashuntracked}/untracked.txt"
+git -C "${stashuntracked}" stash push -q --include-untracked
+run_command 'a stash entry with untracked files' 1 "${stashuntracked}"
+check_present 'a stash entry with untracked files' "${stashuntracked}"
+check_message 'a stash entry with untracked files' \
+  "refusing to remove ${stashuntracked}: 1 commit(s) have changes that are on no remote-tracking ref or tag"
+
+# A commit that moves a submodule is not saved, even where the configuration
+# says to ignore the submodule.  The submodule need not be checked out:  its
+# empty directory stands for one that is not.
+subignored="$(make_clone subignored)"
+printf '[submodule "sub"]\n\tpath = sub\n\turl = %s\n\tignore = all\n' \
+  "${remote}" > "${subignored}/.gitmodules"
+mkdir "${subignored}/sub"
+git -C "${subignored}" add .gitmodules
+git -C "${subignored}" update-index --add \
+  --cacheinfo "160000,$(git -C "${subignored}" rev-parse HEAD),sub"
+git -C "${subignored}" commit -q -m 'Add a submodule'
+git -C "${subignored}" push -q origin subignored
+push_elsewhere subignored 'a change beside a submodule'
+git -C "${subignored}" fetch -q origin
+echo 'a change beside a submodule' >> "${subignored}/file.txt"
+git -C "${subignored}" add file.txt
+git -C "${subignored}" update-index \
+  --cacheinfo "160000,$(git -C "${subignored}" rev-parse HEAD),sub"
+git -C "${subignored}" commit -q -m 'Change a file and move a submodule'
+run_command 'a commit that moves an ignored submodule' 1 "${subignored}"
+check_present 'a commit that moves an ignored submodule' "${subignored}"
+check_message 'a commit that moves an ignored submodule' \
+  "refusing to remove ${subignored}: 1 commit(s) have changes that are on no remote-tracking ref or tag"
+
 # A commit that restores contents that a remote-tracking ref's history holds,
 # but that the commit it names does not, is not saved.
 reverted="$(make_clone reverted)"
@@ -345,7 +422,7 @@ git -C "${reverted}" revert --no-edit HEAD > /dev/null
 run_command 'a commit that reverts' 1 "${reverted}"
 check_present 'a commit that reverts' "${reverted}"
 check_message 'a commit that reverts' \
-  "refusing to remove ${reverted}: 1 commit(s) are on no remote-tracking ref or tag"
+  "refusing to remove ${reverted}: 1 commit(s) have changes that are on no remote-tracking ref or tag"
 
 # A commit that adds a copy of a file is not saved by the original, and a
 # commit that changes a file's mode alone is not saved by the file's contents.
@@ -358,7 +435,7 @@ git -C "${copied}" commit -q -a -m 'Make a file executable'
 run_command 'a commit that copies and one that changes a mode' 1 "${copied}"
 check_present 'a commit that copies and one that changes a mode' "${copied}"
 check_message 'a commit that copies and one that changes a mode' \
-  "refusing to remove ${copied}: 2 commit(s) are on no remote-tracking ref or tag"
+  "refusing to remove ${copied}: 2 commit(s) have changes that are on no remote-tracking ref or tag"
 
 # A branch that changes no file has nothing to land, so merging it into the
 # remote's default branch changes nothing, but its commits have not landed.
@@ -367,7 +444,7 @@ git -C "${empty}" commit -q --allow-empty -m 'Empty commit'
 run_command 'an empty commit' 1 "${empty}"
 check_present 'an empty commit' "${empty}"
 check_message 'an empty commit' \
-  "refusing to remove ${empty}: 1 commit(s) are on no remote-tracking ref or tag"
+  "refusing to remove ${empty}: 1 commit(s) have changes that are on no remote-tracking ref or tag"
 run_command 'an empty commit, waived' 0 --force-unpushed "${empty}"
 check_gone 'an empty commit, waived' "${empty}"
 
@@ -627,7 +704,7 @@ run_command 'a linked worktree with an unpushed commit' 1 \
 check_present 'a linked worktree with an unpushed commit' \
   "${work}/myrepo-branch-wtmine"
 check_message 'a linked worktree with an unpushed commit' \
-  "1 commit(s) are on no other branch, remote-tracking ref, or tag; re-run with --force-unpushed"
+  "1 commit(s) have changes that are on no other branch, remote-tracking ref, or tag; re-run with --force-unpushed"
 if ! git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtmine > /dev/null; then
   fail "a linked worktree with an unpushed commit: its branch was deleted"
 fi
