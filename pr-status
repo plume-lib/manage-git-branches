@@ -7,6 +7,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --check    # snapshot and report changes, but write no document
   pr-status --print-document  # print the dependency document's file name, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
+  pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
 
 Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
@@ -160,7 +161,7 @@ class Repo:
         Returns:
             A link whose text is the PR's reference and whose target is the PR on GitHub.
         """
-        return f"[{self.ref(n)}]({self.url(n)})"
+        return highlight(self.gh, n, f"[{self.ref(n)}]({self.url(n)})")
 
     def refs(self, ns):
         """Return how documents refer to the PRs ns.
@@ -408,7 +409,110 @@ def external_link(ref):
         A link whose text is ref and whose target is the PR on GitHub.
     """
     gh, n = ref.split("#")
-    return f"[{ref}](https://github.com/{gh}/pull/{n})"
+    return highlight(gh, int(n), f"[{ref}](https://github.com/{gh}/pull/{n})")
+
+
+# The PRs that the documents highlight, as pairs of a lowercase GitHub slug, such as
+# "org/repo", and a PR number.
+HIGHLIGHTED = set()
+
+# How the Mermaid graph highlights the node of a PR in HIGHLIGHTED.
+HIGHLIGHTED_NODE_STYLE = "fill:#fcc,stroke:#c00,stroke-width:2px"
+
+
+def highlight(gh, n, text):
+    """Return text, which names PR n of a repository, highlighted if the PR is in HIGHLIGHTED.
+
+    Args:
+        gh: the repository's GitHub slug, such as "ORG/REPO".
+        n: a PR number.
+        text: Markdown that names the PR, such as a link to it.
+
+    Returns:
+        text in bold on a light red background, if HIGHLIGHTED contains the PR; otherwise text.
+    """
+    if (gh.lower(), n) not in HIGHLIGHTED:
+        return text
+    return f'<span style="background-color:#fcc">**{text}**</span>'
+
+
+def resolve_pr_names(models, names):
+    """Return the open PRs that names name.
+
+    Args:
+        models: the model of each repository.
+        names: a list of strings, each of which names PRs, separated by commas or whitespace.
+            A PR's name is a repository's GitHub slug, its name, or the prefix of its
+            references (which is "" when the documents refer to its PRs as "#N"), followed by
+            "#" and a PR number, as in "ORG/REPO#100", "REPO#100", or "#100".
+
+    Returns:
+        The PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR number.
+
+    Raises:
+        ValueError: if a name does not name exactly one repository or does not name an open PR.
+    """
+    result = set()
+    for name in (s for arg in names for s in re.split(r"[,\s]+", arg) if s):
+        head, sep, number = name.rpartition("#")
+        if not sep or not number.isdigit():
+            msg = f"{name} is not of the form REPO#N"
+            raise ValueError(msg)
+        head = head.lower()
+        matches = [
+            m
+            for m in models
+            if head
+            in {
+                m.repo.gh.lower(),
+                m.repo.gh.split("/")[1].lower(),
+                m.repo.name.lower(),
+                m.repo.prefix.removesuffix("#").lower(),
+            }
+        ]
+        if len(matches) != 1:
+            repos = and_list(m.repo.gh for m in matches) if matches else "no repository"
+            msg = f"{name} names {repos} of {and_list(m.repo.gh for m in models)}"
+            raise ValueError(msg)
+        m, n = matches[0], int(number)
+        if n not in m.open:
+            msg = f"{name} is not an open PR of {m.repo.gh}"
+            raise ValueError(msg)
+        result.add((m.repo.gh.lower(), n))
+    return result
+
+
+def needed_to_land(models, prs):
+    """Return the PRs that must land for the given PRs to land.
+
+    Those are the given PRs and, recursively, every PR that one of them depends on or lands
+    with.  The prerequisites and partners of a PR in a repository that
+    models does not describe are not known.
+
+    Args:
+        models: the model of each repository, whose dependency graph is computed.
+        prs: a set of PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR
+            number.
+
+    Returns:
+        The PRs that must land, in the same form as prs.
+    """
+    by_gh = {m.repo.gh.lower(): m for m in models}
+    result, todo = set(), list(prs)
+    while todo:
+        gh, n = todo.pop()
+        if (gh, n) in result:
+            continue
+        result.add((gh, n))
+        m = by_gh.get(gh)
+        if m is None or n not in m.open:
+            continue
+        todo.extend((gh, d) for d in m.all_deps[n])
+        todo.extend(m.cross_repo_unit[n])
+        for ref in m.external[n]:
+            g, d = ref.split("#")
+            todo.append((g.lower(), int(d)))
+    return result
 
 
 def query_pr_states(refs):
@@ -736,6 +840,9 @@ class Model:
         self.deps = deps
         # The members, in this repository, of each PR's land-with unit.
         self.unit = {n: {n} for n in open_prs}
+        # The members, in every repository, of each PR's land-with unit, as pairs of a
+        # lowercase GitHub slug, such as "org/repo", and a PR number.
+        self.cross_repo_unit = {n: {(repo.gh.lower(), n)} for n in open_prs}
         # The external prerequisites that each PR has because of its land-with unit.
         self.inherited_external = {}
 
@@ -973,6 +1080,7 @@ def unite_partners(models):
         for model, n in unit:
             gh = model.repo.gh.lower()
             model.unit[n] = {m for other, m in unit if other is model}
+            model.cross_repo_unit[n] = {(other.repo.gh.lower(), m) for other, m in unit}
             model.deps[n] = {d for (g, d) in prereqs if g == gh and d in model.open}
             inherited = {ref for (g, _), ref in prereqs.items() if g != gh} - set(model.external[n])
             model.inherited_external[n] = inherited
@@ -1743,6 +1851,20 @@ def gen_graph(models, cfg):
             lines.append("")
     if lines[-1] == "":
         lines.pop()
+    highlighted = [
+        f"{m.repo.node_prefix}{n}"
+        for m in models
+        for comp in m.components()
+        for n in comp
+        if (m.repo.gh.lower(), n) in HIGHLIGHTED
+    ]
+    if highlighted:
+        lines.extend(
+            [
+                f"  classDef highlighted {HIGHLIGHTED_NODE_STYLE}",
+                f"  class {','.join(highlighted)} highlighted",
+            ]
+        )
     lines.append("```")
     return lines
 
@@ -2451,7 +2573,7 @@ def default_config(base):
         repo["prefix"] = "#" if len(repos) == 1 else f"{repo_name}#"
         repo["node_prefix"] = "pr" if len(repos) == 1 else re.sub(r"\W", "_", repo_name) + "_"
     print(
-        f"pr-status: no {CONFIG}, so reporting on " + and_list(r["gh"] for r in repos.values()),
+        "pr-status: reporting on " + and_list(r["gh"] for r in repos.values()),
         file=sys.stderr,
     )
     return {
@@ -2624,6 +2746,24 @@ def default_dependency_document(models):
     return "\n".join(lines) + "\n"
 
 
+def shell_word(word):
+    """Return the given word, quoted if a shell would not otherwise read it as that one word.
+
+    Unlike shlex.quote, this does not quote a word for a "#" that does not start it, such as
+    the one in "repo#100", because a shell treats such a "#" as an ordinary character.
+
+    Args:
+        word: a command-line argument, such as "repo#100".
+
+    Returns:
+        word, or word quoted for a shell.
+    """
+    unquoted = word.replace("#", "")
+    if word.startswith("#") or shlex.quote(unquoted) != unquoted:
+        return shlex.quote(word)
+    return word
+
+
 def main():
     """Report changes and regenerate the documents."""
     parser = argparse.ArgumentParser(
@@ -2645,6 +2785,18 @@ def main():
         metavar="DIR",
         help="change to DIR before doing anything else",
     )
+    parser.add_argument(
+        "--highlight",
+        action="extend",
+        nargs="+",
+        default=[],
+        metavar="PR",
+        help=(
+            "in the documents, highlight each PR (such as REPO#N or ORG/REPO#N) and every PR"
+            " that must land for it to land:  the PRs that it depends on or lands with,"
+            " recursively"
+        ),
+    )
     args = parser.parse_args()
     check_only = args.check
     if args.directory is not None:
@@ -2659,12 +2811,19 @@ def main():
     cfg = load_config("pr-status")
     dependencies = pathlib.Path(dependency_document_name(cfg, "pr-status"))
     models = load_models(cfg)
+    try:
+        HIGHLIGHTED.update(needed_to_land(models, resolve_pr_names(models, args.highlight)))
+    except ValueError as error:
+        sys.exit(f"pr-status: --highlight: {error}")
     updates = description_updates(models)
     failed_updates = []
     if not check_only:
         failed_updates = apply_description_updates(updates, cfg)
     now = dt.datetime.now().astimezone()
     as_of = now.strftime("%Y-%m-%d %H:%M %Z")
+    if HIGHLIGHTED:
+        command = " ".join(shell_word(w) for w in ["pr-status", "--highlight", *args.highlight])
+        as_of += f", by `{command}`"
     new = facts(models)
     old = {}
     if pathlib.Path(SNAPSHOT).exists():

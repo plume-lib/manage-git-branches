@@ -290,6 +290,7 @@ class ModelTest(unittest.TestCase):
         repo = types.SimpleNamespace(
             name=gh,
             gh=gh,
+            prefix=f"{gh.split('/')[1]}#",
             owner=gh.split("/")[0],
             default_branch="master",
             keywords=[],
@@ -363,6 +364,94 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model.blocked(), [1, 2, 3, 4])
         self.assertEqual(model.unblocked(), [])
         self.assertEqual(model.independent(), [])
+
+
+class HighlightTest(unittest.TestCase):
+    """Tests for resolve_pr_names, needed_to_land, and highlight."""
+
+    def models(self):
+        """Build models of two repositories, whose PRs depend on each other's.
+
+        Returns:
+            The models.
+        """
+        with mock.patch.dict(pr_status.EXTERNAL_STATE, {"other/repo#5": "open"}):
+            a = ModelTest.raw_model(
+                {1: "Land after #2.", 2: "Land after other/repo#5.", 3: "", 4: "Land after #1."},
+                set(),
+            )
+        b = ModelTest.raw_model({5: "Land after #6.", 6: "", 7: ""}, set(), "other/repo")
+        pr_status.unite_partners([a, b])
+        return [a, b]
+
+    def test_resolves_names(self):
+        """A PR is named by its repository's GitHub slug, name, or reference prefix."""
+        models = self.models()
+        self.assertEqual(
+            pr_status.resolve_pr_names(models, ["Owner/Repo#1, other/repo#5", "other/repo#6"]),
+            {("owner/repo", 1), ("other/repo", 5), ("other/repo", 6)},
+        )
+
+    def test_rejects_bad_names(self):
+        """A name must name one repository and an open PR of it."""
+        models = self.models()
+        for name in ("repo#1", "third/repo#1", "owner/repo#9", "owner/repo", "owner/repo#x"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                pr_status.resolve_pr_names(models, [name])
+
+    def test_transitive_prerequisites_span_repositories(self):
+        """The prerequisites of a PR include its transitive ones, in any repository."""
+        self.assertEqual(
+            pr_status.needed_to_land(self.models(), {("owner/repo", 1)}),
+            {("owner/repo", 1), ("owner/repo", 2), ("other/repo", 5), ("other/repo", 6)},
+        )
+
+    def test_land_with_partners(self):
+        """A PR's land-with partners, in any repository, must land with it."""
+        a = ModelTest.raw_model({1: "Land with #2.", 2: "", 3: "", 4: ""}, set())
+        b = ModelTest.raw_model(
+            {5: "Land with owner/repo#2.", 6: "", 7: "Land after #5."}, {(5, 6)}, "other/repo"
+        )
+        pr_status.unite_partners([a, b])
+        self.assertEqual(
+            pr_status.needed_to_land([a, b], {("owner/repo", 1)}),
+            {("owner/repo", 1), ("owner/repo", 2), ("other/repo", 5), ("other/repo", 6)},
+        )
+
+    def test_highlights_links(self):
+        """A link to a highlighted PR, in this or another repository, is highlighted."""
+        repo = pr_status.Repo(
+            {
+                "name": "repo",
+                "gh": "Owner/Repo",
+                "clone": "/base/repo",
+                "prefix": "#",
+                "label": "repo",
+                "node_prefix": "pr",
+            }
+        )
+        with mock.patch.object(pr_status, "HIGHLIGHTED", {("owner/repo", 1), ("other/repo", 5)}):
+            self.assertEqual(
+                repo.link(1),
+                '<span style="background-color:#fcc">'
+                "**[#1](https://github.com/Owner/Repo/pull/1)**</span>",
+            )
+            self.assertEqual(repo.link(2), "[#2](https://github.com/Owner/Repo/pull/2)")
+            self.assertEqual(
+                pr_status.external_link("other/repo#5"),
+                '<span style="background-color:#fcc">'
+                "**[other/repo#5](https://github.com/other/repo/pull/5)**</span>",
+            )
+
+
+class ShellWordTest(unittest.TestCase):
+    """Tests for shell_word."""
+
+    def test_quotes_only_when_needed(self):
+        """A "#" within a word needs no quoting, but one that starts a word does."""
+        self.assertEqual(pr_status.shell_word("repo#100"), "repo#100")
+        self.assertEqual(pr_status.shell_word("#100"), "'#100'")
+        self.assertEqual(pr_status.shell_word("a#1, b#2"), "'a#1, b#2'")
 
 
 class ApplyDescriptionUpdatesTest(unittest.TestCase):
