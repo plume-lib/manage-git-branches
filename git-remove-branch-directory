@@ -243,13 +243,15 @@ line_count() {
 }
 
 # Usage: count_unlanded DIRECTORY LANDABLE REV-LIST-ARGS...
-# Prints a line "LOST LISTED":  LISTED is the number of commits that
-# `git rev-list REV-LIST-ARGS` lists in the repository of DIRECTORY, such as
-# 5, and LOST is the number of them whose changes would be lost, such as 2:
-# those that are not on a local branch whose changes have landed in a
-# remote's default branch.  LANDABLE names the local branches that may have
-# landed:  `--all` for every one, a branch name for that one alone, or the
-# empty string for none.  Prints nothing if `git rev-list` fails.
+# Prints a line "LISTED LOST", such as "5 2", for `report_unlanded` to
+# report.  LISTED is the number of commits that `git rev-list REV-LIST-ARGS`
+# lists in the repository of DIRECTORY, such as 5.  LOST is the number of
+# them, such as 2, that are not on a local branch whose changes have landed
+# in a remote's default branch; it equals LISTED wherever `count_unlanded`
+# does not ask which branches have landed.  LANDABLE names the local branches
+# that might have landed:  `--all` for every one, a branch name for that one
+# alone, or the empty string for none.  Prints nothing if `git rev-list`
+# fails.
 #
 # A squash-merged pull request is the reason:  its commits are on no remote,
 # because the squash commit replaces them, and its remote branch is deleted,
@@ -299,7 +301,48 @@ count_unlanded() {
     | sed 's/^/^/' \
     | git -C "${count_unlanded_dir}" rev-list --count --stdin "$@" 2> /dev/null)" \
     || return 0
-  echo "${count_unlanded_lost} ${count_unlanded_count}"
+  echo "${count_unlanded_count} ${count_unlanded_lost}"
+}
+
+# Usage: report_unlanded DIRECTORY COUNTS HOLDERS [RECOVERY]
+# Reports the commits that removing DIRECTORY would delete, and sets
+# ${remove_refusals} to 1 if the removal must not proceed:  if COUNTS is
+# empty, or if LOST is more than 0 and --force-unpushed does not waive that.
+# COUNTS is a line "LISTED LOST" that `count_unlanded` printed, such as
+# "5 2", or the empty string if it printed nothing.  HOLDERS names the refs
+# that hold none of the commits, such as "remote-tracking ref or tag"; used
+# for diagnostics.  RECOVERY, such as "; until `git gc` runs, ...", ends the
+# message of a removal that --force-unpushed lets proceed; used for
+# diagnostics.
+#
+# The message counts every commit that is on none of HOLDERS, and says how
+# many of them are on a branch whose changes have landed.  It does not say
+# that the others have changes that are on none of HOLDERS:
+# `count_unlanded` does not always ask which branches have landed, and a
+# commit that changes no file has no changes, yet removing it loses the
+# commit.
+report_unlanded() {
+  if [ -z "$2" ]; then
+    echo "${SCRIPT_NAME}: refusing to remove $1: cannot tell whether it holds commits that no other ref holds" >&2
+    remove_refusals=1
+    return
+  fi
+  read -r report_unlanded_listed report_unlanded_lost << EOF
+$2
+EOF
+  report_unlanded_landed=$((report_unlanded_listed - report_unlanded_lost))
+  report_unlanded_note=
+  if [ "${report_unlanded_landed}" -gt 0 ]; then
+    report_unlanded_note=", ${report_unlanded_landed} of them on a branch whose changes have landed in a remote's default branch"
+  fi
+  if [ "${force_unpushed}" -eq 0 ]; then
+    if [ "${report_unlanded_lost}" -gt 0 ]; then
+      echo "${SCRIPT_NAME}: refusing to remove $1: ${report_unlanded_listed} commit(s) are on no $3${report_unlanded_note}; re-run with --force-unpushed" >&2
+      remove_refusals=1
+    fi
+  elif [ "${report_unlanded_listed}" -gt 0 ]; then
+    echo "${SCRIPT_NAME}: $1: --force-unpushed: deleting ${report_unlanded_listed} commit(s) that are on no $3${report_unlanded_note}${4:-}" >&2
+  fi
 }
 
 # Usage: keyed_blobs
@@ -553,21 +596,10 @@ check_worktree_unpushed() {
   check_worktree_unpushed_dir="$4"
   check_worktree_unpushed_counts="$(count_unlanded "$1" "$3" "$2" ${5:+"$5"} \
     --not ${6:+"$6"} --branches --tags --remotes)"
-  if [ -z "${check_worktree_unpushed_counts}" ]; then
-    echo "${SCRIPT_NAME}: refusing to remove ${check_worktree_unpushed_dir}: cannot tell whether it holds commits that no other ref holds" >&2
-    remove_refusals=1
-    return
-  fi
-  check_worktree_unpushed_lost="${check_worktree_unpushed_counts% *}"
-  check_worktree_unpushed_listed="${check_worktree_unpushed_counts#* }"
-  if [ "${check_worktree_unpushed_lost}" -gt 0 ]; then
-    if [ "${force_unpushed}" -eq 0 ]; then
-      echo "${SCRIPT_NAME}: refusing to remove ${check_worktree_unpushed_dir}: ${check_worktree_unpushed_lost} commit(s) have changes that are on no other branch, remote-tracking ref, or tag; re-run with --force-unpushed" >&2
-      remove_refusals=1
-    else
-      echo "${SCRIPT_NAME}: ${check_worktree_unpushed_dir}: --force-unpushed: deleting ${check_worktree_unpushed_listed} commit(s) that are on no other branch, remote-tracking ref, or tag, ${check_worktree_unpushed_lost} of them with changes that are on none; until \`git gc\` runs, \`git fsck --lost-found\` can recover them" >&2
-    fi
-  fi
+  report_unlanded "${check_worktree_unpushed_dir}" \
+    "${check_worktree_unpushed_counts}" \
+    'other branch, remote-tracking ref, or tag' \
+    "; until \`git gc\` runs, \`git fsck --lost-found\` can recover them"
 }
 
 # Asks each checked-out submodule of the working tree $1, recursively, the
@@ -1126,17 +1158,8 @@ remove_branch_directory() {
     # branch, HEAD, or the stash, and each of those still counts.
     remove_unpushed="$(count_unlanded "${remove_dir}" --all --all \
       --not --remotes --tags)"
-    if [ -z "${remove_unpushed}" ]; then
-      echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot tell whether it holds commits that no other ref holds" >&2
-      remove_refusals=1
-    elif [ "${remove_unpushed% *}" -gt 0 ]; then
-      if [ "${force_unpushed}" -eq 0 ]; then
-        echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: ${remove_unpushed% *} commit(s) have changes that are on no remote-tracking ref or tag; re-run with --force-unpushed" >&2
-        remove_refusals=1
-      else
-        echo "${SCRIPT_NAME}: ${remove_dir}: --force-unpushed: deleting ${remove_unpushed#* } commit(s) that are on no remote-tracking ref or tag, ${remove_unpushed% *} of them with changes that are on none" >&2
-      fi
-    fi
+    report_unlanded "${remove_dir}" "${remove_unpushed}" \
+      'remote-tracking ref or tag'
   fi
 
   if [ "${remove_kind}" = 'linked-worktree' ]; then
