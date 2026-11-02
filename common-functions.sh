@@ -1108,7 +1108,7 @@ resolve_with_agent() {
   # system records a later time than the marker's, so that a file that it
   # changes has a later ctime.  The working tree and the git directory can
   # be on different file systems.  The working tree's pathnames are listed
-  # after the wait, which writes a file in the working tree and then
+  # after the wait, which creates a directory in the working tree and then
   # removes it.
   resolve_index="$(git ls-files --stage -z | cksum)"
   if ! resolve_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-start)" \
@@ -1257,21 +1257,23 @@ working_tree_changes() {
 ## record finer times but advance its clock only every few milliseconds.
 ## DIR and FILE can be on different file systems.
 ##
-## Writes, and then removes, the file DIR/.manage-git-branches-time-probe,
-## which must not already exist.  Returns 1, after printing a diagnostic, if
-## it cannot write that file, or if the time does not advance within about
-## 10 seconds.
+## Creates, and then removes, the directory
+## DIR/.manage-git-branches-time-probe, which must not already exist.
+## Returns 1, after printing a diagnostic, if it cannot create that
+## directory, or if the time does not advance within about 10 seconds.
 wait_for_later_time() {
   wait_probe="$2/.manage-git-branches-time-probe"
-  # `set -C` keeps the redirection from overwriting an existing file.
-  if ! (set -C && : > "${wait_probe}"); then
-    echo "${SCRIPT_NAME}: cannot create the file ${wait_probe}, which must not already exist" >&2
+  # `mkdir` fails if anything, even a symbolic link, already has that name.
+  # By contrast, `set -C` lets a redirection open an existing file that is
+  # not a regular file, such as a FIFO or a symbolic link to /dev/null.
+  if ! mkdir -- "${wait_probe}"; then
+    echo "${SCRIPT_NAME}: cannot create the directory ${wait_probe}, which must not already exist" >&2
     return 1
   fi
   wait_tries=1
   until [ -n "$(find "${wait_probe}" -cnewer "$1" -print)" ]; do
     if [ "${wait_tries}" -ge 20 ]; then
-      rm -f -- "${wait_probe}"
+      rmdir -- "${wait_probe}"
       echo "${SCRIPT_NAME}: after ${wait_tries} tries, the time that the file system records in $2 is not later than the modification time of $1" >&2
       return 1
     fi
@@ -1280,13 +1282,13 @@ wait_for_later_time() {
     # whole number of seconds.
     if [ "${wait_tries}" -ge 10 ]; then sleep 1; fi
     if ! touch -- "${wait_probe}"; then
-      rm -f -- "${wait_probe}"
-      echo "${SCRIPT_NAME}: cannot change the time of the file ${wait_probe}" >&2
+      rmdir -- "${wait_probe}"
+      echo "${SCRIPT_NAME}: cannot change the time of the directory ${wait_probe}" >&2
       return 1
     fi
     wait_tries=$((wait_tries + 1))
   done
-  rm -f -- "${wait_probe}"
+  rmdir -- "${wait_probe}"
 }
 
 ## Usage: report_unresolved FILES

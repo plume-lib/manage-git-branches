@@ -641,15 +641,15 @@ check_resolution_raw reject "CRLF line endings, and a separator remains" \
 rm "${WORK_DIR}/ccr/.gitattributes"
 
 ## Tests of wait_for_later_time.  Each test uses its own directory, in which
-## the function writes its probe file.
+## the function creates its probe directory.
 mkdir "${WORK_DIR}/wflt" "${WORK_DIR}/wflt/now" "${WORK_DIR}/wflt/later" \
-  "${WORK_DIR}/wflt/never" "${WORK_DIR}/wflt/exists"
+  "${WORK_DIR}/wflt/never" "${WORK_DIR}/wflt/exists" "${WORK_DIR}/wflt/symlink"
 
 ## Usage: check_wflt_probe_removed DIR DESCRIPTION
-## Checks that wait_for_later_time removed its probe file from DIR.
+## Checks that wait_for_later_time removed its probe directory from DIR.
 check_wflt_probe_removed() {
   if [ -e "$1/.manage-git-branches-time-probe" ]; then
-    fail "wait_for_later_time, $2: the probe file remains"
+    fail "wait_for_later_time, $2: the probe directory remains"
   fi
 }
 
@@ -702,14 +702,29 @@ check_wflt_probe_removed "${WORK_DIR}/wflt/later" "a marker 2 seconds in the fut
 echo "user data" > "${WORK_DIR}/wflt/exists/.manage-git-branches-time-probe"
 : > "${WORK_DIR}/wflt/exists-marker"
 if wflt_err="$(wait_for_later_time "${WORK_DIR}/wflt/exists-marker" "${WORK_DIR}/wflt/exists" 2>&1)"; then
-  fail "wait_for_later_time succeeded although its probe file exists"
+  fail "wait_for_later_time succeeded although a file has its probe's name"
 fi
 case "${wflt_err}" in
   *"which must not already exist"*) ;;
-  *) fail "wait_for_later_time with an existing probe file: wrong diagnostic: ${wflt_err}" ;;
+  *) fail "wait_for_later_time with a file that has its probe's name: wrong diagnostic: ${wflt_err}" ;;
 esac
 if [ "$(cat "${WORK_DIR}/wflt/exists/.manage-git-branches-time-probe")" != "user data" ]; then
   fail "wait_for_later_time changed an existing file whose name is the probe's"
+fi
+
+# An existing symbolic link whose name is the probe's is left alone, even
+# one to a file that is not a regular file.
+ln -s /dev/null "${WORK_DIR}/wflt/symlink/.manage-git-branches-time-probe"
+: > "${WORK_DIR}/wflt/symlink-marker"
+if wflt_err="$(wait_for_later_time "${WORK_DIR}/wflt/symlink-marker" "${WORK_DIR}/wflt/symlink" 2>&1)"; then
+  fail "wait_for_later_time succeeded although a symbolic link has its probe's name"
+fi
+case "${wflt_err}" in
+  *"which must not already exist"*) ;;
+  *) fail "wait_for_later_time with a symbolic link that has its probe's name: wrong diagnostic: ${wflt_err}" ;;
+esac
+if [ ! -L "${WORK_DIR}/wflt/symlink/.manage-git-branches-time-probe" ]; then
+  fail "wait_for_later_time removed an existing symbolic link whose name is the probe's"
 fi
 
 wait "${wflt_never_pid}"
