@@ -1918,8 +1918,10 @@ pull_resolving() {
   # FETCH_HEAD is read now, before `resolve_merge_conflicts` runs an agent,
   # which might fetch and so overwrite it.  FETCH_HEAD names first the commit
   # that `git pull` merges, fast-forwards to, or rebases onto.
-  if pull_branch="$(git -C "${pull_dir}" symbolic-ref --quiet --short HEAD)" \
-    && pull_remote="$(git -C "${pull_dir}" config --get "branch.${pull_branch}.remote")" \
+  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
+  # "heads/BRANCH" when a tag and the branch have the same name.
+  if pull_ref="$(git -C "${pull_dir}" symbolic-ref --quiet HEAD)" \
+    && pull_remote="$(git -C "${pull_dir}" config --get "branch.${pull_ref#refs/heads/}.remote")" \
     && is_built_remote "${pull_dir}" "${pull_remote}"; then
     # shellcheck disable=SC2034 # used by the commands that source this file
     pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
@@ -1984,6 +1986,9 @@ upstream_description() {
 ## repository with a linked worktree, where commits are made; and of a
 ## repository whose location is not known, as when its pathname names no
 ## directory or begins with "~".
+## Remembers its result for each top level of a working tree and REMOTE in
+## ${built_remote_cache}, so it does not notice a later change, such as a
+## worktree added to the bare repository, unless that variable is cleared.
 is_built_remote() {
   if [ "$2" = . ]; then
     return 1
@@ -1992,7 +1997,35 @@ is_built_remote() {
   # not in a subdirectory such as DIRECTORY.
   built_remote_top="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" \
     || built_remote_top="$1"
-  built_remote_key="$(repository_key "${built_remote_top}" "$2")"
+  # Each entry is 3 lines:  the result, the top level, and REMOTE.
+  built_remote_entry="${built_remote_top}
+$2
+"
+  case "
+${built_remote_cache:-}" in
+    *"
+0
+${built_remote_entry}"*) return 0 ;;
+    *"
+1
+${built_remote_entry}"*) return 1 ;;
+  esac
+  if is_built_remote_uncached "${built_remote_top}" "$2"; then
+    built_remote_result=0
+  else
+    built_remote_result=1
+  fi
+  built_remote_cache="${built_remote_cache:-}${built_remote_result}
+${built_remote_entry}"
+  return "${built_remote_result}"
+}
+
+## Usage: is_built_remote_uncached TOP REMOTE
+## Returns 0 if the branches of the repository that REMOTE names in the clone
+## whose working tree has the top level TOP were built where they were pushed,
+## and returns 1 otherwise; see `is_built_remote`, which remembers the result.
+is_built_remote_uncached() {
+  built_remote_key="$(repository_key "$1" "$2")"
   case "${built_remote_key}" in
     '' | '~'*) return 1 ;;
     /*) ;;
@@ -2123,24 +2156,34 @@ has_unbuilt_merge() {
   # such as the head that a pull fetched, excludes nothing more, and would
   # only lengthen the account.  The other names in ${merge_fix_present} name
   # other commits.
+  # `git merge-base --independent` prints, one per line, the commits that
+  # are in the history of no other commit given, but it prints a commit that
+  # a remote branch is at, so such a commit is excluded separately.
   merge_fix_built=''
-  for merge_fix_commit in ${merge_fix_present}; do
-    merge_fix_redundant=0
-    for merge_fix_other in ${merge_fix_remotes}; do
-      if git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_other}"; then
-        merge_fix_redundant=1
-      fi
-    done
-    for merge_fix_other in ${merge_fix_present}; do
-      if [ "${merge_fix_other}" != "${merge_fix_commit}" ] \
-        && git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_other}"; then
-        merge_fix_redundant=1
-      fi
-    done
-    if [ "${merge_fix_redundant}" -eq 0 ]; then
-      merge_fix_built="${merge_fix_built:+${merge_fix_built} }${merge_fix_commit}"
+  if [ -n "${merge_fix_present}" ]; then
+    # shellcheck disable=SC2086 # the variables are lists of commits
+    if ! merge_fix_independent="$(git merge-base --independent ${merge_fix_remotes} ${merge_fix_hashes})" \
+      || ! merge_fix_remote_hashes="$(git rev-parse ${merge_fix_remotes})"; then
+      echo "${SCRIPT_NAME}: cannot compare the built commits in $(pwd), so no AI agent is asked to fix the build" >&2
+      return 1
     fi
-  done
+    merge_fix_independent=" $(printf '%s' "${merge_fix_independent}" | tr '\n' ' ') "
+    merge_fix_remote_hashes=" $(printf '%s' "${merge_fix_remote_hashes}" | tr '\n' ' ') "
+    # ${merge_fix_hashes} holds the hashes of ${merge_fix_present}, in order.
+    # shellcheck disable=SC2086 # the variable is a list of commits
+    set -- ${merge_fix_hashes}
+    for merge_fix_commit in ${merge_fix_present}; do
+      case "${merge_fix_independent}" in
+        *" $1 "*)
+          case "${merge_fix_remote_hashes}" in
+            *" $1 "*) ;;
+            *) merge_fix_built="${merge_fix_built:+${merge_fix_built} }${merge_fix_commit}" ;;
+          esac
+          ;;
+      esac
+      shift
+    done
+  fi
   if ! merge_fix_tree="$(git rev-parse --verify --quiet 'HEAD^{tree}')"; then
     echo "${SCRIPT_NAME}: cannot read the tree of HEAD in $(pwd), so no AI agent is asked to fix the build" >&2
     return 1
@@ -2196,15 +2239,25 @@ has_unbuilt_merge() {
     return 1
   fi
   merge_fix_branch="$(git symbolic-ref --quiet --short HEAD)" || merge_fix_branch=HEAD
+  case "${merge_fix_built}" in
+    '') merge_fix_built_history='' ;;
+    *' '*) merge_fix_built_history="the histories of $(printf '%s' "${merge_fix_built}" | sed -e 's/ / and /g'), which were built elsewhere" ;;
+    *) merge_fix_built_history="the history of ${merge_fix_built}, which was built elsewhere" ;;
+  esac
+  merge_fix_other=''
   case "${merge_fix_remotes}" in
-    '') merge_fix_lack="Branch ${merge_fix_branch} pushes to and pulls from no remote branch whose history is known to have been built, so its commits might not have been built" ;;
+    '')
+      if [ -n "${merge_fix_built}" ]; then
+        merge_fix_lack="Branch ${merge_fix_branch} has commits that are not in ${merge_fix_built_history}"
+      else
+        merge_fix_lack="Branch ${merge_fix_branch} pushes to and pulls from no remote branch whose history is known to have been built, so its commits might not have been built"
+      fi
+      ;;
     *' '*) merge_fix_lack="Branch ${merge_fix_branch} has commits that the remote branches $(printf '%s' "${merge_fix_remotes}" | sed -e 's/ / and /') lack" ;;
     *) merge_fix_lack="Branch ${merge_fix_branch} has commits that the remote branch ${merge_fix_remotes} lacks" ;;
   esac
-  if [ -n "${merge_fix_built}" ]; then
-    merge_fix_other="other than those in the history of ${merge_fix_built}, which were built elsewhere"
-  else
-    merge_fix_other=''
+  if [ -n "${merge_fix_remotes}" ] && [ -n "${merge_fix_built}" ]; then
+    merge_fix_other="other than those in ${merge_fix_built_history}"
   fi
   merge_fix_excluded="${merge_fix_remotes}${merge_fix_remotes:+${merge_fix_built:+ }}${merge_fix_built}"
   merge_fix_account="${merge_fix_lack}${merge_fix_other:+, ${merge_fix_other}}.  Among those commits are these merges, oldest first, any of which might have combined changes that do not fit together:
@@ -2246,8 +2299,8 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
 ## it, but only if a merge on the current branch might have broken the
 ## build, as `has_unbuilt_merge` determines.  Its argument is BUILT, a list
 ## of commits, separated by spaces, whose histories were built elsewhere,
-## such as "refs/remotes/upstream/main" or the head that a pull of the
-## current branch fetched (see `pull_resolving`), together with the
+## such as "refs/remotes/upstream/main" or the head that a pull fetched (see
+## `pull_resolving`), together with the
 ## `built_commits` of DIRECTORY, a working tree such as the one that COMMIT
 ## comes from, if DIRECTORY is given and not empty.  The merge commit can be
 ## the one that this call made, one that a pull made, or one that an earlier

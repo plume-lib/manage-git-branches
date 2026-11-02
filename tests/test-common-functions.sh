@@ -724,6 +724,9 @@ check_built_remote() {
   fi
 }
 for ibr_dir in "${WORK_DIR}/ibr/clone" "${WORK_DIR}/ibr/clone/sub"; do
+  # is_built_remote remembers its results for the top level, which both
+  # directories have.
+  built_remote_cache=''
   check_built_remote "${ibr_dir}" bare 0
   check_built_remote "${ibr_dir}" ../bare.git 0
   check_built_remote "${ibr_dir}" github 0
@@ -734,6 +737,7 @@ done
 ## A bare repository with a linked worktree is committed to locally.
 git -C "${WORK_DIR}/ibr/clone" push -q bare main
 git -C "${WORK_DIR}/ibr/bare.git" worktree add -q ../bare-worktree main 2> /dev/null
+built_remote_cache=''
 check_built_remote "${WORK_DIR}/ibr/clone" bare 1
 
 ## Tests of remote_branch_refs.  It omits the remote-tracking branch of a
@@ -746,6 +750,7 @@ if [ -n "$(remote_branch_refs "${WORK_DIR}/ibr/clone")" ]; then
   fail "remote_branch_refs: a working clone's branch counts as built: $(remote_branch_refs "${WORK_DIR}/ibr/clone")"
 fi
 git -C "${WORK_DIR}/ibr/bare.git" worktree remove ../bare-worktree
+built_remote_cache=''
 git -C "${WORK_DIR}/ibr/clone" branch -q --set-upstream-to=bare/main
 if [ "$(remote_branch_refs "${WORK_DIR}/ibr/clone")" != refs/remotes/bare/main ]; then
   fail "remote_branch_refs: a bare repository's branch does not count as built: $(remote_branch_refs "${WORK_DIR}/ibr/clone")"
