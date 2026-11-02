@@ -152,11 +152,17 @@ fi
 # branch, even when `pull.rebase` is set, and the pull's own merge does not
 # stop at an editor.  `GIT_MERGE_AUTOEDIT` makes git start the editor even
 # though no terminal is attached, and the editor `false` makes the merge fail.
+# The pull's merge, like `git merge`, runs the `pre-merge-commit` hook, not
+# the `pre-commit` hook, which fails.
 unpushed_merge="$(git -C "${fork}" rev-parse HEAD)"
 git -C "${other}" pull -q --no-rebase
 commit_file "${other}" c.txt 'c2'
 git -C "${other}" push -q origin feature
 git -C "${fork}" config pull.rebase true
+fork_hooks="$(git -C "${fork}" rev-parse --path-format=absolute --git-path hooks)"
+mkdir -p "${fork_hooks}"
+printf '#!/bin/sh\nexit 1\n' > "${fork_hooks}/pre-commit"
+chmod +x "${fork_hooks}/pre-commit"
 if ! GIT_MERGE_AUTOEDIT=yes GIT_EDITOR=false pull_upstream "${fork}" --nocompile; then
   fail "--nocompile: failed: $(cat "${testdir}/errors")"
 elif [ "$(pushed_head)" != "$(git -C "${fork}" rev-parse HEAD)" ]; then
@@ -167,6 +173,7 @@ elif [ "$(cat "${fork}/c.txt")" != 'c2' ]; then
   fail "--nocompile: did not pull c.txt"
 fi
 git -C "${fork}" config --unset pull.rebase
+rm "${fork_hooks}/pre-commit"
 
 # A conflicting merge fails and is not pushed.
 commit_file "${fork}" a.txt 'fork'

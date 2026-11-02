@@ -180,7 +180,7 @@ fi
 # `--no-rebase` because a rebase would drop a merge from `upstream` that an
 # earlier run of this command made but did not push, as when its build
 # failed, and would copy that merge's commits onto the current branch.
-if ! pull_resolving "${llm_agent}" "$(pwd)" -q --no-rebase; then
+if ! pull_resolving "${llm_agent}" "$(pwd)" --no-rebase; then
   exit 1
 fi
 

@@ -432,7 +432,7 @@ git_push_to() {
     return 1
   fi
 
-  if ! pull_resolving "${llm_agent}" "${from_absolute}" -q; then
+  if ! pull_resolving "${llm_agent}" "${from_absolute}"; then
     return 1
   fi
   from_fetched="${pull_fetched}"
@@ -455,7 +455,7 @@ git_push_to() {
   # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
   # that an earlier run of this command made but did not push, as when its
   # build failed, and would copy that merge's commits onto TO_DIR's branch.
-  if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase; then
+  if ! pull_resolving "${llm_agent}" "${to_absolute}" --no-rebase; then
     return 1
   fi
   to_fetched="${pull_fetched}"
