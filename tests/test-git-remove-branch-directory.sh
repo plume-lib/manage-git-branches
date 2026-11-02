@@ -88,7 +88,8 @@ git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
   stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost \
-  squashed empty savedchange partlysaved deletion savedcommit; do
+  squashed empty savedchange partlysaved deletion savedcommit reverted copied \
+  chmodded; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -239,8 +240,17 @@ check_present 'an uncommitted deletion' "${deletion}"
 check_message 'an uncommitted deletion' \
   "refusing to remove ${deletion}: 1 tracked file(s) have uncommitted changes"
 
-# Within a working tree, any commit saves a change, and files outside the
-# directory do not count.
+# An uncommitted change of mode alone is not saved by the file's contents.
+chmodded="$(make_clone chmodded)"
+chmod +x "${chmodded}/file.txt"
+run_command 'an uncommitted change of mode' 1 "${chmodded}"
+check_present 'an uncommitted change of mode' "${chmodded}"
+check_message 'an uncommitted change of mode' \
+  "refusing to remove ${chmodded}: 1 tracked file(s) have uncommitted changes"
+chmod -x "${chmodded}/file.txt"
+
+# Within a working tree, any ref saves a change, but a ref's history does not,
+# and files outside the directory do not count.
 mkdir -p "${inside}/saved"
 echo 'old contents' > "${inside}/saved/tracked.txt"
 git -C "${inside}" add saved/tracked.txt
@@ -248,6 +258,9 @@ git -C "${inside}" commit -q -m "Add a file"
 echo 'new contents' > "${inside}/saved/tracked.txt"
 git -C "${inside}" commit -q -a -m "Change the file"
 echo 'old contents' > "${inside}/saved/tracked.txt"
+run_command 'a subdirectory with changes that history holds' 1 "${inside}/saved"
+check_present 'a subdirectory with changes that history holds' "${inside}/saved"
+git -C "${inside}" branch saved-elsewhere HEAD~1
 echo 'an unsaved change outside the directory' >> "${inside}/file.txt"
 run_command 'a subdirectory with saved changes' 0 "${inside}/saved"
 check_gone 'a subdirectory with saved changes' "${inside}/saved"
@@ -319,6 +332,33 @@ echo 'a commit that is saved' >> "${savedcommit}/file.txt"
 git -C "${savedcommit}" commit -q -a -m 'A commit that is saved'
 run_command 'a saved commit' 0 "${savedcommit}"
 check_gone 'a saved commit' "${savedcommit}"
+
+# A commit that restores contents that a remote-tracking ref's history holds,
+# but that the commit it names does not, is not saved.
+reverted="$(make_clone reverted)"
+echo 'a change to revert to' >> "${reverted}/file.txt"
+git -C "${reverted}" commit -q -a -m 'A change to revert to'
+echo 'a change to revert' >> "${reverted}/file.txt"
+git -C "${reverted}" commit -q -a -m 'A change to revert'
+git -C "${reverted}" push -q origin reverted
+git -C "${reverted}" revert --no-edit HEAD > /dev/null
+run_command 'a commit that reverts' 1 "${reverted}"
+check_present 'a commit that reverts' "${reverted}"
+check_message 'a commit that reverts' \
+  "refusing to remove ${reverted}: 1 commit(s) are on no remote-tracking ref or tag"
+
+# A commit that adds a copy of a file is not saved by the original, and a
+# commit that changes a file's mode alone is not saved by the file's contents.
+copied="$(make_clone copied)"
+cp "${copied}/file.txt" "${copied}/copy.txt"
+git -C "${copied}" add copy.txt
+git -C "${copied}" commit -q -m 'Copy a file'
+chmod +x "${copied}/file.txt"
+git -C "${copied}" commit -q -a -m 'Make a file executable'
+run_command 'a commit that copies and one that changes a mode' 1 "${copied}"
+check_present 'a commit that copies and one that changes a mode' "${copied}"
+check_message 'a commit that copies and one that changes a mode' \
+  "refusing to remove ${copied}: 2 commit(s) are on no remote-tracking ref or tag"
 
 # A branch that changes no file has nothing to land, so merging it into the
 # remote's default branch changes nothing, but its commits have not landed.
