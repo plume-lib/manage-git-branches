@@ -103,6 +103,11 @@ The commands are:
   remote branches nor those of FROM_DIR's branch contain, such as the one
   that it just made, it asks the agent to fix the build, up to 3 times, and
   commits the fix.
+  If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
+  prints a command, such as `cd DIR && claude --resume ID`, that continues
+  the agent's session interactively (one per attempt to fix the build), and
+  appends it to the file `AGENT-TODO.md` at the top level of the working
+  tree.
   `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
   on.
   The agent runs in a sandbox, which requires a recent version:  Claude
@@ -165,6 +170,13 @@ The commands are:
   A directory whose branch still exists in the remote, but whose GitHub pull
   requests are all closed or merged, is neither listed nor removed; a warning
   about it is printed instead.  (This needs the `gh` command.)
+  Likewise, a warning is printed about a directory named `*-branch-*` that
+  is in no git working tree and either holds more than `.project` files, such
+  as one whose removal failed on files that another user owns, or holds no
+  `.project` file at all, such as an empty directory; about one that is in a
+  git working tree that tracks none of its files; and about one that is in a
+  working tree that git cannot use, such as a linked worktree whose main
+  working tree was moved.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
   alias below).
 * [`git-remove-branch-directory`](git-remove-branch-directory)
@@ -172,7 +184,10 @@ The commands are:
   DIRECTORY...`:
   Removes a branch directory, unless the removal would lose work.
   Commits on a branch whose changes have landed in a remote's default branch,
-  as after a squash-merge, do not count as work that would be lost.
+  as after a squash-merge, do not count as work that would be lost.  Neither
+  do the commits of a branch whose remote branch is gone, if they are in a
+  landed GitHub pull request from the branch, even one with later commits
+  that the branch lacks.  (This needs the `gh` command.)
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
