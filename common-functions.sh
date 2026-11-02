@@ -2091,9 +2091,11 @@ has_unbuilt_merge() {
       # A merge of two commits that share history gets an account of the
       # commits that only each of them had.  Those commits' patches show
       # what each side changed, even where the two have several merge bases,
-      # as after criss-cross merges; `--cc` shows, for a merge among them,
-      # what the merge changed beyond its parents, such as a conflict's
-      # resolution.  The account names commits by their full hashes, which
+      # as after criss-cross merges; `--remerge-diff` shows, for a merge among
+      # them, how the merge differs from git's automatic merge of its parents,
+      # such as a conflict's resolution, even one that takes one parent's
+      # version.  (`--cc` and `--diff-merges=first-parent` omit a hunk whose
+      # result equals a parent's.)  The account names commits by their full hashes, which
       # stay unambiguous after the agent creates objects.  An octopus merge,
       # or one whose parents share no history, gets only its line.
       case "${merge_fix_parents}" in
@@ -2105,8 +2107,8 @@ has_unbuilt_merge() {
 "*}"
           merge_fix_theirs="${merge_fix_parents#*"
 "}"
-          merge_fix_ours_log="\`git log -p --cc ${merge_fix_theirs}..${merge_fix_ours}\` shows the commits that only ${merge_fix_ours} had"
-          merge_fix_theirs_log="\`git log -p --cc ${merge_fix_ours}..${merge_fix_theirs}\` shows the commits that only ${merge_fix_theirs} had"
+          merge_fix_ours_log="\`git log -p --remerge-diff ${merge_fix_theirs}..${merge_fix_ours}\` shows the commits that only ${merge_fix_ours} had"
+          merge_fix_theirs_log="\`git log -p --remerge-diff ${merge_fix_ours}..${merge_fix_theirs}\` shows the commits that only ${merge_fix_theirs} had"
           if merge_fix_base="$(git merge-base "${merge_fix_ours}" "${merge_fix_theirs}")"; then
             case "${merge_fix_base}" in
               "${merge_fix_ours}") merge_fix_sides="It merged commit ${merge_fix_theirs} into its ancestor, commit ${merge_fix_ours}.  ${merge_fix_theirs_log}." ;;

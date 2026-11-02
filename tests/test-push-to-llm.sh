@@ -1330,7 +1330,7 @@ fi
 check_pull_fixed "pull that breaks the build" \
   "Fix the build after merging ${pull_description}"
 ## The agent is told what each side of the pull's merge changed.
-if ! grep -q -x -F "  It merged commit ${feature_head} into commit ${local_head}.  \`git log -p --cc ${feature_head}..${local_head}\` shows the commits that only ${local_head} had, and \`git log -p --cc ${local_head}..${feature_head}\` shows the commits that only ${feature_head} had." "${STUB_PROMPT}"; then
+if ! grep -q -x -F "  It merged commit ${feature_head} into commit ${local_head}.  \`git log -p --remerge-diff ${feature_head}..${local_head}\` shows the commits that only ${local_head} had, and \`git log -p --remerge-diff ${local_head}..${feature_head}\` shows the commits that only ${feature_head} had." "${STUB_PROMPT}"; then
   fail "pull that breaks the build: the instructions do not say what each side of the pull's merge changed: $(cat "${STUB_PROMPT}")"
 fi
 

@@ -688,9 +688,9 @@ hum_theirs="$(git -C "${WORK_DIR}/hum-cross" rev-parse HEAD)"
 git -C "${WORK_DIR}/hum-cross" switch -q main
 git -C "${WORK_DIR}/hum-cross" merge -q --no-edit other
 hum_check "criss-cross merges" "${WORK_DIR}/hum-cross" \
-  "  It merged commit ${hum_b1} into commit ${hum_a1}.  \`git log -p --cc ${hum_b1}..${hum_a1}\` shows the commits that only ${hum_a1} had, and \`git log -p --cc ${hum_a1}..${hum_b1}\` shows the commits that only ${hum_b1} had." \
-  "  It merged commit ${hum_a1} into commit ${hum_b1}.  \`git log -p --cc ${hum_a1}..${hum_b1}\` shows the commits that only ${hum_b1} had, and \`git log -p --cc ${hum_b1}..${hum_a1}\` shows the commits that only ${hum_a1} had." \
-  "  It merged commit ${hum_theirs} into commit ${hum_ours}.  \`git log -p --cc ${hum_theirs}..${hum_ours}\` shows the commits that only ${hum_ours} had, and \`git log -p --cc ${hum_ours}..${hum_theirs}\` shows the commits that only ${hum_theirs} had."
+  "  It merged commit ${hum_b1} into commit ${hum_a1}.  \`git log -p --remerge-diff ${hum_b1}..${hum_a1}\` shows the commits that only ${hum_a1} had, and \`git log -p --remerge-diff ${hum_a1}..${hum_b1}\` shows the commits that only ${hum_b1} had." \
+  "  It merged commit ${hum_a1} into commit ${hum_b1}.  \`git log -p --remerge-diff ${hum_a1}..${hum_b1}\` shows the commits that only ${hum_b1} had, and \`git log -p --remerge-diff ${hum_b1}..${hum_a1}\` shows the commits that only ${hum_a1} had." \
+  "  It merged commit ${hum_theirs} into commit ${hum_ours}.  \`git log -p --remerge-diff ${hum_theirs}..${hum_ours}\` shows the commits that only ${hum_ours} had, and \`git log -p --remerge-diff ${hum_ours}..${hum_theirs}\` shows the commits that only ${hum_theirs} had."
 
 ## An octopus merge, and a merge of commits that share no history, get only
 ## their lines.  A merge into an ancestor, which `git merge --no-ff` makes,
@@ -719,6 +719,6 @@ if [ "$(git -C "${WORK_DIR}/hum-misc" rev-list --count --merges HEAD)" -ne 3 ]; 
   fail "has_unbuilt_merge: the test repository has the wrong merges: $(git -C "${WORK_DIR}/hum-misc" log --graph --oneline)"
 fi
 hum_check "an octopus merge, unrelated histories, and a merge into an ancestor" "${WORK_DIR}/hum-misc" \
-  "  It merged commit ${hum_theirs} into its ancestor, commit ${hum_ours}.  \`git log -p --cc ${hum_ours}..${hum_theirs}\` shows the commits that only ${hum_theirs} had."
+  "  It merged commit ${hum_theirs} into its ancestor, commit ${hum_ours}.  \`git log -p --remerge-diff ${hum_ours}..${hum_theirs}\` shows the commits that only ${hum_theirs} had."
 
 echo "${SCRIPT_NAME}: OK"
