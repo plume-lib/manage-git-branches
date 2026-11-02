@@ -180,57 +180,94 @@ export STUB_LOG STUB_PROMPT STUB_ARGS
 ## Creates a remote under ${WORK_DIR}/NAME with branches "main" and
 ## "feature", whose changes to file.txt conflict, and a clone of each.  Every
 ## version of file.txt ends with the line LAST-LINE, if it is given.  Sets
-## ${main_dir} and ${feature_dir} to the clones and ${remote} to the remote.
+## ${main_dir} and ${feature_dir} to the clones, ${remote} to the remote, and
+## ${feature_head} to the commit at the head of feature.
 ## With KIND "build", the project has a Makefile, whose build fails if other.txt
 ## contains "BROKEN", and main adds "BROKEN" to other.txt.  With
 ## "build-modifies", the build also changes the tracked file other.txt if
 ## notes.txt exists.
+##
+## Creating the repositories takes about 30 processes, which are slow to
+## start on macOS, so each case copies a template.  Every case of the same
+## KIND without LAST-LINE copies the same template.
 setup_case() {
   case_last_line="${3-}"
   case_dir="${WORK_DIR}/$1"
-  mkdir "${case_dir}"
+  if [ -e "${case_dir}" ]; then
+    fail "setup_case: ${case_dir} already exists"
+  fi
   remote="${case_dir}/myrepo.git"
-  git init -q --bare -b main "${remote}"
-  git init -q -b main "${case_dir}/seed"
-  write_file "${case_dir}/seed/file.txt" one two three four five six seven eight nine
-  git -C "${case_dir}/seed" add file.txt
-  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
-    echo 'all:' > "${case_dir}/seed/Makefile"
-  fi
-  if [ "${2:-}" = build-modifies ]; then
-    printf '\t@if [ -e notes.txt ]; then echo "built" >> other.txt; fi\n' \
-      >> "${case_dir}/seed/Makefile"
-  fi
-  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
-    printf '\t@if grep -n BROKEN other.txt; then echo "other.txt is broken" >&2; exit 1; fi\n' \
-      >> "${case_dir}/seed/Makefile"
-    echo "fine" > "${case_dir}/seed/other.txt"
-    echo '*.local' > "${case_dir}/seed/.gitignore"
-    git -C "${case_dir}/seed" add Makefile other.txt .gitignore
-  fi
-  git -C "${case_dir}/seed" commit -q -m "Initial commit"
-  git -C "${case_dir}/seed" remote add origin "${remote}"
-  git -C "${case_dir}/seed" push -q --set-upstream origin main
-  git -C "${case_dir}/seed" push -q origin main:refs/heads/feature
-
   main_dir="${case_dir}/myrepo-branch-main"
   feature_dir="${case_dir}/myrepo-branch-feature"
-  git clone -q -b main "${remote}" "${main_dir}"
-  git clone -q -b feature "${remote}" "${feature_dir}"
-  git -C "${main_dir}" config pull.rebase false
-  git -C "${feature_dir}" config pull.rebase false
-
-  write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
-  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
-    echo "BROKEN" >> "${main_dir}/other.txt"
+  # No case can be named ".templates".  A case with LAST-LINE has a template
+  # of its own, named after the case.
+  case_template="${WORK_DIR}/.templates/${3:+$1-}${2:-plain}"
+  if [ ! -d "${case_template}" ]; then
+    mkdir -p "${WORK_DIR}/.templates"
+    create_case_repositories "${case_template}" "${2:-}"
   fi
-  git -C "${main_dir}" commit -q -a -m "Change main"
-  git -C "${main_dir}" push -q
-  write_file "${feature_dir}/file.txt" one two three four five six SEVEN-feature eight nine
-  git -C "${feature_dir}" commit -q -a -m "Change feature"
-  git -C "${feature_dir}" push -q
-  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  cp -R "${case_template}" "${case_dir}"
+  # A copied clone's origin is still the template's remote, and its index
+  # records the template's files' inode numbers and times, so that git would
+  # consider each file possibly changed.
+  for case_clone in "${main_dir}" "${feature_dir}"; do
+    git -C "${case_clone}" remote set-url origin "${remote}"
+    git -C "${case_clone}" update-index -q --refresh
+  done
+  read -r feature_head < "${case_dir}/feature-head"
   : > "${STUB_LOG}"
+}
+
+## Usage: create_case_repositories DIR KIND
+## Creates, in the new directory DIR, the repositories that `setup_case`
+## describes for KIND, which is "", "build", or "build-modifies", and the file
+## DIR/feature-head, which contains the commit at the head of feature.  Every
+## version of file.txt ends with the line ${case_last_line}, if it is not
+## empty.
+create_case_repositories() {
+  mkdir "$1"
+  ccr_remote="$1/myrepo.git"
+  git init -q --bare -b main "${ccr_remote}"
+  git init -q -b main "$1/seed"
+  write_file "$1/seed/file.txt" one two three four five six seven eight nine
+  git -C "$1/seed" add file.txt
+  if [ "$2" = build ] || [ "$2" = build-modifies ]; then
+    echo 'all:' > "$1/seed/Makefile"
+  fi
+  if [ "$2" = build-modifies ]; then
+    printf '\t@if [ -e notes.txt ]; then echo "built" >> other.txt; fi\n' \
+      >> "$1/seed/Makefile"
+  fi
+  if [ "$2" = build ] || [ "$2" = build-modifies ]; then
+    printf '\t@if grep -n BROKEN other.txt; then echo "other.txt is broken" >&2; exit 1; fi\n' \
+      >> "$1/seed/Makefile"
+    echo "fine" > "$1/seed/other.txt"
+    echo '*.local' > "$1/seed/.gitignore"
+    git -C "$1/seed" add Makefile other.txt .gitignore
+  fi
+  git -C "$1/seed" commit -q -m "Initial commit"
+  git -C "$1/seed" push -q "${ccr_remote}" main main:refs/heads/feature
+  # Nothing uses the seed after this push, and a copy of a template is
+  # faster without it.
+  rm -rf "$1/seed"
+
+  ccr_main="$1/myrepo-branch-main"
+  ccr_feature="$1/myrepo-branch-feature"
+  git clone -q -b main "${ccr_remote}" "${ccr_main}"
+  git clone -q -b feature "${ccr_remote}" "${ccr_feature}"
+  git -C "${ccr_main}" config pull.rebase false
+  git -C "${ccr_feature}" config pull.rebase false
+
+  write_file "${ccr_main}/file.txt" ONE two three four five six SEVEN-main eight nine
+  if [ "$2" = build ] || [ "$2" = build-modifies ]; then
+    echo "BROKEN" >> "${ccr_main}/other.txt"
+  fi
+  git -C "${ccr_main}" commit -q -a -m "Change main"
+  git -C "${ccr_main}" push -q
+  write_file "${ccr_feature}/file.txt" one two three four five six SEVEN-feature eight nine
+  git -C "${ccr_feature}" commit -q -a -m "Change feature"
+  git -C "${ccr_feature}" push -q
+  git -C "${ccr_feature}" rev-parse HEAD > "$1/feature-head"
 }
 
 ## Usage: write_file FILE LINE...
@@ -1203,7 +1240,10 @@ for llm_option in --llm --no-llm; do
   git -C "${main_dir}" remote add fork "${fork}"
   git -C "${main_dir}" fetch -q fork
   fork_head="$(git -C "${main_dir}" rev-parse refs/remotes/fork/main)"
-  git -C "${case_dir}/seed" push -q --force "${fork}" main:main
+  # Change the fork's main without a push from main, which, because main has
+  # a remote whose URL is the fork, could update refs/remotes/fork/main.
+  git -C "${fork}" update-ref refs/heads/main \
+    "$(git -C "${main_dir}" rev-list --max-parents=0 HEAD)"
   git -C "${main_dir}" config branch.main.pushRemote fork
   git -C "${main_dir}" config push.default current
   write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
