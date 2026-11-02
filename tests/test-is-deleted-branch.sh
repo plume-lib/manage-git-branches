@@ -113,9 +113,11 @@ testdir="$(mktemp -d)"
 # The signal handlers re-raise the signal with the handler removed, so that
 # the script dies of the signal rather than resuming where it was
 # interrupted, and so that the caller sees that it was killed by a signal.
-trap 'rm -rf "${testdir}"' EXIT
-trap 'rm -rf "${testdir}"; trap - INT; kill -s INT "$$"' INT
-trap 'rm -rf "${testdir}"; trap - TERM; kill -s TERM "$$"' TERM
+# `chmod` restores the permissions of the deliberately unwritable directory
+# created below, so that `rm -rf` can remove it.
+trap 'chmod -R u+w "${testdir}" 2> /dev/null; rm -rf "${testdir}"' EXIT
+trap 'chmod -R u+w "${testdir}" 2> /dev/null; rm -rf "${testdir}"; trap - INT; kill -s INT "$$"' INT
+trap 'chmod -R u+w "${testdir}" 2> /dev/null; rm -rf "${testdir}"; trap - TERM; kill -s TERM "$$"' TERM
 
 sanitize_git_env "${testdir}"
 
@@ -394,6 +396,63 @@ mkdir -p "${testdir}/dotproject-nested-only/sub"
 ## anywhere and is the leftover of nothing.
 mkdir -p "${testdir}/dotproject-empty-tree/sub/deeper"
 
+## Python build output:  a `.venv` directory and a `*.egg-info` directory.
+## Their contents are not examined, so the file inside each would otherwise be
+## content.
+mkdir -p "${testdir}/python-leftover/.venv/bin" \
+  "${testdir}/python-leftover/myproject.egg-info"
+: > "${testdir}/python-leftover/.venv/bin/python"
+: > "${testdir}/python-leftover/myproject.egg-info/PKG-INFO"
+
+## A `*.egg-info` directory below the directory, beside a `.project` file, as
+## in a `src` layout.
+mkdir -p "${testdir}/python-nested-egg-info/src/myproject.egg-info"
+: > "${testdir}/python-nested-egg-info/.project"
+
+## A `.venv` directory beside a file that is not a leftover.
+mkdir -p "${testdir}/python-plus-file/.venv"
+: > "${testdir}/python-plus-file/other"
+
+## A regular file named `.venv`, which is not a virtual environment.
+mkdir "${testdir}/python-venv-file"
+: > "${testdir}/python-venv-file/.venv"
+
+## A symbolic link named `.venv` to a directory, which is content like any
+## other link.
+mkdir -p "${testdir}/python-venv-symlink" "${testdir}/venv-target"
+ln -s ../venv-target "${testdir}/python-venv-symlink/.venv"
+
+## A `.venv` directory that holds a git clone, as
+## `pip install -e git+URL#egg=NAME` makes in `.venv/src/`.  The clone can hold
+## unpushed work, so the `.venv` is not a leftover.
+mkdir -p "${testdir}/python-venv-checkout/.venv/src/mylib/.git"
+: > "${testdir}/python-venv-checkout/.venv/src/mylib/setup.py"
+
+## A `.venv` directory that holds a directory that the user cannot write, as
+## when a container running as root created it.  This is what remains when
+## `rm -rf` of a branch directory cannot remove such files, and it is a
+## leftover.  The superuser can write any directory, so skip this case when
+## running as root.
+unwritable=0
+if [ "$(id -u)" -ne 0 ]; then
+  unwritable=1
+  mkdir -p "${testdir}/python-venv-unwritable/.venv/lib"
+  : > "${testdir}/python-venv-unwritable/.venv/lib/module.py"
+  chmod 555 "${testdir}/python-venv-unwritable/.venv/lib"
+fi
+
+## Directories of leftovers in a working tree.  One holds a `*.egg-info`
+## directory whose file the working tree tracks, as a test fixture can, so it
+## is part of the working tree.  The other holds a `.venv` directory that the
+## working tree does not track, as in a home directory that is a repository
+## of configuration files, so it is a leftover.
+git init -q -b main "${testdir}/python-in-repo"
+mkdir -p "${testdir}/python-in-repo/pkg-tracked/pkg.egg-info" \
+  "${testdir}/python-in-repo/pkg-untracked/.venv"
+: > "${testdir}/python-in-repo/pkg-tracked/pkg.egg-info/PKG-INFO"
+git -C "${testdir}/python-in-repo" add pkg-tracked
+git -C "${testdir}/python-in-repo" commit -q -m 'Track a fixture'
+
 ## A working tree that holds a `.project` file, as an Eclipse project's clone
 ## does.  Its branch still exists in the remote, and the `.git` directory
 ## beside the `.project` file is what keeps the criterion above from applying.
@@ -474,6 +533,26 @@ expect_status 0 "${testdir}/dotproject-nested-only" \
   'directory with no .project file of its own, below which there is one'
 expect_status 2 "${testdir}/dotproject-empty-tree" \
   'directory that holds nothing but empty directories'
+expect_status 0 "${testdir}/python-leftover" \
+  'directory that holds nothing but a .venv directory and a *.egg-info directory'
+expect_status 0 "${testdir}/python-nested-egg-info" \
+  'directory that holds a .project file and, below its top level, a *.egg-info directory'
+expect_status 2 "${testdir}/python-plus-file" \
+  'directory that holds a .venv directory and a file that is not a leftover'
+expect_status 2 "${testdir}/python-venv-file" \
+  'directory that holds a regular file named .venv'
+expect_status 2 "${testdir}/python-venv-symlink" \
+  'directory that holds a symbolic link named .venv'
+expect_status 2 "${testdir}/python-venv-checkout" \
+  'directory that holds a .venv directory that holds a git clone'
+if [ "${unwritable}" -eq 1 ]; then
+  expect_status 0 "${testdir}/python-venv-unwritable" \
+    'directory that holds a .venv directory that rm -rf cannot remove'
+fi
+expect_status 2 "${testdir}/python-in-repo/pkg-tracked" \
+  'directory that holds a *.egg-info directory whose file a working tree tracks'
+expect_status 0 "${testdir}/python-in-repo/pkg-untracked" \
+  'directory that holds a .venv directory that a working tree does not track'
 expect_status 1 "${testdir}/myrepo-live-project" \
   'working tree that holds a .project file and whose branch exists in the remote'
 expect_status 2 "${nonexistent}" 'path that does not exist'

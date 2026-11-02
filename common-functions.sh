@@ -307,8 +307,7 @@ copy_repository() {
     exit 1
   fi
   copy_working_tree "$1" .git/worktrees
-  copy_repository_head="$(git -C "$1" symbolic-ref --quiet HEAD)" \
-    || copy_repository_head=''
+  copy_repository_head="$(current_branch "$1")" || copy_repository_head=''
   # `--bool` normalizes the value, and git prints the key in lower case.
   copy_repository_marked="$(git -C "$1" config --bool --get-regexp \
     '^branch\..*\.createdforbranchdirectory$' \
@@ -316,7 +315,7 @@ copy_repository() {
   printf '%s\n' "${copy_repository_marked}" \
     | while IFS= read -r copy_repository_branch; do
       case "${copy_repository_branch}" in
-        '' | "${2-}" | "${copy_repository_head#refs/heads/}") continue ;;
+        '' | "${2-}" | "${copy_repository_head}") continue ;;
       esac
       if ! git -C "$1" update-ref -d "refs/heads/${copy_repository_branch}" \
         || ! git -C "$1" config --remove-section "branch.${copy_repository_branch}"; then
@@ -753,6 +752,18 @@ fetch_remote() {
   printf '%s\n' "${remote_result}"
 }
 
+## Usage: current_branch [DIRECTORY]
+## Prints the name of the branch that is checked out in DIRECTORY, or in the
+## current directory, such as "main".  Returns 1, printing nothing, if HEAD is
+## detached or the directory is not in a git repository.  It prints the
+## branch's own name even when another ref, such as a tag "main", has the same
+## short name; `git symbolic-ref --short HEAD` would then print "heads/main".
+current_branch() {
+  current_branch_ref="$(git -C "${1:-.}" symbolic-ref --quiet HEAD 2> /dev/null)" \
+    || return 1
+  printf '%s\n' "${current_branch_ref#refs/heads/}"
+}
+
 ## Usage: check_upstream DIRECTORY
 ## Tests whether the working tree DIRECTORY has an upstream branch, which
 ## `git pull` and `git push` require.  If it does not, prints an explanation
@@ -765,16 +776,12 @@ fetch_remote() {
 ## caller that fetches into or merges into that branch, as `git-push-to` does,
 ## can use this name rather than determine it again.
 check_upstream() {
-  checked_out_branch=''
   # If the directory is not a working tree, or HEAD is detached, let a
   # subsequent command diagnose that, as `check_branch_exists` in
   # `git-push-to` does accurately.  `git rev-parse --abbrev-ref HEAD`, by
   # contrast, prints "HEAD" for a detached HEAD, which this function would
   # then report as a branch name.
-  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
-  # "heads/BRANCH" when a tag and the branch have the same name.
-  check_upstream_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
-  checked_out_branch="${check_upstream_ref#refs/heads/}"
+  checked_out_branch="$(current_branch "$1")" || return 0
   check_upstream_remote="$(git -C "$1" config --get "branch.${checked_out_branch}.remote")"
   check_upstream_merge="$(git -C "$1" config --get-all "branch.${checked_out_branch}.merge")"
   if [ -n "${check_upstream_remote}" ] && [ -n "${check_upstream_merge}" ]; then
@@ -1066,6 +1073,7 @@ resolve_merge_conflicts() {
     echo "${resolve_failed}" >&2
     return 1
   elif ! resolve_with_agent; then
+    report_agent_session "Resolve the conflicts in the merge of ${resolve_source}"
     echo "${resolve_failed}" >&2
     return 1
   fi
@@ -1097,23 +1105,33 @@ resolve_merge_conflicts() {
 ## be committed, but a later build could use it.  A file that `git rerere`
 ## resolved must keep the resolution that rerere recorded.
 resolve_with_agent() {
+  # No session is reported if this function fails before the agent runs.
+  agent_session_ids=''
   # The index is compared by its contents.  The working tree, which can hold
   # many large files, such as build output, is compared by its pathnames and
   # by the time at which each file last changed (its "ctime").  Unlike a
   # file's modification time, an unprivileged process cannot set its ctime.
-  # A file changed after the marker file was written, so the marker is in
-  # the git directory, which neither agent can write.  A file system can
-  # record times to the second, so the agent starts at least a second after
-  # the marker is written, and a file that it changes has a later time.
+  # A file changed since the marker file was written if its ctime is later
+  # than the marker's modification time.  The marker is in the git
+  # directory, which neither agent can write, so the agent cannot change the
+  # marker's time.  The agent starts only once the working tree's file
+  # system records a later time than the marker's, so that a file that it
+  # changes has a later ctime.  The working tree and the git directory can
+  # be on different file systems.  The working tree's pathnames are listed
+  # after the wait, which creates a directory in the working tree and then
+  # removes it.
   resolve_index="$(git ls-files --stage -z | cksum)"
-  resolve_paths="$(working_tree_paths)"
   if ! resolve_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-start)" \
     || ! : > "${resolve_marker}"; then
     echo "${SCRIPT_NAME}: cannot write a file in the git directory of $(pwd)" >&2
     return 1
   fi
-  sleep 1
-  resolve_branch="$(git symbolic-ref --quiet --short HEAD)" || resolve_branch="HEAD"
+  if ! wait_for_later_time "${resolve_marker}" "$(pwd)"; then
+    rm -f -- "${resolve_marker}"
+    return 1
+  fi
+  resolve_paths="$(working_tree_paths)"
+  resolve_branch="$(current_branch)" || resolve_branch="HEAD"
   resolve_prompt="You are resolving merge conflicts in the git working tree $(pwd).
 \`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts in these files:
 
@@ -1241,6 +1259,78 @@ working_tree_changes() {
     }' | LC_ALL=C sort
 }
 
+## Usage: wait_for_later_time FILE DIR [TRIES]
+## Returns 0 once every file in DIR, an absolute pathname of a directory,
+## that changes from now on has a later status-change time (ctime) than the
+## modification time of FILE, an absolute pathname, as `find -cnewer`
+## compares them.  A file system can record times to the second, or it can
+## record finer times but advance its clock only every few milliseconds.
+## DIR and FILE can be on different file systems.
+##
+## Creates, and then removes, the directory
+## DIR/.manage-git-branches-time-probe, which must not already exist.  It
+## removes the directory even if a signal such as SIGINT ends the wait.
+## Returns 1, after printing a diagnostic, if it cannot create or remove that
+## directory, or if the time does not advance within TRIES checks, 20 if
+## TRIES is not given; each check after the 10th first sleeps 1 second, so
+## 20 checks take about 10 seconds.
+##
+## The function runs in a subshell, so that its traps do not replace the
+## caller's.
+wait_for_later_time() (
+  wait_probe="$2/.manage-git-branches-time-probe"
+  wait_max_tries="${3:-20}"
+  # `mkdir` fails if anything, even a symbolic link, already has that name.
+  # By contrast, `set -C` lets a redirection open an existing file that is
+  # not a regular file, such as a FIFO or a symbolic link to /dev/null.
+  if ! mkdir -- "${wait_probe}"; then
+    echo "${SCRIPT_NAME}: cannot create the directory ${wait_probe}, which must not already exist" >&2
+    exit 1
+  fi
+  # A probe left behind would make every later wait in DIR fail.
+  trap 'rmdir -- "${wait_probe}"' EXIT
+  trap 'wait_end_by_signal HUP "${wait_probe}"' HUP
+  trap 'wait_end_by_signal INT "${wait_probe}"' INT
+  trap 'wait_end_by_signal TERM "${wait_probe}"' TERM
+  wait_tries=1
+  until [ -n "$(find "${wait_probe}" -cnewer "$1" -print)" ]; do
+    if [ "${wait_tries}" -ge "${wait_max_tries}" ]; then
+      echo "${SCRIPT_NAME}: after ${wait_tries} tries, the time that the file system records in $2 is not later than the modification time of $1" >&2
+      exit 1
+    fi
+    # A file system whose clock advances every few milliseconds needs no
+    # sleep:  each try takes about that long.  POSIX `sleep` accepts only a
+    # whole number of seconds.
+    if [ "${wait_tries}" -ge 10 ]; then sleep 1; fi
+    if ! touch -- "${wait_probe}"; then
+      echo "${SCRIPT_NAME}: cannot change the time of the directory ${wait_probe}" >&2
+      exit 1
+    fi
+    wait_tries=$((wait_tries + 1))
+  done
+  # Removing the probe here, not in the EXIT trap, makes the function fail if
+  # the removal fails:  the status of an EXIT trap does not change the
+  # subshell's exit status.
+  trap - EXIT
+  if ! rmdir -- "${wait_probe}"; then
+    echo "${SCRIPT_NAME}: cannot remove the directory ${wait_probe}" >&2
+    exit 1
+  fi
+)
+
+## Usage: wait_end_by_signal SIGNAL DIR
+## For the traps of `wait_for_later_time`.  Removes DIR, a probe directory;
+## restores the default disposition of SIGNAL, a signal name such as INT; and
+## re-sends SIGNAL to the subshell that runs `wait_for_later_time`, so that
+## the caller sees that the signal ended the wait.  If the subshell merely
+## exited, bash would continue the caller.  `$$` would name the main shell,
+## not the subshell.
+wait_end_by_signal() {
+  rmdir -- "$2"
+  trap - "$1" EXIT
+  kill -s "$1" "$(exec sh -c 'echo "$PPID"')"
+}
+
 ## Usage: report_unresolved FILES
 ## Says why each of FILES, a list of conflicted files one per line, is not
 ## acceptably resolved:  that it still has conflict markers, or else what
@@ -1298,6 +1388,22 @@ agent_available() {
 ## command should run in the current directory.  Otherwise returns 1, after
 ## printing a diagnostic, if the agent fails.
 ##
+## Appends to ${agent_session_ids}, a blank-separated list, the UUID that
+## names the agent's session, such as "1e55b89c-cfb5-468f-a783-cb104201809b".
+## A caller that sets ${agent_session_ids} to the empty string first can
+## report every session that the agent ran in since then, such as one per
+## attempt to fix a build.  Prints a diagnostic and appends nothing if the
+## session has no UUID:  for Claude, if this system cannot make one, and for
+## Codex, if Codex does not print the one that it chose.  Also sets the
+## variables that `report_agent_session` reads:  ${agent_session_agent}, which
+## is AGENT; ${agent_session_command}, the command that continues a session
+## given its UUID, "claude --resume" or "codex resume"; ${agent_session_dir},
+## the current directory; and ${agent_session_todo}, the pathname of the file
+## AGENT-TODO.md at the top level of the working tree, or the empty string if
+## that file must not be written because git tracks it or the top level is
+## unknown.  It is computed before the agent runs, because no git command
+## should run after the agent has changed git's configuration.
+##
 ## The agent can read every file of the working tree, including files that
 ## git ignores, such as a ".env" file, and the repository, including its
 ## configuration.  Instructions in the conflicting text can make it copy a
@@ -1317,6 +1423,14 @@ run_agent() {
       ;;
   esac
   run_agent_start="$(date +%s)"
+  agent_session_agent="$1"
+  agent_session_dir="$(pwd)"
+  run_agent_session=''
+  agent_session_todo=''
+  if run_agent_top="$(git rev-parse --show-toplevel)" \
+    && ! git -C "${run_agent_top}" ls-files --error-unmatch -- "${agent_todo_file}" > /dev/null 2>&1; then
+    agent_session_todo="${run_agent_top}/${agent_todo_file}"
+  fi
   # Each agent reads its instructions from standard input.
   #
   # Claude's restricted mode confines the file tools to the current
@@ -1339,7 +1453,16 @@ run_agent() {
   # own installation, which its sandbox runs.
   case "$1" in
     claude)
+      agent_session_command="claude --resume"
+      run_agent_session="$(new_uuid)"
+      if [ -z "${run_agent_session}" ]; then
+        echo "${SCRIPT_NAME}: cannot make a UUID to name claude's session, so no command will be able to continue it" >&2
+      fi
+      # The UUID contains no character that field splitting or globbing
+      # would change, so the unquoted expansion is one option and its value.
+      # shellcheck disable=SC2086
       printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" claude -p --restricted --strict-mcp-config \
+        ${run_agent_session:+--session-id ${run_agent_session}} \
         --settings '{"permissions": {"blockReadsOutsideWorkingDirectories": true}}' \
         --tools 'Read,Edit,Write,Grep,Glob,Bash' --permission-mode acceptEdits \
         --allowedTools 'Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git merge-base:*)' \
@@ -1347,6 +1470,7 @@ run_agent() {
       run_agent_status=$?
       ;;
     codex)
+      agent_session_command="codex resume"
       if ! run_agent_repository="$(git rev-parse --path-format=absolute --git-common-dir)" \
         || ! run_agent_codex="$(codex_installation)"; then
         echo "${SCRIPT_NAME}: cannot find the files that codex needs to read" >&2
@@ -1361,10 +1485,37 @@ run_agent() {
           run_agent_absent="${run_agent_absent} ${run_agent_name}"
         fi
       done
-      printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" codex exec -c 'default_permissions="resolve_conflicts"' \
-        -c "permissions.resolve_conflicts.filesystem={\":minimal\" = \"read\", \":project_roots\" = {\".\" = \"write\"}, $(toml_string "${run_agent_repository}") = \"read\", $(toml_string "${run_agent_codex}") = \"read\"}" \
-        -
-      run_agent_status=$?
+      # Codex chooses its session's UUID and prints it on standard error, in
+      # a header line such as "session id: 01a19ac9-dab5-7570-93b6-6ba41bf65093".
+      # `tee` copies standard error to a file, from which the first such line
+      # is read, and still shows it to the user.  The file and the file that
+      # holds Codex's exit status are in the git directory, which Codex
+      # cannot write.
+      if ! run_agent_git_dir="$(git rev-parse --absolute-git-dir)"; then
+        echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
+        return 1
+      fi
+      run_agent_log="${run_agent_git_dir}/manage-git-branches-agent-stderr"
+      run_agent_status_file="${run_agent_git_dir}/manage-git-branches-agent-status"
+      rm -f -- "${run_agent_status_file}"
+      {
+        {
+          printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" codex exec -c 'default_permissions="resolve_conflicts"' \
+            -c "permissions.resolve_conflicts.filesystem={\":minimal\" = \"read\", \":project_roots\" = {\".\" = \"write\"}, $(toml_string "${run_agent_repository}") = \"read\", $(toml_string "${run_agent_codex}") = \"read\"}" \
+            - 2>&1 1>&3 3>&-
+          echo "$?" > "${run_agent_status_file}"
+        } | tee -- "${run_agent_log}" >&2
+      } 3>&1
+      run_agent_status="$(cat -- "${run_agent_status_file}" 2> /dev/null)"
+      case "${run_agent_status}" in
+        "" | *[!0-9]*) run_agent_status=1 ;;
+      esac
+      run_agent_session="$(sed -n -e 's/^session id: //p' "${run_agent_log}" 2> /dev/null | head -n 1)"
+      if ! is_uuid "${run_agent_session}"; then
+        run_agent_session=''
+        echo "${SCRIPT_NAME}: codex printed no line \"session id: UUID\", so no command will be able to continue its session" >&2
+      fi
+      rm -f -- "${run_agent_log}" "${run_agent_status_file}"
       for run_agent_name in ${run_agent_absent}; do
         if [ -d "${run_agent_name}" ] && [ ! -L "${run_agent_name}" ]; then
           # `rmdir` removes only an empty directory.
@@ -1377,6 +1528,9 @@ run_agent() {
       return 1
       ;;
   esac
+  if [ -n "${run_agent_session}" ]; then
+    agent_session_ids="${agent_session_ids:-}${agent_session_ids:+ }${run_agent_session}"
+  fi
   if [ "$(git_control_state)" != "${run_agent_git_state}" ]; then
     echo "${SCRIPT_NAME}: $1 changed git's configuration, attributes, or hooks in $(pwd); check them before running git there" >&2
     return 2
@@ -1391,6 +1545,140 @@ run_agent() {
     return 1
   fi
   return 0
+}
+
+## Usage: report_agent_session TASK
+## Prints a command that continues, interactively, each session of the AI
+## agent that `run_agent` recorded in ${agent_session_ids}, such as
+## "cd /home/me/myrepo && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b".
+## The user can then ask the agent about its work, or tell it to finish the
+## work in a way that its instructions forbade, such as by changing text
+## outside a conflict region.  Also appends the commands, under a heading that
+## gives TASK and the time, to the file ${agent_session_todo}, where the user
+## is less likely to overlook them than in the script's output.  TASK is what
+## the agent was asked to do, such as "Fix the build after merging branch
+## 'main'"; only its first line is used.  Neither prints nor writes anything
+## if no session is recorded.
+##
+## Runs no git command, because the agent might have changed git's
+## configuration.  The file is not written if ${agent_session_todo} is empty,
+## or if the file is a symbolic link or has another hard link, either of which
+## could make the file another one outside the working tree, or if it is
+## anything else but a regular file.
+agent_todo_file=AGENT-TODO.md
+report_agent_session() {
+  if [ -z "${agent_session_ids:-}" ]; then
+    return 0
+  fi
+  # The UUIDs contain no character that field splitting or globbing would
+  # change, so each unquoted expansion below is the list of UUIDs.
+  # shellcheck disable=SC2086
+  set -- "$1" ${agent_session_ids}
+  report_task="$(printf '%s\n' "$1" | head -n 1)"
+  shift
+  report_count=$#
+  # The Markdown entry for ${agent_session_todo}.
+  report_entry="
+## ${report_task} (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
+"
+  report_index=0
+  for report_id in "$@"; do
+    report_index=$((report_index + 1))
+    report_command="cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${report_id}"
+    if [ "${report_count}" -eq 1 ]; then
+      report_session="the session"
+    else
+      report_session="session ${report_index} of ${report_count}"
+      report_entry="${report_entry}
+Session ${report_index} of ${report_count}:
+"
+    fi
+    # `echo` in some shells, such as dash, would interpret a backslash in the
+    # directory.
+    printf '%s\n' "${SCRIPT_NAME}: to continue ${report_session} of ${agent_session_agent}:  ${report_command}" >&2
+    report_entry="${report_entry}
+\`\`\`sh
+${report_command}
+\`\`\`
+"
+  done
+  if [ -z "${agent_session_todo:-}" ]; then
+    echo "${SCRIPT_NAME}: did not write ${agent_todo_file}, which git tracks or whose working tree is unknown" >&2
+    return 0
+  fi
+  report_todo="${agent_session_todo}"
+  # `find -links +1` prints the file if it has more than one hard link.
+  if [ -L "${report_todo}" ] \
+    || { [ -e "${report_todo}" ] && [ ! -f "${report_todo}" ]; } \
+    || [ -n "$(find "${report_todo}" -prune -links +1 2> /dev/null)" ]; then
+    echo "${SCRIPT_NAME}: did not write ${report_todo}, which is not a regular file with one link" >&2
+    return 0
+  fi
+  report_new=no
+  if [ ! -e "${report_todo}" ]; then
+    report_new=yes
+  fi
+  if ! {
+    if [ "${report_new}" = yes ]; then
+      # The backquotes are Markdown, not command substitutions.
+      # shellcheck disable=SC2016
+      printf '%s\n' \
+        '# AI agent sessions to continue' \
+        '' \
+        'A script of manage-git-branches, such as `git-push-to`, appends an entry' \
+        'here when an AI agent fails or when the script rejects its work.  The' \
+        "entry's command continues the agent's session interactively.  Delete the" \
+        'entry once you have dealt with it.'
+    fi
+    printf '%s' "${report_entry}"
+  } >> "${report_todo}"; then
+    echo "${SCRIPT_NAME}: cannot write ${report_todo}" >&2
+    return 0
+  fi
+  if [ "${report_count}" -eq 1 ]; then
+    echo "${SCRIPT_NAME}: appended that command to ${report_todo}" >&2
+  else
+    echo "${SCRIPT_NAME}: appended those commands to ${report_todo}" >&2
+  fi
+}
+
+## Usage: new_uuid
+## Prints a new random UUID in lowercase, such as
+## "1e55b89c-cfb5-468f-a783-cb104201809b", or prints nothing if this system
+## cannot make one.
+new_uuid() {
+  if command -v uuidgen > /dev/null 2>&1; then
+    new_uuid_value="$(uuidgen 2> /dev/null | tr 'A-F' 'a-f')"
+  else
+    new_uuid_value="$(cat /proc/sys/kernel/random/uuid 2> /dev/null)"
+  fi
+  if is_uuid "${new_uuid_value}"; then
+    printf '%s\n' "${new_uuid_value}"
+  fi
+}
+
+## Usage: is_uuid STRING
+## Succeeds if STRING is a UUID in lowercase, such as
+## "1e55b89c-cfb5-468f-a783-cb104201809b".
+is_uuid() {
+  printf '%s\n' "$1" \
+    | grep -x -q '[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}'
+}
+
+## Usage: shell_word STRING
+## Prints STRING as a word that a POSIX shell reads as STRING:  unchanged if
+## it consists only of characters that the shell does not interpret, as in
+## "/home/me/myrepo", and otherwise in single quotes, as in
+## "'/home/me/my repo'".
+shell_word() {
+  case "$1" in
+    "" | *[!A-Za-z0-9_./:@%+=,-]*)
+      printf "'%s'\n" "$(printf '%s' "$1" | sed -e "s/'/'\\\\''/g")"
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
 }
 
 ## Usage: run_with_time_limit SECONDS COMMAND [ARGUMENT...]
@@ -1547,6 +1835,8 @@ build_fix_attempts=3
 fix_failed_build() {
   fix_with="$1"
   fix_log="$2"
+  # No session is reported if this function fails before the agent runs.
+  agent_session_ids=''
   # The agent's changes are committed below, and so would be any change that
   # the build made to tracked files.
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
@@ -1670,13 +1960,18 @@ parse_llm_option() {
   return 0
 }
 
-## Usage: pull_resolving RESOLVER DIRECTORY PULL-ARGUMENT...
-## Runs `git -C DIRECTORY pull --no-commit PULL-ARGUMENT...`.  If the pull
-## merges, resolves any conflicts with `resolve_merge_conflicts`, asking
+## Usage: pull_resolving RESOLVER DIRECTORY [--no-rebase]
+## Runs `git -C DIRECTORY pull -q [--no-rebase]`, which pulls the branch
+## checked out in DIRECTORY from its upstream branch, but names the source of
+## a merge that the pull makes without its URL where it can, with the message
+## that `pull_merge_message` composes:  for example, "Merge remote-tracking
+## branch 'origin/feature' into feature" rather than "Merge branch 'feature'
+## of /home/me/repos/proj into feature".  If the pull merges and the merge
+## has conflicts, resolves them with `resolve_merge_conflicts`, asking
 ## RESOLVER, if it is not empty, about any that `git rerere` did not resolve,
-## and commits the merge with the message that `pull_merge_message` composes,
-## which names the source of the merge without its URL where it can.  (A
-## pull that rebases cannot be resolved this way.)
+## and commits the merge with that message.  (A pull that rebases, as
+## `pull.rebase` can make it do unless `--no-rebase` is given, cannot be
+## resolved this way.)
 ## Sets ${pull_fetched} to the head of the upstream branch that the pull
 ## fetched, which it merged, fast-forwarded to, rebased onto, or found already
 ## in the branch, as a full hash such as
@@ -1687,8 +1982,10 @@ parse_llm_option() {
 ## not have been built (see `is_built_remote`), or if the pull did not record
 ## the head in FETCH_HEAD.
 ## Returns 1, after printing a diagnostic, if a merge is already in progress
-## in DIRECTORY, or if the pull fails and its conflicts are not resolved, or
-## if the pull's merge cannot be committed.
+## in DIRECTORY, if the pull fails without a merge in progress, as when the
+## fetch fails or a rebase has conflicts, if the merge's message cannot be
+## composed, or if the merge's conflicts are not resolved or the merge cannot
+## be committed.
 pull_resolving() {
   pull_resolver="$1"
   pull_dir="$2"
@@ -1700,51 +1997,51 @@ pull_resolving() {
     echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
     return 1
   fi
+  # `git pull` decides, as usual, whether to rebase, to fast-forward, or to
+  # merge.  `--edit` makes it run the editor on the message of a merge
+  # commit that it makes, and `GIT_EDITOR` names a command that replaces
+  # that message with the one that `pull_merge_message` composes from
+  # FETCH_HEAD.  The command runs in another shell, so it sources this file
+  # and reads ${SCRIPT_DIR} and ${SCRIPT_NAME} from its environment.  A pull
+  # that fast-forwards, rebases, or stops at conflicts runs no editor.
   # `rerere.autoUpdate` false and the configured conflict style are as for
-  # the merge in `merge_build_push`.  `--no-commit` leaves a merge
-  # uncommitted, so that its message can be replaced; a pull that
-  # fast-forwards or rebases ignores it.  Git reports, even with `-q`, that
-  # it stopped before committing, which this function then does; that line
-  # of the pull's standard error is dropped.  (Git translates it, so in
-  # another language it remains.)  File descriptor 3 carries the pull's
-  # standard output past the command substitution that captures its standard
-  # error.
-  if { pull_errors="$(git -C "${pull_dir}" -c rerere.autoUpdate=false \
-    pull --no-commit "$@" 2>&1 1>&3 3>&-)"; } 3>&1; then
+  # the merge in `merge_build_push`.
+  # shellcheck disable=SC2016 # the editor's shell expands the variables
+  if SCRIPT_DIR="${SCRIPT_DIR}" SCRIPT_NAME="${SCRIPT_NAME}" \
+    GIT_EDITOR='sh -c ". \"\${SCRIPT_DIR}/common-functions.sh\" && pull_merge_message > \"\$1\"" pull-merge-message' \
+    git -C "${pull_dir}" -c rerere.autoUpdate=false pull -q --edit "$@"; then
     pull_conflicted=0
   else
-    pull_conflicted=1
-  fi
-  if [ -n "${pull_errors}" ]; then
-    printf '%s\n' "${pull_errors}" \
-      | grep -v -x -F 'Automatic merge went well; stopped before committing as requested' >&2 \
-      || true
-  fi
-  if [ "${pull_conflicted}" -eq 1 ]; then
     echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
     if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
       return 1
     fi
-  fi
-  # FETCH_HEAD is read now, before `resolve_merge_conflicts` runs an agent,
-  # which might fetch and so overwrite it.
-  pull_merging=0
-  if git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
-    pull_merging=1
-    if ! pull_message="$(cd -- "${pull_dir}" && pull_merge_message)"; then
+    # A merge without conflicts is in progress only if the editor failed.
+    if [ -z "$(git -C "${pull_dir}" ls-files --unmerged)" ]; then
+      echo "${SCRIPT_NAME}: cannot compose a message for the merge that the pull made in ${pull_dir}; the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
+      return 1
+    fi
+    pull_conflicted=1
+    # A pull that stops at conflicts runs no editor, so the message is
+    # composed here.  It is composed at the top level of the working tree,
+    # where git runs the editor and against which git resolves a remote's
+    # relative URL.
+    if ! pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)" \
+      || ! pull_message="$(cd -- "${pull_top}" && pull_merge_message)"; then
       echo "${SCRIPT_NAME}: cannot compose a message for the merge that the pull made in ${pull_dir}; the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
       return 1
     fi
   fi
-  # FETCH_HEAD names first the commit that `git pull` merges, fast-forwards
-  # to, or rebases onto.
-  if pull_branch="$(git -C "${pull_dir}" symbolic-ref --quiet --short HEAD)" \
+  # FETCH_HEAD is read now, before `resolve_merge_conflicts` runs an agent,
+  # which might fetch and so overwrite it.  FETCH_HEAD names first the commit
+  # that the pull merges, fast-forwards to, or rebases onto.
+  if pull_branch="$(current_branch "${pull_dir}")" \
     && pull_remote="$(git -C "${pull_dir}" config --get "branch.${pull_branch}.remote")" \
     && is_built_remote "${pull_dir}" "${pull_remote}"; then
     # shellcheck disable=SC2034 # used by the commands that source this file
     pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
   fi
-  if [ "${pull_merging}" -eq 0 ]; then
+  if [ "${pull_conflicted}" -eq 0 ]; then
     return 0
   fi
   # Git names the conflicted files relative to the top level of the working
@@ -1761,8 +2058,8 @@ pull_resolving() {
       && ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
       exit 1
     fi
-    # `-F` supplies the message, rather than MERGE_MSG, which names the
-    # source by its URL and, after conflicts, lists them.
+    # `-F` supplies the message, rather than MERGE_MSG, to which `git merge`
+    # appended a list of the conflicts.
     if ! printf '%s\n' "${pull_message}" | git commit -q --cleanup=whitespace -F -; then
       echo "${SCRIPT_NAME}: cannot commit the merge of ${pull_source} in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
       exit 1
@@ -1773,38 +2070,52 @@ pull_resolving() {
 ## Usage: pull_merge_message
 ## Prints the message of the merge commit that `git pull` would make in the
 ## current repository from the commits in FETCH_HEAD, as
-## `git fmt-merge-msg` composes it, but with each source that the merge
+## `fmt_merge_message` composes it, but with each source that the merge
 ## merges named without its URL where `source_without_url` can:  for
 ## example, "Merge remote-tracking branch 'origin/feature' into feature"
 ## rather than "Merge branch 'feature' of /home/me/repos/proj into feature".
-## The message has no comment lines.
 pull_merge_message() {
   if ! pull_message_fetch_head="$(git rev-parse --git-path FETCH_HEAD)" \
-    || ! pull_message_lines="$(cat "${pull_message_fetch_head}")"; then
+    || [ ! -f "${pull_message_fetch_head}" ]; then
     return 1
   fi
   # Each line of FETCH_HEAD is "HASH<TAB>not-for-merge<TAB>SOURCE", where
   # "not-for-merge" can be empty.  `git fmt-merge-msg` ignores a line that
   # says "not-for-merge", such as each other branch that a pull fetched, so
-  # it is passed on unchanged.  `merge_build_push` explains the comment
-  # character and the source "... of .".
-  if ! pull_message_composed="$(printf '%s\n' "${pull_message_lines}" \
-    | while IFS= read -r pull_message_line; do
-      pull_message_hash="${pull_message_line%%"	"*}"
-      pull_message_rest="${pull_message_line#*"	"}"
-      pull_message_flag="${pull_message_rest%%"	"*}"
-      pull_message_source="${pull_message_rest#*"	"}"
-      if [ -z "${pull_message_flag}" ]; then
-        pull_message_source="$(source_without_url "${pull_message_source}" "${pull_message_hash}")"
-        case "${pull_message_source}" in
-          "remote-tracking branch "*) pull_message_source="${pull_message_source} of ." ;;
-        esac
-      fi
-      printf '%s\t%s\t%s\n' "${pull_message_hash}" "${pull_message_flag}" "${pull_message_source}"
-    done | git -c core.commentChar='#' fmt-merge-msg)"; then
+  # it is passed on unchanged.  `merge_build_push` explains the source
+  # "... of .".
+  while IFS= read -r pull_message_line; do
+    pull_message_hash="${pull_message_line%%"	"*}"
+    pull_message_rest="${pull_message_line#*"	"}"
+    pull_message_flag="${pull_message_rest%%"	"*}"
+    pull_message_source="${pull_message_rest#*"	"}"
+    if [ -z "${pull_message_flag}" ]; then
+      pull_message_source="$(source_without_url "${pull_message_source}" "${pull_message_hash}")"
+      case "${pull_message_source}" in
+        "remote-tracking branch "*) pull_message_source="${pull_message_source} of ." ;;
+      esac
+    fi
+    printf '%s\t%s\t%s\n' "${pull_message_hash}" "${pull_message_flag}" "${pull_message_source}"
+  done < "${pull_message_fetch_head}" | fmt_merge_message
+}
+
+## Usage: fmt_merge_message
+## Reads lines in the format of FETCH_HEAD, such as
+## "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b<TAB><TAB>branch 'feature' of
+## github.com:org/proj", and prints the message that `git fmt-merge-msg`
+## composes for the merge of their commits into the current branch, as
+## `git merge` would compose it.  The message includes the commit summaries
+## that `merge.log` turns on, but no comment lines.
+fmt_merge_message() {
+  # `git fmt-merge-msg` writes comment lines, such as "# By AUTHOR", that
+  # `git merge` keeps in a message given with `-m`, so they are removed.  The
+  # comment character is set to "#" for both commands, because the summaries
+  # that `merge.log` turns on begin with "* ", which `core.commentChar` might
+  # be.
+  if ! fmt_merge_composed="$(git -c core.commentChar='#' fmt-merge-msg)"; then
     return 1
   fi
-  printf '%s\n' "${pull_message_composed}" | git -c core.commentChar='#' stripspace --strip-comments
+  printf '%s\n' "${fmt_merge_composed}" | git -c core.commentChar='#' stripspace --strip-comments
 }
 
 ## Usage: upstream_description
@@ -1821,7 +2132,7 @@ upstream_description() {
     refs/remotes/*) echo "remote-tracking branch '${upstream_description_ref#refs/remotes/}'" ;;
     refs/heads/*) echo "branch '${upstream_description_ref#refs/heads/}'" ;;
     *)
-      if upstream_description_branch="$(git symbolic-ref --quiet --short HEAD)"; then
+      if upstream_description_branch="$(current_branch)"; then
         echo "the upstream branch of branch '${upstream_description_branch}'"
       else
         echo "the upstream branch"
@@ -1868,8 +2179,8 @@ subject_without_url() {
 ## Prints SOURCE, a source that `git pull` merges, as it writes one in
 ## FETCH_HEAD and in a merge message, such as "branch 'feature' of
 ## github.com:org/proj", named without its URL where it can.  COMMIT is the
-## commit that the merge merged from SOURCE.  For a source "branch 'BRANCH'
-## of URL", prints:
+## commit that the merge merges from SOURCE.  For a source "branch 'BRANCH'
+## of URL" where URL is not ".", the local repository, prints:
 ##  * "remote-tracking branch 'REMOTE/BRANCH'", such as "remote-tracking
 ##    branch 'origin/feature'", if REMOTE/BRANCH tracks BRANCH of URL (see
 ##    `tracking_branch_of`) and contains COMMIT;
@@ -1887,32 +2198,31 @@ source_without_url() {
       return 0
       ;;
   esac
-  source_url_branch="$(printf '%s\n' "$1" | sed -e "s/^branch '//" -e "s/' of .*//")"
-  source_url_url="$(printf '%s\n' "$1" | sed -e "s/^branch '[^']*' of //")"
+  source_url_rest="${1#"branch '"}"
+  source_url_branch="${source_url_rest%%"' of "*}"
+  source_url_url="${source_url_rest#*"' of "}"
+  # The pathname "." is the local repository, which reveals nothing.
+  if [ "${source_url_url}" = . ]; then
+    printf '%s\n' "$1"
+    return 0
+  fi
   if source_url_tracking="$(tracking_branch_of "${source_url_branch}" "${source_url_url}" "$2")"; then
     printf "remote-tracking branch '%s'\n" "${source_url_tracking}"
     return 0
   fi
-  # As in `url_location`, a string is a URL if it has a scheme, other than
-  # "file", or if a colon precedes its first slash.  The pathname "." is the
-  # local repository, which reveals nothing.
   case "${source_url_url}" in
     file://*) ;;
-    . | *://*)
-      printf '%s\n' "$1"
-      return 0
-      ;;
-    *:*)
-      case "${source_url_url%%:*}" in
-        */*) ;;
-        *)
-          printf '%s\n' "$1"
-          return 0
-          ;;
-      esac
+    *)
+      if ! is_pathname "${source_url_url}"; then
+        printf '%s\n' "$1"
+        return 0
+      fi
       ;;
   esac
-  printf "branch '%s' of %s\n" "${source_url_branch}" "${source_url_url##*/}"
+  # For the URL "/srv/proj/.git", `git pull` writes "/srv/proj/", whose last
+  # component is "proj".
+  source_url_path="${source_url_url%"${source_url_url##*[!/]}"}"
+  printf "branch '%s' of %s\n" "${source_url_branch}" "${source_url_path##*/}"
 }
 
 ## Usage: tracking_branch_of BRANCH URL COMMIT
@@ -1935,9 +2245,12 @@ tracking_branch_of() {
       continue
     fi
     # `git pull` writes the URL without trailing slashes and then without a
-    # trailing ".git".  A pathname that it wrote has no key, because no
-    # directory has that name.
-    tracking_of_stripped="$(printf '%s\n' "${tracking_of_url}" | sed -e 's#/*$##' -e 's#\.git$##')"
+    # trailing ".git".  The URL that it wrote is compared with the remote's
+    # URL stripped that way, as well as by key, because a pathname that it
+    # wrote, such as "/srv/proj" for "/srv/proj.git", might name no
+    # directory and so have no key.
+    tracking_of_stripped="${tracking_of_url%"${tracking_of_url##*[!/]}"}"
+    tracking_of_stripped="${tracking_of_stripped%.git}"
     if [ "${tracking_of_stripped}" = "$2" ] \
       || { [ -n "${tracking_of_key}" ] \
         && [ "$(url_key . "${tracking_of_url}")" = "${tracking_of_key}" ]; }; then
@@ -1961,6 +2274,9 @@ tracking_branch_of() {
 ## repository with a linked worktree, where commits are made; and of a
 ## repository whose location is not known, as when its pathname names no
 ## directory or begins with "~".
+## Remembers its result for each top level of a working tree and REMOTE in
+## ${built_remote_cache}, so it does not notice a later change, such as a
+## worktree added to the bare repository, unless that variable is cleared.
 is_built_remote() {
   if [ "$2" = . ]; then
     return 1
@@ -1969,7 +2285,35 @@ is_built_remote() {
   # not in a subdirectory such as DIRECTORY.
   built_remote_top="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" \
     || built_remote_top="$1"
-  built_remote_key="$(repository_key "${built_remote_top}" "$2")"
+  # Each entry is 3 lines:  the result, the top level, and REMOTE.
+  built_remote_entry="${built_remote_top}
+$2
+"
+  case "
+${built_remote_cache:-}" in
+    *"
+0
+${built_remote_entry}"*) return 0 ;;
+    *"
+1
+${built_remote_entry}"*) return 1 ;;
+  esac
+  if is_built_remote_uncached "${built_remote_top}" "$2"; then
+    built_remote_result=0
+  else
+    built_remote_result=1
+  fi
+  built_remote_cache="${built_remote_cache:-}${built_remote_result}
+${built_remote_entry}"
+  return "${built_remote_result}"
+}
+
+## Usage: is_built_remote_uncached TOP REMOTE
+## Returns 0 if the branches of the repository that REMOTE names in the clone
+## whose working tree has the top level TOP were built where they were pushed,
+## and returns 1 otherwise; see `is_built_remote`, which remembers the result.
+is_built_remote_uncached() {
+  built_remote_key="$(repository_key "$1" "$2")"
   case "${built_remote_key}" in
     '' | '~'*) return 1 ;;
     /*) ;;
@@ -2065,14 +2409,14 @@ built_commits() {
 ##    that the merge combined changes, and
 ##  * the current branch's tree differs from those remote branches' and
 ##    BUILT's trees.
-## Commits in BUILT that are not in the repository are ignored.
-## If it returns 0, it sets ${merge_fix_branch} to the current branch's name,
-## such as "feature"; ${merge_fix_account} to an account, for an AI agent, of
-## the merge commits that might have broken the build and of the commands that
-## show them; and ${merge_fix_message} to the message of a commit that fixes
-## the build, such as "Fix the build after merging branch 'main'", which names
-## a merge that a pull made without the pull's URL where it can (see
-## `subject_without_url`).
+## Commits in BUILT that are not in the repository are ignored.  If it
+## returns 0, it sets ${merge_fix_branch} to the current branch's name, such
+## as "feature"; ${merge_fix_account} to an account, for an AI agent, of the
+## merge commits that might have broken the build, of what each side of each
+## of them changed, and of the commands that show them; and
+## ${merge_fix_message} to the message of a commit that fixes the build, such
+## as "Fix the build after merging branch 'main'", which names a merge that a
+## pull made without the pull's URL where it can (see `subject_without_url`).
 ## If it returns 1, a failure of the build is not one that a merge on the
 ## branch caused, and the agent would merely work around it.  For example, a
 ## pull that fast-forwarded the branch brought only commits that the remote
@@ -2083,47 +2427,53 @@ built_commits() {
 ## in BUILT that are the same commit, the account keeps the first.
 has_unbuilt_merge() {
   merge_fix_remotes="$(remote_branch_refs .)"
-  # Every commit in BUILT that is in the repository, for the comparison of
-  # trees below.
+  # The commits in BUILT that are in the repository, each named once:  of two
+  # names of one commit, such as a ref and a hash, only the first.
   merge_fix_present=''
+  merge_fix_hashes=' '
   for merge_fix_commit in $1; do
-    if git rev-parse --verify --quiet "${merge_fix_commit}^{commit}" > /dev/null; then
-      merge_fix_present="${merge_fix_present:+${merge_fix_present} }${merge_fix_commit}"
+    if merge_fix_hash="$(git rev-parse --verify --quiet "${merge_fix_commit}^{commit}")"; then
+      case "${merge_fix_hashes}" in
+        *" ${merge_fix_hash} "*) ;;
+        *)
+          merge_fix_hashes="${merge_fix_hashes}${merge_fix_hash} "
+          merge_fix_present="${merge_fix_present:+${merge_fix_present} }${merge_fix_commit}"
+          ;;
+      esac
     fi
   done
   # A commit in the history of a remote branch or of another commit in BUILT,
   # such as the head that a pull fetched, excludes nothing more, and would
-  # only lengthen the account.  Each commit has a position in
-  # ${merge_fix_present}, so that of two names of one commit, such as a ref
-  # and a hash, only the later is omitted.
+  # only lengthen the account.  The other names in ${merge_fix_present} name
+  # other commits.
+  # `git merge-base --independent` prints, one per line, the commits that
+  # are in the history of no other commit given, but it prints a commit that
+  # a remote branch is at, so such a commit is excluded separately.
   merge_fix_built=''
-  merge_fix_position=0
-  for merge_fix_commit in ${merge_fix_present}; do
-    merge_fix_position=$((merge_fix_position + 1))
-    merge_fix_redundant=0
-    for merge_fix_remote in ${merge_fix_remotes}; do
-      if git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_remote}"; then
-        merge_fix_redundant=1
-        break
-      fi
-    done
-    merge_fix_other_position=0
-    for merge_fix_other in ${merge_fix_present}; do
-      merge_fix_other_position=$((merge_fix_other_position + 1))
-      if [ "${merge_fix_redundant}" -eq 1 ]; then
-        break
-      fi
-      if [ "${merge_fix_other_position}" -ne "${merge_fix_position}" ] \
-        && git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_other}" \
-        && { [ "${merge_fix_other_position}" -lt "${merge_fix_position}" ] \
-          || ! git merge-base --is-ancestor "${merge_fix_other}" "${merge_fix_commit}"; }; then
-        merge_fix_redundant=1
-      fi
-    done
-    if [ "${merge_fix_redundant}" -eq 0 ]; then
-      merge_fix_built="${merge_fix_built:+${merge_fix_built} }${merge_fix_commit}"
+  if [ -n "${merge_fix_present}" ]; then
+    # shellcheck disable=SC2086 # the variables are lists of commits
+    if ! merge_fix_independent="$(git merge-base --independent ${merge_fix_remotes} ${merge_fix_hashes})" \
+      || ! merge_fix_remote_hashes="$(git rev-parse ${merge_fix_remotes})"; then
+      echo "${SCRIPT_NAME}: cannot compare the built commits in $(pwd), so no AI agent is asked to fix the build" >&2
+      return 1
     fi
-  done
+    merge_fix_independent=" $(printf '%s' "${merge_fix_independent}" | tr '\n' ' ') "
+    merge_fix_remote_hashes=" $(printf '%s' "${merge_fix_remote_hashes}" | tr '\n' ' ') "
+    # ${merge_fix_hashes} holds the hashes of ${merge_fix_present}, in order.
+    # shellcheck disable=SC2086 # the variable is a list of commits
+    set -- ${merge_fix_hashes}
+    for merge_fix_commit in ${merge_fix_present}; do
+      case "${merge_fix_independent}" in
+        *" $1 "*)
+          case "${merge_fix_remote_hashes}" in
+            *" $1 "*) ;;
+            *) merge_fix_built="${merge_fix_built:+${merge_fix_built} }${merge_fix_commit}" ;;
+          esac
+          ;;
+      esac
+      shift
+    done
+  fi
   if ! merge_fix_tree="$(git rev-parse --verify --quiet 'HEAD^{tree}')"; then
     echo "${SCRIPT_NAME}: cannot read the tree of HEAD in $(pwd), so no AI agent is asked to fix the build" >&2
     return 1
@@ -2144,8 +2494,9 @@ has_unbuilt_merge() {
     return 1
   fi
   # The merges that combined changes:  their subjects, as the message of the
-  # fix names them (see `subject_without_url`), and lines
-  # "* ABBREVIATION SUBJECT", one per merge.
+  # fix names them (see `subject_without_url`), and, one per merge, a line
+  # "* ABBREVIATION SUBJECT" followed, for a merge of two commits that share
+  # history, by an indented account of what each side changed.
   merge_fix_subjects=''
   merge_fix_list=''
   for merge_fix_commit in ${merge_fix_log}; do
@@ -2165,30 +2516,71 @@ has_unbuilt_merge() {
       fi
     done
     if [ "${merge_fix_combined}" -eq 1 ]; then
-      if ! merge_fix_subject="$(git log -1 --format=%s "${merge_fix_commit}")" \
-        || ! merge_fix_abbrev="$(git rev-parse --short "${merge_fix_commit}")"; then
+      if ! merge_fix_line="$(git log -1 --format='%h %s' "${merge_fix_commit}")"; then
         echo "${SCRIPT_NAME}: cannot read commit ${merge_fix_commit} in $(pwd), so no AI agent is asked to fix the build" >&2
         return 1
       fi
       merge_fix_subjects="${merge_fix_subjects:+${merge_fix_subjects}
-}$(subject_without_url "${merge_fix_subject}" "${merge_fix_commit}^2")"
+}$(subject_without_url "${merge_fix_line#* }" "${merge_fix_commit}^2")"
       merge_fix_list="${merge_fix_list:+${merge_fix_list}
-}* ${merge_fix_abbrev} ${merge_fix_subject}"
+}* ${merge_fix_line}"
+      # A merge of two commits that share history gets an account of the
+      # commits that only each of them had.  Those commits' patches show
+      # what each side changed, even where the two have several merge bases,
+      # as after criss-cross merges; `--remerge-diff` shows, for a merge among
+      # them, how the merge differs from git's automatic merge of its parents,
+      # such as a conflict's resolution, even one that takes one parent's
+      # version.  (`--cc` and `--diff-merges=first-parent` omit a hunk whose
+      # result equals a parent's.)  The account names commits by their full hashes, which
+      # stay unambiguous after the agent creates objects.  An octopus merge,
+      # or one whose parents share no history, gets only its line.
+      case "${merge_fix_parents}" in
+        *"
+"*"
+"*) ;;
+        *)
+          merge_fix_ours="${merge_fix_parents%%"
+"*}"
+          merge_fix_theirs="${merge_fix_parents#*"
+"}"
+          merge_fix_ours_log="\`git log -p --remerge-diff ${merge_fix_theirs}..${merge_fix_ours}\` shows the commits that only ${merge_fix_ours} had"
+          merge_fix_theirs_log="\`git log -p --remerge-diff ${merge_fix_ours}..${merge_fix_theirs}\` shows the commits that only ${merge_fix_theirs} had"
+          if merge_fix_base="$(git merge-base "${merge_fix_ours}" "${merge_fix_theirs}")"; then
+            case "${merge_fix_base}" in
+              "${merge_fix_ours}") merge_fix_sides="It merged commit ${merge_fix_theirs} into its ancestor, commit ${merge_fix_ours}.  ${merge_fix_theirs_log}." ;;
+              "${merge_fix_theirs}") merge_fix_sides="It merged commit ${merge_fix_theirs} into its descendant, commit ${merge_fix_ours}.  ${merge_fix_ours_log}." ;;
+              *) merge_fix_sides="It merged commit ${merge_fix_theirs} into commit ${merge_fix_ours}.  ${merge_fix_ours_log}, and ${merge_fix_theirs_log}." ;;
+            esac
+            merge_fix_list="${merge_fix_list}
+  ${merge_fix_sides}"
+          fi
+          ;;
+      esac
     fi
   done
   if [ -z "${merge_fix_subjects}" ]; then
     return 1
   fi
-  merge_fix_branch="$(git symbolic-ref --quiet --short HEAD)" || merge_fix_branch=HEAD
+  merge_fix_branch="$(current_branch)" || merge_fix_branch=HEAD
+  case "${merge_fix_built}" in
+    '') merge_fix_built_history='' ;;
+    *' '*) merge_fix_built_history="the histories of $(printf '%s' "${merge_fix_built}" | sed -e 's/ / and /g'), which were built elsewhere" ;;
+    *) merge_fix_built_history="the history of ${merge_fix_built}, which was built elsewhere" ;;
+  esac
+  merge_fix_other=''
   case "${merge_fix_remotes}" in
-    '') merge_fix_lack="Git cannot name a remote branch that branch ${merge_fix_branch} pushes to or pulls from, so its commits might not have been built" ;;
+    '')
+      if [ -n "${merge_fix_built}" ]; then
+        merge_fix_lack="Branch ${merge_fix_branch} has commits that are not in ${merge_fix_built_history}"
+      else
+        merge_fix_lack="Branch ${merge_fix_branch} pushes to and pulls from no remote branch whose history is known to have been built, so its commits might not have been built"
+      fi
+      ;;
     *' '*) merge_fix_lack="Branch ${merge_fix_branch} has commits that the remote branches $(printf '%s' "${merge_fix_remotes}" | sed -e 's/ / and /') lack" ;;
     *) merge_fix_lack="Branch ${merge_fix_branch} has commits that the remote branch ${merge_fix_remotes} lacks" ;;
   esac
-  if [ -n "${merge_fix_built}" ]; then
-    merge_fix_other="other than those in the history of ${merge_fix_built}, which were built elsewhere"
-  else
-    merge_fix_other=''
+  if [ -n "${merge_fix_remotes}" ] && [ -n "${merge_fix_built}" ]; then
+    merge_fix_other="other than those in ${merge_fix_built_history}"
   fi
   merge_fix_excluded="${merge_fix_remotes}${merge_fix_remotes:+${merge_fix_built:+ }}${merge_fix_built}"
   merge_fix_account="${merge_fix_lack}${merge_fix_other:+, ${merge_fix_other}}.  Among those commits are these merges, oldest first, any of which might have combined changes that do not fit together:
@@ -2243,15 +2635,8 @@ merge_build_push() {
   # composing it by hand.  Git then writes the "into BRANCH" suffix, which it
   # omits on the default branch, and the commit summaries that `merge.log`
   # turns on.  Saying that COMMIT came from ".", the local repository, keeps
-  # git from appending " of SOURCE" to the message.  `git fmt-merge-msg` also
-  # writes comment lines, such as "# By AUTHOR", that `git merge` keeps in a
-  # message given with `-m`, so they are removed.  The comment character is
-  # set to "#" for both commands, because the summaries that `merge.log`
-  # turns on begin with "* ", which `core.commentChar` might be.
-  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" \
-    | git -c core.commentChar='#' fmt-merge-msg)" \
-    || ! merge_message="$(printf '%s\n' "${merge_message}" \
-      | git -c core.commentChar='#' stripspace --strip-comments)"; then
+  # git from appending " of SOURCE" to the message.
+  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" | fmt_merge_message)"; then
     echo "${SCRIPT_NAME}: cannot compose a merge message for $3" >&2
     return 1
   fi
@@ -2338,6 +2723,7 @@ merge_build_push() {
         merge_did="The script just merged commit $1 into branch ${merge_fix_branch}."
       fi
       if ! fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
+        report_agent_session "${merge_fix_message}"
         return 1
       fi
     fi
@@ -2865,24 +3251,17 @@ remote_location() {
 ## directory.
 url_location() {
   url_location_url="$2"
-  # Git reads a string as a URL if it has a scheme, and as an scp-style URL if
-  # a colon precedes the first slash.  Anything else is a pathname.
   case "${url_location_url}" in
     '') return 0 ;;
-    *://* | '~'*)
+    '~'*)
       printf '%s\n' "${url_location_url}"
       return 0
       ;;
-    *:*)
-      case "${url_location_url%%:*}" in
-        */*) ;;
-        *)
-          printf '%s\n' "${url_location_url}"
-          return 0
-          ;;
-      esac
-      ;;
   esac
+  if ! is_pathname "${url_location_url}"; then
+    printf '%s\n' "${url_location_url}"
+    return 0
+  fi
   case "${url_location_url}" in
     /*) url_location_path="${url_location_url}" ;;
     *) url_location_path="$1/${url_location_url}" ;;
@@ -2893,6 +3272,25 @@ url_location() {
   # location.  Discard `cd`'s diagnostic, which would name the pathname with no
   # hint of what asked about it.
   physical_path "${url_location_path}" 2> /dev/null || true
+}
+
+## Usage: is_pathname URL
+## Returns 0 if URL, a location of a repository that git accepts, such as
+## "../proj" or "git@github.com:org/proj.git", is a pathname, and returns 1
+## if it is a URL.  Git reads a string as a URL if it has a scheme, such as
+## "https://" or "file://", and as an scp-style URL if a colon precedes its
+## first slash.
+is_pathname() {
+  case "$1" in
+    *://*) return 1 ;;
+    *:*)
+      case "${1%%:*}" in
+        */*) ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  return 0
 }
 
 ## Usage: repository_key DIRECTORY REMOTE
@@ -3155,40 +3553,82 @@ remote_heads() {
   return "${remote_heads_status}"
 }
 
-## Usage: only_dot_project DIRECTORY
-## Returns 0 (true) if DIRECTORY holds nothing but Eclipse `.project` files:
-## that is, if every entry of DIRECTORY is a `.project` file or is a directory
-## that itself holds nothing but `.project` files.  A directory that holds
-## nothing at all satisfies this, which is what lets an empty subdirectory --
-## such as the `bin` that Eclipse makes for a project's build output -- count
-## as nothing.
+## Usage: is_build_output_name NAME
+## Returns 0 (true) if NAME, the last component of a directory's pathname, is
+## the name of a directory of Python build output:  `.venv`, a virtual
+## environment, or a name that ends in `.egg-info`, such as
+## `myproject.egg-info`, which holds package metadata.  Such a directory holds
+## no branch directory and no work, except as `holds_no_checkout` tests.
+is_build_output_name() {
+  case "$1" in
+    '.venv' | *.egg-info) return 0 ;;
+  esac
+  return 1
+}
+
+## Usage: holds_no_checkout DIRECTORY
+## Returns 0 (true) if a directory DIRECTORY holds no version-control
+## checkout:  that is, if nothing in DIRECTORY, at any depth, is named `.git`,
+## `.hg`, `.svn`, or `.bzr`.  Returns 1 (false) if the user cannot read some
+## directory in DIRECTORY, which might hold a checkout.
+##
+## `find` writes newline-separated text, which cannot represent a file name
+## that contains a newline, but this function needs only whether `find` wrote
+## anything, which such a name does not obscure.
+holds_no_checkout() {
+  holds_no_checkout_found="$(find "$1" \( -name .git -o -name .hg -o -name .svn \
+    -o -name .bzr \) -prune -print 2> /dev/null)" || return 1
+  [ -z "${holds_no_checkout_found}" ]
+}
+
+## Usage: only_leftovers DIRECTORY
+## Returns 0 (true) if DIRECTORY holds nothing but leftovers:  files and
+## directories that tools other than git create in a working tree and that
+## remain after the working tree itself is gone.  A leftover is one of these:
+##  * an Eclipse `.project` file, which is a regular file;
+##  * a directory of Python build output that holds no version-control
+##    checkout, as `holds_no_checkout` tests:  either a Python virtual environment, which is a directory named `.venv`,
+##    or Python package metadata, which is a directory whose name ends in
+##    `.egg-info`, such as `myproject.egg-info`.
+## That is, every entry of DIRECTORY is a leftover or is a directory that
+## itself holds nothing but leftovers.  A directory that holds nothing at all
+## satisfies this, which is what lets an empty subdirectory -- such as the
+## `bin` that Eclipse makes for a project's build output -- count as nothing.
+##
+## Such a directory's contents are build output, which a build re-creates, so
+## they need not be leftovers themselves.  Nor need they belong to the user:
+## a container that runs as root creates them owned by root, and they are
+## what remains when the user's `rm -rf` of a branch directory cannot remove
+## them.  A `.venv` or `*.egg-info` directory that holds a version-control
+## checkout is not a leftover, because `pip install -e git+URL#egg=NAME`
+## clones a repository into `.venv/src/`, and that clone can hold unpushed
+## work.
 ##
 ## This says only what is in DIRECTORY; the caller decides what that means.
 ## A directory that holds nothing satisfies this test only vacuously, so the
-## variable `only_dot_project_found` is set to a nonempty value if at least
-## one `.project` file was seen, and is left alone otherwise.  A caller that
-## distinguishes a tree of `.project` files from a tree of nothing -- as
-## `is_deleted_branch` does -- sets that variable to the empty string before
+## variable `only_leftovers_found` is set to a nonempty value if at least one
+## leftover was seen, and is left alone otherwise.  A caller that
+## distinguishes a tree of leftovers from a tree of nothing -- as
+## `is_leftover_tree` does -- sets that variable to the empty string before
 ## the call and tests it after.  A shell function has no local variables, so
 ## the recursive calls below all set the one variable, and it therefore
 ## reports about the whole tree.
 ##
 ## A symbolic link is content, whether it names a directory, a file, or
-## nothing:  it is neither skipped as a `.project` file nor descended into.
-## Following one that names an ancestor would not terminate, and a link is
-## something that the user put there.
+## nothing:  it is never a leftover, and it is not descended into.  Following
+## one that names an ancestor would not terminate, and a link is something
+## that the user put there.
 ##
-## `find "$1" ! -name .project ! -type d` would be simpler, but `find`
-## communicates through newline-separated text, which cannot represent a file
-## name that contains a newline, whereas the globs and the positional
-## parameters below can hold any file name.
+## `find` would be simpler, but `find` communicates through newline-separated
+## text, which cannot represent a file name that contains a newline, whereas
+## the globs and the positional parameters below can hold any file name.
 ##
 ## The entries that remain to be examined are held in the positional
 ## parameters, which a shell makes local to a function call, so the recursive
 ## call below gets its own and this call's are intact when it returns.  A
 ## `for` loop over a variable could not recurse, because a shell function has
 ## no local variables.
-only_dot_project() {
+only_leftovers() {
   # In a directory that cannot be listed (but can be searched, such as one with
   # mode 711), every glob below expands to nothing, which is indistinguishable
   # from an empty directory.  Do not claim that such a directory holds nothing.
@@ -3203,28 +3643,52 @@ only_dot_project() {
         continue
         ;;
       '.project')
-        # Skip the Eclipse metadata itself.  A *directory* named `.project`
-        # can hold anything, so leave it to the test below, which descends
-        # into it like any other directory.
+        # A *directory* named `.project` can hold anything, so leave it to the
+        # test below, which descends into it like any other directory.
         if [ -f "$1" ] && [ ! -L "$1" ]; then
-          only_dot_project_found=1
+          only_leftovers_found=1
           shift
           continue
         fi
         ;;
     esac
+    # A *file* with the name of a directory of build output can hold anything,
+    # so leave it to the test below, which treats it as content.
+    if is_build_output_name "${1##*/}" && [ -d "$1" ] && [ ! -L "$1" ]; then
+      if ! holds_no_checkout "$1"; then
+        return 1
+      fi
+      only_leftovers_found=1
+      shift
+      continue
+    fi
     # When a pattern matches nothing, the shell leaves it unexpanded.  Such a
     # pathname names no entry, so it is not content.
     if [ ! -e "$1" ] && [ ! -L "$1" ]; then
       shift
       continue
     fi
-    if [ ! -d "$1" ] || [ -L "$1" ] || ! only_dot_project "$1"; then
+    if [ ! -d "$1" ] || [ -L "$1" ] || ! only_leftovers "$1"; then
       return 1
     fi
     shift
   done
   return 0
+}
+
+## Usage: is_leftover_tree DIRECTORY
+## Returns 0 (true) if a directory DIRECTORY holds nothing but leftovers, as
+## `only_leftovers` tests, and holds at least one leftover.
+##
+## `only_leftovers` is satisfied by a directory that holds nothing at all, and
+## a tree of nothing but empty directories is not evidence of a working tree
+## that a branch directory once held.  The leftover need not be in DIRECTORY
+## itself:  a branch whose Eclipse projects were all below its top level, such
+## as a `java/lib` that Eclipse knew as a project, leaves its metadata there
+## and none at the top.
+is_leftover_tree() {
+  only_leftovers_found=
+  only_leftovers "$1" && [ -n "${only_leftovers_found}" ]
 }
 
 ## Usage: is_deleted_branch DIRECTORY
@@ -3236,10 +3700,22 @@ only_dot_project() {
 ## cannot be answered.  That command is a wrapper around this function, and
 ## its documentation is the documentation of this answer.
 ##
+## Also sets the variable `is_deleted_branch_no_usable_repository` to a
+## nonempty value (true) if this returns status 2 because DIRECTORY is a
+## directory at which git can use no repository, and to the empty string
+## (false) otherwise, including when DIRECTORY does not exist or is not a
+## directory.  Git can use no repository at DIRECTORY if no repository
+## contains DIRECTORY; if the one that contains it is broken, such as a linked
+## worktree whose `.git` file names a git directory that no longer exists; if
+## git refuses it, such as one that another user owns and that
+## `safe.directory` does not allow; or if git cannot enter DIRECTORY.  The
+## variable lets a caller explain status 2 without asking git again.
+##
 ## The body lives here rather than in the command so that the other commands
 ## of this package can ask the question directly.
 is_deleted_branch() {
   is_deleted_branch_dir="$1"
+  is_deleted_branch_no_usable_repository=
 
   # A path that does not exist -- or that exists but is not a directory -- is
   # certainly not a working tree.  Reject it here rather than leaving it to
@@ -3253,40 +3729,57 @@ is_deleted_branch() {
     return 2
   fi
 
-  # A directory that holds nothing but Eclipse `.project` files is the
-  # leftover of a branch directory whose working tree is gone:  what remains
-  # is metadata, a `.project` file for each Eclipse project of the branch and
-  # the directories that hold them, and none of the branch itself.  Such a
-  # directory is as removable as one whose branch was deleted in its remote,
-  # so answer 0 for it.
+  # A directory that holds nothing but leftovers, such as Eclipse `.project`
+  # files and a Python `.venv` directory, is the leftover of a branch directory
+  # whose working tree is gone:  what remains is what other tools made, and
+  # none of the branch itself.  Such a directory is as removable as one whose
+  # branch was deleted in its remote, so answer 0 for it.  `only_leftovers`
+  # says which files and directories are leftovers.  The tests below would
+  # call such a directory "not the top level of a working tree" (status 2):
+  # that is true, and it would leave the caller's question -- may this
+  # directory be removed? -- unanswered when it has an answer.
   #
-  # Answer it before the tests below, which would call such a directory "not
-  # the top level of a working tree" (status 2):  that is true, and it would
-  # leave the caller's question -- may this directory be removed? -- unanswered
-  # when it has an answer.  The tests below still decide every directory that
-  # holds anything else, including a working tree, whose `.git` is not a
-  # `.project` file and which `only_dot_project` therefore rejects at its
-  # first entry.
-  #
-  # Require a `.project` file somewhere in the tree.  `only_dot_project` is
-  # satisfied by a directory that holds nothing at all, and a tree of nothing
-  # but empty directories is not evidence of an Eclipse project that a branch
-  # directory once held.  The `.project` file need not be in DIRECTORY
-  # itself:  a branch whose Eclipse projects were all below its top level,
-  # such as a `java/lib` that Eclipse knew as a project, leaves its metadata
-  # there and none at the top.
-  only_dot_project_found=
-  if only_dot_project "${is_deleted_branch_dir}" \
-    && [ -n "${only_dot_project_found}" ]; then
-    return 0
-  fi
+  # Answer 0 only for a directory of leftovers that no working tree claims:
+  # one at which git can use no repository, or one in a working tree that
+  # tracks none of its files, such as a leftover in a home directory that is a
+  # repository of configuration files.  A directory in a working tree that
+  # tracks a file in it, such as a test fixture that holds a `*.egg-info`
+  # directory, is part of that working tree, and removing it would delete
+  # tracked files.  The top level of a working tree holds its `.git`, which is
+  # not a leftover.
 
   # `git -C DIR rev-parse` succeeds for every directory within a working tree,
   # so also require that DIRECTORY is that working tree's top level.  A
   # subdirectory is not itself a working tree, and answering for the enclosing
   # one would answer a question that the caller did not ask.
-  is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
-    --show-toplevel 2> /dev/null)" || return 2
+  #
+  # `--is-bare-repository` prints a line, "true" or "false", whenever git can
+  # use a repository at DIRECTORY, even one that has no working tree, such as a
+  # bare repository or a `.git` directory.  For such a repository,
+  # `--show-toplevel` then fails in recent versions of git and prints an empty
+  # line in older ones.  So a failure with no output means that git can use no
+  # repository there.
+  if ! is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
+    --is-bare-repository --show-toplevel 2> /dev/null)"; then
+    if [ -z "${is_deleted_branch_toplevel}" ]; then
+      if is_leftover_tree "${is_deleted_branch_dir}"; then
+        return 0
+      fi
+      # shellcheck disable=SC2034 # Callers read it; see the documentation above.
+      is_deleted_branch_no_usable_repository=1
+    fi
+    return 2
+  fi
+  # Remove the line that `--is-bare-repository` printed.  A command
+  # substitution removes trailing newlines, so an empty last line leaves none.
+  case "${is_deleted_branch_toplevel}" in
+    *'
+'*)
+      is_deleted_branch_toplevel="${is_deleted_branch_toplevel#*
+}"
+      ;;
+    *) is_deleted_branch_toplevel= ;;
+  esac
   if [ -z "${is_deleted_branch_toplevel}" ]; then
     # A bare repository has no working tree, so it is not on any branch.
     return 2
@@ -3305,7 +3798,15 @@ is_deleted_branch() {
   fi
   if [ "${is_deleted_branch_dir_real}" != "${is_deleted_branch_top_real}" ]; then
     # Not the top level of a working tree, so it is not on any branch, deleted
-    # or otherwise.
+    # or otherwise.  It is a leftover if the working tree tracks no file in it,
+    # which is status 1 of `git ls-files --error-unmatch`.
+    if is_leftover_tree "${is_deleted_branch_dir}"; then
+      git -C "${is_deleted_branch_dir}" ls-files --error-unmatch -- . \
+        > /dev/null 2>&1
+      if [ "$?" -eq 1 ]; then
+        return 0
+      fi
+    fi
     return 2
   fi
 
@@ -3466,3 +3967,124 @@ is_deleted_branch() {
       ;;
   esac
 }
+
+## Usage: github_slug URL
+## Prints the GitHub slug, such as "ORG/REPO", of the GitHub repository whose
+## URL is URL, such as "git@github.com:ORG/REPO.git", or nothing if URL is not
+## the URL of a GitHub repository.
+github_slug() {
+  printf '%s\n' "$1" | sed -e 's|/*$||' | sed -n \
+    -e 's|^git@github\.com:\([^/]*/[^/]*\)$|\1|p' \
+    -e 's|^ssh://git@github\.com/\([^/]*/[^/]*\)$|\1|p' \
+    -e 's|^https://\([^@/]*@\)\{0,1\}github\.com/\([^/]*/[^/]*\)$|\2|p' \
+    | sed -e 's|\.git$||'
+}
+
+## The number of seconds that a query of GitHub can take before it is
+## abandoned, and fails, so that an unresponsive GitHub does not stall a
+## command.
+github_query_seconds=30
+
+## Usage: with_timeout SECONDS COMMAND [ARGUMENT...]
+## Runs COMMAND, an executable rather than a shell function, with the
+## ARGUMENTs, and returns its exit status.  Kills COMMAND and returns 124 if it
+## runs for more than SECONDS seconds.  The limit needs the `timeout` command
+## of GNU coreutils, which Homebrew installs on macOS as `gtimeout`; if
+## neither is installed, COMMAND runs without a limit.
+with_timeout() {
+  with_timeout_seconds="$1"
+  shift
+  if command -v timeout > /dev/null 2>&1; then
+    timeout "${with_timeout_seconds}" "$@"
+  elif command -v gtimeout > /dev/null 2>&1; then
+    gtimeout "${with_timeout_seconds}" "$@"
+  else
+    "$@"
+  fi
+}
+
+## Usage: pr_repositories DIRECTORY BRANCH
+## Sets ${pr_base_repo} and ${pr_head_repo} to the GitHub slugs, such as
+## "ORG/REPO", of the base and head repositories of the pull requests from a
+## local branch BRANCH of the clone in DIRECTORY, sets ${pr_head_remote} to
+## the name of the clone's remote for the head repository, such as "origin",
+## and sets ${pr_head_branch} to the name of their head branch in the head
+## repository.  Fails, setting nothing, if nothing is known about those pull
+## requests, or if they say nothing about BRANCH.
+##
+## The head repository is the one that `git push` uses for BRANCH; see
+## `push_remote`.  The base repository is the head repository's parent, if
+## the head repository is a fork, and the head repository itself otherwise.
+## The head branch is the remote branch that `is_deleted_branch` asks about:
+## the one that `branch.BRANCH.merge` names, if `branch.BRANCH.remote` is the
+## remote that `git push` uses, and the branch of the same name otherwise.  A
+## pull request from a branch of the same name in another repository, even the
+## base repository, is someone else's.
+##
+## Fails if `gh` is not installed, if the remote is not on GitHub, or if a
+## query fails, because then nothing is known about the pull requests.  Fails
+## if `branch.BRANCH.merge` names a ref outside `refs/heads/`, or names several
+## refs, because a pull request's head is one branch.  Fails if the head
+## branch is the head repository's default branch:  a pull request from it,
+## such as one that merges a release from `main` into a stable branch, says
+## nothing about whether the branch's work is done, because the branch
+## outlives every such pull request.
+pr_repositories() {
+  command -v gh > /dev/null 2>&1 || return 1
+  pr_repositories_branch="$2"
+  pr_repositories_remote="$(push_remote "$1" "$2")"
+  [ -n "${pr_repositories_remote}" ] || return 1
+  pr_repositories_merge="$(git -C "$1" config --get-all "branch.$2.merge")"
+  if [ -n "${pr_repositories_merge}" ] \
+    && [ "$(git -C "$1" config --get "branch.$2.remote")" = "${pr_repositories_remote}" ]; then
+    case "${pr_repositories_merge}" in
+      *'
+'*) return 1 ;;
+      refs/heads/?*) pr_repositories_branch="${pr_repositories_merge#refs/heads/}" ;;
+      *) return 1 ;;
+    esac
+  fi
+  pr_repositories_url="$(git -C "$1" remote get-url --push "${pr_repositories_remote}" 2> /dev/null)" \
+    || return 1
+  pr_repositories_head="$(github_slug "${pr_repositories_url}")"
+  # `git remote get-url` applies `url.BASE.insteadOf`, which may map a GitHub
+  # URL to a mirror or a local copy; the configured URL still names GitHub.
+  if [ -z "${pr_repositories_head}" ]; then
+    pr_repositories_head="$(github_slug "$(git -C "$1" config --get "remote.${pr_repositories_remote}.url")")"
+  fi
+  [ -n "${pr_repositories_head}" ] || return 1
+  # Every branch of a project asks about the same repository, so remember each
+  # answer.  Each line of ${pr_repositories_cache} is "HEAD BASE DEFAULT",
+  # where DEFAULT is HEAD's default branch, or "-" if it has none.  The
+  # repository is named with its host, so that `gh` does not ask the host
+  # that ${GH_HOST} names instead.
+  pr_repositories_answer="$(printf '%s\n' "${pr_repositories_cache}" \
+    | awk -v head="${pr_repositories_head}" '$1 == head { print $2 " " $3; exit }')"
+  if [ -z "${pr_repositories_answer}" ]; then
+    pr_repositories_answer="$(with_timeout "${github_query_seconds}" \
+      gh repo view "github.com/${pr_repositories_head}" \
+      --json owner,name,parent,defaultBranchRef \
+      --jq '"\(if .parent then "\(.parent.owner.login)/\(.parent.name)" else "\(.owner.login)/\(.name)" end) \(.defaultBranchRef.name // "-")"' \
+      < /dev/null 2> /dev/null)" || return 1
+    case "${pr_repositories_answer}" in
+      ?*' '?*) ;;
+      *) return 1 ;;
+    esac
+    pr_repositories_cache="${pr_repositories_cache}
+${pr_repositories_head} ${pr_repositories_answer}"
+  fi
+  if [ "${pr_repositories_branch}" = "${pr_repositories_answer#* }" ]; then
+    return 1
+  fi
+  # shellcheck disable=SC2034 # set for the caller
+  pr_base_repo="${pr_repositories_answer%% *}"
+  # shellcheck disable=SC2034 # set for the caller
+  pr_head_repo="${pr_repositories_head}"
+  # shellcheck disable=SC2034 # set for the caller
+  pr_head_remote="${pr_repositories_remote}"
+  # shellcheck disable=SC2034 # set for the caller
+  pr_head_branch="${pr_repositories_branch}"
+}
+
+## The answers of `gh repo view` that `pr_repositories` has received.
+pr_repositories_cache=''
