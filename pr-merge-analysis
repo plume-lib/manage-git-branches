@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+# Report, for the open pull requests of a GitHub repository:
+#  * which PRs conflict with master,
+#  * which PRs contain all the non-merge commits of another PR, and
+#  * which pairs of PRs conflict with each other.
+#
+# Usage: pr-merge-analysis [--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]
+#   REPO_DIR is a local clone, into which the PR heads are fetched
+#   (as refs/remotes/pr/N) along with master (as refs/remotes/csm/master).
+#   The PR numbers, such as 123, are those of open PRs; if none is given, gh
+#   lists all the open PRs.
+#   --no-pairwise omits the pairwise conflicts, the most expensive section.
+#   --default-branch names the branch that this script calls "master" (default:
+#   the repository's default branch).  It is fetched as refs/remotes/csm/master.
+#   --prune states that the given PR numbers are all the open PRs, so that the
+#   cache and the refs/remotes/pr/N refs can be pruned (see below).
+#
+# Results are cached in .pr-merge-analysis-cache-OWNER__REPO.tsv in the current
+# directory (or in $PR_MERGE_ANALYSIS_CACHE, if set), keyed by commit SHAs, so a
+# check is recomputed only when a branch moves.  When the run covers all the open
+# PRs (no PR number is given, or --prune is given), it removes the cache lines
+# that refer to a commit that is no longer the head of an open PR or master, so
+# repositories must not share a cache file.  It also deletes the refs
+# refs/remotes/pr/N of the PRs that are not open.  Runs at the same time do not
+# corrupt the cache, but one run's pruning can discard the lines that another
+# run adds, which a later run then recomputes.
+# Cache lines:
+#   merge<TAB>SHA1<TAB>SHA2<TAB>clean|conflict<TAB>conflicting files
+#     (SHA1 < SHA2, so the order of the two branches does not matter)
+#   contains<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>yes|no
+#
+# Requires Git 2.38 or later, gh, and Bash 4 or later as the first "bash" on
+# the PATH.  On macOS, /bin/bash is Bash 3.2, so put a newer Bash, such as
+# Homebrew's, earlier on the PATH.
+
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+  echo "$0: needs Bash 4 or later as the first \"bash\" on the PATH, but is running Bash ${BASH_VERSION:-unknown}" >&2
+  exit 2
+fi
+
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
+SCRIPT_NAME="$(basename -- "$0")"
+
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+
+require_git 38 'for git merge-tree --write-tree'
+
+set -o pipefail
+# Prints its arguments as an error message, and exits with status 1.
+die() {
+  echo "$0: $*" >&2
+  exit 1
+}
+usage() {
+  echo "usage: $0 [--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]" >&2
+  exit 2
+}
+PAIRWISE=yes
+DEFAULT_BRANCH=
+PRUNE=no
+while true; do
+  case "$1" in
+    --no-pairwise)
+      PAIRWISE=no
+      shift
+      ;;
+    --default-branch)
+      [ $# -ge 2 ] || usage
+      DEFAULT_BRANCH=$2
+      shift 2
+      ;;
+    --prune)
+      PRUNE=yes
+      shift
+      ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 2 ] || usage
+G=(git -C "$1")
+# GitHub forbids "_" in an owner's name, so the first "__" in the file name ends
+# the owner's name, and no two repositories share the file name.
+CACHE="${PR_MERGE_ANALYSIS_CACHE:-$PWD/.pr-merge-analysis-cache-${2/\//__}.tsv}"
+# Resolve any symbolic links, so that pruning replaces the file that a link
+# names rather than the link.
+links=0
+while [ -L "$CACHE" ]; do
+  links=$((links + 1))
+  [ $links -le 40 ] || die "too many levels of symbolic links: $CACHE"
+  link=$(readlink -- "$CACHE") || die "cannot read symbolic link: $CACHE"
+  case $link in
+    /*) CACHE=$link ;;
+    *) CACHE=$(dirname -- "$CACHE")/$link ;;
+  esac
+done
+touch "$CACHE" || exit 1
+# The standard error of "git merge-tree", which merge_result keeps apart from
+# its standard output.
+MERGE_TREE_ERR=$(mktemp) || exit 1
+# The pruned cache, before it replaces the cache.
+NEW_CACHE=
+trap 'rm -f "$MERGE_TREE_ERR" ${NEW_CACHE:+"$NEW_CACHE"}' EXIT
+
+if [ $# -gt 2 ]; then
+  # Validating the numbers also keeps the unquoted uses of $P from
+  # glob-expanding them.
+  for n in "${@:3}"; do
+    [[ $n =~ ^[1-9][0-9]*$ ]] || die "not a pull request number: $n"
+  done
+  P=$(printf '%s\n' "${@:3}" | sort -nu)
+else
+  # Unlike "gh pr list", which stops at its --limit, this lists every open PR,
+  # as pruning requires.
+  P=$(gh api --paginate "repos/$2/pulls?state=open&per_page=100" --jq '.[].number' | sort -nu) \
+    || exit 1
+  PRUNE=yes
+fi
+# Fetch only the open PRs; refs/pull/*/head would also fetch every closed PR.
+# The ref is named "master" whatever the default branch, so that callers need
+# not know it.  The remote's HEAD is its default branch.
+MASTER_SOURCE=HEAD
+[ -z "$DEFAULT_BRANCH" ] || MASTER_SOURCE=refs/heads/$DEFAULT_BRANCH
+REFSPECS=("+$MASTER_SOURCE:refs/remotes/csm/master")
+for n in $P; do REFSPECS+=("+refs/pull/$n/head:refs/remotes/pr/$n"); done
+# Authenticate as gh does, so that a private repository can be fetched, and never
+# prompt for a username.
+GIT_TERMINAL_PROMPT=0 "${G[@]}" -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+  fetch -q "https://github.com/$2.git" "${REFSPECS[@]}" || exit 1
+MSHA=$("${G[@]}" rev-parse refs/remotes/csm/master) || exit 1
+
+# Matches a commit's object ID, which is a SHA-1 or SHA-256 hash in hexadecimal.
+OID_RE='^[0-9a-f]{40}([0-9a-f]{24})?$'
+# OWN maps a commit to one of its non-merge commits that is not in master, or to
+# the empty string if it has none.
+declare -A SHA CACHED CURRENT OWN
+CURRENT[$MSHA]=1
+REFS=()
+for n in $P; do REFS+=("refs/remotes/pr/$n"); done
+if [ -n "$P" ]; then
+  # "git rev-parse" prints an argument that it cannot resolve, so its exit
+  # status and each line must be checked.
+  shas=$("${G[@]}" rev-parse "${REFS[@]}") || die "git rev-parse failed for the fetched PRs"
+  mapfile -t shas <<< "$shas"
+  [ ${#shas[@]} -eq ${#REFS[@]} ] \
+    || die "git rev-parse printed ${#shas[@]} lines for ${#REFS[@]} PRs"
+  i=0
+  for n in $P; do
+    SHA[$n]=${shas[i++]}
+    [[ ${SHA[$n]} =~ $OID_RE ]] || die "cannot resolve PR $n: ${SHA[$n]}"
+    CURRENT[${SHA[$n]}]=1
+  done
+fi
+# Read only well-formed lines; a line that another run is still writing is
+# incomplete.
+while IFS=$'\t' read -r kind k1 k2 k3 rest; do
+  if [ "$kind" = merge ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE ]] \
+    && [[ $k3 = clean || $k3 = conflict ]]; then
+    CACHED["merge $k1 $k2"]="$k3	$rest"
+  elif [ "$kind" = contains ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE && $k3 =~ $OID_RE ]] \
+    && [[ $rest = yes || $rest = no ]]; then
+    CACHED["contains $k1 $k2 $k3"]="$rest"
+  fi
+done < "$CACHE"
+
+# These functions set RESULT rather than printing it, because a command
+# substitution per call would fork a subshell for each of thousands of pairs.
+
+# Sets RESULT to "clean" or "conflict<TAB>files".
+merge_result() {
+  local x=$1 y=$2
+  [[ $x > $y ]] && {
+    local t=$x
+    x=$y
+    y=$t
+  }
+  local key="merge $x $y"
+  if [ -z "${CACHED[$key]+set}" ]; then
+    local out code status files
+    # Standard error is kept apart, so that a warning, such as one about
+    # merge.renameLimit, does not precede the tree's object ID or appear among
+    # the files.
+    out=$("${G[@]}" merge-tree --write-tree --name-only "$x" "$y" 2> "$MERGE_TREE_ERR")
+    code=$?
+    # A conflict yields exit status 1 and standard output that starts with the
+    # tree's object ID.  Any other failure, including exit status 1 with other
+    # output, as for an argument that is not a commit, is an error.
+    if [ $code -eq 1 ] && ! [[ ${out%%$'\n'*} =~ $OID_RE ]]; then
+      code=error
+    fi
+    case $code in
+      0)
+        status=clean
+        files=
+        ;;
+      1)
+        status=conflict
+        files=$(echo "$out" | sed -n '2,/^$/p' | tr '\n' ' ' | sed 's/ *$//')
+        ;;
+      *)
+        echo "$0: git merge-tree $x $y failed:" >&2
+        cat "$MERGE_TREE_ERR" >&2
+        [ -z "$out" ] || echo "$out" >&2
+        exit 1
+        ;;
+    esac
+    CACHED[$key]="$status	$files"
+    printf 'merge\t%s\t%s\t%s\t%s\n' "$x" "$y" "$status" "$files" >> "$CACHE"
+  fi
+  RESULT=${CACHED[$key]}
+}
+
+# Sets RESULT to "yes" if commit $1 contains every non-merge commit of $2 that
+# is not in master (and there is at least one such commit), otherwise to "no".
+contains_result() {
+  local key="contains $MSHA $1 $2"
+  if [ -z "${CACHED[$key]+set}" ]; then
+    local ok=no missing
+    # The non-merge commits of $2 that are not in master, which depend only on
+    # $2, and those of them that are not in $1.  A failure is an error, not an
+    # answer to cache.
+    if [ -z "${OWN[$2]+set}" ]; then
+      OWN[$2]=$("${G[@]}" rev-list --no-merges -n1 "$2" "^$MSHA") \
+        || die "git rev-list $2 ^$MSHA failed"
+    fi
+    if [ -n "${OWN[$2]}" ]; then
+      missing=$("${G[@]}" rev-list --no-merges -n1 "$2" "^$MSHA" "^$1") \
+        || die "git rev-list $2 ^$MSHA ^$1 failed"
+      [ -n "$missing" ] || ok=yes
+    fi
+    CACHED[$key]=$ok
+    printf 'contains\t%s\t%s\t%s\t%s\n' "$MSHA" "$1" "$2" "$ok" >> "$CACHE"
+  fi
+  RESULT=${CACHED[$key]}
+}
+
+echo "## master conflicts"
+for n in $P; do
+  merge_result "$MSHA" "${SHA[$n]}"
+  [ "${RESULT%%	*}" = conflict ] && echo "$n: ${RESULT#*	}"
+done
+echo "## containment (A contains all non-merge commits of B)"
+for a in $P; do for b in $P; do
+  [ "$a" = "$b" ] && continue
+  contains_result "${SHA[$a]}" "${SHA[$b]}"
+  [ "$RESULT" = yes ] && echo "$a contains $b"
+done; done
+if [ $PAIRWISE = yes ]; then
+  echo "## pairwise conflicts"
+  for a in $P; do for b in $P; do
+    [ "$a" -lt "$b" ] || continue
+    merge_result "${SHA[$a]}" "${SHA[$b]}"
+    [ "${RESULT%%	*}" = conflict ] && echo "$a vs $b: ${RESULT#*	}"
+  done; done
+fi
+
+# Prune the refs and the cache to the open PRs and current commits.  A run on
+# only some of the open PRs does not know the other PRs, so it must not prune.
+[ $PRUNE = yes ] || exit 0
+declare -A OPEN_REF
+for ref in "${REFS[@]}"; do OPEN_REF[$ref]=1; done
+refs=$("${G[@]}" for-each-ref --format='%(refname)' refs/remotes/pr/) \
+  || die "git for-each-ref refs/remotes/pr/ failed"
+STALE=()
+while read -r ref; do
+  [ -z "$ref" ] || [ -n "${OPEN_REF[$ref]+set}" ] || STALE+=("delete $ref")
+done <<< "$refs"
+if [ ${#STALE[@]} -gt 0 ]; then
+  printf '%s\n' "${STALE[@]}" | "${G[@]}" update-ref --stdin \
+    || die "git update-ref failed to delete the refs of closed PRs"
+fi
+# A file of its own, so that runs at the same time do not write the same file.
+NEW_CACHE=$(mktemp "$CACHE.XXXXXX") || exit 1
+# Give it the cache's permissions, rather than mktemp's 0600.
+cp -p "$CACHE" "$NEW_CACHE" || exit 1
+for key in "${!CACHED[@]}"; do
+  # shellcheck disable=SC2206 # A key is words without glob characters; "read <<<" would be slow.
+  k=($key)
+  if [ "${k[0]}" = merge ]; then
+    if [ -n "${CURRENT[${k[1]}]+set}" ] && [ -n "${CURRENT[${k[2]}]+set}" ]; then
+      printf 'merge\t%s\t%s\t%s\n' "${k[1]}" "${k[2]}" "${CACHED[$key]}"
+    fi
+  elif [ "${k[1]}" = "$MSHA" ] && [ -n "${CURRENT[${k[2]}]+set}" ] && [ -n "${CURRENT[${k[3]}]+set}" ]; then
+    printf 'contains\t%s\t%s\t%s\t%s\n' "${k[1]}" "${k[2]}" "${k[3]}" "${CACHED[$key]}"
+  fi
+done > "$NEW_CACHE" && mv "$NEW_CACHE" "$CACHE"
