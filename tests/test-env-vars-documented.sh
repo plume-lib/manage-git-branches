@@ -7,7 +7,9 @@
 # Usage:
 #   tests/test-env-vars-documented.sh
 #
-# The exit status is 0 if every such variable is documented, and 1 otherwise.
+# The exit status is 0 if every such variable is documented, 1 if some variable
+# is not, and 2 if this test cannot determine which variables the scripts set
+# or read.
 
 # TODO: If this is generally useful, move it into plume-scripts or elsewhere.
 
@@ -20,21 +22,28 @@ SCRIPT_NAME="$(basename -- "$0")"
 README="${TOPLEVEL}/README.md"
 
 # The commands, which are executable, and the files that they load, which are
-# not executable but whose names end in ".sh" or ".py".  A variable that a
-# loaded file reads is part of the interface of the commands that load it.
+# not executable but whose names end in ".awk", ".py", or ".sh".  A variable
+# that a loaded file reads is part of the interface of the commands that load
+# it.
 SCRIPTS="$(find "${TOPLEVEL}" -maxdepth 1 -type f ! -name '*~' \
-  \( -perm -u+x -o -name '*.sh' -o -name '*.py' \) -exec basename -- {} ';' | sort)"
+  \( -perm -u+x -o -name '*.awk' -o -name '*.py' -o -name '*.sh' \) \
+  -exec basename -- {} ';' | sort)"
 if [ -z "${SCRIPTS}" ]; then
   echo "${SCRIPT_NAME}: found no scripts in ${TOPLEVEL}" >&2
   exit 2
 fi
 
 # Usage: script_language FILE
-# Prints "shell" if FILE is a shell (sh or Bash) script and "python" if FILE is
-# a Python script, judging by its name and its "#!" line.  Fails if FILE is
-# neither, so that a script in another language is not silently unchecked.
+# Prints "awk" if FILE is an awk program, "python" if FILE is a Python script,
+# and "shell" if FILE is a shell (sh or Bash) script, judging by its name and
+# its "#!" line.  Fails if FILE is none of those, so that a script in another
+# language is not silently unchecked.
 script_language() {
   case "$1" in
+    *.awk)
+      echo awk
+      return
+      ;;
     *.sh)
       echo shell
       return
@@ -57,7 +66,7 @@ script_language() {
 
 # Variables that the shell or the operating system sets, which are therefore
 # not part of the interface of these scripts.
-STANDARD_VARIABLES="BASH_VERSINFO BASH_VERSION CDPATH HOME IFS LANG LC_ALL PATH PWD TMPDIR"
+STANDARD_VARIABLES="CDPATH HOME IFS LANG LC_ALL PATH PWD TMPDIR"
 
 # Usage: script_code FILE
 # Prints FILE with comments removed, so that documentation and commented-out
@@ -67,16 +76,19 @@ script_code() {
   sed -E 's/(^|[[:space:]])#.*/\1/' "$1"
 }
 
-# Usage: set_variables_in FILE
-# Prints, one per line, the variables that FILE, a shell script, assigns in an
-# assignment statement, such as `VAR=value`, `export VAR=value`,
-# `ARRAY[KEY]=value`, or `ARRAY+=(value)`, or declares as an array, as in
-# `declare -A ARRAY`.
+# Usage: set_variables_in FILE KIND
+# Prints, one per line, the variables that FILE, a shell script, sets in the
+# way that KIND, which is "statement" or "prefix", names:
+#  * "statement":  the variables that FILE assigns in an assignment statement,
+#    such as `VAR=value`, `export VAR=value`, `ARRAY[KEY]=value`, or
+#    `ARRAY+=(value)`; declares as an array, as in `declare -A ARRAY`; or reads
+#    input into, as in `read VAR` or `mapfile ARRAY`.
+#  * "prefix":  the variables that FILE assigns in an environment prefix of a
+#    command, as in `VAR=value some-command`.
 #
-# An assignment that is an environment prefix of a command, as in
-# `VAR=value some-command`, does not count:  it sets the variable only in the
-# environment of that command, which does not make the variable internal to
-# this package.  For example, `is-deleted-branch` runs
+# An environment prefix sets the variable only in the environment of that
+# command, which does not make the variable internal to this package.  For
+# example, `is-deleted-branch` runs
 # `GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND=... git ls-remote ...`; the SSH
 # variables remain part of the user-visible interface and must be documented.
 #
@@ -106,12 +118,15 @@ set_variables_in() {
     }
     # The builtins that declare variables, as in "export VAR=value".
     function is_declaration(t) { return t ~ /^(declare|export|local|readonly|typeset)$/ }
+    # The builtins that read input into variables, as in "read VAR".
+    function is_reading_builtin(t) { return t ~ /^(mapfile|read|readarray)$/ }
     # An assignment, to a variable or to an element of an array, which may
     # append to the old value, as in "VAR=value", "ARRAY[KEY]=value", or
     # "ARRAY+=".
     function is_assignment(t) { return t ~ /^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=/ }
-    # Prints the name of the variable that the assignment or declaration T sets.
-    function print_name(t) { sub(/[[+=].*/, "", t); print t }
+    # Prints KIND, which is "statement" or "prefix", and the name of the
+    # variable that T, an assignment or a name, sets.
+    function print_name(kind, t) { sub(/[[+=].*/, "", t); print kind " " t }
     # The redirection operator that introduces a here-document, whose lines
     # are data rather than code.  A here-string, "<<<", supplies its data on
     # the same line, so it is not one.
@@ -121,11 +136,21 @@ set_variables_in() {
     # prefix of a command.
     function is_redirection(t) { return t ~ /^[0-9]*(<|>)/ }
     # A redirection whose target is the word that follows it, rather than being
-    # attached to the operator as in ">file".  When the target duplicates a
-    # file descriptor, as in "2>&1", the tokenizer splits the "&" into a token
-    # of its own, so the target is two tokens rather than one; the loop that
-    # skips redirections accounts for that.
+    # attached to the operator as in ">file".
     function is_bare_redirection(t) { return t ~ /^[0-9]*(<|>|>>|<>|<<<)$/ }
+    # Returns the index of the word that follows the redirection, including
+    # its target, that begins at index R of "words".
+    function after_redirection(r) {
+      if (!is_bare_redirection(words[r])) { return r + 1 }
+      # The target is the word that follows the operator.  When the
+      # redirection duplicates a file descriptor, as in "2>&1", the tokenizer
+      # has split the "&" into a token of its own, so the target is that token
+      # and the one after it rather than a single word.
+      if (r + 2 <= nwords && words[r + 1] == "&" && words[r + 2] ~ /^([0-9]+-?|-)$/) {
+        return r + 3
+      }
+      return r + 2
+    }
     # Whether the word W begins at position P of S:  the characters there are
     # W, and neither the character before nor the character after them can be
     # part of the same word.
@@ -155,8 +180,15 @@ set_variables_in() {
       nwords = 0
       heredoc_in_substitution = 0
     }
-    # Prints the variables that the current logical line assigns.
-    function report_line(  i, j, k, r, at_command, array) {
+    # Prints the variables that the current logical line sets, each preceded
+    # by "statement" or "prefix".
+    #
+    # A "case" statement can span logical lines, so "case_nesting", the
+    # number of "case" statements that are open, and "case_state" persist
+    # from one call to the next.  "case_state" is "subject" between "case"
+    # and "in", "pattern" where a pattern may start, and empty elsewhere.
+    function report_line(  i, j, k, r, at_command, array, inert, w, named, \
+                           option_letters, option_argument, letter) {
       # Within a command substitution, a here-document operator is part of a
       # word rather than a token of its own, so the tokenizer notes it as it
       # goes rather than "is_heredoc" finding it here.
@@ -167,50 +199,123 @@ set_variables_in() {
       at_command = 1
       i = 1
       while (i <= nwords) {
+        if (case_state == "subject") {
+          if (words[i] == "in") { case_state = "pattern" }
+          i++
+          continue
+        }
+        if (case_state == "pattern") {
+          if (words[i] == "esac") {
+            case_nesting--
+            case_state = ""
+            at_command = 0
+          } else if (words[i] == ")") {
+            # The ")" that ends the pattern.  The pattern is not an assignment
+            # even if it looks like one, as "VAR=*)" does.
+            case_state = ""
+            at_command = 1
+          }
+          i++
+          continue
+        }
+        if (at_command && words[i] == "case") {
+          case_nesting++
+          case_state = "subject"
+          i++
+          continue
+        }
+        if (at_command && words[i] == "esac" && case_nesting > 0) {
+          case_nesting--
+          at_command = 0
+          i++
+          continue
+        }
+        if (words[i] == ";;" && case_nesting > 0) {
+          case_state = "pattern"
+          i++
+          continue
+        }
         if (at_command && is_assignment(words[i])) {
           for (j = i; j <= nwords && is_assignment(words[j]); j++) { }
           # A redirection may come between the assignments and the terminator,
           # so skip it before deciding.  The assignments end at "j"; "r" is
           # only for looking past them.
           r = j
-          while (r <= nwords && is_redirection(words[r])) {
-            if (is_bare_redirection(words[r])) {
-              # The target is the word that follows the operator.  When the
-              # redirection duplicates a file descriptor, as in "2>&1", the
-              # tokenizer has split the "&" into a token of its own, so the
-              # target is that token and the one after it rather than a
-              # single word.
-              if (r + 2 <= nwords && words[r + 1] == "&" \
-                  && words[r + 2] ~ /^([0-9]+-?|-)$/) {
-                r += 2
-              } else {
-                r++
-              }
-            }
-            r++
-          }
+          while (r <= nwords && is_redirection(words[r])) { r = after_redirection(r) }
           if (r > nwords || is_terminator(words[r])) {
-            for (k = i; k < j; k++) { print_name(words[k]) }
+            for (k = i; k < j; k++) { print_name("statement", words[k]) }
+            i = j
+            at_command = 0
+          } else {
+            # An environment prefix.  The command that it precedes is at "r".
+            for (k = i; k < j; k++) { print_name("prefix", words[k]) }
+            i = r
+            at_command = 1
           }
-          i = j
-          at_command = 0
           continue
         }
         if (at_command && is_declaration(words[i])) {
           # A declaration sets each variable that it assigns, as in
           # "export VAR=value".  It sets a variable that it names without a
           # value only if it makes that variable an array, as
-          # "declare -A ARRAY" does; neither "declare -p VAR" nor
-          # "export VAR" sets VAR.
+          # "declare -A ARRAY" does; "export VAR" does not set VAR.  An option
+          # that makes it print variables, as in "declare -p VAR", or refer to
+          # functions, as in "export -f FUNCTION", makes it set nothing.
           array = 0
+          inert = 0
           for (i++; i <= nwords && words[i] ~ /^[-+]/; i++) {
             if (words[i] ~ /^-[A-Za-z]*[aA]/) { array = 1 }
+            if (words[i] ~ /^-[A-Za-z]*[fFp]/) { inert = 1 }
           }
           for (; i <= nwords && !is_terminator(words[i]); i++) {
-            if (is_assignment(words[i]) \
-                || (array && words[i] ~ /^[A-Za-z_][A-Za-z0-9_]*$/)) {
-              print_name(words[i])
+            if (!inert && (is_assignment(words[i]) \
+                || (array && words[i] ~ /^[A-Za-z_][A-Za-z0-9_]*$/))) {
+              print_name("statement", words[i])
             }
+          }
+          at_command = 0
+          continue
+        }
+        if (at_command && is_reading_builtin(words[i])) {
+          # The builtin sets each variable that it names, as in "read VAR" or
+          # "mapfile -t ARRAY", and the argument of the "-a" option of "read",
+          # as in "read -ra ARRAY".  Without one, "read" sets REPLY and
+          # "mapfile" sets MAPFILE.  As "getopts" does, read a word that
+          # begins with "-" as a group of option letters; the first letter
+          # that takes an argument, as "d" does in "read -d , VAR", takes the
+          # rest of the word, or the next word if the rest is empty.
+          option_letters = (words[i] == "read") ? "adinNptu" : "CcdnOsu"
+          named = 0
+          option_argument = ""
+          for (i++; i <= nwords && !is_terminator(words[i]); ) {
+            w = words[i]
+            if (option_argument != "") {
+              if (option_argument == "a") { print_name("statement", w); named = 1 }
+              option_argument = ""
+              i++
+            } else if (is_redirection(w)) {
+              i = after_redirection(i)
+            } else if (w ~ /^-./ && w != "--") {
+              for (k = 2; k <= length(w); k++) {
+                letter = substr(w, k, 1)
+                if (index(option_letters, letter) > 0) {
+                  if (k == length(w)) {
+                    option_argument = letter
+                  } else if (letter == "a") {
+                    print_name("statement", substr(w, k + 1))
+                    named = 1
+                  }
+                  break
+                }
+              }
+              i++
+            } else {
+              if (w != "--") { print_name("statement", w); named = 1 }
+              i++
+            }
+          }
+          if (!named) {
+            print_name("statement", (option_letters == "adinNptu") ? "REPLY" : "MAPFILE")
           }
           at_command = 0
           continue
@@ -354,7 +459,7 @@ set_variables_in() {
         # Outside quotation marks, command substitutions, and array literals.
         if (c == "#" && !have_word) { break }
         if (c == " " || c == "\t") { end_word(); i++; continue }
-        if (c == "(" && word ~ /^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=$/) {
+        if (c == "(" && is_assignment(word) && word ~ /=$/) {
           # An array literal, as in "ARRAY=(one two)".  It is part of the word
           # of the assignment, so an element that contains "=", as in
           # "ARRAY=(VAR=value)", is not an assignment.  It continues the
@@ -386,15 +491,16 @@ set_variables_in() {
       report_line()
     }
     END {
-      if (depth > 0) {
-        # A quotation mark, a command substitution, an array literal, or a
-        # "case" statement within a command substitution that never ended.  Either the script is not valid shell
-        # or this program lost track of the nesting, in which case it has
-        # read the rest of the script as one word.  Do not guess.
-        print "<unclosed>"
-      } else {
+      if (depth == 0) {
         end_word()
         report_line()
+      }
+      if (depth > 0 || case_nesting > 0) {
+        # A quotation mark, a command substitution, an array literal, or a
+        # "case" statement that never ended.  Either the script is not valid
+        # shell or this program lost track of the nesting, in which case it
+        # has misread the rest of the script.  Do not guess.
+        print "<unclosed>"
       }
     }
   ' "$1")"
@@ -404,11 +510,13 @@ set_variables_in() {
     exit 2
   fi
   if printf '%s\n' "${assigned}" | grep -qxF '<unclosed>'; then
-    echo "${SCRIPT_NAME}: $1 ends within a quotation, a command substitution, or an array literal" >&2
+    echo "${SCRIPT_NAME}: $1 ends within a quotation, a command substitution, an array literal, or a \"case\" statement" >&2
     echo "${SCRIPT_NAME}: either it is not valid shell, or set_variables_in mis-parsed it" >&2
     exit 2
   fi
-  printf '%s\n' "${assigned}" | grep -xE '[A-Z][A-Z0-9_]*' | sort -u
+  # Sort in the C locale, so that the order does not depend on the user's.
+  printf '%s\n' "${assigned}" | sed -n "s/^$2 //p" | grep -xE '[A-Z][A-Z0-9_]*' \
+    | LC_ALL=C sort -u
 }
 
 # Usage: shell_variables_read FILE
@@ -418,13 +526,17 @@ shell_variables_read() {
   script_code "$1" | grep -oE '\$\{?[A-Z][A-Z0-9_]*' | grep -oE '[A-Z][A-Z0-9_]*' | sort -u
 }
 
-# Usage: python_variables_read FILE
+# Usage: python_variables FILE KIND
 # Prints, one per line, the environment variables that FILE, a Python script,
-# reads, as in `os.environ.get("VAR")`, `os.environ["VAR"]`, `os.getenv("VAR")`,
-# or `"VAR" in os.environ`.  It parses FILE, so that a call that spans lines
-# counts and a string or comment that mentions `os.environ` does not.
-python_variables_read() {
-  python3 -I -c '
+# uses in the way that KIND, which is "read" or "set", names:
+#  * "read":  as in `os.environ.get("VAR")`, `os.environ["VAR"]`,
+#    `os.getenv("VAR")`, or `"VAR" in os.environ`.
+#  * "set":  as in `os.environ["VAR"] = value`.
+# It parses FILE, so that a call that spans lines counts and a string or
+# comment that mentions `os.environ` does not.  Fails if FILE is not valid
+# Python.
+python_variables() {
+  if ! names="$(python3 -I -c '
 import ast
 import re
 import sys
@@ -449,6 +561,7 @@ with open(sys.argv[1], encoding="utf-8") as f:
 names = set()
 for node in ast.walk(tree):
     name = None
+    kind = "read"
     if isinstance(node, ast.Call) and node.args:
         func = node.func
         if (
@@ -462,6 +575,8 @@ for node in ast.walk(tree):
             name = string_value(node.args[0])
     elif isinstance(node, ast.Subscript) and is_environ(node.value):
         name = string_value(node.slice)
+        # A deletion, as in "del os.environ[...]", neither reads nor sets.
+        kind = {ast.Load: "read", ast.Store: "set"}.get(type(node.ctx))
     elif (
         isinstance(node, ast.Compare)
         and len(node.ops) == 1
@@ -470,29 +585,30 @@ for node in ast.walk(tree):
     ):
         name = string_value(node.left)
     # Like the check of shell scripts, consider only upper-case names.
-    if name is not None and re.fullmatch("[A-Z][A-Z0-9_]*", name):
+    if (
+        kind == sys.argv[2]
+        and name is not None
+        and re.fullmatch("[A-Z][A-Z0-9_]*", name)
+    ):
         names.add(name)
 for name in sorted(names):
     print(name)
-' "$1"
-}
-
-# The scripts, partitioned by language.
-SHELL_SCRIPTS=''
-PYTHON_SCRIPTS=''
-for script in ${SCRIPTS}; do
-  file="${TOPLEVEL}/${script}"
-  if [ ! -f "${file}" ]; then
-    echo "${SCRIPT_NAME}: no such file: ${file}" >&2
+' "$1" "$2")"; then
+    echo "${SCRIPT_NAME}: python3 could not parse $1" >&2
     exit 2
   fi
-  # An assignment, so that "set -e" exits if script_language fails.
-  language="$(script_language "${file}")"
-  case "${language}" in
-    shell) SHELL_SCRIPTS="${SHELL_SCRIPTS} ${script}" ;;
-    python) PYTHON_SCRIPTS="${PYTHON_SCRIPTS} ${script}" ;;
-  esac
-done
+  if [ -n "${names}" ]; then
+    printf '%s\n' "${names}"
+  fi
+}
+
+# Usage: awk_variables_read FILE
+# Prints, one per line, the environment variables that FILE, an awk program,
+# reads, as in `ENVIRON["VAR"]`.
+awk_variables_read() {
+  script_code "$1" | grep -oE 'ENVIRON\[[[:space:]]*"[A-Z][A-Z0-9_]*"' \
+    | grep -oE '"[A-Z][A-Z0-9_]*"' | tr -d '"' | sort -u
+}
 
 # Check `set_variables_in` itself on a script that contains each construct
 # that it must get right.  The distinction that it makes -- an assignment
@@ -555,11 +671,36 @@ declare -x EXPORTED_ONLY
 export EXPORTED_ONLY_TOO
 local -a LOCAL_ARRAY=(one)
 readonly -a READONLY_ARRAY
+declare -pa PRINTED_ARRAY
+declare -ap PRINTED_ARRAY_TOO
+declare -p -a PRINTED_ARRAY_AS_WELL
+declare -fa FUNCTION_ONLY
+case "${PLAIN}" in
+  CASE_PATTERN=*) CASE_BODY=1 ;;
+  (PARENTHESIZED_PATTERN=* | OTHER_PATTERN=*) echo other ;;
+  *)
+    LAST_CASE_BODY=1
+    ;;
+esac
+case "${PLAIN}" in ONE_LINE_PATTERN=*) ONE_LINE_CASE_BODY=1 ;; esac
+AFTER_CASE=1
+read -r READ_VARIABLE OTHER_READ_VARIABLE < /dev/null
+IFS= read -r -d '' READ_AFTER_PREFIX < /dev/null
+read -p "Prompt: " PROMPTED
+read -ra READ_ARRAY
+read -aATTACHED_ARRAY
+read < /dev/null
+mapfile -t MAPPED < /dev/null
+mapfile -t < /dev/null
+readarray -d , -t -- READ_ARRAY_TOO
 FIXTURE_END
-EXPECTED='APPENDED
+EXPECTED='AFTER_CASE
+APPENDED
 ARITHMETIC
 ARRAY
+ATTACHED_ARRAY
 BACKTICKED
+CASE_BODY
 CASE_IN_SUBSTITUTION
 CASE_WORD
 CONDITIONAL
@@ -570,26 +711,55 @@ ELEMENT
 ELEMENTS
 ESCAPED
 EXPORTED
+LAST_CASE_BODY
 LOCAL_ARRAY
+MAPFILE
+MAPPED
 MULTILINE
 MULTILINE_ARRAY
 MULTILINE_CASE
 NESTED_ARITHMETIC
 NESTED_SUBSCRIPT
+ONE_LINE_CASE_BODY
 OTHER_DECLARED
+OTHER_READ_VARIABLE
 PARENTHESIZED_CASE
 PIPED_SUBSHELL
 PLAIN
+PROMPTED
 QUOTED
 QUOTED_SUBSCRIPT
 READONLY_ARRAY
+READ_AFTER_PREFIX
+READ_ARRAY
+READ_ARRAY_TOO
+READ_VARIABLE
 REDIRECTED
+REPLY
 STATEMENT_AFTER_CONTINUATION
 SUBSHELL
 SUBSTITUTED'
-ACTUAL="$(set_variables_in "${FIXTURE}")"
+ACTUAL="$(set_variables_in "${FIXTURE}" statement)"
 if [ "${ACTUAL}" != "${EXPECTED}" ]; then
   echo "${SCRIPT_NAME}: set_variables_in is broken" >&2
+  echo "${SCRIPT_NAME}: expected [${EXPECTED}]" >&2
+  echo "${SCRIPT_NAME}: got      [${ACTUAL}]" >&2
+  exit 2
+fi
+EXPECTED='ARITHMETIC_PREFIX
+CASE_IN_SUBSTITUTION_PREFIX
+CONTINUED
+DUPLICATED_DESCRIPTOR_PREFIX
+IFS
+MULTILINE_PREFIX
+PIPED_SUBSHELL_PREFIX
+PREFIX_ONE
+PREFIX_TWO
+REDIRECTED_PREFIX
+SUBSHELL_PREFIX'
+ACTUAL="$(set_variables_in "${FIXTURE}" prefix)"
+if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+  echo "${SCRIPT_NAME}: set_variables_in is broken for environment prefixes" >&2
   echo "${SCRIPT_NAME}: expected [${EXPECTED}]" >&2
   echo "${SCRIPT_NAME}: got      [${ACTUAL}]" >&2
   exit 2
@@ -597,7 +767,7 @@ fi
 
 # A here-document is an error rather than a wrong answer.
 printf '%s\n' 'cat << END_OF_TEXT' 'SOMETHING=1' 'END_OF_TEXT' > "${FIXTURE}"
-if (set_variables_in "${FIXTURE}") > /dev/null 2>&1; then
+if (set_variables_in "${FIXTURE}" statement) > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: set_variables_in read a here-document as code" >&2
   exit 2
 fi
@@ -605,7 +775,7 @@ fi
 # A here-document whose operator is "<<-" is an error as well.  That operator
 # strips leading tabs from its lines, so the fixture contains tabs.
 printf 'cat <<- END_OF_TEXT\n\tSOMETHING=1\n\tEND_OF_TEXT\n' > "${FIXTURE}"
-if (set_variables_in "${FIXTURE}") > /dev/null 2>&1; then
+if (set_variables_in "${FIXTURE}" statement) > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: set_variables_in read a <<- here-document as code" >&2
   exit 2
 fi
@@ -619,7 +789,7 @@ SOMETHING=1
 END_OF_TEXT
 )
 FIXTURE_END
-if (set_variables_in "${FIXTURE}") > /dev/null 2>&1; then
+if (set_variables_in "${FIXTURE}" statement) > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: set_variables_in read a here-document in a command substitution as code" >&2
   exit 2
 fi
@@ -631,7 +801,7 @@ cat > "${FIXTURE}" << 'FIXTURE_END'
 UNCLOSED=$(case ${PLAIN} in 1) echo one
 DROPPED=1
 FIXTURE_END
-if (set_variables_in "${FIXTURE}") > /dev/null 2>&1; then
+if (set_variables_in "${FIXTURE}" statement) > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: set_variables_in accepted an unclosed command substitution" >&2
   exit 2
 fi
@@ -643,15 +813,15 @@ cat <<<"one two"
 HERE_STRING=1
 SUBSTITUTED_HERE_STRING=$(cat <<<"one two")
 FIXTURE_END
-if [ "$(set_variables_in "${FIXTURE}")" != "HERE_STRING
+if [ "$(set_variables_in "${FIXTURE}" statement)" != "HERE_STRING
 SUBSTITUTED_HERE_STRING" ]; then
   echo "${SCRIPT_NAME}: set_variables_in mistook a here-string for a here-document" >&2
   exit 2
 fi
 
-# Check `python_variables_read` on a script that reads environment variables
-# in each way that it must recognize, and that mentions some in ways that are
-# not reads.
+# Check `python_variables` on a script that reads and sets environment
+# variables in each way that it must recognize, and that mentions some in ways
+# that are neither.
 cat > "${FIXTURE}" << 'FIXTURE_END'
 import os
 from os import environ, getenv
@@ -669,6 +839,8 @@ h = os.environ.pop("POPPED", None)
 # os.environ.get("COMMENTED")
 i = 'os.environ.get("IN_STRING")'
 j = os.environ.get("lower_case")
+os.environ["WRITTEN"] = "value"
+del os.environ["DELETED"]
 FIXTURE_END
 EXPECTED='BARE_GETENV
 GETENV
@@ -678,33 +850,87 @@ IN_ENVIRON
 POPPED
 SET_DEFAULT
 SUBSCRIPTED'
-ACTUAL="$(python_variables_read "${FIXTURE}")"
+ACTUAL="$(python_variables "${FIXTURE}" read)"
 if [ "${ACTUAL}" != "${EXPECTED}" ]; then
-  echo "${SCRIPT_NAME}: python_variables_read is broken" >&2
+  echo "${SCRIPT_NAME}: python_variables is broken for reads" >&2
   echo "${SCRIPT_NAME}: expected [${EXPECTED}]" >&2
   echo "${SCRIPT_NAME}: got      [${ACTUAL}]" >&2
   exit 2
 fi
+ACTUAL="$(python_variables "${FIXTURE}" set)"
+if [ "${ACTUAL}" != "WRITTEN" ]; then
+  echo "${SCRIPT_NAME}: python_variables is broken for assignments" >&2
+  echo "${SCRIPT_NAME}: expected [WRITTEN]" >&2
+  echo "${SCRIPT_NAME}: got      [${ACTUAL}]" >&2
+  exit 2
+fi
 
-# The variables that some shell script in this package assigns.  One script
-# sets such a variable before invoking another that reads it, so it is internal
-# to the package rather than part of its user-visible interface.
+# A Python script that is not valid is an error rather than a wrong answer.
+echo 'if' > "${FIXTURE}"
+if (python_variables "${FIXTURE}" read) > /dev/null 2>&1; then
+  echo "${SCRIPT_NAME}: python_variables accepted a script that is not valid Python" >&2
+  exit 2
+fi
+
+# Check `awk_variables_read` on a program that reads environment variables and
+# that mentions one in a comment.
+cat > "${FIXTURE}" << 'FIXTURE_END'
+{ print ENVIRON["READ"], ENVIRON[ "SPACED" ] }
+# ENVIRON["COMMENTED"]
+FIXTURE_END
+ACTUAL="$(awk_variables_read "${FIXTURE}")"
+if [ "${ACTUAL}" != "READ
+SPACED" ]; then
+  echo "${SCRIPT_NAME}: awk_variables_read is broken" >&2
+  echo "${SCRIPT_NAME}: got [${ACTUAL}]" >&2
+  exit 2
+fi
+
+# The variables that some script in this package sets, in a statement and in
+# an environment prefix of a command, respectively.  One script sets such a
+# variable before invoking another that reads it, so it is internal to the
+# package rather than part of its user-visible interface.
 PACKAGE_SET_VARIABLES=''
-for script in ${SHELL_SCRIPTS}; do
+PACKAGE_PREFIX_VARIABLES=''
+for script in ${SCRIPTS}; do
+  file="${TOPLEVEL}/${script}"
+  if [ ! -f "${file}" ]; then
+    echo "${SCRIPT_NAME}: no such file: ${file}" >&2
+    exit 2
+  fi
+  # Each variable is set by an assignment, so that "set -e" exits if the
+  # command that computes it fails.
+  language="$(script_language "${file}")"
+  case "${language}" in
+    awk)
+      set_variables=''
+      prefix_variables=''
+      ;;
+    python)
+      set_variables="$(python_variables "${file}" set)"
+      prefix_variables=''
+      ;;
+    shell)
+      set_variables="$(set_variables_in "${file}" statement)"
+      prefix_variables="$(set_variables_in "${file}" prefix)"
+      ;;
+  esac
   PACKAGE_SET_VARIABLES="${PACKAGE_SET_VARIABLES}
-$(set_variables_in "${TOPLEVEL}/${script}")"
+${set_variables}"
+  PACKAGE_PREFIX_VARIABLES="${PACKAGE_PREFIX_VARIABLES}
+${prefix_variables}"
 done
-PACKAGE_SET_VARIABLES="$(printf '%s\n' "${PACKAGE_SET_VARIABLES}" | sort -u)"
 
 status=0
 
-# Usage: check_documented SCRIPT VARIABLES
+# Usage: check_documented SCRIPT VARIABLES INTERNAL
 # Reports each of VARIABLES, which SCRIPT reads, that is part of the
 # user-visible interface but that README.md does not document, and sets
-# "status" to 1 if there is any.
+# "status" to 1 if there is any.  INTERNAL is the variables, one per line,
+# that are internal to this package in addition to PACKAGE_SET_VARIABLES.
 check_documented() {
   for variable in $2; do
-    if printf '%s\n' "${PACKAGE_SET_VARIABLES}" | grep -qx "${variable}"; then
+    if printf '%s\n' "${PACKAGE_SET_VARIABLES}" "$3" | grep -qx "${variable}"; then
       continue
     fi
     case " ${STANDARD_VARIABLES} " in
@@ -717,15 +943,28 @@ check_documented() {
   done
 }
 
-# Each "read_variables" is an assignment, so that "set -e" exits if the
-# command that computes it fails.
-for script in ${SHELL_SCRIPTS}; do
-  read_variables="$(shell_variables_read "${TOPLEVEL}/${script}")"
-  check_documented "${script}" "${read_variables}"
-done
-for script in ${PYTHON_SCRIPTS}; do
-  read_variables="$(python_variables_read "${TOPLEVEL}/${script}")"
-  check_documented "${script}" "${read_variables}"
+# An awk program in this package runs only when a script of the package runs
+# it, so a variable that a script passes to a command in an environment
+# prefix, as `common-functions.sh` passes `CCR_FILE` to
+# `check-conflict-resolution.awk`, is internal to the package.
+for script in ${SCRIPTS}; do
+  file="${TOPLEVEL}/${script}"
+  language="$(script_language "${file}")"
+  case "${language}" in
+    awk)
+      read_variables="$(awk_variables_read "${file}")"
+      internal="${PACKAGE_PREFIX_VARIABLES}"
+      ;;
+    python)
+      read_variables="$(python_variables "${file}" read)"
+      internal=''
+      ;;
+    shell)
+      read_variables="$(shell_variables_read "${file}")"
+      internal=''
+      ;;
+  esac
+  check_documented "${script}" "${read_variables}" "${internal}"
 done
 
 if [ "${status}" -eq 0 ]; then
