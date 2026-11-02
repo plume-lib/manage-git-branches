@@ -2140,45 +2140,138 @@ upstream_description() {
   esac
 }
 
-## Usage: source_without_url SOURCE COMMIT
-## Prints SOURCE, a source that `git pull` merges, as it writes one in
-## FETCH_HEAD and in a merge message, such as "branch 'feature' of
-## github.com:org/proj", named without its URL where it can.  COMMIT is the
-## commit that the merge merges from SOURCE.  For a source "branch 'BRANCH'
-## of URL" where URL is not ".", the local repository, prints:
-##  * "remote-tracking branch 'REMOTE/BRANCH'", such as "remote-tracking
-##    branch 'origin/feature'", if REMOTE/BRANCH tracks BRANCH of URL (see
-##    `tracking_branch_of`) and contains COMMIT;
-##  * otherwise, if URL is a pathname in the local file system, which a
-##    pushed commit message would reveal, "branch 'BRANCH' of NAME", where
-##    NAME is the last component of the pathname, such as "proj" for
-##    "/home/me/repos/proj";
-##  * otherwise, SOURCE.
-## Prints any other source unchanged.
-source_without_url() {
+## Usage: subject_without_url SUBJECT COMMIT
+## Prints SUBJECT, the subject of a merge commit, with each source that
+## `git merge` or `git pull` named in it written without its URL where it
+## can.  The subject that `git fmt-merge-msg` writes is "Merge SOURCES" or
+## "Merge SOURCES into BRANCH", where SOURCES is one source or several
+## separated by "; ", such as "branches 'a' and 'b' of /home/me/proj;
+## remote-tracking branch 'origin/x'".  If SOURCES is one source, it is
+## written as `source_without_url` writes it, given COMMIT, the commit that
+## the merge merged from that source; otherwise, each source is written as
+## `source_without_pathname` writes it.  For example, prints "Merge
+## remote-tracking branch 'origin/feature' into feature" for "Merge branch
+## 'feature' of github.com:org/proj into feature", and "Merge branch 'a' of
+## p; branch 'b' of github.com:x/y" for "Merge branch 'a' of /home/me/p;
+## branch 'b' of github.com:x/y".  Prints any other subject unchanged.
+subject_without_url() {
   case "$1" in
-    "branch '"*"' of "*) ;;
+    "Merge "*) ;;
     *)
       printf '%s\n' "$1"
       return 0
       ;;
   esac
-  source_url_rest="${1#"branch '"}"
-  source_url_branch="${source_url_rest%%"' of "*}"
-  source_url_url="${source_url_rest#*"' of "}"
+  subject_url_rest="${1#Merge }"
+  # A branch name contains no space, so the last " into " precedes the
+  # destination branch.  `git merge` omits " into BRANCH" on the default
+  # branch.
+  case "${subject_url_rest}" in
+    *" into "*)
+      subject_url_sources="${subject_url_rest% into *}"
+      subject_url_into=" into ${subject_url_rest##* into }"
+      ;;
+    *)
+      subject_url_sources="${subject_url_rest}"
+      subject_url_into=''
+      ;;
+  esac
+  # A ref's name contains no space, so a "; " separates two sources.
+  case "${subject_url_sources}" in
+    *"; "*) ;;
+    *)
+      printf 'Merge %s%s\n' "$(source_without_url "${subject_url_sources}" "$2")" "${subject_url_into}"
+      return 0
+      ;;
+  esac
+  # COMMIT is the commit merged from only one of several sources, so no
+  # remote-tracking branch is sought for any of them.
+  subject_url_shown=''
+  subject_url_separator=''
+  subject_url_more="${subject_url_sources}"
+  while :; do
+    subject_url_shown="${subject_url_shown}${subject_url_separator}$(source_without_pathname "${subject_url_more%%"; "*}")"
+    subject_url_separator='; '
+    case "${subject_url_more}" in
+      *"; "*) subject_url_more="${subject_url_more#*"; "}" ;;
+      *) break ;;
+    esac
+  done
+  printf 'Merge %s%s\n' "${subject_url_shown}" "${subject_url_into}"
+}
+
+## Usage: source_without_url SOURCE COMMIT
+## Prints SOURCE, a source that `git pull` merges, as it writes one in
+## FETCH_HEAD and in a merge message, such as "branch 'feature' of
+## github.com:org/proj", named without its URL where it can.  COMMIT is the
+## commit that the merge merges from SOURCE.  For a source "branch 'BRANCH'
+## of URL" where URL is not ".", the local repository, prints
+## "remote-tracking branch 'REMOTE/BRANCH'", such as "remote-tracking branch
+## 'origin/feature'", if REMOTE/BRANCH tracks BRANCH of URL (see
+## `tracking_branch_of`) and contains COMMIT.  Otherwise, prints SOURCE as
+## `source_without_pathname` writes it.
+source_without_url() {
+  case "$1" in
+    "branch '"*"' of "*)
+      source_url_rest="${1#"branch '"}"
+      source_url_branch="${source_url_rest%%"' of "*}"
+      source_url_url="${source_url_rest#*"' of "}"
+      # A branch's name contains no space.  "branch 'a', tag 'v1' of URL",
+      # which names several sources of URL, yields "a', tag 'v1".
+      case "${source_url_branch}" in
+        *" "*) ;;
+        *)
+          if [ "${source_url_url}" != . ] \
+            && source_url_tracking="$(tracking_branch_of "${source_url_branch}" "${source_url_url}" "$2")"; then
+            printf "remote-tracking branch '%s'\n" "${source_url_tracking}"
+            return 0
+          fi
+          ;;
+      esac
+      ;;
+  esac
+  source_without_pathname "$1"
+}
+
+## Usage: source_without_pathname SOURCE
+## Prints SOURCE, one or several sources of one repository as `git pull`
+## writes them in FETCH_HEAD and in a merge message, with the location of the
+## repository, if it is a pathname in the local file system, which a pushed
+## commit message would reveal, replaced by the last component of the
+## pathname, such as "proj" for "/home/me/repos/proj".  SOURCE has the form
+## "DESCRIPTION of LOCATION", such as "branches 'a' and 'b' of
+## /home/me/repos/proj" or "tag 'v1' of github.com:org/proj", or is a
+## location alone, for the head of the repository there, such as
+## "/home/me/repos/proj".  Prints SOURCE unchanged if its location is ".",
+## the local repository, or is not a pathname, or if SOURCE has neither
+## form, such as "remote-tracking branch 'origin/feature'".
+source_without_pathname() {
+  # A description ends with a quoted name, which contains no space, so the
+  # first "' of " ends it.  A location alone has no quote and, unlike a
+  # subject such as "pull request #12 from org/feature", no space.
+  case "$1" in
+    *"' of "*)
+      source_path_description="${1%%"' of "*}' of "
+      source_path_url="${1#*"' of "}"
+      ;;
+    *"'"* | *" "*)
+      printf '%s\n' "$1"
+      return 0
+      ;;
+    *)
+      source_path_description=''
+      source_path_url="$1"
+      ;;
+  esac
   # The pathname "." is the local repository, which reveals nothing.
-  if [ "${source_url_url}" = . ]; then
+  if [ "${source_path_url}" = . ]; then
     printf '%s\n' "$1"
     return 0
   fi
-  if source_url_tracking="$(tracking_branch_of "${source_url_branch}" "${source_url_url}" "$2")"; then
-    printf "remote-tracking branch '%s'\n" "${source_url_tracking}"
-    return 0
-  fi
-  case "${source_url_url}" in
+  case "${source_path_url}" in
     file://*) ;;
     *)
-      if ! is_pathname "${source_url_url}"; then
+      if ! is_pathname "${source_path_url}"; then
         printf '%s\n' "$1"
         return 0
       fi
@@ -2186,8 +2279,8 @@ source_without_url() {
   esac
   # For the URL "/srv/proj/.git", `git pull` writes "/srv/proj/", whose last
   # component is "proj".
-  source_url_path="${source_url_url%"${source_url_url##*[!/]}"}"
-  printf "branch '%s' of %s\n" "${source_url_branch}" "${source_url_path##*/}"
+  source_path_path="${source_path_url%"${source_path_url##*[!/]}"}"
+  printf '%s%s\n' "${source_path_description}" "${source_path_path##*/}"
 }
 
 ## Usage: tracking_branch_of BRANCH URL COMMIT
@@ -2380,11 +2473,12 @@ built_commits() {
 ## merge commits that might have broken the build, of what each side of each
 ## of them changed, and of the commands that show them; and
 ## ${merge_fix_message} to the message of a commit that fixes the build, such
-## as "Fix the build after merging branch 'main'".  If it returns 1, a
-## failure of the build is not one that a merge on the branch caused, and the
-## agent would merely work around it.  For example, a pull that
-## fast-forwarded the branch brought only commits that the remote already
-## had.  Prints a diagnostic if it returns 1 because git fails.
+## as "Fix the build after merging branch 'main'", which names a merge that a
+## pull made without the pull's URL where it can (see `subject_without_url`).
+## If it returns 1, a failure of the build is not one that a merge on the
+## branch caused, and the agent would merely work around it.  For example, a
+## pull that fast-forwarded the branch brought only commits that the remote
+## already had.  Prints a diagnostic if it returns 1 because git fails.
 ## The account in ${merge_fix_account} omits each commit in BUILT that is in
 ## the history of a remote branch or of another commit in BUILT, because it
 ## excludes no more commits, but that commit's tree still counts.  Of commits
@@ -2457,9 +2551,10 @@ has_unbuilt_merge() {
     echo "${SCRIPT_NAME}: cannot list the merge commits in $(pwd), so no AI agent is asked to fix the build" >&2
     return 1
   fi
-  # The merges that combined changes:  their subjects, and, one per merge,
-  # a line "* ABBREVIATION SUBJECT" followed, for a merge of two commits
-  # that share history, by an indented account of what each side changed.
+  # The merges that combined changes:  their subjects, as the message of the
+  # fix names them (see `subject_without_url`), and, one per merge, a line
+  # "* ABBREVIATION SUBJECT" followed, for a merge of two commits that share
+  # history, by an indented account of what each side changed.
   merge_fix_subjects=''
   merge_fix_list=''
   for merge_fix_commit in ${merge_fix_log}; do
@@ -2484,7 +2579,7 @@ has_unbuilt_merge() {
         return 1
       fi
       merge_fix_subjects="${merge_fix_subjects:+${merge_fix_subjects}
-}${merge_fix_line#* }"
+}$(subject_without_url "${merge_fix_line#* }" "${merge_fix_commit}^2")"
       merge_fix_list="${merge_fix_list:+${merge_fix_list}
 }* ${merge_fix_line}"
       # A merge of two commits that share history gets an account of the

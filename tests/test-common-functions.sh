@@ -696,6 +696,57 @@ check_swu "branch 'main' of ." "branch 'main' of ."
 check_swu "branch 'main'" "branch 'main'"
 check_swu "remote-tracking branch 'origin/main'" \
   "remote-tracking branch 'origin/main'"
+# Other sources of a pathname, and the head of a pathname.
+check_swu "tag 'v1' of /srv/git/proj" "tag 'v1' of proj"
+check_swu "/srv/git/proj" "proj"
+check_swu "tag 'v1' of github.com:org/proj" "tag 'v1' of github.com:org/proj"
+check_swu "github.com:org/proj" "github.com:org/proj"
+
+## Tests of subject_without_url, in the same clone as those of
+## source_without_url.
+
+## Usage: check_subject SUBJECT EXPECTED [COMMIT]
+## Checks that `subject_without_url`, in ${WORK_DIR}/swu, prints EXPECTED for
+## SUBJECT and COMMIT, which is ${swu_head} by default.
+check_subject() {
+  check_subject_actual="$(cd "${WORK_DIR}/swu" && subject_without_url "$1" "${3:-${swu_head}}")"
+  if [ "${check_subject_actual}" != "$2" ]; then
+    fail "subject_without_url [$1] printed [${check_subject_actual}], not [$2]"
+  fi
+}
+
+check_subject "Merge branch 'feature' of github.com:org/proj into feature" \
+  "Merge remote-tracking branch 'origin/feature' into feature"
+# On the default branch, `git merge` omits " into BRANCH".
+check_subject "Merge branch 'feature' of https://github.com/Org/Proj" \
+  "Merge remote-tracking branch 'origin/feature'"
+check_subject "Merge branch 'main' of /nonexistent/repo into feature" \
+  "Merge branch 'main' of repo into feature" "${swu_other}"
+check_subject "Merge branch 'feature' of github.com:org/proj into feature" \
+  "Merge branch 'feature' of github.com:org/proj into feature" "${swu_other}"
+# A merge that no pull made.
+check_subject "Merge branch 'main' into feature" \
+  "Merge branch 'main' into feature"
+check_subject "Merge remote-tracking branch 'origin/main' into feature" \
+  "Merge remote-tracking branch 'origin/main' into feature"
+check_subject "Merge pull request #12 from org/feature" \
+  "Merge pull request #12 from org/feature"
+# Several sources of one repository.
+check_subject "Merge branches 'a' and 'b' of /srv/git/proj into feature" \
+  "Merge branches 'a' and 'b' of proj into feature"
+check_subject "Merge branch 'a', tag 'v1' of /srv/git/proj into feature" \
+  "Merge branch 'a', tag 'v1' of proj into feature"
+check_subject "Merge tag 'v1' of /srv/git/proj into feature" \
+  "Merge tag 'v1' of proj into feature"
+check_subject "Merge /srv/git/proj into feature" "Merge proj into feature"
+# Sources of several repositories, of which none is named by a
+# remote-tracking branch, because COMMIT is the commit of only one of them.
+check_subject "Merge branch 'a' of /home/me/p; branch 'b' of github.com:x/y into main" \
+  "Merge branch 'a' of p; branch 'b' of github.com:x/y into main"
+check_subject "Merge branch 'feature' of github.com:org/proj; branch 'b' of /home/me/q" \
+  "Merge branch 'feature' of github.com:org/proj; branch 'b' of q"
+check_subject "Merge remote-tracking branch 'origin/x'; branch 'a' of /home/p into feature" \
+  "Merge remote-tracking branch 'origin/x'; branch 'a' of p into feature"
 
 ## Tests of wait_for_later_time.  Each test uses its own directory, in which
 ## the function creates its probe directory.
