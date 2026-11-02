@@ -2945,16 +2945,21 @@ only_dot_project() {
 ## cannot be answered.  That command is a wrapper around this function, and
 ## its documentation is the documentation of this answer.
 ##
-## Also sets the variable `is_deleted_branch_no_working_tree` to a nonempty
-## value (true) if git reports that DIRECTORY is in no working tree, which is
-## one reason for status 2, and to the empty string (false) otherwise.  A
-## caller can then explain status 2 without asking git again.
+## Also sets the variable `is_deleted_branch_no_usable_repository` to a
+## nonempty value (true) if this returns status 2 because git can use no
+## repository at DIRECTORY, and to the empty string (false) otherwise.  Git can
+## use no repository at DIRECTORY if no repository contains DIRECTORY; if the
+## one that contains it is broken, such as a linked worktree whose `.git` file
+## names a git directory that no longer exists; if git refuses it, such as one
+## that another user owns and that `safe.directory` does not allow; or if git
+## cannot enter DIRECTORY.  The variable lets a caller explain status 2
+## without asking git again.
 ##
 ## The body lives here rather than in the command so that the other commands
 ## of this package can ask the question directly.
 is_deleted_branch() {
   is_deleted_branch_dir="$1"
-  is_deleted_branch_no_working_tree=
+  is_deleted_branch_no_usable_repository=
 
   # A path that does not exist -- or that exists but is not a directory -- is
   # certainly not a working tree.  Reject it here rather than leaving it to
@@ -2983,36 +2988,48 @@ is_deleted_branch() {
   # `.project` file and which `only_dot_project` therefore rejects at its
   # first entry.
   #
-  # The `.project` file need not be in DIRECTORY itself:  a branch whose
-  # Eclipse projects were all below its top level, such as a `java/lib` that
-  # Eclipse knew as a project, leaves its metadata there and none at the top.
-  #
-  # `only_dot_project` is also satisfied by a tree that holds nothing at all
-  # but empty directories, such as a branch directory whose creation failed
-  # partway.  Such a tree holds no work either, so it, too, is removable, but
-  # only if it is in no git working tree or repository:  within one, it is part
-  # of that working tree, which a build or a tool might expect to find intact,
-  # rather than the leftover of a branch directory.
+  # Require a `.project` file somewhere in the tree.  `only_dot_project` is
+  # satisfied by a directory that holds nothing at all, and a tree of nothing
+  # but empty directories is not evidence of an Eclipse project that a branch
+  # directory once held.  The `.project` file need not be in DIRECTORY
+  # itself:  a branch whose Eclipse projects were all below its top level,
+  # such as a `java/lib` that Eclipse knew as a project, leaves its metadata
+  # there and none at the top.
   only_dot_project_found=
-  if only_dot_project "${is_deleted_branch_dir}"; then
-    if [ -n "${only_dot_project_found}" ]; then
-      return 0
-    fi
-    if ! git -C "${is_deleted_branch_dir}" rev-parse --git-dir > /dev/null 2>&1; then
-      return 0
-    fi
+  if only_dot_project "${is_deleted_branch_dir}" \
+    && [ -n "${only_dot_project_found}" ]; then
+    return 0
   fi
 
   # `git -C DIR rev-parse` succeeds for every directory within a working tree,
   # so also require that DIRECTORY is that working tree's top level.  A
   # subdirectory is not itself a working tree, and answering for the enclosing
   # one would answer a question that the caller did not ask.
+  #
+  # `--is-bare-repository` prints a line, "true" or "false", whenever git can
+  # use a repository at DIRECTORY, even one that has no working tree, such as a
+  # bare repository or a `.git` directory.  For such a repository,
+  # `--show-toplevel` then fails in recent versions of git and prints an empty
+  # line in older ones.  So a failure with no output means that git can use no
+  # repository there.
   if ! is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
-    --show-toplevel 2> /dev/null)"; then
-    # shellcheck disable=SC2034 # Callers read it; see the documentation above.
-    is_deleted_branch_no_working_tree=1
+    --is-bare-repository --show-toplevel 2> /dev/null)"; then
+    if [ -z "${is_deleted_branch_toplevel}" ]; then
+      # shellcheck disable=SC2034 # Callers read it; see the documentation above.
+      is_deleted_branch_no_usable_repository=1
+    fi
     return 2
   fi
+  # Remove the line that `--is-bare-repository` printed.  A command
+  # substitution removes trailing newlines, so an empty last line leaves none.
+  case "${is_deleted_branch_toplevel}" in
+    *'
+'*)
+      is_deleted_branch_toplevel="${is_deleted_branch_toplevel#*
+}"
+      ;;
+    *) is_deleted_branch_toplevel= ;;
+  esac
   if [ -z "${is_deleted_branch_toplevel}" ]; then
     # A bare repository has no working tree, so it is not on any branch.
     return 2

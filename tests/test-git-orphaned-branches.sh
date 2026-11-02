@@ -104,8 +104,7 @@ mkdir -p "${work}/dot-project/p-branch-plus-dangling-symlink"
 touch "${work}/dot-project/p-branch-plus-dangling-symlink/.project"
 ln -s no-such-file "${work}/dot-project/p-branch-plus-dangling-symlink/dangling"
 
-# Contains nothing, as when the creation of a branch directory failed partway.
-# It holds no work, so it is reported.
+# Contains nothing.
 mkdir -p "${work}/dot-project/p-branch-empty"
 
 # Contains no `.project` file.
@@ -136,8 +135,8 @@ touch "${work}/dot-project/p-branch-outer/q-branch-content/other"
 mkdir -p "${work}/dot-project/p-branch-nested-project/java/lib"
 touch "${work}/dot-project/p-branch-nested-project/java/lib/.project"
 
-# Contains nothing but empty directories, so it holds no work and is
-# reported.
+# Contains nothing but empty directories, so it holds no `.project` file
+# anywhere and is the leftover of nothing.
 mkdir -p "${work}/dot-project/p-branch-empty-tree/sub/deeper"
 
 # A `*-branch-*` directory behind a symbolic link to a directory.  The walk
@@ -167,6 +166,11 @@ touch "${work}/dot-project/p-repo/r-branch-subdir/other"
 # An empty `*-branch-*` directory in a working tree is part of that working
 # tree, so it is not reported either.
 mkdir -p "${work}/dot-project/p-repo/r-branch-empty"
+# Neither is a `*-branch-*` directory in a `.git` directory, nor a bare
+# repository:  git can use the repository in each, which has no working tree.
+mkdir -p "${work}/dot-project/p-repo/.git/refs/heads/r-branch-ref"
+touch "${work}/dot-project/p-repo/.git/refs/heads/r-branch-ref/other"
+git init -q --bare -b main "${work}/dot-project/p-branch-bare.git"
 
 # A linked worktree whose main working tree was moved.  Its `.git` file names
 # a git directory that no longer exists, so git cannot use it, but it is a
@@ -203,13 +207,13 @@ check "p-branch-plus-subdir" "listed"
 check "p-branch-leftover" "listed"
 check "p-branch-deep-file" "unlisted"
 check "p-branch-plus-dangling-symlink" "unlisted"
-check "p-branch-empty" "listed"
+check "p-branch-empty" "unlisted"
 check "p-branch-no-project" "unlisted"
 check "p-plain-project" "unlisted"
 check "p-branch-outer" "unlisted"
 check "p-branch-outer/q-branch-inner" "listed"
 check "p-branch-nested-project" "listed"
-check "p-branch-empty-tree" "listed"
+check "p-branch-empty-tree" "unlisted"
 if printf '%s\n' "${output}" | grep -q -F -- 'p-branch-behind-link'; then
   echo "FAIL: git-orphaned-branches followed a symbolic link to a directory"
   status=1
@@ -246,15 +250,17 @@ check_warned "p-branch-plus-hidden" "warned"
 check_warned "p-branch-leftover" "unwarned"
 check_warned "p-branch-deep-file" "warned"
 check_warned "p-branch-plus-dangling-symlink" "warned"
-check_warned "p-branch-empty" "unwarned"
+check_warned "p-branch-empty" "warned"
 check_warned "p-branch-no-project" "warned"
 check_warned "p-plain-project" "unwarned"
 check_warned "p-branch-outer" "warned"
 check_warned "p-branch-outer/q-branch-inner" "unwarned"
 check_warned "p-branch-outer/q-branch-content" "unwarned"
-check_warned "p-branch-empty-tree" "unwarned"
+check_warned "p-branch-empty-tree" "warned"
 check_warned "p-repo/r-branch-subdir" "unwarned"
 check_warned "p-repo/r-branch-empty" "unwarned"
+check_warned "p-repo/.git/refs/heads/r-branch-ref" "unwarned"
+check_warned "p-branch-bare.git" "unwarned"
 check_warned "p-branch-broken-worktree" "unwarned"
 if [ "${unlistable}" -eq 1 ]; then
   check_warned "p-branch-unlistable" "warned"
@@ -269,7 +275,7 @@ if [ "$(grep -c -F -- "warning: not listing ${work}/dot-project/p-branch-outer" 
 fi
 # The linked worktree whose main working tree was moved is warned about as a
 # working tree that git cannot use.
-if ! grep -q -F -- "warning: not listing ${work}/dot-project/p-branch-broken-worktree, which git cannot use as a working tree although ${work}/dot-project/p-branch-broken-worktree/.git exists: " \
+if ! grep -q -F -- "warning: not listing ${work}/dot-project/p-branch-broken-worktree, which git cannot use as a working tree although ${work}/dot-project/p-branch-broken-worktree/.git exists; " \
   "${work}/dot-project.stderr"; then
   echo "FAIL: git-orphaned-branches did not warn that git cannot use p-branch-broken-worktree:"
   cat "${work}/dot-project.stderr"
@@ -288,7 +294,8 @@ fi
 
 # Only the superuser can give a file to another user, so a stub `id` stands
 # in for one:  it prints a user id that owns no file, so that to
-# `git-orphaned-branches`, every file is another user's.
+# `git-orphaned-branches`, every file is another user's, including the
+# `*-branch-*` directory itself.
 mkdir -p "${work}/foreign/f-branch-leftover" "${work}/stub-id"
 touch "${work}/foreign/f-branch-leftover/other"
 printf '#!/bin/sh\necho 2147483646\n' > "${work}/stub-id/id"
@@ -300,9 +307,9 @@ fi
 if [ -n "${output}" ]; then
   fail "git-orphaned-branches printed [${output}] for files that another user owns, expected no output"
 fi
-if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/foreign/f-branch-leftover, which is not in a git working tree and holds files that you do not own, such as ${work}/foreign/f-branch-leftover" \
+if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/foreign/f-branch-leftover, which is not in a git working tree and which another user owns" \
   "${work}/foreign.stderr"; then
-  echo "FAIL: git-orphaned-branches did not name a file that another user owns:"
+  echo "FAIL: git-orphaned-branches did not say that another user owns a directory:"
   cat "${work}/foreign.stderr"
   status=1
 fi

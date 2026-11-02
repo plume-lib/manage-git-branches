@@ -155,22 +155,20 @@ The commands are:
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but Eclipse `.project`
-  files, which a branch directory can leave behind when its working tree
-  is gone, and of a directory that is in no git working tree and holds
-  nothing but empty directories.
+  files, which a branch directory may leave behind when its working tree
+  is gone.
 * [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
   Lists directories named `*-branch-*`, below the current directory, that are
   working trees for branches that were deleted in the remote repository, or
-  that hold nothing but Eclipse `.project` files, or that are in no git
-  working tree and hold nothing but empty directories.
+  that hold nothing but Eclipse `.project` files.
   With `--remove`, removes each of them instead of printing them.
   A directory whose branch still exists in the remote, but whose GitHub pull
   requests are all closed or merged, is neither listed nor removed; a warning
   about it is printed instead.  (This needs the `gh` command.)
   Likewise, a warning is printed about a directory named `*-branch-*` that
-  is in no git working tree and holds anything else, such as one whose
-  removal failed on files that another user owns, and about one that is in a
-  working tree that git cannot use, such as a linked worktree whose main
+  is in no git working tree and holds more than `.project` files, such as one
+  whose removal failed on files that another user owns, and about one that is
+  in a working tree that git cannot use, such as a linked worktree whose main
   working tree was moved.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
   alias below).
