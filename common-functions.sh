@@ -1066,6 +1066,7 @@ resolve_merge_conflicts() {
     echo "${resolve_failed}" >&2
     return 1
   elif ! resolve_with_agent; then
+    report_agent_session "Resolve the conflicts in the merge of ${resolve_source}"
     echo "${resolve_failed}" >&2
     return 1
   fi
@@ -1097,6 +1098,8 @@ resolve_merge_conflicts() {
 ## be committed, but a later build could use it.  A file that `git rerere`
 ## resolved must keep the resolution that rerere recorded.
 resolve_with_agent() {
+  # No session is reported if this function fails before the agent runs.
+  agent_session_ids=''
   # The index is compared by its contents.  The working tree, which can hold
   # many large files, such as build output, is compared by its pathnames and
   # by the time at which each file last changed (its "ctime").  Unlike a
@@ -1367,6 +1370,22 @@ agent_available() {
 ## command should run in the current directory.  Otherwise returns 1, after
 ## printing a diagnostic, if the agent fails.
 ##
+## Appends to ${agent_session_ids}, a blank-separated list, the UUID that
+## names the agent's session, such as "1e55b89c-cfb5-468f-a783-cb104201809b".
+## A caller that sets ${agent_session_ids} to the empty string first can
+## report every session that the agent ran in since then, such as one per
+## attempt to fix a build.  Prints a diagnostic and appends nothing if the
+## session has no UUID:  for Claude, if this system cannot make one, and for
+## Codex, if Codex does not print the one that it chose.  Also sets the
+## variables that `report_agent_session` reads:  ${agent_session_agent}, which
+## is AGENT; ${agent_session_command}, the command that continues a session
+## given its UUID, "claude --resume" or "codex resume"; ${agent_session_dir},
+## the current directory; and ${agent_session_todo}, the pathname of the file
+## AGENT-TODO.md at the top level of the working tree, or the empty string if
+## that file must not be written because git tracks it or the top level is
+## unknown.  It is computed before the agent runs, because no git command
+## should run after the agent has changed git's configuration.
+##
 ## The agent can read every file of the working tree, including files that
 ## git ignores, such as a ".env" file, and the repository, including its
 ## configuration.  Instructions in the conflicting text can make it copy a
@@ -1386,6 +1405,14 @@ run_agent() {
       ;;
   esac
   run_agent_start="$(date +%s)"
+  agent_session_agent="$1"
+  agent_session_dir="$(pwd)"
+  run_agent_session=''
+  agent_session_todo=''
+  if run_agent_top="$(git rev-parse --show-toplevel)" \
+    && ! git -C "${run_agent_top}" ls-files --error-unmatch -- "${agent_todo_file}" > /dev/null 2>&1; then
+    agent_session_todo="${run_agent_top}/${agent_todo_file}"
+  fi
   # Each agent reads its instructions from standard input.
   #
   # Claude's restricted mode confines the file tools to the current
@@ -1408,7 +1435,16 @@ run_agent() {
   # own installation, which its sandbox runs.
   case "$1" in
     claude)
+      agent_session_command="claude --resume"
+      run_agent_session="$(new_uuid)"
+      if [ -z "${run_agent_session}" ]; then
+        echo "${SCRIPT_NAME}: cannot make a UUID to name claude's session, so no command will be able to continue it" >&2
+      fi
+      # The UUID contains no character that field splitting or globbing
+      # would change, so the unquoted expansion is one option and its value.
+      # shellcheck disable=SC2086
       printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" claude -p --restricted --strict-mcp-config \
+        ${run_agent_session:+--session-id ${run_agent_session}} \
         --settings '{"permissions": {"blockReadsOutsideWorkingDirectories": true}}' \
         --tools 'Read,Edit,Write,Grep,Glob,Bash' --permission-mode acceptEdits \
         --allowedTools 'Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git merge-base:*)' \
@@ -1416,6 +1452,7 @@ run_agent() {
       run_agent_status=$?
       ;;
     codex)
+      agent_session_command="codex resume"
       if ! run_agent_repository="$(git rev-parse --path-format=absolute --git-common-dir)" \
         || ! run_agent_codex="$(codex_installation)"; then
         echo "${SCRIPT_NAME}: cannot find the files that codex needs to read" >&2
@@ -1430,10 +1467,37 @@ run_agent() {
           run_agent_absent="${run_agent_absent} ${run_agent_name}"
         fi
       done
-      printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" codex exec -c 'default_permissions="resolve_conflicts"' \
-        -c "permissions.resolve_conflicts.filesystem={\":minimal\" = \"read\", \":project_roots\" = {\".\" = \"write\"}, $(toml_string "${run_agent_repository}") = \"read\", $(toml_string "${run_agent_codex}") = \"read\"}" \
-        -
-      run_agent_status=$?
+      # Codex chooses its session's UUID and prints it on standard error, in
+      # a header line such as "session id: 01a19ac9-dab5-7570-93b6-6ba41bf65093".
+      # `tee` copies standard error to a file, from which the first such line
+      # is read, and still shows it to the user.  The file and the file that
+      # holds Codex's exit status are in the git directory, which Codex
+      # cannot write.
+      if ! run_agent_git_dir="$(git rev-parse --absolute-git-dir)"; then
+        echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
+        return 1
+      fi
+      run_agent_log="${run_agent_git_dir}/manage-git-branches-agent-stderr"
+      run_agent_status_file="${run_agent_git_dir}/manage-git-branches-agent-status"
+      rm -f -- "${run_agent_status_file}"
+      {
+        {
+          printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" codex exec -c 'default_permissions="resolve_conflicts"' \
+            -c "permissions.resolve_conflicts.filesystem={\":minimal\" = \"read\", \":project_roots\" = {\".\" = \"write\"}, $(toml_string "${run_agent_repository}") = \"read\", $(toml_string "${run_agent_codex}") = \"read\"}" \
+            - 2>&1 1>&3 3>&-
+          echo "$?" > "${run_agent_status_file}"
+        } | tee -- "${run_agent_log}" >&2
+      } 3>&1
+      run_agent_status="$(cat -- "${run_agent_status_file}" 2> /dev/null)"
+      case "${run_agent_status}" in
+        "" | *[!0-9]*) run_agent_status=1 ;;
+      esac
+      run_agent_session="$(sed -n -e 's/^session id: //p' "${run_agent_log}" 2> /dev/null | head -n 1)"
+      if ! is_uuid "${run_agent_session}"; then
+        run_agent_session=''
+        echo "${SCRIPT_NAME}: codex printed no line \"session id: UUID\", so no command will be able to continue its session" >&2
+      fi
+      rm -f -- "${run_agent_log}" "${run_agent_status_file}"
       for run_agent_name in ${run_agent_absent}; do
         if [ -d "${run_agent_name}" ] && [ ! -L "${run_agent_name}" ]; then
           # `rmdir` removes only an empty directory.
@@ -1446,6 +1510,9 @@ run_agent() {
       return 1
       ;;
   esac
+  if [ -n "${run_agent_session}" ]; then
+    agent_session_ids="${agent_session_ids:-}${agent_session_ids:+ }${run_agent_session}"
+  fi
   if [ "$(git_control_state)" != "${run_agent_git_state}" ]; then
     echo "${SCRIPT_NAME}: $1 changed git's configuration, attributes, or hooks in $(pwd); check them before running git there" >&2
     return 2
@@ -1460,6 +1527,140 @@ run_agent() {
     return 1
   fi
   return 0
+}
+
+## Usage: report_agent_session TASK
+## Prints a command that continues, interactively, each session of the AI
+## agent that `run_agent` recorded in ${agent_session_ids}, such as
+## "cd /home/me/myrepo && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b".
+## The user can then ask the agent about its work, or tell it to finish the
+## work in a way that its instructions forbade, such as by changing text
+## outside a conflict region.  Also appends the commands, under a heading that
+## gives TASK and the time, to the file ${agent_session_todo}, where the user
+## is less likely to overlook them than in the script's output.  TASK is what
+## the agent was asked to do, such as "Fix the build after merging branch
+## 'main'"; only its first line is used.  Neither prints nor writes anything
+## if no session is recorded.
+##
+## Runs no git command, because the agent might have changed git's
+## configuration.  The file is not written if ${agent_session_todo} is empty,
+## or if the file is a symbolic link or has another hard link, either of which
+## could make the file another one outside the working tree, or if it is
+## anything else but a regular file.
+agent_todo_file=AGENT-TODO.md
+report_agent_session() {
+  if [ -z "${agent_session_ids:-}" ]; then
+    return 0
+  fi
+  # The UUIDs contain no character that field splitting or globbing would
+  # change, so each unquoted expansion below is the list of UUIDs.
+  # shellcheck disable=SC2086
+  set -- "$1" ${agent_session_ids}
+  report_task="$(printf '%s\n' "$1" | head -n 1)"
+  shift
+  report_count=$#
+  # The Markdown entry for ${agent_session_todo}.
+  report_entry="
+## ${report_task} (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
+"
+  report_index=0
+  for report_id in "$@"; do
+    report_index=$((report_index + 1))
+    report_command="cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${report_id}"
+    if [ "${report_count}" -eq 1 ]; then
+      report_session="the session"
+    else
+      report_session="session ${report_index} of ${report_count}"
+      report_entry="${report_entry}
+Session ${report_index} of ${report_count}:
+"
+    fi
+    # `echo` in some shells, such as dash, would interpret a backslash in the
+    # directory.
+    printf '%s\n' "${SCRIPT_NAME}: to continue ${report_session} of ${agent_session_agent}:  ${report_command}" >&2
+    report_entry="${report_entry}
+\`\`\`sh
+${report_command}
+\`\`\`
+"
+  done
+  if [ -z "${agent_session_todo:-}" ]; then
+    echo "${SCRIPT_NAME}: did not write ${agent_todo_file}, which git tracks or whose working tree is unknown" >&2
+    return 0
+  fi
+  report_todo="${agent_session_todo}"
+  # `find -links +1` prints the file if it has more than one hard link.
+  if [ -L "${report_todo}" ] \
+    || { [ -e "${report_todo}" ] && [ ! -f "${report_todo}" ]; } \
+    || [ -n "$(find "${report_todo}" -prune -links +1 2> /dev/null)" ]; then
+    echo "${SCRIPT_NAME}: did not write ${report_todo}, which is not a regular file with one link" >&2
+    return 0
+  fi
+  report_new=no
+  if [ ! -e "${report_todo}" ]; then
+    report_new=yes
+  fi
+  if ! {
+    if [ "${report_new}" = yes ]; then
+      # The backquotes are Markdown, not command substitutions.
+      # shellcheck disable=SC2016
+      printf '%s\n' \
+        '# AI agent sessions to continue' \
+        '' \
+        'A script of manage-git-branches, such as `git-push-to`, appends an entry' \
+        'here when an AI agent fails or when the script rejects its work.  The' \
+        "entry's command continues the agent's session interactively.  Delete the" \
+        'entry once you have dealt with it.'
+    fi
+    printf '%s' "${report_entry}"
+  } >> "${report_todo}"; then
+    echo "${SCRIPT_NAME}: cannot write ${report_todo}" >&2
+    return 0
+  fi
+  if [ "${report_count}" -eq 1 ]; then
+    echo "${SCRIPT_NAME}: appended that command to ${report_todo}" >&2
+  else
+    echo "${SCRIPT_NAME}: appended those commands to ${report_todo}" >&2
+  fi
+}
+
+## Usage: new_uuid
+## Prints a new random UUID in lowercase, such as
+## "1e55b89c-cfb5-468f-a783-cb104201809b", or prints nothing if this system
+## cannot make one.
+new_uuid() {
+  if command -v uuidgen > /dev/null 2>&1; then
+    new_uuid_value="$(uuidgen 2> /dev/null | tr 'A-F' 'a-f')"
+  else
+    new_uuid_value="$(cat /proc/sys/kernel/random/uuid 2> /dev/null)"
+  fi
+  if is_uuid "${new_uuid_value}"; then
+    printf '%s\n' "${new_uuid_value}"
+  fi
+}
+
+## Usage: is_uuid STRING
+## Succeeds if STRING is a UUID in lowercase, such as
+## "1e55b89c-cfb5-468f-a783-cb104201809b".
+is_uuid() {
+  printf '%s\n' "$1" \
+    | grep -x -q '[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}'
+}
+
+## Usage: shell_word STRING
+## Prints STRING as a word that a POSIX shell reads as STRING:  unchanged if
+## it consists only of characters that the shell does not interpret, as in
+## "/home/me/myrepo", and otherwise in single quotes, as in
+## "'/home/me/my repo'".
+shell_word() {
+  case "$1" in
+    "" | *[!A-Za-z0-9_./:@%+=,-]*)
+      printf "'%s'\n" "$(printf '%s' "$1" | sed -e "s/'/'\\\\''/g")"
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
 }
 
 ## Usage: run_with_time_limit SECONDS COMMAND [ARGUMENT...]
@@ -1616,6 +1817,8 @@ build_fix_attempts=3
 fix_failed_build() {
   fix_with="$1"
   fix_log="$2"
+  # No session is reported if this function fails before the agent runs.
+  agent_session_ids=''
   # The agent's changes are committed below, and so would be any change that
   # the build made to tracked files.
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
@@ -2116,6 +2319,7 @@ merge_build_push() {
         merge_did="The script just merged commit $1 into branch ${merge_fix_branch}."
       fi
       if ! fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
+        report_agent_session "${merge_fix_message}"
         return 1
       fi
     fi
@@ -3279,3 +3483,124 @@ is_deleted_branch() {
       ;;
   esac
 }
+
+## Usage: github_slug URL
+## Prints the GitHub slug, such as "ORG/REPO", of the GitHub repository whose
+## URL is URL, such as "git@github.com:ORG/REPO.git", or nothing if URL is not
+## the URL of a GitHub repository.
+github_slug() {
+  printf '%s\n' "$1" | sed -e 's|/*$||' | sed -n \
+    -e 's|^git@github\.com:\([^/]*/[^/]*\)$|\1|p' \
+    -e 's|^ssh://git@github\.com/\([^/]*/[^/]*\)$|\1|p' \
+    -e 's|^https://\([^@/]*@\)\{0,1\}github\.com/\([^/]*/[^/]*\)$|\2|p' \
+    | sed -e 's|\.git$||'
+}
+
+## The number of seconds that a query of GitHub can take before it is
+## abandoned, and fails, so that an unresponsive GitHub does not stall a
+## command.
+github_query_seconds=30
+
+## Usage: with_timeout SECONDS COMMAND [ARGUMENT...]
+## Runs COMMAND, an executable rather than a shell function, with the
+## ARGUMENTs, and returns its exit status.  Kills COMMAND and returns 124 if it
+## runs for more than SECONDS seconds.  The limit needs the `timeout` command
+## of GNU coreutils, which Homebrew installs on macOS as `gtimeout`; if
+## neither is installed, COMMAND runs without a limit.
+with_timeout() {
+  with_timeout_seconds="$1"
+  shift
+  if command -v timeout > /dev/null 2>&1; then
+    timeout "${with_timeout_seconds}" "$@"
+  elif command -v gtimeout > /dev/null 2>&1; then
+    gtimeout "${with_timeout_seconds}" "$@"
+  else
+    "$@"
+  fi
+}
+
+## Usage: pr_repositories DIRECTORY BRANCH
+## Sets ${pr_base_repo} and ${pr_head_repo} to the GitHub slugs, such as
+## "ORG/REPO", of the base and head repositories of the pull requests from a
+## local branch BRANCH of the clone in DIRECTORY, sets ${pr_head_remote} to
+## the name of the clone's remote for the head repository, such as "origin",
+## and sets ${pr_head_branch} to the name of their head branch in the head
+## repository.  Fails, setting nothing, if nothing is known about those pull
+## requests, or if they say nothing about BRANCH.
+##
+## The head repository is the one that `git push` uses for BRANCH; see
+## `push_remote`.  The base repository is the head repository's parent, if
+## the head repository is a fork, and the head repository itself otherwise.
+## The head branch is the remote branch that `is_deleted_branch` asks about:
+## the one that `branch.BRANCH.merge` names, if `branch.BRANCH.remote` is the
+## remote that `git push` uses, and the branch of the same name otherwise.  A
+## pull request from a branch of the same name in another repository, even the
+## base repository, is someone else's.
+##
+## Fails if `gh` is not installed, if the remote is not on GitHub, or if a
+## query fails, because then nothing is known about the pull requests.  Fails
+## if `branch.BRANCH.merge` names a ref outside `refs/heads/`, or names several
+## refs, because a pull request's head is one branch.  Fails if the head
+## branch is the head repository's default branch:  a pull request from it,
+## such as one that merges a release from `main` into a stable branch, says
+## nothing about whether the branch's work is done, because the branch
+## outlives every such pull request.
+pr_repositories() {
+  command -v gh > /dev/null 2>&1 || return 1
+  pr_repositories_branch="$2"
+  pr_repositories_remote="$(push_remote "$1" "$2")"
+  [ -n "${pr_repositories_remote}" ] || return 1
+  pr_repositories_merge="$(git -C "$1" config --get-all "branch.$2.merge")"
+  if [ -n "${pr_repositories_merge}" ] \
+    && [ "$(git -C "$1" config --get "branch.$2.remote")" = "${pr_repositories_remote}" ]; then
+    case "${pr_repositories_merge}" in
+      *'
+'*) return 1 ;;
+      refs/heads/?*) pr_repositories_branch="${pr_repositories_merge#refs/heads/}" ;;
+      *) return 1 ;;
+    esac
+  fi
+  pr_repositories_url="$(git -C "$1" remote get-url --push "${pr_repositories_remote}" 2> /dev/null)" \
+    || return 1
+  pr_repositories_head="$(github_slug "${pr_repositories_url}")"
+  # `git remote get-url` applies `url.BASE.insteadOf`, which may map a GitHub
+  # URL to a mirror or a local copy; the configured URL still names GitHub.
+  if [ -z "${pr_repositories_head}" ]; then
+    pr_repositories_head="$(github_slug "$(git -C "$1" config --get "remote.${pr_repositories_remote}.url")")"
+  fi
+  [ -n "${pr_repositories_head}" ] || return 1
+  # Every branch of a project asks about the same repository, so remember each
+  # answer.  Each line of ${pr_repositories_cache} is "HEAD BASE DEFAULT",
+  # where DEFAULT is HEAD's default branch, or "-" if it has none.  The
+  # repository is named with its host, so that `gh` does not ask the host
+  # that ${GH_HOST} names instead.
+  pr_repositories_answer="$(printf '%s\n' "${pr_repositories_cache}" \
+    | awk -v head="${pr_repositories_head}" '$1 == head { print $2 " " $3; exit }')"
+  if [ -z "${pr_repositories_answer}" ]; then
+    pr_repositories_answer="$(with_timeout "${github_query_seconds}" \
+      gh repo view "github.com/${pr_repositories_head}" \
+      --json owner,name,parent,defaultBranchRef \
+      --jq '"\(if .parent then "\(.parent.owner.login)/\(.parent.name)" else "\(.owner.login)/\(.name)" end) \(.defaultBranchRef.name // "-")"' \
+      < /dev/null 2> /dev/null)" || return 1
+    case "${pr_repositories_answer}" in
+      ?*' '?*) ;;
+      *) return 1 ;;
+    esac
+    pr_repositories_cache="${pr_repositories_cache}
+${pr_repositories_head} ${pr_repositories_answer}"
+  fi
+  if [ "${pr_repositories_branch}" = "${pr_repositories_answer#* }" ]; then
+    return 1
+  fi
+  # shellcheck disable=SC2034 # set for the caller
+  pr_base_repo="${pr_repositories_answer%% *}"
+  # shellcheck disable=SC2034 # set for the caller
+  pr_head_repo="${pr_repositories_head}"
+  # shellcheck disable=SC2034 # set for the caller
+  pr_head_remote="${pr_repositories_remote}"
+  # shellcheck disable=SC2034 # set for the caller
+  pr_head_branch="${pr_repositories_branch}"
+}
+
+## The answers of `gh repo view` that `pr_repositories` has received.
+pr_repositories_cache=''

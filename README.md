@@ -103,6 +103,11 @@ The commands are:
   remote branches nor those of FROM_DIR's branch contain, such as the one
   that it just made, it asks the agent to fix the build, up to 3 times, and
   commits the fix.
+  If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
+  prints a command, such as `cd DIR && claude --resume ID`, that continues
+  the agent's session interactively (one per attempt to fix the build), and
+  appends it to the file `AGENT-TODO.md` at the top level of the working
+  tree.
   `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
   on.
   The agent runs in a sandbox, which requires a recent version:  Claude
@@ -179,7 +184,10 @@ The commands are:
   DIRECTORY...`:
   Removes a branch directory, unless the removal would lose work.
   Commits on a branch whose changes have landed in a remote's default branch,
-  as after a squash-merge, do not count as work that would be lost.
+  as after a squash-merge, do not count as work that would be lost.  Neither
+  do the commits of a branch whose remote branch is gone, if they are in a
+  landed GitHub pull request from the branch, even one with later commits
+  that the branch lacks.  (This needs the `gh` command.)
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
