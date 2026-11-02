@@ -307,8 +307,7 @@ copy_repository() {
     exit 1
   fi
   copy_working_tree "$1" .git/worktrees
-  copy_repository_head="$(git -C "$1" symbolic-ref --quiet HEAD)" \
-    || copy_repository_head=''
+  copy_repository_head="$(current_branch "$1")" || copy_repository_head=''
   # `--bool` normalizes the value, and git prints the key in lower case.
   copy_repository_marked="$(git -C "$1" config --bool --get-regexp \
     '^branch\..*\.createdforbranchdirectory$' \
@@ -316,7 +315,7 @@ copy_repository() {
   printf '%s\n' "${copy_repository_marked}" \
     | while IFS= read -r copy_repository_branch; do
       case "${copy_repository_branch}" in
-        '' | "${2-}" | "${copy_repository_head#refs/heads/}") continue ;;
+        '' | "${2-}" | "${copy_repository_head}") continue ;;
       esac
       if ! git -C "$1" update-ref -d "refs/heads/${copy_repository_branch}" \
         || ! git -C "$1" config --remove-section "branch.${copy_repository_branch}"; then
@@ -753,6 +752,18 @@ fetch_remote() {
   printf '%s\n' "${remote_result}"
 }
 
+## Usage: current_branch [DIRECTORY]
+## Prints the name of the branch that is checked out in DIRECTORY, or in the
+## current directory, such as "main".  Returns 1, printing nothing, if HEAD is
+## detached or the directory is not in a git repository.  It prints the
+## branch's own name even when another ref, such as a tag "main", has the same
+## short name; `git symbolic-ref --short HEAD` would then print "heads/main".
+current_branch() {
+  current_branch_ref="$(git -C "${1:-.}" symbolic-ref --quiet HEAD 2> /dev/null)" \
+    || return 1
+  printf '%s\n' "${current_branch_ref#refs/heads/}"
+}
+
 ## Usage: check_upstream DIRECTORY
 ## Tests whether the working tree DIRECTORY has an upstream branch, which
 ## `git pull` and `git push` require.  If it does not, prints an explanation
@@ -765,16 +776,12 @@ fetch_remote() {
 ## caller that fetches into or merges into that branch, as `git-push-to` does,
 ## can use this name rather than determine it again.
 check_upstream() {
-  checked_out_branch=''
   # If the directory is not a working tree, or HEAD is detached, let a
   # subsequent command diagnose that, as `check_branch_exists` in
   # `git-push-to` does accurately.  `git rev-parse --abbrev-ref HEAD`, by
   # contrast, prints "HEAD" for a detached HEAD, which this function would
   # then report as a branch name.
-  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
-  # "heads/BRANCH" when a tag and the branch have the same name.
-  check_upstream_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
-  checked_out_branch="${check_upstream_ref#refs/heads/}"
+  checked_out_branch="$(current_branch "$1")" || return 0
   check_upstream_remote="$(git -C "$1" config --get "branch.${checked_out_branch}.remote")"
   check_upstream_merge="$(git -C "$1" config --get-all "branch.${checked_out_branch}.merge")"
   if [ -n "${check_upstream_remote}" ] && [ -n "${check_upstream_merge}" ]; then
@@ -1124,7 +1131,7 @@ resolve_with_agent() {
     return 1
   fi
   resolve_paths="$(working_tree_paths)"
-  resolve_branch="$(git symbolic-ref --quiet --short HEAD)" || resolve_branch="HEAD"
+  resolve_branch="$(current_branch)" || resolve_branch="HEAD"
   resolve_prompt="You are resolving merge conflicts in the git working tree $(pwd).
 \`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts in these files:
 
@@ -1968,10 +1975,8 @@ pull_resolving() {
   # FETCH_HEAD is read now, before `resolve_merge_conflicts` runs an agent,
   # which might fetch and so overwrite it.  FETCH_HEAD names first the commit
   # that `git pull` merges, fast-forwards to, or rebases onto.
-  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
-  # "heads/BRANCH" when a tag and the branch have the same name.
-  if pull_ref="$(git -C "${pull_dir}" symbolic-ref --quiet HEAD)" \
-    && pull_remote="$(git -C "${pull_dir}" config --get "branch.${pull_ref#refs/heads/}.remote")" \
+  if pull_branch="$(current_branch "${pull_dir}")" \
+    && pull_remote="$(git -C "${pull_dir}" config --get "branch.${pull_branch}.remote")" \
     && is_built_remote "${pull_dir}" "${pull_remote}"; then
     # shellcheck disable=SC2034 # used by the commands that source this file
     pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
@@ -2014,7 +2019,7 @@ upstream_description() {
     refs/remotes/*) echo "remote-tracking branch '${upstream_description_ref#refs/remotes/}'" ;;
     refs/heads/*) echo "branch '${upstream_description_ref#refs/heads/}'" ;;
     *)
-      if upstream_description_branch="$(git symbolic-ref --quiet --short HEAD)"; then
+      if upstream_description_branch="$(current_branch)"; then
         echo "the upstream branch of branch '${upstream_description_branch}'"
       else
         echo "the upstream branch"
@@ -2321,7 +2326,7 @@ has_unbuilt_merge() {
   if [ -z "${merge_fix_subjects}" ]; then
     return 1
   fi
-  merge_fix_branch="$(git symbolic-ref --quiet --short HEAD)" || merge_fix_branch=HEAD
+  merge_fix_branch="$(current_branch)" || merge_fix_branch=HEAD
   case "${merge_fix_built}" in
     '') merge_fix_built_history='' ;;
     *' '*) merge_fix_built_history="the histories of $(printf '%s' "${merge_fix_built}" | sed -e 's/ / and /g'), which were built elsewhere" ;;

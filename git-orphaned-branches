@@ -269,8 +269,8 @@ live_superproject() {
 # GitHub.  Nor is a directory whose pathname contains a newline, which
 # ${pr_candidates} cannot represent.
 note_pr_candidate() {
-  prs_branch="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
-  pr_repositories "$1" "${prs_branch#refs/heads/}" || return 0
+  prs_branch="$(current_branch "$1")" || return 0
+  pr_repositories "$1" "${prs_branch}" || return 0
   prs_dir="$(absolute_path "$1")" || prs_dir="$1"
   case "${prs_dir}" in
     *'

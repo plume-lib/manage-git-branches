@@ -737,12 +737,10 @@ fi
 # a prompt here is possible even if the pull issued none.
 find_upstream_commit() {
   UPSTREAM_COMMIT=''
-  # `git symbolic-ref --short` would print "heads/main" if a tag "main" exists.
-  if ! fuc_ref="$(git symbolic-ref --quiet HEAD)" \
+  if ! fuc_branch="$(current_branch)" \
     || ! UPSTREAM_REMOTE="$(upstream_remote 2> /dev/null)"; then
     return
   fi
-  fuc_branch="${fuc_ref#refs/heads/}"
   fuc_fetch=1
   if [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ]; then
     if [ "${PULL_SUCCEEDED}" -eq 1 ]; then
@@ -833,8 +831,8 @@ if [ -n "${WORKTREE_HOST}" ]; then
 else
   COLLISION_REPO='.'
   COLLISION_CLONE="${TOPLEVEL}"
-  BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
-  REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
+  CURRENT_BRANCH="$(current_branch)" || CURRENT_BRANCH=''
+  REMOTE="$(push_remote . "${CURRENT_BRANCH}")"
 fi
 
 # A remote-tracking branch is evidence that a remote has the branch, and it
@@ -917,7 +915,7 @@ if [ -n "${SLUG_CLONE}" ]; then
   if [ -n "${UPSTREAM_COMMIT}" ]; then
     SLUG_BASE="${UPSTREAM_NAME}"
     SLUG_START="${UPSTREAM_COMMIT}"
-  elif SLUG_BASE="$(git symbolic-ref --quiet --short HEAD 2> /dev/null)"; then
+  elif SLUG_BASE="$(current_branch)"; then
     SLUG_BASE="its branch ${SLUG_BASE}"
     SLUG_START=HEAD
   else
