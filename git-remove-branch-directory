@@ -83,9 +83,22 @@
 #    commits that the local branch lacks, from another clone, for example,
 #    which `git-outgoing` cannot recognize.  Asking GitHub needs the `gh`
 #    command; without it, or if GitHub cannot be reached, such commits count.
-#    Landed commits never cause a refusal, but a refusal or a waiver of this
-#    check counts them among the commits that the removal would delete, and
-#    says how many of those are on a branch whose changes have landed.
+#    Finally, a commit counts as held if its changes are saved in their final
+#    form.  Call a tip each commit that the removal would lose and that is
+#    the parent of no other such commit, such as the last commit of an
+#    unpushed branch.  A commit's changes are saved if each file that it
+#    changes, relative to its first parent, is in each tip that is the commit
+#    or has it in its history, with the mode and contents that the same file
+#    has in a commit that one of the holding refs names, as for uncommitted
+#    changes; the ref can differ from file to file.  That is what a branch
+#    leaves behind when its final result lands by way of a different pull
+#    request, even if the branch changes a file more than once.  A commit
+#    that deletes a file, that changes no file, a submodule, or a symbolic
+#    link, or whose file a later commit deletes is never saved this way.
+#    Landed and saved commits never cause a refusal, but a refusal or a
+#    waiver of this check counts them among the commits that the removal
+#    would delete, and says how many of those are on a branch whose changes
+#    have landed and how many have saved changes.
 #
 # `--force` waives both.  Each refusal names the check, says what the removal
 # would delete, and quotes the flag that waives it; each waiver says on
@@ -266,13 +279,19 @@ line_count() {
 # Sets ${count_unlanded_listed} to the number of commits, such as 5, that
 # `git rev-list REV-LIST-ARGS` lists in the repository of a directory
 # DIRECTORY, and sets ${count_unlanded_lost} to the number of them, such as
-# 2, that are not on a local branch whose changes have landed in a remote's
-# default branch, nor on one whose commits GitHub holds in a landed pull
-# request.  ${count_unlanded_lost} equals ${count_unlanded_listed} wherever
-# `count_unlanded` does not ask which branches have landed.  LANDABLE names
-# the local branches that might have landed:  `--all` for every one, a
-# branch name for that one alone, or the empty string for none.  Sets
-# ${count_unlanded_lost} to the empty string if `git rev-list` fails.
+# 2, whose changes would be lost.  Not lost are the commits on a local branch
+# whose changes have landed in a remote's default branch, those on one whose
+# commits GitHub holds in a landed pull request, and the commits, such as 1,
+# whose changes are saved in the commits that the arguments after the first
+# `--not` in REV-LIST-ARGS name, as `saved_commits` decides; those arguments
+# are ref options such as `--remotes --tags`.  Sets ${count_unlanded_saved}
+# to the number of the saved commits, which excludes the landed ones.
+# ${count_unlanded_lost} equals ${count_unlanded_listed} wherever
+# `count_unlanded` neither asks which branches have landed nor finds a saved
+# commit.  LANDABLE names the local branches that might have landed:  `--all`
+# for every one, a branch name for that one alone, or the empty string for
+# none.  Sets ${count_unlanded_lost} to the empty string if `git rev-list`
+# fails.
 #
 # A squash-merged pull request is the reason:  its commits are on no remote,
 # because the squash commit replaces them, and its remote branch is deleted,
@@ -280,7 +299,8 @@ line_count() {
 # local copy of its commits loses nothing.  `git-outgoing --omitted` names
 # the branches whose changes have landed, and their commits are not counted.
 # If `git-outgoing` fails, it names no branch.  `count_pr_unlanded` excludes
-# the commits of the branches that GitHub holds.
+# the commits of the branches that GitHub holds.  `saved_commits` is asked
+# only about the commits that remain after both, and only if some remain.
 #
 # `git-outgoing` examines each branch that it is asked about, which is most
 # of its work, so LANDABLE should name no more branches than matter.  It is
@@ -298,16 +318,16 @@ count_unlanded() {
   count_unlanded_landable="$2"
   shift 2
   count_unlanded_lost=''
+  count_unlanded_saved=0
   if count_unlanded_listed="$(git -C "${count_unlanded_dir}" rev-list \
     --count "$@" 2> /dev/null)"; then
     count_unlanded_lost="${count_unlanded_listed}"
   fi
-  if [ -z "${count_unlanded_lost}" ] || [ "${count_unlanded_lost}" -eq 0 ] \
-    || [ -z "${count_unlanded_landable}" ]; then
+  if [ -z "${count_unlanded_lost}" ] || [ "${count_unlanded_lost}" -eq 0 ]; then
     return 0
   fi
   count_unlanded_omitted=''
-  if [ "${outgoing_works}" -eq 1 ] \
+  if [ -n "${count_unlanded_landable}" ] && [ "${outgoing_works}" -eq 1 ] \
     && git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
       refs/remotes 2> /dev/null | grep -q '/HEAD$'; then
     if [ "${count_unlanded_landable}" = --all ]; then
@@ -324,37 +344,73 @@ count_unlanded() {
         "${count_unlanded_omitted}" "$@")"
     fi
   fi
-  if [ -n "${count_unlanded_lost}" ] && [ "${count_unlanded_lost}" -gt 0 ]; then
+  if [ -n "${count_unlanded_landable}" ] && [ -n "${count_unlanded_lost}" ] \
+    && [ "${count_unlanded_lost}" -gt 0 ]; then
     count_pr_unlanded "${count_unlanded_dir}" "${count_unlanded_landable}" \
       "${count_unlanded_omitted}" "${count_unlanded_lost}" "$@"
     count_unlanded_lost="${count_pr_unlanded_result}"
+    count_unlanded_omitted="${count_pr_unlanded_excluded}"
   fi
+  if [ -z "${count_unlanded_lost}" ] || [ "${count_unlanded_lost}" -eq 0 ]; then
+    return 0
+  fi
+
+  # Each line is a commit's hash and then its parents' hashes, with each
+  # commit before its parents, as `saved_commits` requires.  The commits of
+  # the branches that have landed are left out, as `count_excluding` leaves
+  # them out.
+  if ! count_unlanded_graph="$(printf '%s\n' "${count_unlanded_omitted}" \
+    | sed -e '/^$/d' -e 's/^/^/' \
+    | git -C "${count_unlanded_dir}" rev-list --stdin --topo-order \
+      --parents "$@" 2> /dev/null)"; then
+    count_unlanded_lost=''
+    return 0
+  fi
+  # The arguments after the first `--not` in REV-LIST-ARGS name the commits
+  # that hold the others.  With no `--not`, they name none, and no commit is
+  # saved.
+  count_unlanded_past_not=0
+  for count_unlanded_arg do
+    shift
+    if [ "${count_unlanded_past_not}" -eq 1 ]; then
+      set -- "$@" "${count_unlanded_arg}"
+    elif [ "${count_unlanded_arg}" = --not ]; then
+      count_unlanded_past_not=1
+    fi
+  done
+  count_unlanded_saved="$(line_count "$(saved_commits "${count_unlanded_dir}" \
+    "${count_unlanded_graph}" "$@")")"
+  count_unlanded_lost=$((count_unlanded_lost - count_unlanded_saved))
 }
 
-# Usage: report_unlanded DIRECTORY LISTED LOST HOLDERS [RECOVERY [PLACE]]
+# Usage: report_unlanded DIRECTORY LISTED LOST HOLDERS [RECOVERY [PLACE [SAVED]]]
 # Reports the commits that removing DIRECTORY would delete, if any of them
-# are not on a branch whose changes have landed, and sets ${remove_refusals}
-# to 1 if the removal must not proceed:  if it is unknown how many of them
-# are, or if some are and --force-unpushed does not waive that.
+# are not on a branch whose changes have landed and do not have their
+# changes saved, and sets ${remove_refusals} to 1 if the removal must not
+# proceed:  if it is unknown how many of them are, or if some are and
+# --force-unpushed does not waive that.
 # DIRECTORY is a directory to remove; used for diagnostics.  LISTED, such as
-# 5, is the number of commits that the removal would delete, and LOST, such
-# as 2, is the number of them that are not on a branch whose changes have
-# landed, or the empty string if that number is unknown; they are what
-# `count_unlanded` sets ${count_unlanded_listed} and ${count_unlanded_lost}
-# to.  HOLDERS names the refs that hold none of the commits, such as
-# "remote-tracking ref or tag"; used for diagnostics.  RECOVERY, such as
-# "; until `git gc` runs, ...", ends the message of a removal that
-# --force-unpushed lets proceed; used for diagnostics.  PLACE, such as
-# "submodule(s) sub, lib", names the repositories that hold the commits,
-# where they are not the repository of DIRECTORY itself; used for
+# 5, is the number of commits that the removal would delete; LOST, such as
+# 2, is the number of them that are not on a branch whose changes have
+# landed and whose changes are not saved, or the empty string if that number
+# is unknown; and SAVED, such as 1, which defaults to 0, is the number of
+# them whose changes are saved; they are what `count_unlanded` sets
+# ${count_unlanded_listed}, ${count_unlanded_lost}, and
+# ${count_unlanded_saved} to.  HOLDERS names the refs that hold none of the
+# commits, such as "remote-tracking ref or tag"; used for diagnostics.
+# RECOVERY, such as "; until `git gc` runs, ...", ends the message of a
+# removal that --force-unpushed lets proceed; used for diagnostics.  PLACE,
+# such as "submodule(s) sub, lib", names the repositories that hold the
+# commits, where they are not the repository of DIRECTORY itself; used for
 # diagnostics.
 #
-# The message counts first the commits that are on none of HOLDERS and on no
-# branch whose changes have landed, and then the other commits that the
-# removal would delete.  It does not say that the first ones have changes
-# that are on none of HOLDERS:  `count_unlanded` does not always ask which
-# branches have landed, and a commit that changes no file has no changes,
-# yet removing it loses the commit.
+# The message counts first the commits that are on none of HOLDERS, on no
+# branch whose changes have landed, and without saved changes, and then the
+# other commits that the removal would delete:  those on such a branch and
+# those whose changes are saved.  It does not say that the first ones have
+# changes that are on none of HOLDERS:  `count_unlanded` does not always ask
+# which branches have landed, and a commit that changes no file has no
+# changes, yet removing it loses the commit.
 report_unlanded() {
   if [ -z "$3" ]; then
     echo "${SCRIPT_NAME}: refusing to remove $1: cannot tell whether it holds commits that no other ref holds" >&2
@@ -364,10 +420,15 @@ report_unlanded() {
   if [ "$3" -eq 0 ]; then
     return
   fi
+  report_unlanded_saved="${7:-0}"
+  report_unlanded_landed=$(($2 - $3 - report_unlanded_saved))
   report_unlanded_commits="$3 commit(s)${6:+ in $6}"
   report_unlanded_note=
-  if [ "$2" -gt "$3" ]; then
-    report_unlanded_note=", nor on a branch whose changes have landed, and $(($2 - $3)) more on such a branch"
+  if [ "${report_unlanded_landed}" -gt 0 ]; then
+    report_unlanded_note=", nor on a branch whose changes have landed, and ${report_unlanded_landed} more on such a branch"
+  fi
+  if [ "${report_unlanded_saved}" -gt 0 ]; then
+    report_unlanded_note="${report_unlanded_note}, and ${report_unlanded_saved} more whose changes are saved"
   fi
   if [ "${force_unpushed}" -eq 0 ]; then
     echo "${SCRIPT_NAME}: refusing to remove $1: ${report_unlanded_commits} are on no $4${report_unlanded_note}; re-run with --force-unpushed" >&2
@@ -568,6 +629,60 @@ keyed_blobs() {
     }'
 }
 
+# Usage: commit_blobs
+# Reads the output of `git log --format='commit %H' --raw --no-abbrev`, and
+# prints, for each file that it lists, a line
+# "KEY<TAB>MODE<TAB>BLOB<TAB>PATHNAME", as `keyed_blobs` does:  KEY is the
+# hash of the commit that changes the file; MODE is the file's new mode, such
+# as 100644; BLOB is the hash of the file's new contents, or "-" if they
+# cannot be saved, because the file is deleted, a submodule, or a symbolic
+# link, or because git quotes its pathname, as for a pathname that contains a
+# tab or a double quote.  A raw line looks like
+# ":100644 100755 SRC-HASH DST-HASH M<TAB>PATHNAME".  Run git with
+# `-c core.quotePath=false`, so that git does not quote a pathname merely
+# because it contains non-ASCII characters, and with
+# `--ignore-submodules=none`, so that git lists every changed submodule,
+# whatever the configuration says to ignore.
+commit_blobs() {
+  awk '
+    /^commit / { key = $2; next }
+    /^:/ {
+      path = $0
+      sub(/^[^\t]*\t/, "", path)
+      blob = (($2 != "100644" && $2 != "100755") || path ~ /^"/) ? "-" : $4
+      print key "\t" $2 "\t" blob "\t" path
+    }'
+}
+
+# Usage: tree_entries DIRECTORY TREE-ISH PATHNAMES
+# Prints a line "MODE BLOB PATHNAME" for each of PATHNAMES, one pathname per
+# line, relative to the top of the working tree, such as "lib/util.sh", that
+# names a regular file in TREE-ISH, a commit or a tree of the repository of
+# DIRECTORY:  MODE is the file's mode, such as 100644, and BLOB is the hash of
+# its contents.  Prints nothing for a pathname that TREE-ISH lacks or that
+# names a directory, a submodule, or a symbolic link in it.  If git fails,
+# the output can lack some lines.
+#
+# `git ls-tree` takes each pathname literally, not as a pattern, and xargs
+# passes the pathnames in batches, each within the limit on a command line's
+# size.  A pathname that git quotes, which `commit_blobs` never asks about,
+# matches nothing.
+tree_entries() {
+  if [ -z "$3" ]; then
+    return 0
+  fi
+  printf '%s\n' "$3" | tr '\n' '\0' \
+    | xargs -0 git -C "$1" -c core.quotePath=false ls-tree --full-tree "$2" -- \
+      2> /dev/null \
+    | awk '{
+        tab = index($0, "\t")
+        split(substr($0, 1, tab - 1), entry, " ")
+        if (entry[1] == "100644" || entry[1] == "100755") {
+          print entry[1] " " entry[3] " " substr($0, tab + 1)
+        }
+      }'
+}
+
 # Usage: tree_files DIRECTORY TREES PATHNAMES
 # Prints a line "MODE BLOB PATHNAME" for each file whose pathname is one of
 # PATHNAMES in some tree of TREES:  TREES is a list of hashes of trees of the
@@ -584,7 +699,8 @@ keyed_blobs() {
 # in question.  The pathnames are taken literally, not as patterns, and they
 # are passed in batches, each well within the limit on a command line's
 # size.  TREES goes to standard input, which has no such limit.  A pathname
-# that git quotes, which `keyed_blobs` never asks about, matches nothing.
+# that git quotes, which neither `keyed_blobs` nor `commit_blobs` asks about,
+# matches nothing.
 tree_files() {
   tree_files_dir="$1"
   tree_files_paths="$3"
@@ -628,15 +744,16 @@ tree_files_batch() {
 }
 
 # Usage: saved_keys DIRECTORY KEYED-BLOBS HELD-REV-PARSE-ARGS...
-# Prints, one per line, the keys of KEYED-BLOBS, an output of `keyed_blobs`,
-# that are saved in the repository of DIRECTORY, the top of a working tree.  A key is saved if, for each
-# line that KEYED-BLOBS has for it, some commit that `git rev-parse
+# Prints, one per line, the keys of KEYED-BLOBS, an output of `keyed_blobs`
+# or of `commit_blobs`, that are saved in the repository of DIRECTORY, the
+# top of a working tree or a repository without one.  A key is saved if, for
+# each line that KEYED-BLOBS has for it, some commit that `git rev-parse
 # HELD-REV-PARSE-ARGS` names, such as `--remotes --tags`, has a file at that
 # pathname with that mode and those contents.  Different lines can be matched
-# by different commits:  a file whose staged contents are in one
-# remote-tracking branch and whose working-tree contents are in another is
-# saved.  A key with a "-" is never saved.  Prints nothing if the repository
-# cannot be read.
+# by different commits:  a key whose two files are each in a different
+# remote-tracking branch is saved, and so is a file whose staged contents are
+# in one and whose working-tree contents are in the other.  A key with a "-"
+# is never saved.  Prints nothing if the repository cannot be read.
 #
 # Only the named commits count, not their history:  the contents that a file
 # had long ago, such as those that a revert restores, are not saved by being
@@ -679,6 +796,117 @@ saved_keys() {
         }
       }
       END { for (i = 1; i <= keys; i++) if (!unsaved[order[i]]) print order[i] }'
+}
+
+# Usage: saved_commits DIRECTORY GRAPH HELD-REV-PARSE-ARGS...
+# Prints, one per line, the hashes of the commits of GRAPH whose changes are
+# saved in the repository of DIRECTORY.  GRAPH is the output of
+# `git rev-list --topo-order --parents`:  a line per commit, its hash and then
+# its parents' hashes, with each commit before its parents.  A tip is a commit
+# of GRAPH that is no parent of another commit of GRAPH, such as the last
+# commit of a branch.  A commit's changes are saved if, for each file that it
+# changes relative to its first parent, and for each tip that is the commit
+# or has the commit in its history, the file in that tip is a file at the same
+# pathname, with the same mode and contents, in a commit that `git rev-parse
+# HELD-REV-PARSE-ARGS` names, as `saved_keys` decides.  A commit that changes
+# no file, that deletes a file or changes a submodule or a symbolic link, or
+# whose file some tip lacks or has as a submodule or a symbolic link, is never
+# saved.  Prints nothing if the repository cannot be read.
+#
+# The file is compared as it is in the tips, not as the commit leaves it,
+# because a later commit can change the file again:  every commit of a branch
+# whose final result has landed is saved, even a commit whose version of a
+# file a later commit replaced.  The untracked files of a stash entry are in a
+# parent of the entry's commit but not in its tree, so no tip has them, and
+# they are never saved.
+saved_commits() {
+  saved_commits_dir="$1"
+  saved_commits_graph="$2"
+  shift 2
+  # A commit's changes are those from its first parent, which for a merge
+  # commit are the changes that the merge brought in.  The output is read in
+  # full before it is used:  output cut short by a failure could omit some of
+  # a commit's files, and the commit would then appear saved.
+  if ! saved_commits_raw="$(printf '%s\n' "${saved_commits_graph}" \
+    | cut -d ' ' -f 1 \
+    | git -C "${saved_commits_dir}" -c core.quotePath=false log \
+      --no-walk=unsorted --stdin --format='commit %H' --raw --no-abbrev \
+      --no-renames --ignore-submodules=none \
+      --diff-merges=first-parent --no-show-signature 2> /dev/null)"; then
+    return 0
+  fi
+  # Each request is a line "TIP<TAB>KEYED-BLOB" for each line that
+  # `commit_blobs` prints and for each tip of that line's commit.  A line of
+  # GRAPH has no tab; a keyed line has tabs.  Because each commit precedes
+  # its parents, a commit's tips are known when its parents are reached.
+  saved_commits_requests="$({ printf '%s\n' "${saved_commits_graph}"
+      printf '%s\n' "${saved_commits_raw}" | commit_blobs; } \
+    | awk '
+        index($0, "\t") == 0 {
+          if (NF == 0) next
+          order[++commits] = $1
+          listed[$1] = 1
+          parents[$1] = NF - 1
+          for (i = 2; i <= NF; i++) parent[$1, i - 1] = $i
+          next
+        }
+        { keyed[++keys] = $0 }
+        END {
+          for (i = 1; i <= commits; i++) {
+            c = order[i]
+            for (j = 1; j <= parents[c]; j++) has_child[parent[c, j]] = 1
+          }
+          for (i = 1; i <= commits; i++) {
+            c = order[i]
+            if (!(c in has_child)) tips[c] = " " c " "
+            for (j = 1; j <= parents[c]; j++) {
+              p = parent[c, j]
+              if (!(p in listed)) continue
+              n = split(tips[c], tip, " ")
+              for (k = 1; k <= n; k++) {
+                if (index(tips[p], " " tip[k] " ") == 0) {
+                  tips[p] = (tips[p] == "" ? " " : tips[p]) tip[k] " "
+                }
+              }
+            }
+          }
+          for (k = 1; k <= keys; k++) {
+            c = substr(keyed[k], 1, index(keyed[k], "\t") - 1)
+            n = split(tips[c], tip, " ")
+            for (j = 1; j <= n; j++) print tip[j] "\t" keyed[k]
+          }
+        }')"
+  if [ -z "${saved_commits_requests}" ]; then
+    return 0
+  fi
+  # An entry is a line "TIP MODE BLOB PATHNAME" and has no tab.  The result
+  # is a keyed line for each request, with the mode and contents of the file
+  # in the tip, or with "-" if the tip has no such file.
+  saved_commits_keyed="$({
+      for saved_commits_tip in $(printf '%s\n' "${saved_commits_requests}" \
+        | cut -f 1 | sort -u); do
+        tree_entries "${saved_commits_dir}" "${saved_commits_tip}" \
+          "$(printf '%s\n' "${saved_commits_requests}" \
+            | awk -F '\t' -v tip="${saved_commits_tip}" \
+              '$1 == tip && $4 != "-" { print $5 }' | sort -u)" \
+          | sed "s/^/${saved_commits_tip} /"
+      done
+      printf '%s\n' "${saved_commits_requests}"
+    } | awk '
+        index($0, "\t") == 0 {
+          if (NF < 4) next
+          path = $0
+          sub(/^[^ ]* [^ ]* [^ ]* /, "", path)
+          entry[$1 "\t" path] = $2 "\t" $3
+          next
+        }
+        {
+          split($0, field, "\t")
+          found = field[1] "\t" field[5]
+          blob = (field[4] != "-" && (found in entry)) ? entry[found] : "-\t-"
+          print field[2] "\t" blob "\t" field[5]
+        }')"
+  saved_keys "${saved_commits_dir}" "${saved_commits_keyed}" "$@"
 }
 
 # Usage: saved_changes DIRECTORY HELD-REV-PARSE-ARGS...
@@ -829,7 +1057,8 @@ check_worktree_unpushed() {
     --not $(surviving_refs linked-worktree "$3")
   report_unlanded "${check_worktree_unpushed_dir}" "${count_unlanded_listed}" \
     "${count_unlanded_lost}" 'other branch, remote-tracking ref, or tag' \
-    "; until \`git gc\` runs, \`git fsck --lost-found\` can recover them"
+    "; until \`git gc\` runs, \`git fsck --lost-found\` can recover them" '' \
+    "${count_unlanded_saved}"
 }
 
 # Asks each checked-out submodule of the working tree $1, recursively, the
@@ -1444,7 +1673,8 @@ remove_branch_directory() {
     count_unlanded "${remove_dir}" --all --all --not \
       $(surviving_refs "${remove_kind}")
     report_unlanded "${remove_dir}" "${count_unlanded_listed}" \
-      "${count_unlanded_lost}" 'remote-tracking ref or tag'
+      "${count_unlanded_lost}" 'remote-tracking ref or tag' '' '' \
+      "${count_unlanded_saved}"
   fi
 
   if [ "${remove_kind}" = 'linked-worktree' ]; then

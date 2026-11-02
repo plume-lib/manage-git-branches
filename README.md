@@ -226,10 +226,7 @@ The commands are:
   as after a squash-merge, do not count as work that would be lost.  Neither
   do the commits of a branch whose remote branch is gone, if they are in a
   landed GitHub pull request from the branch, even one with later commits
-  that the branch lacks.  (This needs the `gh` command.)  Such landed commits
-  never prevent a removal.  When other commits would be lost, the message
-  that refuses the removal, or that reports its waiver by `--force-unpushed`,
-  counts the landed commits among those that the removal would delete.
+  that the branch lacks.  (This needs the `gh` command.)
   An uncommitted change to a tracked file does not count as work that would
   be lost if it is saved:  if each new version of the file, in the index and
   in the working tree, has the same pathname, mode, and contents as the file
@@ -239,6 +236,15 @@ The commands are:
   history.  A clone's local branches do not save a change, because the
   removal deletes them.  A deleted file, a submodule, and a symbolic link are
   never saved.
+  A commit does not count either if each of its resulting files is saved in
+  the same way; the ref can differ from file to file.  A commit's resulting
+  files are as the last unpushed commit of its branch has them, so a branch
+  whose final result has landed loses no work, even if the branch changes a
+  file more than once.
+  Such landed and saved commits never prevent a removal.  When other commits
+  would be lost, the message that refuses the removal, or that reports its
+  waiver by `--force-unpushed`, counts the landed and saved commits among
+  those that the removal would delete.
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
