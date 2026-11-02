@@ -640,21 +640,86 @@ check_resolution_raw reject "CRLF line endings, and a separator remains" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\na\r\n=======\r\nA\r\nb\r\n'
 rm "${WORK_DIR}/ccr/.gitattributes"
 
-## Tests of wait_for_later_time.  A file that changes immediately after it
-## returns is newer than the marker, and the probe file is removed.
-mkdir "${WORK_DIR}/wflt"
+## Tests of wait_for_later_time.  Each test uses its own directory, in which
+## the function writes its probe file.
+mkdir "${WORK_DIR}/wflt" "${WORK_DIR}/wflt/now" "${WORK_DIR}/wflt/later" \
+  "${WORK_DIR}/wflt/never" "${WORK_DIR}/wflt/exists"
+
+## Usage: check_wflt_probe_removed DIR DESCRIPTION
+## Checks that wait_for_later_time removed its probe file from DIR.
+check_wflt_probe_removed() {
+  if [ -e "$1/.manage-git-branches-time-probe" ]; then
+    fail "wait_for_later_time, $2: the probe file remains"
+  fi
+}
+
+# The time never passes a marker whose modification time is far in the
+# future, so the function gives up after about 10 seconds.  That runs in the
+# background, while the other tests run.
+touch -t 209901010000 "${WORK_DIR}/wflt/never-marker"
+(
+  if wait_for_later_time "${WORK_DIR}/wflt/never-marker" "${WORK_DIR}/wflt/never"; then
+    echo 0
+  else
+    echo 1
+  fi > "${WORK_DIR}/wflt/never-status"
+) 2> "${WORK_DIR}/wflt/never-err" &
+wflt_never_pid=$!
+
+# A file that changes immediately after the function returns is newer than
+# the marker.
 for wflt_try in 1 2 3; do
-  : > "${WORK_DIR}/wflt/marker"
-  if ! wait_for_later_time "${WORK_DIR}/wflt/marker"; then
+  : > "${WORK_DIR}/wflt/now-marker"
+  if ! wait_for_later_time "${WORK_DIR}/wflt/now-marker" "${WORK_DIR}/wflt/now"; then
     fail "wait_for_later_time failed on try ${wflt_try}"
   fi
-  echo "try ${wflt_try}" > "${WORK_DIR}/wflt/changed"
-  if [ -z "$(find "${WORK_DIR}/wflt/changed" -cnewer "${WORK_DIR}/wflt/marker" -print)" ]; then
+  echo "try ${wflt_try}" > "${WORK_DIR}/wflt/now/changed"
+  if [ -z "$(find "${WORK_DIR}/wflt/now/changed" -cnewer "${WORK_DIR}/wflt/now-marker" -print)" ]; then
     fail "wait_for_later_time: a file changed afterward is not newer than the marker, on try ${wflt_try}"
   fi
-  if [ -e "${WORK_DIR}/wflt/marker-probe" ]; then
-    fail "wait_for_later_time: the probe file remains, on try ${wflt_try}"
-  fi
+  check_wflt_probe_removed "${WORK_DIR}/wflt/now" "try ${wflt_try}"
 done
+
+# A marker whose modification time is 2 seconds in the future makes the
+# function sleep before it succeeds.
+: > "${WORK_DIR}/wflt/later-marker"
+python3 -c 'import os, sys, time; t = time.time() + 2; os.utime(sys.argv[1], (t, t))' \
+  "${WORK_DIR}/wflt/later-marker"
+wflt_start="$(date +%s)"
+if ! wait_for_later_time "${WORK_DIR}/wflt/later-marker" "${WORK_DIR}/wflt/later"; then
+  fail "wait_for_later_time failed for a marker 2 seconds in the future"
+fi
+if [ "$(($(date +%s) - wflt_start))" -lt 1 ]; then
+  fail "wait_for_later_time did not wait for a marker 2 seconds in the future"
+fi
+echo "changed" > "${WORK_DIR}/wflt/later/changed"
+if [ -z "$(find "${WORK_DIR}/wflt/later/changed" -cnewer "${WORK_DIR}/wflt/later-marker" -print)" ]; then
+  fail "wait_for_later_time: a file changed afterward is not newer than a marker 2 seconds in the future"
+fi
+check_wflt_probe_removed "${WORK_DIR}/wflt/later" "a marker 2 seconds in the future"
+
+# An existing file whose name is the probe's is left alone.
+echo "user data" > "${WORK_DIR}/wflt/exists/.manage-git-branches-time-probe"
+: > "${WORK_DIR}/wflt/exists-marker"
+if wflt_err="$(wait_for_later_time "${WORK_DIR}/wflt/exists-marker" "${WORK_DIR}/wflt/exists" 2>&1)"; then
+  fail "wait_for_later_time succeeded although its probe file exists"
+fi
+case "${wflt_err}" in
+  *"which must not already exist"*) ;;
+  *) fail "wait_for_later_time with an existing probe file: wrong diagnostic: ${wflt_err}" ;;
+esac
+if [ "$(cat "${WORK_DIR}/wflt/exists/.manage-git-branches-time-probe")" != "user data" ]; then
+  fail "wait_for_later_time changed an existing file whose name is the probe's"
+fi
+
+wait "${wflt_never_pid}"
+if [ "$(cat "${WORK_DIR}/wflt/never-status")" != 1 ]; then
+  fail "wait_for_later_time succeeded for a marker far in the future"
+fi
+case "$(cat "${WORK_DIR}/wflt/never-err")" in
+  *"after 20 tries"*) ;;
+  *) fail "wait_for_later_time for a marker far in the future: wrong diagnostic: $(cat "${WORK_DIR}/wflt/never-err")" ;;
+esac
+check_wflt_probe_removed "${WORK_DIR}/wflt/never" "a marker far in the future"
 
 echo "${SCRIPT_NAME}: OK"
