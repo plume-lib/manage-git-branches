@@ -2964,10 +2964,16 @@ only_leftovers() {
 ## cannot be answered.  That command is a wrapper around this function, and
 ## its documentation is the documentation of this answer.
 ##
+## Also sets the variable `is_deleted_branch_no_working_tree` to a nonempty
+## value (true) if git reports that DIRECTORY is in no working tree, which is
+## one reason for status 2, and to the empty string (false) otherwise.  A
+## caller can then explain status 2 without asking git again.
+##
 ## The body lives here rather than in the command so that the other commands
 ## of this package can ask the question directly.
 is_deleted_branch() {
   is_deleted_branch_dir="$1"
+  is_deleted_branch_no_working_tree=
 
   # A path that does not exist -- or that exists but is not a directory -- is
   # certainly not a working tree.  Reject it here rather than leaving it to
@@ -2995,24 +3001,36 @@ is_deleted_branch() {
   # holds anything else, including a working tree, whose `.git` is not a
   # leftover and which `only_leftovers` therefore rejects.
   #
-  # Require a leftover somewhere in the tree.  `only_leftovers` is satisfied
-  # by a directory that holds nothing at all, and a tree of nothing but empty
-  # directories is not evidence of a working tree that a branch directory once
-  # held.  The leftover need not be in DIRECTORY itself:  a branch whose
-  # Eclipse projects were all below its top level, such as a `java/lib` that
-  # Eclipse knew as a project, leaves its metadata there and none at the top.
+  # The leftover need not be in DIRECTORY itself:  a branch whose Eclipse
+  # projects were all below its top level, such as a `java/lib` that Eclipse
+  # knew as a project, leaves its metadata there and none at the top.
+  #
+  # `only_leftovers` is also satisfied by a tree that holds nothing at all but
+  # empty directories, such as a branch directory whose creation failed
+  # partway.  Such a tree holds no work either, so it, too, is removable, but
+  # only if it is in no git working tree or repository:  within one, it is part
+  # of that working tree, which a build or a tool might expect to find intact,
+  # rather than the leftover of a branch directory.
   only_leftovers_found=
-  if only_leftovers "${is_deleted_branch_dir}" \
-    && [ -n "${only_leftovers_found}" ]; then
-    return 0
+  if only_leftovers "${is_deleted_branch_dir}"; then
+    if [ -n "${only_leftovers_found}" ]; then
+      return 0
+    fi
+    if ! git -C "${is_deleted_branch_dir}" rev-parse --git-dir > /dev/null 2>&1; then
+      return 0
+    fi
   fi
 
   # `git -C DIR rev-parse` succeeds for every directory within a working tree,
   # so also require that DIRECTORY is that working tree's top level.  A
   # subdirectory is not itself a working tree, and answering for the enclosing
   # one would answer a question that the caller did not ask.
-  is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
-    --show-toplevel 2> /dev/null)" || return 2
+  if ! is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
+    --show-toplevel 2> /dev/null)"; then
+    # shellcheck disable=SC2034 # Callers read it; see the documentation above.
+    is_deleted_branch_no_working_tree=1
+    return 2
+  fi
   if [ -z "${is_deleted_branch_toplevel}" ]; then
     # A bare repository has no working tree, so it is not on any branch.
     return 2

@@ -9,7 +9,8 @@
 #  * 0 (true) if the directory is on a branch that was deleted in its remote,
 #    or if the directory is the leftover of such a branch's directory:  it
 #    holds nothing but files that tools other than git leave behind, such as
-#    Eclipse `.project` files (see below),
+#    Eclipse `.project` files, or it is in no git working tree or repository
+#    and holds nothing but empty directories (see below),
 #  * 1 (false) if the directory is on a branch that still exists in its remote,
 #  * 2 (false) if the directory is not the top level of a working tree, so
 #    the question does not apply,
@@ -44,11 +45,16 @@
 # empty directory counts as nothing, which is what lets the empty `bin` that
 # Eclipse leaves behind qualify.  Anything else -- any other regular file, a
 # symbolic link, or a directory that holds either -- is content, and the
-# directory is then judged as a working tree or not, like any other.  At least
-# one leftover must appear somewhere in the tree, though not necessarily in the
-# directory itself:  a tree of nothing but empty directories is the leftover of
-# nothing, whereas a branch whose Eclipse projects were all below its top
-# level leaves its `.project` files there and none at the top.
+# directory is then judged as a working tree or not, like any other.  A
+# leftover need not appear in the directory itself:  a branch whose Eclipse
+# projects were all below its top level leaves its `.project` files there and
+# none at the top.
+#
+# A directory that holds nothing at all, or nothing but empty directories, is
+# status 0 too, provided that it is in no git working tree or repository.  It
+# holds no work, as when the creation of a branch directory failed partway.
+# Within a working tree, such a directory is part of that working tree, so it
+# is status 2 like any other subdirectory.
 #
 # Status 2 is about a working tree, not about a clone.  A submodule's working
 # tree and a linked worktree are working trees like any other -- what
