@@ -203,9 +203,10 @@ setup_case() {
   if [ -n "${case_last_line}" ]; then
     create_case_repositories "${case_dir}" "${2:-}" "${case_last_line}"
   else
-    case_template="${WORK_DIR}/templates/${2:-plain}"
+    # No case can be named ".templates".
+    case_template="${WORK_DIR}/.templates/${2:-plain}"
     if [ ! -d "${case_template}" ]; then
-      mkdir -p "${WORK_DIR}/templates"
+      mkdir -p "${WORK_DIR}/.templates"
       create_case_repositories "${case_template}" "${2:-}" ""
     fi
     cp -R "${case_template}" "${case_dir}"
@@ -248,8 +249,10 @@ create_case_repositories() {
     git -C "$1/seed" add Makefile other.txt .gitignore
   fi
   git -C "$1/seed" commit -q -m "Initial commit"
-  # The seed has no remote, so that a copy of it cannot push to the template.
   git -C "$1/seed" push -q "${ccr_remote}" main main:refs/heads/feature
+  # Nothing uses the seed after this push, and a copy of a template is
+  # faster without it.
+  rm -rf "$1/seed"
 
   ccr_main="$1/myrepo-branch-main"
   ccr_feature="$1/myrepo-branch-feature"
@@ -1247,7 +1250,8 @@ for llm_option in --llm --no-llm; do
   git -C "${main_dir}" remote add fork "${fork}"
   git -C "${main_dir}" fetch -q fork
   fork_head="$(git -C "${main_dir}" rev-parse refs/remotes/fork/main)"
-  git -C "${case_dir}/seed" push -q --force "${fork}" main:main
+  git -C "${main_dir}" push -q --force "${fork}" \
+    "$(git -C "${main_dir}" rev-list --max-parents=0 HEAD):refs/heads/main"
   git -C "${main_dir}" config branch.main.pushRemote fork
   git -C "${main_dir}" config push.default current
   write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine

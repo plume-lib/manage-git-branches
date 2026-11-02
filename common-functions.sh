@@ -1263,7 +1263,7 @@ working_tree_changes() {
 ## Creates, and then removes, the directory
 ## DIR/.manage-git-branches-time-probe, which must not already exist.  It
 ## removes the directory even if a signal such as SIGINT ends the wait.
-## Returns 1, after printing a diagnostic, if it cannot create that
+## Returns 1, after printing a diagnostic, if it cannot create or remove that
 ## directory, or if the time does not advance within TRIES checks, 20 if
 ## TRIES is not given; each check after the 10th first sleeps 1 second, so
 ## 20 checks take about 10 seconds.
@@ -1301,6 +1301,11 @@ wait_for_later_time() (
     fi
     wait_tries=$((wait_tries + 1))
   done
+  # Removing the probe here, not in the EXIT trap, makes the function fail if
+  # the removal fails:  the status of an EXIT trap does not change the
+  # subshell's exit status.
+  trap - EXIT
+  rmdir -- "${wait_probe}"
 )
 
 ## Usage: wait_end_by_signal SIGNAL DIR
