@@ -34,6 +34,8 @@ Each run:
     exist).
 """
 
+from __future__ import annotations
+
 import argparse
 import datetime as dt
 import hashlib
@@ -48,6 +50,10 @@ import subprocess
 import sys
 import typing
 from collections import Counter, defaultdict
+from typing import Any
+
+if typing.TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping
 
 CONFIG = "pr-status-config.json"
 # The dependency document's file name when there is no config file.
@@ -62,7 +68,7 @@ class ConfigError(Exception):
     """There is no config file, and no default config can be constructed."""
 
 
-def run(cmd):
+def run(cmd: list[str]) -> str:
     """Run a command, which must succeed.
 
     Returns:
@@ -71,7 +77,7 @@ def run(cmd):
     return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
 
 
-def succeeds(cmd):
+def succeeds(cmd: list[str]) -> bool:
     """Run a command, discarding its output.
 
     Returns:
@@ -80,7 +86,7 @@ def succeeds(cmd):
     return subprocess.run(cmd, check=False, capture_output=True).returncode == 0
 
 
-def command_failure(error):
+def command_failure(error: subprocess.CalledProcessError) -> str:
     """Describe a command that run raised error for.
 
     Returns:
@@ -89,7 +95,7 @@ def command_failure(error):
     return f"{shlex.join(error.cmd)} failed: {' '.join(error.stderr.split())}"
 
 
-def and_list(items):
+def and_list(items: Iterable[str]) -> str:
     """Join items as an English list, such as "a, b, and c".
 
     Returns:
@@ -101,7 +107,7 @@ def and_list(items):
     return ", ".join(items[:-1]) + ", and " + items[-1]
 
 
-def basename(path):
+def basename(path: str) -> str:
     """Return the last component of a path.
 
     Returns:
@@ -113,7 +119,7 @@ def basename(path):
 class Repo:
     """A GitHub repository, its open PRs, and the merge analysis of those PRs."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: dict[str, Any]) -> None:
         """Create a Repo from its entry in the config, with no PRs."""
         self.name = cfg["name"]
         self.gh = cfg["gh"]
@@ -126,20 +132,22 @@ class Repo:
         self.default_branch = cfg.get("default_branch", "master")
         self.keywords = cfg.get("dependency_keywords", [])
         self.show_author = cfg.get("show_author", False)
-        self.prs = {}  # number -> gh JSON
-        self.master_conflicts = {}  # number -> list of files
-        self.contains = set()  # (a, b): a contains all non-merge commits of b
-        self.pair_conflicts = {}  # (a, b) with a < b -> list of files
-        self.closed_state = {}  # number -> "landed" | "closed" | None (not a PR)
+        self.prs: dict[int, dict[str, Any]] = {}  # number -> gh JSON
+        self.master_conflicts: dict[int, list[str]] = {}  # number -> list of files
+        # (a, b): a contains all non-merge commits of b
+        self.contains: set[tuple[int, int]] = set()
+        self.pair_conflicts: dict[tuple[int, int], list[str]] = {}  # (a, b) with a < b -> files
+        # number -> "landed" | "closed" | None (not a PR)
+        self.closed_state: dict[int, str | None] = {}
         # number -> list of whether each unresolved review thread is outdated;
         # None until load_reviews_and_ci runs.
-        self.review_threads = None
+        self.review_threads: dict[int, list[bool]] | None = None
         # The numbers of the PRs whose CI failed; None until load_reviews_and_ci runs.
-        self.ci_failed = None
+        self.ci_failed: set[int] | None = None
         # The numbers of the PRs whose CI completed and passed; None until load_reviews_and_ci runs.
-        self.ci_passed = None
+        self.ci_passed: set[int] | None = None
 
-    def ref(self, n):
+    def ref(self, n: int | str) -> str:
         """Return how documents refer to PR n.
 
         Returns:
@@ -147,7 +155,7 @@ class Repo:
         """
         return f"{self.prefix}{n}"
 
-    def url(self, n):
+    def url(self, n: int) -> str:
         """Return the URL of PR n.
 
         Returns:
@@ -155,7 +163,7 @@ class Repo:
         """
         return f"https://github.com/{self.gh}/pull/{n}"
 
-    def link(self, n):
+    def link(self, n: int) -> str:
         """Return a Markdown link to PR n.
 
         Returns:
@@ -163,16 +171,17 @@ class Repo:
         """
         return highlight(self.gh, n, f"[{self.ref(n)}]({self.url(n)})")
 
-    def failed_mark(self, n):
+    def failed_mark(self, n: int) -> str:
         """Return the mark that a link to PR n carries if the PR's CI failed.
 
         Returns:
             FAILED_MARK if the PR's CI failed, or "" otherwise.
         """
         load_reviews_and_ci(self)
+        assert self.ci_failed is not None
         return FAILED_MARK if n in self.ci_failed else ""
 
-    def refs(self, ns):
+    def refs(self, ns: Iterable[int]) -> str:
         """Return how documents refer to the PRs ns.
 
         Returns:
@@ -180,7 +189,7 @@ class Repo:
         """
         return and_list(self.ref(n) for n in sorted(ns))
 
-    def links(self, ns):
+    def links(self, ns: Iterable[int]) -> str:
         """Return Markdown links to the PRs ns.
 
         Returns:
@@ -188,7 +197,7 @@ class Repo:
         """
         return and_list(self.link(n) for n in sorted(ns))
 
-    def state_of(self, n):
+    def state_of(self, n: int) -> str | None:
         """Return the state of PR n, which is not open.
 
         Returns:
@@ -203,7 +212,7 @@ class Repo:
         return self.closed_state[n]
 
 
-def load_repo(repo, pairwise=True):
+def load_repo(repo: Repo, pairwise: bool = True) -> None:
     """Read the open PRs and the merge analysis.
 
     Without pairwise, repo.pair_conflicts stays empty.
@@ -266,7 +275,7 @@ def load_repo(repo, pairwise=True):
             repo.pair_conflicts[int(m[1]), int(m[2])] = m[3].split()
 
 
-def branches_conflict(repo, a, b):
+def branches_conflict(repo: Repo, a: int, b: int) -> bool:
     """Return whether merging the branches of PRs a and b would conflict.
 
     Args:
@@ -325,7 +334,7 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 """.replace("FIELDS", REVIEW_THREAD_FIELDS)
 
 
-def review_thread_query(repo, query, jq, *fields):
+def review_thread_query(repo: Repo, query: str, jq: str, *fields: str) -> list[Any]:
     """Run a paginated GraphQL query about repo, whose variables are $owner, $name, and fields.
 
     Returns:
@@ -358,7 +367,7 @@ CHECK_FAILURES = {"ACTION_REQUIRED", "FAILURE", "STARTUP_FAILURE", "TIMED_OUT"}
 STATUS_FAILURES = {"ERROR", "FAILURE"}
 
 
-def ci_failed(checks):
+def ci_failed(checks: Iterable[dict[str, Any]]) -> bool:
     """Return whether CI failed, given the checks of a commit.
 
     Returns:
@@ -369,7 +378,7 @@ def ci_failed(checks):
     )
 
 
-def load_reviews_and_ci(repo):
+def load_reviews_and_ci(repo: Repo) -> None:
     """Read the unresolved review threads and the CI results of the open PRs.
 
     Sets repo.review_threads, repo.ci_failed, and repo.ci_passed.
@@ -406,10 +415,10 @@ def load_reviews_and_ci(repo):
 PR_STATES = {"OPEN": "open", "MERGED": "landed", "CLOSED": "closed"}
 
 
-EXTERNAL_STATE = {}
+EXTERNAL_STATE: dict[str, str | None] = {}
 
 
-def external_state(ref):
+def external_state(ref: str) -> str | None:
     """Return the state of a PR "owner/repo#N" in another repository.
 
     Returns:
@@ -425,7 +434,7 @@ def external_state(ref):
     return EXTERNAL_STATE[ref]
 
 
-def external_link(ref):
+def external_link(ref: str) -> str:
     """Return a Markdown link to a PR "owner/repo#N" in another repository.
 
     Returns:
@@ -441,13 +450,13 @@ FAILED_MARK = " ❌"
 
 # The PRs that the documents highlight, as pairs of a lowercase GitHub slug, such as
 # "org/repo", and a PR number.
-HIGHLIGHTED = set()
+HIGHLIGHTED: set[tuple[str, int]] = set()
 
 # How the Mermaid graph highlights the node of a PR in HIGHLIGHTED.
 HIGHLIGHTED_NODE_STYLE = "fill:#fcc,stroke:#c00,stroke-width:2px"
 
 
-def highlight(gh, n, text):
+def highlight(gh: str, n: int, text: str) -> str:
     """Return text, which names PR n of a repository, highlighted if the PR is in HIGHLIGHTED.
 
     Args:
@@ -463,7 +472,7 @@ def highlight(gh, n, text):
     return f'<span style="background-color:#fcc">**{text}**</span>'
 
 
-def resolve_pr_names(models, names):
+def resolve_pr_names(models: list[Model], names: Iterable[str]) -> set[tuple[str, int]]:
     """Return the open PRs that names name.
 
     Args:
@@ -509,7 +518,7 @@ def resolve_pr_names(models, names):
     return result
 
 
-def needed_to_land(models, prs):
+def needed_to_land(models: list[Model], prs: Iterable[tuple[str, int]]) -> set[tuple[str, int]]:
     """Return the PRs that must land for the given PRs to land.
 
     Those are the given PRs and, recursively, every PR that one of them depends on or lands
@@ -542,7 +551,7 @@ def needed_to_land(models, prs):
     return result
 
 
-def query_pr_states(refs):
+def query_pr_states(refs: Iterable[str]) -> dict[str, str | None]:
     """Look up the states of the PRs "owner/repo#N" in refs, with one GraphQL query.
 
     Returns:
@@ -592,7 +601,7 @@ LANDING_START = re.compile(
 )
 
 
-def pr_refs(text, repo):
+def pr_refs(text: str, repo: Repo) -> tuple[set[int], set[str]]:
     """Find the PRs that text names.
 
     Returns:
@@ -610,7 +619,9 @@ def pr_refs(text, repo):
     return numbers, external
 
 
-def stated_prerequisites(body, repo):
+def stated_prerequisites(
+    body: str, repo: Repo
+) -> tuple[set[int], set[str], set[int], set[int], set[str]]:
     """Find the PRs that a description names as related to its PR.
 
     A land-with partner, as in "Land with #N", lands together with the PR.  It is neither a
@@ -671,7 +682,7 @@ def stated_prerequisites(body, repo):
     return numbers, external, dependents, partners, external_partners
 
 
-def landing_line(line, repo):
+def landing_line(line: str, repo: Repo) -> tuple[str, str] | None:
     """Parse a landing-order line of a description of a PR in repo.
 
     A landing-order line has the conventional format, such as "Land after #N.", except
@@ -692,7 +703,7 @@ def landing_line(line, repo):
     return m[1], (f"#{numbers.pop()}" if numbers else external.pop())
 
 
-def malformed_landing_lines(body, repo):
+def malformed_landing_lines(body: str, repo: Repo) -> list[str]:
     """Find the lines of a description that look like landing-order lines but are not.
 
     Returns:
@@ -706,7 +717,13 @@ def malformed_landing_lines(body, repo):
     ]
 
 
-def updated_pr_description(body, repo, prerequisites, dependents, external_prerequisites=()):
+def updated_pr_description(
+    body: str,
+    repo: Repo,
+    prerequisites: Iterable[int],
+    dependents: Iterable[int],
+    external_prerequisites: Iterable[str] = (),
+) -> str:
     """Update the landing-order lines, as defined by landing_line, in a PR description.
 
     prerequisites and dependents are PR numbers in repo, and external_prerequisites are
@@ -730,7 +747,7 @@ def updated_pr_description(body, repo, prerequisites, dependents, external_prere
     final_newline = body.endswith("\n")
     landing = [(i, landing_line(line, repo)) for i, line in enumerate(lines)]
     landing = [(i, parsed) for i, parsed in landing if parsed]
-    existing = {}
+    existing: dict[tuple[str, str], str] = {}
     for i, parsed in landing:
         existing.setdefault(parsed, lines[i])
     with_lines = [lines[i] for i, (kind, _) in landing if kind == "with"]
@@ -740,11 +757,11 @@ def updated_pr_description(body, repo, prerequisites, dependents, external_prere
         lines[i] for i, (kind, ref) in landing if kind == "before" and not ref.startswith("#")
     ]
 
-    def ref_key(ref):
+    def ref_key(ref: str) -> tuple[str, int]:
         gh, n = ref.split("#")
         return gh.lower(), int(n)
 
-    def generated(kind, ref):
+    def generated(kind: str, ref: str) -> str:
         return existing.get((kind, ref), f"Land {kind} {ref}.")
 
     replacement = [
@@ -788,7 +805,7 @@ def updated_pr_description(body, repo, prerequisites, dependents, external_prere
 class Model:
     """The dependencies among the open PRs of a repository."""
 
-    def __init__(self, repo, cfg):
+    def __init__(self, repo: Repo, cfg: dict[str, Any]) -> None:
         """Find the dependencies among the open PRs of repo, which load_repo has read.
 
         unite_partners must be called before the dependency graph is used.
@@ -799,15 +816,15 @@ class Model:
         not_prereq = set(rc.get("not_prerequisites", []))
         open_prs = set(repo.prs) - self.excluded
         self.open = open_prs
-        self.stated = {}
-        self.stated_dependents = {}
-        self.stated_partners = {}
-        self.external_partners = {}
-        self.stated_closed = {}
-        self.external = {}
+        self.stated: dict[int, set[int]] = {}
+        self.stated_dependents: dict[int, set[int]] = {}
+        self.stated_partners: dict[int, set[int]] = {}
+        self.external_partners: dict[int, set[str]] = {}
+        self.stated_closed: dict[int, list[tuple[int, str | None]]] = {}
+        self.external: dict[int, list[str]] = {}
         # This model and the models that unite_partners unites it with, as a map from each
         # one's lowercase GitHub slug, such as "org/repo", to the model.
-        self.by_gh = {repo.gh.lower(): self}
+        self.by_gh: dict[str, Model] = {repo.gh.lower(): self}
         prereqs = {n: stated_prerequisites(repo.prs[n]["body"], repo) for n in open_prs}
         # Look up all the states at once; state_of and external_state look up any that remain.
         external = {e for _, ext, _, _, _ in prereqs.values() for e in ext} | {
@@ -839,13 +856,13 @@ class Model:
                 self.external[int(n)] = sorted(
                     set(self.external[int(n)]) | {e for e in refs if external_state(e) == "open"}
                 )
-        deps = defaultdict(set)
+        deps: defaultdict[int, set[int]] = defaultdict(set)
         for n in open_prs:
             deps[n] |= self.stated[n]
             for m in self.stated_dependents[n]:
                 deps[m].add(n)
         # A stacked PR depends on the PR whose branch is its base branch.
-        self.base_pr = {}
+        self.base_pr: dict[int, int] = {}
         by_head = {(pr["owner"].lower(), pr["headRefName"]): m for m, pr in repo.prs.items()}
         for n in open_prs:
             base = repo.prs[n]["baseRefName"]
@@ -862,7 +879,7 @@ class Model:
                 and (b, a) not in repo.contains
             ):
                 deps[a].add(b)
-        self.extra = defaultdict(set)
+        self.extra: defaultdict[int, set[int]] = defaultdict(set)
         for a, b in rc.get("extra_dependencies", []):
             if a in open_prs and b in open_prs:
                 deps[a].add(b)
@@ -874,9 +891,9 @@ class Model:
         # lowercase GitHub slug, such as "org/repo", and a PR number.
         self.cross_repo_unit = {n: {(repo.gh.lower(), n)} for n in open_prs}
         # The external prerequisites that each PR has because of its land-with unit.
-        self.inherited_external = {}
+        self.inherited_external: dict[int, set[str]] = {}
 
-    def compute_graph(self):
+    def compute_graph(self) -> None:
         """Compute the dependency graph from the dependencies that unite_partners set."""
         open_prs, deps = self.open, self.deps
         self.all_deps = {n: self.closure(deps, n) for n in open_prs}
@@ -893,7 +910,7 @@ class Model:
         }
         # Direct dependencies:  the transitive reduction, in which a dependency on a PR also
         # covers the unit members whose commits its branch contains.
-        self.direct = {}
+        self.direct: dict[int, set[int]] = {}
         for n in open_prs:
             indirect = (
                 set().union(*(self.all_deps[d] | covered[d] for d in self.all_deps[n]))
@@ -901,7 +918,7 @@ class Model:
                 else set()
             )
             self.direct[n] = self.all_deps[n] - indirect
-        self.dependents = defaultdict(set)
+        self.dependents: defaultdict[int, set[int]] = defaultdict(set)
         for n in open_prs:
             for d in self.direct[n]:
                 self.dependents[d].add(n)
@@ -912,7 +929,7 @@ class Model:
         self.cycle_affected = set(self.cyclic).union(*(self.all_dependents[n] for n in self.cyclic))
 
     @staticmethod
-    def closure(deps, n):
+    def closure(deps: dict[int, set[int]], n: int) -> set[int]:
         """Compute the transitive dependencies of n.
 
         Returns:
@@ -926,7 +943,7 @@ class Model:
                 todo.extend(deps[d])
         return seen
 
-    def in_graph(self, n):
+    def in_graph(self, n: int) -> bool:
         """Return whether PR n depends on, or is depended on by, another open PR.
 
         Returns:
@@ -934,7 +951,7 @@ class Model:
         """
         return bool(self.direct[n] or self.dependents[n])
 
-    def is_blocked(self, n):
+    def is_blocked(self, n: int) -> bool:
         """Return whether PR n depends on another open PR.
 
         Returns:
@@ -943,7 +960,7 @@ class Model:
         """
         return bool(self.direct[n] or self.external[n] or n in self.cycle_affected)
 
-    def unblocked(self):
+    def unblocked(self) -> list[int]:
         """Return the PRs that depend on no other open PR.
 
         Returns:
@@ -951,7 +968,7 @@ class Model:
         """
         return sorted(n for n in self.open if not self.is_blocked(n))
 
-    def blocked(self):
+    def blocked(self) -> list[int]:
         """Return the PRs that depend on another open PR.
 
         Returns:
@@ -959,7 +976,7 @@ class Model:
         """
         return sorted(n for n in self.open if self.is_blocked(n))
 
-    def independent(self):
+    def independent(self) -> list[int]:
         """Return the PRs that have no prerequisite and no dependent.
 
         Returns:
@@ -967,7 +984,7 @@ class Model:
         """
         return sorted(n for n in self.open if not self.in_graph(n) and not self.is_blocked(n))
 
-    def assignees(self, n):
+    def assignees(self, n: int) -> list[str]:
         """Return the assignees of PR n.
 
         Returns:
@@ -975,7 +992,7 @@ class Model:
         """
         return [a["login"] for a in self.repo.prs[n]["assignees"]]
 
-    def assigned_to(self, n):
+    def assigned_to(self, n: int) -> str:
         """Return the "Assigned to" cell of PR n.
 
         Returns:
@@ -983,7 +1000,7 @@ class Model:
         """
         return and_list(self.assignees(n))
 
-    def conflicting_prerequisites(self, n):
+    def conflicting_prerequisites(self, n: int) -> set[int]:
         """Return the direct prerequisites of PR n whose branches conflict with PR n's.
 
         Returns:
@@ -992,7 +1009,7 @@ class Model:
         """
         return {d for d in self.direct[n] if branches_conflict(self.repo, n, d)}
 
-    def unresolved_threads(self, n):
+    def unresolved_threads(self, n: int) -> str:
         """Return the "Unresolved threads" cell of PR n.
 
         Returns:
@@ -1003,6 +1020,9 @@ class Model:
             none of these applies.
         """
         load_reviews_and_ci(self.repo)
+        assert self.repo.review_threads is not None
+        assert self.repo.ci_failed is not None
+        assert self.repo.ci_passed is not None
         threads = self.repo.review_threads.get(n, [])
         cell = []
         if threads:
@@ -1016,7 +1036,7 @@ class Model:
             cell.append(" 🔀")
         return "".join(cell)
 
-    def head_status(self, a, b):
+    def head_status(self, a: int, b: int) -> str:
         """Return whether a's branch has b's current commits.
 
         Returns:
@@ -1034,16 +1054,16 @@ class Model:
         own = run([*g, "rev-list", "--no-merges", pb, "^refs/remotes/csm/master"]).split()
         return "none" if len(missing) == len(own) else "newest"
 
-    def levels(self):
+    def levels(self) -> dict[int, int]:
         """Compute each PR's level in the dependency graph.
 
         Returns:
             A map from each PR in the dependency graph to 1 plus the largest level of its
             direct prerequisites, or to 1 if it has none.
         """
-        level = {}
+        level: dict[int, int] = {}
 
-        def lev(n):
+        def lev(n: int) -> int:
             if n not in level:
                 level[n] = 1  # provisional, so that a cycle of dependencies terminates
                 level[n] = 1 + max((lev(d) for d in self.direct[n]), default=0)
@@ -1054,7 +1074,7 @@ class Model:
                 lev(n)
         return level
 
-    def components(self):
+    def components(self) -> list[list[int]]:
         """Compute the connected components of the dependency graph.
 
         Returns:
@@ -1077,7 +1097,7 @@ class Model:
         return comps
 
 
-def unite_partners(models):
+def unite_partners(models: list[Model]) -> None:
     """Make each set of land-with partners one unit, and compute each model's graph.
 
     The partners of a PR are the PRs that its description says to land with it, and the
@@ -1134,7 +1154,7 @@ def unite_partners(models):
         model.compute_graph()
 
 
-def load_models(cfg, pairwise=True):
+def load_models(cfg: dict[str, Any], pairwise: bool = True) -> list[Model]:
     """Read the open PRs of each repository that cfg describes, and model their dependencies.
 
     Returns:
@@ -1149,7 +1169,7 @@ def load_models(cfg, pairwise=True):
     return models
 
 
-def description_updates(models):
+def description_updates(models: list[Model]) -> list[tuple[Model, int, str]]:
     """Find the PR descriptions whose conventional landing-order lines are stale.
 
     Returns:
@@ -1178,7 +1198,7 @@ def description_updates(models):
     return updates
 
 
-def refresh_description_facts(model, cfg, n):
+def refresh_description_facts(model: Model, cfg: dict[str, Any], n: int) -> None:
     """Refresh the facts derived from one locally updated PR description."""
     r = model.repo
     names, external, dependents, partners, external_partners = stated_prerequisites(
@@ -1199,7 +1219,9 @@ def refresh_description_facts(model, cfg, n):
     )
 
 
-def apply_description_updates(updates, cfg):
+def apply_description_updates(
+    updates: Iterable[tuple[Model, int, str]], cfg: dict[str, Any]
+) -> list[tuple[Model, int, subprocess.CalledProcessError]]:
     """Write PR description updates to GitHub and reflect them in the in-memory facts.
 
     Returns:
@@ -1218,7 +1240,7 @@ def apply_description_updates(updates, cfg):
     return failures
 
 
-def needed_by(model, n):
+def needed_by(model: Model, n: int) -> str:
     """Return the "Needed by" cell of PR n.
 
     Returns:
@@ -1235,7 +1257,7 @@ def needed_by(model, n):
     return text
 
 
-def external_failed_mark(model, ref):
+def external_failed_mark(model: Model, ref: str) -> str:
     """Return the mark that a link to the PR ref carries if the PR's CI failed.
 
     Args:
@@ -1251,7 +1273,7 @@ def external_failed_mark(model, ref):
     return other.repo.failed_mark(int(n)) if other else ""
 
 
-def depends_on(model, n, mark_failed=False):
+def depends_on(model: Model, n: int, mark_failed: bool = False) -> str:
     """Return the "Depends on" cell of PR n.
 
     If mark_failed is true, each prerequisite whose CI failed is followed by a red X.
@@ -1264,10 +1286,10 @@ def depends_on(model, n, mark_failed=False):
     """
     r = model.repo
 
-    def link(d):
+    def link(d: int) -> str:
         return r.link(d) + (r.failed_mark(d) if mark_failed else "")
 
-    def ext_link(e):
+    def ext_link(e: str) -> str:
         return external_link(e) + (external_failed_mark(model, e) if mark_failed else "")
 
     conflicting = model.conflicting_prerequisites(n)
@@ -1284,7 +1306,7 @@ def depends_on(model, n, mark_failed=False):
     return text
 
 
-def auto_notes(model, n, master=True):
+def auto_notes(model: Model, n: int, master: bool = True) -> list[str]:
     """Generate the notes about PR n that do not come from the config.
 
     If master is false, omit the note about conflicts with the default branch, which the
@@ -1316,7 +1338,7 @@ def auto_notes(model, n, master=True):
     return notes
 
 
-def fix_empty_cells(lines):
+def fix_empty_cells(lines: Iterable[str]) -> list[str]:
     """Write each empty table cell as "| |", not "|  |".
 
     Returns:
@@ -1327,7 +1349,7 @@ def fix_empty_cells(lines):
     ]
 
 
-def table_row(cells):
+def table_row(cells: Iterable[str]) -> str:
     """Return a Markdown table row containing cells.
 
     Pipe characters within a cell are escaped so that they do not create extra columns.
@@ -1338,7 +1360,7 @@ def table_row(cells):
     return "| " + " | ".join(re.sub(r"(?<!\\)\|", r"\\|", cell) for cell in cells) + " |"
 
 
-def capitalize(s):
+def capitalize(s: str) -> str:
     """Capitalize the first letter of s, leaving the rest of s unchanged.
 
     Returns:
@@ -1347,7 +1369,7 @@ def capitalize(s):
     return s[:1].upper() + s[1:] if s else s
 
 
-def unblocked_notes(model, cfg, n, master=True):
+def unblocked_notes(model: Model, cfg: dict[str, Any], n: int, master: bool = True) -> str:
     """Return the "Notes" cell of PR n in a table of unblocked PRs.
 
     If master is false, omit the note about conflicts with the default branch.
@@ -1360,7 +1382,7 @@ def unblocked_notes(model, cfg, n, master=True):
     return capitalize("; ".join(parts))
 
 
-def detail_notes(model, cfg, n, master=True):
+def detail_notes(model: Model, cfg: dict[str, Any], n: int, master: bool = True) -> str:
     """Return the "Notes" cell of PR n in a table of PRs that have dependencies.
 
     If master is false, omit the note about conflicts with the default branch.
@@ -1375,7 +1397,7 @@ def detail_notes(model, cfg, n, master=True):
     return "  ".join(parts)
 
 
-def title(model, cfg, n):
+def title(model: Model, cfg: dict[str, Any], n: int) -> str:
     """Return the title of PR n.
 
     Returns:
@@ -1384,10 +1406,10 @@ def title(model, cfg, n):
     return cfg["repos"][model.repo.name].get("titles", {}).get(str(n), model.repo.prs[n]["title"])
 
 
-DIRECTORIES = None
+DIRECTORIES: dict[str, tuple[str, ...]] | None = None
 
 
-def scan_directories(base):
+def scan_directories(base: str) -> dict[str, tuple[str, ...]]:
     """Classify each entry of base, once.
 
     Owner and repo are lowercase; branch is the current branch, or "" if HEAD is detached.
@@ -1420,7 +1442,7 @@ def scan_directories(base):
     return DIRECTORIES
 
 
-def pr_directories(repo, pr, base):
+def pr_directories(repo: Repo, pr: dict[str, Any], base: str) -> list[str]:
     """Find the working copies of a PR's branch.
 
     Returns:
@@ -1443,7 +1465,7 @@ def pr_directories(repo, pr, base):
     return result
 
 
-def pr_directory(repo, n, base):
+def pr_directory(repo: Repo, n: int, base: str) -> str:
     """Return the "Directory" cell of PR n.
 
     Returns:
@@ -1453,10 +1475,11 @@ def pr_directory(repo, n, base):
     return ", ".join(f"`{base}/{d}/`" for d in dirs) if dirs else "(none)"
 
 
-PRS_WITH_HEAD = {}  # (GitHub repository, branch) -> gh JSON of every PR with that head branch
+# (GitHub repository, branch) -> gh JSON of every PR with that head branch
+PRS_WITH_HEAD: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
 
-def prs_with_head(repo, branch):
+def prs_with_head(repo: Repo, branch: str) -> list[dict[str, Any]]:
     """Find the PRs, in any state and from any fork, whose head branch is branch.
 
     Returns:
@@ -1484,7 +1507,7 @@ def prs_with_head(repo, branch):
     return PRS_WITH_HEAD[key]
 
 
-def head_owner(pr):
+def head_owner(pr: dict[str, Any]) -> str:
     """Return the lowercase owner of a PR's head repository, from gh JSON.
 
     Returns:
@@ -1493,7 +1516,7 @@ def head_owner(pr):
     return (pr.get("headRepositoryOwner") or {}).get("login", "").lower()
 
 
-def pr_state(pr):
+def pr_state(pr: dict[str, Any]) -> str:
     """Return the state of a PR, from gh JSON.
 
     Returns:
@@ -1502,7 +1525,7 @@ def pr_state(pr):
     return {"MERGED": "landed", "CLOSED": "closed"}.get(pr["state"], pr["state"].lower())
 
 
-def worktree_paths(path):
+def worktree_paths(path: str | pathlib.Path) -> list[str]:
     """Return the working trees of the repository whose working tree is path.
 
     Returns:
@@ -1514,7 +1537,7 @@ def worktree_paths(path):
     ]
 
 
-def is_linked_worktree(path):
+def is_linked_worktree(path: str | pathlib.Path) -> bool:
     """Return whether path is a linked working tree, which `git worktree add` created.
 
     Returns:
@@ -1523,7 +1546,7 @@ def is_linked_worktree(path):
     return pathlib.Path(path, ".git").is_file()
 
 
-def fork_clone(base, owner, name):
+def fork_clone(base: str, owner: str, name: str) -> str | None:
     """Find a clone of owner's repository name, in which to create a working tree.
 
     Returns:
@@ -1537,7 +1560,7 @@ def fork_clone(base, owner, name):
     return clones[0] if clones else None
 
 
-def rename_obstacle(models, base, d, new, owner):
+def rename_obstacle(models: list[Model], base: str, d: str, new: str, owner: str) -> str | None:
     """Return why fix_directory cannot rename entry d of base to new without losing information.
 
     If d's origin is not owner's repository, fix_directory re-creates d as a working tree of
@@ -1569,7 +1592,7 @@ def rename_obstacle(models, base, d, new, owner):
     return None
 
 
-def record_directory(base, d, new, info):
+def record_directory(base: str, d: str, new: str, info: tuple[str, ...]) -> None:
     """Record in the result of scan_directories that entry d of base is now new, with info."""
     global DIRECTORIES
     entries = scan_directories(base)
@@ -1578,7 +1601,7 @@ def record_directory(base, d, new, info):
     DIRECTORIES = dict(sorted(entries.items()))
 
 
-def fix_directory(base, d, new, owner):
+def fix_directory(base: str, d: str, new: str, owner: str) -> str | None:
     """Rename entry d of base to new, and make its origin owner's repository.
 
     If d's origin is another repository, re-create d as a working tree of a clone of owner's
@@ -1603,7 +1626,9 @@ def fix_directory(base, d, new, owner):
         return None
     branch = info[3]
     old = ["git", "-C", str(path)]
-    fork = ["git", "-C", str(pathlib.Path(base, fork_clone(base, owner, info[2])))]
+    clone = fork_clone(base, owner, info[2])
+    assert clone is not None, "rename_obstacle checks that there is a clone"
+    fork = ["git", "-C", str(pathlib.Path(base, clone))]
     head = run([*old, "rev-parse", "HEAD"])
     status = run([*old, "status", "--porcelain"])
     created = run([*old, "config", "--default", "", f"branch.{branch}.createdforbranchdirectory"])
@@ -1639,7 +1664,9 @@ def fix_directory(base, d, new, owner):
     return None
 
 
-def directory_problems(models, base, fix=False):
+def directory_problems(
+    models: list[Model], base: str, fix: bool = False
+) -> tuple[list[str], list[str]]:
     """Find the directories that do not follow the naming and remote conventions.
 
     A working copy of a PR's branch from OWNER is named PROJECT-fork-OWNER-branch-BRANCH (or
@@ -1659,7 +1686,7 @@ def directory_problems(models, base, fix=False):
     problems = []
     renames = []
 
-    def fix_or_report(d, ref, new, owner, problem):
+    def fix_or_report(d: str, ref: str, new: str, owner: str, problem: str) -> None:
         """Fix entry d of base, the working copy of ref; report problem if that fails."""
         obstacle = rename_obstacle(models, base, d, new, owner)
         if obstacle is None:
@@ -1728,7 +1755,7 @@ def directory_problems(models, base, fix=False):
 # ---------- unblocked documents ----------
 
 
-def keep(model, n, flt):
+def keep(model: Model, n: int, flt: Any) -> bool:
     """Return whether PR n passes a document's filter.
 
     Returns:
@@ -1742,7 +1769,9 @@ def keep(model, n, flt):
     return not who or any(w in flt["unassigned_or"] for w in who)
 
 
-def unblocked_doc(models, cfg, base, doc, as_of):
+def unblocked_doc(
+    models: list[Model], cfg: dict[str, Any], base: str, doc: dict[str, Any], as_of: str
+) -> str:
     """Generate an unblocked document.
 
     Returns:
@@ -1841,7 +1870,7 @@ def unblocked_doc(models, cfg, base, doc, as_of):
 # ---------- generated sections of the dependency document ----------
 
 
-def gen_status(models):
+def gen_status(models: list[Model]) -> list[str]:
     """Generate the "status" section.
 
     Returns:
@@ -1885,7 +1914,7 @@ def gen_status(models):
     return lines
 
 
-def gen_clusters(models, cfg):
+def gen_clusters(models: list[Model], cfg: dict[str, Any]) -> list[str]:
     """Generate the "clusters" section.
 
     Returns:
@@ -1905,7 +1934,7 @@ def gen_clusters(models, cfg):
     return lines
 
 
-def gen_graph(models, cfg):
+def gen_graph(models: list[Model], cfg: dict[str, Any]) -> list[str]:
     """Generate the "graph" section.
 
     Returns:
@@ -1948,7 +1977,7 @@ def gen_graph(models, cfg):
     return lines
 
 
-def dependency_cells(model, n, mark_failed=False):
+def dependency_cells(model: Model, n: int, mark_failed: bool = False) -> list[str]:
     """Return the dependency cells of PR n, which has a prerequisite.
 
     If mark_failed is true, each prerequisite in the "Depends on" cell whose CI failed is
@@ -1995,7 +2024,7 @@ def dependency_cells(model, n, mark_failed=False):
     return [depends_on(model, n, mark_failed), stated_text, contains]
 
 
-def gen_details(model, cfg):
+def gen_details(model: Model, cfg: dict[str, Any]) -> list[str]:
     """Generate the "details-REPO" section.
 
     Returns:
@@ -2025,7 +2054,7 @@ def gen_details(model, cfg):
     return lines
 
 
-def gen_prerequisites(model):
+def gen_prerequisites(model: Model) -> list[str]:
     """Generate the "prerequisites-REPO" section.
 
     Returns:
@@ -2044,7 +2073,7 @@ def gen_prerequisites(model):
     return [f"Prerequisites with no prerequisite of their own: {and_list(items)}."] if items else []
 
 
-def textual_conflicts(model, cfg, n):
+def textual_conflicts(model: Model, cfg: dict[str, Any], n: int) -> str:
     """Return the "Textual conflicts" cell of PR n.
 
     If PR n conflicts with the default branch or with a neighbor in a chain of dependencies
@@ -2059,7 +2088,8 @@ def textual_conflicts(model, cfg, n):
     """
     r = model.repo
     routine = set(cfg["repos"][r.name].get("routine_files", []))
-    by_file = defaultdict(set)  # file -> partners, where None stands for the default branch
+    # file -> partners, where None stands for the default branch
+    by_file: dict[str, set[int | None]] = defaultdict(set)
     for f in r.master_conflicts.get(n, []):
         if basename(f) not in routine:
             by_file[basename(f)].add(None)
@@ -2080,8 +2110,8 @@ def textual_conflicts(model, cfg, n):
     for f, partners in by_file.items():
         by_partners[frozenset(partners)].append(f)
 
-    def partner_list(partners):
-        prs = [r.link(m) for m in sorted(partners - {None})]
+    def partner_list(partners: frozenset[int | None]) -> str:
+        prs = [r.link(m) for m in sorted(m for m in partners if m is not None)]
         return and_list(([f"`{r.default_branch}`"] if None in partners else []) + prs)
 
     groups = [
@@ -2096,7 +2126,7 @@ def textual_conflicts(model, cfg, n):
     return "; ".join(groups) or "none"
 
 
-def gen_independent(model, cfg):
+def gen_independent(model: Model, cfg: dict[str, Any]) -> list[str]:
     """Generate the "independent-REPO" section.
 
     Returns:
@@ -2124,7 +2154,13 @@ def gen_independent(model, cfg):
     return lines
 
 
-def pr_table(model, cfg, base, heading, rows):
+def pr_table(
+    model: Model,
+    cfg: dict[str, Any],
+    base: str,
+    heading: list[str],
+    rows: Iterable[tuple[int, list[str]]],
+) -> list[str]:
     """Generate a table of PRs.
 
     The table's first columns are PR, Author (if the repository shows authors), Assigned to,
@@ -2160,7 +2196,7 @@ def pr_table(model, cfg, base, heading, rows):
     return lines
 
 
-def gen_unblocked(model, cfg, base):
+def gen_unblocked(model: Model, cfg: dict[str, Any], base: str) -> list[str]:
     """Generate the "unblocked-REPO" section.
 
     Returns:
@@ -2185,7 +2221,7 @@ def gen_unblocked(model, cfg, base):
     )
 
 
-def gen_blocked(model, cfg, base):
+def gen_blocked(model: Model, cfg: dict[str, Any], base: str) -> list[str]:
     """Generate the "blocked-REPO" section.
 
     Returns:
@@ -2209,7 +2245,7 @@ def gen_blocked(model, cfg, base):
     )
 
 
-def gen_directories(models, cfg, base):
+def gen_directories(models: list[Model], cfg: dict[str, Any], base: str) -> list[str]:
     """Generate the "directories" section.
 
     Returns:
@@ -2280,7 +2316,7 @@ def gen_directories(models, cfg, base):
     return lines
 
 
-def replace_sections(text, generators):
+def replace_sections(text: str, generators: Mapping[str, Callable[[], list[str]]]) -> str:
     """Replace each generated section of text.
 
     generators maps a section name to a function that returns the section's lines.  A document
@@ -2303,7 +2339,7 @@ def replace_sections(text, generators):
     )
 
 
-def add_as_of_section(text):
+def add_as_of_section(text: str) -> str:
     """Add an empty "as-of" generated section after the title of text, if text lacks one.
 
     Returns:
@@ -2319,13 +2355,15 @@ def add_as_of_section(text):
     return section + "\n" + text
 
 
-def section_generators(models, cfg, base, as_of):
+def section_generators(
+    models: list[Model], cfg: dict[str, Any], base: str, as_of: str
+) -> dict[str, Callable[[], list[str]]]:
     """Return the generators of the generated sections.
 
     Returns:
         A map from each generated section name to a function that returns the section's lines.
     """
-    generators = {
+    generators: dict[str, Callable[[], list[str]]] = {
         "as-of": lambda: [f"As of {as_of}."],
         "status": lambda: gen_status(models),
         "clusters": lambda: gen_clusters(models, cfg),
@@ -2347,7 +2385,7 @@ def section_generators(models, cfg, base, as_of):
 # ---------- commands that update dependent branches ----------
 
 
-def chain_has_conflict(repo, prs, has_upstream):
+def chain_has_conflict(repo: Repo, prs: list[int], has_upstream: bool) -> bool:
     """Return whether merging a chain of PRs would encounter a textual conflict.
 
     A later merge receives every earlier branch in the chain.  Therefore, a conflict
@@ -2362,7 +2400,9 @@ def chain_has_conflict(repo, prs, has_upstream):
     )
 
 
-def push_chains(model, base, conflicts_only=False):
+def push_chains(
+    model: Model, base: str, conflicts_only: bool = False
+) -> tuple[list[list[str]], list[int], bool]:
     """Compute the `git-push-to` chains that update every PR from upstream and its prerequisites.
 
     Each chain is a list of directories, each of which `git-push-to` pushes into the next.
@@ -2422,15 +2462,15 @@ def push_chains(model, base, conflicts_only=False):
 class PushCommands(typing.NamedTuple):
     """The shell commands that update the PRs' branches, as push_commands generates them."""
 
-    lines: list
+    lines: list[str]
     """The commands' lines, such as "git-push-to \\"."""
-    notes: list
+    notes: list[str]
     """Notes about what the commands omit."""
     chain_count: int
     """The number of `git-push-to` chains that the commands run."""
 
 
-def push_commands(models, base, conflicts_only=False):
+def push_commands(models: list[Model], base: str, conflicts_only: bool = False) -> PushCommands:
     """Return the shell commands that update each PR's branch from upstream and its prerequisites.
 
     Returns:
@@ -2464,7 +2504,7 @@ def push_commands(models, base, conflicts_only=False):
     return PushCommands(lines, notes, chain_count)
 
 
-def gen_push_commands(models, base, conflicts_only=False):
+def gen_push_commands(models: list[Model], base: str, conflicts_only: bool = False) -> list[str]:
     """Return the lines of the "push-commands" or "conflicting-push-commands" section.
 
     Args:
@@ -2496,7 +2536,7 @@ def gen_push_commands(models, base, conflicts_only=False):
 # ---------- snapshot and changes ----------
 
 
-def facts(models):
+def facts(models: list[Model]) -> dict[str, Any]:
     """Collect the facts that the snapshot records.
 
     Returns:
@@ -2524,7 +2564,7 @@ def facts(models):
     return result
 
 
-def report_changes(models, old, new):
+def report_changes(models: list[Model], old: dict[str, Any], new: dict[str, Any]) -> list[str]:
     """Compare the facts of the previous snapshot with the current ones.
 
     Returns:
@@ -2568,7 +2608,8 @@ def report_changes(models, old, new):
             for k in sorted(set(od) | set(nd), key=int)
             if od.get(k) != nd.get(k) and k in nd
         )
-        oc, nc = o["master_conflicts"], n["master_conflicts"]
+        oc: dict[str, list[str]] = o["master_conflicts"]
+        nc: dict[str, list[str]] = n["master_conflicts"]
         out.extend(
             f"master conflicts: {r.ref(k)}: {oc.get(k)} -> {nc[k]}"
             for k in sorted(nc, key=int)
@@ -2592,7 +2633,7 @@ def report_changes(models, old, new):
 # ---------- the default config ----------
 
 
-def default_config(base):
+def default_config(base: str) -> dict[str, Any]:
     """Construct the config to use when there is no config file.
 
     The config describes each GitHub repository that at least 2 of the git clones in base
@@ -2678,7 +2719,7 @@ def default_config(base):
     }
 
 
-def read_config_file():
+def read_config_file() -> dict[str, Any] | None:
     """Return the contents of the config file in the current directory.
 
     Returns:
@@ -2691,7 +2732,7 @@ def read_config_file():
         return json.load(f)
 
 
-def dependency_document_name(cfg, program):
+def dependency_document_name(cfg: dict[str, Any] | None, program: str) -> str:
     """Return the file name of the dependency document that the given config names.
 
     Exit with an error message if the config names no dependency document.
@@ -2717,7 +2758,7 @@ def dependency_document_name(cfg, program):
     return name
 
 
-def load_config(program):
+def load_config(program: str) -> dict[str, Any]:
     """Return the config for the current directory, which holds the working copy directories.
 
     Exit with an error message if the current directory is in a git working copy, or if
@@ -2749,7 +2790,7 @@ def load_config(program):
         sys.exit(f"{program}: {error}")
 
 
-def generated(name):
+def generated(name: str) -> list[str]:
     """Return an empty generated section.
 
     Returns:
@@ -2758,7 +2799,7 @@ def generated(name):
     return [f"<!-- BEGIN GENERATED: {name} -->", f"<!-- END GENERATED: {name} -->"]
 
 
-def default_dependency_document(models):
+def default_dependency_document(models: list[Model]) -> str:
     """Generate the dependency document to use when it does not exist.
 
     Returns:
@@ -2840,7 +2881,7 @@ def default_dependency_document(models):
     return "\n".join(lines) + "\n"
 
 
-def shell_word(word):
+def shell_word(word: str) -> str:
     """Return the given word, quoted if a shell would not otherwise read it as that one word.
 
     Unlike shlex.quote, this does not quote a word for a "#" that does not start it, such as
@@ -2858,7 +2899,7 @@ def shell_word(word):
     return word
 
 
-def main():
+def main() -> None:
     """Report changes and regenerate the documents."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
