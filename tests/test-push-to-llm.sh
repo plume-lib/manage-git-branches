@@ -402,13 +402,15 @@ case "${push_output}" in
   *) fail "change outside a conflict region: wrong diagnostic: ${push_output}" ;;
 esac
 ## The command that continues Claude's session names the session that the
-## stub was given.
+## stub was given.  The directory is a physical path, as on macOS, where
+## the temporary directory is under a symbolic link.
 session_id="$(sed -n -e '/^--session-id$/{n;p;}' "${STUB_ARGS}")"
+session_dir="$(cd "${feature_dir}" && pwd -P)"
 case "${session_id}" in
   "") fail "change outside a conflict region: claude was not given --session-id" ;;
   *)
     case "${push_output}" in
-      *"to continue the session of claude:  cd ${feature_dir} && claude --resume ${session_id}"*) ;;
+      *"to continue the session of claude:  cd ${session_dir} && claude --resume ${session_id}"*) ;;
       *) fail "change outside a conflict region: no command to continue the session: ${push_output}" ;;
     esac
     ;;
