@@ -1250,8 +1250,10 @@ for llm_option in --llm --no-llm; do
   git -C "${main_dir}" remote add fork "${fork}"
   git -C "${main_dir}" fetch -q fork
   fork_head="$(git -C "${main_dir}" rev-parse refs/remotes/fork/main)"
-  git -C "${main_dir}" push -q --force "${fork}" \
-    "$(git -C "${main_dir}" rev-list --max-parents=0 HEAD):refs/heads/main"
+  # Change the fork's main without a push from main, which, because main has
+  # a remote whose URL is the fork, could update refs/remotes/fork/main.
+  git -C "${fork}" update-ref refs/heads/main \
+    "$(git -C "${main_dir}" rev-list --max-parents=0 HEAD)"
   git -C "${main_dir}" config branch.main.pushRemote fork
   git -C "${main_dir}" config push.default current
   write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
