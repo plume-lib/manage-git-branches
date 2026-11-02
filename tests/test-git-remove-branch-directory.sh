@@ -145,18 +145,14 @@ check_gone 'a directory that is no repository' "${project}"
 
 # A directory that `rm -rf` cannot remove entirely, because it holds a file in
 # a directory that the user cannot write, as when a container running as root
-# created a `.venv`.  What remains is moved to a new directory in /tmp if /tmp
-# is on the same file system, and otherwise beneath ~/tmp/DELETEME.  HOME is
+# created a `.venv`.  What remains is moved to a new directory in /tmp if
+# rename(2) can move it there, and otherwise beneath ~/tmp/DELETEME.  HOME is
 # under ${work}, so the second destination is always on the same file system,
-# and the test never writes in the real ~/tmp.  The superuser can delete any
-# file, so skip this case, and the similar one for a linked worktree, when
-# running as root.
-same_fs="$(df -P -- "${work}" /tmp | awk 'NR > 1 { $2 = $3 = $4 = $5 = ""; print }' | sort -u | wc -l)"
-if [ "${same_fs}" -eq 1 ]; then
-  expected_dest=/tmp
-else
-  expected_dest="${work}/home/tmp/DELETEME"
-fi
+# and the test never writes in the real ~/tmp.  Which destination succeeds is
+# hard to predict:  for example, `df` reports two btrfs subvolumes as one file
+# system, but rename(2) cannot move between them.  So either is accepted.  The
+# superuser can delete any file, so skip this case, and the similar ones for a
+# linked worktree, when running as root.
 if [ "$(id -u)" -ne 0 ]; then
   undeletable="${work}/myrepo-branch-undeletable"
   mkdir -p "${undeletable}/.venv/bin"
@@ -169,7 +165,7 @@ if [ "$(id -u)" -ne 0 ]; then
   HOME="${saved_home}"
   check_gone 'a directory that rm -rf cannot remove entirely' "${undeletable}"
   case "${out}" in
-    *"so moved what remains to ${expected_dest}/"*)
+    *"so moved what remains to /tmp/"* | *"so moved what remains to ${work}/home/tmp/DELETEME/"*)
       moved="${out##*so moved what remains to }"
       if [ ! -e "${moved}/myrepo-branch-undeletable/.venv/bin/python" ]; then
         fail "a directory that rm -rf cannot remove entirely: not in ${moved}: ${out}"
@@ -186,7 +182,7 @@ if [ "$(id -u)" -ne 0 ]; then
       rm -rf -- "${moved}"
       ;;
     *)
-      fail "a directory that rm -rf cannot remove entirely: did not say that it moved it to ${expected_dest}: ${out}"
+      fail "a directory that rm -rf cannot remove entirely: did not say that it moved it to /tmp or ~/tmp/DELETEME: ${out}"
       chmod -R u+w "${undeletable}"
       ;;
   esac
@@ -644,7 +640,7 @@ if [ "$(id -u)" -ne 0 ]; then
   check_unregistered 'a linked worktree that git cannot remove entirely' \
     "${wthost}" "${wtundeletable}" wtundeletable
   case "${out}" in
-    *"so moved what remains to ${expected_dest}/"*)
+    *"so moved what remains to /tmp/"* | *"so moved what remains to ${work}/home/tmp/DELETEME/"*)
       moved="${out##*so moved what remains to }"
       if [ ! -e "${moved}/myrepo-branch-wtundeletable/.venv/bin/python" ]; then
         fail "a linked worktree that git cannot remove entirely: not in ${moved}: ${out}"
@@ -658,10 +654,34 @@ if [ "$(id -u)" -ne 0 ]; then
       rm -rf -- "${moved}"
       ;;
     *)
-      fail "a linked worktree that git cannot remove entirely: did not say that it moved it to ${expected_dest}: ${out}"
+      fail "a linked worktree that git cannot remove entirely: did not say that it moved it to /tmp or ~/tmp/DELETEME: ${out}"
       chmod -R u+w "${wtundeletable}"
       ;;
   esac
+
+  # A linked worktree that git unregisters but that neither git nor the
+  # fallback can remove or move, because its parent directory is not
+  # writable.  What remains is no longer a worktree, so a later run would not
+  # know about the branch; it is deleted now.
+  wtparent="${work}/read-only-parent"
+  wtstuck="${wtparent}/myrepo-branch-wtstuck"
+  mkdir -p "${wtparent}"
+  git -C "${wthost}" worktree add -q -b wtstuck "${wtstuck}"
+  mark_created wtstuck
+  chmod 555 "${wtparent}"
+  saved_home="${HOME}"
+  HOME="${work}/home"
+  export HOME
+  run_command 'a linked worktree that cannot be removed or moved' 1 "${wtstuck}"
+  HOME="${saved_home}"
+  chmod 755 "${wtparent}"
+  check_present 'a linked worktree that cannot be removed or moved' "${wtstuck}"
+  check_unregistered 'a linked worktree that cannot be removed or moved' \
+    "${wthost}" "${wtstuck}" wtstuck
+  check_message 'a linked worktree that cannot be removed or moved' \
+    "git has already unregistered ${wtstuck}, so what remains is an ordinary directory"
+  run_command 'what remains of a linked worktree' 0 "${wtstuck}"
+  check_gone 'what remains of a linked worktree' "${wtstuck}"
 fi
 
 # A linked worktree that was moved with `mv`, and not repaired, is no longer
