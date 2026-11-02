@@ -365,6 +365,17 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model.unblocked(), [])
         self.assertEqual(model.independent(), [])
 
+    def test_unresolved_threads_shows_conflict_with_direct_prerequisite(self):
+        """The cell shows 🔀 only if a direct prerequisite's branch conflicts with the PR's."""
+        model = self.model(
+            {1: "Land after #2.", 2: "Land after #3.", 3: "", 4: "Land after #3."}, set()
+        )
+        repo = model.repo
+        repo.review_threads, repo.ci_failed, repo.ci_passed = {}, set(), set()
+        # 1 vs 3 is not direct, and 2 vs 3 is reported for 2, the dependent, not for 3.
+        repo.pair_conflicts = {(1, 3): ["file"], (2, 3): ["file"]}
+        self.assertEqual([model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["", " 🔀", "", ""])
+
 
 class HighlightTest(unittest.TestCase):
     """Tests for resolve_pr_names, needed_to_land, and highlight."""

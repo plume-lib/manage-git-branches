@@ -959,7 +959,9 @@ class Model:
         Returns:
             The number of the PR's unresolved review threads and how many of them are
             outdated, followed by a red X if the PR's CI failed or a green checkmark if it
-            completed and passed; or "" if none of these applies.
+            completed and passed, followed by shuffle arrows (🔀) if merging some direct
+            prerequisite's branch into the PR's branch would conflict, in any file; or "" if
+            none of these applies.
         """
         load_reviews_and_ci(self.repo)
         threads = self.repo.review_threads.get(n, [])
@@ -971,6 +973,8 @@ class Model:
             cell.append(" ❌")
         elif n in self.repo.ci_passed:
             cell.append(" ✅")
+        if any(tuple(sorted((n, d))) in self.repo.pair_conflicts for d in self.direct[n]):
+            cell.append(" 🔀")
         return "".join(cell)
 
     def head_status(self, a, b):
