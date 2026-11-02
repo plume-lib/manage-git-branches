@@ -325,12 +325,12 @@ squash_merge "${landedwaived}"
 run_command 'a landed branch and an unpushed one' 1 "${landedwaived}"
 check_present 'a landed branch and an unpushed one' "${landedwaived}"
 check_message 'a landed branch and an unpushed one' \
-  "refusing to remove ${landedwaived}: 2 commit(s) are on no remote-tracking ref or tag, 1 of them on a branch whose changes have landed in a remote's default branch; re-run with --force-unpushed"
+  "refusing to remove ${landedwaived}: 1 commit(s) are on no remote-tracking ref or tag, nor on a branch whose changes have landed, and 1 more on such a branch; re-run with --force-unpushed"
 run_command 'a landed branch and an unpushed one, waived' 0 --force-unpushed \
   "${landedwaived}"
 check_gone 'a landed branch and an unpushed one, waived' "${landedwaived}"
 check_line 'a landed branch and an unpushed one, waived' \
-  "git-remove-branch-directory: ${landedwaived}: --force-unpushed: deleting 2 commit(s) that are on no remote-tracking ref or tag, 1 of them on a branch whose changes have landed in a remote's default branch"
+  "git-remove-branch-directory: ${landedwaived}: --force-unpushed: deleting 1 commit(s) that are on no remote-tracking ref or tag, nor on a branch whose changes have landed, and 1 more on such a branch"
 
 # A waiver that overrides nothing says nothing, though the removal deletes
 # commits, because all of them are on a branch whose changes have landed.

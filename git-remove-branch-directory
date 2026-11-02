@@ -249,16 +249,16 @@ line_count() {
 }
 
 # Usage: count_unlanded DIRECTORY LANDABLE REV-LIST-ARGS...
-# Sets ${count_unlanded_result} to a line "LISTED LOST", such as "5 2".
-# LISTED is the number of commits that `git rev-list REV-LIST-ARGS` lists in
-# the repository of DIRECTORY, such as 5.  LOST is the number of them, such
-# as 2, that are not on a local branch whose changes have landed in a
-# remote's default branch, nor on one whose commits GitHub holds in a landed
-# pull request; it equals LISTED wherever `count_unlanded` does not ask which
-# branches have landed.  LANDABLE names the local branches that might have
-# landed:  `--all` for every one, a branch name for that one alone, or the
-# empty string for none.  Sets it to the empty string if `git rev-list`
-# fails.
+# Sets ${count_unlanded_listed} to the number of commits, such as 5, that
+# `git rev-list REV-LIST-ARGS` lists in the repository of a directory
+# DIRECTORY, and sets ${count_unlanded_lost} to the number of them, such as
+# 2, that are not on a local branch whose changes have landed in a remote's
+# default branch, nor on one whose commits GitHub holds in a landed pull
+# request.  ${count_unlanded_lost} equals ${count_unlanded_listed} wherever
+# `count_unlanded` does not ask which branches have landed.  LANDABLE names
+# the local branches that might have landed:  `--all` for every one, a
+# branch name for that one alone, or the empty string for none.  Sets
+# ${count_unlanded_lost} to the empty string if `git rev-list` fails.
 #
 # A squash-merged pull request is the reason:  its commits are on no remote,
 # because the squash commit replaces them, and its remote branch is deleted,
@@ -283,16 +283,15 @@ count_unlanded() {
   count_unlanded_dir="$1"
   count_unlanded_landable="$2"
   shift 2
-  if ! count_unlanded_count="$(git -C "${count_unlanded_dir}" rev-list \
+  count_unlanded_lost=''
+  if count_unlanded_listed="$(git -C "${count_unlanded_dir}" rev-list \
     --count "$@" 2> /dev/null)"; then
-    count_unlanded_result=''
+    count_unlanded_lost="${count_unlanded_listed}"
+  fi
+  if [ -z "${count_unlanded_lost}" ] || [ "${count_unlanded_lost}" -eq 0 ] \
+    || [ -z "${count_unlanded_landable}" ]; then
     return 0
   fi
-  count_unlanded_result="${count_unlanded_count} ${count_unlanded_count}"
-  if [ "${count_unlanded_count}" -eq 0 ] || [ -z "${count_unlanded_landable}" ]; then
-    return 0
-  fi
-  count_unlanded_lost="${count_unlanded_count}"
   count_unlanded_omitted=''
   if [ "${outgoing_works}" -eq 1 ] \
     && git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
@@ -309,64 +308,58 @@ count_unlanded() {
     elif [ -n "${count_unlanded_omitted}" ]; then
       count_unlanded_lost="$(count_excluding "${count_unlanded_dir}" \
         "${count_unlanded_omitted}" "$@")"
-      if [ -z "${count_unlanded_lost}" ]; then
-        count_unlanded_result=''
-        return 0
-      fi
-      count_unlanded_result="${count_unlanded_count} ${count_unlanded_lost}"
-      if [ "${count_unlanded_lost}" -eq 0 ]; then
-        return 0
-      fi
     fi
   fi
-  count_pr_unlanded "${count_unlanded_dir}" "${count_unlanded_landable}" \
-    "${count_unlanded_omitted}" "${count_unlanded_lost}" "$@"
-  if [ -z "${count_pr_unlanded_result}" ]; then
-    count_unlanded_result=''
-  else
-    count_unlanded_result="${count_unlanded_count} ${count_pr_unlanded_result}"
+  if [ -n "${count_unlanded_lost}" ] && [ "${count_unlanded_lost}" -gt 0 ]; then
+    count_pr_unlanded "${count_unlanded_dir}" "${count_unlanded_landable}" \
+      "${count_unlanded_omitted}" "${count_unlanded_lost}" "$@"
+    count_unlanded_lost="${count_pr_unlanded_result}"
   fi
 }
 
-# Usage: report_unlanded DIRECTORY COUNTS HOLDERS [RECOVERY]
-# Reports the commits that removing DIRECTORY would delete, if LOST is more
-# than 0, and sets ${remove_refusals} to 1 if the removal must not proceed:
-# if COUNTS is empty, or if LOST is more than 0 and --force-unpushed does not
-# waive that.  DIRECTORY is the directory to remove; used for diagnostics.
-# COUNTS is what `count_unlanded` set ${count_unlanded_result} to:  a line
-# "LISTED LOST", such as "5 2", or the empty string.  HOLDERS names the refs
-# that hold none of the commits, such as "remote-tracking ref or tag"; used
-# for diagnostics.  RECOVERY, such as "; until `git gc` runs, ...", ends the
-# message of a removal that --force-unpushed lets proceed; used for
+# Usage: report_unlanded DIRECTORY LISTED LOST HOLDERS [RECOVERY [PLACE]]
+# Reports the commits that removing DIRECTORY would delete, if any of them
+# are not on a branch whose changes have landed, and sets ${remove_refusals}
+# to 1 if the removal must not proceed:  if it is unknown how many of them
+# are, or if some are and --force-unpushed does not waive that.
+# DIRECTORY is a directory to remove; used for diagnostics.  LISTED, such as
+# 5, is the number of commits that the removal would delete, and LOST, such
+# as 2, is the number of them that are not on a branch whose changes have
+# landed, or the empty string if that number is unknown; they are what
+# `count_unlanded` sets ${count_unlanded_listed} and ${count_unlanded_lost}
+# to.  HOLDERS names the refs that hold none of the commits, such as
+# "remote-tracking ref or tag"; used for diagnostics.  RECOVERY, such as
+# "; until `git gc` runs, ...", ends the message of a removal that
+# --force-unpushed lets proceed; used for diagnostics.  PLACE, such as
+# "submodule(s) sub, lib", names the repositories that hold the commits,
+# where they are not the repository of DIRECTORY itself; used for
 # diagnostics.
 #
-# The message counts every commit that is on none of HOLDERS, and says how
-# many of them are on a branch whose changes have landed.  It does not say
-# that the others have changes that are on none of HOLDERS:
-# `count_unlanded` does not always ask which branches have landed, and a
-# commit that changes no file has no changes, yet removing it loses the
-# commit.
+# The message counts first the commits that are on none of HOLDERS and on no
+# branch whose changes have landed, and then the other commits that the
+# removal would delete.  It does not say that the first ones have changes
+# that are on none of HOLDERS:  `count_unlanded` does not always ask which
+# branches have landed, and a commit that changes no file has no changes,
+# yet removing it loses the commit.
 report_unlanded() {
-  if [ -z "$2" ]; then
+  if [ -z "$3" ]; then
     echo "${SCRIPT_NAME}: refusing to remove $1: cannot tell whether it holds commits that no other ref holds" >&2
     remove_refusals=1
     return
   fi
-  report_unlanded_listed="${2% *}"
-  report_unlanded_lost="${2#* }"
-  if [ "${report_unlanded_lost}" -eq 0 ]; then
+  if [ "$3" -eq 0 ]; then
     return
   fi
-  report_unlanded_landed=$((report_unlanded_listed - report_unlanded_lost))
+  report_unlanded_commits="$3 commit(s)${6:+ in $6}"
   report_unlanded_note=
-  if [ "${report_unlanded_landed}" -gt 0 ]; then
-    report_unlanded_note=", ${report_unlanded_landed} of them on a branch whose changes have landed in a remote's default branch"
+  if [ "$2" -gt "$3" ]; then
+    report_unlanded_note=", nor on a branch whose changes have landed, and $(($2 - $3)) more on such a branch"
   fi
   if [ "${force_unpushed}" -eq 0 ]; then
-    echo "${SCRIPT_NAME}: refusing to remove $1: ${report_unlanded_listed} commit(s) are on no $3${report_unlanded_note}; re-run with --force-unpushed" >&2
+    echo "${SCRIPT_NAME}: refusing to remove $1: ${report_unlanded_commits} are on no $4${report_unlanded_note}; re-run with --force-unpushed" >&2
     remove_refusals=1
   else
-    echo "${SCRIPT_NAME}: $1: --force-unpushed: deleting ${report_unlanded_listed} commit(s) that are on no $3${report_unlanded_note}${4:-}" >&2
+    echo "${SCRIPT_NAME}: $1: --force-unpushed: deleting ${report_unlanded_commits} that are on no $4${report_unlanded_note}${5:-}" >&2
   fi
 }
 
@@ -614,8 +607,8 @@ check_worktree_unpushed() {
   fi
   check_worktree_unpushed_dir="$4"
   count_unlanded "$1" "$3" "$2" ${5:+"$5"} --not ${6:+"$6"} --branches --tags --remotes
-  report_unlanded "${check_worktree_unpushed_dir}" "${count_unlanded_result}" \
-    'other branch, remote-tracking ref, or tag' \
+  report_unlanded "${check_worktree_unpushed_dir}" "${count_unlanded_listed}" \
+    "${count_unlanded_lost}" 'other branch, remote-tracking ref, or tag' \
     "; until \`git gc\` runs, \`git fsck --lost-found\` can recover them"
 }
 
@@ -694,23 +687,18 @@ check_module_repositories() {
   report_submodule_counts "$2" "${check_modules_counts}"
 }
 
-# Reports the counts $2 of commits that no remote-tracking ref and no tag
-# holds, one line per submodule, a count and then the submodule's name, for
-# the directory $1.  Sets remove_refusals to 1 if the removal must not
-# proceed.
+# Reports, as `report_unlanded` does, the counts $2 of commits that no
+# remote-tracking ref and no tag holds, one line per submodule, a count and
+# then the submodule's name, such as "3 sub", for a directory $1.  Sets
+# remove_refusals to 1 if the removal must not proceed.  No submodule commit
+# counts as landed.
 report_submodule_counts() {
   report_submodule_total="$(printf '%s\n' "$2" \
     | awk '{ n += $1 } END { print n + 0 }')"
   report_submodule_paths="$(printf '%s\n' "$2" \
     | awk '$1 > 0 { sub(/^[0-9]+ /, ""); printf "%s%s", sep, $0; sep = ", " }')"
-  if [ "${report_submodule_total}" -gt 0 ]; then
-    if [ "${force_unpushed}" -eq 0 ]; then
-      echo "${SCRIPT_NAME}: refusing to remove $1: ${report_submodule_total} commit(s) in submodule(s) ${report_submodule_paths} are on no remote-tracking ref or tag; re-run with --force-unpushed" >&2
-      remove_refusals=1
-    else
-      echo "${SCRIPT_NAME}: $1: --force-unpushed: deleting ${report_submodule_total} commit(s) in submodule(s) ${report_submodule_paths} that are on no remote-tracking ref or tag" >&2
-    fi
-  fi
+  report_unlanded "$1" "${report_submodule_total}" "${report_submodule_total}" \
+    'remote-tracking ref or tag' '' "submodule(s) ${report_submodule_paths}"
 }
 
 # Prints why the branch $2, which the linked worktree registered at the
@@ -1196,8 +1184,8 @@ remove_branch_directory() {
     # alone names is not caught; however, a commit is nearly always also on a
     # branch, HEAD, or the stash, and each of those still counts.
     count_unlanded "${remove_dir}" --all --all --not --remotes --tags
-    report_unlanded "${remove_dir}" "${count_unlanded_result}" \
-      'remote-tracking ref or tag'
+    report_unlanded "${remove_dir}" "${count_unlanded_listed}" \
+      "${count_unlanded_lost}" 'remote-tracking ref or tag'
   fi
 
   if [ "${remove_kind}" = 'linked-worktree' ]; then
