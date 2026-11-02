@@ -21,6 +21,9 @@
 #   merge<TAB>SHA1<TAB>SHA2<TAB>clean|conflict<TAB>conflicting files
 #     (SHA1 < SHA2, so the order of the two branches does not matter)
 #   contains<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>yes|no
+#
+# Requires Git 2.38 or later, gh, and Bash 4 or later as /bin/bash.  On macOS,
+# /bin/bash is Bash 3.2, so this script does not work there.
 
 set -o pipefail
 PAIRWISE=yes

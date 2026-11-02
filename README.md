@@ -163,7 +163,9 @@ The commands are:
   `--no-pairwise`) which pairs conflict with each other.  It fetches the
   pull requests into REPO_DIR, a clone of the repository, and caches its
   results in the current directory.  `pr-status` runs it.
-  This command needs Bash 4 or later, Git 2.38 or later, and `gh`.
+  This command needs Git 2.38 or later, `gh`, and Bash 4 or later as
+  `/bin/bash`.  On macOS, `/bin/bash` is Bash 3.2, so this command and
+  `pr-status` do not work there.
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--claude | --codex] [-C DIR]`:
   Runs `pr-status`, which regenerates `pr-status.md`, then runs each
