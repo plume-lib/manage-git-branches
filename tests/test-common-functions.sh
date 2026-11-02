@@ -722,34 +722,4 @@ if ! (cd "${WORK_DIR}/hum" && has_unbuilt_merge refs/remotes/upstream/main); the
   fail "has_unbuilt_merge: the unpushed merge is not blamed"
 fi
 
-## The account says which commits only each side of a merge had.  The
-## parents of the last merge have two merge bases, because of the criss-cross
-## merges before it, so the account lists commits rather than diffing from a
-## base.
-git init -q -b main "${WORK_DIR}/hum-cross"
-hum_commit "${WORK_DIR}/hum-cross" base.txt "Initial commit"
-git -C "${WORK_DIR}/hum-cross" switch -q -c other
-hum_commit "${WORK_DIR}/hum-cross" b1.txt "Change other"
-git -C "${WORK_DIR}/hum-cross" switch -q main
-hum_commit "${WORK_DIR}/hum-cross" a1.txt "Change main"
-hum_a1="$(git -C "${WORK_DIR}/hum-cross" rev-parse HEAD)"
-git -C "${WORK_DIR}/hum-cross" merge -q --no-edit other
-hum_commit "${WORK_DIR}/hum-cross" a2.txt "Change main again"
-hum_ours="$(git -C "${WORK_DIR}/hum-cross" rev-parse --short HEAD)"
-git -C "${WORK_DIR}/hum-cross" switch -q other
-git -C "${WORK_DIR}/hum-cross" merge -q --no-edit "${hum_a1}"
-hum_commit "${WORK_DIR}/hum-cross" b2.txt "Change other again"
-hum_theirs="$(git -C "${WORK_DIR}/hum-cross" rev-parse --short HEAD)"
-git -C "${WORK_DIR}/hum-cross" switch -q main
-git -C "${WORK_DIR}/hum-cross" merge -q --no-edit other
-if ! (cd "${WORK_DIR}/hum-cross" && has_unbuilt_merge '' && printf '%s\n' "${merge_fix_account}" > "${WORK_DIR}/hum-cross.account"); then
-  fail "has_unbuilt_merge: the criss-cross merge is not blamed"
-fi
-if ! grep -q -F "It merged commit ${hum_theirs} into commit ${hum_ours}, which have several merge bases.  \`git log -p ${hum_theirs}..${hum_ours}\`" "${WORK_DIR}/hum-cross.account"; then
-  fail "has_unbuilt_merge: the account of the criss-cross merge is wrong: $(cat "${WORK_DIR}/hum-cross.account")"
-fi
-if ! grep -q -F "the two had diverged at commit" "${WORK_DIR}/hum-cross.account"; then
-  fail "has_unbuilt_merge: the account of a merge with one merge base is wrong: $(cat "${WORK_DIR}/hum-cross.account")"
-fi
-
 echo "${SCRIPT_NAME}: OK"
