@@ -88,9 +88,9 @@ git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
   stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost \
-  squashed empty savedchange partlysaved deletion savedcommit reverted copied \
-  chmodded overwritten partlysavedcommits stashsaved stashuntracked \
-  subignored; do
+  squashed empty landedwaived savedchange partlysaved deletion savedcommit \
+  reverted copied chmodded overwritten partlysavedcommits stashsaved \
+  stashuntracked subignored; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -322,6 +322,23 @@ check_message 'work after a squash-merge' \
 git -C "${squashed}" reset -q --hard HEAD~1
 run_command 'a squash-merged branch' 0 "${squashed}"
 check_gone 'a squash-merged branch' "${squashed}"
+
+# A waiver reports every commit that it deletes, including those whose
+# changes have landed.
+landedwaived="$(make_clone landedwaived)"
+add_unpushed_commit "${landedwaived}"
+echo "landed work" > "${landedwaived}/landed.txt"
+git -C "${landedwaived}" add landed.txt
+git -C "${landedwaived}" commit -q -m "Work to squash-merge"
+squash_merge "${landedwaived}"
+run_command 'a landed branch and an unpushed one' 1 "${landedwaived}"
+check_message 'a landed branch and an unpushed one' \
+  "refusing to remove ${landedwaived}: 1 commit(s) have changes that are on no remote-tracking ref or tag"
+run_command 'a landed branch and an unpushed one, waived' 0 --force-unpushed \
+  "${landedwaived}"
+check_gone 'a landed branch and an unpushed one, waived' "${landedwaived}"
+check_message 'a landed branch and an unpushed one, waived' \
+  "--force-unpushed: deleting 2 commit(s) that are on no remote-tracking ref or tag, 1 of them with changes that are on none"
 
 # A commit whose changes landed by way of another branch, so that merging its
 # branch would conflict, is saved.
