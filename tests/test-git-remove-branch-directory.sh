@@ -75,6 +75,14 @@ check_message() {
   fi
 }
 
+## Usage: check_no_message DESCRIPTION TEXT
+## Checks that the last command's output does not contain TEXT.
+check_no_message() {
+  if printf '%s\n' "${out}" | grep -q -F -- "$2"; then
+    fail "$1: the output contains [$2]: ${out}"
+  fi
+}
+
 ## Usage: check_line DESCRIPTION LINE
 ## Checks that a line of the last command's output is exactly LINE.
 check_line() {
@@ -268,8 +276,8 @@ check_gone 'a landed branch and an unpushed one, waived' "${landedwaived}"
 check_line 'a landed branch and an unpushed one, waived' \
   "git-remove-branch-directory: ${landedwaived}: --force-unpushed: deleting 2 commit(s) that are on no remote-tracking ref or tag, 1 of them on a branch whose changes have landed in a remote's default branch"
 
-# A waiver reports the commits that it deletes even when the removal needs
-# no waiver, because all of them are on a branch whose changes have landed.
+# A waiver that overrides nothing says nothing, though the removal deletes
+# commits, because all of them are on a branch whose changes have landed.
 landedforced="$(make_clone landedforced)"
 echo "landed work" > "${landedforced}/landedforced.txt"
 git -C "${landedforced}" add landedforced.txt
@@ -277,8 +285,7 @@ git -C "${landedforced}" commit -q -m "Work to squash-merge"
 squash_merge "${landedforced}"
 run_command 'a landed branch, waived' 0 --force-unpushed "${landedforced}"
 check_gone 'a landed branch, waived' "${landedforced}"
-check_line 'a landed branch, waived' \
-  "git-remove-branch-directory: ${landedforced}: --force-unpushed: deleting 1 commit(s) that are on no remote-tracking ref or tag, 1 of them on a branch whose changes have landed in a remote's default branch"
+check_no_message 'a landed branch, waived' "--force-unpushed"
 
 # A branch that changes no file has nothing to land, so merging it into the
 # remote's default branch changes nothing, but its commits have not landed.
@@ -557,8 +564,8 @@ run_command 'a linked worktree with an unpushed commit, waived' 0 \
   --force-unpushed "${work}/myrepo-branch-wtmine"
 check_gone 'a linked worktree with an unpushed commit, waived' \
   "${work}/myrepo-branch-wtmine"
-check_message 'a linked worktree with an unpushed commit, waived' \
-  "git fsck --lost-found"
+check_line 'a linked worktree with an unpushed commit, waived' \
+  "git-remove-branch-directory: ${work}/myrepo-branch-wtmine: --force-unpushed: deleting 1 commit(s) that are on no other branch, remote-tracking ref, or tag; until \`git gc\` runs, \`git fsck --lost-found\` can recover them"
 if git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtmine > /dev/null; then
   fail "a linked worktree with an unpushed commit, waived: its branch is left"
 fi
@@ -575,6 +582,8 @@ squash_merge "${work}/myrepo-branch-wtsquashed"
 git -C "${work}/myrepo-branch-wtsquashed" merge -q --no-edit origin/main
 run_command 'a linked worktree whose branch was squash-merged' 0 \
   "${work}/myrepo-branch-wtsquashed"
+check_no_message 'a linked worktree whose branch was squash-merged' \
+  "commit(s)"
 check_unregistered 'a linked worktree whose branch was squash-merged' \
   "${wthost}" "${work}/myrepo-branch-wtsquashed" wtsquashed
 
