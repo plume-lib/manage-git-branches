@@ -257,6 +257,20 @@ def load_repo(repo, pairwise=True):
             repo.pair_conflicts[int(m[1]), int(m[2])] = m[3].split()
 
 
+def branches_conflict(repo, a, b):
+    """Return whether merging the branches of PRs a and b would conflict.
+
+    Args:
+        repo: a Repo, which load_repo has read with pairwise conflicts.
+        a: the number of an open PR of repo, such as 123.
+        b: the number of another open PR of repo.
+
+    Returns:
+        True if the merge analysis found a textual conflict between the 2 branches.
+    """
+    return (min(a, b), max(a, b)) in repo.pair_conflicts
+
+
 REVIEW_THREAD_FIELDS = "isResolved isOutdated"
 
 REVIEW_THREADS_QUERY = """
@@ -959,9 +973,10 @@ class Model:
         Returns:
             The number of the PR's unresolved review threads and how many of them are
             outdated, followed by a red X if the PR's CI failed or a green checkmark if it
-            completed and passed, followed by shuffle arrows (🔀) if merging some direct
-            prerequisite's branch into the PR's branch would conflict, in any file; or "" if
-            none of these applies.
+            completed and passed, followed by shuffle arrows (🔀) if merging a direct
+            prerequisite into the PR would conflict, in any file; or "" if none of these
+            applies.  The only direct prerequisite of an unblocked PR is the default branch,
+            so an unblocked PR has the arrows if it cannot land without a merge.
         """
         load_reviews_and_ci(self.repo)
         threads = self.repo.review_threads.get(n, [])
@@ -973,7 +988,11 @@ class Model:
             cell.append(" ❌")
         elif n in self.repo.ci_passed:
             cell.append(" ✅")
-        if any(tuple(sorted((n, d))) in self.repo.pair_conflicts for d in self.direct[n]):
+        if self.is_blocked(n):
+            merge_conflicts = any(branches_conflict(self.repo, n, d) for d in self.direct[n])
+        else:
+            merge_conflicts = n in self.repo.master_conflicts
+        if merge_conflicts:
             cell.append(" 🔀")
         return "".join(cell)
 
@@ -1976,7 +1995,8 @@ def textual_conflicts(model, cfg, n):
         The non-routine files in which PR n conflicts with the default branch and with other
         open PRs, grouped by partner, or "none".  A group of more than 4 files is given as a
         count.  The default branch comes first, both among the groups and within each group's
-        partners.
+        partners.  Shuffle arrows (🔀) follow each partner that is a direct prerequisite of
+        PR n, because merging it into PR n would conflict.
     """
     r = model.repo
     routine = set(cfg["repos"][r.name].get("routine_files", []))
@@ -2002,7 +2022,9 @@ def textual_conflicts(model, cfg, n):
         by_partners[frozenset(partners)].append(f)
 
     def partner_list(partners):
-        prs = [r.link(m) for m in sorted(partners - {None})]
+        prs = [
+            r.link(m) + (" 🔀" if m in model.direct[n] else "") for m in sorted(partners - {None})
+        ]
         return and_list(([f"`{r.default_branch}`"] if None in partners else []) + prs)
 
     conflicts = "; ".join(
@@ -2268,7 +2290,7 @@ def chain_has_conflict(repo, prs, has_upstream):
         True if at least one merge in the chain would conflict.
     """
     return (has_upstream and any(n in repo.master_conflicts for n in prs)) or any(
-        tuple(sorted(pair)) in repo.pair_conflicts for pair in itertools.combinations(prs, 2)
+        branches_conflict(repo, a, b) for a, b in itertools.combinations(prs, 2)
     )
 
 

@@ -365,16 +365,51 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model.unblocked(), [])
         self.assertEqual(model.independent(), [])
 
-    def test_unresolved_threads_shows_conflict_with_direct_prerequisite(self):
-        """The cell shows 🔀 only if a direct prerequisite's branch conflicts with the PR's."""
+    def conflicting_model(self):
+        """Build a model of a chain of PRs with conflicts.
+
+        PR 1 depends on 2, which depends on 3; PR 4 depends on 3.  PRs 1 and 3 conflict with
+        the default branch.  PR 2 conflicts with 1 in b.txt and with 3 in a.txt, and PR 1
+        conflicts with 3.
+
+        Returns:
+            The model.
+        """
         model = self.model(
             {1: "Land after #2.", 2: "Land after #3.", 3: "", 4: "Land after #3."}, set()
         )
         repo = model.repo
         repo.review_threads, repo.ci_failed, repo.ci_passed = {}, set(), set()
-        # 1 vs 3 is not direct, and 2 vs 3 is reported for 2, the dependent, not for 3.
-        repo.pair_conflicts = {(1, 3): ["file"], (2, 3): ["file"]}
+        repo.master_conflicts = {1: ["c.txt"], 3: ["c.txt"]}
+        repo.pair_conflicts = {(1, 2): ["b.txt"], (1, 3): ["c.txt"], (2, 3): ["a.txt"]}
+        repo.link = lambda n: f"#{n}"
+        return model
+
+    def test_unresolved_threads_shows_conflict_with_direct_prerequisite(self):
+        """The cell shows 🔀 only if merging a direct prerequisite into the PR conflicts.
+
+        PR 1's conflicts with 3 and with the default branch are not with a direct
+        prerequisite, but its conflict with 2 is.  2 vs 3 is reported for 2, the dependent,
+        not for 3.  The default branch is the direct prerequisite of PR 3, which is unblocked.
+        """
+        model = self.conflicting_model()
+        self.assertEqual(
+            [model.unresolved_threads(n) for n in (1, 2, 3, 4)], [" 🔀", " 🔀", " 🔀", ""]
+        )
+        model.repo.master_conflicts = {1: ["c.txt"]}
+        model.repo.pair_conflicts = {(1, 3): ["c.txt"], (2, 3): ["a.txt"]}
         self.assertEqual([model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["", " 🔀", "", ""])
+
+    def test_textual_conflicts_marks_direct_prerequisites(self):
+        """The cell shows 🔀 after each conflicting partner that is a direct prerequisite."""
+        model = self.conflicting_model()
+        cfg = {"repos": {model.repo.name: {}}}
+        self.assertEqual(
+            pr_status.textual_conflicts(model, cfg, 2), "`a.txt` with #3 🔀; `b.txt` with #1"
+        )
+        self.assertEqual(
+            pr_status.textual_conflicts(model, cfg, 1), "`c.txt` with `master`; `b.txt` with #2 🔀"
+        )
 
 
 class HighlightTest(unittest.TestCase):
