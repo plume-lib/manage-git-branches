@@ -1066,7 +1066,7 @@ resolve_merge_conflicts() {
     echo "${resolve_failed}" >&2
     return 1
   elif ! resolve_with_agent; then
-    report_agent_session
+    report_agent_session "Resolve the conflicts in the merge of ${resolve_source}"
     echo "${resolve_failed}" >&2
     return 1
   fi
@@ -1438,20 +1438,67 @@ run_agent() {
   return 0
 }
 
-## Usage: report_agent_session
+## Usage: report_agent_session TASK
 ## Prints a command that continues, interactively, the session of the AI agent
 ## that `run_agent` last ran, such as
 ## "cd /home/me/myrepo && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b".
 ## The user can then ask the agent about its work, or tell it to finish the
 ## work in a way that its instructions forbade, such as by changing text
-## outside a conflict region.  Prints nothing if the session has no known
-## UUID.
+## outside a conflict region.  Also appends the command, under a heading that
+## gives TASK and the time, to the file ${agent_todo_file} at the top level of
+## the working tree in which the agent ran, where the user is less likely to
+## overlook it than in the script's output.  TASK is what the agent was asked
+## to do, such as "Fix the build after merging branch 'main'"; only its first
+## line is used.  Neither prints nor writes anything if the session has no
+## known UUID.
+##
+## The file is not written if it is a symbolic link, which could point
+## outside the working tree, or anything else but a regular file, or if git
+## tracks it, as when a branch that was merged contains it.
+agent_todo_file=AGENT-TODO.md
 report_agent_session() {
-  if [ -n "${agent_session_id:-}" ]; then
-    # `echo` in some shells, such as dash, would interpret a backslash in the
-    # directory.
-    printf '%s\n' "${SCRIPT_NAME}: to continue the session of ${agent_session_command%% *}:  cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${agent_session_id}" >&2
+  if [ -z "${agent_session_id:-}" ]; then
+    return 0
   fi
+  report_command="cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${agent_session_id}"
+  # `echo` in some shells, such as dash, would interpret a backslash in the
+  # directory.
+  printf '%s\n' "${SCRIPT_NAME}: to continue the session of ${agent_session_command%% *}:  ${report_command}" >&2
+  if ! report_top="$(git -C "${agent_session_dir}" rev-parse --show-toplevel)"; then
+    echo "${SCRIPT_NAME}: cannot find the top level of the working tree ${agent_session_dir}, so did not write ${agent_todo_file}" >&2
+    return 0
+  fi
+  report_todo="${report_top}/${agent_todo_file}"
+  if [ -L "${report_todo}" ] \
+    || { [ -e "${report_todo}" ] && [ ! -f "${report_todo}" ]; } \
+    || git -C "${report_top}" ls-files --error-unmatch -- "${agent_todo_file}" > /dev/null 2>&1; then
+    echo "${SCRIPT_NAME}: did not write ${report_todo}, which is not an untracked regular file" >&2
+    return 0
+  fi
+  report_new=no
+  if [ ! -e "${report_todo}" ]; then
+    report_new=yes
+  fi
+  if ! {
+    if [ "${report_new}" = yes ]; then
+      # The backquotes are Markdown, not command substitutions.
+      # shellcheck disable=SC2016
+      printf '%s\n' \
+        '# AI agent sessions to continue' \
+        '' \
+        'A script of manage-git-branches, such as `git-push-to`, appends an entry' \
+        'here when an AI agent fails or when the script rejects its work.  The' \
+        "entry's command continues the agent's session interactively.  Delete the" \
+        'entry once you have dealt with it.'
+    fi
+    # shellcheck disable=SC2016
+    printf '\n## %s (%s, %s)\n\n```sh\n%s\n```\n' \
+      "$(printf '%s\n' "$1" | head -n 1)" "${SCRIPT_NAME}" "$(date '+%Y-%m-%d %H:%M:%S')" "${report_command}"
+  } >> "${report_todo}"; then
+    echo "${SCRIPT_NAME}: cannot write ${report_todo}" >&2
+    return 0
+  fi
+  echo "${SCRIPT_NAME}: appended that command to ${report_todo}" >&2
 }
 
 ## Usage: new_uuid
@@ -2149,7 +2196,7 @@ merge_build_push() {
         merge_did="The script just merged commit $1 into branch ${merge_fix_branch}."
       fi
       if ! fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
-        report_agent_session
+        report_agent_session "${merge_fix_message}"
         return 1
       fi
     fi

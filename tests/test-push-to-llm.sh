@@ -416,6 +416,16 @@ case "${session_id}" in
       *"to continue the session of claude:  cd ${session_dir} && claude --resume ${session_id}"*) ;;
       *) fail "change outside a conflict region: no command to continue the session: ${push_output}" ;;
     esac
+    ## The command is also appended to AGENT-TODO.md, which starts with a
+    ## title.
+    todo="${feature_dir}/AGENT-TODO.md"
+    if [ "$(head -n 1 "${todo}" 2> /dev/null)" != "# AI agent sessions to continue" ]; then
+      fail "change outside a conflict region: AGENT-TODO.md has no title: $(cat "${todo}" 2> /dev/null)"
+    fi
+    if ! grep -q -x "## Resolve the conflicts in the merge of .* (git-push-to, .*)" "${todo}" \
+      || ! grep -q -x -F "cd ${session_dir} && claude --resume ${session_id}" "${todo}"; then
+      fail "change outside a conflict region: AGENT-TODO.md lacks the command: $(cat "${todo}")"
+    fi
     ;;
 esac
 
@@ -428,14 +438,37 @@ case "${push_output}" in
   *) fail "remaining conflict markers: wrong diagnostic: ${push_output}" ;;
 esac
 
-## A failing agent is reported.
+## A failing agent is reported.  The command that continues its session is
+## appended to an existing AGENT-TODO.md, which gets no second title.
 setup_case fail
+printf '%s\n' '# AI agent sessions to continue' '' 'An earlier entry.' > "${feature_dir}/AGENT-TODO.md"
 push_to fail --llm
 check_not_resolved "failing agent"
 case "${push_output}" in
   *"claude failed with status 3"*"conflicted: file.txt"*"claude --resume "*) ;;
   *) fail "failing agent: wrong diagnostic: ${push_output}" ;;
 esac
+todo="${feature_dir}/AGENT-TODO.md"
+if [ "$(grep -c '^# ' "${todo}")" -ne 1 ] \
+  || ! grep -q -x 'An earlier entry.' "${todo}" \
+  || ! grep -q '^cd .* && claude --resume ' "${todo}"; then
+  fail "failing agent: AGENT-TODO.md was not appended to: $(cat "${todo}")"
+fi
+
+## AGENT-TODO.md is not written through a symbolic link, which could point
+## outside the working tree.
+setup_case todo-link
+echo "outside" > "${case_dir}/outside.txt"
+ln -s ../outside.txt "${feature_dir}/AGENT-TODO.md"
+push_to fail --llm
+check_not_resolved "AGENT-TODO.md link"
+case "${push_output}" in
+  *"claude --resume "*"did not write "*"AGENT-TODO.md, which is not an untracked regular file"*) ;;
+  *) fail "AGENT-TODO.md link: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${case_dir}/outside.txt")" != outside ]; then
+  fail "AGENT-TODO.md link: the link's target was changed: $(cat "${case_dir}/outside.txt")"
+fi
 
 ## The command that continues Codex's session names the session that Codex
 ## printed.
@@ -446,6 +479,9 @@ case "${push_output}" in
   *"codex failed with status 3"*"to continue the session of codex:  cd "*" && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093"*) ;;
   *) fail "failing codex: wrong diagnostic: ${push_output}" ;;
 esac
+if ! grep -q -x 'cd .* && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093' "${feature_dir}/AGENT-TODO.md"; then
+  fail "failing codex: AGENT-TODO.md lacks the command: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
 
 ## The work of an agent that fails is checked too.
 setup_case fail-create
@@ -843,6 +879,9 @@ case "${push_output}" in
   *"claude did not fix the build"*"claude --resume "*) ;;
   *) fail "build not fixed: wrong diagnostic: ${push_output}" ;;
 esac
+if ! grep -q -x "## Fix the build after merging branch 'main' (git-push-to, .*)" "${feature_dir}/AGENT-TODO.md"; then
+  fail "build not fixed: AGENT-TODO.md lacks the entry: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
 if [ "$(wc -l < "${STUB_LOG}")" -ne 2 ]; then
   fail "build not fixed: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
 fi

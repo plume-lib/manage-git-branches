@@ -140,10 +140,13 @@
 #   cd DIR && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b
 # or
 #   cd DIR && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093
-# that continues the agent's session interactively.  There, you can ask the
-# agent about its work, or tell it to finish in a way that its instructions
-# forbade, such as by changing text outside a conflict region.  Then commit
-# the merge or the fix yourself, and run this script again.  The resumed
+# that continues the agent's session interactively.  In the resumed session,
+# you can ask the agent about its work, or tell it to finish in a way that
+# its instructions forbade, such as by changing text outside a conflict
+# region.  Then commit the merge or the fix yourself, and run this script
+# again.  This script also appends the command to the file AGENT-TODO.md at
+# the top level of the working tree, where you are less likely to overlook
+# it; delete the entry once you have dealt with it.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
 # contains the text of the merged changes, which can include instructions
 # from other people.
