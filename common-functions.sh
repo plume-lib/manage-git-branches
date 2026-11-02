@@ -1448,7 +1448,9 @@ run_agent() {
 ## UUID.
 report_agent_session() {
   if [ -n "${agent_session_id:-}" ]; then
-    echo "${SCRIPT_NAME}: to continue the session of ${agent_session_command%% *}:  cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${agent_session_id}" >&2
+    # `echo` in some shells, such as dash, would interpret a backslash in the
+    # directory.
+    printf '%s\n' "${SCRIPT_NAME}: to continue the session of ${agent_session_command%% *}:  cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${agent_session_id}" >&2
   fi
 }
 
