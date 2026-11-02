@@ -831,8 +831,8 @@ if [ -n "${WORKTREE_HOST}" ]; then
 else
   COLLISION_REPO='.'
   COLLISION_CLONE="${TOPLEVEL}"
-  BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
-  REMOTE="$(push_remote . "${BRANCH_REF#refs/heads/}")"
+  CURRENT_BRANCH="$(current_branch)" || CURRENT_BRANCH=''
+  REMOTE="$(push_remote . "${CURRENT_BRANCH}")"
 fi
 
 # A remote-tracking branch is evidence that a remote has the branch, and it

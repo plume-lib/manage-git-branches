@@ -1005,8 +1005,7 @@ remove_branch_directory() {
     remove_kind='linked-worktree'
     # Read everything that the removal will destroy now, because afterward
     # the information is gone.
-    remove_branch="$(git -C "${remove_dir}" symbolic-ref --quiet HEAD 2> /dev/null)"
-    remove_branch="${remove_branch#refs/heads/}"
+    remove_branch="$(current_branch "${remove_dir}")" || remove_branch=''
     remove_head="$(git -C "${remove_dir}" rev-parse --verify --quiet HEAD)"
     if [ -z "${remove_head}" ]; then
       if [ -n "${remove_branch}" ]; then

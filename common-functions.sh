@@ -307,8 +307,7 @@ copy_repository() {
     exit 1
   fi
   copy_working_tree "$1" .git/worktrees
-  copy_repository_head="$(git -C "$1" symbolic-ref --quiet HEAD)" \
-    || copy_repository_head=''
+  copy_repository_head="$(current_branch "$1")" || copy_repository_head=''
   # `--bool` normalizes the value, and git prints the key in lower case.
   copy_repository_marked="$(git -C "$1" config --bool --get-regexp \
     '^branch\..*\.createdforbranchdirectory$' \
@@ -316,7 +315,7 @@ copy_repository() {
   printf '%s\n' "${copy_repository_marked}" \
     | while IFS= read -r copy_repository_branch; do
       case "${copy_repository_branch}" in
-        '' | "${2-}" | "${copy_repository_head#refs/heads/}") continue ;;
+        '' | "${2-}" | "${copy_repository_head}") continue ;;
       esac
       if ! git -C "$1" update-ref -d "refs/heads/${copy_repository_branch}" \
         || ! git -C "$1" config --remove-section "branch.${copy_repository_branch}"; then
@@ -777,7 +776,6 @@ current_branch() {
 ## caller that fetches into or merges into that branch, as `git-push-to` does,
 ## can use this name rather than determine it again.
 check_upstream() {
-  checked_out_branch=''
   # If the directory is not a working tree, or HEAD is detached, let a
   # subsequent command diagnose that, as `check_branch_exists` in
   # `git-push-to` does accurately.  `git rev-parse --abbrev-ref HEAD`, by
