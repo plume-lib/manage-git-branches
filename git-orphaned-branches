@@ -8,8 +8,16 @@
 # A directory whose branch still exists in the remote, but whose GitHub pull
 # requests are all closed or merged, is not listed; instead, a warning about
 # it is printed on standard error.  (This needs the `gh` command.)
-# Also lists directories that hold nothing but Eclipse `.project` files,
-# which is what a branch directory leaves behind when its working tree is gone.
+# Also lists directories that hold nothing but leftovers, such as Eclipse
+# `.project` files and Python `.venv` directories, which is what a branch
+# directory leaves behind when its working tree is gone; `is-deleted-branch`
+# says which files are leftovers.  A directory named *-branch-* that is in no
+# git working tree and either holds anything else, such as one whose removal
+# failed on files owned by another user, or holds no leftover at all, such as
+# an empty directory, is not listed; instead, a warning about it is printed on
+# standard error.  So is a directory in a git working tree that tracks none
+# of its files, and a directory in a working tree that git cannot use, such
+# as a linked worktree whose main working tree was moved.
 #
 # A directory that another live working tree depends on -- one that hosts a
 # linked worktree, or one that is a submodule of a superproject -- is never
@@ -251,95 +259,26 @@ live_superproject() {
   fi
 }
 
-# Prints OWNER/REPO for the GitHub URL $1, or nothing if $1 is not the URL of
-# a GitHub repository.
-github_slug() {
-  printf '%s\n' "$1" | sed -e 's|/*$||' | sed -n \
-    -e 's|^git@github\.com:\([^/]*/[^/]*\)$|\1|p' \
-    -e 's|^ssh://git@github\.com/\([^/]*/[^/]*\)$|\1|p' \
-    -e 's|^https://\([^@/]*@\)\{0,1\}github\.com/\([^/]*/[^/]*\)$|\2|p' \
-    | sed -e 's|\.git$||'
-}
-
 # Records directory $1, whose branch still exists in its remote, so that
 # `warn_about_closed_prs` asks about its pull requests after the scan.
 #
-# The pull requests are those whose base is the parent of the repository that
-# `git push` uses, if that repository is a fork, and is that repository itself
-# otherwise; and whose head is the remote branch in the repository that
-# `git push` uses.  A pull request from a branch of the same name in another
-# repository, even the base repository, is someone else's.  Nothing is
-# recorded for the default branch of the repository that `git push` uses:  a
-# pull request from it, such as one that merges a release from `main` into a
-# stable branch, says nothing about whether a directory of the branch is
-# obsolete, because the branch outlives every such pull request.  Nor is
-# anything recorded if `gh` is not installed, if the remote is not on GitHub, or if a
-# query fails, because then nothing is known about the pull requests; the
-# scan's other answers do not depend on GitHub.  Nor is a directory whose
-# pathname contains a newline, which ${pr_candidates} cannot represent.
+# The pull requests are those that `pr_repositories` describes.  Nothing is
+# recorded where `pr_repositories` fails:  for a detached HEAD, for the
+# default branch of the repository that `git push` uses, or when nothing is
+# known about the pull requests; the scan's other answers do not depend on
+# GitHub.  Nor is a directory whose pathname contains a newline, which
+# ${pr_candidates} cannot represent.
 note_pr_candidate() {
-  command -v gh > /dev/null 2>&1 || return 0
   prs_branch="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
-  prs_branch="${prs_branch#refs/heads/}"
-  prs_remote="$(push_remote "$1" "${prs_branch}")"
-  [ -n "${prs_remote}" ] || return 0
-  # The remote branch is the one that `is_deleted_branch` found:  the one that
-  # `branch.BRANCH.merge` names, if `branch.BRANCH.remote` is ${prs_remote},
-  # and the branch of the same name otherwise.  A pull request's head is a
-  # branch, so a ref outside refs/heads/ has none, and several refs have no
-  # one answer.
-  prs_merge="$(git -C "$1" config --get-all "branch.${prs_branch}.merge")"
-  if [ -n "${prs_merge}" ] \
-    && [ "$(git -C "$1" config --get "branch.${prs_branch}.remote")" = "${prs_remote}" ]; then
-    case "${prs_merge}" in
-      *'
-'*) return 0 ;;
-      refs/heads/?*) prs_branch="${prs_merge#refs/heads/}" ;;
-      *) return 0 ;;
-    esac
-  fi
-  prs_url="$(git -C "$1" remote get-url --push "${prs_remote}" 2> /dev/null)" || return 0
-  prs_head_repo="$(github_slug "${prs_url}")"
-  # `git remote get-url` applies `url.BASE.insteadOf`, which may map a GitHub
-  # URL to a mirror or a local copy; the configured URL still names GitHub.
-  if [ -z "${prs_head_repo}" ]; then
-    prs_head_repo="$(github_slug "$(git -C "$1" config --get "remote.${prs_remote}.url")")"
-  fi
-  [ -n "${prs_head_repo}" ] || return 0
-  # Every branch directory of a project asks about the same repository, so
-  # remember each answer.  Each line of ${base_repo_cache} is
-  # "HEAD BASE DEFAULT", where DEFAULT is HEAD's default branch, or "-" if it
-  # has none.  The repository is named with its host, so that `gh` does not
-  # ask the host that ${GH_HOST} may name instead.
-  prs_answer="$(printf '%s\n' "${base_repo_cache}" \
-    | awk -v head="${prs_head_repo}" '$1 == head { print $2 " " $3; exit }')"
-  if [ -z "${prs_answer}" ]; then
-    prs_answer="$(gh repo view "github.com/${prs_head_repo}" \
-      --json owner,name,parent,defaultBranchRef \
-      --jq '"\(if .parent then "\(.parent.owner.login)/\(.parent.name)" else "\(.owner.login)/\(.name)" end) \(.defaultBranchRef.name // "-")"' \
-      2> /dev/null)" || return 0
-    case "${prs_answer}" in
-      ?*' '?*) ;;
-      *) return 0 ;;
-    esac
-    base_repo_cache="${base_repo_cache}
-${prs_head_repo} ${prs_answer}"
-  fi
-  prs_base_repo="${prs_answer%% *}"
-  if [ "${prs_branch}" = "${prs_answer#* }" ]; then
-    return 0
-  fi
+  pr_repositories "$1" "${prs_branch#refs/heads/}" || return 0
   prs_dir="$(absolute_path "$1")" || prs_dir="$1"
   case "${prs_dir}" in
     *'
 '*) return 0 ;;
   esac
-  pr_candidates="${pr_candidates}${prs_base_repo}	${prs_head_repo}	${prs_branch}	${prs_dir}
+  pr_candidates="${pr_candidates}${pr_base_repo}	${pr_head_repo}	${pr_head_branch}	${prs_dir}
 "
 }
-
-# The answers of `gh repo view` that `note_pr_candidate` has received.
-base_repo_cache=''
 
 # The directories that `note_pr_candidate` has recorded, one per line, each
 # line "BASE<TAB>HEAD<TAB>BRANCH<TAB>DIRECTORY", where BRANCH is the branch in
@@ -468,11 +407,155 @@ rest_pr_states() {
     < /dev/null 2> /dev/null
 }
 
+# Warns, on standard error, about directory $1, whose name matches
+# `*-branch-*` and which contains a `/`, for which `is_deleted_branch` has
+# just returned status 2, if git can use no repository there, as
+# `is_deleted_branch_no_usable_repository` says, or if $1 is in a working tree
+# that tracks no file in $1.  Says nothing about a directory that holds a
+# tracked file, such as a subdirectory of a source tree that happens to be
+# named `*-branch-*`, nor about one in a repository that has no working tree,
+# such as a bare repository.  Sets `status` to 1 if the directory's absolute
+# path cannot be determined.
+#
+# Such a directory is usually what a failed removal of a branch directory left
+# behind.  For example, `rm -rf` removes every file that the user can delete,
+# including most of the `.git` directory, but not the contents of a directory
+# that another user owns, such as a `.venv` that a container running as root
+# created.  `is_deleted_branch` recognizes only some kinds of leftover, such as
+# a `.venv` that holds no version-control checkout, so without this warning any
+# other kind would go unmentioned.  The directory is not listed, because with no
+# repository, nothing tells whether it holds work.  A leftover can be in a
+# working tree that git can use, such as when the user's home directory is a
+# repository of configuration files; that working tree does not track the
+# leftover's files.  Such a working tree often ignores the leftover, as a
+# `.gitignore` of `*` or of the directory that holds clones does, so a
+# working tree's ignoring $1 is no evidence that $1 is not a leftover.  An
+# ignored directory that is not a leftover, such as an npm package in
+# `node_modules` whose name matches `*-branch-*`, is warned about too.
+#
+# A directory can also be in a working tree that git cannot use, because the
+# working tree's `.git` names a git directory that does not exist (as for a
+# linked worktree whose main working tree was moved), is not a valid git
+# directory, or belongs to another user (which git refuses unless
+# `safe.directory` allows it).  The nearest ancestor of $1, or $1 itself, that
+# holds a `.git` file or a `.git` directory with a `HEAD` is that working tree
+# if git cannot use it either.  The warning then names it, and says how to
+# learn why git cannot use it, because it is a repository that can hold work,
+# not a leftover.  When git names the repository that it refuses, the warning
+# names that one, which can be farther away than a `.git` directory that git
+# skips because it is not a valid git directory.  If git can use that
+# ancestor, then $1 is beyond a file system boundary or a directory in
+# `GIT_CEILING_DIRECTORIES`, where git stops searching, and the warning names
+# the working tree and says that $1 is beyond where git searches for it.  A
+# `.git` directory that holds no `HEAD` is no evidence of a working tree:  it
+# is what a failed `rm -rf` leaves when the `.git` directory holds files that
+# another user owns, as when a container running as root ran git.
+#
+# A directory that the user cannot enter is warned about as such, without
+# looking for a working tree:  git could use the one that holds it, if any,
+# but cannot enter the directory itself.
+#
+# The walk of `examine_directory` visits every directory below a directory
+# before any directory outside it, so ${warned_dir}, the absolute path of the
+# directory that this function last warned about, is the only one that can
+# contain $1.  A directory within it is part of its contents, which the user
+# has to inspect anyway, so the warning about it covers them.
+warned_dir=
+wnwt_newline='
+'
+warn_if_not_in_working_tree() {
+  # Resolve the parent rather than $1, which the user might be unable to
+  # enter, such as a directory that only another user can search.
+  # `examine_directory` follows no symbolic link, so the last component of
+  # $1 needs no resolving.  `cd` prints its own diagnostic on failure.
+  if ! wnwt_parent="$(absolute_path "${1%/*}")"; then
+    status=1
+    return 0
+  fi
+  wnwt_dir="${wnwt_parent%/}/${1##*/}"
+  if [ -n "${warned_dir}" ]; then
+    case "${wnwt_dir}" in
+      "${warned_dir}" | "${warned_dir}"/*) return 0 ;;
+    esac
+  fi
+
+  if [ -n "${is_deleted_branch_no_usable_repository}" ] && [ ! -x "$1" ]; then
+    wnwt_where='you cannot enter'
+  elif [ -n "${is_deleted_branch_no_usable_repository}" ]; then
+    wnwt_where='is not in a git working tree'
+    wnwt_ancestor="${wnwt_dir}"
+    while [ -n "${wnwt_ancestor}" ]; do
+      if [ -f "${wnwt_ancestor}/.git" ] || [ -L "${wnwt_ancestor}/.git" ] \
+        || [ -e "${wnwt_ancestor}/.git/HEAD" ] || [ -L "${wnwt_ancestor}/.git/HEAD" ]; then
+        # `LC_ALL=C` makes the diagnostic English, so that it can be matched.
+        if wnwt_git_error="$(LC_ALL=C git -C "${wnwt_ancestor}" rev-parse --git-dir \
+          2>&1 > /dev/null < /dev/null)"; then
+          wnwt_where="is in the git working tree ${wnwt_ancestor} but beyond where git searches for it"
+          break
+        fi
+        # The diagnostic's first line ends with the quoted path of the
+        # repository that git refuses.
+        wnwt_refused="dubious ownership in repository at '"
+        case "${wnwt_git_error}" in
+          *"${wnwt_refused}"*)
+            wnwt_ancestor="${wnwt_git_error#*"${wnwt_refused}"}"
+            wnwt_ancestor="${wnwt_ancestor%%"${wnwt_newline}"*}"
+            wnwt_ancestor="${wnwt_ancestor%\'}"
+            ;;
+        esac
+        warned_dir="${wnwt_ancestor}"
+        if [ "${wnwt_ancestor}" = "${wnwt_dir}" ]; then
+          echo "${SCRIPT_NAME}: warning: not listing ${wnwt_dir}, which git cannot use as a working tree although ${wnwt_dir}/.git exists; \`git -C ${wnwt_dir} status\` says why" >&2
+        else
+          echo "${SCRIPT_NAME}: warning: not listing directories in ${wnwt_ancestor}, such as ${wnwt_dir}, because git cannot use ${wnwt_ancestor} as a working tree although ${wnwt_ancestor}/.git exists; \`git -C ${wnwt_ancestor} status\` says why" >&2
+        fi
+        return 0
+      fi
+      wnwt_ancestor="${wnwt_ancestor%/*}"
+    done
+  else
+    # Of `git ls-files --error-unmatch`, status 1 means that the working tree
+    # tracks no file in $1, and any status but 0 and 1 means that git can use
+    # no working tree there, as for a repository that has none.  Most
+    # directories here hold a tracked file, so ask that first:  it is one
+    # `git` invocation, and the question below costs another.
+    git -C "$1" ls-files --error-unmatch -- . > /dev/null 2>&1 < /dev/null
+    if [ "$?" -ne 1 ]; then
+      return 0
+    fi
+    if ! wnwt_toplevel="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null < /dev/null)" \
+      || [ -z "${wnwt_toplevel}" ]; then
+      return 0
+    fi
+    wnwt_where="is in the git working tree ${wnwt_toplevel} but holds no file that it tracks"
+  fi
+  warned_dir="${wnwt_dir}"
+
+  # Files that the user does not own are the likeliest reason that the
+  # directory is still here, so name one.  `-prune` keeps `find` out of a
+  # directory that another user owns:  that directory is itself the example,
+  # and when it is ${wnwt_dir}, `find` prints nothing else.  `find` writes one
+  # pathname per line, so the example is truncated at a newline in its
+  # pathname, which is harmless in a diagnostic.
+  wnwt_foreign="$(find "${wnwt_dir}" ! -user "$(id -u)" -prune -print 2> /dev/null \
+    | head -n 1)"
+  if [ "${wnwt_foreign}" = "${wnwt_dir}" ]; then
+    echo "${SCRIPT_NAME}: warning: not listing ${wnwt_dir}, which ${wnwt_where} and which another user owns" >&2
+  elif [ -n "${wnwt_foreign}" ]; then
+    echo "${SCRIPT_NAME}: warning: not listing ${wnwt_dir}, which ${wnwt_where} and holds files that you do not own, such as ${wnwt_foreign}" >&2
+  else
+    echo "${SCRIPT_NAME}: warning: not listing ${wnwt_dir}, which ${wnwt_where}" >&2
+  fi
+}
+
 # Reports directory $1, whose name matches `*-branch-*`, if its branch was
-# deleted in the remote or if it holds nothing but Eclipse `.project` files.
+# deleted in the remote or if it holds nothing but leftovers, such as Eclipse
+# `.project` files.  Warns about it if it is in no git working tree but holds
+# anything else or holds no leftover at all, as an empty directory does, or if
+# it is in a working tree that tracks none of its files.
 #
 # `is_deleted_branch` answers about both:  it reports a directory that holds
-# nothing but `.project` files as deleted (status 0), which is why this
+# nothing but leftovers as deleted (status 0), which is why this
 # function need not test for one itself, and for that matter cannot, since
 # such a directory is no working tree and is on no branch.
 check_directory() {
@@ -501,7 +584,7 @@ check_directory() {
       if ! dir_absolute="$(absolute_path "$dir")"; then
         status=1
       else
-        # A directory that holds nothing but `.project` files is no
+        # A directory that holds nothing but leftovers is no
         # repository, so these two queries find nothing in one and cost two
         # `git` invocations that answer "no".  That is a scan of the leftovers
         # of deleted branches, not of every directory examined, and asking
@@ -526,7 +609,8 @@ check_directory() {
       fi
       ;;
     1) note_pr_candidate "$dir" < /dev/null ;;
-    2 | 3) ;;
+    2) warn_if_not_in_working_tree "$dir" ;;
+    3) ;;
     *)
       echo "${SCRIPT_NAME}: is_deleted_branch returned status ${is_deleted_status} on: $dir" >&2
       status=1
@@ -570,9 +654,15 @@ examine_directory() {
         *-branch-*) check_directory "$1" ;;
       esac
       # Examine every directory's entries, even those of a directory that is
-      # itself named `*-branch-*`, because such a directory may contain
-      # another.
-      examine_directory "$1"
+      # itself named `*-branch-*`, because such a directory can contain
+      # another.  A directory of build output, such as a `.venv`, holds no
+      # branch directory unless it holds a version-control checkout, such as
+      # one that `pip install -e git+URL#egg=NAME` makes in `.venv/src/`.  So
+      # skip the entries of one that holds none, which can number in the
+      # thousands.
+      if ! is_build_output_name "${1##*/}" || ! holds_no_checkout "$1"; then
+        examine_directory "$1"
+      fi
     fi
     shift
   done
@@ -616,8 +706,10 @@ holds_kept_dir() {
 # The removal phase.  Each directory goes through
 # `git-remove-branch-directory`, which refuses to remove one that holds
 # uncommitted changes or commits that the removal would lose, and says why.
-# Nothing is printed on standard output; the only report of a directory is the
-# diagnostic about one that was kept.
+# Nothing is printed on standard output.  On standard error,
+# `git-remove-branch-directory` reports each directory that it kept and why,
+# each branch that it kept, and each directory that it could remove only by
+# moving it to /tmp or ~/tmp/DELETEME.
 #
 # The order is the reverse of the order of discovery, which means innermost
 # first:  the scan descends into a directory that it reported, because such a

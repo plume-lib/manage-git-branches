@@ -357,6 +357,18 @@ check_is_deleted_branch "${WORK_DIR}/idb-dead" 0 'a branch deleted in its remote
 check_is_deleted_branch "${WORK_DIR}/idb-live" 1 'a branch that still exists'
 mkdir -p "${WORK_DIR}/idb-plain-directory"
 check_is_deleted_branch "${WORK_DIR}/idb-plain-directory" 2 'no working tree'
+if [ -z "${is_deleted_branch_no_usable_repository}" ]; then
+  fail "is_deleted_branch did not record that git can use no repository at a plain directory"
+fi
+mkdir -p "${WORK_DIR}/idb-live/subdirectory"
+check_is_deleted_branch "${WORK_DIR}/idb-live/subdirectory" 2 'a subdirectory of a working tree'
+if [ -n "${is_deleted_branch_no_usable_repository}" ]; then
+  fail "is_deleted_branch recorded that git can use no repository at a subdirectory of a working tree"
+fi
+check_is_deleted_branch "${WORK_DIR}/idb-remote.git" 2 'a bare repository'
+if [ -n "${is_deleted_branch_no_usable_repository}" ]; then
+  fail "is_deleted_branch recorded that git can use no repository at a bare repository"
+fi
 
 # `check_is_deleted_branch` calls the function on the left of `||`, which
 # suppresses `set -e` for the whole of the function's body.  A caller that acts
@@ -683,6 +695,103 @@ check_swu "branch 'main'" "branch 'main'"
 check_swu "remote-tracking branch 'origin/main'" \
   "remote-tracking branch 'origin/main'"
 
+## Tests of wait_for_later_time.  Each test uses its own directory, in which
+## the function creates its probe directory.
+mkdir "${WORK_DIR}/wflt" "${WORK_DIR}/wflt/now" "${WORK_DIR}/wflt/later" \
+  "${WORK_DIR}/wflt/never" "${WORK_DIR}/wflt/exists" "${WORK_DIR}/wflt/symlink"
+
+## Usage: check_wflt_probe_removed DIR DESCRIPTION
+## Checks that wait_for_later_time removed its probe directory from DIR.
+check_wflt_probe_removed() {
+  if [ -e "$1/.manage-git-branches-time-probe" ]; then
+    fail "wait_for_later_time, $2: the probe directory remains"
+  fi
+}
+
+# The time never passes a marker whose modification time is far in the
+# future, so the function gives up after about 10 seconds.  That runs in the
+# background, while the other tests run.
+touch -t 209901010000 "${WORK_DIR}/wflt/never-marker"
+(
+  if wait_for_later_time "${WORK_DIR}/wflt/never-marker" "${WORK_DIR}/wflt/never"; then
+    echo 0
+  else
+    echo 1
+  fi > "${WORK_DIR}/wflt/never-status"
+) 2> "${WORK_DIR}/wflt/never-err" &
+wflt_never_pid=$!
+
+# A file that changes immediately after the function returns is newer than
+# the marker.
+for wflt_try in 1 2 3; do
+  : > "${WORK_DIR}/wflt/now-marker"
+  if ! wait_for_later_time "${WORK_DIR}/wflt/now-marker" "${WORK_DIR}/wflt/now"; then
+    fail "wait_for_later_time failed on try ${wflt_try}"
+  fi
+  echo "try ${wflt_try}" > "${WORK_DIR}/wflt/now/changed"
+  if [ -z "$(find "${WORK_DIR}/wflt/now/changed" -cnewer "${WORK_DIR}/wflt/now-marker" -print)" ]; then
+    fail "wait_for_later_time: a file changed afterward is not newer than the marker, on try ${wflt_try}"
+  fi
+  check_wflt_probe_removed "${WORK_DIR}/wflt/now" "try ${wflt_try}"
+done
+
+# A marker whose modification time is 2 seconds in the future makes the
+# function sleep before it succeeds.
+: > "${WORK_DIR}/wflt/later-marker"
+python3 -c 'import os, sys, time; t = time.time() + 2; os.utime(sys.argv[1], (t, t))' \
+  "${WORK_DIR}/wflt/later-marker"
+wflt_start="$(date +%s)"
+if ! wait_for_later_time "${WORK_DIR}/wflt/later-marker" "${WORK_DIR}/wflt/later"; then
+  fail "wait_for_later_time failed for a marker 2 seconds in the future"
+fi
+if [ "$(($(date +%s) - wflt_start))" -lt 1 ]; then
+  fail "wait_for_later_time did not wait for a marker 2 seconds in the future"
+fi
+echo "changed" > "${WORK_DIR}/wflt/later/changed"
+if [ -z "$(find "${WORK_DIR}/wflt/later/changed" -cnewer "${WORK_DIR}/wflt/later-marker" -print)" ]; then
+  fail "wait_for_later_time: a file changed afterward is not newer than a marker 2 seconds in the future"
+fi
+check_wflt_probe_removed "${WORK_DIR}/wflt/later" "a marker 2 seconds in the future"
+
+# An existing file whose name is the probe's is left alone.
+echo "user data" > "${WORK_DIR}/wflt/exists/.manage-git-branches-time-probe"
+: > "${WORK_DIR}/wflt/exists-marker"
+if wflt_err="$(wait_for_later_time "${WORK_DIR}/wflt/exists-marker" "${WORK_DIR}/wflt/exists" 2>&1)"; then
+  fail "wait_for_later_time succeeded although a file has its probe's name"
+fi
+case "${wflt_err}" in
+  *"which must not already exist"*) ;;
+  *) fail "wait_for_later_time with a file that has its probe's name: wrong diagnostic: ${wflt_err}" ;;
+esac
+if [ "$(cat "${WORK_DIR}/wflt/exists/.manage-git-branches-time-probe")" != "user data" ]; then
+  fail "wait_for_later_time changed an existing file whose name is the probe's"
+fi
+
+# An existing symbolic link whose name is the probe's is left alone, even
+# one to a file that is not a regular file.
+ln -s /dev/null "${WORK_DIR}/wflt/symlink/.manage-git-branches-time-probe"
+: > "${WORK_DIR}/wflt/symlink-marker"
+if wflt_err="$(wait_for_later_time "${WORK_DIR}/wflt/symlink-marker" "${WORK_DIR}/wflt/symlink" 2>&1)"; then
+  fail "wait_for_later_time succeeded although a symbolic link has its probe's name"
+fi
+case "${wflt_err}" in
+  *"which must not already exist"*) ;;
+  *) fail "wait_for_later_time with a symbolic link that has its probe's name: wrong diagnostic: ${wflt_err}" ;;
+esac
+if [ ! -L "${WORK_DIR}/wflt/symlink/.manage-git-branches-time-probe" ]; then
+  fail "wait_for_later_time removed an existing symbolic link whose name is the probe's"
+fi
+
+wait "${wflt_never_pid}"
+if [ "$(cat "${WORK_DIR}/wflt/never-status")" != 1 ]; then
+  fail "wait_for_later_time succeeded for a marker far in the future"
+fi
+case "$(cat "${WORK_DIR}/wflt/never-err")" in
+  *"after 20 tries"*) ;;
+  *) fail "wait_for_later_time for a marker far in the future: wrong diagnostic: $(cat "${WORK_DIR}/wflt/never-err")" ;;
+esac
+check_wflt_probe_removed "${WORK_DIR}/wflt/never" "a marker far in the future"
+
 ## Usage: hum_commit DIRECTORY FILE MESSAGE
 ## Writes MESSAGE to FILE in DIRECTORY and commits it with that message.
 hum_commit() {
@@ -690,6 +799,79 @@ hum_commit() {
   git -C "$1" add -- "$2"
   git -C "$1" commit -q -m "$3"
 }
+
+## Usage: hum_check DESCRIPTION DIRECTORY LINE...
+## Fails unless has_unbuilt_merge, run in DIRECTORY, returns 0 and its
+## account's lines that say what each side of a merge changed are exactly the
+## LINEs, in any order.  (Commits in the test repositories can share a
+## timestamp, so `git log` might order merges in either way.)
+hum_check() {
+  hum_description="$1"
+  hum_dir="$2"
+  shift 2
+  if ! (cd "${hum_dir}" && has_unbuilt_merge '' && printf '%s\n' "${merge_fix_account}" > "${hum_dir}.account"); then
+    fail "has_unbuilt_merge: ${hum_description}: no merge is blamed"
+  fi
+  { grep -e '^  It merged ' "${hum_dir}.account" || true; } | sort > "${hum_dir}.sides"
+  printf '%s\n' "$@" | sort > "${hum_dir}.sides.goal"
+  if ! cmp -s "${hum_dir}.sides.goal" "${hum_dir}.sides"; then
+    fail "has_unbuilt_merge: ${hum_description}: the account of what each side changed is wrong: $(diff "${hum_dir}.sides.goal" "${hum_dir}.sides")"
+  fi
+}
+
+## Tests of has_unbuilt_merge.  The account lists the commits that only each
+## side of a merge had.  The parents of the last merge have two merge bases,
+## because of the criss-cross merges before it.
+git init -q -b main "${WORK_DIR}/hum-cross"
+hum_commit "${WORK_DIR}/hum-cross" base.txt "Initial commit"
+git -C "${WORK_DIR}/hum-cross" switch -q -c other
+hum_commit "${WORK_DIR}/hum-cross" b1.txt "Change other"
+hum_b1="$(git -C "${WORK_DIR}/hum-cross" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-cross" switch -q main
+hum_commit "${WORK_DIR}/hum-cross" a1.txt "Change main"
+hum_a1="$(git -C "${WORK_DIR}/hum-cross" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-cross" merge -q --no-edit other
+hum_commit "${WORK_DIR}/hum-cross" a2.txt "Change main again"
+hum_ours="$(git -C "${WORK_DIR}/hum-cross" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-cross" switch -q other
+git -C "${WORK_DIR}/hum-cross" merge -q --no-edit "${hum_a1}"
+hum_commit "${WORK_DIR}/hum-cross" b2.txt "Change other again"
+hum_theirs="$(git -C "${WORK_DIR}/hum-cross" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-cross" switch -q main
+git -C "${WORK_DIR}/hum-cross" merge -q --no-edit other
+hum_check "criss-cross merges" "${WORK_DIR}/hum-cross" \
+  "  It merged commit ${hum_b1} into commit ${hum_a1}.  \`git log -p --remerge-diff ${hum_b1}..${hum_a1}\` shows the commits that only ${hum_a1} had, and \`git log -p --remerge-diff ${hum_a1}..${hum_b1}\` shows the commits that only ${hum_b1} had." \
+  "  It merged commit ${hum_a1} into commit ${hum_b1}.  \`git log -p --remerge-diff ${hum_a1}..${hum_b1}\` shows the commits that only ${hum_b1} had, and \`git log -p --remerge-diff ${hum_b1}..${hum_a1}\` shows the commits that only ${hum_a1} had." \
+  "  It merged commit ${hum_theirs} into commit ${hum_ours}.  \`git log -p --remerge-diff ${hum_theirs}..${hum_ours}\` shows the commits that only ${hum_ours} had, and \`git log -p --remerge-diff ${hum_ours}..${hum_theirs}\` shows the commits that only ${hum_theirs} had."
+
+## An octopus merge, and a merge of commits that share no history, get only
+## their lines.  A merge into an ancestor, which `git merge --no-ff` makes,
+## gets an account of only the other side.
+git init -q -b main "${WORK_DIR}/hum-misc"
+hum_commit "${WORK_DIR}/hum-misc" base.txt "Initial commit"
+for hum_branch in x y; do
+  git -C "${WORK_DIR}/hum-misc" switch -q -c "${hum_branch}" main
+  hum_commit "${WORK_DIR}/hum-misc" "${hum_branch}.txt" "Change ${hum_branch}"
+done
+git -C "${WORK_DIR}/hum-misc" switch -q main
+hum_commit "${WORK_DIR}/hum-misc" main.txt "Change main"
+git -C "${WORK_DIR}/hum-misc" merge -q --no-edit x y > /dev/null
+git -C "${WORK_DIR}/hum-misc" switch -q --orphan unrelated
+hum_commit "${WORK_DIR}/hum-misc" unrelated.txt "Unrelated commit"
+git -C "${WORK_DIR}/hum-misc" switch -q main
+git -C "${WORK_DIR}/hum-misc" merge -q --no-edit --allow-unrelated-histories unrelated
+hum_ours="$(git -C "${WORK_DIR}/hum-misc" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-misc" switch -q -c ahead
+hum_commit "${WORK_DIR}/hum-misc" ahead.txt "Change ahead"
+hum_theirs="$(git -C "${WORK_DIR}/hum-misc" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-misc" switch -q main
+git -C "${WORK_DIR}/hum-misc" merge -q --no-ff --no-commit ahead > /dev/null
+hum_commit "${WORK_DIR}/hum-misc" edited.txt "Merge branch 'ahead', with an edit"
+if [ "$(git -C "${WORK_DIR}/hum-misc" rev-list --count --merges HEAD)" -ne 3 ]; then
+  fail "has_unbuilt_merge: the test repository has the wrong merges: $(git -C "${WORK_DIR}/hum-misc" log --graph --oneline)"
+fi
+hum_check "an octopus merge, unrelated histories, and a merge into an ancestor" "${WORK_DIR}/hum-misc" \
+  "  It merged commit ${hum_theirs} into its ancestor, commit ${hum_ours}.  \`git log -p --remerge-diff ${hum_ours}..${hum_theirs}\` shows the commits that only ${hum_theirs} had."
 
 ## Tests of has_unbuilt_merge.  A commit in BUILT that is in the history of a
 ## remote branch is omitted from the account, but its tree still counts:
@@ -767,6 +949,9 @@ check_built_remote() {
   fi
 }
 for ibr_dir in "${WORK_DIR}/ibr/clone" "${WORK_DIR}/ibr/clone/sub"; do
+  # is_built_remote remembers its results for the top level, which both
+  # directories have.
+  built_remote_cache=''
   check_built_remote "${ibr_dir}" bare 0
   check_built_remote "${ibr_dir}" ../bare.git 0
   check_built_remote "${ibr_dir}" github 0
@@ -777,6 +962,7 @@ done
 ## A bare repository with a linked worktree is committed to locally.
 git -C "${WORK_DIR}/ibr/clone" push -q bare main
 git -C "${WORK_DIR}/ibr/bare.git" worktree add -q ../bare-worktree main 2> /dev/null
+built_remote_cache=''
 check_built_remote "${WORK_DIR}/ibr/clone" bare 1
 
 ## Tests of remote_branch_refs.  It omits the remote-tracking branch of a
@@ -789,6 +975,7 @@ if [ -n "$(remote_branch_refs "${WORK_DIR}/ibr/clone")" ]; then
   fail "remote_branch_refs: a working clone's branch counts as built: $(remote_branch_refs "${WORK_DIR}/ibr/clone")"
 fi
 git -C "${WORK_DIR}/ibr/bare.git" worktree remove ../bare-worktree
+built_remote_cache=''
 git -C "${WORK_DIR}/ibr/clone" branch -q --set-upstream-to=bare/main
 if [ "$(remote_branch_refs "${WORK_DIR}/ibr/clone")" != refs/remotes/bare/main ]; then
   fail "remote_branch_refs: a bare repository's branch does not count as built: $(remote_branch_refs "${WORK_DIR}/ibr/clone")"

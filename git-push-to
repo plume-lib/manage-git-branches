@@ -125,15 +125,37 @@
 # this script stops, with the agent's changes staged but not committed.
 # A merge might have broken the build if TO_DIR's branch has a merge commit
 # that is in the history of none of the remote branches that TO_DIR's branch
-# and FROM_DIR's branch push to and pull from, and that combined changes
-# (its tree differs from each of its parents' trees), and if TO_DIR's tree
-# differs from those remote branches' trees.  That merge commit can be the
-# merge of FROM_DIR's branch, the merge that the pull of TO_DIR or of
-# FROM_DIR made, or a merge that an earlier run made but did not push, as
-# when its build failed; so a rerun after a failed build asks the agent too.
+# and FROM_DIR's branch push to and pull from and of the heads that the pulls
+# of TO_DIR and FROM_DIR fetched, and that combined changes (its tree differs
+# from each of its parents' trees), and if TO_DIR's tree differs from those
+# commits' trees.  A remote branch, or a fetched head, counts only if its
+# repository is not in the local file system, such as one on GitHub, or is a
+# bare repository without a linked worktree, because the branches of another
+# repository, such as another working clone, need not have been built.
+# That merge commit can be the merge of FROM_DIR's branch, the merge that the
+# pull of TO_DIR or of FROM_DIR made, or a merge that an earlier run made but
+# did not push, as when its build failed; so a rerun after a failed build
+# asks the agent too.
 # If there is no such merge commit, as after a pull that only fast-forwarded
 # TO_DIR's branch, the agent would merely work around a failure that no
 # merge caused, so it is not asked.
+#
+# When the agent fails to resolve the conflicts or to fix the build, or when
+# this script rejects its work, this script prints a command such as
+#   cd DIR && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b
+# or
+#   cd DIR && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093
+# that continues the agent's session interactively, or one such command for
+# each of the agent's attempts to fix the build.  In the resumed session,
+# you can ask the agent about its work, or tell it to finish in a way that
+# its instructions forbade, such as by changing text outside a conflict
+# region.  Then commit the merge or the fix yourself, and run this script
+# again.  This script also appends the command to the file AGENT-TODO.md at
+# the top level of the working tree, where you are less likely to overlook
+# it; delete the entry once you have dealt with it.  The resumed
+# session runs with your usual permissions, not in the sandbox, and it
+# contains the text of the merged changes, which can include instructions
+# from other people.
 
 # Here is an example of use.
 #
