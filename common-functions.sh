@@ -1101,10 +1101,12 @@ resolve_with_agent() {
   # many large files, such as build output, is compared by its pathnames and
   # by the time at which each file last changed (its "ctime").  Unlike a
   # file's modification time, an unprivileged process cannot set its ctime.
-  # A file changed after the marker file was written, so the marker is in
-  # the git directory, which neither agent can write.  The agent starts only
-  # once the file system records a later time than the marker's, so that a
-  # file that it changes has a later time.
+  # A file changed since the marker file was written if its ctime is later
+  # than the marker's modification time.  The marker is in the git
+  # directory, which neither agent can write, so the agent cannot change the
+  # marker's time.  The agent starts only once the file system records a
+  # later time than the marker's, so that a file that it changes has a later
+  # ctime.
   resolve_index="$(git ls-files --stage -z | cksum)"
   resolve_paths="$(working_tree_paths)"
   if ! resolve_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-start)" \
