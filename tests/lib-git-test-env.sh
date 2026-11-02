@@ -51,7 +51,8 @@ sanitize_git_env() {
   # A global setting such as `commit.gpgsign`, `pull.rebase`, `merge.ff`,
   # `core.hooksPath`, or `commit.template` would change what the commands
   # under test do, or make them fail.  Replace the global configuration file
-  # with an empty one and ignore the system configuration file.
+  # with one that holds a single setting, below, and ignore the system
+  # configuration file.
   GIT_CONFIG_GLOBAL="${sanitize_git_env_dir}/gitconfig"
   GIT_CONFIG_SYSTEM=/dev/null
   GIT_CONFIG_NOSYSTEM=1
@@ -62,7 +63,12 @@ sanitize_git_env() {
   GIT_COMMITTER_EMAIL="${GIT_AUTHOR_EMAIL}"
   export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
   export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-  : > "${GIT_CONFIG_GLOBAL}" || return 1
+  # The single setting keeps a command that changes a repository, such as
+  # `git commit`, `git fetch`, or `git merge`, from starting
+  # `git maintenance run --auto`, a separate process.  The tests make many
+  # small repositories, which never need maintenance, and starting a process
+  # is slow on some systems, such as macOS.
+  printf '[maintenance]\n\tauto = false\n' > "${GIT_CONFIG_GLOBAL}" || return 1
 
   # By default, the commands under test run an AI agent, `claude` or `codex`,
   # when a merge has conflicts or a build fails.  A test must never run a real
