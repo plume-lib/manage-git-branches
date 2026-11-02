@@ -480,20 +480,17 @@ rest_pr_states() {
 # `*-branch-*`, for which `is_deleted_branch` has just returned status 2, if
 # git reports that the directory is in no working tree.  Says nothing about a
 # directory that is in one, such as a subdirectory of a source tree that
-# happens to be named `*-branch-*`, nor about a bare repository, nor about one
-# within a `.venv` or `*.egg-info` directory, which holds build output rather
-# than branch directories, and which, in a directory of leftovers, is removed
-# with it.  Sets `status` to 1 if the directory's absolute path cannot be
-# determined.
+# happens to be named `*-branch-*`, nor about a bare repository.  Sets
+# `status` to 1 if the directory's absolute path cannot be determined.
 #
 # Such a directory is usually what a failed removal of a branch directory left
 # behind.  For example, `rm -rf` removes the `.git` directory and every file
 # that the user can delete, but not the contents of a directory that another
-# user owns and that a container running as root created.  `is_deleted_branch`
-# recognizes only some kinds of leftover, such as a `.venv` directory, so
-# without this warning any other kind would go unmentioned.  The directory is
-# not listed, because with no repository, nothing tells whether it holds
-# work.
+# user owns, such as a `.venv` that a container running as root created.
+# `is_deleted_branch` recognizes only some kinds of leftover, such as a `.venv`
+# that the user can remove, so without this warning any other kind would go
+# unmentioned.  The directory is not listed, because with no repository,
+# nothing tells whether it holds work.
 #
 # A directory can also be in a working tree that git cannot use, because a
 # `.git` in it or in an ancestor names a git directory that does not exist (as
@@ -509,9 +506,6 @@ rest_pr_states() {
 # anyway, so the warning about it covers them.
 warned_dir=
 warn_if_not_in_working_tree() {
-  case "$1" in
-    */.venv/* | *.egg-info/*) return 0 ;;
-  esac
   if [ -z "${is_deleted_branch_no_working_tree}" ]; then
     return 0
   fi
@@ -664,9 +658,13 @@ examine_directory() {
         *-branch-*) check_directory "$1" ;;
       esac
       # Examine every directory's entries, even those of a directory that is
-      # itself named `*-branch-*`, because such a directory may contain
-      # another.
-      examine_directory "$1"
+      # itself named `*-branch-*`, because such a directory can contain
+      # another.  A directory of build output, such as a `.venv`, holds no
+      # branch directory, so skip its entries, which can number in the
+      # thousands.
+      if ! is_build_output_name "${1##*/}"; then
+        examine_directory "$1"
+      fi
     fi
     shift
   done

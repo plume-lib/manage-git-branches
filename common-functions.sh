@@ -2864,25 +2864,59 @@ remote_heads() {
   return "${remote_heads_status}"
 }
 
+## Usage: is_build_output_name NAME
+## Returns 0 (true) if NAME, the last component of a directory's pathname, is
+## the name of a directory of Python build output:  `.venv`, a virtual
+## environment, or a name that ends in `.egg-info`, such as
+## `myproject.egg-info`, which holds package metadata.  Such a directory holds
+## no branch directory and no work, except as `removable_build_output` tests.
+is_build_output_name() {
+  case "$1" in
+    '.venv' | *.egg-info) return 0 ;;
+  esac
+  return 1
+}
+
+## Usage: removable_build_output DIRECTORY
+## Returns 0 (true) if `rm -rf` can remove DIRECTORY, a directory of build
+## output, and DIRECTORY holds no version-control checkout:  that is, if the
+## user owns DIRECTORY and everything in it, can read, write, and search every
+## directory among them, and nothing in it is named `.git`, `.hg`, `.svn`, or
+## `.bzr`.  Returns 1 if `find` cannot examine all of DIRECTORY.
+##
+## `find` writes newline-separated text, which cannot represent a file name
+## that contains a newline, but this function needs only whether `find` wrote
+## anything, which such a name does not obscure.
+removable_build_output() {
+  removable_build_output_found="$(find "$1" \( ! -user "$(id -u)" \
+    -o -type d ! -perm -u+rwx -o -name .git -o -name .hg -o -name .svn \
+    -o -name .bzr \) -prune -print 2> /dev/null)" || return 1
+  [ -z "${removable_build_output_found}" ]
+}
+
 ## Usage: only_leftovers DIRECTORY
 ## Returns 0 (true) if DIRECTORY holds nothing but leftovers:  files and
 ## directories that tools other than git create in a working tree and that
 ## remain after the working tree itself is gone.  A leftover is one of these:
 ##  * an Eclipse `.project` file, which is a regular file;
-##  * a Python virtual environment, which is a directory named `.venv`;
-##  * Python package metadata, which is a directory whose name ends in
+##  * a directory of Python build output that `rm -rf` can remove and that
+##    holds no version-control checkout, as `removable_build_output` tests:
+##    either a Python virtual environment, which is a directory named `.venv`,
+##    or Python package metadata, which is a directory whose name ends in
 ##    `.egg-info`, such as `myproject.egg-info`.
 ## That is, every entry of DIRECTORY is a leftover or is a directory that
 ## itself holds nothing but leftovers.  A directory that holds nothing at all
 ## satisfies this, which is what lets an empty subdirectory -- such as the
 ## `bin` that Eclipse makes for a project's build output -- count as nothing.
 ##
-## A `.venv` or `*.egg-info` directory is a leftover whatever it holds, so this
-## function does not look inside it:  its contents are build output, which a
-## build re-creates.  Often they are also what made the leftover a leftover:  a
-## container that runs as root creates them owned by root, and then the
-## user's `rm -rf` of the working tree removes everything else but cannot
-## remove them.
+## Such a directory's contents are build output, which a build re-creates, so
+## they need not be leftovers themselves.  Two exceptions keep a `.venv` or
+## `*.egg-info` directory from being a leftover.  First, a container that runs
+## as root creates its contents owned by root, and the user's `rm -rf` cannot
+## remove them; treating it as a leftover would offer for removal a directory
+## that every removal fails on.  Second, `pip install -e git+URL#egg=NAME`
+## clones a repository into `.venv/src/`, and that clone can hold unpushed
+## work.
 ##
 ## This says only what is in DIRECTORY; the caller decides what that means.
 ## A directory that holds nothing satisfies this test only vacuously, so the
@@ -2931,16 +2965,17 @@ only_leftovers() {
           continue
         fi
         ;;
-      '.venv' | *.egg-info)
-        # A *file* with one of these names can hold anything, so leave it to
-        # the test below, which treats it as content.
-        if [ -d "$1" ] && [ ! -L "$1" ]; then
-          only_leftovers_found=1
-          shift
-          continue
-        fi
-        ;;
     esac
+    # A *file* with the name of a directory of build output can hold anything,
+    # so leave it to the test below, which treats it as content.
+    if is_build_output_name "${1##*/}" && [ -d "$1" ] && [ ! -L "$1" ]; then
+      if ! removable_build_output "$1"; then
+        return 1
+      fi
+      only_leftovers_found=1
+      shift
+      continue
+    fi
     # When a pattern matches nothing, the shell leaves it unexpanded.  Such a
     # pathname names no entry, so it is not content.
     if [ ! -e "$1" ] && [ ! -L "$1" ]; then

@@ -113,9 +113,11 @@ testdir="$(mktemp -d)"
 # The signal handlers re-raise the signal with the handler removed, so that
 # the script dies of the signal rather than resuming where it was
 # interrupted, and so that the caller sees that it was killed by a signal.
-trap 'rm -rf "${testdir}"' EXIT
-trap 'rm -rf "${testdir}"; trap - INT; kill -s INT "$$"' INT
-trap 'rm -rf "${testdir}"; trap - TERM; kill -s TERM "$$"' TERM
+# `chmod` restores the permissions of the deliberately unwritable directory
+# created below, so that `rm -rf` can remove it.
+trap 'chmod -R u+w "${testdir}" 2> /dev/null; rm -rf "${testdir}"' EXIT
+trap 'chmod -R u+w "${testdir}" 2> /dev/null; rm -rf "${testdir}"; trap - INT; kill -s INT "$$"' INT
+trap 'chmod -R u+w "${testdir}" 2> /dev/null; rm -rf "${testdir}"; trap - TERM; kill -s TERM "$$"' TERM
 
 sanitize_git_env "${testdir}"
 
@@ -422,6 +424,24 @@ mkdir "${testdir}/python-venv-file"
 mkdir -p "${testdir}/python-venv-symlink" "${testdir}/venv-target"
 ln -s ../venv-target "${testdir}/python-venv-symlink/.venv"
 
+## A `.venv` directory that holds a git clone, as
+## `pip install -e git+URL#egg=NAME` makes in `.venv/src/`.  The clone can hold
+## unpushed work, so the `.venv` is not a leftover.
+mkdir -p "${testdir}/python-venv-checkout/.venv/src/mylib/.git"
+: > "${testdir}/python-venv-checkout/.venv/src/mylib/setup.py"
+
+## A `.venv` directory that holds a directory that the user cannot write, as
+## when a container running as root created it, so that `rm -rf` cannot
+## remove it.  The superuser can write any directory, so skip this case when
+## running as root.
+unwritable=0
+if [ "$(id -u)" -ne 0 ]; then
+  unwritable=1
+  mkdir -p "${testdir}/python-venv-unwritable/.venv/lib"
+  : > "${testdir}/python-venv-unwritable/.venv/lib/module.py"
+  chmod 555 "${testdir}/python-venv-unwritable/.venv/lib"
+fi
+
 ## An empty directory in a working tree, which is part of that working tree.
 mkdir "${testdir}/myrepo-branch-dead/empty-subdirectory"
 
@@ -515,6 +535,12 @@ expect_status 2 "${testdir}/python-venv-file" \
   'directory that holds a regular file named .venv'
 expect_status 2 "${testdir}/python-venv-symlink" \
   'directory that holds a symbolic link named .venv'
+expect_status 2 "${testdir}/python-venv-checkout" \
+  'directory that holds a .venv directory that holds a git clone'
+if [ "${unwritable}" -eq 1 ]; then
+  expect_status 2 "${testdir}/python-venv-unwritable" \
+    'directory that holds a .venv directory that rm -rf cannot remove'
+fi
 expect_status 2 "${testdir}/myrepo-branch-dead/empty-subdirectory" \
   'empty directory in a working tree'
 expect_status 1 "${testdir}/myrepo-live-project" \

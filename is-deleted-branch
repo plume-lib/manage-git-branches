@@ -33,10 +33,14 @@
 #  * a Python virtual environment, which is a directory named `.venv`;
 #  * Python package metadata, which is a directory whose name ends in
 #    `.egg-info`, such as `myproject.egg-info`.
-# A `.venv` or `*.egg-info` directory is a leftover whatever it holds.  It
-# often survives because a container that runs as root created it, so that the
-# user's `rm -rf` of the working tree cannot remove its contents.  Nothing of
-# the branch survives in a directory of leftovers, so it is as removable as a
+# A `.venv` or `*.egg-info` directory is a leftover whatever build output it
+# holds, but only if the user can remove it and it holds no version-control
+# checkout:  the user owns everything in it and can read, write, and search
+# every directory in it, and nothing in it is named `.git`, `.hg`, `.svn`, or
+# `.bzr`.  A container that runs as root creates such a directory's contents
+# owned by root, and the user's `rm -rf` cannot remove them; and
+# `pip install -e git+URL#egg=NAME` clones a repository into `.venv/src/`,
+# where it can hold unpushed work.  Nothing of the branch survives in a directory of leftovers, so it is as removable as a
 # working tree whose branch was deleted in its remote, which is the question
 # that callers ask this command.
 #

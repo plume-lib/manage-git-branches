@@ -157,8 +157,10 @@ The commands are:
   It is also true of a directory that holds nothing but leftovers, which a
   branch directory can leave behind when its working tree is gone:  Eclipse
   `.project` files, Python `.venv` directories, and `*.egg-info`
-  directories.  It is also true of a directory that is in no git working
-  tree and holds nothing but empty directories.
+  directories.  A `.venv` or `*.egg-info` directory is a leftover only if
+  the user can remove it and it holds no version-control checkout.  It is
+  also true of a directory that is in no git working tree and holds nothing
+  but empty directories.
 * [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
   Lists directories named `*-branch-*`, below the current directory, that are
   working trees for branches that were deleted in the remote repository, or

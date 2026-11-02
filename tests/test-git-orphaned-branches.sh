@@ -148,6 +148,12 @@ mkdir -p "${work}/dot-project/p-branch-python/.venv/lib/x-branch-y" \
   "${work}/dot-project/p-branch-python/myproject.egg-info"
 touch "${work}/dot-project/p-branch-python/.venv/lib/x-branch-y/other"
 
+# Contains nothing but a `.venv` directory, but that holds a git clone, as
+# `pip install -e git+URL#egg=NAME` makes in `.venv/src/`.  The clone can hold
+# unpushed work, so the directory is not a leftover.
+mkdir -p "${work}/dot-project/p-branch-python-checkout/.venv/src/mylib/.git"
+touch "${work}/dot-project/p-branch-python-checkout/.venv/src/mylib/setup.py"
+
 # A `*-branch-*` directory behind a symbolic link to a directory.  The walk
 # does not follow such a link, which is what keeps a link to an ancestor from
 # sending it around forever.
@@ -220,6 +226,7 @@ check "p-branch-nested-project" "listed"
 check "p-branch-empty-tree" "listed"
 check "p-branch-python" "listed"
 check "p-branch-python/.venv/lib/x-branch-y" "unlisted"
+check "p-branch-python-checkout" "unlisted"
 if printf '%s\n' "${output}" | grep -q -F -- 'p-branch-behind-link'; then
   echo "FAIL: git-orphaned-branches followed a symbolic link to a directory"
   status=1
@@ -265,6 +272,7 @@ check_warned "p-branch-outer/q-branch-content" "unwarned"
 check_warned "p-branch-empty-tree" "unwarned"
 check_warned "p-branch-python" "unwarned"
 check_warned "p-branch-python/.venv/lib/x-branch-y" "unwarned"
+check_warned "p-branch-python-checkout" "warned"
 check_warned "p-repo/r-branch-subdir" "unwarned"
 check_warned "p-repo/r-branch-empty" "unwarned"
 check_warned "p-branch-broken-worktree" "unwarned"
@@ -303,6 +311,11 @@ fi
 # `git-orphaned-branches`, every file is another user's.
 mkdir -p "${work}/foreign/f-branch-leftover" "${work}/stub-id"
 touch "${work}/foreign/f-branch-leftover/other"
+# A `.venv` whose files another user owns cannot be removed, so it is not a
+# leftover, and the directory that holds it is warned about rather than
+# listed.
+mkdir -p "${work}/foreign/f-branch-python/.venv/bin"
+touch "${work}/foreign/f-branch-python/.venv/bin/python"
 printf '#!/bin/sh\necho 2147483646\n' > "${work}/stub-id/id"
 chmod +x "${work}/stub-id/id"
 if ! output="$(cd "${work}/foreign" && PATH="${work}/stub-id:${PATH}" \
@@ -312,12 +325,14 @@ fi
 if [ -n "${output}" ]; then
   fail "git-orphaned-branches printed [${output}] for files that another user owns, expected no output"
 fi
-if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/foreign/f-branch-leftover, which is not in a git working tree and holds files that you do not own, such as ${work}/foreign/f-branch-leftover" \
-  "${work}/foreign.stderr"; then
-  echo "FAIL: git-orphaned-branches did not name a file that another user owns:"
-  cat "${work}/foreign.stderr"
-  status=1
-fi
+for foreign_dir in f-branch-leftover f-branch-python; do
+  if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/foreign/${foreign_dir}, which is not in a git working tree and holds files that you do not own, such as ${work}/foreign/${foreign_dir}" \
+    "${work}/foreign.stderr"; then
+    echo "FAIL: git-orphaned-branches did not name a file that another user owns in ${foreign_dir}:"
+    cat "${work}/foreign.stderr"
+    status=1
+  fi
+done
 
 ###########################################################################
 ## A directory whose name contains a newline.
