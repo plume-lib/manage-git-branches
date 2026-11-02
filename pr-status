@@ -163,6 +163,15 @@ class Repo:
         """
         return highlight(self.gh, n, f"[{self.ref(n)}]({self.url(n)})")
 
+    def failed_mark(self, n):
+        """Return the mark that a link to PR n carries if the PR's CI failed.
+
+        Returns:
+            " ❌" if the PR's CI failed, or "" otherwise.
+        """
+        load_reviews_and_ci(self)
+        return " ❌" if n in self.ci_failed else ""
+
     def refs(self, ns):
         """Return how documents refer to the PRs ns.
 
@@ -410,6 +419,23 @@ def external_link(ref):
     """
     gh, n = ref.split("#")
     return highlight(gh, int(n), f"[{ref}](https://github.com/{gh}/pull/{n})")
+
+
+def external_failed_mark(ref):
+    """Return the mark that a link to the PR "owner/repo#N" carries if the PR's CI failed.
+
+    Returns:
+        " ❌" if the config describes the PR's repository and the PR's CI failed, or ""
+        otherwise.
+    """
+    gh, n = ref.split("#")
+    repo = REPOS.get(gh.lower())
+    return repo.failed_mark(int(n)) if repo else ""
+
+
+# The repositories that the config describes, as a map from each one's lowercase GitHub
+# slug, such as "org/repo", to its Repo.
+REPOS = {}
 
 
 # The PRs that the documents highlight, as pairs of a lowercase GitHub slug, such as
@@ -967,8 +993,9 @@ class Model:
         if threads:
             outdated = sum(threads)
             cell.append(str(len(threads)) + (f" ({outdated} outdated)" if outdated else ""))
-        if n in self.repo.ci_failed:
-            cell.append(" ❌")
+        failed = self.repo.failed_mark(n)
+        if failed:
+            cell.append(failed)
         elif n in self.repo.ci_passed:
             cell.append(" ✅")
         return "".join(cell)
@@ -1098,6 +1125,7 @@ def load_models(cfg, pairwise=True):
     models = []
     for name in cfg["order"]:
         repo = Repo(cfg["repos"][name])
+        REPOS[repo.gh.lower()] = repo
         load_repo(repo, pairwise=pairwise)
         models.append(Model(repo, cfg))
     unite_partners(models)
@@ -1190,23 +1218,30 @@ def needed_by(model, n):
     return text
 
 
-def depends_on(model, n):
+def depends_on(model, n, mark_failed=False):
     """Return the "Depends on" cell of PR n.
+
+    If mark_failed is true, each prerequisite whose CI failed is followed by a red X.
 
     Returns:
         The PR's direct prerequisites, followed by its transitive ones.
     """
     r = model.repo
-    items = [r.link(d) for d in sorted(model.direct[n])] + [
-        external_link(e) for e in model.external[n]
-    ]
-    more = model.all_deps[n] - model.direct[n]
+
+    def link(d):
+        return r.link(d) + (r.failed_mark(d) if mark_failed else "")
+
+    def ext_link(e):
+        return external_link(e) + (external_failed_mark(e) if mark_failed else "")
+
+    items = [link(d) for d in sorted(model.direct[n])] + [ext_link(e) for e in model.external[n]]
+    more = and_list(link(d) for d in sorted(model.all_deps[n] - model.direct[n]))
     if not items:
         # In a cycle of dependencies, a PR can have no direct prerequisite.
-        return r.links(more)
+        return more
     text = and_list(items)
     if more:
-        text += f" (and transitively {r.links(more)})"
+        text += f" (and transitively {more})"
     return text
 
 
@@ -1869,8 +1904,11 @@ def gen_graph(models, cfg):
     return lines
 
 
-def dependency_cells(model, n):
+def dependency_cells(model, n, mark_failed=False):
     """Return the dependency cells of PR n, which has a prerequisite.
+
+    If mark_failed is true, each prerequisite in the "Depends on" cell whose CI failed is
+    followed by a red X.
 
     Returns:
         The "Depends on", "Stated in description", and
@@ -1910,7 +1948,7 @@ def dependency_cells(model, n):
         if none:
             parts.append(f"lacks every commit of {r.links(none)}")
         contains = f"no ({'; '.join(parts)})"
-    return [depends_on(model, n), stated_text, contains]
+    return [depends_on(model, n, mark_failed), stated_text, contains]
 
 
 def gen_details(model, cfg):
@@ -2111,7 +2149,10 @@ def gen_blocked(model, cfg, base):
         cfg,
         base,
         ["Depends on", "Stated in description", "Branch contains prerequisites' commits", "Notes"],
-        [(n, [*dependency_cells(model, n), detail_notes(model, cfg, n)]) for n in model.blocked()],
+        [
+            (n, [*dependency_cells(model, n, mark_failed=True), detail_notes(model, cfg, n)])
+            for n in model.blocked()
+        ],
     )
 
 
