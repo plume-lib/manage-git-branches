@@ -29,7 +29,15 @@
 #  * Uncommitted changes to tracked files, waived by `--force-uncommitted`.
 #    Untracked and ignored files do not count:  a branch directory is full of
 #    build output, and refusing on account of that would refuse nearly every
-#    directory and make this command useless.
+#    directory and make this command useless.  Nor does a file whose changes
+#    are saved, as defined below, in a commit that the removal leaves:  any
+#    commit, for a directory within a working tree; a commit of another
+#    branch, a remote-tracking ref, or a tag, for a linked worktree; and a
+#    commit of a remote-tracking ref or a tag, for a clone.  A file's
+#    uncommitted changes, in the index and in the working tree, are saved if
+#    each of its new contents is in such a commit, at any pathname.  For
+#    example, a file whose working-tree contents equal its contents in
+#    `origin/main` is saved.  A deleted file is never saved.
 #  * Commits that no other ref holds, waived by `--force-unpushed`.
 #    For a clone, the question is about every ref of the clone, not just the
 #    branch that is checked out, because `rm -rf` takes all of them with it:
@@ -56,6 +64,12 @@
 #    with later work that has not landed, nor of a branch none of whose
 #    commits, other than merges, changes a file, such as one whose only
 #    commits are empty.
+#    Finally, a commit counts as held if its changes are saved:  if each file
+#    that it changes, relative to its first parent, has contents that a
+#    commit held by another ref also has, as for uncommitted changes.  That
+#    is what a commit leaves behind when the same change lands by way of a
+#    different pull request.  A commit that deletes a file, or that changes
+#    no file, is never saved this way.
 #
 # `--force` waives both.  Each refusal names the check, says how much would be
 # lost, and quotes the flag that waives it; each waiver says on standard error
@@ -235,10 +249,11 @@ line_count() {
 # Usage: count_unlanded DIRECTORY LANDABLE REV-LIST-ARGS...
 # Prints the number of commits that `git rev-list REV-LIST-ARGS` lists in the
 # repository of DIRECTORY, other than those on a local branch whose changes
-# have landed in a remote's default branch.  LANDABLE names the local branches
-# that may have landed:  `--all` for every one, a branch name for that one
-# alone, or the empty string for none.  Prints nothing if `git rev-list`
-# fails.
+# have landed in a remote's default branch, and those whose changes are saved
+# in the commits that the arguments after the first `--not` in REV-LIST-ARGS
+# list, as `count_saved` decides.  LANDABLE names the local branches that may
+# have landed:  `--all` for every one, a branch name for that one alone, or
+# the empty string for none.  Prints nothing if `git rev-list` fails.
 #
 # A squash-merged pull request is the reason:  its commits are on no remote,
 # because the squash commit replaces them, and its remote branch is deleted,
@@ -256,36 +271,159 @@ count_unlanded() {
   count_unlanded_dir="$1"
   count_unlanded_landable="$2"
   shift 2
-  count_unlanded_count="$(git -C "${count_unlanded_dir}" rev-list --count \
+  count_unlanded_commits="$(git -C "${count_unlanded_dir}" rev-list \
     "$@" 2> /dev/null)" || return 0
-  if [ "${count_unlanded_count}" -eq 0 ] || [ -z "${count_unlanded_landable}" ] \
-    || [ "${outgoing_works}" -eq 0 ] \
-    || ! git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
+  if [ -z "${count_unlanded_commits}" ]; then
+    echo 0
+    return 0
+  fi
+  if [ -n "${count_unlanded_landable}" ] && [ "${outgoing_works}" -eq 1 ] \
+    && git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
       refs/remotes 2> /dev/null | grep -q '/HEAD$'; then
+    if [ "${count_unlanded_landable}" = --all ]; then
+      count_unlanded_only=
+    else
+      count_unlanded_only="--only-branch=${count_unlanded_landable}"
+    fi
+    if ! count_unlanded_omitted="$(cd -- "${count_unlanded_dir}" \
+      && "${SCRIPT_DIR}"/git-outgoing ${count_unlanded_only:+"${count_unlanded_only}"} --omitted)"; then
+      echo "${SCRIPT_NAME}: cannot tell whether the changes of the commits in ${count_unlanded_dir} have landed, so counting them all" >&2
+    elif [ -n "${count_unlanded_omitted}" ]; then
+      # A `--not` in REV-LIST-ARGS does not apply to the revisions that git
+      # reads from standard input, so each omitted branch is negated by its
+      # `^`.  The branches are passed that way rather than as arguments, which
+      # might exceed the limit on a command line's size.
+      count_unlanded_commits="$(printf '%s\n' "${count_unlanded_omitted}" \
+        | sed 's/^/^/' \
+        | git -C "${count_unlanded_dir}" rev-list --stdin "$@" 2> /dev/null)" \
+        || return 0
+    fi
+  fi
+  count_unlanded_count="$(line_count "${count_unlanded_commits}")"
+  if [ "${count_unlanded_count}" -eq 0 ]; then
+    echo 0
+    return 0
+  fi
+
+  # Discount each commit whose changes are saved, as `count_saved` decides.
+  # A commit's changes are those from its first parent, which for a merge
+  # commit are the changes that the merge brought in.  The output is read in
+  # full before it is used:  output cut short by a failure could omit some of
+  # a commit's files, and the commit would then appear saved.
+  if ! count_unlanded_raw="$(printf '%s\n' "${count_unlanded_commits}" \
+    | git -C "${count_unlanded_dir}" log --no-walk=unsorted --stdin \
+      --format='commit %H' --raw --no-abbrev --no-renames \
+      --diff-merges=first-parent --no-show-signature 2> /dev/null)"; then
     echo "${count_unlanded_count}"
     return 0
   fi
-  if [ "${count_unlanded_landable}" = --all ]; then
-    count_unlanded_only=
-  else
-    count_unlanded_only="--only-branch=${count_unlanded_landable}"
-  fi
-  if ! count_unlanded_omitted="$(cd -- "${count_unlanded_dir}" \
-    && "${SCRIPT_DIR}"/git-outgoing ${count_unlanded_only:+"${count_unlanded_only}"} --omitted)"; then
-    echo "${SCRIPT_NAME}: cannot tell whether the changes of the commits in ${count_unlanded_dir} have landed, so counting them all" >&2
-    echo "${count_unlanded_count}"
+  # The arguments after the first `--not` in REV-LIST-ARGS list the commits
+  # that hold the others.
+  count_unlanded_past_not=0
+  for count_unlanded_arg do
+    shift
+    if [ "${count_unlanded_past_not}" -eq 1 ]; then
+      set -- "$@" "${count_unlanded_arg}"
+    elif [ "${count_unlanded_arg}" = --not ]; then
+      count_unlanded_past_not=1
+    fi
+  done
+  count_unlanded_saved="$(count_saved "${count_unlanded_dir}" \
+    "$(printf '%s\n' "${count_unlanded_raw}" | keyed_blobs commit)" "$@")"
+  echo "$((count_unlanded_count - count_unlanded_saved))"
+}
+
+# Usage: keyed_blobs commit|path
+# Reads the output of `git log --format='commit %H' --raw --no-abbrev` or of
+# `git diff-tree --raw --no-abbrev`, and prints, for each file that it lists,
+# a line "BLOB KEY":  BLOB is the hash of the file's new contents, or "-" if
+# no blob holds them, because the file is deleted or is a submodule; KEY is
+# the hash of the commit that changes the file, given `commit`, or the file's
+# pathname, given `path`.  A raw line looks like
+# ":100644 100644 SRC-HASH DST-HASH M<TAB>PATHNAME".
+keyed_blobs() {
+  awk -v mode="$1" '
+    /^commit / { key = $2; next }
+    /^:/ {
+      if (mode == "path") {
+        key = $0
+        sub(/^[^\t]*\t/, "", key)
+      }
+      print (($2 == "000000" || $2 == "160000") ? "-" : $4) " " key
+    }'
+}
+
+# Usage: count_saved DIRECTORY KEYED-BLOBS HELD-REV-LIST-ARGS...
+# Prints the number of keys in KEYED-BLOBS, the output of `keyed_blobs`, that
+# are saved in the repository of DIRECTORY.  A key is saved if each blob that
+# KEYED-BLOBS lists for it is in a commit that `git rev-list
+# HELD-REV-LIST-ARGS` lists, such as `--remotes --tags`, at any pathname.  A
+# key with a "-" is never saved.  Prints 0 if git fails.
+#
+# `git log --find-object` lists the commits that add or remove one of the
+# blobs, and such a commit or its parent contains the blob.  Merge commits are
+# diffed against their first parent, so that a blob that only a merge's
+# resolution of a conflict holds is found as well.
+count_saved() {
+  count_saved_dir="$1"
+  count_saved_keyed="$2"
+  shift 2
+  count_saved_finds="$(printf '%s\n' "${count_saved_keyed}" \
+    | awk '$1 ~ /^[0-9a-f]+$/ { print "--find-object=" $1 }' | sort -u)"
+  if [ -z "${count_saved_finds}" ]; then
+    echo 0
     return 0
   fi
-  if [ -z "${count_unlanded_omitted}" ]; then
-    echo "${count_unlanded_count}"
+  # shellcheck disable=SC2086 # Each word of ${count_saved_finds} is an option.
+  if ! count_saved_found="$(git -C "${count_saved_dir}" log --format= --raw \
+    --no-abbrev --no-renames --diff-merges=first-parent \
+    ${count_saved_finds} "$@" 2> /dev/null)"; then
+    echo 0
     return 0
   fi
-  # A `--not` in REV-LIST-ARGS does not apply to the revisions that git reads
-  # from standard input, so each omitted branch is negated by its `^`.  The
-  # branches are passed that way rather than as arguments, which might exceed
-  # the limit on a command line's size.
-  printf '%s\n' "${count_unlanded_omitted}" | sed 's/^/^/' \
-    | git -C "${count_unlanded_dir}" rev-list --count --stdin "$@" 2> /dev/null
+  # The found raw lines come first, then a line "--", then the keyed blobs.
+  { printf '%s\n' "${count_saved_found}" '--' "${count_saved_keyed}"; } \
+    | awk '
+        !keys && $0 == "--" { keys = 1; next }
+        !keys { if (/^:/) { held[$3] = 1; held[$4] = 1 }; next }
+        $0 == "" { next }
+        {
+          key = substr($0, index($0, " ") + 1)
+          if (!(key in unsaved)) { unsaved[key] = 0 }
+          if ($1 == "-" || !($1 in held)) { unsaved[key] = 1 }
+        }
+        END { n = 0; for (key in unsaved) if (!unsaved[key]) n++; print n }'
+}
+
+# Usage: count_saved_changes DIRECTORY HELD-REV-LIST-ARGS...
+# Prints the number of tracked files in DIRECTORY, a working tree or a
+# directory within one, whose uncommitted changes are saved:  each of the
+# file's new contents, in the index and in the working tree, is in a commit
+# that `git rev-list HELD-REV-LIST-ARGS` lists, as `count_saved` decides.
+# Prints 0 if git fails.
+#
+# `git stash create` makes a commit W, which no ref names, whose tree is that
+# of the working tree, whose first parent is HEAD, and whose second parent is
+# a commit whose tree is that of the index.  It writes the blobs of the
+# changed files into the repository, where `git gc` eventually removes them.
+count_saved_changes() {
+  count_saved_changes_dir="$1"
+  shift
+  if ! count_saved_changes_stash="$(git -C "${count_saved_changes_dir}" \
+    stash create 2> /dev/null)" || [ -z "${count_saved_changes_stash}" ]; then
+    echo 0
+    return 0
+  fi
+  if ! count_saved_changes_raw="$(git -C "${count_saved_changes_dir}" \
+    diff-tree -r --raw --no-abbrev --no-renames \
+    HEAD "${count_saved_changes_stash}" -- . \
+    && git -C "${count_saved_changes_dir}" diff-tree -r --raw --no-abbrev \
+      --no-renames HEAD "${count_saved_changes_stash}^2" -- .)"; then
+    echo 0
+    return 0
+  fi
+  count_saved "${count_saved_changes_dir}" \
+    "$(printf '%s\n' "${count_saved_changes_raw}" | keyed_blobs path)" "$@"
 }
 
 # Prints the number of live linked worktrees of the repository in directory
@@ -862,6 +1000,18 @@ remove_branch_directory() {
   # afterward the information is gone.
   remove_refusals=0
 
+  if [ "${remove_kind}" = 'linked-worktree' ]; then
+    remove_kept=''
+    remove_doomed="${remove_branch}"
+    if [ -n "${remove_branch}" ]; then
+      remove_kept="$(worktree_branch_kept "${remove_common}" \
+        "${remove_branch}" "${remove_registered%/.git}")"
+      if [ -n "${remove_kept}" ]; then
+        remove_doomed=''
+      fi
+    fi
+  fi
+
   if [ "${remove_kind}" = 'working-tree' ] \
     || [ "${remove_kind}" = 'linked-worktree' ] \
     || [ "${remove_kind}" = 'within-working-tree' ]; then
@@ -870,15 +1020,43 @@ remove_branch_directory() {
     # files, and refusing on account of those would refuse nearly every
     # directory.  For a directory within a working tree, ask only about that
     # directory, which is all that the removal would take.
+    # `--no-renames` makes a renamed file two lines, a deletion and an
+    # addition, as `count_saved_changes` counts it.
     remove_status_failed=0
     if [ "${remove_kind}" != 'within-working-tree' ]; then
-      remove_modified="$(git -C "${remove_dir}" status --porcelain \
+      remove_modified="$(git -C "${remove_dir}" status --porcelain --no-renames \
         --untracked-files=no --ignore-submodules=none 2> /dev/null)" || remove_status_failed=1
     else
-      remove_modified="$(git -C "${remove_dir}" status --porcelain \
+      remove_modified="$(git -C "${remove_dir}" status --porcelain --no-renames \
         --untracked-files=no --ignore-submodules=none -- . 2> /dev/null)" || remove_status_failed=1
     fi
     remove_modified_count="$(line_count "${remove_modified}")"
+    # Discount the files whose changes are saved in commits that the removal
+    # leaves:  for a linked worktree, those of every other branch, as well as
+    # of remote-tracking refs and tags; for a clone, those of remote-tracking
+    # refs and tags; and for a directory within a working tree, every commit.
+    # A file whose changes a submodule holds is never saved, because
+    # `count_saved_changes` does not see it, and an inconsistent answer is
+    # read as "nothing saved".
+    if [ "${remove_status_failed}" -eq 0 ] && [ "${remove_modified_count}" -gt 0 ] \
+      && [ "${force_uncommitted}" -eq 0 ]; then
+      case "${remove_kind}" in
+        linked-worktree)
+          remove_saved="$(count_saved_changes "${remove_dir}" \
+            ${remove_doomed:+"--exclude=${remove_doomed}"} --branches \
+            --remotes --tags)"
+          ;;
+        within-working-tree)
+          remove_saved="$(count_saved_changes "${remove_dir}" --all)"
+          ;;
+        *)
+          remove_saved="$(count_saved_changes "${remove_dir}" --remotes --tags)"
+          ;;
+      esac
+      if [ "${remove_saved}" -le "${remove_modified_count}" ]; then
+        remove_modified_count=$((remove_modified_count - remove_saved))
+      fi
+    fi
     if [ "${remove_status_failed}" -ne 0 ]; then
       # `git status` failed, so its empty output says nothing about the
       # working tree.  Reading it as "no modified files" would remove a
@@ -936,15 +1114,6 @@ remove_branch_directory() {
   fi
 
   if [ "${remove_kind}" = 'linked-worktree' ]; then
-    remove_kept=''
-    remove_doomed="${remove_branch}"
-    if [ -n "${remove_branch}" ]; then
-      remove_kept="$(worktree_branch_kept "${remove_common}" \
-        "${remove_branch}" "${remove_registered%/.git}")"
-      if [ -n "${remove_kept}" ]; then
-        remove_doomed=''
-      fi
-    fi
     check_worktree_unpushed "${remove_common}" "${remove_head}" \
       "${remove_doomed}" "${remove_dir}"
   fi
