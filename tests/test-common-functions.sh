@@ -628,4 +628,42 @@ check_resolution_raw reject "CRLF line endings, and a separator remains" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\na\r\n=======\r\nA\r\nb\r\n'
 rm "${WORK_DIR}/ccr/.gitattributes"
 
+## Usage: hum_commit DIRECTORY FILE MESSAGE
+## Writes MESSAGE to FILE in DIRECTORY and commits it with that message.
+hum_commit() {
+  printf '%s\n' "$3" > "$1/$2"
+  git -C "$1" add -- "$2"
+  git -C "$1" commit -q -m "$3"
+}
+
+## Tests of has_unbuilt_merge.  A commit in BUILT that is in the history of a
+## remote branch is omitted from the account, but its tree still counts:
+## when the current branch's tree is that of such a commit, upstream/main,
+## no merge broke the build, although an unpushed merge combined changes.
+git init -q -b main "${WORK_DIR}/hum"
+hum_commit "${WORK_DIR}/hum" base.txt "Initial commit"
+hum_commit "${WORK_DIR}/hum" upstream.txt "Change upstream"
+git -C "${WORK_DIR}/hum" update-ref refs/remotes/upstream/main HEAD
+git -C "${WORK_DIR}/hum" switch -q -c feature
+hum_commit "${WORK_DIR}/hum" feature.txt "Change feature"
+git -C "${WORK_DIR}/hum" remote add origin /nonexistent/hum.git
+git -C "${WORK_DIR}/hum" update-ref refs/remotes/origin/feature HEAD
+git -C "${WORK_DIR}/hum" config branch.feature.remote origin
+git -C "${WORK_DIR}/hum" config branch.feature.merge refs/heads/feature
+git -C "${WORK_DIR}/hum" switch -q -c side
+hum_commit "${WORK_DIR}/hum" side.txt "Change side"
+git -C "${WORK_DIR}/hum" switch -q feature
+hum_commit "${WORK_DIR}/hum" other.txt "Change feature again"
+git -C "${WORK_DIR}/hum" merge -q --no-edit side
+git -C "${WORK_DIR}/hum" rm -q feature.txt side.txt other.txt
+git -C "${WORK_DIR}/hum" commit -q -m "Match upstream"
+if (cd "${WORK_DIR}/hum" && has_unbuilt_merge refs/remotes/upstream/main); then
+  fail "has_unbuilt_merge: a tree that upstream/main has is blamed on a merge"
+fi
+## Without that tree, the merge might have broken the build.
+hum_commit "${WORK_DIR}/hum" new.txt "Differ from upstream"
+if ! (cd "${WORK_DIR}/hum" && has_unbuilt_merge refs/remotes/upstream/main); then
+  fail "has_unbuilt_merge: the unpushed merge is not blamed"
+fi
+
 echo "${SCRIPT_NAME}: OK"

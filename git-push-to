@@ -413,6 +413,7 @@ git_push_to() {
   if ! pull_resolving "${llm_agent}" "${from_absolute}" -q; then
     return 1
   fi
+  from_fetched="${pull_fetched}"
 
   orig_dir=$(pwd)
 
@@ -435,6 +436,7 @@ git_push_to() {
   if ! pull_resolving "${llm_agent}" "${to_absolute}" -q --no-rebase; then
     return 1
   fi
+  to_fetched="${pull_fetched}"
 
   # Note: pwd=to_absolute
   if ! fetch_branch "${from_absolute}" "${from_branch}"; then
@@ -452,13 +454,14 @@ git_push_to() {
   # that `merge.log` turns on with "* 'feature' of ../myrepo-branch-feature:".
   # `merge_build_push` describes the commit as a branch of this repository.
   # The histories of the remote branches that FROM_DIR's branch pushes to and
-  # pulls from were built where they were pushed, so a failed build of TO_DIR
+  # pulls from, and of the heads that the pulls of FROM_DIR and TO_DIR
+  # fetched, were built where they were pushed, so a failed build of TO_DIR
   # does not ask the agent about their merges.  FROM_DIR's own merges, such
   # as the one that the pull just made, are not among them.
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
     "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}" \
-    '' "${from_absolute}"; then
+    "${to_fetched} ${from_fetched}" "${from_absolute}"; then
     return 1
   fi
 

@@ -1677,12 +1677,23 @@ parse_llm_option() {
 ## if it is not empty, about any that `git rerere` did not resolve, and
 ## commits the merge with the message that `git pull` composed.  (A pull that
 ## rebases cannot be resolved this way.)
+## Sets ${pull_fetched} to the head of the upstream branch that the pull
+## fetched, which it merged, fast-forwarded to, rebased onto, or found already
+## in the branch, as a full hash such as the 40 hexadecimal digits that
+## `git rev-parse HEAD` prints.  That commit's history was built where it
+## was pushed, even if no remote-tracking branch records it, as when
+## `branch.BRANCH.remote` is a URL.  Sets ${pull_fetched} to the empty string
+## instead if the upstream branch is in the local repository or in a non-bare
+## repository in the local file system, such as another working clone, whose
+## branches need not have been pushed, or if the pull did not record the head
+## in FETCH_HEAD.
 ## Returns 1, after printing a diagnostic, if a merge is already in progress
 ## in DIRECTORY, or if the pull fails and its conflicts are not resolved.
 pull_resolving() {
   pull_resolver="$1"
   pull_dir="$2"
   shift 2
+  pull_fetched=''
   # Otherwise, `git pull` would refuse to run, and the merge in progress would
   # seem to be the pull's.
   if git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
@@ -1692,11 +1703,33 @@ pull_resolving() {
   # `rerere.autoUpdate` false and the configured conflict style are as for
   # the merge in `merge_build_push`.
   if git -C "${pull_dir}" -c rerere.autoUpdate=false pull --no-edit "$@"; then
-    return 0
+    pull_conflicted=0
+  else
+    echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
+    if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+      return 1
+    fi
+    pull_conflicted=1
   fi
-  echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
-  if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
-    return 1
+  # FETCH_HEAD is read now, before `resolve_merge_conflicts` runs an agent,
+  # which might fetch and so overwrite it.  FETCH_HEAD names first the commit
+  # that `git pull` merges, fast-forwards to, or rebases onto.  The remote
+  # "." is the local repository.
+  if pull_branch="$(git -C "${pull_dir}" symbolic-ref --quiet --short HEAD)" \
+    && pull_remote="$(git -C "${pull_dir}" config --get "branch.${pull_branch}.remote")" \
+    && [ "${pull_remote}" != . ]; then
+    pull_key="$(repository_key "${pull_dir}" "${pull_remote}")"
+    case "${pull_key}" in
+      /*) pull_bare="$(git -C "${pull_key}" rev-parse --is-bare-repository 2> /dev/null)" ;;
+      *) pull_bare=true ;;
+    esac
+    if [ "${pull_bare}" = true ]; then
+      # shellcheck disable=SC2034 # used by the commands that source this file
+      pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
+    fi
+  fi
+  if [ "${pull_conflicted}" -eq 0 ]; then
+    return 0
   fi
   # Git names the conflicted files relative to the top level of the working
   # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
@@ -1827,11 +1860,30 @@ built_commits() {
 ## caused, and the agent would merely work around it.  For example, a pull
 ## that fast-forwarded the branch brought only commits that the remote
 ## already had.  Prints a diagnostic if it returns 1 because git fails.
+## The account in ${merge_fix_account} omits each commit in BUILT that is in
+## the history of a remote branch or of an earlier commit in BUILT, because it
+## excludes no more commits, but that commit's tree still counts.
 has_unbuilt_merge() {
   merge_fix_remotes="$(remote_branch_refs .)"
   merge_fix_built=''
+  # Every commit in BUILT that is in the repository, for the comparison of
+  # trees below.
+  merge_fix_trees=''
   for merge_fix_commit in $1; do
-    if git rev-parse --verify --quiet "${merge_fix_commit}^{commit}" > /dev/null; then
+    if ! git rev-parse --verify --quiet "${merge_fix_commit}^{commit}" > /dev/null; then
+      continue
+    fi
+    merge_fix_trees="${merge_fix_trees:+${merge_fix_trees} }${merge_fix_commit}"
+    # A commit in a remote branch's history, such as the head that a pull
+    # fetched, excludes nothing more, and would only lengthen the account.
+    merge_fix_redundant=0
+    for merge_fix_remote in ${merge_fix_remotes} ${merge_fix_built}; do
+      if git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_remote}"; then
+        merge_fix_redundant=1
+        break
+      fi
+    done
+    if [ "${merge_fix_redundant}" -eq 0 ]; then
       merge_fix_built="${merge_fix_built:+${merge_fix_built} }${merge_fix_commit}"
     fi
   done
@@ -1841,7 +1893,7 @@ has_unbuilt_merge() {
   fi
   # The build of a tree that a remote branch, or a commit in BUILT, has is
   # not a merge's doing.
-  for merge_fix_commit in ${merge_fix_remotes} ${merge_fix_built}; do
+  for merge_fix_commit in ${merge_fix_remotes} ${merge_fix_trees}; do
     if [ "$(git rev-parse --verify --quiet "${merge_fix_commit}^{tree}")" = "${merge_fix_tree}" ]; then
       return 1
     fi
@@ -1940,9 +1992,10 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
 ## it, but only if a merge on the current branch might have broken the
 ## build, as `has_unbuilt_merge` determines.  Its argument is BUILT, a list
 ## of commits, separated by spaces, whose histories were built elsewhere,
-## such as "refs/remotes/upstream/main", together with the `built_commits`
-## of DIRECTORY, a working tree such as the one that COMMIT comes from, if
-## DIRECTORY is given and not empty.  The merge commit can be the one that
+## such as "refs/remotes/upstream/main" or the head that a pull of the
+## current branch fetched (see `pull_resolving`), together with the
+## `built_commits` of DIRECTORY, a working tree such as the one that COMMIT
+## comes from, if DIRECTORY is given and not empty.  The merge commit can be the one that
 ## this call made, one that a pull made, or one that an earlier call made
 ## but did not push, as when its build failed.
 ## Returns 1, after printing a diagnostic, on failure.
