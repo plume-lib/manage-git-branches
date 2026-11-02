@@ -104,7 +104,7 @@ set_variables_in() {
     exit 2
   fi
   if printf '%s\n' "${assigned}" | grep -qxF '<unclosed>'; then
-    echo "${SCRIPT_NAME}: $1 ends within a quotation, a command substitution, an array literal, or a \"case\" statement" >&2
+    echo "${SCRIPT_NAME}: $1 ends within a quotation, a command substitution, a parameter expansion, an array literal, or a \"case\" statement" >&2
     echo "${SCRIPT_NAME}: either it is not valid shell, or set_variables_in mis-parsed it" >&2
     exit 2
   fi
@@ -147,6 +147,8 @@ awk_variables_read() {
 # statement, whose variable is internal to this package, versus an environment
 # prefix of a command, whose variable is not -- is easy to break, and breaking
 # it would make this test quietly stop requiring a variable to be documented.
+# The script has no "#!" line, so `set_variables_in` parses it as a POSIX shell
+# script, as in the expansion "${PLAIN:-it's}".
 FIXTURE="$(mktemp "${TMPDIR:-/tmp}/manage-git-branches-fixture.XXXXXX")"
 trap 'rm -f "${FIXTURE}"' EXIT
 trap 'rm -f "${FIXTURE}"; trap - INT; kill -s INT "$$"' INT
@@ -187,6 +189,14 @@ REDIRECTED_PREFIX=1 >/dev/null some-command # The target is attached.
 DUPLICATED_DESCRIPTOR_PREFIX=1 2>&1 some-command
 MULTILINE_PREFIX="one
 two" some-command
+NESTED_QUOTE="${PLAIN#*"it's "}"
+NESTED_QUOTE_SUFFIX="${PLAIN%"'"}"
+LITERAL_QUOTE="${PLAIN:-it's}"
+NESTED_EXPANSION="${PLAIN:-${PLAIN:-it's}}"
+PATTERN_QUOTE="${PLAIN#'"'}"
+NESTED_PATTERN_QUOTE="${PLAIN#${PLAIN:-'"'}}"
+PID_BRACE="$${" # The special parameter "$$", then a literal "{".
+UNQUOTED_EXPANSION=${PLAIN:-'a } b'}
 ARRAY=(one two)
 APPENDED+=(three)
 ELEMENT[1]=one
@@ -244,6 +254,7 @@ ELEMENTS
 ESCAPED
 EXPORTED
 LAST_CASE_BODY
+LITERAL_QUOTE
 LOCAL_ARRAY
 MAPFILE
 MAPPED
@@ -251,11 +262,17 @@ MULTILINE
 MULTILINE_ARRAY
 MULTILINE_CASE
 NESTED_ARITHMETIC
+NESTED_EXPANSION
+NESTED_PATTERN_QUOTE
+NESTED_QUOTE
+NESTED_QUOTE_SUFFIX
 NESTED_SUBSCRIPT
 ONE_LINE_CASE_BODY
 OTHER_DECLARED
 OTHER_READ_VARIABLE
 PARENTHESIZED_CASE
+PATTERN_QUOTE
+PID_BRACE
 PIPED_SUBSHELL
 PLAIN
 PROMPTED
@@ -270,7 +287,8 @@ REDIRECTED
 REPLY
 STATEMENT_AFTER_CONTINUATION
 SUBSHELL
-SUBSTITUTED'
+SUBSTITUTED
+UNQUOTED_EXPANSION'
 ACTUAL="$(set_variables_in "${FIXTURE}" statement)"
 if [ "${ACTUAL}" != "${EXPECTED}" ]; then
   echo "${SCRIPT_NAME}: set_variables_in is broken" >&2
@@ -348,6 +366,19 @@ FIXTURE_END
 if [ "$(set_variables_in "${FIXTURE}" statement)" != "HERE_STRING
 SUBSTITUTED_HERE_STRING" ]; then
   echo "${SCRIPT_NAME}: set_variables_in mistook a here-string for a here-document" >&2
+  exit 2
+fi
+
+# Bash, unlike a POSIX shell, treats a "'" in the word of "${VAR:-word}" as a
+# quotation mark even within double quotation marks.
+cat > "${FIXTURE}" << 'FIXTURE_END'
+#!/usr/bin/env bash
+BASH_QUOTE="${PLAIN:-'"'}"
+AFTER_BASH_QUOTE=1
+FIXTURE_END
+if [ "$(set_variables_in "${FIXTURE}" statement)" != "AFTER_BASH_QUOTE
+BASH_QUOTE" ]; then
+  echo "${SCRIPT_NAME}: set_variables_in mis-parsed a parameter expansion in a Bash script" >&2
   exit 2
 fi
 

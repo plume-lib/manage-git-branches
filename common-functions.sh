@@ -1111,7 +1111,7 @@ resolve_with_agent() {
   # system records a later time than the marker's, so that a file that it
   # changes has a later ctime.  The working tree and the git directory can
   # be on different file systems.  The working tree's pathnames are listed
-  # after the wait, which writes a file in the working tree and then
+  # after the wait, which creates a directory in the working tree and then
   # removes it.
   resolve_index="$(git ls-files --stage -z | cksum)"
   if ! resolve_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-start)" \
@@ -1260,25 +1260,28 @@ working_tree_changes() {
 ## record finer times but advance its clock only every few milliseconds.
 ## DIR and FILE can be on different file systems.
 ##
-## Writes, and then removes, the file DIR/.manage-git-branches-time-probe,
-## which must not already exist.  It removes the file even if a signal such
-## as SIGINT ends the wait.  Returns 1, after printing a diagnostic, if it
-## cannot write that file, or if the time does not advance within TRIES
-## checks, 20 if TRIES is not given; each check after the 10th first sleeps
-## 1 second, so 20 checks take about 10 seconds.
+## Creates, and then removes, the directory
+## DIR/.manage-git-branches-time-probe, which must not already exist.  It
+## removes the directory even if a signal such as SIGINT ends the wait.
+## Returns 1, after printing a diagnostic, if it cannot create that
+## directory, or if the time does not advance within TRIES checks, 20 if
+## TRIES is not given; each check after the 10th first sleeps 1 second, so
+## 20 checks take about 10 seconds.
 ##
 ## The function runs in a subshell, so that its traps do not replace the
 ## caller's.
 wait_for_later_time() (
   wait_probe="$2/.manage-git-branches-time-probe"
   wait_max_tries="${3:-20}"
-  # `set -C` keeps the redirection from overwriting an existing file.
-  if ! (set -C && : > "${wait_probe}"); then
-    echo "${SCRIPT_NAME}: cannot create the file ${wait_probe}, which must not already exist" >&2
+  # `mkdir` fails if anything, even a symbolic link, already has that name.
+  # By contrast, `set -C` lets a redirection open an existing file that is
+  # not a regular file, such as a FIFO or a symbolic link to /dev/null.
+  if ! mkdir -- "${wait_probe}"; then
+    echo "${SCRIPT_NAME}: cannot create the directory ${wait_probe}, which must not already exist" >&2
     exit 1
   fi
   # A probe left behind would make every later wait in DIR fail.
-  trap 'rm -f -- "${wait_probe}"' EXIT
+  trap 'rmdir -- "${wait_probe}"' EXIT
   trap 'wait_end_by_signal HUP "${wait_probe}"' HUP
   trap 'wait_end_by_signal INT "${wait_probe}"' INT
   trap 'wait_end_by_signal TERM "${wait_probe}"' TERM
@@ -1293,22 +1296,22 @@ wait_for_later_time() (
     # whole number of seconds.
     if [ "${wait_tries}" -ge 10 ]; then sleep 1; fi
     if ! touch -- "${wait_probe}"; then
-      echo "${SCRIPT_NAME}: cannot change the time of the file ${wait_probe}" >&2
+      echo "${SCRIPT_NAME}: cannot change the time of the directory ${wait_probe}" >&2
       exit 1
     fi
     wait_tries=$((wait_tries + 1))
   done
 )
 
-## Usage: wait_end_by_signal SIGNAL FILE
-## For the traps of `wait_for_later_time`.  Removes FILE, a probe file;
+## Usage: wait_end_by_signal SIGNAL DIR
+## For the traps of `wait_for_later_time`.  Removes DIR, a probe directory;
 ## restores the default disposition of SIGNAL, a signal name such as INT; and
 ## re-sends SIGNAL to the subshell that runs `wait_for_later_time`, so that
 ## the caller sees that the signal ended the wait.  If the subshell merely
 ## exited, bash would continue the caller.  `$$` would name the main shell,
 ## not the subshell.
 wait_end_by_signal() {
-  rm -f -- "$2"
+  rmdir -- "$2"
   trap - "$1" EXIT
   kill -s "$1" "$(exec sh -c 'echo "$PPID"')"
 }
@@ -2193,13 +2196,14 @@ built_commits() {
 ## Commits in BUILT that are not in the repository are ignored.  If it
 ## returns 0, it sets ${merge_fix_branch} to the current branch's name, such
 ## as "feature"; ${merge_fix_account} to an account, for an AI agent, of the
-## merge commits that might have broken the build and of the commands that
-## show them; and ${merge_fix_message} to the message of a commit that fixes
-## the build, such as "Fix the build after merging branch 'main'".  If it
-## returns 1, a failure of the build is not one that a merge on the branch
-## caused, and the agent would merely work around it.  For example, a pull
-## that fast-forwarded the branch brought only commits that the remote
-## already had.  Prints a diagnostic if it returns 1 because git fails.
+## merge commits that might have broken the build, of what each side of each
+## of them changed, and of the commands that show them; and
+## ${merge_fix_message} to the message of a commit that fixes the build, such
+## as "Fix the build after merging branch 'main'".  If it returns 1, a
+## failure of the build is not one that a merge on the branch caused, and the
+## agent would merely work around it.  For example, a pull that
+## fast-forwarded the branch brought only commits that the remote already
+## had.  Prints a diagnostic if it returns 1 because git fails.
 ## The account in ${merge_fix_account} omits each commit in BUILT that is in
 ## the history of a remote branch or of another commit in BUILT, because it
 ## excludes no more commits, but that commit's tree still counts.  Of commits
@@ -2272,8 +2276,9 @@ has_unbuilt_merge() {
     echo "${SCRIPT_NAME}: cannot list the merge commits in $(pwd), so no AI agent is asked to fix the build" >&2
     return 1
   fi
-  # The merges that combined changes:  their subjects, and lines
-  # "* ABBREVIATION SUBJECT", one per merge.
+  # The merges that combined changes:  their subjects, and, one per merge,
+  # a line "* ABBREVIATION SUBJECT" followed, for a merge of two commits
+  # that share history, by an indented account of what each side changed.
   merge_fix_subjects=''
   merge_fix_list=''
   for merge_fix_commit in ${merge_fix_log}; do
@@ -2293,15 +2298,46 @@ has_unbuilt_merge() {
       fi
     done
     if [ "${merge_fix_combined}" -eq 1 ]; then
-      if ! merge_fix_subject="$(git log -1 --format=%s "${merge_fix_commit}")" \
-        || ! merge_fix_abbrev="$(git rev-parse --short "${merge_fix_commit}")"; then
+      if ! merge_fix_line="$(git log -1 --format='%h %s' "${merge_fix_commit}")"; then
         echo "${SCRIPT_NAME}: cannot read commit ${merge_fix_commit} in $(pwd), so no AI agent is asked to fix the build" >&2
         return 1
       fi
       merge_fix_subjects="${merge_fix_subjects:+${merge_fix_subjects}
-}${merge_fix_subject}"
+}${merge_fix_line#* }"
       merge_fix_list="${merge_fix_list:+${merge_fix_list}
-}* ${merge_fix_abbrev} ${merge_fix_subject}"
+}* ${merge_fix_line}"
+      # A merge of two commits that share history gets an account of the
+      # commits that only each of them had.  Those commits' patches show
+      # what each side changed, even where the two have several merge bases,
+      # as after criss-cross merges; `--remerge-diff` shows, for a merge among
+      # them, how the merge differs from git's automatic merge of its parents,
+      # such as a conflict's resolution, even one that takes one parent's
+      # version.  (`--cc` and `--diff-merges=first-parent` omit a hunk whose
+      # result equals a parent's.)  The account names commits by their full hashes, which
+      # stay unambiguous after the agent creates objects.  An octopus merge,
+      # or one whose parents share no history, gets only its line.
+      case "${merge_fix_parents}" in
+        *"
+"*"
+"*) ;;
+        *)
+          merge_fix_ours="${merge_fix_parents%%"
+"*}"
+          merge_fix_theirs="${merge_fix_parents#*"
+"}"
+          merge_fix_ours_log="\`git log -p --remerge-diff ${merge_fix_theirs}..${merge_fix_ours}\` shows the commits that only ${merge_fix_ours} had"
+          merge_fix_theirs_log="\`git log -p --remerge-diff ${merge_fix_ours}..${merge_fix_theirs}\` shows the commits that only ${merge_fix_theirs} had"
+          if merge_fix_base="$(git merge-base "${merge_fix_ours}" "${merge_fix_theirs}")"; then
+            case "${merge_fix_base}" in
+              "${merge_fix_ours}") merge_fix_sides="It merged commit ${merge_fix_theirs} into its ancestor, commit ${merge_fix_ours}.  ${merge_fix_theirs_log}." ;;
+              "${merge_fix_theirs}") merge_fix_sides="It merged commit ${merge_fix_theirs} into its descendant, commit ${merge_fix_ours}.  ${merge_fix_ours_log}." ;;
+              *) merge_fix_sides="It merged commit ${merge_fix_theirs} into commit ${merge_fix_ours}.  ${merge_fix_ours_log}, and ${merge_fix_theirs_log}." ;;
+            esac
+            merge_fix_list="${merge_fix_list}
+  ${merge_fix_sides}"
+          fi
+          ;;
+      esac
     fi
   done
   if [ -z "${merge_fix_subjects}" ]; then
