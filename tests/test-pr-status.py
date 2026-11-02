@@ -481,28 +481,31 @@ class DependsOnTest(unittest.TestCase):
             }.items()
         }
         other = self.repo("other/repo", {5})
+        other.prs = {
+            5: {"body": "", "baseRefName": "master", "owner": "owner", "headRefName": "b5"}
+        }
         with mock.patch.dict(pr_status.EXTERNAL_STATE, {"other/repo#5": "open"}):
             model = pr_status.Model(repo, {"repos": {"owner/repo": {}}})
-        pr_status.unite_partners([model])
+        other_model = pr_status.Model(other, {"repos": {"other/repo": {}}})
+        pr_status.unite_partners([model, other_model])
 
         def link(gh, n):
             return (
                 f"[{'#' if gh == 'owner/repo' else gh + '#'}{n}](https://github.com/{gh}/pull/{n})"
             )
 
-        with mock.patch.dict(pr_status.REPOS, {"other/repo": other}):
-            self.assertEqual(
-                pr_status.depends_on(model, 2, mark_failed=True),
-                f"{link('owner/repo', 3)} ❌ and {link('other/repo', 5)} ❌",
-            )
-            self.assertEqual(
-                pr_status.depends_on(model, 1, mark_failed=True),
-                f"{link('owner/repo', 2)} (and transitively {link('owner/repo', 3)} ❌)",
-            )
-            self.assertEqual(
-                pr_status.depends_on(model, 2),
-                f"{link('owner/repo', 3)} and {link('other/repo', 5)}",
-            )
+        self.assertEqual(
+            pr_status.depends_on(model, 2, mark_failed=True),
+            f"{link('owner/repo', 3)} ❌ and {link('other/repo', 5)} ❌",
+        )
+        self.assertEqual(
+            pr_status.depends_on(model, 1, mark_failed=True),
+            f"{link('owner/repo', 2)} (and transitively {link('owner/repo', 3)} ❌)",
+        )
+        self.assertEqual(
+            pr_status.depends_on(model, 2),
+            f"{link('owner/repo', 3)} and {link('other/repo', 5)}",
+        )
 
 
 class ShellWordTest(unittest.TestCase):

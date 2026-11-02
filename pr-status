@@ -167,10 +167,10 @@ class Repo:
         """Return the mark that a link to PR n carries if the PR's CI failed.
 
         Returns:
-            " ❌" if the PR's CI failed, or "" otherwise.
+            FAILED_MARK if the PR's CI failed, or "" otherwise.
         """
         load_reviews_and_ci(self)
-        return " ❌" if n in self.ci_failed else ""
+        return FAILED_MARK if n in self.ci_failed else ""
 
     def refs(self, ns):
         """Return how documents refer to the PRs ns.
@@ -421,21 +421,8 @@ def external_link(ref):
     return highlight(gh, int(n), f"[{ref}](https://github.com/{gh}/pull/{n})")
 
 
-def external_failed_mark(ref):
-    """Return the mark that a link to the PR "owner/repo#N" carries if the PR's CI failed.
-
-    Returns:
-        " ❌" if the config describes the PR's repository and the PR's CI failed, or ""
-        otherwise.
-    """
-    gh, n = ref.split("#")
-    repo = REPOS.get(gh.lower())
-    return repo.failed_mark(int(n)) if repo else ""
-
-
-# The repositories that the config describes, as a map from each one's lowercase GitHub
-# slug, such as "org/repo", to its Repo.
-REPOS = {}
+# The mark that follows a PR whose CI failed.
+FAILED_MARK = " ❌"
 
 
 # The PRs that the documents highlight, as pairs of a lowercase GitHub slug, such as
@@ -804,6 +791,9 @@ class Model:
         self.external_partners = {}
         self.stated_closed = {}
         self.external = {}
+        # This model and the models that unite_partners unites it with, as a map from each
+        # one's lowercase GitHub slug, such as "org/repo", to the model.
+        self.by_gh = {repo.gh.lower(): self}
         prereqs = {n: stated_prerequisites(repo.prs[n]["body"], repo) for n in open_prs}
         # Look up all the states at once; state_of and external_state look up any that remain.
         external = {e for _, ext, _, _, _ in prereqs.values() for e in ext} | {
@@ -993,9 +983,8 @@ class Model:
         if threads:
             outdated = sum(threads)
             cell.append(str(len(threads)) + (f" ({outdated} outdated)" if outdated else ""))
-        failed = self.repo.failed_mark(n)
-        if failed:
-            cell.append(failed)
+        if n in self.repo.ci_failed:
+            cell.append(FAILED_MARK)
         elif n in self.repo.ci_passed:
             cell.append(" ✅")
         return "".join(cell)
@@ -1070,6 +1059,8 @@ def unite_partners(models):
     depends on every prerequisite of every member, and on no member.
     """
     by_gh = {m.repo.gh.lower(): m for m in models}
+    for model in models:
+        model.by_gh = by_gh
     neighbors = defaultdict(set)  # (model, PR number) -> partners
     for model in models:
         for n in model.open:
@@ -1125,7 +1116,6 @@ def load_models(cfg, pairwise=True):
     models = []
     for name in cfg["order"]:
         repo = Repo(cfg["repos"][name])
-        REPOS[repo.gh.lower()] = repo
         load_repo(repo, pairwise=pairwise)
         models.append(Model(repo, cfg))
     unite_partners(models)
@@ -1218,6 +1208,22 @@ def needed_by(model, n):
     return text
 
 
+def external_failed_mark(model, ref):
+    """Return the mark that a link to the PR ref carries if the PR's CI failed.
+
+    Args:
+        model: a Model.
+        ref: a PR in another repository, such as "owner/repo#5".
+
+    Returns:
+        FAILED_MARK if the PR's repository is one of the models that unite_partners united
+        with model and the PR's CI failed, or "" otherwise.
+    """
+    gh, n = ref.split("#")
+    other = model.by_gh.get(gh.lower())
+    return other.repo.failed_mark(int(n)) if other else ""
+
+
 def depends_on(model, n, mark_failed=False):
     """Return the "Depends on" cell of PR n.
 
@@ -1232,7 +1238,7 @@ def depends_on(model, n, mark_failed=False):
         return r.link(d) + (r.failed_mark(d) if mark_failed else "")
 
     def ext_link(e):
-        return external_link(e) + (external_failed_mark(e) if mark_failed else "")
+        return external_link(e) + (external_failed_mark(model, e) if mark_failed else "")
 
     items = [link(d) for d in sorted(model.direct[n])] + [ext_link(e) for e in model.external[n]]
     more = and_list(link(d) for d in sorted(model.all_deps[n] - model.direct[n]))
