@@ -1961,18 +1961,17 @@ parse_llm_option() {
 }
 
 ## Usage: pull_resolving RESOLVER DIRECTORY [--no-rebase]
-## Pulls the branch checked out in DIRECTORY from its upstream branch, as
-## `git -C DIRECTORY pull -q [--no-rebase]` does, but names the source of a
-## merge without its URL where it can.  A pull that merges is done as
-## `git fetch` followed by `git merge`, whose message `pull_merge_message`
-## composes:  for example, "Merge remote-tracking branch 'origin/feature'
-## into feature" rather than "Merge branch 'feature' of /home/me/repos/proj
-## into feature".  If the merge has conflicts, resolves them with
-## `resolve_merge_conflicts`, asking RESOLVER, if it is not empty, about any
-## that `git rerere` did not resolve, and commits the merge with that
-## message.  A pull that rebases, as `pull.rebase` can make it do unless
-## `--no-rebase` is given, is done by `git pull`, and its conflicts are not
-## resolved.
+## Runs `git -C DIRECTORY pull -q [--no-rebase]`, which pulls the branch
+## checked out in DIRECTORY from its upstream branch, but names the source of
+## a merge that the pull makes without its URL where it can, with the message
+## that `pull_merge_message` composes:  for example, "Merge remote-tracking
+## branch 'origin/feature' into feature" rather than "Merge branch 'feature'
+## of /home/me/repos/proj into feature".  If the pull merges and the merge
+## has conflicts, resolves them with `resolve_merge_conflicts`, asking
+## RESOLVER, if it is not empty, about any that `git rerere` did not resolve,
+## and commits the merge with that message.  (A pull that rebases, as
+## `pull.rebase` can make it do unless `--no-rebase` is given, cannot be
+## resolved this way.)
 ## Sets ${pull_fetched} to the head of the upstream branch that the pull
 ## fetched, which it merged, fast-forwarded to, rebased onto, or found already
 ## in the branch, as a full hash such as
@@ -1990,6 +1989,7 @@ parse_llm_option() {
 pull_resolving() {
   pull_resolver="$1"
   pull_dir="$2"
+  shift 2
   pull_fetched=''
   # Otherwise, `git pull` would refuse to run, and the merge in progress would
   # seem to be the pull's.
@@ -1997,35 +1997,39 @@ pull_resolving() {
     echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
     return 1
   fi
-  pull_conflicted=0
-  pull_rebase="$(pull_rebase_setting "${pull_dir}" "${3:-}")"
-  if [ "${pull_rebase}" = true ]; then
-    if ! git -C "${pull_dir}" pull -q; then
-      echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
-      return 1
-    fi
+  # `git pull` decides, as usual, whether to rebase, to fast-forward, or to
+  # merge.  `--edit` makes it run the editor on the message of a merge
+  # commit that it makes, and `GIT_EDITOR` names a command that replaces
+  # that message with the one that `pull_merge_message` composes from
+  # FETCH_HEAD.  The command runs in another shell, so it sources this file
+  # and reads ${SCRIPT_DIR} and ${SCRIPT_NAME} from its environment.  A pull
+  # that fast-forwards, rebases, or stops at conflicts runs no editor.
+  # `rerere.autoUpdate` false and the configured conflict style are as for
+  # the merge in `merge_build_push`.
+  # shellcheck disable=SC2016 # the editor's shell expands the variables
+  if SCRIPT_DIR="${SCRIPT_DIR}" SCRIPT_NAME="${SCRIPT_NAME}" \
+    GIT_EDITOR='sh -c ". \"\${SCRIPT_DIR}/common-functions.sh\" && pull_merge_message > \"\$1\"" pull-merge-message' \
+    git -C "${pull_dir}" -c rerere.autoUpdate=false pull -q --edit "$@"; then
+    pull_conflicted=0
   else
-    # `git fetch` with no arguments fetches what `git pull` does, and marks
-    # the upstream branch in FETCH_HEAD as the one to merge.
-    if ! git -C "${pull_dir}" fetch -q; then
-      echo "${SCRIPT_NAME}: problem fetching in ${pull_dir}" >&2
+    echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
+    if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
       return 1
     fi
-    pull_ff_option="$(pull_ff_option "${pull_dir}" "${pull_rebase}")"
-    if ! pull_message="$(cd -- "${pull_dir}" && pull_merge_message)"; then
-      echo "${SCRIPT_NAME}: cannot compose a message for the merge of the pull in ${pull_dir}" >&2
+    # A merge without conflicts is in progress only if the editor failed.
+    if [ -z "$(git -C "${pull_dir}" ls-files --unmerged)" ]; then
+      echo "${SCRIPT_NAME}: cannot compose a message for the merge that the pull made in ${pull_dir}; the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
       return 1
     fi
-    # `git merge FETCH_HEAD` merges what FETCH_HEAD marks, as `git pull`
-    # does.  `rerere.autoUpdate` false, the configured conflict style,
-    # `--no-edit`, and `--no-log` are as for the merge in `merge_build_push`.
-    if ! git -C "${pull_dir}" -c rerere.autoUpdate=false merge -q --no-edit --no-log \
-      ${pull_ff_option:+"${pull_ff_option}"} -m "${pull_message}" FETCH_HEAD; then
-      echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
-      if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
-        return 1
-      fi
-      pull_conflicted=1
+    pull_conflicted=1
+    # A pull that stops at conflicts runs no editor, so the message is
+    # composed here.  It is composed at the top level of the working tree,
+    # where git runs the editor and against which git resolves a remote's
+    # relative URL.
+    if ! pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)" \
+      || ! pull_message="$(cd -- "${pull_top}" && pull_merge_message)"; then
+      echo "${SCRIPT_NAME}: cannot compose a message for the merge that the pull made in ${pull_dir}; the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
+      return 1
     fi
   fi
   # FETCH_HEAD is read now, before `resolve_merge_conflicts` runs an agent,
@@ -2060,56 +2064,6 @@ pull_resolving() {
       exit 1
     fi
   )
-}
-
-## Usage: pull_rebase_setting DIRECTORY [--no-rebase]
-## Prints "true" if `git pull`, given the argument if any, rebases the branch
-## checked out in DIRECTORY, "false" if it merges because the argument or a
-## setting says to, or nothing if it merges because nothing says whether to
-## rebase.  As for `git pull`, `--no-rebase` overrides
-## `branch.BRANCH.rebase`, which overrides `pull.rebase`.
-pull_rebase_setting() {
-  if [ "${2:-}" = --no-rebase ]; then
-    echo false
-    return 0
-  fi
-  pull_rebase_key=pull.rebase
-  if pull_rebase_ref="$(git -C "$1" symbolic-ref --quiet HEAD)" \
-    && git -C "$1" config --get "branch.${pull_rebase_ref#refs/heads/}.rebase" > /dev/null; then
-    pull_rebase_key="branch.${pull_rebase_ref#refs/heads/}.rebase"
-  fi
-  if git -C "$1" config --type=bool --get "${pull_rebase_key}" 2> /dev/null; then
-    return 0
-  fi
-  # A value that is not a boolean, such as "merges", rebases.
-  if git -C "$1" config --get "${pull_rebase_key}" > /dev/null; then
-    echo true
-  fi
-}
-
-## Usage: pull_ff_option DIRECTORY REBASE
-## Prints the option, "--ff", "--no-ff", or "--ff-only", that `git pull`
-## gives the merge that it makes in DIRECTORY after it fetches, or prints
-## nothing if `git merge` is to follow `merge.ff`.  REBASE is what
-## `pull_rebase_setting` printed for the pull, other than "true".  FETCH_HEAD
-## records what the pull fetched.
-pull_ff_option() {
-  # As for `git pull`, `pull.ff` overrides `merge.ff`.
-  if [ "$(git -C "$1" config --get pull.ff)" = only ]; then
-    echo --ff-only
-    return 0
-  fi
-  case "$(git -C "$1" config --type=bool --get pull.ff 2> /dev/null)" in
-    true) echo --ff ;;
-    false) echo --no-ff ;;
-    *)
-      # If nothing says whether to rebase, `git pull` refuses to merge
-      # branches that have diverged, and `--ff-only` refuses too.
-      if [ -z "$2" ] && ! git -C "$1" merge-base --is-ancestor HEAD FETCH_HEAD 2> /dev/null; then
-        echo --ff-only
-      fi
-      ;;
-  esac
 }
 
 ## Usage: pull_merge_message
