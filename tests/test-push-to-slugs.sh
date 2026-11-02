@@ -58,7 +58,7 @@ make_remote() {
 ## Clones BRANCH of PROJECT's remote into DIRECTORY, under ${WORK_DIR}/work.
 make_clone() {
   git clone -q -b "$2" "${WORK_DIR}/$1.git" "${WORK_DIR}/work/$3"
-  # `sanitize_git_env` leaves the global configuration empty, and git refuses
+  # `sanitize_git_env` leaves `pull.rebase` unset, and git refuses
   # to pull divergent branches unless something says how to reconcile them.
   git -C "${WORK_DIR}/work/$3" config pull.rebase false
 }
