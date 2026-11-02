@@ -628,7 +628,7 @@ check_resolution_raw reject "CRLF line endings, and a separator remains" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\na\r\n=======\r\nA\r\nb\r\n'
 rm "${WORK_DIR}/ccr/.gitattributes"
 
-## Tests of subject_without_url.  The clone has the remote "origin", an
+## Tests of source_without_url.  The clone has the remote "origin", an
 ## scp-style URL with the remote-tracking branch "origin/feature", and the
 ## remote "local", a pathname with the remote-tracking branch "local/main".
 ## Both contain ${swu_head}, but neither contains ${swu_other}.
@@ -642,47 +642,46 @@ swu_head="$(git -C "${WORK_DIR}/swu" rev-parse HEAD)"
 git -C "${WORK_DIR}/swu" commit -q --allow-empty -m "Second commit"
 swu_other="$(git -C "${WORK_DIR}/swu" rev-parse HEAD)"
 
-## Usage: check_swu SUBJECT EXPECTED [COMMIT]
-## Checks that `subject_without_url`, in ${WORK_DIR}/swu, prints EXPECTED for
-## SUBJECT and COMMIT, which is ${swu_head} by default.
+## Usage: check_swu SOURCE EXPECTED [COMMIT]
+## Checks that `source_without_url`, in ${WORK_DIR}/swu, prints EXPECTED for
+## SOURCE and COMMIT, which is ${swu_head} by default.
 check_swu() {
-  check_swu_actual="$(cd "${WORK_DIR}/swu" && subject_without_url "$1" "${3:-${swu_head}}")"
+  check_swu_actual="$(cd "${WORK_DIR}/swu" && source_without_url "$1" "${3:-${swu_head}}")"
   if [ "${check_swu_actual}" != "$2" ]; then
-    fail "subject_without_url [$1] printed [${check_swu_actual}], not [$2]"
+    fail "source_without_url [$1] printed [${check_swu_actual}], not [$2]"
   fi
 }
 
 # `git pull` writes the URL without its user and its trailing ".git".
-check_swu "Merge branch 'feature' of github.com:org/proj into feature" \
-  "Merge remote-tracking branch 'origin/feature' into feature"
-# Another spelling of the URL, on the default branch, which has no " into ".
-check_swu "Merge branch 'feature' of https://github.com/Org/Proj" \
-  "Merge remote-tracking branch 'origin/feature'"
+check_swu "branch 'feature' of github.com:org/proj" \
+  "remote-tracking branch 'origin/feature'"
+# Another spelling of the URL.
+check_swu "branch 'feature' of https://github.com/Org/Proj" \
+  "remote-tracking branch 'origin/feature'"
 # A pathname, which names no directory, without its trailing "/" and ".git".
-check_swu "Merge branch 'main' of /nonexistent/repo into feature" \
-  "Merge remote-tracking branch 'local/main' into feature"
+check_swu "branch 'main' of /nonexistent/repo" \
+  "remote-tracking branch 'local/main'"
 # No remote-tracking branch tracks the source, and its URL is not a pathname.
-check_swu "Merge branch 'other' of github.com:org/proj into feature" \
-  "Merge branch 'other' of github.com:org/proj into feature"
-check_swu "Merge branch 'feature' of github.com:org/elsewhere into feature" \
-  "Merge branch 'feature' of github.com:org/elsewhere into feature"
+check_swu "branch 'other' of github.com:org/proj" \
+  "branch 'other' of github.com:org/proj"
+check_swu "branch 'feature' of github.com:org/elsewhere" \
+  "branch 'feature' of github.com:org/elsewhere"
 # The remote-tracking branch lacks the merged commit.
-check_swu "Merge branch 'feature' of github.com:org/proj into feature" \
-  "Merge branch 'feature' of github.com:org/proj into feature" "${swu_other}"
+check_swu "branch 'feature' of github.com:org/proj" \
+  "branch 'feature' of github.com:org/proj" "${swu_other}"
 # No remote-tracking branch tracks the source, and its URL is a pathname,
 # which only its last component names.
-check_swu "Merge branch 'main' of /nonexistent/repo into feature" \
-  "Merge branch 'main' of repo into feature" "${swu_other}"
-check_swu "Merge branch 'main' of ../sibling/proj into feature" \
-  "Merge branch 'main' of proj into feature"
-check_swu "Merge branch 'main' of file:///srv/git/proj" \
-  "Merge branch 'main' of proj"
-check_swu "Merge branch 'main' of /srv/a:b/proj into feature" \
-  "Merge branch 'main' of proj into feature"
-# A merge that no pull made.
-check_swu "Merge branch 'main' into feature" "Merge branch 'main' into feature"
-check_swu "Merge remote-tracking branch 'origin/main' into feature" \
-  "Merge remote-tracking branch 'origin/main' into feature"
+check_swu "branch 'main' of /nonexistent/repo" "branch 'main' of repo" \
+  "${swu_other}"
+check_swu "branch 'main' of ../sibling/proj" "branch 'main' of proj"
+check_swu "branch 'main' of file:///srv/git/proj" "branch 'main' of proj"
+check_swu "branch 'main' of /srv/a:b/proj" "branch 'main' of proj"
+# The local repository, whose pathname reveals nothing.
+check_swu "branch 'main' of ." "branch 'main' of ."
+# A source that names no URL.
+check_swu "branch 'main'" "branch 'main'"
+check_swu "remote-tracking branch 'origin/main'" \
+  "remote-tracking branch 'origin/main'"
 
 ## Usage: hum_commit DIRECTORY FILE MESSAGE
 ## Writes MESSAGE to FILE in DIRECTORY and commits it with that message.
