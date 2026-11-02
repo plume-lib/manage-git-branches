@@ -159,22 +159,25 @@ The commands are:
   and refuses any other.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
-  It is also true of a directory that holds nothing but Eclipse `.project`
-  files, which a branch directory may leave behind when its working tree
-  is gone.
+  It is also true of a directory that holds nothing but leftovers, which a
+  branch directory can leave behind when its working tree is gone:  Eclipse
+  `.project` files, Python `.venv` directories, and `*.egg-info`
+  directories.  A `.venv` or `*.egg-info` directory is a leftover only if
+  it holds no version-control checkout, and a directory of leftovers counts
+  only if no git working tree tracks a file in it.
 * [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
   Lists directories named `*-branch-*`, below the current directory, that are
   working trees for branches that were deleted in the remote repository, or
-  that hold nothing but Eclipse `.project` files.
+  that hold nothing but leftovers, as for `is-deleted-branch`.
   With `--remove`, removes each of them instead of printing them.
   A directory whose branch still exists in the remote, but whose GitHub pull
   requests are all closed or merged, is neither listed nor removed; a warning
   about it is printed instead.  (This needs the `gh` command.)
   Likewise, a warning is printed about a directory named `*-branch-*` that
-  is in no git working tree and either holds more than `.project` files, such
-  as one whose removal failed on files that another user owns, or holds no
-  `.project` file at all, such as an empty directory; about one that is in a
-  git working tree that tracks none of its files; and about one that is in a
+  is in no git working tree and either holds more than leftovers, such as
+  one whose removal failed on files that another user owns, or holds no
+  leftover at all, such as an empty directory; about one that is in a git
+  working tree that tracks none of its files; and about one that is in a
   working tree that git cannot use, such as a linked worktree whose main
   working tree was moved.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
@@ -191,6 +194,11 @@ The commands are:
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
+  If `rm -rf` cannot remove everything, as when a container running as root
+  created files in the directory, it moves what remains to a new directory in
+  `/tmp`, whose cleanup runs as root, provided that `/tmp` is on the same
+  file system, or else to a new directory beneath `~/tmp/DELETEME`, under the
+  same condition.
   Given a worktree whose directory was already removed with `rm -rf`, it
   removes what that left behind:  the worktree's registration and, under the
   same conditions, its branch, in the repository that `--repository` names

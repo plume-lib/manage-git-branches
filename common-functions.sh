@@ -1113,18 +1113,26 @@ resolve_with_agent() {
   # many large files, such as build output, is compared by its pathnames and
   # by the time at which each file last changed (its "ctime").  Unlike a
   # file's modification time, an unprivileged process cannot set its ctime.
-  # A file changed after the marker file was written, so the marker is in
-  # the git directory, which neither agent can write.  A file system can
-  # record times to the second, so the agent starts at least a second after
-  # the marker is written, and a file that it changes has a later time.
+  # A file changed since the marker file was written if its ctime is later
+  # than the marker's modification time.  The marker is in the git
+  # directory, which neither agent can write, so the agent cannot change the
+  # marker's time.  The agent starts only once the working tree's file
+  # system records a later time than the marker's, so that a file that it
+  # changes has a later ctime.  The working tree and the git directory can
+  # be on different file systems.  The working tree's pathnames are listed
+  # after the wait, which creates a directory in the working tree and then
+  # removes it.
   resolve_index="$(git ls-files --stage -z | cksum)"
-  resolve_paths="$(working_tree_paths)"
   if ! resolve_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-start)" \
     || ! : > "${resolve_marker}"; then
     echo "${SCRIPT_NAME}: cannot write a file in the git directory of $(pwd)" >&2
     return 1
   fi
-  sleep 1
+  if ! wait_for_later_time "${resolve_marker}" "$(pwd)"; then
+    rm -f -- "${resolve_marker}"
+    return 1
+  fi
+  resolve_paths="$(working_tree_paths)"
   resolve_branch="$(current_branch)" || resolve_branch="HEAD"
   resolve_prompt="You are resolving merge conflicts in the git working tree $(pwd).
 \`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts in these files:
@@ -1251,6 +1259,48 @@ working_tree_changes() {
         if (count[file] == 0) print "changed a file: " relative(file)
       }
     }' | LC_ALL=C sort
+}
+
+## Usage: wait_for_later_time FILE DIR
+## Returns 0 once every file in DIR, an absolute pathname of a directory,
+## that changes from now on has a later status-change time (ctime) than the
+## modification time of FILE, an absolute pathname, as `find -cnewer`
+## compares them.  A file system can record times to the second, or it can
+## record finer times but advance its clock only every few milliseconds.
+## DIR and FILE can be on different file systems.
+##
+## Creates, and then removes, the directory
+## DIR/.manage-git-branches-time-probe, which must not already exist.
+## Returns 1, after printing a diagnostic, if it cannot create that
+## directory, or if the time does not advance within about 10 seconds.
+wait_for_later_time() {
+  wait_probe="$2/.manage-git-branches-time-probe"
+  # `mkdir` fails if anything, even a symbolic link, already has that name.
+  # By contrast, `set -C` lets a redirection open an existing file that is
+  # not a regular file, such as a FIFO or a symbolic link to /dev/null.
+  if ! mkdir -- "${wait_probe}"; then
+    echo "${SCRIPT_NAME}: cannot create the directory ${wait_probe}, which must not already exist" >&2
+    return 1
+  fi
+  wait_tries=1
+  until [ -n "$(find "${wait_probe}" -cnewer "$1" -print)" ]; do
+    if [ "${wait_tries}" -ge 20 ]; then
+      rmdir -- "${wait_probe}"
+      echo "${SCRIPT_NAME}: after ${wait_tries} tries, the time that the file system records in $2 is not later than the modification time of $1" >&2
+      return 1
+    fi
+    # A file system whose clock advances every few milliseconds needs no
+    # sleep:  each try takes about that long.  POSIX `sleep` accepts only a
+    # whole number of seconds.
+    if [ "${wait_tries}" -ge 10 ]; then sleep 1; fi
+    if ! touch -- "${wait_probe}"; then
+      rmdir -- "${wait_probe}"
+      echo "${SCRIPT_NAME}: cannot change the time of the directory ${wait_probe}" >&2
+      return 1
+    fi
+    wait_tries=$((wait_tries + 1))
+  done
+  rmdir -- "${wait_probe}"
 }
 
 ## Usage: report_unresolved FILES
@@ -2131,13 +2181,14 @@ built_commits() {
 ## Commits in BUILT that are not in the repository are ignored.  If it
 ## returns 0, it sets ${merge_fix_branch} to the current branch's name, such
 ## as "feature"; ${merge_fix_account} to an account, for an AI agent, of the
-## merge commits that might have broken the build and of the commands that
-## show them; and ${merge_fix_message} to the message of a commit that fixes
-## the build, such as "Fix the build after merging branch 'main'".  If it
-## returns 1, a failure of the build is not one that a merge on the branch
-## caused, and the agent would merely work around it.  For example, a pull
-## that fast-forwarded the branch brought only commits that the remote
-## already had.  Prints a diagnostic if it returns 1 because git fails.
+## merge commits that might have broken the build, of what each side of each
+## of them changed, and of the commands that show them; and
+## ${merge_fix_message} to the message of a commit that fixes the build, such
+## as "Fix the build after merging branch 'main'".  If it returns 1, a
+## failure of the build is not one that a merge on the branch caused, and the
+## agent would merely work around it.  For example, a pull that
+## fast-forwarded the branch brought only commits that the remote already
+## had.  Prints a diagnostic if it returns 1 because git fails.
 ## The account in ${merge_fix_account} omits each commit in BUILT that is in
 ## the history of a remote branch or of another commit in BUILT, because it
 ## excludes no more commits, but that commit's tree still counts.  Of commits
@@ -2210,8 +2261,9 @@ has_unbuilt_merge() {
     echo "${SCRIPT_NAME}: cannot list the merge commits in $(pwd), so no AI agent is asked to fix the build" >&2
     return 1
   fi
-  # The merges that combined changes:  their subjects, and lines
-  # "* ABBREVIATION SUBJECT", one per merge.
+  # The merges that combined changes:  their subjects, and, one per merge,
+  # a line "* ABBREVIATION SUBJECT" followed, for a merge of two commits
+  # that share history, by an indented account of what each side changed.
   merge_fix_subjects=''
   merge_fix_list=''
   for merge_fix_commit in ${merge_fix_log}; do
@@ -2231,15 +2283,46 @@ has_unbuilt_merge() {
       fi
     done
     if [ "${merge_fix_combined}" -eq 1 ]; then
-      if ! merge_fix_subject="$(git log -1 --format=%s "${merge_fix_commit}")" \
-        || ! merge_fix_abbrev="$(git rev-parse --short "${merge_fix_commit}")"; then
+      if ! merge_fix_line="$(git log -1 --format='%h %s' "${merge_fix_commit}")"; then
         echo "${SCRIPT_NAME}: cannot read commit ${merge_fix_commit} in $(pwd), so no AI agent is asked to fix the build" >&2
         return 1
       fi
       merge_fix_subjects="${merge_fix_subjects:+${merge_fix_subjects}
-}${merge_fix_subject}"
+}${merge_fix_line#* }"
       merge_fix_list="${merge_fix_list:+${merge_fix_list}
-}* ${merge_fix_abbrev} ${merge_fix_subject}"
+}* ${merge_fix_line}"
+      # A merge of two commits that share history gets an account of the
+      # commits that only each of them had.  Those commits' patches show
+      # what each side changed, even where the two have several merge bases,
+      # as after criss-cross merges; `--remerge-diff` shows, for a merge among
+      # them, how the merge differs from git's automatic merge of its parents,
+      # such as a conflict's resolution, even one that takes one parent's
+      # version.  (`--cc` and `--diff-merges=first-parent` omit a hunk whose
+      # result equals a parent's.)  The account names commits by their full hashes, which
+      # stay unambiguous after the agent creates objects.  An octopus merge,
+      # or one whose parents share no history, gets only its line.
+      case "${merge_fix_parents}" in
+        *"
+"*"
+"*) ;;
+        *)
+          merge_fix_ours="${merge_fix_parents%%"
+"*}"
+          merge_fix_theirs="${merge_fix_parents#*"
+"}"
+          merge_fix_ours_log="\`git log -p --remerge-diff ${merge_fix_theirs}..${merge_fix_ours}\` shows the commits that only ${merge_fix_ours} had"
+          merge_fix_theirs_log="\`git log -p --remerge-diff ${merge_fix_ours}..${merge_fix_theirs}\` shows the commits that only ${merge_fix_theirs} had"
+          if merge_fix_base="$(git merge-base "${merge_fix_ours}" "${merge_fix_theirs}")"; then
+            case "${merge_fix_base}" in
+              "${merge_fix_ours}") merge_fix_sides="It merged commit ${merge_fix_theirs} into its ancestor, commit ${merge_fix_ours}.  ${merge_fix_theirs_log}." ;;
+              "${merge_fix_theirs}") merge_fix_sides="It merged commit ${merge_fix_theirs} into its descendant, commit ${merge_fix_ours}.  ${merge_fix_ours_log}." ;;
+              *) merge_fix_sides="It merged commit ${merge_fix_theirs} into commit ${merge_fix_ours}.  ${merge_fix_ours_log}, and ${merge_fix_theirs_log}." ;;
+            esac
+            merge_fix_list="${merge_fix_list}
+  ${merge_fix_sides}"
+          fi
+          ;;
+      esac
     fi
   done
   if [ -z "${merge_fix_subjects}" ]; then
@@ -3232,40 +3315,82 @@ remote_heads() {
   return "${remote_heads_status}"
 }
 
-## Usage: only_dot_project DIRECTORY
-## Returns 0 (true) if DIRECTORY holds nothing but Eclipse `.project` files:
-## that is, if every entry of DIRECTORY is a `.project` file or is a directory
-## that itself holds nothing but `.project` files.  A directory that holds
-## nothing at all satisfies this, which is what lets an empty subdirectory --
-## such as the `bin` that Eclipse makes for a project's build output -- count
-## as nothing.
+## Usage: is_build_output_name NAME
+## Returns 0 (true) if NAME, the last component of a directory's pathname, is
+## the name of a directory of Python build output:  `.venv`, a virtual
+## environment, or a name that ends in `.egg-info`, such as
+## `myproject.egg-info`, which holds package metadata.  Such a directory holds
+## no branch directory and no work, except as `holds_no_checkout` tests.
+is_build_output_name() {
+  case "$1" in
+    '.venv' | *.egg-info) return 0 ;;
+  esac
+  return 1
+}
+
+## Usage: holds_no_checkout DIRECTORY
+## Returns 0 (true) if a directory DIRECTORY holds no version-control
+## checkout:  that is, if nothing in DIRECTORY, at any depth, is named `.git`,
+## `.hg`, `.svn`, or `.bzr`.  Returns 1 (false) if the user cannot read some
+## directory in DIRECTORY, which might hold a checkout.
+##
+## `find` writes newline-separated text, which cannot represent a file name
+## that contains a newline, but this function needs only whether `find` wrote
+## anything, which such a name does not obscure.
+holds_no_checkout() {
+  holds_no_checkout_found="$(find "$1" \( -name .git -o -name .hg -o -name .svn \
+    -o -name .bzr \) -prune -print 2> /dev/null)" || return 1
+  [ -z "${holds_no_checkout_found}" ]
+}
+
+## Usage: only_leftovers DIRECTORY
+## Returns 0 (true) if DIRECTORY holds nothing but leftovers:  files and
+## directories that tools other than git create in a working tree and that
+## remain after the working tree itself is gone.  A leftover is one of these:
+##  * an Eclipse `.project` file, which is a regular file;
+##  * a directory of Python build output that holds no version-control
+##    checkout, as `holds_no_checkout` tests:  either a Python virtual environment, which is a directory named `.venv`,
+##    or Python package metadata, which is a directory whose name ends in
+##    `.egg-info`, such as `myproject.egg-info`.
+## That is, every entry of DIRECTORY is a leftover or is a directory that
+## itself holds nothing but leftovers.  A directory that holds nothing at all
+## satisfies this, which is what lets an empty subdirectory -- such as the
+## `bin` that Eclipse makes for a project's build output -- count as nothing.
+##
+## Such a directory's contents are build output, which a build re-creates, so
+## they need not be leftovers themselves.  Nor need they belong to the user:
+## a container that runs as root creates them owned by root, and they are
+## what remains when the user's `rm -rf` of a branch directory cannot remove
+## them.  A `.venv` or `*.egg-info` directory that holds a version-control
+## checkout is not a leftover, because `pip install -e git+URL#egg=NAME`
+## clones a repository into `.venv/src/`, and that clone can hold unpushed
+## work.
 ##
 ## This says only what is in DIRECTORY; the caller decides what that means.
 ## A directory that holds nothing satisfies this test only vacuously, so the
-## variable `only_dot_project_found` is set to a nonempty value if at least
-## one `.project` file was seen, and is left alone otherwise.  A caller that
-## distinguishes a tree of `.project` files from a tree of nothing -- as
-## `is_deleted_branch` does -- sets that variable to the empty string before
+## variable `only_leftovers_found` is set to a nonempty value if at least one
+## leftover was seen, and is left alone otherwise.  A caller that
+## distinguishes a tree of leftovers from a tree of nothing -- as
+## `is_leftover_tree` does -- sets that variable to the empty string before
 ## the call and tests it after.  A shell function has no local variables, so
 ## the recursive calls below all set the one variable, and it therefore
 ## reports about the whole tree.
 ##
 ## A symbolic link is content, whether it names a directory, a file, or
-## nothing:  it is neither skipped as a `.project` file nor descended into.
-## Following one that names an ancestor would not terminate, and a link is
-## something that the user put there.
+## nothing:  it is never a leftover, and it is not descended into.  Following
+## one that names an ancestor would not terminate, and a link is something
+## that the user put there.
 ##
-## `find "$1" ! -name .project ! -type d` would be simpler, but `find`
-## communicates through newline-separated text, which cannot represent a file
-## name that contains a newline, whereas the globs and the positional
-## parameters below can hold any file name.
+## `find` would be simpler, but `find` communicates through newline-separated
+## text, which cannot represent a file name that contains a newline, whereas
+## the globs and the positional parameters below can hold any file name.
 ##
 ## The entries that remain to be examined are held in the positional
 ## parameters, which a shell makes local to a function call, so the recursive
 ## call below gets its own and this call's are intact when it returns.  A
 ## `for` loop over a variable could not recurse, because a shell function has
 ## no local variables.
-only_dot_project() {
+only_leftovers() {
   # In a directory that cannot be listed (but can be searched, such as one with
   # mode 711), every glob below expands to nothing, which is indistinguishable
   # from an empty directory.  Do not claim that such a directory holds nothing.
@@ -3280,28 +3405,52 @@ only_dot_project() {
         continue
         ;;
       '.project')
-        # Skip the Eclipse metadata itself.  A *directory* named `.project`
-        # can hold anything, so leave it to the test below, which descends
-        # into it like any other directory.
+        # A *directory* named `.project` can hold anything, so leave it to the
+        # test below, which descends into it like any other directory.
         if [ -f "$1" ] && [ ! -L "$1" ]; then
-          only_dot_project_found=1
+          only_leftovers_found=1
           shift
           continue
         fi
         ;;
     esac
+    # A *file* with the name of a directory of build output can hold anything,
+    # so leave it to the test below, which treats it as content.
+    if is_build_output_name "${1##*/}" && [ -d "$1" ] && [ ! -L "$1" ]; then
+      if ! holds_no_checkout "$1"; then
+        return 1
+      fi
+      only_leftovers_found=1
+      shift
+      continue
+    fi
     # When a pattern matches nothing, the shell leaves it unexpanded.  Such a
     # pathname names no entry, so it is not content.
     if [ ! -e "$1" ] && [ ! -L "$1" ]; then
       shift
       continue
     fi
-    if [ ! -d "$1" ] || [ -L "$1" ] || ! only_dot_project "$1"; then
+    if [ ! -d "$1" ] || [ -L "$1" ] || ! only_leftovers "$1"; then
       return 1
     fi
     shift
   done
   return 0
+}
+
+## Usage: is_leftover_tree DIRECTORY
+## Returns 0 (true) if a directory DIRECTORY holds nothing but leftovers, as
+## `only_leftovers` tests, and holds at least one leftover.
+##
+## `only_leftovers` is satisfied by a directory that holds nothing at all, and
+## a tree of nothing but empty directories is not evidence of a working tree
+## that a branch directory once held.  The leftover need not be in DIRECTORY
+## itself:  a branch whose Eclipse projects were all below its top level, such
+## as a `java/lib` that Eclipse knew as a project, leaves its metadata there
+## and none at the top.
+is_leftover_tree() {
+  only_leftovers_found=
+  only_leftovers "$1" && [ -n "${only_leftovers_found}" ]
 }
 
 ## Usage: is_deleted_branch DIRECTORY
@@ -3342,33 +3491,24 @@ is_deleted_branch() {
     return 2
   fi
 
-  # A directory that holds nothing but Eclipse `.project` files is the
-  # leftover of a branch directory whose working tree is gone:  what remains
-  # is metadata, a `.project` file for each Eclipse project of the branch and
-  # the directories that hold them, and none of the branch itself.  Such a
-  # directory is as removable as one whose branch was deleted in its remote,
-  # so answer 0 for it.
+  # A directory that holds nothing but leftovers, such as Eclipse `.project`
+  # files and a Python `.venv` directory, is the leftover of a branch directory
+  # whose working tree is gone:  what remains is what other tools made, and
+  # none of the branch itself.  Such a directory is as removable as one whose
+  # branch was deleted in its remote, so answer 0 for it.  `only_leftovers`
+  # says which files and directories are leftovers.  The tests below would
+  # call such a directory "not the top level of a working tree" (status 2):
+  # that is true, and it would leave the caller's question -- may this
+  # directory be removed? -- unanswered when it has an answer.
   #
-  # Answer it before the tests below, which would call such a directory "not
-  # the top level of a working tree" (status 2):  that is true, and it would
-  # leave the caller's question -- may this directory be removed? -- unanswered
-  # when it has an answer.  The tests below still decide every directory that
-  # holds anything else, including a working tree, whose `.git` is not a
-  # `.project` file and which `only_dot_project` therefore rejects at its
-  # first entry.
-  #
-  # Require a `.project` file somewhere in the tree.  `only_dot_project` is
-  # satisfied by a directory that holds nothing at all, and a tree of nothing
-  # but empty directories is not evidence of an Eclipse project that a branch
-  # directory once held.  The `.project` file need not be in DIRECTORY
-  # itself:  a branch whose Eclipse projects were all below its top level,
-  # such as a `java/lib` that Eclipse knew as a project, leaves its metadata
-  # there and none at the top.
-  only_dot_project_found=
-  if only_dot_project "${is_deleted_branch_dir}" \
-    && [ -n "${only_dot_project_found}" ]; then
-    return 0
-  fi
+  # Answer 0 only for a directory of leftovers that no working tree claims:
+  # one at which git can use no repository, or one in a working tree that
+  # tracks none of its files, such as a leftover in a home directory that is a
+  # repository of configuration files.  A directory in a working tree that
+  # tracks a file in it, such as a test fixture that holds a `*.egg-info`
+  # directory, is part of that working tree, and removing it would delete
+  # tracked files.  The top level of a working tree holds its `.git`, which is
+  # not a leftover.
 
   # `git -C DIR rev-parse` succeeds for every directory within a working tree,
   # so also require that DIRECTORY is that working tree's top level.  A
@@ -3384,6 +3524,9 @@ is_deleted_branch() {
   if ! is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
     --is-bare-repository --show-toplevel 2> /dev/null)"; then
     if [ -z "${is_deleted_branch_toplevel}" ]; then
+      if is_leftover_tree "${is_deleted_branch_dir}"; then
+        return 0
+      fi
       # shellcheck disable=SC2034 # Callers read it; see the documentation above.
       is_deleted_branch_no_usable_repository=1
     fi
@@ -3417,7 +3560,15 @@ is_deleted_branch() {
   fi
   if [ "${is_deleted_branch_dir_real}" != "${is_deleted_branch_top_real}" ]; then
     # Not the top level of a working tree, so it is not on any branch, deleted
-    # or otherwise.
+    # or otherwise.  It is a leftover if the working tree tracks no file in it,
+    # which is status 1 of `git ls-files --error-unmatch`.
+    if is_leftover_tree "${is_deleted_branch_dir}"; then
+      git -C "${is_deleted_branch_dir}" ls-files --error-unmatch -- . \
+        > /dev/null 2>&1
+      if [ "$?" -eq 1 ]; then
+        return 0
+      fi
+    fi
     return 2
   fi
 
