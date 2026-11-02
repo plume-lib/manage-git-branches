@@ -246,7 +246,6 @@ create_case_repositories() {
     git -C "$1/seed" add Makefile other.txt .gitignore
   fi
   git -C "$1/seed" commit -q -m "Initial commit"
-  # The seed has no remote, so that a copy of it cannot push to the template.
   git -C "$1/seed" push -q "${ccr_remote}" main main:refs/heads/feature
   # Nothing uses the seed after this push, and a copy of a template is
   # faster without it.
@@ -274,18 +273,11 @@ create_case_repositories() {
 ## Usage: write_file FILE LINE...
 ## Writes the LINEs, and then ${case_last_line} if it is not empty, to FILE.
 write_file() {
-  write_file_ending "${case_last_line}" "$@"
-}
-
-## Usage: write_file_ending LAST-LINE FILE LINE...
-## Writes the LINEs, and then LAST-LINE if it is not empty, to FILE.
-write_file_ending() {
-  write_file_last_line="$1"
-  write_file_name="$2"
-  shift 2
+  write_file_name="$1"
+  shift
   printf '%s\n' "$@" > "${write_file_name}"
-  if [ -n "${write_file_last_line}" ]; then
-    printf '%s\n' "${write_file_last_line}" >> "${write_file_name}"
+  if [ -n "${case_last_line}" ]; then
+    printf '%s\n' "${case_last_line}" >> "${write_file_name}"
   fi
 }
 
