@@ -98,9 +98,10 @@ git -C "${work}/seed" push -q origin main
 host="${work}/proj"
 git clone -q 'https://github.com/someone/proj' "${host}"
 
-## Usage: make_landed_worktree BRANCH
+## Usage: make_landed_worktree BRANCH [--no-upstream]
 ## Adds a linked worktree ${work}/proj-branch-BRANCH of ${host} on a new branch
-## BRANCH, as `git-new-branch` does, and pushes a commit on it.  Then, as
+## BRANCH, as `git-new-branch` does, and pushes a commit on it, setting the
+## branch's upstream unless --no-upstream is given.  Then, as
 ## another clone, adds a commit to the remote branch that ${host} never
 ## fetches, squash-merges the remote branch into `main` as landing a pull
 ## request does, keeps the pull request's last commit in `refs/pull/1/head` as
@@ -114,7 +115,11 @@ make_landed_worktree() {
   echo "work" > "${mlw_dir}/$1.txt"
   git -C "${mlw_dir}" add "$1.txt"
   git -C "${mlw_dir}" commit -q -m "Work on $1"
-  git -C "${mlw_dir}" push -q -u origin "$1" 2> /dev/null
+  if [ "$2" = --no-upstream ]; then
+    git -C "${mlw_dir}" push -q origin "$1" 2> /dev/null
+  else
+    git -C "${mlw_dir}" push -q -u origin "$1" 2> /dev/null
+  fi
   # The later commit changes the same line, so that neither merging BRANCH
   # into `main` nor merging it into the squash commit's parent reproduces the
   # squash commit, and `git-outgoing` does not omit BRANCH.
@@ -197,6 +202,17 @@ FAKE_GH_PULLS="${pr_head} someone/proj"
 run_command 'a removed worktree of a landed pull request' 0 \
   --repository "${host}" "${work}/proj-branch-rmrf"
 check_removed 'a removed worktree of a landed pull request' rmrf
+
+# The same, for a branch that was pushed without setting its upstream, so
+# that git does not report its remote branch as gone.
+pr_head="$(make_landed_worktree noupstream --no-upstream)"
+if [ -n "$(git -C "${host}" for-each-ref --format='%(upstream)' refs/heads/noupstream)" ]; then
+  fail "the setup: the branch noupstream has an upstream"
+fi
+FAKE_GH_PULLS="${pr_head} someone/proj"
+run_command 'a landed pull request from a branch without an upstream' 0 \
+  "${work}/proj-branch-noupstream"
+check_removed 'a landed pull request from a branch without an upstream' noupstream
 
 # A commit made after the last push is not on GitHub, so it would be lost.
 pr_head="$(make_landed_worktree unpushed)"

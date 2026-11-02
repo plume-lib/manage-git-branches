@@ -3188,13 +3188,37 @@ github_slug() {
     | sed -e 's|\.git$||'
 }
 
+## The number of seconds that a query of GitHub can take before it is
+## abandoned, and fails, so that an unresponsive GitHub does not stall a
+## command.
+github_query_seconds=30
+
+## Usage: with_timeout SECONDS COMMAND [ARGUMENT...]
+## Runs COMMAND, an executable rather than a shell function, with the
+## ARGUMENTs, and returns its exit status.  Kills COMMAND and returns 124 if it
+## runs for more than SECONDS seconds.  The limit needs the `timeout` command
+## of GNU coreutils, which Homebrew installs on macOS as `gtimeout`; if
+## neither is installed, COMMAND runs without a limit.
+with_timeout() {
+  with_timeout_seconds="$1"
+  shift
+  if command -v timeout > /dev/null 2>&1; then
+    timeout "${with_timeout_seconds}" "$@"
+  elif command -v gtimeout > /dev/null 2>&1; then
+    gtimeout "${with_timeout_seconds}" "$@"
+  else
+    "$@"
+  fi
+}
+
 ## Usage: pr_repositories DIRECTORY BRANCH
 ## Sets ${pr_base_repo} and ${pr_head_repo} to the GitHub slugs, such as
 ## "ORG/REPO", of the base and head repositories of the pull requests from a
-## local branch BRANCH of the clone in DIRECTORY, and sets ${pr_head_branch}
-## to the name of their head branch in the head repository.  Fails, setting
-## nothing, if nothing is known about those pull requests, or if they say
-## nothing about BRANCH.
+## local branch BRANCH of the clone in DIRECTORY, sets ${pr_head_remote} to
+## the name of the clone's remote for the head repository, such as "origin",
+## and sets ${pr_head_branch} to the name of their head branch in the head
+## repository.  Fails, setting nothing, if nothing is known about those pull
+## requests, or if they say nothing about BRANCH.
 ##
 ## The head repository is the one that `git push` uses for BRANCH; see
 ## `push_remote`.  The base repository is the head repository's parent, if
@@ -3245,7 +3269,8 @@ pr_repositories() {
   pr_repositories_answer="$(printf '%s\n' "${pr_repositories_cache}" \
     | awk -v head="${pr_repositories_head}" '$1 == head { print $2 " " $3; exit }')"
   if [ -z "${pr_repositories_answer}" ]; then
-    pr_repositories_answer="$(gh repo view "github.com/${pr_repositories_head}" \
+    pr_repositories_answer="$(with_timeout "${github_query_seconds}" \
+      gh repo view "github.com/${pr_repositories_head}" \
       --json owner,name,parent,defaultBranchRef \
       --jq '"\(if .parent then "\(.parent.owner.login)/\(.parent.name)" else "\(.owner.login)/\(.name)" end) \(.defaultBranchRef.name // "-")"' \
       < /dev/null 2> /dev/null)" || return 1
@@ -3263,6 +3288,8 @@ ${pr_repositories_head} ${pr_repositories_answer}"
   pr_base_repo="${pr_repositories_answer%% *}"
   # shellcheck disable=SC2034 # set for the caller
   pr_head_repo="${pr_repositories_head}"
+  # shellcheck disable=SC2034 # set for the caller
+  pr_head_remote="${pr_repositories_remote}"
   # shellcheck disable=SC2034 # set for the caller
   pr_head_branch="${pr_repositories_branch}"
 }
