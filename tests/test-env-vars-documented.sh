@@ -19,19 +19,45 @@ SCRIPT_NAME="$(basename -- "$0")"
 
 README="${TOPLEVEL}/README.md"
 
-# The commands, which are executable, and the files that they source, which
-# are not executable but whose names end in ".sh".  A variable that a sourced
-# file reads is part of the interface of the commands that source it.
+# The commands, which are executable, and the files that they load, which are
+# not executable but whose names end in ".sh" or ".py".  A variable that a
+# loaded file reads is part of the interface of the commands that load it.
 SCRIPTS="$(find "${TOPLEVEL}" -maxdepth 1 -type f ! -name '*~' \
-  \( -perm -u+x -o -name '*.sh' \) -exec basename -- {} ';' | sort)"
+  \( -perm -u+x -o -name '*.sh' -o -name '*.py' \) -exec basename -- {} ';' | sort)"
 if [ -z "${SCRIPTS}" ]; then
   echo "${SCRIPT_NAME}: found no scripts in ${TOPLEVEL}" >&2
   exit 2
 fi
 
+# Usage: script_language FILE
+# Prints "shell" if FILE is a shell (sh or Bash) script and "python" if FILE is
+# a Python script, judging by its name and its "#!" line.  Fails if FILE is
+# neither, so that a script in another language is not silently unchecked.
+script_language() {
+  case "$1" in
+    *.sh)
+      echo shell
+      return
+      ;;
+    *.py)
+      echo python
+      return
+      ;;
+  esac
+  case "$(head -n 1 -- "$1")" in
+    '#!/bin/sh' | '#!/bin/bash' | '#!/usr/bin/env sh' | '#!/usr/bin/env bash') echo shell ;;
+    '#!/usr/bin/python3' | '#!/usr/bin/env python3') echo python ;;
+    *)
+      echo "${SCRIPT_NAME}: $1 is neither a shell script nor a Python script" >&2
+      echo "${SCRIPT_NAME}: extend script_language and the checks that use it" >&2
+      exit 2
+      ;;
+  esac
+}
+
 # Variables that the shell or the operating system sets, which are therefore
 # not part of the interface of these scripts.
-STANDARD_VARIABLES="CDPATH HOME IFS LANG LC_ALL PATH PWD TMPDIR"
+STANDARD_VARIABLES="BASH_VERSINFO BASH_VERSION CDPATH HOME IFS LANG LC_ALL PATH PWD TMPDIR"
 
 # Usage: script_code FILE
 # Prints FILE with comments removed, so that documentation and commented-out
@@ -42,8 +68,10 @@ script_code() {
 }
 
 # Usage: set_variables_in FILE
-# Prints, one per line, the variables that FILE assigns in an assignment
-# statement, such as `VAR=value` or `export VAR=value`.
+# Prints, one per line, the variables that FILE, a shell script, assigns in an
+# assignment statement, such as `VAR=value`, `export VAR=value`,
+# `ARRAY[KEY]=value`, or `ARRAY+=(value)`, or declares, as in
+# `declare -A ARRAY`.
 #
 # An assignment that is an environment prefix of a command, as in
 # `VAR=value some-command`, does not count:  it sets the variable only in the
@@ -77,7 +105,12 @@ set_variables_in() {
       return is_terminator(t) \
         || t ~ /^(!|if|then|elif|else|do|while|until|export|readonly|local|time)$/
     }
-    function is_assignment(t) { return t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ }
+    # An assignment, to a variable or to an element of an array, which may
+    # append to the old value, as in "VAR=value", "ARRAY[KEY]=value", or
+    # "ARRAY+=".
+    function is_assignment(t) { return t ~ /^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=/ }
+    # Prints the name of the variable that the assignment or declaration T sets.
+    function print_name(t) { sub(/[[+=].*/, "", t); print t }
     # The redirection operator that introduces a here-document, whose lines
     # are data rather than code.  A here-string, "<<<", supplies its data on
     # the same line, so it is not one.
@@ -122,7 +155,7 @@ set_variables_in() {
       heredoc_in_substitution = 0
     }
     # Prints the variables that the current logical line assigns.
-    function report_line(  i, j, k, r, name, at_command) {
+    function report_line(  i, j, k, r, at_command) {
       # Within a command substitution, a here-document operator is part of a
       # word rather than a token of its own, so the tokenizer notes it as it
       # goes rather than "is_heredoc" finding it here.
@@ -156,13 +189,21 @@ set_variables_in() {
             r++
           }
           if (r > nwords || is_terminator(words[r])) {
-            for (k = i; k < j; k++) {
-              name = words[k]
-              sub(/=.*/, "", name)
-              print name
-            }
+            for (k = i; k < j; k++) { print_name(words[k]) }
           }
           i = j
+          at_command = 0
+          continue
+        }
+        if (at_command && words[i] ~ /^(declare|typeset)$/) {
+          # A declaration sets each variable that it names, whether or not
+          # with a value, as in "declare -A ARRAY OTHER=1".
+          for (i++; i <= nwords && words[i] ~ /^[-+]/; i++) { }
+          for (; i <= nwords && !is_terminator(words[i]); i++) {
+            if (words[i] ~ /^[A-Za-z_][A-Za-z0-9_]*$/ || is_assignment(words[i])) {
+              print_name(words[i])
+            }
+          }
           at_command = 0
           continue
         }
@@ -396,22 +437,37 @@ REDIRECTED_PREFIX=1 >/dev/null some-command # The target is attached.
 DUPLICATED_DESCRIPTOR_PREFIX=1 2>&1 some-command
 MULTILINE_PREFIX="one
 two" some-command
+ARRAY=(one two)
+APPENDED+=(three)
+ELEMENT[1]=one
+NESTED_SUBSCRIPT[${ELEMENT[1]}]=1
+QUOTED_SUBSCRIPT["a b"]=1
+declare -A DECLARED OTHER_DECLARED
+declare -r DECLARED_WITH_VALUE=1
 FIXTURE_END
-EXPECTED='ARITHMETIC
+EXPECTED='APPENDED
+ARITHMETIC
+ARRAY
 BACKTICKED
 CASE_IN_SUBSTITUTION
 CASE_WORD
 CONDITIONAL
+DECLARED
+DECLARED_WITH_VALUE
 DUPLICATED_DESCRIPTOR
+ELEMENT
 ESCAPED
 EXPORTED
 MULTILINE
 MULTILINE_CASE
 NESTED_ARITHMETIC
+NESTED_SUBSCRIPT
+OTHER_DECLARED
 PARENTHESIZED_CASE
 PIPED_SUBSHELL
 PLAIN
 QUOTED
+QUOTED_SUBSCRIPT
 REDIRECTED
 STATEMENT_AFTER_CONTINUATION
 SUBSHELL
@@ -478,13 +534,16 @@ SUBSTITUTED_HERE_STRING" ]; then
   exit 2
 fi
 
-# The variables that some script in this package assigns.  One script sets
-# such a variable before invoking another that reads it, so it is internal to
-# the package rather than part of its user-visible interface.
+# The variables that some shell script in this package assigns.  One script
+# sets such a variable before invoking another that reads it, so it is internal
+# to the package rather than part of its user-visible interface.
 PACKAGE_SET_VARIABLES=''
 for script in ${SCRIPTS}; do
-  PACKAGE_SET_VARIABLES="${PACKAGE_SET_VARIABLES}
+  language="$(script_language "${TOPLEVEL}/${script}")"
+  if [ "${language}" = shell ]; then
+    PACKAGE_SET_VARIABLES="${PACKAGE_SET_VARIABLES}
 $(set_variables_in "${TOPLEVEL}/${script}")"
+  fi
 done
 PACKAGE_SET_VARIABLES="$(printf '%s\n' "${PACKAGE_SET_VARIABLES}" | sort -u)"
 
@@ -492,9 +551,16 @@ status=0
 
 for script in ${SCRIPTS}; do
   file="${TOPLEVEL}/${script}"
-  read_variables="$(script_code "${file}" \
-    | grep -oE '\$\{?[A-Z][A-Z0-9_]*' \
-    | grep -oE '[A-Z][A-Z0-9_]*' | sort -u)"
+  if [ "$(script_language "${file}")" = shell ]; then
+    read_variables="$(script_code "${file}" \
+      | grep -oE '\$\{?[A-Z][A-Z0-9_]*' \
+      | grep -oE '[A-Z][A-Z0-9_]*' | sort -u)"
+  else
+    # A Python script reads a variable with "os.environ" or "os.getenv".
+    read_variables="$(script_code "${file}" \
+      | grep -oE '(os\.environ\.get\(|os\.environ\[|os\.getenv\()["'"'"'][A-Z][A-Z0-9_]*' \
+      | grep -oE '[A-Z][A-Z0-9_]*$' | sort -u)"
+  fi
   for variable in ${read_variables}; do
     if printf '%s\n' "${PACKAGE_SET_VARIABLES}" | grep -qx "${variable}"; then
       continue
