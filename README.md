@@ -149,6 +149,22 @@ The commands are:
   `git rerere` and an AI agent, and it accepts the same `--llm`, `--no-llm`,
   `--claude`,
   and `--codex` options.
+* [`pr-merge-analysis`](pr-merge-analysis)
+  `[--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]`:
+  For the given open pull requests of the GitHub repository OWNER/REPO (by
+  default, all of them), reports which ones conflict with the default
+  branch, which ones contain every non-merge commit of another, and (unless
+  `--no-pairwise`) which pairs conflict with each other.  It fetches the
+  pull requests into REPO_DIR, a clone of the repository, and caches its
+  results in the current directory.  When the run covers every open pull
+  request (no PR number is given, or `--prune` says that the given ones are
+  all of them), it removes the cached results for commits that are no longer
+  the head of an open pull request, and it deletes from REPO_DIR the refs of
+  the pull requests that are not open.  `--default-branch BRANCH` compares
+  against BRANCH rather than the repository's default branch.
+  This command needs Git 2.38 or later, `gh`, and Bash 4 or later as the
+  first `bash` on the PATH.  On macOS, `/bin/bash` is Bash 3.2, so put a
+  newer Bash, such as Homebrew's, earlier on the PATH.
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--claude | --codex] [-C DIR]`:
   Runs `pr-status`, which regenerates `pr-dependencies.md`, then runs each
@@ -190,7 +206,10 @@ The commands are:
   as after a squash-merge, do not count as work that would be lost.  Neither
   do the commits of a branch whose remote branch is gone, if they are in a
   landed GitHub pull request from the branch, even one with later commits
-  that the branch lacks.  (This needs the `gh` command.)
+  that the branch lacks.  (This needs the `gh` command.)  Such landed commits
+  never prevent a removal.  When other commits would be lost, the message
+  that refuses the removal, or that reports its waiver by `--force-unpushed`,
+  counts the landed commits among those that the removal would delete.
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
@@ -268,6 +287,9 @@ takes effect when it is set to a non-empty value.
   run when it resolves merge conflicts.  An agent that runs longer is stopped,
   and the merge is left in progress.  The default is 1800 (30 minutes); 0
   means no limit.
+* `PR_MERGE_ANALYSIS_CACHE`: the file in which `pr-merge-analysis` caches its
+  results.  The default is `.pr-merge-analysis-cache-OWNER__REPO.tsv` in the
+  current directory.  Repositories must not share a cache file.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
 * `AZURE_DEVOPS_EXT_PAT`: the commands that use the Azure DevOps API use this

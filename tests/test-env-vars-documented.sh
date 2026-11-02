@@ -66,7 +66,7 @@ script_language() {
 
 # Variables that the shell or the operating system sets, which are therefore
 # not part of the interface of these scripts.
-STANDARD_VARIABLES="CDPATH HOME IFS LANG LC_ALL PATH PPID PWD TMPDIR"
+STANDARD_VARIABLES="BASH_VERSINFO BASH_VERSION CDPATH HOME IFS LANG LC_ALL PATH PPID PWD TMPDIR"
 
 # Usage: script_code FILE
 # Prints FILE with comments removed, so that documentation and commented-out
