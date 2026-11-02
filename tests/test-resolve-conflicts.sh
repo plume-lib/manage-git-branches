@@ -1,14 +1,17 @@
 #!/bin/sh
 
-# Tests that `resolve-conflicts` runs the chains that pr-dependencies.md lists
+# Tests that `resolve-conflicts` runs the chains that the dependency document
+# lists
 # under "Dependency chains with conflicts", with an AI agent resolving the
 # conflicts, and that it refuses a command that `pr-status` does not write.
 #
 # Usage:
 #   tests/test-resolve-conflicts.sh
 #
-# A stub `pr-status.py` writes pr-dependencies.md, and a stub `claude` stands
-# in for the agent.
+# The test runs a copy of the commands in which a stub `pr-status` writes the
+# dependency document, and a stub `claude` stands in for the agent.  The stub
+# names the document deps.md rather than the default, pr-status.md, so that the
+# test checks that `resolve-conflicts` asks `pr-status` for the name.
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -59,11 +62,22 @@ sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^=======$/d' -e '/^>>>>
 mv file.txt.new file.txt
 EOF
 
-## The stub pr-status writes pr-dependencies.md in the current directory.  On
-## its first run, the section of chains with conflicts contains the commands
-## in ${STUB_COMMANDS}; afterward, it contains none.
-cat > "${WORK_DIR}/test-bin/pr-status.py" << 'EOF'
+## A copy of the commands, in which the stub pr-status replaces the real one.
+mkdir "${WORK_DIR}/commands"
+for command_file in "${COMMANDS_DIR}"/*; do
+  if [ -f "${command_file}" ]; then cp -p "${command_file}" "${WORK_DIR}/commands/"; fi
+done
+
+## The stub pr-status writes deps.md in the current directory.  On its first
+## run, the section of chains with conflicts contains the commands in
+## ${STUB_COMMANDS}; afterward, it contains none.  With "--print-document", it
+## prints the document's file name.
+cat > "${WORK_DIR}/commands/pr-status" << 'EOF'
 #!/bin/sh
+if [ "$1" = --print-document ]; then
+  echo deps.md
+  exit 0
+fi
 echo pr-status >> "${STUB_LOG}"
 if grep -q -x pr-status-ran "${STUB_LOG}"; then
   commands=''
@@ -81,9 +95,9 @@ fi
   echo 'echo "success"'
   echo '```'
   echo '<!-- END GENERATED: conflicting-push-commands -->'
-} > pr-dependencies.md
+} > deps.md
 EOF
-chmod +x "${WORK_DIR}/test-bin/claude" "${WORK_DIR}/test-bin/pr-status.py"
+chmod +x "${WORK_DIR}/test-bin/claude" "${WORK_DIR}/commands/pr-status"
 
 ## Usage: setup_case NAME
 ## Creates ${WORK_DIR}/NAME, the directory that holds the working copy
@@ -117,7 +131,7 @@ setup_case() {
 ## ${resolve_output}.
 resolve_conflicts() {
   if resolve_output="$(cd "${case_dir}" && PATH="${WORK_DIR}/test-bin:${PATH}" \
-    "${COMMANDS_DIR}/resolve-conflicts" 2>&1)"; then
+    "${WORK_DIR}/commands/resolve-conflicts" 2>&1)"; then
     resolve_status=0
   else
     resolve_status=$?

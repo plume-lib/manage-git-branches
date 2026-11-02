@@ -1,7 +1,7 @@
 """Tests for the cancel-blocked-ci script.
 
 The tests contact no server:  fakes replace the HTTP requests that the script makes and
-the pr-status script that it imports.
+the pr-status function that it calls to read GitHub.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import importlib.util
 import io
 import json
 import sys
-import tempfile
 import unittest
 import urllib.error
 from email.message import Message
@@ -34,26 +33,19 @@ CIRCLECI = "https://circleci.com/api/v2"
 
 
 def load_script() -> types.ModuleType:
-    """Import cancel-blocked-ci, with a fake pr-status script.
+    """Import cancel-blocked-ci, whose name is not a legal module name.
 
     Returns:
         The imported module.
     """
-    with tempfile.TemporaryDirectory() as tmp:
-        fake = Path(tmp) / "pr-status.py"
-        fake.write_text('CONFIG = "pr-status-config.json"\n')
-        loader = importlib.machinery.SourceFileLoader(
-            "cancel_blocked_ci", str(TOPLEVEL / "cancel-blocked-ci")
-        )
-        spec = importlib.util.spec_from_loader(loader.name, loader)
-        assert spec is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[loader.name] = module
-        with (
-            mock.patch("pathlib.Path.exists", return_value=False),
-            mock.patch("shutil.which", return_value=str(fake)),
-        ):
-            loader.exec_module(module)
+    loader = importlib.machinery.SourceFileLoader(
+        "cancel_blocked_ci", str(TOPLEVEL / "cancel-blocked-ci")
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
     return module
 
 
@@ -385,9 +377,7 @@ class CancelBlockedCiTest(unittest.TestCase):
         model.repo.prs = prs
         model.repo.ref.side_effect = lambda n: f"#{n}"
         model.blocked.return_value = [2, 3]
-        with mock.patch.object(
-            cancel_blocked_ci.pr_status, "load_models", create=True, return_value=[model]
-        ):
+        with mock.patch.object(cancel_blocked_ci.pr_status, "load_models", return_value=[model]):
             [repo] = cancel_blocked_ci.blocked_prs({})
         self.assertEqual(
             repo.prs,

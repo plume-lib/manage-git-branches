@@ -9,7 +9,8 @@
 #   tests/test-push-to-llm.sh
 #
 # Stub `claude` and `codex` commands stand in for the agents.  Environment
-# variables STUB_MODE and STUB_BUILD say what the stubs do.
+# variables STUB_MODE and STUB_BUILD say what the stubs do, and the `codex`
+# stub prints no session id if STUB_NO_SESSION is set.
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -86,6 +87,10 @@ mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
 basename -- "$0" >> "${STUB_LOG}"
+printf '%s\n' "$@" > "${STUB_ARGS}"
+if [ "$(basename -- "$0")" = codex ] && [ -z "${STUB_NO_SESSION:-}" ]; then
+  echo "session id: 01a19ac9-dab5-7570-93b6-6ba41bf65093" >&2
+fi
 cat > "${STUB_PROMPT}"
 if ! grep -q '^<<<<<<< ' file.txt; then
   case "${STUB_BUILD:-none}" in
@@ -168,63 +173,101 @@ chmod +x "${WORK_DIR}/test-bin/claude"
 cp "${WORK_DIR}/test-bin/claude" "${WORK_DIR}/test-bin/codex"
 STUB_LOG="${WORK_DIR}/stub-log"
 STUB_PROMPT="${WORK_DIR}/stub-prompt"
-export STUB_LOG STUB_PROMPT
+STUB_ARGS="${WORK_DIR}/stub-args"
+export STUB_LOG STUB_PROMPT STUB_ARGS
 
 ## Usage: setup_case NAME [KIND [LAST-LINE]]
 ## Creates a remote under ${WORK_DIR}/NAME with branches "main" and
 ## "feature", whose changes to file.txt conflict, and a clone of each.  Every
 ## version of file.txt ends with the line LAST-LINE, if it is given.  Sets
-## ${main_dir} and ${feature_dir} to the clones and ${remote} to the remote.
+## ${main_dir} and ${feature_dir} to the clones, ${remote} to the remote, and
+## ${feature_head} to the commit at the head of feature.
 ## With KIND "build", the project has a Makefile, whose build fails if other.txt
 ## contains "BROKEN", and main adds "BROKEN" to other.txt.  With
 ## "build-modifies", the build also changes the tracked file other.txt if
 ## notes.txt exists.
+##
+## Creating the repositories takes about 30 processes, which are slow to
+## start on macOS, so each case copies a template.  Every case of the same
+## KIND without LAST-LINE copies the same template.
 setup_case() {
   case_last_line="${3-}"
   case_dir="${WORK_DIR}/$1"
-  mkdir "${case_dir}"
+  if [ -e "${case_dir}" ]; then
+    fail "setup_case: ${case_dir} already exists"
+  fi
   remote="${case_dir}/myrepo.git"
-  git init -q --bare -b main "${remote}"
-  git init -q -b main "${case_dir}/seed"
-  write_file "${case_dir}/seed/file.txt" one two three four five six seven eight nine
-  git -C "${case_dir}/seed" add file.txt
-  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
-    echo 'all:' > "${case_dir}/seed/Makefile"
-  fi
-  if [ "${2:-}" = build-modifies ]; then
-    printf '\t@if [ -e notes.txt ]; then echo "built" >> other.txt; fi\n' \
-      >> "${case_dir}/seed/Makefile"
-  fi
-  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
-    printf '\t@if grep -n BROKEN other.txt; then echo "other.txt is broken" >&2; exit 1; fi\n' \
-      >> "${case_dir}/seed/Makefile"
-    echo "fine" > "${case_dir}/seed/other.txt"
-    echo '*.local' > "${case_dir}/seed/.gitignore"
-    git -C "${case_dir}/seed" add Makefile other.txt .gitignore
-  fi
-  git -C "${case_dir}/seed" commit -q -m "Initial commit"
-  git -C "${case_dir}/seed" remote add origin "${remote}"
-  git -C "${case_dir}/seed" push -q --set-upstream origin main
-  git -C "${case_dir}/seed" push -q origin main:refs/heads/feature
-
   main_dir="${case_dir}/myrepo-branch-main"
   feature_dir="${case_dir}/myrepo-branch-feature"
-  git clone -q -b main "${remote}" "${main_dir}"
-  git clone -q -b feature "${remote}" "${feature_dir}"
-  git -C "${main_dir}" config pull.rebase false
-  git -C "${feature_dir}" config pull.rebase false
-
-  write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
-  if [ "${2:-}" = build ] || [ "${2:-}" = build-modifies ]; then
-    echo "BROKEN" >> "${main_dir}/other.txt"
+  # No case can be named ".templates".  A case with LAST-LINE has a template
+  # of its own, named after the case.
+  case_template="${WORK_DIR}/.templates/${3:+$1-}${2:-plain}"
+  if [ ! -d "${case_template}" ]; then
+    mkdir -p "${WORK_DIR}/.templates"
+    create_case_repositories "${case_template}" "${2:-}"
   fi
-  git -C "${main_dir}" commit -q -a -m "Change main"
-  git -C "${main_dir}" push -q
-  write_file "${feature_dir}/file.txt" one two three four five six SEVEN-feature eight nine
-  git -C "${feature_dir}" commit -q -a -m "Change feature"
-  git -C "${feature_dir}" push -q
-  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  cp -R "${case_template}" "${case_dir}"
+  # A copied clone's origin is still the template's remote, and its index
+  # records the template's files' inode numbers and times, so that git would
+  # consider each file possibly changed.
+  for case_clone in "${main_dir}" "${feature_dir}"; do
+    git -C "${case_clone}" remote set-url origin "${remote}"
+    git -C "${case_clone}" update-index -q --refresh
+  done
+  read -r feature_head < "${case_dir}/feature-head"
   : > "${STUB_LOG}"
+}
+
+## Usage: create_case_repositories DIR KIND
+## Creates, in the new directory DIR, the repositories that `setup_case`
+## describes for KIND, which is "", "build", or "build-modifies", and the file
+## DIR/feature-head, which contains the commit at the head of feature.  Every
+## version of file.txt ends with the line ${case_last_line}, if it is not
+## empty.
+create_case_repositories() {
+  mkdir "$1"
+  ccr_remote="$1/myrepo.git"
+  git init -q --bare -b main "${ccr_remote}"
+  git init -q -b main "$1/seed"
+  write_file "$1/seed/file.txt" one two three four five six seven eight nine
+  git -C "$1/seed" add file.txt
+  if [ "$2" = build ] || [ "$2" = build-modifies ]; then
+    echo 'all:' > "$1/seed/Makefile"
+  fi
+  if [ "$2" = build-modifies ]; then
+    printf '\t@if [ -e notes.txt ]; then echo "built" >> other.txt; fi\n' \
+      >> "$1/seed/Makefile"
+  fi
+  if [ "$2" = build ] || [ "$2" = build-modifies ]; then
+    printf '\t@if grep -n BROKEN other.txt; then echo "other.txt is broken" >&2; exit 1; fi\n' \
+      >> "$1/seed/Makefile"
+    echo "fine" > "$1/seed/other.txt"
+    echo '*.local' > "$1/seed/.gitignore"
+    git -C "$1/seed" add Makefile other.txt .gitignore
+  fi
+  git -C "$1/seed" commit -q -m "Initial commit"
+  git -C "$1/seed" push -q "${ccr_remote}" main main:refs/heads/feature
+  # Nothing uses the seed after this push, and a copy of a template is
+  # faster without it.
+  rm -rf "$1/seed"
+
+  ccr_main="$1/myrepo-branch-main"
+  ccr_feature="$1/myrepo-branch-feature"
+  git clone -q -b main "${ccr_remote}" "${ccr_main}"
+  git clone -q -b feature "${ccr_remote}" "${ccr_feature}"
+  git -C "${ccr_main}" config pull.rebase false
+  git -C "${ccr_feature}" config pull.rebase false
+
+  write_file "${ccr_main}/file.txt" ONE two three four five six SEVEN-main eight nine
+  if [ "$2" = build ] || [ "$2" = build-modifies ]; then
+    echo "BROKEN" >> "${ccr_main}/other.txt"
+  fi
+  git -C "${ccr_main}" commit -q -a -m "Change main"
+  git -C "${ccr_main}" push -q
+  write_file "${ccr_feature}/file.txt" one two three four five six SEVEN-feature eight nine
+  git -C "${ccr_feature}" commit -q -a -m "Change feature"
+  git -C "${ccr_feature}" push -q
+  git -C "${ccr_feature}" rev-parse HEAD > "$1/feature-head"
 }
 
 ## Usage: write_file FILE LINE...
@@ -399,6 +442,30 @@ case "${push_output}" in
   *"the text before the first conflict region changed"*) ;;
   *) fail "change outside a conflict region: wrong diagnostic: ${push_output}" ;;
 esac
+## The command that continues Claude's session names the session that the
+## stub was given.  The directory is a physical path, as on macOS, where
+## the temporary directory is under a symbolic link.
+session_id="$(sed -n -e '/^--session-id$/{n;p;}' "${STUB_ARGS}")"
+session_dir="$(cd "${feature_dir}" && pwd -P)"
+case "${session_id}" in
+  "") fail "change outside a conflict region: claude was not given --session-id" ;;
+  *)
+    case "${push_output}" in
+      *"to continue the session of claude:  cd ${session_dir} && claude --resume ${session_id}"*) ;;
+      *) fail "change outside a conflict region: no command to continue the session: ${push_output}" ;;
+    esac
+    ## The command is also appended to AGENT-TODO.md, which starts with a
+    ## title.
+    todo="${feature_dir}/AGENT-TODO.md"
+    if [ "$(head -n 1 "${todo}" 2> /dev/null)" != "# AI agent sessions to continue" ]; then
+      fail "change outside a conflict region: AGENT-TODO.md has no title: $(cat "${todo}" 2> /dev/null)"
+    fi
+    if ! grep -q -x "## Resolve the conflicts in the merge of .* (git-push-to, .*)" "${todo}" \
+      || ! grep -q -x -F "cd ${session_dir} && claude --resume ${session_id}" "${todo}"; then
+      fail "change outside a conflict region: AGENT-TODO.md lacks the command: $(cat "${todo}")"
+    fi
+    ;;
+esac
 
 ## Remaining conflict markers are rejected.
 setup_case none
@@ -409,14 +476,97 @@ case "${push_output}" in
   *) fail "remaining conflict markers: wrong diagnostic: ${push_output}" ;;
 esac
 
-## A failing agent is reported.
+## A failing agent is reported.  The command that continues its session is
+## appended to an existing AGENT-TODO.md, which gets no second title.
 setup_case fail
+printf '%s\n' '# AI agent sessions to continue' '' 'An earlier entry.' > "${feature_dir}/AGENT-TODO.md"
 push_to fail --llm
 check_not_resolved "failing agent"
 case "${push_output}" in
-  *"claude failed with status 3"*"conflicted: file.txt"*) ;;
+  *"claude failed with status 3"*"conflicted: file.txt"*"claude --resume "*) ;;
   *) fail "failing agent: wrong diagnostic: ${push_output}" ;;
 esac
+todo="${feature_dir}/AGENT-TODO.md"
+if [ "$(grep -c '^# ' "${todo}")" -ne 1 ] \
+  || ! grep -q -x 'An earlier entry.' "${todo}" \
+  || ! grep -q '^cd .* && claude --resume ' "${todo}"; then
+  fail "failing agent: AGENT-TODO.md was not appended to: $(cat "${todo}")"
+fi
+
+## AGENT-TODO.md is not written through a symbolic link, which could point
+## outside the working tree.
+setup_case todo-link
+echo "outside" > "${case_dir}/outside.txt"
+ln -s ../outside.txt "${feature_dir}/AGENT-TODO.md"
+push_to fail --llm
+check_not_resolved "AGENT-TODO.md link"
+case "${push_output}" in
+  *"claude --resume "*"did not write "*"AGENT-TODO.md, which is not a regular file with one link"*) ;;
+  *) fail "AGENT-TODO.md link: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${case_dir}/outside.txt")" != outside ]; then
+  fail "AGENT-TODO.md link: the link's target was changed: $(cat "${case_dir}/outside.txt")"
+fi
+
+## Nor is it written through a hard link.
+setup_case todo-hard-link
+echo "outside" > "${case_dir}/outside.txt"
+ln "${case_dir}/outside.txt" "${feature_dir}/AGENT-TODO.md"
+push_to fail --llm
+check_not_resolved "AGENT-TODO.md hard link"
+case "${push_output}" in
+  *"claude --resume "*"did not write "*"AGENT-TODO.md, which is not a regular file with one link"*) ;;
+  *) fail "AGENT-TODO.md hard link: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${case_dir}/outside.txt")" != outside ]; then
+  fail "AGENT-TODO.md hard link: the link's target was changed: $(cat "${case_dir}/outside.txt")"
+fi
+
+## Nor is it written if git tracks it.
+setup_case todo-tracked
+echo "# Tracked" > "${feature_dir}/AGENT-TODO.md"
+git -C "${feature_dir}" add AGENT-TODO.md
+git -C "${feature_dir}" commit -q -m "Add AGENT-TODO.md"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+push_to fail --llm
+check_not_resolved "tracked AGENT-TODO.md"
+case "${push_output}" in
+  *"claude --resume "*"did not write AGENT-TODO.md, which git tracks"*) ;;
+  *) fail "tracked AGENT-TODO.md: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${feature_dir}/AGENT-TODO.md")" != "# Tracked" ]; then
+  fail "tracked AGENT-TODO.md: the file was changed: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+
+## The command that continues Codex's session names the session that Codex
+## printed.
+setup_case fail-codex
+push_to fail --codex
+check_not_resolved "failing codex"
+case "${push_output}" in
+  *"codex failed with status 3"*"to continue the session of codex:  cd "*" && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093"*) ;;
+  *) fail "failing codex: wrong diagnostic: ${push_output}" ;;
+esac
+if ! grep -q -x 'cd .* && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093' "${feature_dir}/AGENT-TODO.md"; then
+  fail "failing codex: AGENT-TODO.md lacks the command: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
+
+## If Codex prints no session id, the user is told that its session cannot be
+## continued, and AGENT-TODO.md is not written.
+setup_case codex-no-session
+STUB_NO_SESSION=1 push_to fail --codex
+check_not_resolved "codex without a session id"
+case "${push_output}" in
+  *'codex printed no line "session id: UUID", so no command will be able to continue its session'*) ;;
+  *) fail "codex without a session id: wrong diagnostic: ${push_output}" ;;
+esac
+case "${push_output}" in
+  *"codex resume"*) fail "codex without a session id: a command to continue the session: ${push_output}" ;;
+esac
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "codex without a session id: AGENT-TODO.md was written: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
 
 ## The work of an agent that fails is checked too.
 setup_case fail-create
@@ -811,9 +961,12 @@ setup_case build-none build
 STUB_BUILD=none push_to good --llm
 check_not_pushed "build not fixed"
 case "${push_output}" in
-  *"claude did not fix the build"*) ;;
+  *"claude did not fix the build"*"claude --resume "*) ;;
   *) fail "build not fixed: wrong diagnostic: ${push_output}" ;;
 esac
+if ! grep -q -x "## Fix the build after merging branch 'main' (git-push-to, .*)" "${feature_dir}/AGENT-TODO.md"; then
+  fail "build not fixed: AGENT-TODO.md lacks the entry: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
 if [ "$(wc -l < "${STUB_LOG}")" -ne 2 ]; then
   fail "build not fixed: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
 fi
@@ -828,6 +981,16 @@ case "${push_output}" in
 esac
 if [ "$(wc -l < "${STUB_LOG}")" -ne 4 ]; then
   fail "bad build fix: expected claude to run 4 times, but ran: $(cat "${STUB_LOG}")"
+fi
+## Each attempt's session can be continued, but not the session that
+## resolved the conflicts.
+case "${push_output}" in
+  *"to continue session 1 of 3 of claude:  cd "*"to continue session 2 of 3 of claude:  cd "*"to continue session 3 of 3 of claude:  cd "*) ;;
+  *) fail "bad build fix: no command to continue each attempt's session: ${push_output}" ;;
+esac
+if [ "$(grep -c '^cd .* && claude --resume ' "${feature_dir}/AGENT-TODO.md")" -ne 3 ] \
+  || ! grep -q -x 'Session 3 of 3:' "${feature_dir}/AGENT-TODO.md"; then
+  fail "bad build fix: AGENT-TODO.md lacks a command per attempt: $(cat "${feature_dir}/AGENT-TODO.md")"
 fi
 if ! git -C "${feature_dir}" diff --cached --name-only | grep -q -x notes.txt; then
   fail "bad build fix: the agent's changes are not staged"
@@ -1051,8 +1214,11 @@ fi
 if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
   fail "build fix with a URL remote: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
 fi
-if ! grep -q 'Git cannot name a remote branch' "${STUB_PROMPT}"; then
-  fail "build fix with a URL remote: the instructions do not say that git cannot name a remote branch: $(cat "${STUB_PROMPT}")"
+# The heads that the pulls fetched were built, although no remote branch is
+# known to have been.
+if ! grep -q 'Branch feature has commits that are not in the histor' "${STUB_PROMPT}" \
+  || grep -q 'no remote branch whose history is known to have been built' "${STUB_PROMPT}"; then
+  fail "build fix with a URL remote: the instructions do not say that the commits are not in the fetched heads' histories: $(cat "${STUB_PROMPT}")"
 fi
 message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
 if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
@@ -1074,7 +1240,10 @@ for llm_option in --llm --no-llm; do
   git -C "${main_dir}" remote add fork "${fork}"
   git -C "${main_dir}" fetch -q fork
   fork_head="$(git -C "${main_dir}" rev-parse refs/remotes/fork/main)"
-  git -C "${case_dir}/seed" push -q --force "${fork}" main:main
+  # Change the fork's main without a push from main, which, because main has
+  # a remote whose URL is the fork, could update refs/remotes/fork/main.
+  git -C "${fork}" update-ref refs/heads/main \
+    "$(git -C "${main_dir}" rev-list --max-parents=0 HEAD)"
   git -C "${main_dir}" config branch.main.pushRemote fork
   git -C "${main_dir}" config push.default current
   write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
@@ -1140,15 +1309,19 @@ set_pull_subject() {
 ## that adds "BROKEN" to other.txt.  Unless MAIN is "main", main is reset to
 ## the initial commit, which feature already contains, so that merging main
 ## changes nothing.  Sets ${feature_head} to the remote's feature,
-## ${local_head} to the local feature before the pull, and
-## ${pull_description} and ${pull_subject} to what the message of the pull's
-## merge says.
+## ${local_head} to the local feature before the pull, ${pull_excluded} to
+## the commits whose histories the agent is told were built (see
+## `check_pull_fixed`), and ${pull_description} and ${pull_subject} to what
+## the message of the pull's merge says.
 setup_pull_breaks() {
   setup_case "$1" build
   set_pull_subject
-  if [ "${2:-}" != main ]; then
+  if [ "${2:-}" = main ]; then
+    pull_excluded="refs/remotes/origin/feature $(git -C "${remote}" rev-parse refs/heads/main)"
+  else
     git -C "${main_dir}" reset -q --hard HEAD^
     git -C "${main_dir}" push -q --force
+    pull_excluded=refs/remotes/origin/feature
   fi
   git clone -q -b feature "${remote}" "${case_dir}/other-clone"
   echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
@@ -1165,12 +1338,12 @@ setup_pull_breaks() {
 ## and contains each LINE, was committed on top of the merge of the pull of
 ## feature, which combines ${local_head} and ${feature_head}, and was pushed,
 ## and that the agent was told how to list the commits that the remote's
-## feature lacks.
+## feature and the commits in ${pull_excluded} lack.
 check_pull_fixed() {
   check_description="$1"
   check_subject="$2"
   shift 2
-  if ! grep -q -F 'git log --graph --stat HEAD --not refs/remotes/origin/feature ' "${STUB_PROMPT}"; then
+  if ! grep -q -F "git log --graph --stat HEAD --not ${pull_excluded}\`" "${STUB_PROMPT}"; then
     fail "${check_description}: the instructions do not list the unpushed commits: $(cat "${STUB_PROMPT}")"
   fi
   message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
@@ -1203,6 +1376,10 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
 fi
 check_pull_fixed "pull that breaks the build" \
   "Fix the build after merging ${pull_description}"
+## The agent is told what each side of the pull's merge changed.
+if ! grep -q -x -F "  It merged commit ${feature_head} into commit ${local_head}.  \`git log -p --remerge-diff ${feature_head}..${local_head}\` shows the commits that only ${local_head} had, and \`git log -p --remerge-diff ${local_head}..${feature_head}\` shows the commits that only ${feature_head} had." "${STUB_PROMPT}"; then
+  fail "pull that breaks the build: the instructions do not say what each side of the pull's merge changed: $(cat "${STUB_PROMPT}")"
+fi
 
 ## When both the pull and the merge change the branch, the fix's message
 ## lists both merges.
@@ -1233,6 +1410,73 @@ for ff in true false; do
   esac
   if [ -s "${STUB_LOG}" ]; then
     fail "pull with pull.ff=${ff} to a broken build: an agent ran: $(cat "${STUB_LOG}")"
+  fi
+done
+
+## Usage: setup_broken_clone_merge CASE
+## Sets up a case named CASE, in which the feature branch of
+## ${case_dir}/other-clone, a working clone of the remote, has a merge, not
+## yet pushed, that combines a commit that adds remote.txt with one that adds
+## "BROKEN" to other.txt.  Main is reset to the initial commit, which feature
+## already contains, so that merging main changes nothing.
+setup_broken_clone_merge() {
+  setup_case "$1" build
+  git -C "${main_dir}" reset -q --hard HEAD^
+  git -C "${main_dir}" push -q --force
+  git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+  git -C "${case_dir}/other-clone" switch -q -c side
+  echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
+  git -C "${case_dir}/other-clone" commit -q -a -m "Break the build on side"
+  git -C "${case_dir}/other-clone" switch -q feature
+  echo "remote" > "${case_dir}/other-clone/remote.txt"
+  git -C "${case_dir}/other-clone" add remote.txt
+  git -C "${case_dir}/other-clone" commit -q -m "Add remote.txt"
+  git -C "${case_dir}/other-clone" merge -q --no-ff --no-edit side
+}
+
+## When the branch's remote is a URL, no remote-tracking branch records the
+## remote's feature, but the head that the pull fetched was built there too.
+## So a pull that fast-forwards to a merge of the remote that breaks the
+## build does not ask the agent.
+setup_broken_clone_merge pull-build-fast-forward-url
+git -C "${case_dir}/other-clone" push -q
+feature_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
+git -C "${feature_dir}" config branch.feature.remote "${remote}"
+STUB_BUILD=fix push_to good --llm
+check_not_pushed "pull with a URL remote to a broken build"
+case "${push_output}" in
+  *"unable to build"*) ;;
+  *) fail "pull with a URL remote to a broken build: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "pull with a URL remote to a broken build: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## A working clone in the local file system, unlike a bare repository, need
+## not have pushed its branches, so the head that a pull from it fetched was
+## not necessarily built.  A pull that fast-forwards to an unpushed merge of
+## that clone that breaks the build asks the agent, whether the branch's
+## remote is the clone's pathname or the name of a remote, whose
+## remote-tracking branch then records the clone's feature.
+for clone_remote in pathname name; do
+  setup_broken_clone_merge "pull-build-fast-forward-clone-${clone_remote}"
+  if [ "${clone_remote}" = name ]; then
+    git -C "${feature_dir}" remote add clone "${case_dir}/other-clone"
+    git -C "${feature_dir}" config branch.feature.remote clone
+  else
+    git -C "${feature_dir}" config branch.feature.remote "${case_dir}/other-clone"
+  fi
+  git -C "${feature_dir}" config branch.feature.pushRemote origin
+  git -C "${feature_dir}" config push.default current
+  STUB_BUILD=fix push_to good --llm
+  if [ "${push_status}" -ne 0 ]; then
+    fail "pull from a working clone, by ${clone_remote}, to a broken build: git-push-to failed: ${push_output}"
+  fi
+  if [ "$(cat "${STUB_LOG}")" != claude ]; then
+    fail "pull from a working clone, by ${clone_remote}, to a broken build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+  fi
+  if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+    fail "pull from a working clone, by ${clone_remote}, to a broken build: the build is not fixed"
   fi
 done
 
@@ -1271,6 +1515,7 @@ check_pull_fixed "pull with pull.rebase that breaks the build" \
 ## the build.
 setup_case pull-build-rerun build
 set_pull_subject
+pull_excluded="refs/remotes/origin/feature $(git -C "${remote}" rev-parse refs/heads/main)"
 STUB_BUILD=none push_to good --llm
 check_not_pushed "failed build before a rerun"
 : > "${STUB_LOG}"
