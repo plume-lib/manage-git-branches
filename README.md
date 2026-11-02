@@ -206,7 +206,10 @@ The commands are:
   as after a squash-merge, do not count as work that would be lost.  Neither
   do the commits of a branch whose remote branch is gone, if they are in a
   landed GitHub pull request from the branch, even one with later commits
-  that the branch lacks.  (This needs the `gh` command.)
+  that the branch lacks.  (This needs the `gh` command.)  Such landed commits
+  never prevent a removal.  When other commits would be lost, the message
+  that refuses the removal, or that reports its waiver by `--force-unpushed`,
+  counts the landed commits among those that the removal would delete.
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
