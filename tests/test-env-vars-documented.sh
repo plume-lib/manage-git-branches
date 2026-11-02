@@ -70,7 +70,7 @@ script_code() {
 # Usage: set_variables_in FILE
 # Prints, one per line, the variables that FILE, a shell script, assigns in an
 # assignment statement, such as `VAR=value`, `export VAR=value`,
-# `ARRAY[KEY]=value`, or `ARRAY+=(value)`, or declares, as in
+# `ARRAY[KEY]=value`, or `ARRAY+=(value)`, or declares as an array, as in
 # `declare -A ARRAY`.
 #
 # An assignment that is an environment prefix of a command, as in
@@ -102,9 +102,10 @@ set_variables_in() {
     function is_terminator(t) { return t ~ /^(;|;;|&|&&|\||\|\||\(|\)|\{|\})$/ }
     # The tokens after which a command may start.
     function is_command_start(t) {
-      return is_terminator(t) \
-        || t ~ /^(!|if|then|elif|else|do|while|until|export|readonly|local|time)$/
+      return is_terminator(t) || t ~ /^(!|if|then|elif|else|do|while|until|time)$/
     }
+    # The builtins that declare variables, as in "export VAR=value".
+    function is_declaration(t) { return t ~ /^(declare|export|local|readonly|typeset)$/ }
     # An assignment, to a variable or to an element of an array, which may
     # append to the old value, as in "VAR=value", "ARRAY[KEY]=value", or
     # "ARRAY+=".
@@ -155,7 +156,7 @@ set_variables_in() {
       heredoc_in_substitution = 0
     }
     # Prints the variables that the current logical line assigns.
-    function report_line(  i, j, k, r, at_command) {
+    function report_line(  i, j, k, r, at_command, array) {
       # Within a command substitution, a here-document operator is part of a
       # word rather than a token of its own, so the tokenizer notes it as it
       # goes rather than "is_heredoc" finding it here.
@@ -195,12 +196,18 @@ set_variables_in() {
           at_command = 0
           continue
         }
-        if (at_command && words[i] ~ /^(declare|typeset)$/) {
-          # A declaration sets each variable that it names, whether or not
-          # with a value, as in "declare -A ARRAY OTHER=1".
-          for (i++; i <= nwords && words[i] ~ /^[-+]/; i++) { }
+        if (at_command && is_declaration(words[i])) {
+          # A declaration sets each variable that it assigns, as in
+          # "export VAR=value".  It sets a variable that it names without a
+          # value only if it makes that variable an array, as "declare -A
+          # ARRAY" does; neither "declare -p VAR" nor "export VAR" sets VAR.
+          array = 0
+          for (i++; i <= nwords && words[i] ~ /^[-+]/; i++) {
+            if (words[i] ~ /^-[A-Za-z]*[aA]/) { array = 1 }
+          }
           for (; i <= nwords && !is_terminator(words[i]); i++) {
-            if (words[i] ~ /^[A-Za-z_][A-Za-z0-9_]*$/ || is_assignment(words[i])) {
+            if (is_assignment(words[i]) \
+                || (array && words[i] ~ /^[A-Za-z_][A-Za-z0-9_]*$/)) {
               print_name(words[i])
             }
           }
@@ -335,9 +342,27 @@ set_variables_in() {
           continue
         }
         if (context() == "backtick") { add_word(c); i++; continue }
-        # Outside quotation marks and command substitutions.
+        if (context() == "array") {
+          # A "#" that begins an element starts a comment, which ends the line.
+          if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t(]/)) { break }
+          if (c == ")") pop_context()
+          add_word(c)
+          i++
+          continue
+        }
+        # Outside quotation marks, command substitutions, and array literals.
         if (c == "#" && !have_word) { break }
         if (c == " " || c == "\t") { end_word(); i++; continue }
+        if (c == "(" && word ~ /^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=$/) {
+          # An array literal, as in "ARRAY=(one two)".  It is part of the word
+          # of the assignment, so an element that contains "=", as in
+          # "ARRAY=(VAR=value)", is not an assignment.  It continues the
+          # logical line until its ")".
+          push_context("array")
+          add_word(c)
+          i++
+          continue
+        }
         if (c == ";" || c == "&" || c == "|" || c == "(" || c == ")") {
           if (substr(line, i + 1, 1) == c && c != "(" && c != ")") {
             add_token(c c)
@@ -351,8 +376,9 @@ set_variables_in() {
         add_word(c)
         i++
       }
-      # A quotation mark or a command substitution that is still open, or a
-      # backslash at the end of the line, continues the logical line.
+      # A quotation mark, a command substitution, or an array literal that is
+      # still open, or a backslash at the end of the line, continues the
+      # logical line.
       if (depth > 0) { add_word("\n"); next }
       if (continued) next
       end_word()
@@ -360,8 +386,8 @@ set_variables_in() {
     }
     END {
       if (depth > 0) {
-        # A quotation mark, a command substitution, or a "case" statement
-        # within one that never ended.  Either the script is not valid shell
+        # A quotation mark, a command substitution, an array literal, or a
+        # "case" statement within a command substitution that never ended.  Either the script is not valid shell
         # or this program lost track of the nesting, in which case it has
         # read the rest of the script as one word.  Do not guess.
         print "<unclosed>"
@@ -377,19 +403,94 @@ set_variables_in() {
     exit 2
   fi
   if printf '%s\n' "${assigned}" | grep -qxF '<unclosed>'; then
-    echo "${SCRIPT_NAME}: $1 ends within a quotation or a command substitution" >&2
+    echo "${SCRIPT_NAME}: $1 ends within a quotation, a command substitution, or an array literal" >&2
     echo "${SCRIPT_NAME}: either it is not valid shell, or set_variables_in mis-parsed it" >&2
     exit 2
   fi
   printf '%s\n' "${assigned}" | grep -xE '[A-Z][A-Z0-9_]*' | sort -u
 }
 
+# Usage: shell_variables_read FILE
+# Prints, one per line, the variables that FILE, a shell script, reads, as in
+# `$VAR` or `${VAR}`.
+shell_variables_read() {
+  script_code "$1" | grep -oE '\$\{?[A-Z][A-Z0-9_]*' | grep -oE '[A-Z][A-Z0-9_]*' | sort -u
+}
+
+# Usage: python_variables_read FILE
+# Prints, one per line, the environment variables that FILE, a Python script,
+# reads, as in `os.environ.get("VAR")`, `os.environ["VAR"]`, `os.getenv("VAR")`,
+# or `"VAR" in os.environ`.  It parses FILE, so that a call that spans lines
+# counts and a string or comment that mentions `os.environ` does not.
+python_variables_read() {
+  python3 -I -c '
+import ast
+import re
+import sys
+
+
+def is_environ(node):
+    """Return True if the expression is "os.environ" or "environ"."""
+    return (isinstance(node, ast.Attribute) and node.attr == "environ") or (
+        isinstance(node, ast.Name) and node.id == "environ"
+    )
+
+
+def string_value(node):
+    """Return the value of the string literal, or None if it is not one."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    tree = ast.parse(f.read(), sys.argv[1])
+names = set()
+for node in ast.walk(tree):
+    name = None
+    if isinstance(node, ast.Call) and node.args:
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in ("get", "pop", "setdefault")
+            and is_environ(func.value)
+        ) or (
+            (isinstance(func, ast.Attribute) and func.attr == "getenv")
+            or (isinstance(func, ast.Name) and func.id == "getenv")
+        ):
+            name = string_value(node.args[0])
+    elif isinstance(node, ast.Subscript) and is_environ(node.value):
+        name = string_value(node.slice)
+    elif (
+        isinstance(node, ast.Compare)
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], (ast.In, ast.NotIn))
+        and is_environ(node.comparators[0])
+    ):
+        name = string_value(node.left)
+    # Like the check of shell scripts, consider only upper-case names.
+    if name is not None and re.fullmatch("[A-Z][A-Z0-9_]*", name):
+        names.add(name)
+for name in sorted(names):
+    print(name)
+' "$1"
+}
+
+# The scripts, partitioned by language.
+SHELL_SCRIPTS=''
+PYTHON_SCRIPTS=''
 for script in ${SCRIPTS}; do
   file="${TOPLEVEL}/${script}"
   if [ ! -f "${file}" ]; then
     echo "${SCRIPT_NAME}: no such file: ${file}" >&2
     exit 2
   fi
+  # An assignment, so that "set -e" exits if script_language fails.
+  language="$(script_language "${file}")"
+  case "${language}" in
+    shell) SHELL_SCRIPTS="${SHELL_SCRIPTS} ${script}" ;;
+    python) PYTHON_SCRIPTS="${PYTHON_SCRIPTS} ${script}" ;;
+  esac
 done
 
 # Check `set_variables_in` itself on a script that contains each construct
@@ -442,8 +543,17 @@ APPENDED+=(three)
 ELEMENT[1]=one
 NESTED_SUBSCRIPT[${ELEMENT[1]}]=1
 QUOTED_SUBSCRIPT["a b"]=1
+ELEMENTS=(NOT_AN_ASSIGNMENT=1 "two words")
+MULTILINE_ARRAY=(
+  NOT_AN_ASSIGNMENT_EITHER=1 # It's a comment, whose "'" is not a quotation mark.
+)
 declare -A DECLARED OTHER_DECLARED
 declare -r DECLARED_WITH_VALUE=1
+declare -p PRINTED_ONLY > /dev/null 2>&1
+declare -x EXPORTED_ONLY
+export EXPORTED_ONLY_TOO
+local -a LOCAL_ARRAY=(one)
+readonly -a READONLY_ARRAY
 FIXTURE_END
 EXPECTED='APPENDED
 ARITHMETIC
@@ -456,9 +566,12 @@ DECLARED
 DECLARED_WITH_VALUE
 DUPLICATED_DESCRIPTOR
 ELEMENT
+ELEMENTS
 ESCAPED
 EXPORTED
+LOCAL_ARRAY
 MULTILINE
+MULTILINE_ARRAY
 MULTILINE_CASE
 NESTED_ARITHMETIC
 NESTED_SUBSCRIPT
@@ -468,6 +581,7 @@ PIPED_SUBSHELL
 PLAIN
 QUOTED
 QUOTED_SUBSCRIPT
+READONLY_ARRAY
 REDIRECTED
 STATEMENT_AFTER_CONTINUATION
 SUBSHELL
@@ -534,34 +648,61 @@ SUBSTITUTED_HERE_STRING" ]; then
   exit 2
 fi
 
+# Check `python_variables_read` on a script that reads environment variables
+# in each way that it must recognize, and that mentions some in ways that are
+# not reads.
+cat > "${FIXTURE}" << 'FIXTURE_END'
+import os
+from os import environ, getenv
+
+a = os.environ.get("GOT")
+b = os.environ.get(
+    "GOT_ACROSS_LINES"
+)
+c = os.environ["SUBSCRIPTED"]
+d = os.getenv("GETENV")
+e = getenv( "BARE_GETENV")
+f = environ.setdefault("SET_DEFAULT", "value")
+g = "IN_ENVIRON" in os.environ
+h = os.environ.pop("POPPED", None)
+# os.environ.get("COMMENTED")
+i = 'os.environ.get("IN_STRING")'
+j = os.environ.get("lower_case")
+FIXTURE_END
+EXPECTED='BARE_GETENV
+GETENV
+GOT
+GOT_ACROSS_LINES
+IN_ENVIRON
+POPPED
+SET_DEFAULT
+SUBSCRIPTED'
+ACTUAL="$(python_variables_read "${FIXTURE}")"
+if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+  echo "${SCRIPT_NAME}: python_variables_read is broken" >&2
+  echo "${SCRIPT_NAME}: expected [${EXPECTED}]" >&2
+  echo "${SCRIPT_NAME}: got      [${ACTUAL}]" >&2
+  exit 2
+fi
+
 # The variables that some shell script in this package assigns.  One script
 # sets such a variable before invoking another that reads it, so it is internal
 # to the package rather than part of its user-visible interface.
 PACKAGE_SET_VARIABLES=''
-for script in ${SCRIPTS}; do
-  language="$(script_language "${TOPLEVEL}/${script}")"
-  if [ "${language}" = shell ]; then
-    PACKAGE_SET_VARIABLES="${PACKAGE_SET_VARIABLES}
+for script in ${SHELL_SCRIPTS}; do
+  PACKAGE_SET_VARIABLES="${PACKAGE_SET_VARIABLES}
 $(set_variables_in "${TOPLEVEL}/${script}")"
-  fi
 done
 PACKAGE_SET_VARIABLES="$(printf '%s\n' "${PACKAGE_SET_VARIABLES}" | sort -u)"
 
 status=0
 
-for script in ${SCRIPTS}; do
-  file="${TOPLEVEL}/${script}"
-  if [ "$(script_language "${file}")" = shell ]; then
-    read_variables="$(script_code "${file}" \
-      | grep -oE '\$\{?[A-Z][A-Z0-9_]*' \
-      | grep -oE '[A-Z][A-Z0-9_]*' | sort -u)"
-  else
-    # A Python script reads a variable with "os.environ" or "os.getenv".
-    read_variables="$(script_code "${file}" \
-      | grep -oE '(os\.environ\.get\(|os\.environ\[|os\.getenv\()["'"'"'][A-Z][A-Z0-9_]*' \
-      | grep -oE '[A-Z][A-Z0-9_]*$' | sort -u)"
-  fi
-  for variable in ${read_variables}; do
+# Usage: check_documented SCRIPT VARIABLES
+# Reports each of VARIABLES, which SCRIPT reads, that is part of the
+# user-visible interface but that README.md does not document, and sets
+# "status" to 1 if there is any.
+check_documented() {
+  for variable in $2; do
     if printf '%s\n' "${PACKAGE_SET_VARIABLES}" | grep -qx "${variable}"; then
       continue
     fi
@@ -569,10 +710,21 @@ for script in ${SCRIPTS}; do
       *" ${variable} "*) continue ;;
     esac
     if ! grep -qF "\`${variable}\`" "${README}"; then
-      echo "${SCRIPT_NAME}: ${script} reads ${variable}, which README.md does not document" >&2
+      echo "${SCRIPT_NAME}: $1 reads ${variable}, which README.md does not document" >&2
       status=1
     fi
   done
+}
+
+# Each "read_variables" is an assignment, so that "set -e" exits if the
+# command that computes it fails.
+for script in ${SHELL_SCRIPTS}; do
+  read_variables="$(shell_variables_read "${TOPLEVEL}/${script}")"
+  check_documented "${script}" "${read_variables}"
+done
+for script in ${PYTHON_SCRIPTS}; do
+  read_variables="$(python_variables_read "${TOPLEVEL}/${script}")"
+  check_documented "${script}" "${read_variables}"
 done
 
 if [ "${status}" -eq 0 ]; then
