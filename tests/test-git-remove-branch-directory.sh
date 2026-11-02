@@ -38,6 +38,9 @@ trap 'rm -rf "${work}"; trap - TERM; kill -s TERM "$$"' TERM
 
 work="$(CDPATH='' cd -- "${work}" && pwd -P)"
 sanitize_git_env "${work}"
+# Some checks match English messages, such as rm's "Permission denied".
+LC_ALL=C
+export LC_ALL
 
 ## Usage: run_command DESCRIPTION EXPECTED-STATUS ARGUMENT...
 ## Runs the command under test, checks its exit status, and sets ${out} to
@@ -72,6 +75,14 @@ check_present() {
 check_message() {
   if ! printf '%s\n' "${out}" | grep -q -F -- "$2"; then
     fail "$1: the output does not contain [$2]: ${out}"
+  fi
+}
+
+## Usage: check_no_message DESCRIPTION TEXT
+## Checks that the last command's output does not contain TEXT.
+check_no_message() {
+  if printf '%s\n' "${out}" | grep -q -F -- "$2"; then
+    fail "$1: the output contains [$2]: ${out}"
   fi
 }
 
@@ -148,6 +159,59 @@ mkdir -p "${project}"
 touch "${project}/.project"
 run_command 'a directory that is no repository' 0 "${project}"
 check_gone 'a directory that is no repository' "${project}"
+
+# A directory that `rm -rf` cannot remove entirely, because it holds a file in
+# a directory that the user cannot write, as when a container running as root
+# created a `.venv`.  What remains is moved to a new directory in /tmp if
+# rename(2) can move it there, and otherwise beneath ~/tmp/DELETEME.  HOME is
+# under ${work}, so the second destination is always on the same file system,
+# and the test never writes in the real ~/tmp.  Which destination succeeds is
+# hard to predict:  for example, `df` reports two btrfs subvolumes as one file
+# system, but rename(2) cannot move between them.  So either is accepted.  The
+# superuser can delete any file, so skip this case, and the similar ones for a
+# linked worktree, when running as root.
+if [ "$(id -u)" -ne 0 ]; then
+  undeletable="${work}/myrepo-branch-undeletable"
+  mkdir -p "${undeletable}/.venv/bin"
+  touch "${undeletable}/.venv/bin/python" "${undeletable}/other"
+  chmod 555 "${undeletable}/.venv/bin"
+  saved_home="${HOME}"
+  HOME="${work}/home"
+  export HOME
+  run_command 'a directory that rm -rf cannot remove entirely' 0 "${undeletable}"
+  HOME="${saved_home}"
+  check_gone 'a directory that rm -rf cannot remove entirely' "${undeletable}"
+  case "${out}" in
+    *"so moved what remains to /tmp/"* | *"so moved what remains to ${work}/home/tmp/DELETEME/"*)
+      moved="${out##*so moved what remains to }"
+      if [ ! -e "${moved}/myrepo-branch-undeletable/.venv/bin/python" ]; then
+        fail "a directory that rm -rf cannot remove entirely: not in ${moved}: ${out}"
+      fi
+      if [ -e "${moved}/myrepo-branch-undeletable/other" ]; then
+        fail "a directory that rm -rf cannot remove entirely: moved a file that rm -rf can remove"
+      fi
+      case "${out}" in
+        *'Permission denied'*)
+          fail "a directory that rm -rf cannot remove entirely: printed rm's messages: ${out}"
+          ;;
+      esac
+      chmod -R u+w "${moved}"
+      rm -rf -- "${moved}"
+      ;;
+    *)
+      fail "a directory that rm -rf cannot remove entirely: did not say that it moved it to /tmp or ~/tmp/DELETEME: ${out}"
+      chmod -R u+w "${undeletable}"
+      ;;
+  esac
+fi
+
+# A directory that is no repository and holds nothing but Python build output,
+# which `git-orphaned-branches` also reports.
+python_leftover="${work}/myrepo-branch-python"
+mkdir -p "${python_leftover}/.venv/bin"
+touch "${python_leftover}/.venv/bin/python"
+run_command 'a directory of Python build output' 0 "${python_leftover}"
+check_gone 'a directory of Python build output' "${python_leftover}"
 
 # Several directories in one invocation, since a caller passes a whole list.
 several1="$(make_clone several1)"
@@ -340,15 +404,15 @@ squash_merge "${landedwaived}"
 run_command 'a landed branch and an unpushed one' 1 "${landedwaived}"
 check_present 'a landed branch and an unpushed one' "${landedwaived}"
 check_message 'a landed branch and an unpushed one' \
-  "refusing to remove ${landedwaived}: 2 commit(s) are on no remote-tracking ref or tag, 1 of them on a branch whose changes have landed in a remote's default branch; re-run with --force-unpushed"
+  "refusing to remove ${landedwaived}: 1 commit(s) are on no remote-tracking ref or tag, nor on a branch whose changes have landed, and 1 more on such a branch; re-run with --force-unpushed"
 run_command 'a landed branch and an unpushed one, waived' 0 --force-unpushed \
   "${landedwaived}"
 check_gone 'a landed branch and an unpushed one, waived' "${landedwaived}"
 check_line 'a landed branch and an unpushed one, waived' \
-  "git-remove-branch-directory: ${landedwaived}: --force-unpushed: deleting 2 commit(s) that are on no remote-tracking ref or tag, 1 of them on a branch whose changes have landed in a remote's default branch"
+  "git-remove-branch-directory: ${landedwaived}: --force-unpushed: deleting 1 commit(s) that are on no remote-tracking ref or tag, nor on a branch whose changes have landed, and 1 more on such a branch"
 
-# A waiver reports the commits that it deletes even when the removal needs
-# no waiver, because all of them are on a branch whose changes have landed.
+# A waiver that overrides nothing says nothing, though the removal deletes
+# commits, because all of them are on a branch whose changes have landed.
 landedforced="$(make_clone landedforced)"
 echo "landed work" > "${landedforced}/landedforced.txt"
 git -C "${landedforced}" add landedforced.txt
@@ -356,8 +420,7 @@ git -C "${landedforced}" commit -q -m "Work to squash-merge"
 squash_merge "${landedforced}"
 run_command 'a landed branch, waived' 0 --force-unpushed "${landedforced}"
 check_gone 'a landed branch, waived' "${landedforced}"
-check_line 'a landed branch, waived' \
-  "git-remove-branch-directory: ${landedforced}: --force-unpushed: deleting 1 commit(s) that are on no remote-tracking ref or tag, 1 of them on a branch whose changes have landed in a remote's default branch"
+check_no_message 'a landed branch, waived' "--force-unpushed"
 
 # A branch that changes no file has nothing to land, so merging it into the
 # remote's default branch changes nothing, but its commits have not landed.
@@ -636,8 +699,8 @@ run_command 'a linked worktree with an unpushed commit, waived' 0 \
   --force-unpushed "${work}/myrepo-branch-wtmine"
 check_gone 'a linked worktree with an unpushed commit, waived' \
   "${work}/myrepo-branch-wtmine"
-check_message 'a linked worktree with an unpushed commit, waived' \
-  "git fsck --lost-found"
+check_line 'a linked worktree with an unpushed commit, waived' \
+  "git-remove-branch-directory: ${work}/myrepo-branch-wtmine: --force-unpushed: deleting 1 commit(s) that are on no other branch, remote-tracking ref, or tag; until \`git gc\` runs, \`git fsck --lost-found\` can recover them"
 if git -C "${wthost}" rev-parse --verify --quiet refs/heads/wtmine > /dev/null; then
   fail "a linked worktree with an unpushed commit, waived: its branch is left"
 fi
@@ -654,6 +717,8 @@ squash_merge "${work}/myrepo-branch-wtsquashed"
 git -C "${work}/myrepo-branch-wtsquashed" merge -q --no-edit origin/main
 run_command 'a linked worktree whose branch was squash-merged' 0 \
   "${work}/myrepo-branch-wtsquashed"
+check_no_message 'a linked worktree whose branch was squash-merged' \
+  "commit(s)"
 check_unregistered 'a linked worktree whose branch was squash-merged' \
   "${wthost}" "${work}/myrepo-branch-wtsquashed" wtsquashed
 
@@ -701,6 +766,70 @@ git -C "${wthost}" worktree unlock "${work}/myrepo-branch-wtlocked"
 run_command 'an unlocked linked worktree' 0 "${work}/myrepo-branch-wtlocked"
 check_unregistered 'an unlocked linked worktree' "${wthost}" \
   "${work}/myrepo-branch-wtlocked" wtlocked
+
+# A linked worktree that `git worktree remove` cannot remove entirely, as when
+# a container running as root created a `.venv` in it.  Git deletes the
+# administrative directory anyway, and what remains is moved, as for a
+# directory that is no repository above.
+if [ "$(id -u)" -ne 0 ]; then
+  wtundeletable="${work}/myrepo-branch-wtundeletable"
+  git -C "${wthost}" worktree add -q -b wtundeletable "${wtundeletable}"
+  mark_created wtundeletable
+  mkdir -p "${wtundeletable}/.venv/bin"
+  touch "${wtundeletable}/.venv/bin/python"
+  chmod 555 "${wtundeletable}/.venv/bin"
+  saved_home="${HOME}"
+  HOME="${work}/home"
+  export HOME
+  run_command 'a linked worktree that git cannot remove entirely' 0 "${wtundeletable}"
+  HOME="${saved_home}"
+  check_gone 'a linked worktree that git cannot remove entirely' "${wtundeletable}"
+  check_unregistered 'a linked worktree that git cannot remove entirely' \
+    "${wthost}" "${wtundeletable}" wtundeletable
+  case "${out}" in
+    *"so moved what remains to /tmp/"* | *"so moved what remains to ${work}/home/tmp/DELETEME/"*)
+      moved="${out##*so moved what remains to }"
+      if [ ! -e "${moved}/myrepo-branch-wtundeletable/.venv/bin/python" ]; then
+        fail "a linked worktree that git cannot remove entirely: not in ${moved}: ${out}"
+      fi
+      case "${out}" in
+        *'Permission denied'*)
+          fail "a linked worktree that git cannot remove entirely: printed the messages of git or rm: ${out}"
+          ;;
+      esac
+      chmod -R u+w "${moved}"
+      rm -rf -- "${moved}"
+      ;;
+    *)
+      fail "a linked worktree that git cannot remove entirely: did not say that it moved it to /tmp or ~/tmp/DELETEME: ${out}"
+      chmod -R u+w "${wtundeletable}"
+      ;;
+  esac
+
+  # A linked worktree that git unregisters but that neither git nor the
+  # fallback can remove or move, because its parent directory is not
+  # writable.  What remains is no longer a worktree, so a later run would not
+  # know about the branch; it is deleted now.
+  wtparent="${work}/read-only-parent"
+  wtstuck="${wtparent}/myrepo-branch-wtstuck"
+  mkdir -p "${wtparent}"
+  git -C "${wthost}" worktree add -q -b wtstuck "${wtstuck}"
+  mark_created wtstuck
+  chmod 555 "${wtparent}"
+  saved_home="${HOME}"
+  HOME="${work}/home"
+  export HOME
+  run_command 'a linked worktree that cannot be removed or moved' 1 "${wtstuck}"
+  HOME="${saved_home}"
+  chmod 755 "${wtparent}"
+  check_present 'a linked worktree that cannot be removed or moved' "${wtstuck}"
+  check_unregistered 'a linked worktree that cannot be removed or moved' \
+    "${wthost}" "${wtstuck}" wtstuck
+  check_message 'a linked worktree that cannot be removed or moved' \
+    "git has already unregistered ${wtstuck}, so what remains is an ordinary directory"
+  run_command 'what remains of a linked worktree' 0 "${wtstuck}"
+  check_gone 'what remains of a linked worktree' "${wtstuck}"
+fi
 
 # A linked worktree that was moved with `mv`, and not repaired, is no longer
 # where its registration says.  `git worktree remove` cannot remove it, so the

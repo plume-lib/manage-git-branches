@@ -103,6 +103,11 @@ The commands are:
   remote branches nor those of FROM_DIR's branch contain, such as the one
   that it just made, it asks the agent to fix the build, up to 3 times, and
   commits the fix.
+  If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
+  prints a command, such as `cd DIR && claude --resume ID`, that continues
+  the agent's session interactively (one per attempt to fix the build), and
+  appends it to the file `AGENT-TODO.md` at the top level of the working
+  tree.
   `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
   on.
   The agent runs in a sandbox, which requires a recent version:  Claude
@@ -144,6 +149,22 @@ The commands are:
   `git rerere` and an AI agent, and it accepts the same `--llm`, `--no-llm`,
   `--claude`,
   and `--codex` options.
+* [`pr-merge-analysis`](pr-merge-analysis)
+  `[--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]`:
+  For the given open pull requests of the GitHub repository OWNER/REPO (by
+  default, all of them), reports which ones conflict with the default
+  branch, which ones contain every non-merge commit of another, and (unless
+  `--no-pairwise`) which pairs conflict with each other.  It fetches the
+  pull requests into REPO_DIR, a clone of the repository, and caches its
+  results in the current directory.  When the run covers every open pull
+  request (no PR number is given, or `--prune` says that the given ones are
+  all of them), it removes the cached results for commits that are no longer
+  the head of an open pull request, and it deletes from REPO_DIR the refs of
+  the pull requests that are not open.  `--default-branch BRANCH` compares
+  against BRANCH rather than the repository's default branch.
+  This command needs Git 2.38 or later, `gh`, and Bash 4 or later as the
+  first `bash` on the PATH.  On macOS, `/bin/bash` is Bash 3.2, so put a
+  newer Bash, such as Homebrew's, earlier on the PATH.
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--claude | --codex] [-C DIR]`:
   Runs `pr-status`, which regenerates `pr-dependencies.md`, then runs each
@@ -154,17 +175,27 @@ The commands are:
   and refuses any other.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
-  It is also true of a directory that holds nothing but Eclipse `.project`
-  files, which a branch directory may leave behind when its working tree
-  is gone.
+  It is also true of a directory that holds nothing but leftovers, which a
+  branch directory can leave behind when its working tree is gone:  Eclipse
+  `.project` files, Python `.venv` directories, and `*.egg-info`
+  directories.  A `.venv` or `*.egg-info` directory is a leftover only if
+  it holds no version-control checkout, and a directory of leftovers counts
+  only if no git working tree tracks a file in it.
 * [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
   Lists directories named `*-branch-*`, below the current directory, that are
   working trees for branches that were deleted in the remote repository, or
-  that hold nothing but Eclipse `.project` files.
+  that hold nothing but leftovers, as for `is-deleted-branch`.
   With `--remove`, removes each of them instead of printing them.
   A directory whose branch still exists in the remote, but whose GitHub pull
   requests are all closed or merged, is neither listed nor removed; a warning
   about it is printed instead.  (This needs the `gh` command.)
+  Likewise, a warning is printed about a directory named `*-branch-*` that
+  is in no git working tree and either holds more than leftovers, such as
+  one whose removal failed on files that another user owns, or holds no
+  leftover at all, such as an empty directory; about one that is in a git
+  working tree that tracks none of its files; and about one that is in a
+  working tree that git cannot use, such as a linked worktree whose main
+  working tree was moved.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
   alias below).
 * [`git-remove-branch-directory`](git-remove-branch-directory)
@@ -172,7 +203,13 @@ The commands are:
   DIRECTORY...`:
   Removes a branch directory, unless the removal would lose work.
   Commits on a branch whose changes have landed in a remote's default branch,
-  as after a squash-merge, do not count as work that would be lost.
+  as after a squash-merge, do not count as work that would be lost.  Neither
+  do the commits of a branch whose remote branch is gone, if they are in a
+  landed GitHub pull request from the branch, even one with later commits
+  that the branch lacks.  (This needs the `gh` command.)  Such landed commits
+  never prevent a removal.  When other commits would be lost, the message
+  that refuses the removal, or that reports its waiver by `--force-unpushed`,
+  counts the landed commits among those that the removal would delete.
   Nor does an uncommitted change each of whose resulting files, with its
   pathname, mode, and contents, is in a commit that some ref that the removal
   leaves names, such as a remote-tracking ref; the ref can differ from file to
@@ -180,6 +217,11 @@ The commands are:
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
+  If `rm -rf` cannot remove everything, as when a container running as root
+  created files in the directory, it moves what remains to a new directory in
+  `/tmp`, whose cleanup runs as root, provided that `/tmp` is on the same
+  file system, or else to a new directory beneath `~/tmp/DELETEME`, under the
+  same condition.
   Given a worktree whose directory was already removed with `rm -rf`, it
   removes what that left behind:  the worktree's registration and, under the
   same conditions, its branch, in the repository that `--repository` names
@@ -249,6 +291,9 @@ takes effect when it is set to a non-empty value.
   run when it resolves merge conflicts.  An agent that runs longer is stopped,
   and the merge is left in progress.  The default is 1800 (30 minutes); 0
   means no limit.
+* `PR_MERGE_ANALYSIS_CACHE`: the file in which `pr-merge-analysis` caches its
+  results.  The default is `.pr-merge-analysis-cache-OWNER__REPO.tsv` in the
+  current directory.  Repositories must not share a cache file.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
 * `AZURE_DEVOPS_EXT_PAT`: the commands that use the Azure DevOps API use this
