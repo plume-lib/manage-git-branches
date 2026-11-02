@@ -851,8 +851,7 @@ check_branch_dir() {
   if has_branch_checked_out "$1" "${slug_branch}"; then
     return 0
   fi
-  check_actual="$(git -C "$1" symbolic-ref --quiet --short HEAD 2> /dev/null)" \
-    || check_actual="a detached HEAD"
+  check_actual="$(current_branch "$1")" || check_actual="a detached HEAD"
   echo "${SCRIPT_NAME}: ${1#./} has ${check_actual} checked out, not ${slug_branch}" >&2
   return 1
 }
