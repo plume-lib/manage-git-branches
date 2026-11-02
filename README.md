@@ -144,9 +144,20 @@ The commands are:
   `git rerere` and an AI agent, and it accepts the same `--llm`, `--no-llm`,
   `--claude`,
   and `--codex` options.
+* [`pr-status`](pr-status) `[--check] [-C DIR]`:
+  Computes the dependencies among the open pull requests, updates the "Land
+  after" and "Land before" lines of their descriptions, and regenerates
+  `pr-status.md` (or the documents that `pr-status-config.json` names),
+  which lists the dependencies and the `git-push-to` commands that update
+  each dependency chain.  It prints what changed since its previous run.
+  With `--check`, it writes no document.
+  Run it in a directory that holds the working copy directories, or pass
+  that directory with `-C`.
+  This command needs Python 3.8 or later, `gh`, and
+  `~/bin/share/pr-merge-analysis.sh`.
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--claude | --codex] [-C DIR]`:
-  Runs `pr-status`, which regenerates `pr-dependencies.md`, then runs each
+  Runs `pr-status`, which regenerates `pr-status.md`, then runs each
   `git-push-to` command in its section "Dependency chains with conflicts",
   with `--claude` (or `--codex`), which asks an AI agent for help.  Repeats
   until no chain has conflicts, for up to 3 rounds; stops after a round in

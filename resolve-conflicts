@@ -6,11 +6,11 @@
 # Usage:
 #   resolve-conflicts [--nocompile] [--claude | --codex] [-C DIR]
 #
-# Run it in the directory that holds pr-dependencies.md and the working
+# Run it in the directory that holds pr-status.md and the working
 # copies, as for `pr-status`, or pass that directory with "-C".
 #
 # This script does the following:
-#  * run `pr-status`, which regenerates pr-dependencies.md,
+#  * run `pr-status`, which regenerates pr-status.md,
 #  * run each command in its section "Dependency chains with conflicts", one
 #    `git-push-to` command per chain, adding the "--claude" option (or
 #    "--codex"; see `git-push-to`, under "Asking an AI agent") and any
@@ -24,9 +24,6 @@
 # `cd DIR`, `git-push-to ARGUMENT...`, and `echo "success"`, joined by "&&".
 # It refuses any other command, or an argument that contains a character that
 # the shell would interpret, before running any command.
-#
-# This script finds `pr-status` in its own directory or, as `pr-status.py`, on
-# the PATH.
 
 script_path="$0"
 case "${script_path}" in
@@ -68,7 +65,7 @@ SCRIPT_NAME="$(basename -- "$0")"
 max_rounds=3
 # The document that `pr-status` writes, and its section of chains with
 # conflicts.
-document="pr-dependencies.md"
+document="pr-status.md"
 section="conflicting-push-commands"
 
 usage() {
@@ -146,12 +143,7 @@ while [ "$#" -ge 1 ]; do
   shift
 done
 
-if [ -x "${SCRIPT_DIR}/pr-status" ]; then
-  pr_status="${SCRIPT_DIR}/pr-status"
-elif ! pr_status="$(command -v pr-status.py)"; then
-  echo "${SCRIPT_NAME}: cannot find pr-status or pr-status.py" >&2
-  exit 1
-fi
+pr_status="${SCRIPT_DIR}/pr-status"
 
 # The commands are split into words, which must not be expanded as patterns.
 set -f
