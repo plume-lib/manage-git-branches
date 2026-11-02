@@ -19,11 +19,23 @@ SCRIPT_NAME="$(basename -- "$0")"
 
 README="${TOPLEVEL}/README.md"
 
-# The commands, which are executable, and the files that they source, which
-# are not executable but whose names end in ".sh".  A variable that a sourced
-# file reads is part of the interface of the commands that source it.
+# The shell commands, which are executable and start with "#!/bin/sh", and the
+# files that they source, which are not executable but whose names end in
+# ".sh".  A variable that a sourced file reads is part of the interface of the
+# commands that source it.  The Python commands and the Bash command
+# `pr-merge-analysis` are not checked; `set_variables_in` does not parse Bash
+# arrays.
 SCRIPTS="$(find "${TOPLEVEL}" -maxdepth 1 -type f ! -name '*~' \
   \( -perm -u+x -o -name '*.sh' \) -exec basename -- {} ';' | sort)"
+shell_scripts=''
+for script in ${SCRIPTS}; do
+  case "${script}" in
+    *.sh) ;;
+    *) if [ "$(head -n 1 -- "${TOPLEVEL}/${script}")" != '#!/bin/sh' ]; then continue; fi ;;
+  esac
+  shell_scripts="${shell_scripts} ${script}"
+done
+SCRIPTS="${shell_scripts}"
 if [ -z "${SCRIPTS}" ]; then
   echo "${SCRIPT_NAME}: found no scripts in ${TOPLEVEL}" >&2
   exit 2

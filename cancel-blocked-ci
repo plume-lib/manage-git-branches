@@ -57,7 +57,6 @@ import json
 import operator
 import pathlib
 import re
-import shutil
 import sys
 import types
 import typing
@@ -87,21 +86,12 @@ def report_failure(message):
 def load_pr_status() -> types.ModuleType:
     """Import the pr-status script, whose name is not a legal module name.
 
-    The script is pr-status in the directory of this script, or else pr-status or
-    pr-status.py on the PATH.
+    The script is pr-status in the directory of this script.
 
     Returns:
         The imported module.
     """
     path = pathlib.Path(__file__).resolve().parent / "pr-status"
-    if not path.exists():
-        found = shutil.which("pr-status") or shutil.which("pr-status.py")
-        if found is None:
-            sys.exit(
-                f"{PROGRAM}: cannot find pr-status in {path.parent},"
-                " nor pr-status or pr-status.py on the PATH"
-            )
-        path = pathlib.Path(found)
     loader = importlib.machinery.SourceFileLoader("pr_status", str(path))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec is not None

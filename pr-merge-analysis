@@ -1,0 +1,156 @@
+#!/bin/bash
+# Report, for the open pull requests of a GitHub repository:
+#  * which PRs conflict with master,
+#  * which PRs contain all the non-merge commits of another PR, and
+#  * which pairs of PRs conflict with each other.
+#
+# Usage: pr-merge-analysis [--no-pairwise] [--default-branch BRANCH] REPO_DIR OWNER/REPO [PR_NUMBER...]
+#   REPO_DIR is a local clone, into which the PR heads are fetched
+#   (as refs/remotes/pr/N) along with master (as refs/remotes/csm/master).
+#   The PR numbers are those of the open PRs; if none is given, gh lists them.
+#   --no-pairwise omits the pairwise conflicts, the most expensive section.
+#   --default-branch names the repository's default branch, which this script
+#   calls "master" (default: master).  It is fetched as refs/remotes/csm/master.
+#
+# Results are cached in .pr-merge-analysis-cache-OWNER-REPO.tsv in the current
+# directory (or in $PR_MERGE_ANALYSIS_CACHE, if set), keyed by commit SHAs, so a
+# check is recomputed only when a branch moves.  Each run removes the cache lines
+# that refer to a commit that is no longer the head of an open PR or master, so
+# repositories must not share a cache file.
+# Cache lines:
+#   merge<TAB>SHA1<TAB>SHA2<TAB>clean|conflict<TAB>conflicting files
+#     (SHA1 < SHA2, so the order of the two branches does not matter)
+#   contains<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>yes|no
+
+set -o pipefail
+PAIRWISE=yes
+DEFAULT_BRANCH=master
+while true; do
+  case "$1" in
+    --no-pairwise)
+      PAIRWISE=no
+      shift
+      ;;
+    --default-branch)
+      DEFAULT_BRANCH=$2
+      shift 2
+      ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 2 ] || {
+  echo "usage: $0 [--no-pairwise] [--default-branch BRANCH] REPO_DIR OWNER/REPO [PR_NUMBER...]" >&2
+  exit 2
+}
+G="git -C $1"
+CACHE="${PR_MERGE_ANALYSIS_CACHE:-$PWD/.pr-merge-analysis-cache-${2//\//-}.tsv}"
+touch "$CACHE"
+
+if [ $# -gt 2 ]; then
+  P=$(printf '%s\n' "${@:3}" | sort -n)
+else
+  P=$(gh pr list -R "$2" --state open --limit 300 --json number --jq '.[].number' | sort -n) || exit 1
+fi
+# Fetch only the open PRs; refs/pull/*/head would also fetch every closed PR.
+# The ref is named "master" whatever the default branch, so that callers need not know it.
+REFSPECS=("+refs/heads/$DEFAULT_BRANCH:refs/remotes/csm/master")
+for n in $P; do REFSPECS+=("+refs/pull/$n/head:refs/remotes/pr/$n"); done
+# Authenticate as gh does, so that a private repository can be fetched, and never
+# prompt for a username.
+GIT_TERMINAL_PROMPT=0 $G -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+  fetch -q "https://github.com/$2.git" "${REFSPECS[@]}" || exit 1
+MSHA=$($G rev-parse refs/remotes/csm/master)
+
+declare -A SHA CACHED CURRENT
+CURRENT[$MSHA]=1
+if [ -n "$P" ]; then
+  REFS=()
+  for n in $P; do REFS+=("refs/remotes/pr/$n"); done
+  mapfile -t shas < <($G rev-parse "${REFS[@]}")
+  i=0
+  for n in $P; do
+    SHA[$n]=${shas[i++]}
+    CURRENT[${SHA[$n]}]=1
+  done
+fi
+while IFS=$'\t' read -r kind k1 k2 k3 rest; do
+  if [ "$kind" = merge ]; then
+    CACHED["merge $k1 $k2"]="$k3	$rest"
+  elif [ "$kind" = contains ]; then CACHED["contains $k1 $k2 $k3"]="$rest"; fi
+done < "$CACHE"
+
+# These functions set RESULT rather than printing it, because a command
+# substitution per call would fork a subshell for each of thousands of pairs.
+
+# Sets RESULT to "clean" or "conflict<TAB>files".
+merge_result() {
+  local x=$1 y=$2
+  [[ $x > $y ]] && {
+    local t=$x
+    x=$y
+    y=$t
+  }
+  local key="merge $x $y"
+  if [ -z "${CACHED[$key]+set}" ]; then
+    local out status files
+    if out=$($G merge-tree --write-tree --name-only "$x" "$y" 2>&1); then
+      status=clean
+      files=
+    else
+      status=conflict
+      files=$(echo "$out" | sed -n '2,/^$/p' | tr '\n' ' ' | sed 's/ *$//')
+    fi
+    CACHED[$key]="$status	$files"
+    printf 'merge\t%s\t%s\t%s\t%s\n' "$x" "$y" "$status" "$files" >> "$CACHE"
+  fi
+  RESULT=${CACHED[$key]}
+}
+
+# Sets RESULT to "yes" if commit $1 contains every non-merge commit of $2 that
+# is not in master (and there is at least one such commit), otherwise to "no".
+contains_result() {
+  local key="contains $MSHA $1 $2"
+  if [ -z "${CACHED[$key]+set}" ]; then
+    local ok=no
+    if [ -n "$($G rev-list --no-merges -n1 "$2" "^$MSHA")" ] \
+      && [ -z "$($G rev-list --no-merges -n1 "$2" "^$MSHA" "^$1")" ]; then
+      ok=yes
+    fi
+    CACHED[$key]=$ok
+    printf 'contains\t%s\t%s\t%s\t%s\n' "$MSHA" "$1" "$2" "$ok" >> "$CACHE"
+  fi
+  RESULT=${CACHED[$key]}
+}
+
+echo "## master conflicts"
+for n in $P; do
+  merge_result "$MSHA" "${SHA[$n]}"
+  [ "${RESULT%%	*}" = conflict ] && echo "$n: ${RESULT#*	}"
+done
+echo "## containment (A contains all non-merge commits of B)"
+for a in $P; do for b in $P; do
+  [ "$a" = "$b" ] && continue
+  contains_result "${SHA[$a]}" "${SHA[$b]}"
+  [ "$RESULT" = yes ] && echo "$a contains $b"
+done; done
+if [ $PAIRWISE = yes ]; then
+  echo "## pairwise conflicts"
+  for a in $P; do for b in $P; do
+    [ "$a" -lt "$b" ] || continue
+    merge_result "${SHA[$a]}" "${SHA[$b]}"
+    [ "${RESULT%%	*}" = conflict ] && echo "$a vs $b: ${RESULT#*	}"
+  done; done
+fi
+
+# Prune the cache to the lines about current commits.
+for key in "${!CACHED[@]}"; do
+  # shellcheck disable=SC2206 # A key is words without glob characters; "read <<<" would be slow.
+  k=($key)
+  if [ "${k[0]}" = merge ]; then
+    if [ -n "${CURRENT[${k[1]}]+set}" ] && [ -n "${CURRENT[${k[2]}]+set}" ]; then
+      printf 'merge\t%s\t%s\t%s\n' "${k[1]}" "${k[2]}" "${CACHED[$key]}"
+    fi
+  elif [ "${k[1]}" = "$MSHA" ] && [ -n "${CURRENT[${k[2]}]+set}" ] && [ -n "${CURRENT[${k[3]}]+set}" ]; then
+    printf 'contains\t%s\t%s\t%s\t%s\n' "${k[1]}" "${k[2]}" "${k[3]}" "${CACHED[$key]}"
+  fi
+done > "$CACHE.new" && mv "$CACHE.new" "$CACHE"
