@@ -9,7 +9,8 @@
 #   tests/test-push-to-llm.sh
 #
 # Stub `claude` and `codex` commands stand in for the agents.  Environment
-# variables STUB_MODE and STUB_BUILD say what the stubs do.
+# variables STUB_MODE and STUB_BUILD say what the stubs do, and the `codex`
+# stub prints no session id if STUB_NO_SESSION is set.
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -87,7 +88,7 @@ cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
 basename -- "$0" >> "${STUB_LOG}"
 printf '%s\n' "$@" > "${STUB_ARGS}"
-if [ "$(basename -- "$0")" = codex ]; then
+if [ "$(basename -- "$0")" = codex ] && [ -z "${STUB_NO_SESSION:-}" ]; then
   echo "session id: 01a19ac9-dab5-7570-93b6-6ba41bf65093" >&2
 fi
 cat > "${STUB_PROMPT}"
@@ -463,11 +464,42 @@ ln -s ../outside.txt "${feature_dir}/AGENT-TODO.md"
 push_to fail --llm
 check_not_resolved "AGENT-TODO.md link"
 case "${push_output}" in
-  *"claude --resume "*"did not write "*"AGENT-TODO.md, which is not an untracked regular file"*) ;;
+  *"claude --resume "*"did not write "*"AGENT-TODO.md, which is not a regular file with one link"*) ;;
   *) fail "AGENT-TODO.md link: wrong diagnostic: ${push_output}" ;;
 esac
 if [ "$(cat "${case_dir}/outside.txt")" != outside ]; then
   fail "AGENT-TODO.md link: the link's target was changed: $(cat "${case_dir}/outside.txt")"
+fi
+
+## Nor is it written through a hard link.
+setup_case todo-hard-link
+echo "outside" > "${case_dir}/outside.txt"
+ln "${case_dir}/outside.txt" "${feature_dir}/AGENT-TODO.md"
+push_to fail --llm
+check_not_resolved "AGENT-TODO.md hard link"
+case "${push_output}" in
+  *"claude --resume "*"did not write "*"AGENT-TODO.md, which is not a regular file with one link"*) ;;
+  *) fail "AGENT-TODO.md hard link: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${case_dir}/outside.txt")" != outside ]; then
+  fail "AGENT-TODO.md hard link: the link's target was changed: $(cat "${case_dir}/outside.txt")"
+fi
+
+## Nor is it written if git tracks it.
+setup_case todo-tracked
+echo "# Tracked" > "${feature_dir}/AGENT-TODO.md"
+git -C "${feature_dir}" add AGENT-TODO.md
+git -C "${feature_dir}" commit -q -m "Add AGENT-TODO.md"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+push_to fail --llm
+check_not_resolved "tracked AGENT-TODO.md"
+case "${push_output}" in
+  *"claude --resume "*"did not write AGENT-TODO.md, which git tracks"*) ;;
+  *) fail "tracked AGENT-TODO.md: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${feature_dir}/AGENT-TODO.md")" != "# Tracked" ]; then
+  fail "tracked AGENT-TODO.md: the file was changed: $(cat "${feature_dir}/AGENT-TODO.md")"
 fi
 
 ## The command that continues Codex's session names the session that Codex
@@ -481,6 +513,22 @@ case "${push_output}" in
 esac
 if ! grep -q -x 'cd .* && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093' "${feature_dir}/AGENT-TODO.md"; then
   fail "failing codex: AGENT-TODO.md lacks the command: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
+
+## If Codex prints no session id, the user is told that its session cannot be
+## continued, and AGENT-TODO.md is not written.
+setup_case codex-no-session
+STUB_NO_SESSION=1 push_to fail --codex
+check_not_resolved "codex without a session id"
+case "${push_output}" in
+  *'codex printed no line "session id: UUID", so no command will be able to continue its session'*) ;;
+  *) fail "codex without a session id: wrong diagnostic: ${push_output}" ;;
+esac
+case "${push_output}" in
+  *"codex resume"*) fail "codex without a session id: a command to continue the session: ${push_output}" ;;
+esac
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "codex without a session id: AGENT-TODO.md was written: $(cat "${feature_dir}/AGENT-TODO.md")"
 fi
 
 ## The work of an agent that fails is checked too.
@@ -896,6 +944,16 @@ case "${push_output}" in
 esac
 if [ "$(wc -l < "${STUB_LOG}")" -ne 4 ]; then
   fail "bad build fix: expected claude to run 4 times, but ran: $(cat "${STUB_LOG}")"
+fi
+## Each attempt's session can be continued, but not the session that
+## resolved the conflicts.
+case "${push_output}" in
+  *"to continue session 1 of 3 of claude:  cd "*"to continue session 2 of 3 of claude:  cd "*"to continue session 3 of 3 of claude:  cd "*) ;;
+  *) fail "bad build fix: no command to continue each attempt's session: ${push_output}" ;;
+esac
+if [ "$(grep -c '^cd .* && claude --resume ' "${feature_dir}/AGENT-TODO.md")" -ne 3 ] \
+  || ! grep -q -x 'Session 3 of 3:' "${feature_dir}/AGENT-TODO.md"; then
+  fail "bad build fix: AGENT-TODO.md lacks a command per attempt: $(cat "${feature_dir}/AGENT-TODO.md")"
 fi
 if ! git -C "${feature_dir}" diff --cached --name-only | grep -q -x notes.txt; then
   fail "bad build fix: the agent's changes are not staged"

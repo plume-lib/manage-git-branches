@@ -140,7 +140,8 @@
 #   cd DIR && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b
 # or
 #   cd DIR && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093
-# that continues the agent's session interactively.  In the resumed session,
+# that continues the agent's session interactively, or one such command for
+# each of the agent's attempts to fix the build.  In the resumed session,
 # you can ask the agent about its work, or tell it to finish in a way that
 # its instructions forbade, such as by changing text outside a conflict
 # region.  Then commit the merge or the fix yourself, and run this script

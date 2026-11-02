@@ -1099,7 +1099,7 @@ resolve_merge_conflicts() {
 ## resolved must keep the resolution that rerere recorded.
 resolve_with_agent() {
   # No session is reported if this function fails before the agent runs.
-  agent_session_id=''
+  agent_session_ids=''
   # The index is compared by its contents.  The working tree, which can hold
   # many large files, such as build output, is compared by its pathnames and
   # by the time at which each file last changed (its "ctime").  Unlike a
@@ -1301,13 +1301,21 @@ agent_available() {
 ## command should run in the current directory.  Otherwise returns 1, after
 ## printing a diagnostic, if the agent fails.
 ##
-## Sets ${agent_session_id}, ${agent_session_command}, and
-## ${agent_session_dir}, which `report_agent_session` reads:  a UUID such as
-## "1e55b89c-cfb5-468f-a783-cb104201809b" that names the agent's session; the
-## command that continues a session given its UUID, "claude --resume" or
-## "codex resume"; and the current directory.  ${agent_session_id} is empty if
-## the session has no UUID:  for Claude, if this system cannot make one, and
-## for Codex, if Codex does not print the one that it chose.
+## Appends to ${agent_session_ids}, a blank-separated list, the UUID that
+## names the agent's session, such as "1e55b89c-cfb5-468f-a783-cb104201809b".
+## A caller that sets ${agent_session_ids} to the empty string first can
+## report every session that the agent ran in since then, such as one per
+## attempt to fix a build.  Prints a diagnostic and appends nothing if the
+## session has no UUID:  for Claude, if this system cannot make one, and for
+## Codex, if Codex does not print the one that it chose.  Also sets the
+## variables that `report_agent_session` reads:  ${agent_session_agent}, which
+## is AGENT; ${agent_session_command}, the command that continues a session
+## given its UUID, "claude --resume" or "codex resume"; ${agent_session_dir},
+## the current directory; and ${agent_session_todo}, the pathname of the file
+## AGENT-TODO.md at the top level of the working tree, or the empty string if
+## that file must not be written because git tracks it or the top level is
+## unknown.  It is computed before the agent runs, because no git command
+## should run after the agent has changed git's configuration.
 ##
 ## The agent can read every file of the working tree, including files that
 ## git ignores, such as a ".env" file, and the repository, including its
@@ -1328,9 +1336,14 @@ run_agent() {
       ;;
   esac
   run_agent_start="$(date +%s)"
-  agent_session_id=''
-  agent_session_command="$1 resume"
+  agent_session_agent="$1"
   agent_session_dir="$(pwd)"
+  run_agent_session=''
+  agent_session_todo=''
+  if run_agent_top="$(git rev-parse --show-toplevel)" \
+    && ! git -C "${run_agent_top}" ls-files --error-unmatch -- "${agent_todo_file}" > /dev/null 2>&1; then
+    agent_session_todo="${run_agent_top}/${agent_todo_file}"
+  fi
   # Each agent reads its instructions from standard input.
   #
   # Claude's restricted mode confines the file tools to the current
@@ -1354,12 +1367,15 @@ run_agent() {
   case "$1" in
     claude)
       agent_session_command="claude --resume"
-      agent_session_id="$(new_uuid)"
+      run_agent_session="$(new_uuid)"
+      if [ -z "${run_agent_session}" ]; then
+        echo "${SCRIPT_NAME}: cannot make a UUID to name claude's session, so no command will be able to continue it" >&2
+      fi
       # The UUID contains no character that field splitting or globbing
       # would change, so the unquoted expansion is one option and its value.
       # shellcheck disable=SC2086
       printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" claude -p --restricted --strict-mcp-config \
-        ${agent_session_id:+--session-id ${agent_session_id}} \
+        ${run_agent_session:+--session-id ${run_agent_session}} \
         --settings '{"permissions": {"blockReadsOutsideWorkingDirectories": true}}' \
         --tools 'Read,Edit,Write,Grep,Glob,Bash' --permission-mode acceptEdits \
         --allowedTools 'Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git merge-base:*)' \
@@ -1367,6 +1383,7 @@ run_agent() {
       run_agent_status=$?
       ;;
     codex)
+      agent_session_command="codex resume"
       if ! run_agent_repository="$(git rev-parse --path-format=absolute --git-common-dir)" \
         || ! run_agent_codex="$(codex_installation)"; then
         echo "${SCRIPT_NAME}: cannot find the files that codex needs to read" >&2
@@ -1387,11 +1404,12 @@ run_agent() {
       # is read, and still shows it to the user.  The file and the file that
       # holds Codex's exit status are in the git directory, which Codex
       # cannot write.
-      if ! run_agent_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-stderr)" \
-        || ! run_agent_status_file="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-status)"; then
+      if ! run_agent_git_dir="$(git rev-parse --absolute-git-dir)"; then
         echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
         return 1
       fi
+      run_agent_log="${run_agent_git_dir}/manage-git-branches-agent-stderr"
+      run_agent_status_file="${run_agent_git_dir}/manage-git-branches-agent-status"
       rm -f -- "${run_agent_status_file}"
       {
         {
@@ -1405,9 +1423,10 @@ run_agent() {
       case "${run_agent_status}" in
         "" | *[!0-9]*) run_agent_status=1 ;;
       esac
-      agent_session_id="$(sed -n -e 's/^session id: //p' "${run_agent_log}" 2> /dev/null | head -n 1)"
-      if ! is_uuid "${agent_session_id}"; then
-        agent_session_id=''
+      run_agent_session="$(sed -n -e 's/^session id: //p' "${run_agent_log}" 2> /dev/null | head -n 1)"
+      if ! is_uuid "${run_agent_session}"; then
+        run_agent_session=''
+        echo "${SCRIPT_NAME}: codex printed no line \"session id: UUID\", so no command will be able to continue its session" >&2
       fi
       rm -f -- "${run_agent_log}" "${run_agent_status_file}"
       for run_agent_name in ${run_agent_absent}; do
@@ -1422,6 +1441,9 @@ run_agent() {
       return 1
       ;;
   esac
+  if [ -n "${run_agent_session}" ]; then
+    agent_session_ids="${agent_session_ids:-}${agent_session_ids:+ }${run_agent_session}"
+  fi
   if [ "$(git_control_state)" != "${run_agent_git_state}" ]; then
     echo "${SCRIPT_NAME}: $1 changed git's configuration, attributes, or hooks in $(pwd); check them before running git there" >&2
     return 2
@@ -1439,40 +1461,70 @@ run_agent() {
 }
 
 ## Usage: report_agent_session TASK
-## Prints a command that continues, interactively, the session of the AI agent
-## that `run_agent` last ran, such as
+## Prints a command that continues, interactively, each session of the AI
+## agent that `run_agent` recorded in ${agent_session_ids}, such as
 ## "cd /home/me/myrepo && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b".
 ## The user can then ask the agent about its work, or tell it to finish the
 ## work in a way that its instructions forbade, such as by changing text
-## outside a conflict region.  Also appends the command, under a heading that
-## gives TASK and the time, to the file ${agent_todo_file} at the top level of
-## the working tree in which the agent ran, where the user is less likely to
-## overlook it than in the script's output.  TASK is what the agent was asked
-## to do, such as "Fix the build after merging branch 'main'"; only its first
-## line is used.  Neither prints nor writes anything if the session has no
-## known UUID.
+## outside a conflict region.  Also appends the commands, under a heading that
+## gives TASK and the time, to the file ${agent_session_todo}, where the user
+## is less likely to overlook them than in the script's output.  TASK is what
+## the agent was asked to do, such as "Fix the build after merging branch
+## 'main'"; only its first line is used.  Neither prints nor writes anything
+## if no session is recorded.
 ##
-## The file is not written if it is a symbolic link, which could point
-## outside the working tree, or anything else but a regular file, or if git
-## tracks it, as when a branch that was merged contains it.
+## Runs no git command, because the agent might have changed git's
+## configuration.  The file is not written if ${agent_session_todo} is empty,
+## or if the file is a symbolic link or has another hard link, either of which
+## could make the file another one outside the working tree, or if it is
+## anything else but a regular file.
 agent_todo_file=AGENT-TODO.md
 report_agent_session() {
-  if [ -z "${agent_session_id:-}" ]; then
+  if [ -z "${agent_session_ids:-}" ]; then
     return 0
   fi
-  report_command="cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${agent_session_id}"
-  # `echo` in some shells, such as dash, would interpret a backslash in the
-  # directory.
-  printf '%s\n' "${SCRIPT_NAME}: to continue the session of ${agent_session_command%% *}:  ${report_command}" >&2
-  if ! report_top="$(git -C "${agent_session_dir}" rev-parse --show-toplevel)"; then
-    echo "${SCRIPT_NAME}: cannot find the top level of the working tree ${agent_session_dir}, so did not write ${agent_todo_file}" >&2
+  # The UUIDs contain no character that field splitting or globbing would
+  # change, so each unquoted expansion below is the list of UUIDs.
+  # shellcheck disable=SC2086
+  set -- "$1" ${agent_session_ids}
+  report_task="$(printf '%s\n' "$1" | head -n 1)"
+  shift
+  report_count=$#
+  # The Markdown entry for ${agent_session_todo}.
+  report_entry="
+## ${report_task} (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
+"
+  report_index=0
+  for report_id in "$@"; do
+    report_index=$((report_index + 1))
+    report_command="cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${report_id}"
+    if [ "${report_count}" -eq 1 ]; then
+      report_session="the session"
+    else
+      report_session="session ${report_index} of ${report_count}"
+      report_entry="${report_entry}
+Session ${report_index} of ${report_count}:
+"
+    fi
+    # `echo` in some shells, such as dash, would interpret a backslash in the
+    # directory.
+    printf '%s\n' "${SCRIPT_NAME}: to continue ${report_session} of ${agent_session_agent}:  ${report_command}" >&2
+    report_entry="${report_entry}
+\`\`\`sh
+${report_command}
+\`\`\`
+"
+  done
+  if [ -z "${agent_session_todo:-}" ]; then
+    echo "${SCRIPT_NAME}: did not write ${agent_todo_file}, which git tracks or whose working tree is unknown" >&2
     return 0
   fi
-  report_todo="${report_top}/${agent_todo_file}"
+  report_todo="${agent_session_todo}"
+  # `find -links +1` prints the file if it has more than one hard link.
   if [ -L "${report_todo}" ] \
     || { [ -e "${report_todo}" ] && [ ! -f "${report_todo}" ]; } \
-    || git -C "${report_top}" ls-files --error-unmatch -- "${agent_todo_file}" > /dev/null 2>&1; then
-    echo "${SCRIPT_NAME}: did not write ${report_todo}, which is not an untracked regular file" >&2
+    || [ -n "$(find "${report_todo}" -prune -links +1 2> /dev/null)" ]; then
+    echo "${SCRIPT_NAME}: did not write ${report_todo}, which is not a regular file with one link" >&2
     return 0
   fi
   report_new=no
@@ -1491,14 +1543,16 @@ report_agent_session() {
         "entry's command continues the agent's session interactively.  Delete the" \
         'entry once you have dealt with it.'
     fi
-    # shellcheck disable=SC2016
-    printf '\n## %s (%s, %s)\n\n```sh\n%s\n```\n' \
-      "$(printf '%s\n' "$1" | head -n 1)" "${SCRIPT_NAME}" "$(date '+%Y-%m-%d %H:%M:%S')" "${report_command}"
+    printf '%s' "${report_entry}"
   } >> "${report_todo}"; then
     echo "${SCRIPT_NAME}: cannot write ${report_todo}" >&2
     return 0
   fi
-  echo "${SCRIPT_NAME}: appended that command to ${report_todo}" >&2
+  if [ "${report_count}" -eq 1 ]; then
+    echo "${SCRIPT_NAME}: appended that command to ${report_todo}" >&2
+  else
+    echo "${SCRIPT_NAME}: appended those commands to ${report_todo}" >&2
+  fi
 }
 
 ## Usage: new_uuid
@@ -1695,7 +1749,7 @@ fix_failed_build() {
   fix_with="$1"
   fix_log="$2"
   # No session is reported if this function fails before the agent runs.
-  agent_session_id=''
+  agent_session_ids=''
   # The agent's changes are committed below, and so would be any change that
   # the build made to tracked files.
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
