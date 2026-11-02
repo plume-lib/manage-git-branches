@@ -104,7 +104,7 @@ set_variables_in() {
     exit 2
   fi
   if printf '%s\n' "${assigned}" | grep -qxF '<unclosed>'; then
-    echo "${SCRIPT_NAME}: $1 ends within a quotation, a command substitution, an array literal, or a \"case\" statement" >&2
+    echo "${SCRIPT_NAME}: $1 ends within a quotation, a command substitution, a parameter expansion, an array literal, or a \"case\" statement" >&2
     echo "${SCRIPT_NAME}: either it is not valid shell, or set_variables_in mis-parsed it" >&2
     exit 2
   fi
@@ -187,6 +187,10 @@ REDIRECTED_PREFIX=1 >/dev/null some-command # The target is attached.
 DUPLICATED_DESCRIPTOR_PREFIX=1 2>&1 some-command
 MULTILINE_PREFIX="one
 two" some-command
+NESTED_QUOTE="${PLAIN#*"it's "}"
+NESTED_QUOTE_SUFFIX="${PLAIN%"'"}"
+LITERAL_QUOTE="${PLAIN:-it's}"
+UNQUOTED_EXPANSION=${PLAIN:-'a } b'}
 ARRAY=(one two)
 APPENDED+=(three)
 ELEMENT[1]=one
@@ -244,6 +248,7 @@ ELEMENTS
 ESCAPED
 EXPORTED
 LAST_CASE_BODY
+LITERAL_QUOTE
 LOCAL_ARRAY
 MAPFILE
 MAPPED
@@ -251,6 +256,8 @@ MULTILINE
 MULTILINE_ARRAY
 MULTILINE_CASE
 NESTED_ARITHMETIC
+NESTED_QUOTE
+NESTED_QUOTE_SUFFIX
 NESTED_SUBSCRIPT
 ONE_LINE_CASE_BODY
 OTHER_DECLARED
@@ -270,7 +277,8 @@ REDIRECTED
 REPLY
 STATEMENT_AFTER_CONTINUATION
 SUBSHELL
-SUBSTITUTED'
+SUBSTITUTED
+UNQUOTED_EXPANSION'
 ACTUAL="$(set_variables_in "${FIXTURE}" statement)"
 if [ "${ACTUAL}" != "${EXPECTED}" ]; then
   echo "${SCRIPT_NAME}: set_variables_in is broken" >&2

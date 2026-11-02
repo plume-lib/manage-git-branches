@@ -13,8 +13,8 @@
 # Instead of a variable, it prints "<here-document>" if FILE contains a
 # here-document, whose lines are data rather than code; this program does not
 # skip them, so it would read them as code.  It prints "<unclosed>" if FILE
-# ends within a quotation, a command substitution, an array literal, or a
-# "case" statement.
+# ends within a quotation, a command substitution, a parameter expansion, an
+# array literal, or a "case" statement.
 #
 # This splits the script into words the way a shell does, so that a value that
 # contains whitespace, quotation marks, or a command substitution does not
@@ -296,6 +296,32 @@ function report_line(  i, j, k, r, at_command, array, inert, w, named, \
       pos++
       continue
     }
+    if (c == "$" && substr(line, pos + 1, 1) == "{") {
+      # A parameter expansion.  Quoting starts afresh within it, even within
+      # double quotation marks, so that a '"' within it begins a quotation
+      # rather than ending the one around it, as in "${VAR#*"x"}".
+      param_in_double[depth + 1] = (context() == "double")
+      push_context("param")
+      add_word("${")
+      pos += 2
+      continue
+    }
+    if (context() == "param") {
+      if (c == "}") { pop_context(); add_word(c); pos++; continue }
+      if (c == "\"") { push_context("double"); add_word(c); pos++; continue }
+      # Within double quotation marks, a "'" in a parameter expansion is an
+      # ordinary character, as in "${VAR:-it's}".  Elsewhere, it begins a
+      # quotation, as in ${VAR:-'a b'}.
+      if (c == "'" && !param_in_double[depth]) {
+        push_context("single")
+        add_word(c)
+        pos++
+        continue
+      }
+      add_word(c)
+      pos++
+      continue
+    }
     if (context() == "arith") {
       if (c == "(") { arith_parens[depth]++; add_word(c); pos++; continue }
       if (c == ")") {
@@ -402,9 +428,9 @@ function report_line(  i, j, k, r, at_command, array, inert, w, named, \
     add_word(c)
     pos++
   }
-  # A quotation mark, a command substitution, or an array literal that is
-  # still open, or a backslash at the end of the line, continues the
-  # logical line.
+  # A quotation mark, a command substitution, a parameter expansion, or an
+  # array literal that is still open, or a backslash at the end of the line,
+  # continues the logical line.
   if (depth > 0) { add_word("\n"); next }
   if (continued) next
   end_word()
@@ -416,10 +442,10 @@ END {
     report_line()
   }
   if (depth > 0 || case_nesting > 0) {
-    # A quotation mark, a command substitution, an array literal, or a
-    # "case" statement that never ended.  Either the script is not valid
-    # shell or this program lost track of the nesting, in which case it
-    # has misread the rest of the script.  Do not guess.
+    # A quotation mark, a command substitution, a parameter expansion, an
+    # array literal, or a "case" statement that never ended.  Either the
+    # script is not valid shell or this program lost track of the nesting,
+    # in which case it has misread the rest of the script.  Do not guess.
     print "<unclosed>"
   }
 }
