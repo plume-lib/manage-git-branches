@@ -357,6 +357,18 @@ check_is_deleted_branch "${WORK_DIR}/idb-dead" 0 'a branch deleted in its remote
 check_is_deleted_branch "${WORK_DIR}/idb-live" 1 'a branch that still exists'
 mkdir -p "${WORK_DIR}/idb-plain-directory"
 check_is_deleted_branch "${WORK_DIR}/idb-plain-directory" 2 'no working tree'
+if [ -z "${is_deleted_branch_no_usable_repository}" ]; then
+  fail "is_deleted_branch did not record that git can use no repository at a plain directory"
+fi
+mkdir -p "${WORK_DIR}/idb-live/subdirectory"
+check_is_deleted_branch "${WORK_DIR}/idb-live/subdirectory" 2 'a subdirectory of a working tree'
+if [ -n "${is_deleted_branch_no_usable_repository}" ]; then
+  fail "is_deleted_branch recorded that git can use no repository at a subdirectory of a working tree"
+fi
+check_is_deleted_branch "${WORK_DIR}/idb-remote.git" 2 'a bare repository'
+if [ -n "${is_deleted_branch_no_usable_repository}" ]; then
+  fail "is_deleted_branch recorded that git can use no repository at a bare repository"
+fi
 
 # `check_is_deleted_branch` calls the function on the left of `||`, which
 # suppresses `set -e` for the whole of the function's body.  A caller that acts
