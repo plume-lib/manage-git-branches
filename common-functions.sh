@@ -2945,10 +2945,22 @@ only_dot_project() {
 ## cannot be answered.  That command is a wrapper around this function, and
 ## its documentation is the documentation of this answer.
 ##
+## Also sets the variable `is_deleted_branch_no_usable_repository` to a
+## nonempty value (true) if this returns status 2 because DIRECTORY is a
+## directory at which git can use no repository, and to the empty string
+## (false) otherwise, including when DIRECTORY does not exist or is not a
+## directory.  Git can use no repository at DIRECTORY if no repository
+## contains DIRECTORY; if the one that contains it is broken, such as a linked
+## worktree whose `.git` file names a git directory that no longer exists; if
+## git refuses it, such as one that another user owns and that
+## `safe.directory` does not allow; or if git cannot enter DIRECTORY.  The
+## variable lets a caller explain status 2 without asking git again.
+##
 ## The body lives here rather than in the command so that the other commands
 ## of this package can ask the question directly.
 is_deleted_branch() {
   is_deleted_branch_dir="$1"
+  is_deleted_branch_no_usable_repository=
 
   # A path that does not exist -- or that exists but is not a directory -- is
   # certainly not a working tree.  Reject it here rather than leaving it to
@@ -2994,8 +3006,31 @@ is_deleted_branch() {
   # so also require that DIRECTORY is that working tree's top level.  A
   # subdirectory is not itself a working tree, and answering for the enclosing
   # one would answer a question that the caller did not ask.
-  is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
-    --show-toplevel 2> /dev/null)" || return 2
+  #
+  # `--is-bare-repository` prints a line, "true" or "false", whenever git can
+  # use a repository at DIRECTORY, even one that has no working tree, such as a
+  # bare repository or a `.git` directory.  For such a repository,
+  # `--show-toplevel` then fails in recent versions of git and prints an empty
+  # line in older ones.  So a failure with no output means that git can use no
+  # repository there.
+  if ! is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
+    --is-bare-repository --show-toplevel 2> /dev/null)"; then
+    if [ -z "${is_deleted_branch_toplevel}" ]; then
+      # shellcheck disable=SC2034 # Callers read it; see the documentation above.
+      is_deleted_branch_no_usable_repository=1
+    fi
+    return 2
+  fi
+  # Remove the line that `--is-bare-repository` printed.  A command
+  # substitution removes trailing newlines, so an empty last line leaves none.
+  case "${is_deleted_branch_toplevel}" in
+    *'
+'*)
+      is_deleted_branch_toplevel="${is_deleted_branch_toplevel#*
+}"
+      ;;
+    *) is_deleted_branch_toplevel= ;;
+  esac
   if [ -z "${is_deleted_branch_toplevel}" ]; then
     # A bare repository has no working tree, so it is not on any branch.
     return 2
