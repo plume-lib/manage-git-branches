@@ -1066,6 +1066,7 @@ resolve_merge_conflicts() {
     echo "${resolve_failed}" >&2
     return 1
   elif ! resolve_with_agent; then
+    report_agent_session
     echo "${resolve_failed}" >&2
     return 1
   fi
@@ -1097,6 +1098,8 @@ resolve_merge_conflicts() {
 ## be committed, but a later build could use it.  A file that `git rerere`
 ## resolved must keep the resolution that rerere recorded.
 resolve_with_agent() {
+  # No session is reported if this function fails before the agent runs.
+  agent_session_id=''
   # The index is compared by its contents.  The working tree, which can hold
   # many large files, such as build output, is compared by its pathnames and
   # by the time at which each file last changed (its "ctime").  Unlike a
@@ -1298,6 +1301,12 @@ agent_available() {
 ## command should run in the current directory.  Otherwise returns 1, after
 ## printing a diagnostic, if the agent fails.
 ##
+## Sets ${agent_session_id} and ${agent_session_dir}, which
+## `report_agent_session` reads:  for Claude, a UUID such as
+## "1e55b89c-cfb5-468f-a783-cb104201809b" that names the agent's session, and
+## the current directory, in which `claude --resume` finds that session.
+## ${agent_session_id} is empty for Codex, or if no UUID could be made.
+##
 ## The agent can read every file of the working tree, including files that
 ## git ignores, such as a ".env" file, and the repository, including its
 ## configuration.  Instructions in the conflicting text can make it copy a
@@ -1317,6 +1326,8 @@ run_agent() {
       ;;
   esac
   run_agent_start="$(date +%s)"
+  agent_session_id=''
+  agent_session_dir="$(pwd)"
   # Each agent reads its instructions from standard input.
   #
   # Claude's restricted mode confines the file tools to the current
@@ -1339,7 +1350,12 @@ run_agent() {
   # own installation, which its sandbox runs.
   case "$1" in
     claude)
+      agent_session_id="$(new_uuid)"
+      # The UUID contains no character that field splitting or globbing
+      # would change, so the unquoted expansion is one option and its value.
+      # shellcheck disable=SC2086
       printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" claude -p --restricted --strict-mcp-config \
+        ${agent_session_id:+--session-id ${agent_session_id}} \
         --settings '{"permissions": {"blockReadsOutsideWorkingDirectories": true}}' \
         --tools 'Read,Edit,Write,Grep,Glob,Bash' --permission-mode acceptEdits \
         --allowedTools 'Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git merge-base:*)' \
@@ -1391,6 +1407,52 @@ run_agent() {
     return 1
   fi
   return 0
+}
+
+## Usage: report_agent_session
+## Prints a command that continues, interactively, the session of the AI agent
+## that `run_agent` last ran, such as
+## "cd /home/me/myrepo && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b".
+## The user can then ask the agent about its work, or tell it to finish the
+## work in a way that its instructions forbade, such as by changing text
+## outside a conflict region.  Prints nothing if there is no such session, as
+## for Codex.
+report_agent_session() {
+  if [ -n "${agent_session_id:-}" ]; then
+    echo "${SCRIPT_NAME}: to continue the session of claude:  cd $(shell_word "${agent_session_dir}") && claude --resume ${agent_session_id}" >&2
+  fi
+}
+
+## Usage: new_uuid
+## Prints a new random UUID in lowercase, such as
+## "1e55b89c-cfb5-468f-a783-cb104201809b", or prints nothing if this system
+## cannot make one.
+new_uuid() {
+  if command -v uuidgen > /dev/null 2>&1; then
+    new_uuid_value="$(uuidgen 2> /dev/null | tr 'A-F' 'a-f')"
+  else
+    new_uuid_value="$(cat /proc/sys/kernel/random/uuid 2> /dev/null)"
+  fi
+  if printf '%s\n' "${new_uuid_value}" \
+    | grep -x -q '[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}'; then
+    printf '%s\n' "${new_uuid_value}"
+  fi
+}
+
+## Usage: shell_word STRING
+## Prints STRING as a word that a POSIX shell reads as STRING:  unchanged if
+## it consists only of characters that the shell does not interpret, as in
+## "/home/me/myrepo", and otherwise in single quotes, as in
+## "'/home/me/my repo'".
+shell_word() {
+  case "$1" in
+    "" | *[!A-Za-z0-9_./:@%+=,-]*)
+      printf "'%s'\n" "$(printf '%s' "$1" | sed -e "s/'/'\\\\''/g")"
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
 }
 
 ## Usage: run_with_time_limit SECONDS COMMAND [ARGUMENT...]
@@ -1547,6 +1609,8 @@ build_fix_attempts=3
 fix_failed_build() {
   fix_with="$1"
   fix_log="$2"
+  # No session is reported if this function fails before the agent runs.
+  agent_session_id=''
   # The agent's changes are committed below, and so would be any change that
   # the build made to tracked files.
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
@@ -2047,6 +2111,7 @@ merge_build_push() {
         merge_did="The script just merged commit $1 into branch ${merge_fix_branch}."
       fi
       if ! fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
+        report_agent_session
         return 1
       fi
     fi

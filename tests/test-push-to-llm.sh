@@ -86,6 +86,7 @@ mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
 basename -- "$0" >> "${STUB_LOG}"
+printf '%s\n' "$@" > "${STUB_ARGS}"
 cat > "${STUB_PROMPT}"
 if ! grep -q '^<<<<<<< ' file.txt; then
   case "${STUB_BUILD:-none}" in
@@ -168,7 +169,8 @@ chmod +x "${WORK_DIR}/test-bin/claude"
 cp "${WORK_DIR}/test-bin/claude" "${WORK_DIR}/test-bin/codex"
 STUB_LOG="${WORK_DIR}/stub-log"
 STUB_PROMPT="${WORK_DIR}/stub-prompt"
-export STUB_LOG STUB_PROMPT
+STUB_ARGS="${WORK_DIR}/stub-args"
+export STUB_LOG STUB_PROMPT STUB_ARGS
 
 ## Usage: setup_case NAME [KIND [LAST-LINE]]
 ## Creates a remote under ${WORK_DIR}/NAME with branches "main" and
@@ -399,6 +401,18 @@ case "${push_output}" in
   *"the text before the first conflict region changed"*) ;;
   *) fail "change outside a conflict region: wrong diagnostic: ${push_output}" ;;
 esac
+## The command that continues Claude's session names the session that the
+## stub was given.
+session_id="$(sed -n -e '/^--session-id$/{n;p;}' "${STUB_ARGS}")"
+case "${session_id}" in
+  "") fail "change outside a conflict region: claude was not given --session-id" ;;
+  *)
+    case "${push_output}" in
+      *"to continue the session of claude:  cd ${feature_dir} && claude --resume ${session_id}"*) ;;
+      *) fail "change outside a conflict region: no command to continue the session: ${push_output}" ;;
+    esac
+    ;;
+esac
 
 ## Remaining conflict markers are rejected.
 setup_case none
@@ -414,8 +428,20 @@ setup_case fail
 push_to fail --llm
 check_not_resolved "failing agent"
 case "${push_output}" in
-  *"claude failed with status 3"*"conflicted: file.txt"*) ;;
+  *"claude failed with status 3"*"conflicted: file.txt"*"claude --resume "*) ;;
   *) fail "failing agent: wrong diagnostic: ${push_output}" ;;
+esac
+
+## No command to continue a session is printed for Codex.
+setup_case fail-codex
+push_to fail --codex
+check_not_resolved "failing codex"
+case "${push_output}" in
+  *"codex failed with status 3"*) ;;
+  *) fail "failing codex: wrong diagnostic: ${push_output}" ;;
+esac
+case "${push_output}" in
+  *"to continue the session"*) fail "failing codex: printed a command to continue a session: ${push_output}" ;;
 esac
 
 ## The work of an agent that fails is checked too.
@@ -811,7 +837,7 @@ setup_case build-none build
 STUB_BUILD=none push_to good --llm
 check_not_pushed "build not fixed"
 case "${push_output}" in
-  *"claude did not fix the build"*) ;;
+  *"claude did not fix the build"*"claude --resume "*) ;;
   *) fail "build not fixed: wrong diagnostic: ${push_output}" ;;
 esac
 if [ "$(wc -l < "${STUB_LOG}")" -ne 2 ]; then
