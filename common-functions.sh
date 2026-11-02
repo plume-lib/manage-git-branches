@@ -1102,9 +1102,9 @@ resolve_with_agent() {
   # by the time at which each file last changed (its "ctime").  Unlike a
   # file's modification time, an unprivileged process cannot set its ctime.
   # A file changed after the marker file was written, so the marker is in
-  # the git directory, which neither agent can write.  A file system can
-  # record times to the second, so the agent starts at least a second after
-  # the marker is written, and a file that it changes has a later time.
+  # the git directory, which neither agent can write.  The agent starts only
+  # once the file system records a later time than the marker's, so that a
+  # file that it changes has a later time.
   resolve_index="$(git ls-files --stage -z | cksum)"
   resolve_paths="$(working_tree_paths)"
   if ! resolve_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-start)" \
@@ -1112,7 +1112,11 @@ resolve_with_agent() {
     echo "${SCRIPT_NAME}: cannot write a file in the git directory of $(pwd)" >&2
     return 1
   fi
-  sleep 1
+  if ! wait_for_later_time "${resolve_marker}"; then
+    rm -f -- "${resolve_marker}"
+    echo "${SCRIPT_NAME}: the file system's time does not advance in the git directory of $(pwd)" >&2
+    return 1
+  fi
   resolve_branch="$(git symbolic-ref --quiet --short HEAD)" || resolve_branch="HEAD"
   resolve_prompt="You are resolving merge conflicts in the git working tree $(pwd).
 \`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts in these files:
@@ -1239,6 +1243,34 @@ working_tree_changes() {
         if (count[file] == 0) print "changed a file: " relative(file)
       }
     }' | LC_ALL=C sort
+}
+
+## Usage: wait_for_later_time FILE
+## Returns 0 once every file that changes from now on has a later
+## status-change time (ctime) than FILE's modification time, as
+## `find -cnewer` compares them; returns 1 if that does not happen within
+## about 10 seconds.  A file system can record times to the second, or it
+## can record finer times but advance its clock only every few milliseconds.
+## Writes, and then removes, the file FILE-probe, such as
+## ".git/manage-git-branches-agent-start-probe" for FILE
+## ".git/manage-git-branches-agent-start".
+wait_for_later_time() {
+  wait_probe="$1-probe"
+  wait_tries=0
+  while [ "${wait_tries}" -lt 20 ]; do
+    if ! touch -- "${wait_probe}"; then break; fi
+    if [ -n "$(find "${wait_probe}" -cnewer "$1" -print)" ]; then
+      rm -f -- "${wait_probe}"
+      return 0
+    fi
+    wait_tries=$((wait_tries + 1))
+    # A file system whose clock advances every few milliseconds needs no
+    # sleep:  each try takes about that long.  POSIX `sleep` accepts only a
+    # whole number of seconds.
+    if [ "${wait_tries}" -ge 10 ]; then sleep 1; fi
+  done
+  rm -f -- "${wait_probe}"
+  return 1
 }
 
 ## Usage: report_unresolved FILES

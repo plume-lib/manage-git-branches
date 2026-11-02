@@ -640,4 +640,21 @@ check_resolution_raw reject "CRLF line endings, and a separator remains" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\na\r\n=======\r\nA\r\nb\r\n'
 rm "${WORK_DIR}/ccr/.gitattributes"
 
+## Tests of wait_for_later_time.  A file that changes immediately after it
+## returns is newer than the marker, and the probe file is removed.
+mkdir "${WORK_DIR}/wflt"
+for wflt_try in 1 2 3; do
+  : > "${WORK_DIR}/wflt/marker"
+  if ! wait_for_later_time "${WORK_DIR}/wflt/marker"; then
+    fail "wait_for_later_time failed on try ${wflt_try}"
+  fi
+  echo "try ${wflt_try}" > "${WORK_DIR}/wflt/changed"
+  if [ -z "$(find "${WORK_DIR}/wflt/changed" -cnewer "${WORK_DIR}/wflt/marker" -print)" ]; then
+    fail "wait_for_later_time: a file changed afterward is not newer than the marker, on try ${wflt_try}"
+  fi
+  if [ -e "${WORK_DIR}/wflt/marker-probe" ]; then
+    fail "wait_for_later_time: the probe file remains, on try ${wflt_try}"
+  fi
+done
+
 echo "${SCRIPT_NAME}: OK"
