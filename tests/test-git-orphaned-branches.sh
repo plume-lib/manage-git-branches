@@ -34,7 +34,8 @@ fi
 # shellcheck disable=SC2329 # Is called from traps.
 cleanup() {
   chmod 755 "${work}/dot-project/p-branch-unlistable" \
-    "${work}/dot-project/p-branch-unenterable" 2> /dev/null
+    "${work}/dot-project/p-branch-unenterable" \
+    "${work}/dot-project/p-repo/r-branch-unenterable" 2> /dev/null
   rm -rf "${work}"
 }
 # The signal handlers re-raise the signal with the handler removed, so that
@@ -184,6 +185,22 @@ git -C "${work}/dot-project/p-repo" commit -q -m 'Track a file'
 mkdir -p "${work}/dot-project/p-repo/r-branch-empty"
 mkdir -p "${work}/dot-project/p-repo/r-branch-untracked"
 touch "${work}/dot-project/p-repo/r-branch-untracked/other"
+# A `*-branch-*` directory that the working tree ignores, or that is within
+# one that it ignores, is build output or a package, not a leftover, so it is
+# not warned about either.
+printf 'r-branch-ignored/\nnode_modules/\n' > "${work}/dot-project/p-repo/.gitignore"
+mkdir -p "${work}/dot-project/p-repo/r-branch-ignored" \
+  "${work}/dot-project/p-repo/node_modules/git-branch-is"
+touch "${work}/dot-project/p-repo/r-branch-ignored/other" \
+  "${work}/dot-project/p-repo/node_modules/git-branch-is/other"
+# A `*-branch-*` directory in a working tree that git can use, but that the
+# user cannot enter, is warned about as such, and says nothing about the
+# working tree.
+if [ "${unlistable}" -eq 1 ]; then
+  mkdir -p "${work}/dot-project/p-repo/r-branch-unenterable"
+  touch "${work}/dot-project/p-repo/r-branch-unenterable/other"
+  chmod 000 "${work}/dot-project/p-repo/r-branch-unenterable"
+fi
 # Neither is a `*-branch-*` directory in a `.git` directory, nor a bare
 # repository:  git can use the repository in each, which has no working tree.
 mkdir -p "${work}/dot-project/p-repo/.git/refs/heads/r-branch-ref"
@@ -293,7 +310,28 @@ check_warned "p-branch-bare.git" "unwarned"
 check_warned "p-branch-broken-worktree" "unwarned"
 if [ "${unlistable}" -eq 1 ]; then
   check_warned "p-branch-unlistable" "warned"
-  check_warned "p-branch-unenterable" "warned"
+  # A directory that the user cannot enter is warned about as such.
+  for d in p-branch-unenterable p-repo/r-branch-unenterable; do
+    check_warned "$d" "unwarned"
+    if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/dot-project/$d, which you cannot enter" \
+      "${work}/dot-project.stderr"; then
+      echo "FAIL: git-orphaned-branches did not warn that the user cannot enter $d:"
+      cat "${work}/dot-project.stderr"
+      status=1
+    fi
+  done
+fi
+# A working tree that git can use is not called one that git cannot use.
+if grep -q -F -- "git cannot use ${work}/dot-project/p-repo " "${work}/dot-project.stderr"; then
+  echo "FAIL: git-orphaned-branches claimed that git cannot use p-repo:"
+  cat "${work}/dot-project.stderr"
+  status=1
+fi
+# Ignored `*-branch-*` directories are not warned about.
+if grep -q -F -e "r-branch-ignored" -e "git-branch-is" "${work}/dot-project.stderr"; then
+  echo "FAIL: git-orphaned-branches warned about an ignored directory:"
+  cat "${work}/dot-project.stderr"
+  status=1
 fi
 # Each `*-branch-*` directory in a working tree that tracks none of its files
 # is warned about.
@@ -340,6 +378,34 @@ fi
 if grep -q -F -- 'files that you do not own' "${work}/dot-project.stderr"; then
   echo "FAIL: git-orphaned-branches claimed that a file that the user owns is another user's:"
   cat "${work}/dot-project.stderr"
+  status=1
+fi
+
+###########################################################################
+## A directory beyond which git does not search for a repository.
+###########################################################################
+
+# Git stops searching for a repository at a directory in
+# `GIT_CEILING_DIRECTORIES`, as it does at a file system boundary.  A
+# working tree above that directory is one that git can use, so the
+# `*-branch-*` directory is warned about as being in no working tree, not as
+# being in one that git cannot use.
+git init -q -b main "${work}/ceiling"
+git -C "${work}/ceiling" commit -q --allow-empty -m 'Initial commit'
+mkdir -p "${work}/ceiling/mount/c-branch-x"
+touch "${work}/ceiling/mount/c-branch-x/other"
+if ! output="$(cd "${work}/ceiling/mount" \
+  && GIT_CEILING_DIRECTORIES="${work}/ceiling/mount" "${GIT_ORPHANED_BRANCHES}" \
+    2> "${work}/ceiling.stderr")"; then
+  fail "git-orphaned-branches exited with a failure status beyond a ceiling directory"
+fi
+if [ -n "${output}" ]; then
+  fail "git-orphaned-branches printed [${output}] beyond a ceiling directory, expected no output"
+fi
+if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/ceiling/mount/c-branch-x, which is not in a git working tree" \
+  "${work}/ceiling.stderr"; then
+  echo "FAIL: git-orphaned-branches did not warn about c-branch-x as being in no working tree:"
+  cat "${work}/ceiling.stderr"
   status=1
 fi
 

@@ -478,12 +478,13 @@ rest_pr_states() {
 # Warns, on standard error, about directory $1, whose name matches
 # `*-branch-*` and which contains a `/`, for which `is_deleted_branch` has
 # just returned status 2, if git can use no repository there, as
-# `is_deleted_branch_no_usable_repository` says, or if $1 is in a working tree
-# that tracks no file in $1.  Says nothing about a directory that holds a
-# tracked file, such as a subdirectory of a source tree that happens to be
-# named `*-branch-*`, nor about one in a repository that has no working tree,
-# such as a bare repository.  Sets `status` to 1 if the directory's absolute
-# path cannot be determined.
+# `is_deleted_branch_git_error` says, or if $1 is in a working tree that
+# neither tracks nor ignores any file in $1.  Says nothing about a directory
+# that holds a tracked file, such as a subdirectory of a source tree that
+# happens to be named `*-branch-*`, nor about an ignored one, such as build
+# output or an npm package in `node_modules`, nor about one in a repository
+# that has no working tree, such as a bare repository.  Sets `status` to 1 if
+# the directory's absolute path cannot be determined.
 #
 # Such a directory is usually what a failed removal of a branch directory left
 # behind.  For example, `rm -rf` removes every file that the user can delete,
@@ -500,12 +501,21 @@ rest_pr_states() {
 # A directory can also be in a working tree that git cannot use, because a
 # `.git` in it or in an ancestor names a git directory that does not exist (as
 # for a linked worktree whose main working tree was moved) or belongs to
-# another user (which git refuses unless `safe.directory` allows it).  The
-# warning then names that working tree, and says how to learn why git cannot
-# use it, because it is a repository that can hold work, not a leftover.  A
-# `.git` directory that holds no `HEAD` is no such evidence:  it is what a
+# another user (which git refuses unless `safe.directory` allows it).  Git's
+# diagnostic says so, and only then does this function look for that working
+# tree.  The warning then names it, and says how to learn why git cannot use
+# it, because it is a repository that can hold work, not a leftover.  A
+# `.git` directory that holds no `HEAD` is no such working tree:  it is what a
 # failed `rm -rf` leaves when the `.git` directory holds files that another
-# user owns, as when a container running as root ran git.
+# user owns, as when a container running as root ran git.  Other reasons for
+# git to use no repository, such as a `.git` beyond a file system boundary,
+# where git stops searching, say nothing about whether a working tree holds
+# the directory, so the warning then says only that the directory is in none
+# that git can use.
+#
+# A directory that the user cannot enter is warned about as such, without
+# looking for a working tree:  git could use the one that holds it, if any,
+# but cannot enter the directory itself.
 #
 # The walk of `examine_directory` visits every directory below a directory
 # before any directory outside it, so ${warned_dir}, the absolute path of the
@@ -529,10 +539,15 @@ warn_if_not_in_working_tree() {
     esac
   fi
 
-  if [ -n "${is_deleted_branch_no_usable_repository}" ]; then
+  if [ -n "${is_deleted_branch_git_error}" ] && [ ! -x "$1" ]; then
+    wnwt_where='you cannot enter'
+  elif [ -n "${is_deleted_branch_git_error}" ]; then
     wnwt_where='is not in a git working tree'
-    wnwt_ancestor="${wnwt_dir}"
-    while :; do
+    case "${is_deleted_branch_git_error}" in
+      *'not a git repository: '* | *'dubious ownership'*) wnwt_ancestor="${wnwt_dir}" ;;
+      *) wnwt_ancestor= ;;
+    esac
+    while [ -n "${wnwt_ancestor}" ]; do
       if [ -f "${wnwt_ancestor}/.git" ] || [ -L "${wnwt_ancestor}/.git" ] \
         || [ -e "${wnwt_ancestor}/.git/HEAD" ] || [ -L "${wnwt_ancestor}/.git/HEAD" ]; then
         warned_dir="${wnwt_ancestor}"
@@ -543,17 +558,19 @@ warn_if_not_in_working_tree() {
         fi
         return 0
       fi
-      if [ -z "${wnwt_ancestor}" ]; then
-        break
-      fi
       wnwt_ancestor="${wnwt_ancestor%/*}"
     done
   else
-    # `--show-toplevel` fails in a repository that has no working tree.  Of
+    # `--show-toplevel` fails in a repository that has no working tree.
+    # `git check-ignore` succeeds for a directory that the working tree
+    # ignores, or that is within one that it ignores.  Of
     # `git ls-files --error-unmatch`, status 1 means that the working tree
     # tracks no file in $1.
     if ! wnwt_toplevel="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null < /dev/null)" \
       || [ -z "${wnwt_toplevel}" ]; then
+      return 0
+    fi
+    if git -C "$1" check-ignore -q -- . > /dev/null 2>&1 < /dev/null; then
       return 0
     fi
     git -C "$1" ls-files --error-unmatch -- . > /dev/null 2>&1 < /dev/null
