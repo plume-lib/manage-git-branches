@@ -85,7 +85,7 @@ check_linear() {
     fail "$1 has merge commits after $2"
   fi
   if [ "$(git -C "$1" rev-parse HEAD)" != "$(git -C "$1" rev-parse '@{upstream}')" ] \
-    || [ "$(git -C "$1" rev-parse HEAD)" != "$(git -C "${REMOTE}" rev-parse "refs/heads/$(git -C "$1" symbolic-ref --short HEAD)")" ]; then
+    || [ "$(git -C "$1" rev-parse HEAD)" != "$(git -C "${REMOTE}" rev-parse "$(git -C "$1" symbolic-ref HEAD)")" ]; then
     fail "$1 was not pushed"
   fi
 }

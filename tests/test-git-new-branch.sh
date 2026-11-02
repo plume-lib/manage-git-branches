@@ -1476,14 +1476,14 @@ for slug_case in proj-fork-other/subdir:from-other proj:from-upstream \
     continue
   fi
   case "${out}" in
-    *"making branch ${slug_branch} in ${slugs}/proj-fork-mernst, at commit $(git -C "${slugs}/proj-fork-mernst" rev-parse --short HEAD) of its branch $(git -C "${slugs}/proj-fork-mernst" symbolic-ref --short HEAD)"*) ;;
+    *"making branch ${slug_branch} in ${slugs}/proj-fork-mernst, at commit $(git -C "${slugs}/proj-fork-mernst" rev-parse --short HEAD) of its branch $(git -C "${slugs}/proj-fork-mernst" symbolic-ref HEAD | sed 's,^refs/heads/,,')"*) ;;
     *) fail "mernst:${slug_branch} did not say where it made the branch: ${out}" ;;
   esac
   if [ ! -d "${slug_newdir}" ]; then
     fail "mernst:${slug_branch} did not create ${slug_newdir}: ${out}"
     continue
   fi
-  if [ "$(git -C "${slug_newdir}" symbolic-ref --short HEAD)" != "${slug_branch}" ]; then
+  if [ "$(git -C "${slug_newdir}" symbolic-ref HEAD)" != "refs/heads/${slug_branch}" ]; then
     fail "mernst:${slug_branch} did not check out ${slug_branch} in ${slug_newdir}"
   fi
   if [ "$(git -C "${slug_newdir}" rev-parse HEAD)" != "${mernst_commit}" ]; then
@@ -1648,7 +1648,7 @@ case "${out}" in
   *"making branch in-upstream in ${slugs}/proj, at commit "*) ;;
   *) fail "-:in-upstream did not say that it made the branch in proj: ${out}" ;;
 esac
-if [ "$(git -C "${slugs}/proj-branch-in-upstream" symbolic-ref --short HEAD 2> /dev/null)" != in-upstream ]; then
+if [ "$(git -C "${slugs}/proj-branch-in-upstream" symbolic-ref HEAD 2> /dev/null)" != refs/heads/in-upstream ]; then
   fail "-:in-upstream did not make ${slugs}/proj-branch-in-upstream"
 fi
 

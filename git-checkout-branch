@@ -161,8 +161,8 @@ fi
 #
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
 # asked, and only the local tests in `find_branch` apply.
-BRANCH_REF="$(git symbolic-ref --quiet HEAD 2> /dev/null)" || BRANCH_REF=''
-REMOTE="$(fetch_remote . "${BRANCH_REF#refs/heads/}")"
+CURRENT_BRANCH="$(current_branch)" || CURRENT_BRANCH=''
+REMOTE="$(fetch_remote . "${CURRENT_BRANCH}")"
 
 # How the `git checkout` below creates the branch, set by `find_branch`:
 # ${CHECKOUT_START_POINT} is the ref or commit to create it from, or empty to
