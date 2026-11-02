@@ -56,6 +56,12 @@
 #    with later work that has not landed, nor of a branch none of whose
 #    commits, other than merges, changes a file, such as one whose only
 #    commits are empty.
+#    A commit also counts as held if it is on a local branch whose remote
+#    branch is gone and whose last commit GitHub holds in a landed pull
+#    request from the branch:  a squash-merged pull request that gained
+#    commits that the local branch lacks, from another clone, for example,
+#    which `git-outgoing` cannot recognize.  Asking GitHub needs the `gh`
+#    command; without it, or if GitHub cannot be reached, such commits count.
 #
 # `--force` waives both.  Each refusal names the check, says how much would be
 # lost, and quotes the flag that waives it; each waiver says on standard error
@@ -235,57 +241,156 @@ line_count() {
 # Usage: count_unlanded DIRECTORY LANDABLE REV-LIST-ARGS...
 # Prints the number of commits that `git rev-list REV-LIST-ARGS` lists in the
 # repository of DIRECTORY, other than those on a local branch whose changes
-# have landed in a remote's default branch.  LANDABLE names the local branches
-# that may have landed:  `--all` for every one, a branch name for that one
-# alone, or the empty string for none.  Prints nothing if `git rev-list`
-# fails.
+# have landed in a remote's default branch, or that GitHub holds in a landed
+# pull request.  LANDABLE names the local branches that may have landed:
+# `--all` for every one, a branch name for that one alone, or the empty
+# string for none.  Prints nothing if `git rev-list` fails.
 #
 # A squash-merged pull request is the reason:  its commits are on no remote,
 # because the squash commit replaces them, and its remote branch is deleted,
 # but its changes are in the remote's default branch, so removing the only
-# copy of its commits loses nothing.  `git-outgoing --omitted` names the
-# branches whose changes have landed, and their commits are not counted.  If
-# `git-outgoing` fails, every commit counts.
+# local copy of its commits loses nothing.  `git-outgoing --omitted` names
+# the branches whose changes have landed, and their commits are not counted.
+# If `git-outgoing` fails, every commit counts.  `pr_landed_branches` names
+# the branches that GitHub holds, and their commits are not counted either.
 #
 # `git-outgoing` examines each branch that it is asked about, which is most
 # of its work, so LANDABLE should name no more branches than matter.  It is
 # not run where it cannot find anything:  when `git rev-list` lists no commit,
 # when LANDABLE is empty, when git is older than 2.40, which `git-outgoing`
 # requires, or when no remote has a default branch (`REMOTE/HEAD`).
+# `pr_landed_branches`, which queries GitHub, is run only when commits remain
+# to be counted after `git-outgoing` has run.
 count_unlanded() {
   count_unlanded_dir="$1"
   count_unlanded_landable="$2"
   shift 2
   count_unlanded_count="$(git -C "${count_unlanded_dir}" rev-list --count \
     "$@" 2> /dev/null)" || return 0
-  if [ "${count_unlanded_count}" -eq 0 ] || [ -z "${count_unlanded_landable}" ] \
-    || [ "${outgoing_works}" -eq 0 ] \
-    || ! git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
+  if [ "${count_unlanded_count}" -eq 0 ] || [ -z "${count_unlanded_landable}" ]; then
+    echo "${count_unlanded_count}"
+    return 0
+  fi
+  count_unlanded_omitted=''
+  if [ "${outgoing_works}" -eq 1 ] \
+    && git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
       refs/remotes 2> /dev/null | grep -q '/HEAD$'; then
+    if [ "${count_unlanded_landable}" = --all ]; then
+      count_unlanded_only=
+    else
+      count_unlanded_only="--only-branch=${count_unlanded_landable}"
+    fi
+    if ! count_unlanded_omitted="$(cd -- "${count_unlanded_dir}" \
+      && "${SCRIPT_DIR}"/git-outgoing ${count_unlanded_only:+"${count_unlanded_only}"} --omitted)"; then
+      echo "${SCRIPT_NAME}: cannot tell whether the changes of the commits in ${count_unlanded_dir} have landed, so counting them all" >&2
+      echo "${count_unlanded_count}"
+      return 0
+    fi
+    if [ -n "${count_unlanded_omitted}" ]; then
+      count_unlanded_count="$(count_excluding "${count_unlanded_dir}" \
+        "${count_unlanded_omitted}" "$@")"
+      if [ -z "${count_unlanded_count}" ] || [ "${count_unlanded_count}" -eq 0 ]; then
+        echo "${count_unlanded_count}"
+        return 0
+      fi
+    fi
+  fi
+  count_unlanded_held="$(pr_landed_branches "${count_unlanded_dir}" \
+    "${count_unlanded_landable}" "${count_unlanded_omitted}")"
+  if [ -z "${count_unlanded_held}" ]; then
     echo "${count_unlanded_count}"
     return 0
   fi
-  if [ "${count_unlanded_landable}" = --all ]; then
-    count_unlanded_only=
+  if [ -n "${count_unlanded_omitted}" ]; then
+    count_unlanded_held="${count_unlanded_omitted}
+${count_unlanded_held}"
+  fi
+  count_excluding "${count_unlanded_dir}" "${count_unlanded_held}" "$@"
+}
+
+# Usage: count_excluding DIRECTORY REFS REV-LIST-ARGS...
+# Prints the number of commits that `git rev-list REV-LIST-ARGS` lists in the
+# repository of DIRECTORY and that none of REFS, full ref names such as
+# `refs/heads/main`, one per line, holds.  Prints nothing if `git rev-list`
+# fails.
+#
+# A `--not` in REV-LIST-ARGS does not apply to the revisions that git reads
+# from standard input, so each ref is negated by its `^`.  The refs are passed
+# that way rather than as arguments, which might exceed the limit on a command
+# line's size.
+count_excluding() {
+  count_excluding_dir="$1"
+  count_excluding_refs="$2"
+  shift 2
+  printf '%s\n' "${count_excluding_refs}" | sed 's/^/^/' \
+    | git -C "${count_excluding_dir}" rev-list --count --stdin "$@" 2> /dev/null
+}
+
+# Usage: pr_landed_branches DIRECTORY LANDABLE OMITTED
+# Prints the full names, such as `refs/heads/feature`, one per line, of the
+# local branches among LANDABLE, as for `count_unlanded`, in the repository of
+# DIRECTORY, whose commits GitHub holds in a landed pull request.  Ignores
+# each branch whose full name is a line of OMITTED.
+#
+# GitHub holds a branch's commits if the branch's last commit is, or is an
+# ancestor of, the last commit of a pull request from the branch, because
+# GitHub keeps every pull request's last commit after the pull request's
+# branch is deleted.  This finds a squash-merged pull request that
+# `git-outgoing` misses:  one that gained commits that the local branch
+# lacks, from another clone or from GitHub's "Update branch" button, for
+# example.  Merging the local branch then does not reproduce the squash
+# commit, but nothing that the local branch holds is lost.  A pull request
+# that was closed without landing holds its commits too, but its work did
+# not land, and the user is likely to want the branch, so only a landed pull
+# request counts.  The pull requests from a branch are the ones that
+# `pr_repositories` describes.  GitHub's answer about whether one commit is
+# an ancestor of another is used, rather than git's, because the pull
+# request's last commit is often missing from the local repository.
+#
+# GitHub is asked only about a branch whose remote branch is gone:  the
+# commits of any other branch that GitHub holds are held by a remote-tracking
+# ref, too.  A branch for which `pr_repositories` fails, or for which a
+# query fails, is not printed.
+pr_landed_branches() {
+  if [ "$2" = --all ]; then
+    pr_landed_pattern=refs/heads
   else
-    count_unlanded_only="--only-branch=${count_unlanded_landable}"
+    pr_landed_pattern="refs/heads/$2"
   fi
-  if ! count_unlanded_omitted="$(cd -- "${count_unlanded_dir}" \
-    && "${SCRIPT_DIR}"/git-outgoing ${count_unlanded_only:+"${count_unlanded_only}"} --omitted)"; then
-    echo "${SCRIPT_NAME}: cannot tell whether the changes of the commits in ${count_unlanded_dir} have landed, so counting them all" >&2
-    echo "${count_unlanded_count}"
-    return 0
-  fi
-  if [ -z "${count_unlanded_omitted}" ]; then
-    echo "${count_unlanded_count}"
-    return 0
-  fi
-  # A `--not` in REV-LIST-ARGS does not apply to the revisions that git reads
-  # from standard input, so each omitted branch is negated by its `^`.  The
-  # branches are passed that way rather than as arguments, which might exceed
-  # the limit on a command line's size.
-  printf '%s\n' "${count_unlanded_omitted}" | sed 's/^/^/' \
-    | git -C "${count_unlanded_dir}" rev-list --count --stdin "$@" 2> /dev/null
+  git -C "$1" for-each-ref --format='%(refname) %(upstream:track)' \
+    "${pr_landed_pattern}" 2> /dev/null \
+    | while read -r pr_landed_ref pr_landed_track; do
+      [ "${pr_landed_track}" = '[gone]' ] || continue
+      if printf '%s\n' "$3" | grep -q -x -F -e "${pr_landed_ref}"; then
+        continue
+      fi
+      pr_repositories "$1" "${pr_landed_ref#refs/heads/}" || continue
+      pr_landed_tip="$(git -C "$1" rev-parse --verify --quiet \
+        "${pr_landed_ref}^{commit}")" || continue
+      # Each line is "COMMIT HEAD" for one landed pull request, where COMMIT
+      # is its last commit and HEAD its head repository, or "-" if that was
+      # deleted.  The `head` parameter names only the head repository's
+      # owner, who might have both the base repository and a fork of it.
+      pr_landed_prs="$(gh api -X GET "repos/${pr_base_repo}/pulls" \
+        -f "head=${pr_head_repo%%/*}:${pr_head_branch}" -f state=closed -f per_page=100 \
+        --hostname github.com --paginate \
+        --jq '.[] | select(.merged_at) | "\(.head.sha) \(.head.repo.full_name // "-")"' \
+        < /dev/null 2> /dev/null)" || continue
+      # GitHub ignores the case of a repository's name, so a remote URL may
+      # spell it differently than GitHub's answer does.
+      for pr_landed_commit in $(printf '%s\n' "${pr_landed_prs}" \
+        | awk -v head="${pr_head_repo}" 'tolower($2) == tolower(head) { print $1 }'); do
+        # "ahead" means that the pull request's last commit descends from the
+        # branch's.  GitHub fails if it lacks the branch's last commit.
+        case "$(gh api -X GET "repos/${pr_base_repo}/compare/${pr_landed_tip}...${pr_landed_commit}" \
+          -f per_page=1 --hostname github.com --jq .status < /dev/null 2> /dev/null)" in
+          ahead | identical)
+            printf '%s\n' "${pr_landed_ref}"
+            break
+            ;;
+        esac
+      done
+    done
 }
 
 # Prints the number of live linked worktrees of the repository in directory

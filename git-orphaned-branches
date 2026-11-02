@@ -251,95 +251,26 @@ live_superproject() {
   fi
 }
 
-# Prints OWNER/REPO for the GitHub URL $1, or nothing if $1 is not the URL of
-# a GitHub repository.
-github_slug() {
-  printf '%s\n' "$1" | sed -e 's|/*$||' | sed -n \
-    -e 's|^git@github\.com:\([^/]*/[^/]*\)$|\1|p' \
-    -e 's|^ssh://git@github\.com/\([^/]*/[^/]*\)$|\1|p' \
-    -e 's|^https://\([^@/]*@\)\{0,1\}github\.com/\([^/]*/[^/]*\)$|\2|p' \
-    | sed -e 's|\.git$||'
-}
-
 # Records directory $1, whose branch still exists in its remote, so that
 # `warn_about_closed_prs` asks about its pull requests after the scan.
 #
-# The pull requests are those whose base is the parent of the repository that
-# `git push` uses, if that repository is a fork, and is that repository itself
-# otherwise; and whose head is the remote branch in the repository that
-# `git push` uses.  A pull request from a branch of the same name in another
-# repository, even the base repository, is someone else's.  Nothing is
-# recorded for the default branch of the repository that `git push` uses:  a
-# pull request from it, such as one that merges a release from `main` into a
-# stable branch, says nothing about whether a directory of the branch is
-# obsolete, because the branch outlives every such pull request.  Nor is
-# anything recorded if `gh` is not installed, if the remote is not on GitHub, or if a
-# query fails, because then nothing is known about the pull requests; the
-# scan's other answers do not depend on GitHub.  Nor is a directory whose
-# pathname contains a newline, which ${pr_candidates} cannot represent.
+# The pull requests are those that `pr_repositories` describes.  Nothing is
+# recorded where `pr_repositories` fails:  for a detached HEAD, for the
+# default branch of the repository that `git push` uses, or when nothing is
+# known about the pull requests; the scan's other answers do not depend on
+# GitHub.  Nor is a directory whose pathname contains a newline, which
+# ${pr_candidates} cannot represent.
 note_pr_candidate() {
-  command -v gh > /dev/null 2>&1 || return 0
   prs_branch="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 0
-  prs_branch="${prs_branch#refs/heads/}"
-  prs_remote="$(push_remote "$1" "${prs_branch}")"
-  [ -n "${prs_remote}" ] || return 0
-  # The remote branch is the one that `is_deleted_branch` found:  the one that
-  # `branch.BRANCH.merge` names, if `branch.BRANCH.remote` is ${prs_remote},
-  # and the branch of the same name otherwise.  A pull request's head is a
-  # branch, so a ref outside refs/heads/ has none, and several refs have no
-  # one answer.
-  prs_merge="$(git -C "$1" config --get-all "branch.${prs_branch}.merge")"
-  if [ -n "${prs_merge}" ] \
-    && [ "$(git -C "$1" config --get "branch.${prs_branch}.remote")" = "${prs_remote}" ]; then
-    case "${prs_merge}" in
-      *'
-'*) return 0 ;;
-      refs/heads/?*) prs_branch="${prs_merge#refs/heads/}" ;;
-      *) return 0 ;;
-    esac
-  fi
-  prs_url="$(git -C "$1" remote get-url --push "${prs_remote}" 2> /dev/null)" || return 0
-  prs_head_repo="$(github_slug "${prs_url}")"
-  # `git remote get-url` applies `url.BASE.insteadOf`, which may map a GitHub
-  # URL to a mirror or a local copy; the configured URL still names GitHub.
-  if [ -z "${prs_head_repo}" ]; then
-    prs_head_repo="$(github_slug "$(git -C "$1" config --get "remote.${prs_remote}.url")")"
-  fi
-  [ -n "${prs_head_repo}" ] || return 0
-  # Every branch directory of a project asks about the same repository, so
-  # remember each answer.  Each line of ${base_repo_cache} is
-  # "HEAD BASE DEFAULT", where DEFAULT is HEAD's default branch, or "-" if it
-  # has none.  The repository is named with its host, so that `gh` does not
-  # ask the host that ${GH_HOST} may name instead.
-  prs_answer="$(printf '%s\n' "${base_repo_cache}" \
-    | awk -v head="${prs_head_repo}" '$1 == head { print $2 " " $3; exit }')"
-  if [ -z "${prs_answer}" ]; then
-    prs_answer="$(gh repo view "github.com/${prs_head_repo}" \
-      --json owner,name,parent,defaultBranchRef \
-      --jq '"\(if .parent then "\(.parent.owner.login)/\(.parent.name)" else "\(.owner.login)/\(.name)" end) \(.defaultBranchRef.name // "-")"' \
-      2> /dev/null)" || return 0
-    case "${prs_answer}" in
-      ?*' '?*) ;;
-      *) return 0 ;;
-    esac
-    base_repo_cache="${base_repo_cache}
-${prs_head_repo} ${prs_answer}"
-  fi
-  prs_base_repo="${prs_answer%% *}"
-  if [ "${prs_branch}" = "${prs_answer#* }" ]; then
-    return 0
-  fi
+  pr_repositories "$1" "${prs_branch#refs/heads/}" || return 0
   prs_dir="$(absolute_path "$1")" || prs_dir="$1"
   case "${prs_dir}" in
     *'
 '*) return 0 ;;
   esac
-  pr_candidates="${pr_candidates}${prs_base_repo}	${prs_head_repo}	${prs_branch}	${prs_dir}
+  pr_candidates="${pr_candidates}${pr_base_repo}	${pr_head_repo}	${pr_head_branch}	${prs_dir}
 "
 }
-
-# The answers of `gh repo view` that `note_pr_candidate` has received.
-base_repo_cache=''
 
 # The directories that `note_pr_candidate` has recorded, one per line, each
 # line "BASE<TAB>HEAD<TAB>BRANCH<TAB>DIRECTORY", where BRANCH is the branch in

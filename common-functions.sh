@@ -3175,3 +3175,97 @@ is_deleted_branch() {
       ;;
   esac
 }
+
+## Usage: github_slug URL
+## Prints the GitHub slug, such as "ORG/REPO", of the GitHub repository whose
+## URL is URL, such as "git@github.com:ORG/REPO.git", or nothing if URL is not
+## the URL of a GitHub repository.
+github_slug() {
+  printf '%s\n' "$1" | sed -e 's|/*$||' | sed -n \
+    -e 's|^git@github\.com:\([^/]*/[^/]*\)$|\1|p' \
+    -e 's|^ssh://git@github\.com/\([^/]*/[^/]*\)$|\1|p' \
+    -e 's|^https://\([^@/]*@\)\{0,1\}github\.com/\([^/]*/[^/]*\)$|\2|p' \
+    | sed -e 's|\.git$||'
+}
+
+## Usage: pr_repositories DIRECTORY BRANCH
+## Sets ${pr_base_repo} and ${pr_head_repo} to the GitHub slugs, such as
+## "ORG/REPO", of the base and head repositories of the pull requests from a
+## local branch BRANCH of the clone in DIRECTORY, and sets ${pr_head_branch}
+## to the name of their head branch in the head repository.  Fails, setting
+## nothing, if nothing is known about those pull requests, or if they say
+## nothing about BRANCH.
+##
+## The head repository is the one that `git push` uses for BRANCH; see
+## `push_remote`.  The base repository is the head repository's parent, if
+## the head repository is a fork, and the head repository itself otherwise.
+## The head branch is the remote branch that `is_deleted_branch` asks about:
+## the one that `branch.BRANCH.merge` names, if `branch.BRANCH.remote` is the
+## remote that `git push` uses, and the branch of the same name otherwise.  A
+## pull request from a branch of the same name in another repository, even the
+## base repository, is someone else's.
+##
+## Fails if `gh` is not installed, if the remote is not on GitHub, or if a
+## query fails, because then nothing is known about the pull requests.  Fails
+## if `branch.BRANCH.merge` names a ref outside `refs/heads/`, or names several
+## refs, because a pull request's head is one branch.  Fails if the head
+## branch is the head repository's default branch:  a pull request from it,
+## such as one that merges a release from `main` into a stable branch, says
+## nothing about whether the branch's work is done, because the branch
+## outlives every such pull request.
+pr_repositories() {
+  command -v gh > /dev/null 2>&1 || return 1
+  pr_repositories_branch="$2"
+  pr_repositories_remote="$(push_remote "$1" "$2")"
+  [ -n "${pr_repositories_remote}" ] || return 1
+  pr_repositories_merge="$(git -C "$1" config --get-all "branch.$2.merge")"
+  if [ -n "${pr_repositories_merge}" ] \
+    && [ "$(git -C "$1" config --get "branch.$2.remote")" = "${pr_repositories_remote}" ]; then
+    case "${pr_repositories_merge}" in
+      *'
+'*) return 1 ;;
+      refs/heads/?*) pr_repositories_branch="${pr_repositories_merge#refs/heads/}" ;;
+      *) return 1 ;;
+    esac
+  fi
+  pr_repositories_url="$(git -C "$1" remote get-url --push "${pr_repositories_remote}" 2> /dev/null)" \
+    || return 1
+  pr_repositories_head="$(github_slug "${pr_repositories_url}")"
+  # `git remote get-url` applies `url.BASE.insteadOf`, which may map a GitHub
+  # URL to a mirror or a local copy; the configured URL still names GitHub.
+  if [ -z "${pr_repositories_head}" ]; then
+    pr_repositories_head="$(github_slug "$(git -C "$1" config --get "remote.${pr_repositories_remote}.url")")"
+  fi
+  [ -n "${pr_repositories_head}" ] || return 1
+  # Every branch of a project asks about the same repository, so remember each
+  # answer.  Each line of ${pr_repositories_cache} is "HEAD BASE DEFAULT",
+  # where DEFAULT is HEAD's default branch, or "-" if it has none.  The
+  # repository is named with its host, so that `gh` does not ask the host
+  # that ${GH_HOST} names instead.
+  pr_repositories_answer="$(printf '%s\n' "${pr_repositories_cache}" \
+    | awk -v head="${pr_repositories_head}" '$1 == head { print $2 " " $3; exit }')"
+  if [ -z "${pr_repositories_answer}" ]; then
+    pr_repositories_answer="$(gh repo view "github.com/${pr_repositories_head}" \
+      --json owner,name,parent,defaultBranchRef \
+      --jq '"\(if .parent then "\(.parent.owner.login)/\(.parent.name)" else "\(.owner.login)/\(.name)" end) \(.defaultBranchRef.name // "-")"' \
+      < /dev/null 2> /dev/null)" || return 1
+    case "${pr_repositories_answer}" in
+      ?*' '?*) ;;
+      *) return 1 ;;
+    esac
+    pr_repositories_cache="${pr_repositories_cache}
+${pr_repositories_head} ${pr_repositories_answer}"
+  fi
+  if [ "${pr_repositories_branch}" = "${pr_repositories_answer#* }" ]; then
+    return 1
+  fi
+  # shellcheck disable=SC2034 # set for the caller
+  pr_base_repo="${pr_repositories_answer%% *}"
+  # shellcheck disable=SC2034 # set for the caller
+  pr_head_repo="${pr_repositories_head}"
+  # shellcheck disable=SC2034 # set for the caller
+  pr_head_branch="${pr_repositories_branch}"
+}
+
+## The answers of `gh repo view` that `pr_repositories` has received.
+pr_repositories_cache=''
