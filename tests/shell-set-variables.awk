@@ -16,6 +16,10 @@
 # ends within a quotation, a command substitution, a parameter expansion, an
 # array literal, or a "case" statement.
 #
+# It parses FILE as a Bash script if FILE's first line is a "#!" line that
+# names bash, as in "#!/usr/bin/env bash", and as a POSIX shell script
+# otherwise.  The two differ in how they quote within a parameter expansion.
+#
 # This splits the script into words the way a shell does, so that a value that
 # contains whitespace, quotation marks, or a command substitution does not
 # affect the result.  Then, at each point where a command can start, it reads
@@ -245,6 +249,7 @@ function report_line(  i, j, k, r, at_command, array, inert, w, named, \
   }
   nwords = 0
 }
+FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
 {
   line = $0
   len = length(line)
@@ -297,10 +302,21 @@ function report_line(  i, j, k, r, at_command, array, inert, w, named, \
       continue
     }
     if (c == "$" && substr(line, pos + 1, 1) == "{") {
-      # A parameter expansion.  Quoting starts afresh within it, even within
-      # double quotation marks, so that a '"' within it begins a quotation
-      # rather than ending the one around it, as in "${VAR#*"x"}".
-      param_in_double[depth + 1] = (context() == "double")
+      # A parameter expansion.  Within it, a '"' begins a quotation, even
+      # within double quotation marks, rather than ending the one around
+      # it, as in "${VAR#*"x"}".  A "'" begins a quotation as well, as in
+      # ${VAR:-'a b'} and "${VAR#'x'}", with one exception:  in a POSIX
+      # shell, within double quotation marks, a "'" in the word of
+      # ${VAR-word}, ${VAR=word}, ${VAR?word}, or ${VAR+word} (each with
+      # an optional ":" before the operator) is an ordinary character, as
+      # in "${VAR:-it's}".  The word of such an expansion is itself within
+      # the double quotation marks, so the exception holds for an expansion
+      # nested in it, as in "${A:-${B:-it's}}", but not for one nested in a
+      # pattern, as in "${A#${B:-'x'}}".
+      in_double = (context() == "double") \
+        || (context() == "param" && param_literal_quote[depth])
+      param_literal_quote[depth + 1] = !bash && in_double \
+        && substr(line, pos + 2) ~ /^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[-*@#?$!]):?[-=?+]/
       push_context("param")
       add_word("${")
       pos += 2
@@ -309,10 +325,7 @@ function report_line(  i, j, k, r, at_command, array, inert, w, named, \
     if (context() == "param") {
       if (c == "}") { pop_context(); add_word(c); pos++; continue }
       if (c == "\"") { push_context("double"); add_word(c); pos++; continue }
-      # Within double quotation marks, a "'" in a parameter expansion is an
-      # ordinary character, as in "${VAR:-it's}".  Elsewhere, it begins a
-      # quotation, as in ${VAR:-'a b'}.
-      if (c == "'" && !param_in_double[depth]) {
+      if (c == "'" && !param_literal_quote[depth]) {
         push_context("single")
         add_word(c)
         pos++
