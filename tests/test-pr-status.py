@@ -367,7 +367,7 @@ class ModelTest(unittest.TestCase):
 
 
 class HighlightTest(unittest.TestCase):
-    """Tests for resolve_pr_names, with_transitive_prerequisites, and highlight."""
+    """Tests for resolve_pr_names, needed_to_land, and highlight."""
 
     def models(self):
         """Build models of two repositories, whose PRs depend on each other's.
@@ -402,7 +402,19 @@ class HighlightTest(unittest.TestCase):
     def test_transitive_prerequisites_span_repositories(self):
         """The prerequisites of a PR include its transitive ones, in any repository."""
         self.assertEqual(
-            pr_status.with_transitive_prerequisites(self.models(), {("owner/repo", 1)}),
+            pr_status.needed_to_land(self.models(), {("owner/repo", 1)}),
+            {("owner/repo", 1), ("owner/repo", 2), ("other/repo", 5), ("other/repo", 6)},
+        )
+
+    def test_land_with_partners(self):
+        """A PR's land-with partners, in any repository, must land with it."""
+        a = ModelTest.raw_model({1: "Land with #2.", 2: "", 3: "", 4: ""}, set())
+        b = ModelTest.raw_model(
+            {5: "Land with owner/repo#2.", 6: "", 7: "Land after #5."}, {(5, 6)}, "other/repo"
+        )
+        pr_status.unite_partners([a, b])
+        self.assertEqual(
+            pr_status.needed_to_land([a, b], {("owner/repo", 1)}),
             {("owner/repo", 1), ("owner/repo", 2), ("other/repo", 5), ("other/repo", 6)},
         )
 
@@ -432,17 +444,14 @@ class HighlightTest(unittest.TestCase):
             )
 
 
-class WithoutDirectoryOptionTest(unittest.TestCase):
-    """Tests for without_directory_option."""
+class ShellWordTest(unittest.TestCase):
+    """Tests for shell_word."""
 
-    def test_removes_directory_option(self):
-        """Each form of the -C option, and its argument, is removed."""
-        self.assertEqual(
-            pr_status.without_directory_option(
-                ["-C", "/a", "--highlight", "repo#1", "-C/b", "--directory", "/c", "--directory=/d"]
-            ),
-            ["--highlight", "repo#1"],
-        )
+    def test_quotes_only_when_needed(self):
+        """A "#" within a word needs no quoting, but one that starts a word does."""
+        self.assertEqual(pr_status.shell_word("repo#100"), "repo#100")
+        self.assertEqual(pr_status.shell_word("#100"), "'#100'")
+        self.assertEqual(pr_status.shell_word("a#1, b#2"), "'a#1, b#2'")
 
 
 class ApplyDescriptionUpdatesTest(unittest.TestCase):

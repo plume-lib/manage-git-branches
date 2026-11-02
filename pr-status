@@ -7,7 +7,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --check    # snapshot and report changes, but write no document
   pr-status --print-document  # print the dependency document's file name, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
-  pr-status --highlight avocado-agent#100  # highlight a PR and its transitive prerequisites
+  pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
 
 Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
@@ -441,10 +441,10 @@ def resolve_pr_names(models, names):
 
     Args:
         models: the model of each repository.
-        names: strings, each of which names PRs, separated by commas or whitespace.  A PR's
-            name is a repository's GitHub slug, its name, or the prefix of its references
-            (which is "" when the documents refer to its PRs as "#N"), followed by "#" and a
-            PR number, as in "ORG/REPO#100", "REPO#100", or "#100".
+        names: a list of strings, each of which names PRs, separated by commas or whitespace.
+            A PR's name is a repository's GitHub slug, its name, or the prefix of its
+            references (which is "" when the documents refer to its PRs as "#N"), followed by
+            "#" and a PR number, as in "ORG/REPO#100", "REPO#100", or "#100".
 
     Returns:
         The PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR number.
@@ -482,17 +482,20 @@ def resolve_pr_names(models, names):
     return result
 
 
-def with_transitive_prerequisites(models, prs):
-    """Return the given PRs and every PR that one of them depends on, directly or transitively.
+def needed_to_land(models, prs):
+    """Return the PRs that must land for the given PRs to land.
 
-    The prerequisites of a PR in a repository that models does not describe are not known.
+    Those are the given PRs and, recursively, every PR that one of them depends on or lands
+    with.  The prerequisites and partners of a PR in a repository that
+    models does not describe are not known.
 
     Args:
         models: the model of each repository, whose dependency graph is computed.
-        prs: PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR number.
+        prs: a set of PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR
+            number.
 
     Returns:
-        The PRs and their prerequisites, in the same form as prs.
+        The PRs that must land, in the same form as prs.
     """
     by_gh = {m.repo.gh.lower(): m for m in models}
     result, todo = set(), list(prs)
@@ -505,6 +508,7 @@ def with_transitive_prerequisites(models, prs):
         if m is None or n not in m.open:
             continue
         todo.extend((gh, d) for d in m.all_deps[n])
+        todo.extend(m.cross_repo_unit[n])
         for ref in m.external[n]:
             g, d = ref.split("#")
             todo.append((g.lower(), int(d)))
@@ -836,6 +840,9 @@ class Model:
         self.deps = deps
         # The members, in this repository, of each PR's land-with unit.
         self.unit = {n: {n} for n in open_prs}
+        # The members, in every repository, of each PR's land-with unit, as pairs of a
+        # lowercase GitHub slug, such as "org/repo", and a PR number.
+        self.cross_repo_unit = {n: {(repo.gh.lower(), n)} for n in open_prs}
         # The external prerequisites that each PR has because of its land-with unit.
         self.inherited_external = {}
 
@@ -1073,6 +1080,7 @@ def unite_partners(models):
         for model, n in unit:
             gh = model.repo.gh.lower()
             model.unit[n] = {m for other, m in unit if other is model}
+            model.cross_repo_unit[n] = {(other.repo.gh.lower(), m) for other, m in unit}
             model.deps[n] = {d for (g, d) in prereqs if g == gh and d in model.open}
             inherited = {ref for (g, _), ref in prereqs.items() if g != gh} - set(model.external[n])
             model.inherited_external[n] = inherited
@@ -2738,34 +2746,28 @@ def default_dependency_document(models):
     return "\n".join(lines) + "\n"
 
 
-def without_directory_option(args):
-    """Return command-line arguments without the -C option.
+def shell_word(word):
+    """Return the given word, quoted if a shell would not otherwise read it as that one word.
+
+    Unlike shlex.quote, this does not quote a word for a "#" that does not start it, such as
+    the one in "repo#100", because a shell treats such a "#" as an ordinary character.
 
     Args:
-        args: command-line arguments, such as ["-C", "/base", "--highlight", "repo#1"].
+        word: a command-line argument, such as "repo#100".
 
     Returns:
-        args without any -C or --directory option and its argument, such as
-        ["--highlight", "repo#1"].
+        word, or word quoted for a shell.
     """
-    result, skip = [], False
-    for arg in args:
-        if skip:
-            skip = False
-        elif arg in {"-C", "--directory"}:
-            skip = True
-        elif not arg.startswith(("-C", "--directory=")):
-            result.append(arg)
-    return result
+    unquoted = word.replace("#", "")
+    if word.startswith("#") or shlex.quote(unquoted) != unquoted:
+        return shlex.quote(word)
+    return word
 
 
 def main():
     """Report changes and regenerate the documents."""
     parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        # without_directory_option recognizes only the full option names.
-        allow_abbrev=False,
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
         "--check",
@@ -2785,12 +2787,14 @@ def main():
     )
     parser.add_argument(
         "--highlight",
+        action="extend",
         nargs="+",
         default=[],
         metavar="PR",
         help=(
             "in the documents, highlight each PR (such as REPO#N or ORG/REPO#N) and every PR"
-            " that it depends on, directly or transitively"
+            " that must land for it to land:  the PRs that it depends on or lands with,"
+            " recursively"
         ),
     )
     args = parser.parse_args()
@@ -2808,9 +2812,7 @@ def main():
     dependencies = pathlib.Path(dependency_document_name(cfg, "pr-status"))
     models = load_models(cfg)
     try:
-        HIGHLIGHTED.update(
-            with_transitive_prerequisites(models, resolve_pr_names(models, args.highlight))
-        )
+        HIGHLIGHTED.update(needed_to_land(models, resolve_pr_names(models, args.highlight)))
     except ValueError as error:
         sys.exit(f"pr-status: --highlight: {error}")
     updates = description_updates(models)
@@ -2820,7 +2822,7 @@ def main():
     now = dt.datetime.now().astimezone()
     as_of = now.strftime("%Y-%m-%d %H:%M %Z")
     if HIGHLIGHTED:
-        command = shlex.join(["pr-status", *without_directory_option(sys.argv[1:])])
+        command = " ".join(shell_word(w) for w in ["pr-status", "--highlight", *args.highlight])
         as_of += f", by `{command}`"
     new = facts(models)
     old = {}

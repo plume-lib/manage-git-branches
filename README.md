@@ -159,9 +159,10 @@ The commands are:
   With `--check`, it writes no document.  With `--print-document`, it prints
   the file name of the dependency document and does nothing else.
   `--highlight PR...` highlights, wherever the documents name it, each
-  given PR (such as `REPO#100` or `ORG/REPO#100`) and every PR that it
-  depends on, directly or transitively:  in bold on a light red background,
-  and as a red node in the dependency graph.
+  given PR (such as `REPO#100` or `ORG/REPO#100`) and every PR that must
+  land for it to land:  the PRs that it depends on or lands with,
+  recursively.  It shows them in bold on a light red background, and as red
+  nodes in the dependency graph.
   Run it in a directory that holds the working copy directories, or pass
   that directory with `-C`.
   This command needs Python 3.9 or later, and the programs that
