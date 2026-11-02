@@ -185,14 +185,11 @@ git -C "${work}/dot-project/p-repo" commit -q -m 'Track a file'
 mkdir -p "${work}/dot-project/p-repo/r-branch-empty"
 mkdir -p "${work}/dot-project/p-repo/r-branch-untracked"
 touch "${work}/dot-project/p-repo/r-branch-untracked/other"
-# A `*-branch-*` directory that the working tree ignores, or that is within
-# one that it ignores, is build output or a package, not a leftover, so it is
-# not warned about either.
-printf 'r-branch-ignored/\nnode_modules/\n' > "${work}/dot-project/p-repo/.gitignore"
-mkdir -p "${work}/dot-project/p-repo/r-branch-ignored" \
-  "${work}/dot-project/p-repo/node_modules/git-branch-is"
-touch "${work}/dot-project/p-repo/r-branch-ignored/other" \
-  "${work}/dot-project/p-repo/node_modules/git-branch-is/other"
+# So is one that the working tree ignores by name, as a repository of
+# configuration files ignores the directory that holds clones.
+printf 'r-branch-ignored/\n' > "${work}/dot-project/p-repo/.gitignore"
+mkdir -p "${work}/dot-project/p-repo/r-branch-ignored"
+touch "${work}/dot-project/p-repo/r-branch-ignored/other"
 # A `*-branch-*` directory in a working tree that git can use, but that the
 # user cannot enter, is warned about as such, and says nothing about the
 # working tree.
@@ -327,15 +324,9 @@ if grep -q -F -- "git cannot use ${work}/dot-project/p-repo " "${work}/dot-proje
   cat "${work}/dot-project.stderr"
   status=1
 fi
-# Ignored `*-branch-*` directories are not warned about.
-if grep -q -F -e "r-branch-ignored" -e "git-branch-is" "${work}/dot-project.stderr"; then
-  echo "FAIL: git-orphaned-branches warned about an ignored directory:"
-  cat "${work}/dot-project.stderr"
-  status=1
-fi
 # Each `*-branch-*` directory in a working tree that tracks none of its files
-# is warned about.
-for d in r-branch-empty r-branch-untracked; do
+# is warned about, whether or not the working tree ignores it.
+for d in r-branch-empty r-branch-untracked r-branch-ignored; do
   if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/dot-project/p-repo/$d, which is in the git working tree ${work}/dot-project/p-repo but holds no file that it tracks" \
     "${work}/dot-project.stderr"; then
     echo "FAIL: git-orphaned-branches did not warn that p-repo tracks no file in $d:"
@@ -388,8 +379,8 @@ fi
 # Git stops searching for a repository at a directory in
 # `GIT_CEILING_DIRECTORIES`, as it does at a file system boundary.  A
 # working tree above that directory is one that git can use, so the
-# `*-branch-*` directory is warned about as being in no working tree, not as
-# being in one that git cannot use.
+# `*-branch-*` directory is warned about as being beyond where git searches
+# for that working tree, not as being in one that git cannot use.
 git init -q -b main "${work}/ceiling"
 git -C "${work}/ceiling" commit -q --allow-empty -m 'Initial commit'
 mkdir -p "${work}/ceiling/mount/c-branch-x"
@@ -402,9 +393,9 @@ fi
 if [ -n "${output}" ]; then
   fail "git-orphaned-branches printed [${output}] beyond a ceiling directory, expected no output"
 fi
-if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/ceiling/mount/c-branch-x, which is not in a git working tree" \
+if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/ceiling/mount/c-branch-x, which is in the git working tree ${work}/ceiling but beyond where git searches for it" \
   "${work}/ceiling.stderr"; then
-  echo "FAIL: git-orphaned-branches did not warn about c-branch-x as being in no working tree:"
+  echo "FAIL: git-orphaned-branches did not warn about c-branch-x as being beyond where git searches:"
   cat "${work}/ceiling.stderr"
   status=1
 fi

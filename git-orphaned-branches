@@ -410,12 +410,11 @@ rest_pr_states() {
 # `*-branch-*` and which contains a `/`, for which `is_deleted_branch` has
 # just returned status 2, if git can use no repository there, as
 # `is_deleted_branch_no_usable_repository` says, or if $1 is in a working tree
-# that neither tracks nor ignores any file in $1.  Says nothing about a
-# directory that holds a tracked file, such as a subdirectory of a source tree
-# that happens to be named `*-branch-*`, nor about an ignored one, such as
-# build output or an npm package in `node_modules`, nor about one in a
-# repository that has no working tree, such as a bare repository.  Sets
-# `status` to 1 if the directory's absolute path cannot be determined.
+# that tracks no file in $1.  Says nothing about a directory that holds a
+# tracked file, such as a subdirectory of a source tree that happens to be
+# named `*-branch-*`, nor about one in a repository that has no working tree,
+# such as a bare repository.  Sets `status` to 1 if the directory's absolute
+# path cannot be determined.
 #
 # Such a directory is usually what a failed removal of a branch directory left
 # behind.  For example, `rm -rf` removes every file that the user can delete,
@@ -427,10 +426,11 @@ rest_pr_states() {
 # repository, nothing tells whether it holds work.  A leftover can be in a
 # working tree that git can use, such as when the user's home directory is a
 # repository of configuration files; that working tree does not track the
-# leftover's files.  Such a working tree often ignores every file that it does
-# not track, as a `.gitignore` of `*` does, so a working tree's ignoring $1 is
-# evidence that $1 is not a leftover only if the working tree does not also
-# ignore a file at its top level that it has never heard of.
+# leftover's files.  Such a working tree often ignores the leftover, as a
+# `.gitignore` of `*` or of the directory that holds clones does, so a
+# working tree's ignoring $1 is no evidence that $1 is not a leftover.  An
+# ignored directory that is not a leftover, such as an npm package in
+# `node_modules` whose name matches `*-branch-*`, is warned about too.
 #
 # A directory can also be in a working tree that git cannot use, because the
 # working tree's `.git` names a git directory that does not exist (as for a
@@ -444,11 +444,11 @@ rest_pr_states() {
 # names that one, which can be farther away than a `.git` directory that git
 # skips because it is not a valid git directory.  If git can use that
 # ancestor, then $1 is beyond a file system boundary or a directory in
-# `GIT_CEILING_DIRECTORIES`, where git stops searching, and the warning says
-# only that $1 is in no working tree that git can use.  A `.git` directory
-# that holds no `HEAD` is no evidence of a working tree:  it is what a failed
-# `rm -rf` leaves when the `.git` directory holds files that another user
-# owns, as when a container running as root ran git.
+# `GIT_CEILING_DIRECTORIES`, where git stops searching, and the warning names
+# the working tree and says that $1 is beyond where git searches for it.  A
+# `.git` directory that holds no `HEAD` is no evidence of a working tree:  it
+# is what a failed `rm -rf` leaves when the `.git` directory holds files that
+# another user owns, as when a container running as root ran git.
 #
 # A directory that the user cannot enter is warned about as such, without
 # looking for a working tree:  git could use the one that holds it, if any,
@@ -460,6 +460,8 @@ rest_pr_states() {
 # contain $1.  A directory within it is part of its contents, which the user
 # has to inspect anyway, so the warning about it covers them.
 warned_dir=
+wnwt_newline='
+'
 warn_if_not_in_working_tree() {
   # Resolve the parent rather than $1, which the user might be unable to
   # enter, such as a directory that only another user can search.
@@ -487,12 +489,11 @@ warn_if_not_in_working_tree() {
         # `LC_ALL=C` makes the diagnostic English, so that it can be matched.
         if wnwt_git_error="$(LC_ALL=C git -C "${wnwt_ancestor}" rev-parse --git-dir \
           2>&1 > /dev/null < /dev/null)"; then
+          wnwt_where="is in the git working tree ${wnwt_ancestor} but beyond where git searches for it"
           break
         fi
         # The diagnostic's first line ends with the quoted path of the
         # repository that git refuses.
-        wnwt_newline='
-'
         wnwt_refused="dubious ownership in repository at '"
         case "${wnwt_git_error}" in
           *"${wnwt_refused}"*)
@@ -516,17 +517,9 @@ warn_if_not_in_working_tree() {
     # tracks no file in $1, and any status but 0 and 1 means that git can use
     # no working tree there, as for a repository that has none.  Most
     # directories here hold a tracked file, so ask that first:  it is one
-    # `git` invocation, and the questions below cost two more.
+    # `git` invocation, and the question below costs another.
     git -C "$1" ls-files --error-unmatch -- . > /dev/null 2>&1 < /dev/null
     if [ "$?" -ne 1 ]; then
-      return 0
-    fi
-    # `git check-ignore` prints each of its arguments that the working tree
-    # ignores, including a directory that is within one that it ignores.
-    # The second argument names a file at the top level that does not exist.
-    wnwt_ignored="$(git -C "$1" check-ignore -- . ":(top)${SCRIPT_NAME}-no-such-file" \
-      2> /dev/null < /dev/null)"
-    if [ "${wnwt_ignored}" = '.' ]; then
       return 0
     fi
     if ! wnwt_toplevel="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null < /dev/null)" \
