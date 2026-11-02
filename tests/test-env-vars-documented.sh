@@ -22,7 +22,9 @@ README="${TOPLEVEL}/README.md"
 # The shell commands, which are executable and start with "#!/bin/sh", and the
 # files that they source, which are not executable but whose names end in
 # ".sh".  A variable that a sourced file reads is part of the interface of the
-# commands that source it.  The Python commands are not checked.
+# commands that source it.  The Python commands and the Bash command
+# `pr-merge-analysis` are not checked; `set_variables_in` does not parse Bash
+# arrays.
 SCRIPTS="$(find "${TOPLEVEL}" -maxdepth 1 -type f ! -name '*~' \
   \( -perm -u+x -o -name '*.sh' \) -exec basename -- {} ';' | sort)"
 shell_scripts=''

@@ -13,7 +13,7 @@ Inputs:
   .pr-status-snapshot.json written by the previous run; compared with this run
 Each run:
   * reads the open PRs with gh,
-  * runs pr-merge-analysis.sh (cached) on them, for each repository,
+  * runs pr-merge-analysis (cached) on them, for each repository,
   * computes the dependencies:  a PR depends on another if its description says
     so, if its branch contains all of the other PR's non-merge commits, or if the
     config says so; PRs that land together (possibly in different repositories) are one
@@ -48,7 +48,7 @@ from collections import Counter, defaultdict
 
 CONFIG = "pr-status-config.json"
 SNAPSHOT = ".pr-status-snapshot.json"
-ANALYSIS = str(pathlib.Path("~/bin/share/pr-merge-analysis.sh").expanduser())
+ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
 
 
 class ConfigError(Exception):

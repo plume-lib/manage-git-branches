@@ -153,8 +153,17 @@ The commands are:
   With `--check`, it writes no document.
   Run it in a directory that holds the working copy directories, or pass
   that directory with `-C`.
-  This command needs Python 3.8 or later, `gh`, and
-  `~/bin/share/pr-merge-analysis.sh`.
+  This command needs Python 3.8 or later, and the programs that
+  `pr-merge-analysis` needs.
+* [`pr-merge-analysis`](pr-merge-analysis)
+  `[--no-pairwise] [--default-branch BRANCH] REPO_DIR OWNER/REPO [PR_NUMBER...]`:
+  For the given open pull requests of the GitHub repository OWNER/REPO (by
+  default, all of them), reports which ones conflict with the default
+  branch, which ones contain every non-merge commit of another, and (unless
+  `--no-pairwise`) which pairs conflict with each other.  It fetches the
+  pull requests into REPO_DIR, a clone of the repository, and caches its
+  results in the current directory.  `pr-status` runs it.
+  This command needs Bash 4 or later, Git 2.38 or later, and `gh`.
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--claude | --codex] [-C DIR]`:
   Runs `pr-status`, which regenerates `pr-status.md`, then runs each
@@ -256,6 +265,9 @@ takes effect when it is set to a non-empty value.
   run when it resolves merge conflicts.  An agent that runs longer is stopped,
   and the merge is left in progress.  The default is 1800 (30 minutes); 0
   means no limit.
+* `PR_MERGE_ANALYSIS_CACHE`: the file in which `pr-merge-analysis` caches its
+  results.  The default is `.pr-merge-analysis-cache-OWNER-REPO.tsv` in the
+  current directory.  Repositories must not share a cache file.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
 * `AZURE_DEVOPS_EXT_PAT`: the commands that use the Azure DevOps API use this
