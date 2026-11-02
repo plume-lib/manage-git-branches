@@ -2821,10 +2821,7 @@ def main():
     as_of = now.strftime("%Y-%m-%d %H:%M %Z")
     if HIGHLIGHTED:
         command = shlex.join(["pr-status", *without_directory_option(sys.argv[1:])])
-        as_of += (
-            f", by `{command}`, which highlights the PRs that it names"
-            " and every PR that they depend on"
-        )
+        as_of += f", by `{command}`"
     new = facts(models)
     old = {}
     if pathlib.Path(SNAPSHOT).exists():
