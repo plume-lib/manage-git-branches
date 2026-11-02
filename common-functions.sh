@@ -3225,40 +3225,82 @@ remote_heads() {
   return "${remote_heads_status}"
 }
 
-## Usage: only_dot_project DIRECTORY
-## Returns 0 (true) if DIRECTORY holds nothing but Eclipse `.project` files:
-## that is, if every entry of DIRECTORY is a `.project` file or is a directory
-## that itself holds nothing but `.project` files.  A directory that holds
-## nothing at all satisfies this, which is what lets an empty subdirectory --
-## such as the `bin` that Eclipse makes for a project's build output -- count
-## as nothing.
+## Usage: is_build_output_name NAME
+## Returns 0 (true) if NAME, the last component of a directory's pathname, is
+## the name of a directory of Python build output:  `.venv`, a virtual
+## environment, or a name that ends in `.egg-info`, such as
+## `myproject.egg-info`, which holds package metadata.  Such a directory holds
+## no branch directory and no work, except as `holds_no_checkout` tests.
+is_build_output_name() {
+  case "$1" in
+    '.venv' | *.egg-info) return 0 ;;
+  esac
+  return 1
+}
+
+## Usage: holds_no_checkout DIRECTORY
+## Returns 0 (true) if a directory DIRECTORY holds no version-control
+## checkout:  that is, if nothing in DIRECTORY, at any depth, is named `.git`,
+## `.hg`, `.svn`, or `.bzr`.  Returns 1 (false) if the user cannot read some
+## directory in DIRECTORY, which might hold a checkout.
+##
+## `find` writes newline-separated text, which cannot represent a file name
+## that contains a newline, but this function needs only whether `find` wrote
+## anything, which such a name does not obscure.
+holds_no_checkout() {
+  holds_no_checkout_found="$(find "$1" \( -name .git -o -name .hg -o -name .svn \
+    -o -name .bzr \) -prune -print 2> /dev/null)" || return 1
+  [ -z "${holds_no_checkout_found}" ]
+}
+
+## Usage: only_leftovers DIRECTORY
+## Returns 0 (true) if DIRECTORY holds nothing but leftovers:  files and
+## directories that tools other than git create in a working tree and that
+## remain after the working tree itself is gone.  A leftover is one of these:
+##  * an Eclipse `.project` file, which is a regular file;
+##  * a directory of Python build output that holds no version-control
+##    checkout, as `holds_no_checkout` tests:  either a Python virtual environment, which is a directory named `.venv`,
+##    or Python package metadata, which is a directory whose name ends in
+##    `.egg-info`, such as `myproject.egg-info`.
+## That is, every entry of DIRECTORY is a leftover or is a directory that
+## itself holds nothing but leftovers.  A directory that holds nothing at all
+## satisfies this, which is what lets an empty subdirectory -- such as the
+## `bin` that Eclipse makes for a project's build output -- count as nothing.
+##
+## Such a directory's contents are build output, which a build re-creates, so
+## they need not be leftovers themselves.  Nor need they belong to the user:
+## a container that runs as root creates them owned by root, and they are
+## what remains when the user's `rm -rf` of a branch directory cannot remove
+## them.  A `.venv` or `*.egg-info` directory that holds a version-control
+## checkout is not a leftover, because `pip install -e git+URL#egg=NAME`
+## clones a repository into `.venv/src/`, and that clone can hold unpushed
+## work.
 ##
 ## This says only what is in DIRECTORY; the caller decides what that means.
 ## A directory that holds nothing satisfies this test only vacuously, so the
-## variable `only_dot_project_found` is set to a nonempty value if at least
-## one `.project` file was seen, and is left alone otherwise.  A caller that
-## distinguishes a tree of `.project` files from a tree of nothing -- as
-## `is_deleted_branch` does -- sets that variable to the empty string before
+## variable `only_leftovers_found` is set to a nonempty value if at least one
+## leftover was seen, and is left alone otherwise.  A caller that
+## distinguishes a tree of leftovers from a tree of nothing -- as
+## `is_leftover_tree` does -- sets that variable to the empty string before
 ## the call and tests it after.  A shell function has no local variables, so
 ## the recursive calls below all set the one variable, and it therefore
 ## reports about the whole tree.
 ##
 ## A symbolic link is content, whether it names a directory, a file, or
-## nothing:  it is neither skipped as a `.project` file nor descended into.
-## Following one that names an ancestor would not terminate, and a link is
-## something that the user put there.
+## nothing:  it is never a leftover, and it is not descended into.  Following
+## one that names an ancestor would not terminate, and a link is something
+## that the user put there.
 ##
-## `find "$1" ! -name .project ! -type d` would be simpler, but `find`
-## communicates through newline-separated text, which cannot represent a file
-## name that contains a newline, whereas the globs and the positional
-## parameters below can hold any file name.
+## `find` would be simpler, but `find` communicates through newline-separated
+## text, which cannot represent a file name that contains a newline, whereas
+## the globs and the positional parameters below can hold any file name.
 ##
 ## The entries that remain to be examined are held in the positional
 ## parameters, which a shell makes local to a function call, so the recursive
 ## call below gets its own and this call's are intact when it returns.  A
 ## `for` loop over a variable could not recurse, because a shell function has
 ## no local variables.
-only_dot_project() {
+only_leftovers() {
   # In a directory that cannot be listed (but can be searched, such as one with
   # mode 711), every glob below expands to nothing, which is indistinguishable
   # from an empty directory.  Do not claim that such a directory holds nothing.
@@ -3273,28 +3315,52 @@ only_dot_project() {
         continue
         ;;
       '.project')
-        # Skip the Eclipse metadata itself.  A *directory* named `.project`
-        # can hold anything, so leave it to the test below, which descends
-        # into it like any other directory.
+        # A *directory* named `.project` can hold anything, so leave it to the
+        # test below, which descends into it like any other directory.
         if [ -f "$1" ] && [ ! -L "$1" ]; then
-          only_dot_project_found=1
+          only_leftovers_found=1
           shift
           continue
         fi
         ;;
     esac
+    # A *file* with the name of a directory of build output can hold anything,
+    # so leave it to the test below, which treats it as content.
+    if is_build_output_name "${1##*/}" && [ -d "$1" ] && [ ! -L "$1" ]; then
+      if ! holds_no_checkout "$1"; then
+        return 1
+      fi
+      only_leftovers_found=1
+      shift
+      continue
+    fi
     # When a pattern matches nothing, the shell leaves it unexpanded.  Such a
     # pathname names no entry, so it is not content.
     if [ ! -e "$1" ] && [ ! -L "$1" ]; then
       shift
       continue
     fi
-    if [ ! -d "$1" ] || [ -L "$1" ] || ! only_dot_project "$1"; then
+    if [ ! -d "$1" ] || [ -L "$1" ] || ! only_leftovers "$1"; then
       return 1
     fi
     shift
   done
   return 0
+}
+
+## Usage: is_leftover_tree DIRECTORY
+## Returns 0 (true) if a directory DIRECTORY holds nothing but leftovers, as
+## `only_leftovers` tests, and holds at least one leftover.
+##
+## `only_leftovers` is satisfied by a directory that holds nothing at all, and
+## a tree of nothing but empty directories is not evidence of a working tree
+## that a branch directory once held.  The leftover need not be in DIRECTORY
+## itself:  a branch whose Eclipse projects were all below its top level, such
+## as a `java/lib` that Eclipse knew as a project, leaves its metadata there
+## and none at the top.
+is_leftover_tree() {
+  only_leftovers_found=
+  only_leftovers "$1" && [ -n "${only_leftovers_found}" ]
 }
 
 ## Usage: is_deleted_branch DIRECTORY
@@ -3335,33 +3401,24 @@ is_deleted_branch() {
     return 2
   fi
 
-  # A directory that holds nothing but Eclipse `.project` files is the
-  # leftover of a branch directory whose working tree is gone:  what remains
-  # is metadata, a `.project` file for each Eclipse project of the branch and
-  # the directories that hold them, and none of the branch itself.  Such a
-  # directory is as removable as one whose branch was deleted in its remote,
-  # so answer 0 for it.
+  # A directory that holds nothing but leftovers, such as Eclipse `.project`
+  # files and a Python `.venv` directory, is the leftover of a branch directory
+  # whose working tree is gone:  what remains is what other tools made, and
+  # none of the branch itself.  Such a directory is as removable as one whose
+  # branch was deleted in its remote, so answer 0 for it.  `only_leftovers`
+  # says which files and directories are leftovers.  The tests below would
+  # call such a directory "not the top level of a working tree" (status 2):
+  # that is true, and it would leave the caller's question -- may this
+  # directory be removed? -- unanswered when it has an answer.
   #
-  # Answer it before the tests below, which would call such a directory "not
-  # the top level of a working tree" (status 2):  that is true, and it would
-  # leave the caller's question -- may this directory be removed? -- unanswered
-  # when it has an answer.  The tests below still decide every directory that
-  # holds anything else, including a working tree, whose `.git` is not a
-  # `.project` file and which `only_dot_project` therefore rejects at its
-  # first entry.
-  #
-  # Require a `.project` file somewhere in the tree.  `only_dot_project` is
-  # satisfied by a directory that holds nothing at all, and a tree of nothing
-  # but empty directories is not evidence of an Eclipse project that a branch
-  # directory once held.  The `.project` file need not be in DIRECTORY
-  # itself:  a branch whose Eclipse projects were all below its top level,
-  # such as a `java/lib` that Eclipse knew as a project, leaves its metadata
-  # there and none at the top.
-  only_dot_project_found=
-  if only_dot_project "${is_deleted_branch_dir}" \
-    && [ -n "${only_dot_project_found}" ]; then
-    return 0
-  fi
+  # Answer 0 only for a directory of leftovers that no working tree claims:
+  # one at which git can use no repository, or one in a working tree that
+  # tracks none of its files, such as a leftover in a home directory that is a
+  # repository of configuration files.  A directory in a working tree that
+  # tracks a file in it, such as a test fixture that holds a `*.egg-info`
+  # directory, is part of that working tree, and removing it would delete
+  # tracked files.  The top level of a working tree holds its `.git`, which is
+  # not a leftover.
 
   # `git -C DIR rev-parse` succeeds for every directory within a working tree,
   # so also require that DIRECTORY is that working tree's top level.  A
@@ -3377,6 +3434,9 @@ is_deleted_branch() {
   if ! is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
     --is-bare-repository --show-toplevel 2> /dev/null)"; then
     if [ -z "${is_deleted_branch_toplevel}" ]; then
+      if is_leftover_tree "${is_deleted_branch_dir}"; then
+        return 0
+      fi
       # shellcheck disable=SC2034 # Callers read it; see the documentation above.
       is_deleted_branch_no_usable_repository=1
     fi
@@ -3410,7 +3470,15 @@ is_deleted_branch() {
   fi
   if [ "${is_deleted_branch_dir_real}" != "${is_deleted_branch_top_real}" ]; then
     # Not the top level of a working tree, so it is not on any branch, deleted
-    # or otherwise.
+    # or otherwise.  It is a leftover if the working tree tracks no file in it,
+    # which is status 1 of `git ls-files --error-unmatch`.
+    if is_leftover_tree "${is_deleted_branch_dir}"; then
+      git -C "${is_deleted_branch_dir}" ls-files --error-unmatch -- . \
+        > /dev/null 2>&1
+      if [ "$?" -eq 1 ]; then
+        return 0
+      fi
+    fi
     return 2
   fi
 

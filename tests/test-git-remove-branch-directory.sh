@@ -140,6 +140,14 @@ touch "${project}/.project"
 run_command 'a directory that is no repository' 0 "${project}"
 check_gone 'a directory that is no repository' "${project}"
 
+# A directory that is no repository and holds nothing but Python build output,
+# which `git-orphaned-branches` also reports.
+python_leftover="${work}/myrepo-branch-python"
+mkdir -p "${python_leftover}/.venv/bin"
+touch "${python_leftover}/.venv/bin/python"
+run_command 'a directory of Python build output' 0 "${python_leftover}"
+check_gone 'a directory of Python build output' "${python_leftover}"
+
 # Several directories in one invocation, since a caller passes a whole list.
 several1="$(make_clone several1)"
 several2="$(make_clone several2)"

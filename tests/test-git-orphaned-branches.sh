@@ -141,6 +141,22 @@ touch "${work}/dot-project/p-branch-nested-project/java/lib/.project"
 # anywhere and is the leftover of nothing.
 mkdir -p "${work}/dot-project/p-branch-empty-tree/sub/deeper"
 
+# Contains nothing but Python build output.  A `*-branch-*` directory within
+# its `.venv` is build output, so it is neither listed nor warned about.
+mkdir -p "${work}/dot-project/p-branch-python/.venv/lib/x-branch-y" \
+  "${work}/dot-project/p-branch-python/myproject.egg-info"
+touch "${work}/dot-project/p-branch-python/.venv/lib/x-branch-y/other"
+
+# Contains nothing but a `.venv` directory, but that holds a git clone, as
+# `pip install -e git+URL#egg=NAME` makes in `.venv/src/`.  The clone can hold
+# unpushed work, so the directory is not a leftover.
+mkdir -p "${work}/dot-project/p-branch-python-checkout/.venv/src/mylib/.git"
+touch "${work}/dot-project/p-branch-python-checkout/.venv/src/mylib/setup.py"
+# A `*-branch-*` directory within a `.venv` that holds a checkout is examined
+# like any other.  This one is the leftover of a clone, so it is warned about.
+mkdir -p "${work}/dot-project/p-plain-python/.venv/src/mylib-branch-fix/.git"
+touch "${work}/dot-project/p-plain-python/.venv/src/mylib-branch-fix/setup.py"
+
 # A `*-branch-*` directory behind a symbolic link to a directory.  The walk
 # does not follow such a link, which is what keeps a link to an ancestor from
 # sending it around forever.
@@ -177,7 +193,14 @@ touch "${work}/dot-project/p-branch-git-leftover/.git/objects/ab/cdef"
 git init -q -b main "${work}/dot-project/p-repo"
 mkdir -p "${work}/dot-project/p-repo/r-branch-subdir"
 touch "${work}/dot-project/p-repo/r-branch-subdir/other"
-git -C "${work}/dot-project/p-repo" add r-branch-subdir/other
+# Likewise for one that holds nothing but Python build output, such as a test
+# fixture, if the working tree tracks a file in it.  If the working tree
+# tracks none, it is a leftover, so it is listed.
+mkdir -p "${work}/dot-project/p-repo/r-branch-tracked-python/pkg.egg-info" \
+  "${work}/dot-project/p-repo/r-branch-untracked-python/.venv"
+touch "${work}/dot-project/p-repo/r-branch-tracked-python/pkg.egg-info/PKG-INFO"
+git -C "${work}/dot-project/p-repo" add r-branch-subdir/other \
+  r-branch-tracked-python
 git -C "${work}/dot-project/p-repo" commit -q -m 'Track a file'
 # A `*-branch-*` directory in a working tree that tracks none of its files,
 # empty or not, is not part of that working tree.  It is not listed, but it is
@@ -251,6 +274,12 @@ check "p-branch-outer" "unlisted"
 check "p-branch-outer/q-branch-inner" "listed"
 check "p-branch-nested-project" "listed"
 check "p-branch-empty-tree" "unlisted"
+check "p-branch-python" "listed"
+check "p-branch-python/.venv/lib/x-branch-y" "unlisted"
+check "p-branch-python-checkout" "unlisted"
+check "p-plain-python/.venv/src/mylib-branch-fix" "unlisted"
+check "p-repo/r-branch-tracked-python" "unlisted"
+check "p-repo/r-branch-untracked-python" "listed"
 if printf '%s\n' "${output}" | grep -q -F -- 'p-branch-behind-link'; then
   echo "FAIL: git-orphaned-branches followed a symbolic link to a directory"
   status=1
@@ -300,6 +329,10 @@ check_warned "p-branch-outer" "warned"
 check_warned "p-branch-outer/q-branch-inner" "unwarned"
 check_warned "p-branch-outer/q-branch-content" "unwarned"
 check_warned "p-branch-empty-tree" "warned"
+check_warned "p-branch-python" "unwarned"
+check_warned "p-branch-python/.venv/lib/x-branch-y" "unwarned"
+check_warned "p-branch-python-checkout" "warned"
+check_warned "p-plain-python/.venv/src/mylib-branch-fix" "warned"
 check_warned "p-repo/r-branch-subdir" "unwarned"
 check_warned "p-branch-git-leftover" "warned"
 check_warned "p-repo/.git/refs/heads/r-branch-ref" "unwarned"
@@ -330,6 +363,16 @@ for d in r-branch-empty r-branch-untracked r-branch-ignored; do
   if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/dot-project/p-repo/$d, which is in the git working tree ${work}/dot-project/p-repo but holds no file that it tracks" \
     "${work}/dot-project.stderr"; then
     echo "FAIL: git-orphaned-branches did not warn that p-repo tracks no file in $d:"
+    cat "${work}/dot-project.stderr"
+    status=1
+  fi
+done
+# Neither directory of Python build output in a working tree is warned about:
+# the one that holds a tracked file is part of the working tree, and the other
+# is listed.
+for d in r-branch-tracked-python r-branch-untracked-python; do
+  if grep -q -F -- "${work}/dot-project/p-repo/$d" "${work}/dot-project.stderr"; then
+    echo "FAIL: git-orphaned-branches warned about p-repo/$d:"
     cat "${work}/dot-project.stderr"
     status=1
   fi
@@ -493,18 +536,22 @@ esac
 # `*-branch-*` directory itself.
 mkdir -p "${work}/foreign/f-branch-leftover" "${work}/stub-id"
 touch "${work}/foreign/f-branch-leftover/other"
+# A `.venv` whose files another user owns, as when a container running as
+# root created them, is a leftover, so the directory that holds it is listed.
+mkdir -p "${work}/foreign/f-branch-python/.venv/bin"
+touch "${work}/foreign/f-branch-python/.venv/bin/python"
 printf '#!/bin/sh\necho 2147483646\n' > "${work}/stub-id/id"
 chmod +x "${work}/stub-id/id"
 if ! output="$(cd "${work}/foreign" && PATH="${work}/stub-id:${PATH}" \
   "${GIT_ORPHANED_BRANCHES}" 2> "${work}/foreign.stderr")"; then
   fail "git-orphaned-branches exited with a failure status on files that another user owns"
 fi
-if [ -n "${output}" ]; then
-  fail "git-orphaned-branches printed [${output}] for files that another user owns, expected no output"
+if [ "${output}" != "${work}/foreign/f-branch-python" ]; then
+  fail "git-orphaned-branches printed [${output}] for files that another user owns, expected [${work}/foreign/f-branch-python]"
 fi
 if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/foreign/f-branch-leftover, which is not in a git working tree and which another user owns" \
   "${work}/foreign.stderr"; then
-  echo "FAIL: git-orphaned-branches did not say that another user owns a directory:"
+  echo "FAIL: git-orphaned-branches did not say that another user owns f-branch-leftover:"
   cat "${work}/foreign.stderr"
   status=1
 fi

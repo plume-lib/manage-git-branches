@@ -8,12 +8,13 @@
 # A directory whose branch still exists in the remote, but whose GitHub pull
 # requests are all closed or merged, is not listed; instead, a warning about
 # it is printed on standard error.  (This needs the `gh` command.)
-# Also lists directories that hold nothing but Eclipse `.project` files,
-# which is what a branch directory leaves behind when its working tree is gone.
-# A directory named *-branch-* that is in no git working tree and either
-# holds anything else, such as one whose removal failed on files owned by
-# another user, or holds no `.project` file at all, such as an empty
-# directory, is not listed; instead, a warning about it is printed on
+# Also lists directories that hold nothing but leftovers, such as Eclipse
+# `.project` files and Python `.venv` directories, which is what a branch
+# directory leaves behind when its working tree is gone; `is-deleted-branch`
+# says which files are leftovers.  A directory named *-branch-* that is in no
+# git working tree and either holds anything else, such as one whose removal
+# failed on files owned by another user, or holds no leftover at all, such as
+# an empty directory, is not listed; instead, a warning about it is printed on
 # standard error.  So is a directory in a git working tree that tracks none
 # of its files, and a directory in a working tree that git cannot use, such
 # as a linked worktree whose main working tree was moved.
@@ -421,8 +422,8 @@ rest_pr_states() {
 # including most of the `.git` directory, but not the contents of a directory
 # that another user owns, such as a `.venv` that a container running as root
 # created.  `is_deleted_branch` recognizes only some kinds of leftover, such as
-# a tree of Eclipse `.project` files, so without this warning any other kind
-# would go unmentioned.  The directory is not listed, because with no
+# a `.venv` that holds no version-control checkout, so without this warning any
+# other kind would go unmentioned.  The directory is not listed, because with no
 # repository, nothing tells whether it holds work.  A leftover can be in a
 # working tree that git can use, such as when the user's home directory is a
 # repository of configuration files; that working tree does not track the
@@ -548,13 +549,13 @@ warn_if_not_in_working_tree() {
 }
 
 # Reports directory $1, whose name matches `*-branch-*`, if its branch was
-# deleted in the remote or if it holds nothing but Eclipse `.project` files.
-# Warns about it if it is in no git working tree but holds anything else or
-# holds no `.project` file at all, as an empty directory does, or if it is in
-# a working tree that tracks none of its files.
+# deleted in the remote or if it holds nothing but leftovers, such as Eclipse
+# `.project` files.  Warns about it if it is in no git working tree but holds
+# anything else or holds no leftover at all, as an empty directory does, or if
+# it is in a working tree that tracks none of its files.
 #
 # `is_deleted_branch` answers about both:  it reports a directory that holds
-# nothing but `.project` files as deleted (status 0), which is why this
+# nothing but leftovers as deleted (status 0), which is why this
 # function need not test for one itself, and for that matter cannot, since
 # such a directory is no working tree and is on no branch.
 check_directory() {
@@ -583,7 +584,7 @@ check_directory() {
       if ! dir_absolute="$(absolute_path "$dir")"; then
         status=1
       else
-        # A directory that holds nothing but `.project` files is no
+        # A directory that holds nothing but leftovers is no
         # repository, so these two queries find nothing in one and cost two
         # `git` invocations that answer "no".  That is a scan of the leftovers
         # of deleted branches, not of every directory examined, and asking
@@ -653,9 +654,15 @@ examine_directory() {
         *-branch-*) check_directory "$1" ;;
       esac
       # Examine every directory's entries, even those of a directory that is
-      # itself named `*-branch-*`, because such a directory may contain
-      # another.
-      examine_directory "$1"
+      # itself named `*-branch-*`, because such a directory can contain
+      # another.  A directory of build output, such as a `.venv`, holds no
+      # branch directory unless it holds a version-control checkout, such as
+      # one that `pip install -e git+URL#egg=NAME` makes in `.venv/src/`.  So
+      # skip the entries of one that holds none, which can number in the
+      # thousands.
+      if ! is_build_output_name "${1##*/}" || ! holds_no_checkout "$1"; then
+        examine_directory "$1"
+      fi
     fi
     shift
   done
