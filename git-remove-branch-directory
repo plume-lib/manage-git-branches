@@ -579,33 +579,52 @@ keyed_blobs() {
 # a pathname that names a directory in some tree.  If git fails, the output
 # can lack some lines.
 #
-# One `git diff-tree` compares the empty tree with each tree of TREES, which
+# Each `git diff-tree` compares the empty tree with each tree of TREES, which
 # lists every file of that tree as added; the pathnames limit it to the files
-# in question.  The pathnames are taken literally, not as patterns, and xargs
-# passes them in batches, each within the limit on a command line's size.  A
-# pathname that git quotes, which `keyed_blobs` never asks about, matches
-# nothing.
+# in question.  The pathnames are taken literally, not as patterns, and they
+# are passed in batches, each well within the limit on a command line's
+# size.  TREES goes to standard input, which has no such limit.  A pathname
+# that git quotes, which `keyed_blobs` never asks about, matches nothing.
 tree_files() {
-  if [ -z "$2" ] || [ -z "$3" ]; then
+  tree_files_dir="$1"
+  tree_files_paths="$3"
+  if [ -z "$2" ] || [ -z "${tree_files_paths}" ]; then
     return 0
   fi
-  if ! tree_files_empty="$(git -C "$1" hash-object -t tree /dev/null \
-    2> /dev/null)"; then
+  if ! tree_files_empty="$(git -C "${tree_files_dir}" hash-object -t tree \
+    /dev/null 2> /dev/null)"; then
     return 0
   fi
-  # shellcheck disable=SC2016 # The inner shell expands the variables.
-  printf '%s\n' "$3" | tr '\n' '\0' \
-    | TREE_FILES_DIR="$1" \
-      TREE_FILES_PAIRS="$(printf '%s\n' "$2" | sed "s/^/${tree_files_empty} /")" \
-      xargs -0 sh -c 'printf "%s\n" "${TREE_FILES_PAIRS}" \
-        | git -C "${TREE_FILES_DIR}" --literal-pathspecs \
-          -c core.quotePath=false diff-tree --stdin -r --raw --no-abbrev -- "$@"' \
-        tree_files 2> /dev/null \
-    | awk '/^:/ {
-        path = $0
-        sub(/^[^\t]*\t/, "", path)
-        print $2 " " $4 " " path
-      }'
+  tree_files_pairs="$(printf '%s\n' "$2" | sed "s/^/${tree_files_empty} /")"
+  printf '%s\n' "${tree_files_paths}" | {
+    set --
+    tree_files_size=0
+    while IFS= read -r tree_files_path; do
+      set -- "$@" "${tree_files_path}"
+      tree_files_size=$((tree_files_size + ${#tree_files_path} + 1))
+      if [ "${tree_files_size}" -gt 65536 ]; then
+        tree_files_batch "$@"
+        set --
+        tree_files_size=0
+      fi
+    done
+    if [ "$#" -gt 0 ]; then
+      tree_files_batch "$@"
+    fi
+  } | awk '/^:/ {
+      path = $0
+      sub(/^[^\t]*\t/, "", path)
+      print $2 " " $4 " " path
+    }'
+}
+
+# Usage: tree_files_batch PATHNAME...
+# Prints the raw `git diff-tree` lines that `tree_files` reads for the given
+# pathnames.  It uses the variables that `tree_files` sets.
+tree_files_batch() {
+  printf '%s\n' "${tree_files_pairs}" \
+    | git -C "${tree_files_dir}" --literal-pathspecs -c core.quotePath=false \
+      diff-tree --stdin -r --raw --no-abbrev -- "$@" 2> /dev/null
 }
 
 # Usage: saved_keys DIRECTORY KEYED-BLOBS HELD-REV-PARSE-ARGS...

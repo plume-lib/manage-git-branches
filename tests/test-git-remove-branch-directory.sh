@@ -108,7 +108,7 @@ git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
   stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost \
   squashed empty landedwaived landedforced savedchange partlysaved deletion \
-  chmodded localsaved submodulesaved; do
+  chmodded localsaved submodulesaved manytags; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -283,6 +283,22 @@ echo 'a change that is saved' >> "${savedchange}/file.txt"
 git -C "${savedchange}" add file.txt
 run_command 'a saved uncommitted change' 0 "${savedchange}"
 check_gone 'a saved uncommitted change' "${savedchange}"
+
+# A change is saved among many tags, whose trees' hashes, one per line, are
+# longer than a single argument to a command can be.
+manytags="$(make_clone manytags)"
+push_elsewhere manytags 'a change among many tags'
+git -C "${manytags}" fetch -q origin
+awk 'BEGIN {
+    for (i = 0; i < 2000; i++) {
+      printf "commit refs/tags/many-%d\n", i
+      printf "committer Tester <tester@example.com> 0 +0000\ndata 0\n"
+      printf "M 644 inline tag.txt\ndata <<END\n%d\nEND\n\n", i
+    }
+  }' | git -C "${manytags}" fast-import --quiet
+echo 'a change among many tags' >> "${manytags}/file.txt"
+run_command 'a saved uncommitted change among many tags' 0 "${manytags}"
+check_gone 'a saved uncommitted change among many tags' "${manytags}"
 
 # Only the files whose changes are saved are discounted.
 partlysaved="$(make_clone partlysaved)"
