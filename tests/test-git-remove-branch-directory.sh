@@ -38,6 +38,9 @@ trap 'rm -rf "${work}"; trap - TERM; kill -s TERM "$$"' TERM
 
 work="$(CDPATH='' cd -- "${work}" && pwd -P)"
 sanitize_git_env "${work}"
+# Some checks match English messages, such as rm's "Permission denied".
+LC_ALL=C
+export LC_ALL
 
 ## Usage: run_command DESCRIPTION EXPECTED-STATUS ARGUMENT...
 ## Runs the command under test, checks its exit status, and sets ${out} to
@@ -146,18 +149,19 @@ check_gone 'a directory that is no repository' "${project}"
 # is on the same file system, and otherwise beneath ~/tmp/DELETEME.  HOME is
 # under ${work}, so the second destination is always on the same file system,
 # and the test never writes in the real ~/tmp.  The superuser can delete any
-# file, so skip this case when running as root.
+# file, so skip this case, and the similar one for a linked worktree, when
+# running as root.
+same_fs="$(df -P -- "${work}" /tmp | awk 'NR > 1 { $2 = $3 = $4 = $5 = ""; print }' | sort -u | wc -l)"
+if [ "${same_fs}" -eq 1 ]; then
+  expected_dest=/tmp
+else
+  expected_dest="${work}/home/tmp/DELETEME"
+fi
 if [ "$(id -u)" -ne 0 ]; then
   undeletable="${work}/myrepo-branch-undeletable"
   mkdir -p "${undeletable}/.venv/bin"
   touch "${undeletable}/.venv/bin/python" "${undeletable}/other"
   chmod 555 "${undeletable}/.venv/bin"
-  same_fs="$(df -P -- "${work}" /tmp | awk 'NR > 1 { $2 = $3 = $4 = $5 = ""; print }' | sort -u | wc -l)"
-  if [ "${same_fs}" -eq 1 ]; then
-    expected_dest=/tmp
-  else
-    expected_dest="${work}/home/tmp/DELETEME"
-  fi
   saved_home="${HOME}"
   HOME="${work}/home"
   export HOME
@@ -619,6 +623,46 @@ git -C "${wthost}" worktree unlock "${work}/myrepo-branch-wtlocked"
 run_command 'an unlocked linked worktree' 0 "${work}/myrepo-branch-wtlocked"
 check_unregistered 'an unlocked linked worktree' "${wthost}" \
   "${work}/myrepo-branch-wtlocked" wtlocked
+
+# A linked worktree that `git worktree remove` cannot remove entirely, as when
+# a container running as root created a `.venv` in it.  Git deletes the
+# administrative directory anyway, and what remains is moved, as for a
+# directory that is no repository above.
+if [ "$(id -u)" -ne 0 ]; then
+  wtundeletable="${work}/myrepo-branch-wtundeletable"
+  git -C "${wthost}" worktree add -q -b wtundeletable "${wtundeletable}"
+  mark_created wtundeletable
+  mkdir -p "${wtundeletable}/.venv/bin"
+  touch "${wtundeletable}/.venv/bin/python"
+  chmod 555 "${wtundeletable}/.venv/bin"
+  saved_home="${HOME}"
+  HOME="${work}/home"
+  export HOME
+  run_command 'a linked worktree that git cannot remove entirely' 0 "${wtundeletable}"
+  HOME="${saved_home}"
+  check_gone 'a linked worktree that git cannot remove entirely' "${wtundeletable}"
+  check_unregistered 'a linked worktree that git cannot remove entirely' \
+    "${wthost}" "${wtundeletable}" wtundeletable
+  case "${out}" in
+    *"so moved what remains to ${expected_dest}/"*)
+      moved="${out##*so moved what remains to }"
+      if [ ! -e "${moved}/myrepo-branch-wtundeletable/.venv/bin/python" ]; then
+        fail "a linked worktree that git cannot remove entirely: not in ${moved}: ${out}"
+      fi
+      case "${out}" in
+        *'Permission denied'*)
+          fail "a linked worktree that git cannot remove entirely: printed the messages of git or rm: ${out}"
+          ;;
+      esac
+      chmod -R u+w "${moved}"
+      rm -rf -- "${moved}"
+      ;;
+    *)
+      fail "a linked worktree that git cannot remove entirely: did not say that it moved it to ${expected_dest}: ${out}"
+      chmod -R u+w "${wtundeletable}"
+      ;;
+  esac
+fi
 
 # A linked worktree that was moved with `mv`, and not repaired, is no longer
 # where its registration says.  `git worktree remove` cannot remove it, so the

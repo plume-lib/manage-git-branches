@@ -26,9 +26,9 @@
 #
 # If `rm -rf` cannot remove everything, as when a container running as root
 # created files in the directory, what remains is moved to a new directory in
-# /tmp, whose cleanup runs as root, and a note says where.  That happens only
-# if /tmp is on the same file system, so that the move is a rename.  If the
-# move to /tmp is impossible, what remains is moved instead to a new directory
+# /tmp, whose cleanup runs as root, and a note says where.  The move is a
+# rename, so it happens only if /tmp is on the same file system.  If the move
+# to /tmp is impossible, what remains is moved instead to a new directory
 # beneath ~/tmp/DELETEME, under the same condition.
 #
 # Two checks therefore ask, first, whether anything would be lost:
@@ -672,48 +672,66 @@ remove_missing_worktree() {
     "${missing_head}" "${missing_kept}"
 }
 
-# Prints the file system that holds directory $1, and its mount point, as one
-# line of `df -P` with its four numeric columns removed, or prints nothing if
-# `df` fails.  Two directories for which this prints the same line are on the
-# same mounted file system, so `mv` from one to the other is a rename.
-mounted_file_system() {
-  df -P -- "$1" 2> /dev/null | awk 'NR == 2 { $2 = $3 = $4 = $5 = ""; print }'
-}
-
-# Moves directory $1 into a new directory beneath existing directory $2, and
-# sets ${move_tree_dest} to that new directory.  Returns 1, and sets
-# ${move_tree_reason} to a phrase such as "/tmp is on another file system"
-# that says why, if it cannot.
+# Moves directory $1 into a new directory beneath directory $2, creating $2 if
+# it does not exist, and sets ${move_tree_dest} to that new directory.  If it
+# cannot, returns 1, leaves no new directory behind, and sets
+# ${move_tree_reason} to a phrase such as "cannot move it to /tmp: Invalid
+# cross-device link" that says why.
 #
-# The move happens only if $1 and $2 are on the same mounted file system.
-# Otherwise `mv` would copy what remains, which can be large, and then fail to
-# delete the original for the same reason that `rm -rf` did.  If `mv` fails
-# anyway, the partial copy is deleted:  it belongs to the user, who made it.
+# The move is a rename, which fails between file systems.  `mv` would instead
+# copy what remains, which can be large, and then fail to delete the original
+# for the same reason that `rm -rf` did.  `mv --no-copy` avoids that, but only
+# GNU `mv` 9.6 and later have it; Perl's `rename` is rename(2) everywhere.
 move_tree_beneath() {
-  move_tree_fs="$(mounted_file_system "$1")"
-  if [ -z "${move_tree_fs}" ] \
-    || [ "${move_tree_fs}" != "$(mounted_file_system "$2")" ]; then
-    move_tree_reason="$2 is on another file system"
+  # The outermost directory that this function creates, so that it can remove
+  # those directories if the move fails.
+  move_tree_created=''
+  move_tree_dir="$2"
+  while [ ! -e "${move_tree_dir}" ] && [ ! -L "${move_tree_dir}" ]; do
+    move_tree_created="${move_tree_dir}"
+    move_tree_dir="$(dirname -- "${move_tree_dir}")"
+  done
+  if ! mkdir -p -- "$2" 2> /dev/null; then
+    move_tree_reason="cannot create $2"
+    move_tree_undo_mkdir "$2"
     return 1
   fi
-  if ! move_tree_dest="$(mktemp -d "$2/${SCRIPT_NAME}.XXXXXX")" \
+  if ! move_tree_dest="$(mktemp -d "$2/${SCRIPT_NAME}.XXXXXX" 2> /dev/null)" \
     || [ -z "${move_tree_dest}" ]; then
     move_tree_reason="cannot create a directory in $2"
+    move_tree_undo_mkdir "$2"
     return 1
   fi
-  if ! mv -- "$1" "${move_tree_dest}/"; then
-    rm -rf -- "${move_tree_dest}"
-    move_tree_reason="cannot move it to $2"
+  # shellcheck disable=SC2016 # The single-quoted text is Perl, not shell.
+  if ! move_tree_error="$(perl -e 'rename($ARGV[0], $ARGV[1]) or die "$!\n"' \
+    -- "$1" "${move_tree_dest}/$(basename -- "$1")" 2>&1)"; then
+    rmdir -- "${move_tree_dest}"
+    move_tree_reason="cannot move it to $2${move_tree_error:+: ${move_tree_error}}"
+    move_tree_undo_mkdir "$2"
     return 1
   fi
   return 0
 }
 
+# Removes directory $1 and each of its ancestors up to ${move_tree_created},
+# which `move_tree_beneath` created, if they are empty.
+move_tree_undo_mkdir() {
+  if [ -z "${move_tree_created}" ]; then
+    return 0
+  fi
+  move_tree_dir="$1"
+  while { [ ! -e "${move_tree_dir}" ] \
+    || rmdir -- "${move_tree_dir}" 2> /dev/null; } \
+    && [ "${move_tree_dir}" != "${move_tree_created}" ]; do
+    move_tree_dir="$(dirname -- "${move_tree_dir}")"
+  done
+}
+
 # Removes directory $1 and everything in it.  If `rm -rf` cannot remove all of
 # it, moves what remains into a new directory in /tmp, or, if that is
-# impossible, beneath ${HOME}/tmp/DELETEME, which it creates if necessary, and
-# says so on standard error.  Prints a diagnostic and returns 1 if none of
-# those works, so that $1 is still there.
+# impossible, beneath ${HOME}/tmp/DELETEME, and says so on standard error.
+# Prints a diagnostic and returns 1 if none of those works, so that $1 is
+# still there.
 #
 # `rm -rf` fails, for example, on a `.venv` directory that a container running
 # as root created inside a branch directory:  the user cannot delete files in
@@ -725,28 +743,18 @@ move_tree_beneath() {
 # name tells the user, who can become root, what to do with it.
 remove_tree() {
   # Each file that `rm` cannot delete gets a message, and a `.venv` holds
-  # thousands of files, so print the messages only if the move fails too.
+  # thousands of files, so print the messages only if the moves fail too.
   if remove_tree_errors="$(rm -rf -- "$1" 2>&1)"; then
     return 0
   fi
-  if move_tree_beneath "$1" /tmp; then
-    echo "${SCRIPT_NAME}: cannot remove everything in $1, so moved what remains to ${move_tree_dest}" >&2
-    return 0
-  fi
-  remove_tree_reasons="${move_tree_reason}"
-  if [ -z "${HOME}" ]; then
-    remove_tree_reasons="${remove_tree_reasons}; HOME is not set"
-  else
-    remove_tree_deleteme="${HOME}/tmp/DELETEME"
-    if ! mkdir -p -- "${remove_tree_deleteme}" 2> /dev/null; then
-      remove_tree_reasons="${remove_tree_reasons}; cannot create ${remove_tree_deleteme}"
-    elif move_tree_beneath "$1" "${remove_tree_deleteme}"; then
+  remove_tree_reasons=''
+  for remove_tree_parent in /tmp ${HOME:+"${HOME}/tmp/DELETEME"}; do
+    if move_tree_beneath "$1" "${remove_tree_parent}"; then
       echo "${SCRIPT_NAME}: cannot remove everything in $1, so moved what remains to ${move_tree_dest}" >&2
       return 0
-    else
-      remove_tree_reasons="${remove_tree_reasons}; ${move_tree_reason}"
     fi
-  fi
+    remove_tree_reasons="${remove_tree_reasons:+${remove_tree_reasons}; }${move_tree_reason}"
+  done
   printf '%s\n' "${remove_tree_errors}" >&2
   echo "${SCRIPT_NAME}: cannot remove: $1 (${remove_tree_reasons})" >&2
   return 1
@@ -1052,7 +1060,8 @@ remove_branch_directory() {
     # directory that is its own, rather than pruning.  That administrative
     # directory holds the submodules' repositories, which
     # `check_submodules_unpushed` has asked about.  Every other worktree is
-    # removed by git, and a failure is reported rather than overridden.
+    # removed by git, and a failure is reported rather than overridden, except
+    # as described below.
     #
     # `--force`, because git refuses to remove a worktree that holds any
     # modification, including the ignored build output that these
@@ -1067,10 +1076,22 @@ remove_branch_directory() {
         echo "${SCRIPT_NAME}: cannot remove: ${remove_gitdir}" >&2
         return 1
       fi
-    elif ! git --git-dir="${remove_common}" worktree remove --force \
-      "${remove_dir}" > /dev/null; then
-      echo "${SCRIPT_NAME}: cannot remove: ${remove_dir}" >&2
-      return 1
+    elif ! remove_git_errors="$(git --git-dir="${remove_common}" worktree \
+      remove --force "${remove_dir}" 2>&1 > /dev/null)"; then
+      # Once git starts deleting, it deletes the administrative directory even
+      # if it could not delete everything in the worktree, as when a container
+      # running as root created files there.  The worktree is then neither
+      # registered nor removed, so finish the job.  Any other failure leaves
+      # the administrative directory, and it is reported.
+      if [ -e "${remove_gitdir}" ]; then
+        printf '%s\n' "${remove_git_errors}" >&2
+        echo "${SCRIPT_NAME}: cannot remove: ${remove_dir}" >&2
+        return 1
+      fi
+      if ! remove_tree "${remove_dir}"; then
+        printf '%s\n' "${remove_git_errors}" >&2
+        return 1
+      fi
     fi
     delete_worktree_branch "${remove_common}" "${remove_branch}" \
       "${remove_head}" "${remove_kept}"
