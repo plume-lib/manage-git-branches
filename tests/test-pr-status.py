@@ -432,6 +432,19 @@ class HighlightTest(unittest.TestCase):
             )
 
 
+class WithoutDirectoryOptionTest(unittest.TestCase):
+    """Tests for without_directory_option."""
+
+    def test_removes_directory_option(self):
+        """Each form of the -C option, and its argument, is removed."""
+        self.assertEqual(
+            pr_status.without_directory_option(
+                ["-C", "/a", "--highlight", "repo#1", "-C/b", "--directory", "/c", "--directory=/d"]
+            ),
+            ["--highlight", "repo#1"],
+        )
+
+
 class ApplyDescriptionUpdatesTest(unittest.TestCase):
     """Tests for apply_description_updates."""
 

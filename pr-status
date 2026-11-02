@@ -2738,10 +2738,34 @@ def default_dependency_document(models):
     return "\n".join(lines) + "\n"
 
 
+def without_directory_option(args):
+    """Return command-line arguments without the -C option.
+
+    Args:
+        args: command-line arguments, such as ["-C", "/base", "--highlight", "repo#1"].
+
+    Returns:
+        args without any -C or --directory option and its argument, such as
+        ["--highlight", "repo#1"].
+    """
+    result, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg in {"-C", "--directory"}:
+            skip = True
+        elif not arg.startswith(("-C", "--directory=")):
+            result.append(arg)
+    return result
+
+
 def main():
     """Report changes and regenerate the documents."""
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        # without_directory_option recognizes only the full option names.
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--check",
@@ -2795,6 +2819,12 @@ def main():
         failed_updates = apply_description_updates(updates, cfg)
     now = dt.datetime.now().astimezone()
     as_of = now.strftime("%Y-%m-%d %H:%M %Z")
+    if HIGHLIGHTED:
+        command = shlex.join(["pr-status", *without_directory_option(sys.argv[1:])])
+        as_of += (
+            f", by `{command}`, which highlights the PRs that it names"
+            " and every PR that they depend on"
+        )
     new = facts(models)
     old = {}
     if pathlib.Path(SNAPSHOT).exists():
