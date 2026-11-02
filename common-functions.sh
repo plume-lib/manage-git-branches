@@ -2124,13 +2124,14 @@ built_commits() {
 ## Commits in BUILT that are not in the repository are ignored.  If it
 ## returns 0, it sets ${merge_fix_branch} to the current branch's name, such
 ## as "feature"; ${merge_fix_account} to an account, for an AI agent, of the
-## merge commits that might have broken the build and of the commands that
-## show them; and ${merge_fix_message} to the message of a commit that fixes
-## the build, such as "Fix the build after merging branch 'main'".  If it
-## returns 1, a failure of the build is not one that a merge on the branch
-## caused, and the agent would merely work around it.  For example, a pull
-## that fast-forwarded the branch brought only commits that the remote
-## already had.  Prints a diagnostic if it returns 1 because git fails.
+## merge commits that might have broken the build, of what each side of each
+## of them changed, and of the commands that show them; and
+## ${merge_fix_message} to the message of a commit that fixes the build, such
+## as "Fix the build after merging branch 'main'".  If it returns 1, a
+## failure of the build is not one that a merge on the branch caused, and the
+## agent would merely work around it.  For example, a pull that
+## fast-forwarded the branch brought only commits that the remote already
+## had.  Prints a diagnostic if it returns 1 because git fails.
 ## The account in ${merge_fix_account} omits each commit in BUILT that is in
 ## the history of a remote branch or of another commit in BUILT, because it
 ## excludes no more commits, but that commit's tree still counts.  Of commits
@@ -2203,8 +2204,9 @@ has_unbuilt_merge() {
     echo "${SCRIPT_NAME}: cannot list the merge commits in $(pwd), so no AI agent is asked to fix the build" >&2
     return 1
   fi
-  # The merges that combined changes:  their subjects, and lines
-  # "* ABBREVIATION SUBJECT", one per merge.
+  # The merges that combined changes:  their subjects, and, one per merge,
+  # a line "* ABBREVIATION SUBJECT" followed, for a merge of two commits
+  # that share history, by an indented account of what each side changed.
   merge_fix_subjects=''
   merge_fix_list=''
   for merge_fix_commit in ${merge_fix_log}; do
@@ -2224,15 +2226,46 @@ has_unbuilt_merge() {
       fi
     done
     if [ "${merge_fix_combined}" -eq 1 ]; then
-      if ! merge_fix_subject="$(git log -1 --format=%s "${merge_fix_commit}")" \
-        || ! merge_fix_abbrev="$(git rev-parse --short "${merge_fix_commit}")"; then
+      if ! merge_fix_line="$(git log -1 --format='%h %s' "${merge_fix_commit}")"; then
         echo "${SCRIPT_NAME}: cannot read commit ${merge_fix_commit} in $(pwd), so no AI agent is asked to fix the build" >&2
         return 1
       fi
       merge_fix_subjects="${merge_fix_subjects:+${merge_fix_subjects}
-}${merge_fix_subject}"
+}${merge_fix_line#* }"
       merge_fix_list="${merge_fix_list:+${merge_fix_list}
-}* ${merge_fix_abbrev} ${merge_fix_subject}"
+}* ${merge_fix_line}"
+      # A merge of two commits that share history gets an account of the
+      # commits that only each of them had.  Those commits' patches show
+      # what each side changed, even where the two have several merge bases,
+      # as after criss-cross merges; `--remerge-diff` shows, for a merge among
+      # them, how the merge differs from git's automatic merge of its parents,
+      # such as a conflict's resolution, even one that takes one parent's
+      # version.  (`--cc` and `--diff-merges=first-parent` omit a hunk whose
+      # result equals a parent's.)  The account names commits by their full hashes, which
+      # stay unambiguous after the agent creates objects.  An octopus merge,
+      # or one whose parents share no history, gets only its line.
+      case "${merge_fix_parents}" in
+        *"
+"*"
+"*) ;;
+        *)
+          merge_fix_ours="${merge_fix_parents%%"
+"*}"
+          merge_fix_theirs="${merge_fix_parents#*"
+"}"
+          merge_fix_ours_log="\`git log -p --remerge-diff ${merge_fix_theirs}..${merge_fix_ours}\` shows the commits that only ${merge_fix_ours} had"
+          merge_fix_theirs_log="\`git log -p --remerge-diff ${merge_fix_ours}..${merge_fix_theirs}\` shows the commits that only ${merge_fix_theirs} had"
+          if merge_fix_base="$(git merge-base "${merge_fix_ours}" "${merge_fix_theirs}")"; then
+            case "${merge_fix_base}" in
+              "${merge_fix_ours}") merge_fix_sides="It merged commit ${merge_fix_theirs} into its ancestor, commit ${merge_fix_ours}.  ${merge_fix_theirs_log}." ;;
+              "${merge_fix_theirs}") merge_fix_sides="It merged commit ${merge_fix_theirs} into its descendant, commit ${merge_fix_ours}.  ${merge_fix_ours_log}." ;;
+              *) merge_fix_sides="It merged commit ${merge_fix_theirs} into commit ${merge_fix_ours}.  ${merge_fix_ours_log}, and ${merge_fix_theirs_log}." ;;
+            esac
+            merge_fix_list="${merge_fix_list}
+  ${merge_fix_sides}"
+          fi
+          ;;
+      esac
     fi
   done
   if [ -z "${merge_fix_subjects}" ]; then

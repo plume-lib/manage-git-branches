@@ -648,6 +648,79 @@ hum_commit() {
   git -C "$1" commit -q -m "$3"
 }
 
+## Usage: hum_check DESCRIPTION DIRECTORY LINE...
+## Fails unless has_unbuilt_merge, run in DIRECTORY, returns 0 and its
+## account's lines that say what each side of a merge changed are exactly the
+## LINEs, in any order.  (Commits in the test repositories can share a
+## timestamp, so `git log` might order merges in either way.)
+hum_check() {
+  hum_description="$1"
+  hum_dir="$2"
+  shift 2
+  if ! (cd "${hum_dir}" && has_unbuilt_merge '' && printf '%s\n' "${merge_fix_account}" > "${hum_dir}.account"); then
+    fail "has_unbuilt_merge: ${hum_description}: no merge is blamed"
+  fi
+  { grep -e '^  It merged ' "${hum_dir}.account" || true; } | sort > "${hum_dir}.sides"
+  printf '%s\n' "$@" | sort > "${hum_dir}.sides.goal"
+  if ! cmp -s "${hum_dir}.sides.goal" "${hum_dir}.sides"; then
+    fail "has_unbuilt_merge: ${hum_description}: the account of what each side changed is wrong: $(diff "${hum_dir}.sides.goal" "${hum_dir}.sides")"
+  fi
+}
+
+## Tests of has_unbuilt_merge.  The account lists the commits that only each
+## side of a merge had.  The parents of the last merge have two merge bases,
+## because of the criss-cross merges before it.
+git init -q -b main "${WORK_DIR}/hum-cross"
+hum_commit "${WORK_DIR}/hum-cross" base.txt "Initial commit"
+git -C "${WORK_DIR}/hum-cross" switch -q -c other
+hum_commit "${WORK_DIR}/hum-cross" b1.txt "Change other"
+hum_b1="$(git -C "${WORK_DIR}/hum-cross" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-cross" switch -q main
+hum_commit "${WORK_DIR}/hum-cross" a1.txt "Change main"
+hum_a1="$(git -C "${WORK_DIR}/hum-cross" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-cross" merge -q --no-edit other
+hum_commit "${WORK_DIR}/hum-cross" a2.txt "Change main again"
+hum_ours="$(git -C "${WORK_DIR}/hum-cross" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-cross" switch -q other
+git -C "${WORK_DIR}/hum-cross" merge -q --no-edit "${hum_a1}"
+hum_commit "${WORK_DIR}/hum-cross" b2.txt "Change other again"
+hum_theirs="$(git -C "${WORK_DIR}/hum-cross" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-cross" switch -q main
+git -C "${WORK_DIR}/hum-cross" merge -q --no-edit other
+hum_check "criss-cross merges" "${WORK_DIR}/hum-cross" \
+  "  It merged commit ${hum_b1} into commit ${hum_a1}.  \`git log -p --remerge-diff ${hum_b1}..${hum_a1}\` shows the commits that only ${hum_a1} had, and \`git log -p --remerge-diff ${hum_a1}..${hum_b1}\` shows the commits that only ${hum_b1} had." \
+  "  It merged commit ${hum_a1} into commit ${hum_b1}.  \`git log -p --remerge-diff ${hum_a1}..${hum_b1}\` shows the commits that only ${hum_b1} had, and \`git log -p --remerge-diff ${hum_b1}..${hum_a1}\` shows the commits that only ${hum_a1} had." \
+  "  It merged commit ${hum_theirs} into commit ${hum_ours}.  \`git log -p --remerge-diff ${hum_theirs}..${hum_ours}\` shows the commits that only ${hum_ours} had, and \`git log -p --remerge-diff ${hum_ours}..${hum_theirs}\` shows the commits that only ${hum_theirs} had."
+
+## An octopus merge, and a merge of commits that share no history, get only
+## their lines.  A merge into an ancestor, which `git merge --no-ff` makes,
+## gets an account of only the other side.
+git init -q -b main "${WORK_DIR}/hum-misc"
+hum_commit "${WORK_DIR}/hum-misc" base.txt "Initial commit"
+for hum_branch in x y; do
+  git -C "${WORK_DIR}/hum-misc" switch -q -c "${hum_branch}" main
+  hum_commit "${WORK_DIR}/hum-misc" "${hum_branch}.txt" "Change ${hum_branch}"
+done
+git -C "${WORK_DIR}/hum-misc" switch -q main
+hum_commit "${WORK_DIR}/hum-misc" main.txt "Change main"
+git -C "${WORK_DIR}/hum-misc" merge -q --no-edit x y > /dev/null
+git -C "${WORK_DIR}/hum-misc" switch -q --orphan unrelated
+hum_commit "${WORK_DIR}/hum-misc" unrelated.txt "Unrelated commit"
+git -C "${WORK_DIR}/hum-misc" switch -q main
+git -C "${WORK_DIR}/hum-misc" merge -q --no-edit --allow-unrelated-histories unrelated
+hum_ours="$(git -C "${WORK_DIR}/hum-misc" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-misc" switch -q -c ahead
+hum_commit "${WORK_DIR}/hum-misc" ahead.txt "Change ahead"
+hum_theirs="$(git -C "${WORK_DIR}/hum-misc" rev-parse HEAD)"
+git -C "${WORK_DIR}/hum-misc" switch -q main
+git -C "${WORK_DIR}/hum-misc" merge -q --no-ff --no-commit ahead > /dev/null
+hum_commit "${WORK_DIR}/hum-misc" edited.txt "Merge branch 'ahead', with an edit"
+if [ "$(git -C "${WORK_DIR}/hum-misc" rev-list --count --merges HEAD)" -ne 3 ]; then
+  fail "has_unbuilt_merge: the test repository has the wrong merges: $(git -C "${WORK_DIR}/hum-misc" log --graph --oneline)"
+fi
+hum_check "an octopus merge, unrelated histories, and a merge into an ancestor" "${WORK_DIR}/hum-misc" \
+  "  It merged commit ${hum_theirs} into its ancestor, commit ${hum_ours}.  \`git log -p --remerge-diff ${hum_ours}..${hum_theirs}\` shows the commits that only ${hum_theirs} had."
+
 ## Tests of has_unbuilt_merge.  A commit in BUILT that is in the history of a
 ## remote branch is omitted from the account, but its tree still counts:
 ## when the current branch's tree is that of such a commit, upstream/main,
