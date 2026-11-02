@@ -5,6 +5,7 @@ Usage (run in the directory that holds the documents and the working copies, whi
 must not itself be in a git working copy, or pass that directory with -C):
   pr-status            # snapshot, report changes, regenerate the documents
   pr-status --check    # snapshot and report changes, but write no document
+  pr-status --print-document  # print the dependency document's file name, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
 
 Inputs:
@@ -47,6 +48,8 @@ import sys
 from collections import Counter, defaultdict
 
 CONFIG = "pr-status-config.json"
+# The dependency document's file name when there is no config file.
+DEFAULT_DEPENDENCY_DOCUMENT = "pr-status.md"
 SNAPSHOT = ".pr-status-snapshot.json"
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
 
@@ -225,6 +228,8 @@ def load_repo(repo, pairwise=True):
             *([] if pairwise else ["--no-pairwise"]),
             "--default-branch",
             repo.default_branch,
+            # repo.prs holds every open PR.
+            "--prune",
             repo.clone,
             repo.gh,
             *map(str, sorted(repo.prs)),
@@ -2230,10 +2235,11 @@ def gen_push_commands(models, base, conflicts_only=False):
     """Return the lines of the "push-commands" or "conflicting-push-commands" section.
 
     Args:
-        models: the models of the repositories
-        base: the directory that holds the working copy directories
-        conflicts_only: True for the "conflicting-push-commands" section, whose chains are the
-            ones with conflicts
+        models: a list of the models of the repositories, one per repository
+        base: the directory that holds the working copy directories of the repositories
+        conflicts_only: True if the lines are those of the "conflicting-push-commands" section,
+            whose chains are the ones with conflicts; False if they are those of the
+            "push-commands" section
 
     Returns:
         The section's lines:  with conflicts_only, if there is a chain, a suggestion to run
@@ -2435,9 +2441,22 @@ def default_config(base):
     return {
         "order": list(repos),
         "repos": repos,
-        "documents": {"dependencies": "pr-status.md"},
+        "documents": {"dependencies": DEFAULT_DEPENDENCY_DOCUMENT},
         "directories": [],
     }
+
+
+def dependency_document_name():
+    """Return the file name of the dependency document in the current directory.
+
+    Returns:
+        The file name, such as "pr-status.md", that the config file names, or
+        DEFAULT_DEPENDENCY_DOCUMENT if there is no config file.
+    """
+    if pathlib.Path(CONFIG).exists():
+        with pathlib.Path(CONFIG).open() as f:
+            return json.load(f)["documents"]["dependencies"]
+    return DEFAULT_DEPENDENCY_DOCUMENT
 
 
 def load_config(program):
@@ -2574,6 +2593,11 @@ def main():
         help="report changes, but change no document, snapshot, PR description, or directory",
     )
     parser.add_argument(
+        "--print-document",
+        action="store_true",
+        help="print the file name of the dependency document, and do nothing else",
+    )
+    parser.add_argument(
         "-C",
         "--directory",
         metavar="DIR",
@@ -2586,6 +2610,9 @@ def main():
             os.chdir(args.directory)
         except OSError as error:
             sys.exit(f"pr-status: cannot change to directory {args.directory}: {error.strerror}")
+    if args.print_document:
+        print(dependency_document_name())
+        return
     base = str(pathlib.Path.cwd())
     cfg = load_config("pr-status")
     models = load_models(cfg)

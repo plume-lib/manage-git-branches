@@ -6,11 +6,12 @@
 # Usage:
 #   resolve-conflicts [--nocompile] [--claude | --codex] [-C DIR]
 #
-# Run it in the directory that holds pr-status.md and the working
-# copies, as for `pr-status`, or pass that directory with "-C".
+# Run it in the directory that holds the dependency document (by default,
+# pr-status.md; see `pr-status --print-document`) and the working copies, as
+# for `pr-status`, or pass that directory with "-C".
 #
 # This script does the following:
-#  * run `pr-status`, which regenerates pr-status.md,
+#  * run `pr-status`, which regenerates the dependency document,
 #  * run each command in its section "Dependency chains with conflicts", one
 #    `git-push-to` command per chain, adding the "--claude" option (or
 #    "--codex"; see `git-push-to`, under "Asking an AI agent") and any
@@ -63,9 +64,9 @@ SCRIPT_NAME="$(basename -- "$0")"
 
 # The number of times to run `pr-status` and the chains that it lists.
 max_rounds=3
-# The document that `pr-status` writes, and its section of chains with
-# conflicts.
-document="pr-status.md"
+# The section of chains with conflicts in the dependency document, which
+# `pr-status` writes.  The document's file name is set after the "-C" option
+# is processed.
 section="conflicting-push-commands"
 
 usage() {
@@ -144,6 +145,10 @@ while [ "$#" -ge 1 ]; do
 done
 
 pr_status="${SCRIPT_DIR}/pr-status"
+if ! document="$("${pr_status}" --print-document)" || [ -z "${document}" ]; then
+  echo "${SCRIPT_NAME}: ${pr_status} --print-document failed in $(pwd)" >&2
+  exit 1
+fi
 
 # The commands are split into words, which must not be expanded as patterns.
 set -f

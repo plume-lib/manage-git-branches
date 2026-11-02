@@ -1,14 +1,17 @@
 #!/bin/sh
 
-# Tests that `resolve-conflicts` runs the chains that pr-status.md lists
+# Tests that `resolve-conflicts` runs the chains that the dependency document
+# lists
 # under "Dependency chains with conflicts", with an AI agent resolving the
 # conflicts, and that it refuses a command that `pr-status` does not write.
 #
 # Usage:
 #   tests/test-resolve-conflicts.sh
 #
-# The test runs a copy of the commands in which a stub `pr-status` writes
-# pr-status.md, and a stub `claude` stands in for the agent.
+# The test runs a copy of the commands in which a stub `pr-status` writes the
+# dependency document, and a stub `claude` stands in for the agent.  The stub
+# names the document deps.md rather than the default, pr-status.md, so that the
+# test checks that `resolve-conflicts` asks `pr-status` for the name.
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -65,11 +68,16 @@ for command_file in "${COMMANDS_DIR}"/*; do
   if [ -f "${command_file}" ]; then cp -p "${command_file}" "${WORK_DIR}/commands/"; fi
 done
 
-## The stub pr-status writes pr-status.md in the current directory.  On
-## its first run, the section of chains with conflicts contains the commands
-## in ${STUB_COMMANDS}; afterward, it contains none.
+## The stub pr-status writes deps.md in the current directory.  On its first
+## run, the section of chains with conflicts contains the commands in
+## ${STUB_COMMANDS}; afterward, it contains none.  With "--print-document", it
+## prints the document's file name.
 cat > "${WORK_DIR}/commands/pr-status" << 'EOF'
 #!/bin/sh
+if [ "$1" = --print-document ]; then
+  echo deps.md
+  exit 0
+fi
 echo pr-status >> "${STUB_LOG}"
 if grep -q -x pr-status-ran "${STUB_LOG}"; then
   commands=''
@@ -87,7 +95,7 @@ fi
   echo 'echo "success"'
   echo '```'
   echo '<!-- END GENERATED: conflicting-push-commands -->'
-} > pr-status.md
+} > deps.md
 EOF
 chmod +x "${WORK_DIR}/test-bin/claude" "${WORK_DIR}/commands/pr-status"
 
