@@ -52,7 +52,8 @@ sanitize_git_env() {
   # `core.hooksPath`, or `commit.template` would change what the commands
   # under test do, or make them fail.  Replace the global configuration file
   # with one that holds only the settings below, and ignore the system
-  # configuration file.
+  # configuration file.  A test that needs another global setting adds it
+  # after calling this function.
   GIT_CONFIG_GLOBAL="${sanitize_git_env_dir}/gitconfig"
   GIT_CONFIG_SYSTEM=/dev/null
   GIT_CONFIG_NOSYSTEM=1
@@ -65,10 +66,14 @@ sanitize_git_env() {
   export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
   # Setting `maintenance.auto` to false keeps a command that changes a
   # repository, such as `git commit`, `git fetch`, or `git merge`, from
-  # starting `git maintenance run --auto`, a separate process.  The tests
-  # make many small repositories, which never need maintenance, and starting
-  # a process is slow on some systems, such as macOS.
-  printf '[maintenance]\n\tauto = false\n' > "${GIT_CONFIG_GLOBAL}" || return 1
+  # starting `git maintenance run --auto`, a separate process.  Setting
+  # `receive.autoGc` to false does the same for the repository that receives
+  # a `git push`; older versions of Git start `git gc --auto` there and
+  # ignore `maintenance.auto`.  The tests make many small repositories, which
+  # never need maintenance, and starting a process is slow on some systems,
+  # such as macOS.
+  printf '[maintenance]\n\tauto = false\n[receive]\n\tautoGc = false\n' \
+    > "${GIT_CONFIG_GLOBAL}" || return 1
 
   # By default, the commands under test run an AI agent, `claude` or `codex`,
   # when a merge has conflicts or a build fails.  A test must never run a real
