@@ -188,51 +188,48 @@ export STUB_LOG STUB_PROMPT STUB_ARGS
 ## notes.txt exists.
 ##
 ## Creating the repositories takes about 30 processes, which are slow to
-## start on macOS, so a case without LAST-LINE copies a template that is
-## created once for each KIND.
+## start on macOS, so each case copies a template.  Every case of the same
+## KIND without LAST-LINE copies the same template.
 setup_case() {
   case_last_line="${3-}"
   case_dir="${WORK_DIR}/$1"
   if [ -e "${case_dir}" ]; then
-    echo "setup_case: ${case_dir} already exists" >&2
-    exit 1
+    fail "setup_case: ${case_dir} already exists"
   fi
   remote="${case_dir}/myrepo.git"
   main_dir="${case_dir}/myrepo-branch-main"
   feature_dir="${case_dir}/myrepo-branch-feature"
-  if [ -n "${case_last_line}" ]; then
-    create_case_repositories "${case_dir}" "${2:-}" "${case_last_line}"
-  else
-    # No case can be named ".templates".
-    case_template="${WORK_DIR}/.templates/${2:-plain}"
-    if [ ! -d "${case_template}" ]; then
-      mkdir -p "${WORK_DIR}/.templates"
-      create_case_repositories "${case_template}" "${2:-}" ""
-    fi
-    cp -R "${case_template}" "${case_dir}"
-    # A copied clone's origin is still the template's remote, and its index
-    # records the template's files' inode numbers and times, so that git
-    # would consider each file possibly changed.
-    for case_clone in "${main_dir}" "${feature_dir}"; do
-      git -C "${case_clone}" remote set-url origin "${remote}"
-      git -C "${case_clone}" update-index -q --refresh
-    done
+  # No case can be named ".templates".  A case with LAST-LINE has a template
+  # of its own, named after the case.
+  case_template="${WORK_DIR}/.templates/${3:+$1-}${2:-plain}"
+  if [ ! -d "${case_template}" ]; then
+    mkdir -p "${WORK_DIR}/.templates"
+    create_case_repositories "${case_template}" "${2:-}"
   fi
+  cp -R "${case_template}" "${case_dir}"
+  # A copied clone's origin is still the template's remote, and its index
+  # records the template's files' inode numbers and times, so that git would
+  # consider each file possibly changed.
+  for case_clone in "${main_dir}" "${feature_dir}"; do
+    git -C "${case_clone}" remote set-url origin "${remote}"
+    git -C "${case_clone}" update-index -q --refresh
+  done
   read -r feature_head < "${case_dir}/feature-head"
   : > "${STUB_LOG}"
 }
 
-## Usage: create_case_repositories DIR KIND LAST-LINE
+## Usage: create_case_repositories DIR KIND
 ## Creates, in the new directory DIR, the repositories that `setup_case`
 ## describes for KIND, which is "", "build", or "build-modifies", and the file
 ## DIR/feature-head, which contains the commit at the head of feature.  Every
-## version of file.txt ends with the line LAST-LINE, if it is not empty.
+## version of file.txt ends with the line ${case_last_line}, if it is not
+## empty.
 create_case_repositories() {
   mkdir "$1"
   ccr_remote="$1/myrepo.git"
   git init -q --bare -b main "${ccr_remote}"
   git init -q -b main "$1/seed"
-  write_file_ending "$3" "$1/seed/file.txt" one two three four five six seven eight nine
+  write_file "$1/seed/file.txt" one two three four five six seven eight nine
   git -C "$1/seed" add file.txt
   if [ "$2" = build ] || [ "$2" = build-modifies ]; then
     echo 'all:' > "$1/seed/Makefile"
@@ -261,13 +258,13 @@ create_case_repositories() {
   git -C "${ccr_main}" config pull.rebase false
   git -C "${ccr_feature}" config pull.rebase false
 
-  write_file_ending "$3" "${ccr_main}/file.txt" ONE two three four five six SEVEN-main eight nine
+  write_file "${ccr_main}/file.txt" ONE two three four five six SEVEN-main eight nine
   if [ "$2" = build ] || [ "$2" = build-modifies ]; then
     echo "BROKEN" >> "${ccr_main}/other.txt"
   fi
   git -C "${ccr_main}" commit -q -a -m "Change main"
   git -C "${ccr_main}" push -q
-  write_file_ending "$3" "${ccr_feature}/file.txt" one two three four five six SEVEN-feature eight nine
+  write_file "${ccr_feature}/file.txt" one two three four five six SEVEN-feature eight nine
   git -C "${ccr_feature}" commit -q -a -m "Change feature"
   git -C "${ccr_feature}" push -q
   git -C "${ccr_feature}" rev-parse HEAD > "$1/feature-head"
@@ -276,18 +273,11 @@ create_case_repositories() {
 ## Usage: write_file FILE LINE...
 ## Writes the LINEs, and then ${case_last_line} if it is not empty, to FILE.
 write_file() {
-  write_file_ending "${case_last_line}" "$@"
-}
-
-## Usage: write_file_ending LAST-LINE FILE LINE...
-## Writes the LINEs, and then LAST-LINE if it is not empty, to FILE.
-write_file_ending() {
-  write_file_last_line="$1"
-  write_file_name="$2"
-  shift 2
+  write_file_name="$1"
+  shift
   printf '%s\n' "$@" > "${write_file_name}"
-  if [ -n "${write_file_last_line}" ]; then
-    printf '%s\n' "${write_file_last_line}" >> "${write_file_name}"
+  if [ -n "${case_last_line}" ]; then
+    printf '%s\n' "${case_last_line}" >> "${write_file_name}"
   fi
 }
 

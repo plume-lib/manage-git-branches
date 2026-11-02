@@ -1312,7 +1312,10 @@ wait_for_later_time() (
   # the removal fails:  the status of an EXIT trap does not change the
   # subshell's exit status.
   trap - EXIT
-  rmdir -- "${wait_probe}"
+  if ! rmdir -- "${wait_probe}"; then
+    echo "${SCRIPT_NAME}: cannot remove the directory ${wait_probe}" >&2
+    exit 1
+  fi
 )
 
 ## Usage: wait_end_by_signal SIGNAL DIR
