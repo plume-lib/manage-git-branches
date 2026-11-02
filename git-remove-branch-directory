@@ -317,9 +317,8 @@ report_unlanded() {
     remove_refusals=1
     return
   fi
-  read -r report_unlanded_listed report_unlanded_lost << EOF
-$2
-EOF
+  report_unlanded_listed="${2% *}"
+  report_unlanded_lost="${2#* }"
   report_unlanded_landed=$((report_unlanded_listed - report_unlanded_lost))
   report_unlanded_note=
   if [ "${report_unlanded_landed}" -gt 0 ]; then
