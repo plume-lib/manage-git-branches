@@ -149,7 +149,8 @@ The commands are:
   `git rerere` and an AI agent, and it accepts the same `--llm`, `--no-llm`,
   `--claude`,
   and `--codex` options.
-* [`pr-status`](pr-status) `[--check] [--print-document] [-C DIR]`:
+* [`pr-status`](pr-status)
+  `[--check] [--print-document] [-C DIR] [--highlight PR...]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
   `pr-status.md` (or the documents that `pr-status-config.json` names),
@@ -157,6 +158,10 @@ The commands are:
   each dependency chain.  It prints what changed since its previous run.
   With `--check`, it writes no document.  With `--print-document`, it prints
   the file name of the dependency document and does nothing else.
+  `--highlight PR...` highlights, wherever the documents name it, each
+  given PR (such as `REPO#100` or `ORG/REPO#100`) and every PR that it
+  depends on, directly or transitively:  in bold on a light red background,
+  and as a red node in the dependency graph.
   Run it in a directory that holds the working copy directories, or pass
   that directory with `-C`.
   This command needs Python 3.9 or later, and the programs that
