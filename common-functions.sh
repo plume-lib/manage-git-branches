@@ -2945,32 +2945,22 @@ only_dot_project() {
 ## cannot be answered.  That command is a wrapper around this function, and
 ## its documentation is the documentation of this answer.
 ##
-## Also sets the variable `is_deleted_branch_git_error`.  If this returns
-## status 2 because DIRECTORY is a directory at which git can use no
-## repository, the variable holds git's diagnostic, in English, which says
-## why.  Examples are
-##  * "fatal: not a git repository (or any of the parent directories): .git"
-##    when git finds no repository that contains DIRECTORY, including when it
-##    stops searching at a file system boundary or at a directory in
-##    `GIT_CEILING_DIRECTORIES`;
-##  * "fatal: not a git repository: /home/u/proj/.git/worktrees/feat" when the
-##    `.git` file of the working tree that contains DIRECTORY names a git
-##    directory that does not exist, as for a linked worktree whose main
-##    working tree was moved;
-##  * "fatal: detected dubious ownership in repository at '/home/u/proj'" when
-##    git refuses the repository that contains DIRECTORY, because another user
-##    owns it and `safe.directory` does not allow it; and
-##  * "fatal: cannot change to 'DIRECTORY': Permission denied" when git cannot
-##    enter DIRECTORY.
-## Otherwise, including when DIRECTORY does not exist or is not a directory,
-## the variable is the empty string.  It lets a caller explain status 2
-## without asking git again.
+## Also sets the variable `is_deleted_branch_no_usable_repository` to a
+## nonempty value (true) if this returns status 2 because DIRECTORY is a
+## directory at which git can use no repository, and to the empty string
+## (false) otherwise, including when DIRECTORY does not exist or is not a
+## directory.  Git can use no repository at DIRECTORY if no repository
+## contains DIRECTORY; if the one that contains it is broken, such as a linked
+## worktree whose `.git` file names a git directory that no longer exists; if
+## git refuses it, such as one that another user owns and that
+## `safe.directory` does not allow; or if git cannot enter DIRECTORY.  The
+## variable lets a caller explain status 2 without asking git again.
 ##
 ## The body lives here rather than in the command so that the other commands
 ## of this package can ask the question directly.
 is_deleted_branch() {
   is_deleted_branch_dir="$1"
-  is_deleted_branch_git_error=
+  is_deleted_branch_no_usable_repository=
 
   # A path that does not exist -- or that exists but is not a directory -- is
   # certainly not a working tree.  Reject it here rather than leaving it to
@@ -3026,16 +3016,8 @@ is_deleted_branch() {
   if ! is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
     --is-bare-repository --show-toplevel 2> /dev/null)"; then
     if [ -z "${is_deleted_branch_toplevel}" ]; then
-      # Ask again for the diagnostic, which the call above discards because
-      # its standard error would corrupt its output when it succeeds.  This
-      # costs a second `git` invocation only for a directory where git can
-      # use no repository.  `LC_ALL=C` makes the diagnostic English, so that a
-      # caller can match it.
       # shellcheck disable=SC2034 # Callers read it; see the documentation above.
-      is_deleted_branch_git_error="$(LC_ALL=C git -C "${is_deleted_branch_dir}" \
-        rev-parse --git-dir 2>&1 > /dev/null)"
-      # shellcheck disable=SC2034 # Callers read it; see the documentation above.
-      : "${is_deleted_branch_git_error:=fatal: git can use no repository at ${is_deleted_branch_dir}}"
+      is_deleted_branch_no_usable_repository=1
     fi
     return 2
   fi

@@ -410,6 +410,89 @@ if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/ceili
 fi
 
 ###########################################################################
+## A working tree that ignores every file that it does not track.
+###########################################################################
+
+# A repository of configuration files in a home directory often has a
+# `.gitignore` of `*`.  Its ignoring a `*-branch-*` directory says nothing
+# about whether the directory is a leftover, so the directory is warned about.
+git init -q -b main "${work}/dotfiles"
+printf '*\n' > "${work}/dotfiles/.gitignore"
+git -C "${work}/dotfiles" add -f .gitignore
+git -C "${work}/dotfiles" commit -q -m 'Ignore everything'
+mkdir -p "${work}/dotfiles/d-branch-x"
+touch "${work}/dotfiles/d-branch-x/other"
+if ! output="$(cd "${work}/dotfiles" && "${GIT_ORPHANED_BRANCHES}" \
+  2> "${work}/dotfiles.stderr")"; then
+  fail "git-orphaned-branches exited with a failure status in a working tree that ignores everything"
+fi
+if [ -n "${output}" ]; then
+  fail "git-orphaned-branches printed [${output}] in a working tree that ignores everything, expected no output"
+fi
+if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/dotfiles/d-branch-x, which is in the git working tree ${work}/dotfiles but holds no file that it tracks" \
+  "${work}/dotfiles.stderr"; then
+  echo "FAIL: git-orphaned-branches did not warn about d-branch-x in a working tree that ignores everything:"
+  cat "${work}/dotfiles.stderr"
+  status=1
+fi
+
+###########################################################################
+## Working trees that git cannot use, whatever git's diagnostic.
+###########################################################################
+
+# A `.git` directory that holds a `HEAD` but is not a valid git directory,
+# which git skips while it searches for a repository, and a `.git` file that
+# is not a valid gitfile.  Each is a working tree that git cannot use, not a
+# directory that is in no working tree.
+mkdir -p "${work}/unusable/invalid/.git" "${work}/unusable/invalid/i-branch-x" \
+  "${work}/unusable/garbage/g-branch-x"
+echo 'ref: refs/heads/main' > "${work}/unusable/invalid/.git/HEAD"
+echo 'garbage' > "${work}/unusable/garbage/.git"
+if ! output="$(cd "${work}/unusable" && "${GIT_ORPHANED_BRANCHES}" \
+  2> "${work}/unusable.stderr")"; then
+  fail "git-orphaned-branches exited with a failure status in working trees that git cannot use"
+fi
+if [ -n "${output}" ]; then
+  fail "git-orphaned-branches printed [${output}] in working trees that git cannot use, expected no output"
+fi
+for d in invalid/i-branch-x garbage/g-branch-x; do
+  if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing directories in ${work}/unusable/${d%/*}, such as ${work}/unusable/$d, because git cannot use ${work}/unusable/${d%/*} as a working tree although ${work}/unusable/${d%/*}/.git exists; \`git -C ${work}/unusable/${d%/*} status\` says why" \
+    "${work}/unusable.stderr"; then
+    echo "FAIL: git-orphaned-branches did not warn that git cannot use ${d%/*}:"
+    cat "${work}/unusable.stderr"
+    status=1
+  fi
+done
+
+# A repository that git refuses because another user owns it, with an
+# invalid `.git` directory between it and the `*-branch-*` directory.  The
+# warning names the repository that git refuses.  Only the superuser can give
+# a repository to another user, so a knob of git's own test suite stands in
+# for one.  Git versions that lack the knob, or that word the diagnostic
+# differently, are not tested.
+git init -q -b main "${work}/dubious"
+mkdir -p "${work}/dubious/mid/.git" "${work}/dubious/mid/m-branch-x"
+echo 'ref: refs/heads/main' > "${work}/dubious/mid/.git/HEAD"
+case "$(GIT_TEST_ASSUME_DIFFERENT_OWNER=1 LC_ALL=C \
+  git -C "${work}/dubious/mid/m-branch-x" rev-parse --git-dir 2>&1)" in
+  *"dubious ownership in repository at '${work}/dubious'"*)
+    if ! output="$(cd "${work}/dubious/mid" && GIT_TEST_ASSUME_DIFFERENT_OWNER=1 \
+      "${GIT_ORPHANED_BRANCHES}" 2> "${work}/dubious.stderr")"; then
+      fail "git-orphaned-branches exited with a failure status in a repository that git refuses"
+    fi
+    if [ -n "${output}" ]; then
+      fail "git-orphaned-branches printed [${output}] in a repository that git refuses, expected no output"
+    fi
+    if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing directories in ${work}/dubious, such as ${work}/dubious/mid/m-branch-x, because git cannot use ${work}/dubious as a working tree although ${work}/dubious/.git exists; \`git -C ${work}/dubious status\` says why" \
+      "${work}/dubious.stderr"; then
+      echo "FAIL: git-orphaned-branches did not warn that git refuses dubious:"
+      cat "${work}/dubious.stderr"
+      status=1
+    fi
+    ;;
+esac
+
+###########################################################################
 ## A directory that holds files that another user owns.
 ###########################################################################
 
