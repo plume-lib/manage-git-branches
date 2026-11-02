@@ -686,6 +686,8 @@ check_swu "branch 'feature' of github.com:org/proj" \
 check_swu "branch 'main' of /nonexistent/repo" "branch 'main' of repo" \
   "${swu_other}"
 check_swu "branch 'main' of ../sibling/proj" "branch 'main' of proj"
+# `git pull` writes "/srv/git/proj/" for the URL "/srv/git/proj/.git".
+check_swu "branch 'main' of /srv/git/proj/" "branch 'main' of proj"
 check_swu "branch 'main' of file:///srv/git/proj" "branch 'main' of proj"
 check_swu "branch 'main' of /srv/a:b/proj" "branch 'main' of proj"
 # The local repository, whose pathname reveals nothing.

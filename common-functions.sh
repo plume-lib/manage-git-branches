@@ -1923,16 +1923,19 @@ parse_llm_option() {
   return 0
 }
 
-## Usage: pull_resolving RESOLVER DIRECTORY PULL-ARGUMENT...
-## Runs `git -C DIRECTORY pull --no-commit PULL-ARGUMENT...`.  Each
-## PULL-ARGUMENT is an option, such as "-q"; none names a repository or a
-## refspec, so the pull fetches the upstream branch of the branch checked out
-## in DIRECTORY.  If the pull merges, resolves any conflicts with
+## Usage: pull_resolving RESOLVER DIRECTORY [--no-rebase]
+## Pulls the branch checked out in DIRECTORY from its upstream branch, as
+## `git -C DIRECTORY pull -q [--no-rebase]` does, but names the source of a
+## merge without its URL where it can.  A pull that merges is done as
+## `git fetch` followed by `git merge`, whose message `pull_merge_message`
+## composes:  for example, "Merge remote-tracking branch 'origin/feature'
+## into feature" rather than "Merge branch 'feature' of /home/me/repos/proj
+## into feature".  If the merge has conflicts, resolves them with
 ## `resolve_merge_conflicts`, asking RESOLVER, if it is not empty, about any
-## that `git rerere` did not resolve, and commits the merge with the message
-## that `pull_merge_message` composes, which names the source of the merge
-## without its URL where it can.  (A pull that rebases cannot be resolved this
-## way.)
+## that `git rerere` did not resolve, and commits the merge with that
+## message.  A pull that rebases, as `pull.rebase` can make it do unless
+## `--no-rebase` is given, is done by `git pull`, and its conflicts are not
+## resolved.
 ## Sets ${pull_fetched} to the head of the upstream branch that the pull
 ## fetched, which it merged, fast-forwarded to, rebased onto, or found already
 ## in the branch, as a full hash such as
@@ -1943,12 +1946,13 @@ parse_llm_option() {
 ## not have been built (see `is_built_remote`), or if the pull did not record
 ## the head in FETCH_HEAD.
 ## Returns 1, after printing a diagnostic, if a merge is already in progress
-## in DIRECTORY, or if the pull fails and its conflicts are not resolved, or
-## if the pull's merge cannot be committed.
+## in DIRECTORY, if the pull fails without a merge in progress, as when the
+## fetch fails or a rebase has conflicts, if the merge's message cannot be
+## composed, or if the merge's conflicts are not resolved or the merge cannot
+## be committed.
 pull_resolving() {
   pull_resolver="$1"
   pull_dir="$2"
-  shift 2
   pull_fetched=''
   # Otherwise, `git pull` would refuse to run, and the merge in progress would
   # seem to be the pull's.
@@ -1956,44 +1960,40 @@ pull_resolving() {
     echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
     return 1
   fi
-  # `rerere.autoUpdate` false and the configured conflict style are as for
-  # the merge in `merge_build_push`.  `--no-commit` leaves a merge
-  # uncommitted, so that its message can be replaced; a pull that
-  # fast-forwards or rebases ignores it.  Git reports, even with `-q`, that
-  # it stopped before committing, which this function then does; that line
-  # of the pull's standard error is dropped.  (Git translates it, so in
-  # another language it remains.)  File descriptor 3 carries the pull's
-  # standard output past the command substitution that captures its standard
-  # error.
-  if { pull_errors="$(git -C "${pull_dir}" -c rerere.autoUpdate=false \
-    pull --no-commit "$@" 2>&1 1>&3 3>&-)"; } 3>&1; then
-    pull_conflicted=0
-  else
-    pull_conflicted=1
-  fi
-  if [ -n "${pull_errors}" ]; then
-    printf '%s\n' "${pull_errors}" \
-      | grep -v -x -F 'Automatic merge went well; stopped before committing as requested' >&2 \
-      || true
-  fi
-  if [ "${pull_conflicted}" -eq 1 ]; then
-    echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
-    if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  pull_conflicted=0
+  pull_rebase="$(pull_rebase_setting "${pull_dir}" "${3:-}")"
+  if [ "${pull_rebase}" = true ]; then
+    if ! git -C "${pull_dir}" pull -q; then
+      echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
       return 1
+    fi
+  else
+    # `git fetch` with no arguments fetches what `git pull` does, and marks
+    # the upstream branch in FETCH_HEAD as the one to merge.
+    if ! git -C "${pull_dir}" fetch -q; then
+      echo "${SCRIPT_NAME}: problem fetching in ${pull_dir}" >&2
+      return 1
+    fi
+    pull_ff_option="$(pull_ff_option "${pull_dir}" "${pull_rebase}")"
+    if ! pull_message="$(cd -- "${pull_dir}" && pull_merge_message)"; then
+      echo "${SCRIPT_NAME}: cannot compose a message for the merge of the pull in ${pull_dir}" >&2
+      return 1
+    fi
+    # `git merge FETCH_HEAD` merges what FETCH_HEAD marks, as `git pull`
+    # does.  `rerere.autoUpdate` false, the configured conflict style,
+    # `--no-edit`, and `--no-log` are as for the merge in `merge_build_push`.
+    if ! git -C "${pull_dir}" -c rerere.autoUpdate=false merge -q --no-edit --no-log \
+      ${pull_ff_option:+"${pull_ff_option}"} -m "${pull_message}" FETCH_HEAD; then
+      echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
+      if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+        return 1
+      fi
+      pull_conflicted=1
     fi
   fi
   # FETCH_HEAD is read now, before `resolve_merge_conflicts` runs an agent,
-  # which might fetch and so overwrite it.
-  pull_merging=0
-  if git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
-    pull_merging=1
-    if ! pull_message="$(cd -- "${pull_dir}" && pull_merge_message)"; then
-      echo "${SCRIPT_NAME}: cannot compose a message for the merge that the pull made in ${pull_dir}; the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
-      return 1
-    fi
-  fi
-  # FETCH_HEAD names first the commit that `git pull` merges, fast-forwards
-  # to, or rebases onto.
+  # which might fetch and so overwrite it.  FETCH_HEAD names first the commit
+  # that the pull merges, fast-forwards to, or rebases onto.
   # Strip the known prefix ourselves, because `symbolic-ref --short` can return
   # "heads/BRANCH" when a tag and the branch have the same name.
   if pull_ref="$(git -C "${pull_dir}" symbolic-ref --quiet HEAD)" \
@@ -2002,7 +2002,7 @@ pull_resolving() {
     # shellcheck disable=SC2034 # used by the commands that source this file
     pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
   fi
-  if [ "${pull_merging}" -eq 0 ]; then
+  if [ "${pull_conflicted}" -eq 0 ]; then
     return 0
   fi
   # Git names the conflicted files relative to the top level of the working
@@ -2015,12 +2015,11 @@ pull_resolving() {
       exit 1
     fi
     pull_source="$(upstream_description)"
-    if [ "${pull_conflicted}" -eq 1 ] \
-      && ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
+    if ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
       exit 1
     fi
-    # `-F` supplies the message, rather than MERGE_MSG, which names the
-    # source by its URL and, after conflicts, lists them.
+    # `-F` supplies the message, rather than MERGE_MSG, to which `git merge`
+    # appended a list of the conflicts.
     if ! printf '%s\n' "${pull_message}" | git commit -q --cleanup=whitespace -F -; then
       echo "${SCRIPT_NAME}: cannot commit the merge of ${pull_source} in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
       exit 1
@@ -2028,41 +2027,105 @@ pull_resolving() {
   )
 }
 
+## Usage: pull_rebase_setting DIRECTORY [--no-rebase]
+## Prints "true" if `git pull`, given the argument if any, rebases the branch
+## checked out in DIRECTORY, "false" if it merges because the argument or a
+## setting says to, or nothing if it merges because nothing says whether to
+## rebase.  As for `git pull`, `--no-rebase` overrides
+## `branch.BRANCH.rebase`, which overrides `pull.rebase`.
+pull_rebase_setting() {
+  if [ "${2:-}" = --no-rebase ]; then
+    echo false
+    return 0
+  fi
+  pull_rebase_key=pull.rebase
+  if pull_rebase_ref="$(git -C "$1" symbolic-ref --quiet HEAD)" \
+    && git -C "$1" config --get "branch.${pull_rebase_ref#refs/heads/}.rebase" > /dev/null; then
+    pull_rebase_key="branch.${pull_rebase_ref#refs/heads/}.rebase"
+  fi
+  if git -C "$1" config --type=bool --get "${pull_rebase_key}" 2> /dev/null; then
+    return 0
+  fi
+  # A value that is not a boolean, such as "merges", rebases.
+  if git -C "$1" config --get "${pull_rebase_key}" > /dev/null; then
+    echo true
+  fi
+}
+
+## Usage: pull_ff_option DIRECTORY REBASE
+## Prints the option, "--ff", "--no-ff", or "--ff-only", that `git pull`
+## gives the merge that it makes in DIRECTORY after it fetches, or prints
+## nothing if `git merge` is to follow `merge.ff`.  REBASE is what
+## `pull_rebase_setting` printed for the pull, other than "true".  FETCH_HEAD
+## records what the pull fetched.
+pull_ff_option() {
+  # As for `git pull`, `pull.ff` overrides `merge.ff`.
+  if [ "$(git -C "$1" config --get pull.ff)" = only ]; then
+    echo --ff-only
+    return 0
+  fi
+  case "$(git -C "$1" config --type=bool --get pull.ff 2> /dev/null)" in
+    true) echo --ff ;;
+    false) echo --no-ff ;;
+    *)
+      # If nothing says whether to rebase, `git pull` refuses to merge
+      # branches that have diverged, and `--ff-only` refuses too.
+      if [ -z "$2" ] && ! git -C "$1" merge-base --is-ancestor HEAD FETCH_HEAD 2> /dev/null; then
+        echo --ff-only
+      fi
+      ;;
+  esac
+}
+
 ## Usage: pull_merge_message
 ## Prints the message of the merge commit that `git pull` would make in the
 ## current repository from the commits in FETCH_HEAD, as
-## `git fmt-merge-msg` composes it, but with each source that the merge
+## `fmt_merge_message` composes it, but with each source that the merge
 ## merges named without its URL where `source_without_url` can:  for
 ## example, "Merge remote-tracking branch 'origin/feature' into feature"
 ## rather than "Merge branch 'feature' of /home/me/repos/proj into feature".
-## The message has no comment lines.
 pull_merge_message() {
   if ! pull_message_fetch_head="$(git rev-parse --git-path FETCH_HEAD)" \
-    || ! pull_message_lines="$(cat "${pull_message_fetch_head}")"; then
+    || [ ! -f "${pull_message_fetch_head}" ]; then
     return 1
   fi
   # Each line of FETCH_HEAD is "HASH<TAB>not-for-merge<TAB>SOURCE", where
   # "not-for-merge" can be empty.  `git fmt-merge-msg` ignores a line that
   # says "not-for-merge", such as each other branch that a pull fetched, so
-  # it is passed on unchanged.  `merge_build_push` explains the comment
-  # character and the source "... of .".
-  if ! pull_message_composed="$(printf '%s\n' "${pull_message_lines}" \
-    | while IFS= read -r pull_message_line; do
-      pull_message_hash="${pull_message_line%%"	"*}"
-      pull_message_rest="${pull_message_line#*"	"}"
-      pull_message_flag="${pull_message_rest%%"	"*}"
-      pull_message_source="${pull_message_rest#*"	"}"
-      if [ -z "${pull_message_flag}" ]; then
-        pull_message_source="$(source_without_url "${pull_message_source}" "${pull_message_hash}")"
-        case "${pull_message_source}" in
-          "remote-tracking branch "*) pull_message_source="${pull_message_source} of ." ;;
-        esac
-      fi
-      printf '%s\t%s\t%s\n' "${pull_message_hash}" "${pull_message_flag}" "${pull_message_source}"
-    done | git -c core.commentChar='#' fmt-merge-msg)"; then
+  # it is passed on unchanged.  `merge_build_push` explains the source
+  # "... of .".
+  while IFS= read -r pull_message_line; do
+    pull_message_hash="${pull_message_line%%"	"*}"
+    pull_message_rest="${pull_message_line#*"	"}"
+    pull_message_flag="${pull_message_rest%%"	"*}"
+    pull_message_source="${pull_message_rest#*"	"}"
+    if [ -z "${pull_message_flag}" ]; then
+      pull_message_source="$(source_without_url "${pull_message_source}" "${pull_message_hash}")"
+      case "${pull_message_source}" in
+        "remote-tracking branch "*) pull_message_source="${pull_message_source} of ." ;;
+      esac
+    fi
+    printf '%s\t%s\t%s\n' "${pull_message_hash}" "${pull_message_flag}" "${pull_message_source}"
+  done < "${pull_message_fetch_head}" | fmt_merge_message
+}
+
+## Usage: fmt_merge_message
+## Reads lines in the format of FETCH_HEAD, such as
+## "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b<TAB><TAB>branch 'feature' of
+## github.com:org/proj", and prints the message that `git fmt-merge-msg`
+## composes for the merge of their commits into the current branch, as
+## `git merge` would compose it.  The message includes the commit summaries
+## that `merge.log` turns on, but no comment lines.
+fmt_merge_message() {
+  # `git fmt-merge-msg` writes comment lines, such as "# By AUTHOR", that
+  # `git merge` keeps in a message given with `-m`, so they are removed.  The
+  # comment character is set to "#" for both commands, because the summaries
+  # that `merge.log` turns on begin with "* ", which `core.commentChar` might
+  # be.
+  if ! fmt_merge_composed="$(git -c core.commentChar='#' fmt-merge-msg)"; then
     return 1
   fi
-  printf '%s\n' "${pull_message_composed}" | git -c core.commentChar='#' stripspace --strip-comments
+  printf '%s\n' "${fmt_merge_composed}" | git -c core.commentChar='#' stripspace --strip-comments
 }
 
 ## Usage: upstream_description
@@ -2092,8 +2155,8 @@ upstream_description() {
 ## Prints SOURCE, a source that `git pull` merges, as it writes one in
 ## FETCH_HEAD and in a merge message, such as "branch 'feature' of
 ## github.com:org/proj", named without its URL where it can.  COMMIT is the
-## commit that the merge merged from SOURCE.  For a source "branch 'BRANCH'
-## of URL", prints:
+## commit that the merge merges from SOURCE.  For a source "branch 'BRANCH'
+## of URL" where URL is not ".", the local repository, prints:
 ##  * "remote-tracking branch 'REMOTE/BRANCH'", such as "remote-tracking
 ##    branch 'origin/feature'", if REMOTE/BRANCH tracks BRANCH of URL (see
 ##    `tracking_branch_of`) and contains COMMIT;
@@ -2111,32 +2174,31 @@ source_without_url() {
       return 0
       ;;
   esac
-  source_url_branch="$(printf '%s\n' "$1" | sed -e "s/^branch '//" -e "s/' of .*//")"
-  source_url_url="$(printf '%s\n' "$1" | sed -e "s/^branch '[^']*' of //")"
+  source_url_rest="${1#"branch '"}"
+  source_url_branch="${source_url_rest%%"' of "*}"
+  source_url_url="${source_url_rest#*"' of "}"
+  # The pathname "." is the local repository, which reveals nothing.
+  if [ "${source_url_url}" = . ]; then
+    printf '%s\n' "$1"
+    return 0
+  fi
   if source_url_tracking="$(tracking_branch_of "${source_url_branch}" "${source_url_url}" "$2")"; then
     printf "remote-tracking branch '%s'\n" "${source_url_tracking}"
     return 0
   fi
-  # As in `url_location`, a string is a URL if it has a scheme, other than
-  # "file", or if a colon precedes its first slash.  The pathname "." is the
-  # local repository, which reveals nothing.
   case "${source_url_url}" in
     file://*) ;;
-    . | *://*)
-      printf '%s\n' "$1"
-      return 0
-      ;;
-    *:*)
-      case "${source_url_url%%:*}" in
-        */*) ;;
-        *)
-          printf '%s\n' "$1"
-          return 0
-          ;;
-      esac
+    *)
+      if ! is_pathname "${source_url_url}"; then
+        printf '%s\n' "$1"
+        return 0
+      fi
       ;;
   esac
-  printf "branch '%s' of %s\n" "${source_url_branch}" "${source_url_url##*/}"
+  # For the URL "/srv/proj/.git", `git pull` writes "/srv/proj/", whose last
+  # component is "proj".
+  source_url_path="${source_url_url%"${source_url_url##*[!/]}"}"
+  printf "branch '%s' of %s\n" "${source_url_branch}" "${source_url_path##*/}"
 }
 
 ## Usage: tracking_branch_of BRANCH URL COMMIT
@@ -2159,9 +2221,12 @@ tracking_branch_of() {
       continue
     fi
     # `git pull` writes the URL without trailing slashes and then without a
-    # trailing ".git".  A pathname that it wrote has no key, because no
-    # directory has that name.
-    tracking_of_stripped="$(printf '%s\n' "${tracking_of_url}" | sed -e 's#/*$##' -e 's#\.git$##')"
+    # trailing ".git".  The URL that it wrote is compared with the remote's
+    # URL stripped that way, as well as by key, because a pathname that it
+    # wrote, such as "/srv/proj" for "/srv/proj.git", might name no
+    # directory and so have no key.
+    tracking_of_stripped="${tracking_of_url%"${tracking_of_url##*[!/]}"}"
+    tracking_of_stripped="${tracking_of_stripped%.git}"
     if [ "${tracking_of_stripped}" = "$2" ] \
       || { [ -n "${tracking_of_key}" ] \
         && [ "$(url_key . "${tracking_of_url}")" = "${tracking_of_key}" ]; }; then
@@ -2544,15 +2609,8 @@ merge_build_push() {
   # composing it by hand.  Git then writes the "into BRANCH" suffix, which it
   # omits on the default branch, and the commit summaries that `merge.log`
   # turns on.  Saying that COMMIT came from ".", the local repository, keeps
-  # git from appending " of SOURCE" to the message.  `git fmt-merge-msg` also
-  # writes comment lines, such as "# By AUTHOR", that `git merge` keeps in a
-  # message given with `-m`, so they are removed.  The comment character is
-  # set to "#" for both commands, because the summaries that `merge.log`
-  # turns on begin with "* ", which `core.commentChar` might be.
-  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" \
-    | git -c core.commentChar='#' fmt-merge-msg)" \
-    || ! merge_message="$(printf '%s\n' "${merge_message}" \
-      | git -c core.commentChar='#' stripspace --strip-comments)"; then
+  # git from appending " of SOURCE" to the message.
+  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" | fmt_merge_message)"; then
     echo "${SCRIPT_NAME}: cannot compose a merge message for $3" >&2
     return 1
   fi
@@ -3167,24 +3225,17 @@ remote_location() {
 ## directory.
 url_location() {
   url_location_url="$2"
-  # Git reads a string as a URL if it has a scheme, and as an scp-style URL if
-  # a colon precedes the first slash.  Anything else is a pathname.
   case "${url_location_url}" in
     '') return 0 ;;
-    *://* | '~'*)
+    '~'*)
       printf '%s\n' "${url_location_url}"
       return 0
       ;;
-    *:*)
-      case "${url_location_url%%:*}" in
-        */*) ;;
-        *)
-          printf '%s\n' "${url_location_url}"
-          return 0
-          ;;
-      esac
-      ;;
   esac
+  if ! is_pathname "${url_location_url}"; then
+    printf '%s\n' "${url_location_url}"
+    return 0
+  fi
   case "${url_location_url}" in
     /*) url_location_path="${url_location_url}" ;;
     *) url_location_path="$1/${url_location_url}" ;;
@@ -3195,6 +3246,25 @@ url_location() {
   # location.  Discard `cd`'s diagnostic, which would name the pathname with no
   # hint of what asked about it.
   physical_path "${url_location_path}" 2> /dev/null || true
+}
+
+## Usage: is_pathname URL
+## Returns 0 if URL, a location of a repository that git accepts, such as
+## "../proj" or "git@github.com:org/proj.git", is a pathname, and returns 1
+## if it is a URL.  Git reads a string as a URL if it has a scheme, such as
+## "https://" or "file://", and as an scp-style URL if a colon precedes its
+## first slash.
+is_pathname() {
+  case "$1" in
+    *://*) return 1 ;;
+    *:*)
+      case "${1%%:*}" in
+        */*) ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  return 0
 }
 
 ## Usage: repository_key DIRECTORY REMOTE
