@@ -149,6 +149,18 @@ The commands are:
   `git rerere` and an AI agent, and it accepts the same `--llm`, `--no-llm`,
   `--claude`,
   and `--codex` options.
+* [`pr-status`](pr-status) `[--check] [--print-document] [-C DIR]`:
+  Computes the dependencies among the open pull requests, updates the "Land
+  after" and "Land before" lines of their descriptions, and regenerates
+  `pr-status.md` (or the documents that `pr-status-config.json` names),
+  which lists the dependencies and the `git-push-to` commands that update
+  each dependency chain.  It prints what changed since its previous run.
+  With `--check`, it writes no document.  With `--print-document`, it prints
+  the file name of the dependency document and does nothing else.
+  Run it in a directory that holds the working copy directories, or pass
+  that directory with `-C`.
+  This command needs Python 3.9 or later, and the programs that
+  `pr-merge-analysis` needs.
 * [`pr-merge-analysis`](pr-merge-analysis)
   `[--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]`:
   For the given open pull requests of the GitHub repository OWNER/REPO (by
@@ -162,12 +174,14 @@ The commands are:
   the head of an open pull request, and it deletes from REPO_DIR the refs of
   the pull requests that are not open.  `--default-branch BRANCH` compares
   against BRANCH rather than the repository's default branch.
+  `pr-status` runs it.
   This command needs Git 2.38 or later, `gh`, and Bash 4 or later as the
   first `bash` on the PATH.  On macOS, `/bin/bash` is Bash 3.2, so put a
   newer Bash, such as Homebrew's, earlier on the PATH.
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--claude | --codex] [-C DIR]`:
-  Runs `pr-status`, which regenerates `pr-dependencies.md`, then runs each
+  Runs `pr-status`, which regenerates the dependency document (by default,
+  `pr-status.md`), then runs each
   `git-push-to` command in its section "Dependency chains with conflicts",
   with `--claude` (or `--codex`), which asks an AI agent for help.  Repeats
   until no chain has conflicts, for up to 3 rounds; stops after a round in
@@ -210,6 +224,15 @@ The commands are:
   never prevent a removal.  When other commits would be lost, the message
   that refuses the removal, or that reports its waiver by `--force-unpushed`,
   counts the landed commits among those that the removal would delete.
+  An uncommitted change to a tracked file does not count as work that would
+  be lost if it is saved:  if each new version of the file, in the index and
+  in the working tree, has the same pathname, mode, and contents as the file
+  in the commit that some ref that the removal leaves names, such as a
+  remote-tracking ref.  The ref can differ from version to version and from
+  file to file, and only the commit that the ref names counts, not its
+  history.  A clone's local branches do not save a change, because the
+  removal deletes them.  A deleted file, a submodule, and a symbolic link are
+  never saved.
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
@@ -289,7 +312,8 @@ takes effect when it is set to a non-empty value.
   means no limit.
 * `PR_MERGE_ANALYSIS_CACHE`: the file in which `pr-merge-analysis` caches its
   results.  The default is `.pr-merge-analysis-cache-OWNER__REPO.tsv` in the
-  current directory.  Repositories must not share a cache file.
+  current directory.  Repositories must not share a cache file, so do not set
+  this variable for a `pr-status` run whose config names several repositories.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
 * `AZURE_DEVOPS_EXT_PAT`: the commands that use the Azure DevOps API use this

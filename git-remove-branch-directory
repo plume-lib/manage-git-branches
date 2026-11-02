@@ -36,7 +36,21 @@
 #  * Uncommitted changes to tracked files, waived by `--force-uncommitted`.
 #    Untracked and ignored files do not count:  a branch directory is full of
 #    build output, and refusing on account of that would refuse nearly every
-#    directory and make this command useless.
+#    directory and make this command useless.  A tracked file whose
+#    uncommitted changes are saved does not count either.  A file's changes
+#    are saved if each new version of the file -- its mode and contents in
+#    the index, and those in the working tree, wherever they differ from
+#    HEAD's -- is the file at the same pathname in the commit that some
+#    surviving ref names.  A surviving ref is one that the removal leaves:
+#    for a directory within a working tree, any ref; for a linked worktree,
+#    a remote-tracking ref, a tag, or a branch other than the one that the
+#    removal deletes; and for a clone, a remote-tracking ref or a tag, but
+#    not a local branch, which `rm -rf` deletes with the clone.  Only the
+#    commit that a ref names counts, not the ref's history.  Different
+#    versions, and different files, can be saved by different refs.  For
+#    example, a file whose working-tree contents equal its contents in
+#    `origin/main` is saved.  A deleted file, a submodule, and a symbolic
+#    link are never saved.
 #  * Commits that no other ref holds, waived by `--force-unpushed`.
 #    For a clone, the question is about every ref of the clone, not just the
 #    branch that is checked out, because `rm -rf` takes all of them with it:
@@ -495,6 +509,216 @@ ${count_pr_unlanded_ref}"
   done
 }
 
+# Usage: surviving_refs KIND [DOOMED]
+# Prints the arguments of `git rev-parse`, separated by spaces, that name the
+# refs that the removal of a directory of kind KIND leaves, such as
+# "--remotes --tags":  for `within-working-tree`, every ref; for
+# `linked-worktree`, every branch other than DOOMED, a branch name such as
+# "feature" or empty, as well as every remote-tracking ref and tag; and for
+# any other kind, every remote-tracking ref and tag.  The output is meant to
+# be expanded unquoted:  a branch name contains no space and no glob
+# character.  `--exclude` applies only to the option that follows it, and a
+# pattern for `--branches` omits `refs/heads/`.
+surviving_refs() {
+  case "$1" in
+    within-working-tree) echo '--all' ;;
+    linked-worktree) echo "${2:+--exclude=$2 }--branches --remotes --tags" ;;
+    *) echo '--remotes --tags' ;;
+  esac
+}
+
+# Usage: keyed_blobs [--unhashed]
+# Reads lines of `git diff-index --raw --no-abbrev` that compare HEAD with the
+# index or with the working tree, and prints, for each new version of a file
+# that they list, a line "KEY<TAB>MODE<TAB>BLOB<TAB>PATHNAME":  KEY is the
+# file's pathname, by which `saved_keys` groups the lines; MODE is the
+# version's mode, such as 100644; BLOB is the hash of the version's contents,
+# or "-" if they cannot be saved, because the file is deleted, unmerged, a
+# submodule, or a symbolic link, or because git quotes its pathname, as for
+# a pathname that contains a tab or a double quote.  A raw line looks like
+# ":100644 100755 SRC-HASH DST-HASH M<TAB>PATHNAME", where SRC is HEAD's
+# version.  A version that equals HEAD's is not new, and gets no line.
+#
+# For a file whose working-tree contents differ from the index, git prints a
+# DST-HASH of all zeros.  With `--unhashed`, print instead only the pathnames
+# of those files, one per line, for `git hash-object --stdin-paths`.
+# Without it, the input starts with that command's output, each line
+# prefixed with "H", and the hashes are taken in order.
+#
+# Run git with `-c core.quotePath=false`, so that git does not quote a
+# pathname merely because it contains non-ASCII characters, and with
+# `--ignore-submodules=none`, so that git lists every changed submodule,
+# whatever the configuration says to ignore.
+keyed_blobs() {
+  awk -v unhashed="$([ "${1:-}" = --unhashed ] && echo 1)" '
+    /^H./ { hash[++hashes] = substr($0, 2); next }
+    /^:/ {
+      path = $0
+      sub(/^[^\t]*\t/, "", path)
+      mode = $2
+      blob = $4
+      if ((mode != "100644" && mode != "100755") || path ~ /^"/) {
+        blob = "-"
+      } else if (blob ~ /^0+$/) {
+        if (unhashed) { print path; next }
+        blob = (++used <= hashes) ? hash[used] : "-"
+      }
+      if (unhashed || (mode == substr($1, 2) && blob == $3)) next
+      print path "\t" mode "\t" blob "\t" path
+    }'
+}
+
+# Usage: tree_files DIRECTORY TREES PATHNAMES
+# Prints a line "MODE BLOB PATHNAME" for each file whose pathname is one of
+# PATHNAMES in some tree of TREES:  TREES is a list of hashes of trees of the
+# repository of DIRECTORY, the top of a working tree, and PATHNAMES a list of
+# pathnames relative to DIRECTORY, such as "lib/util.sh", each list one per
+# line.
+# MODE is the file's mode, such as 100644, and BLOB is the hash of its
+# contents.  The output can repeat a line, and it can include files beneath
+# a pathname that names a directory in some tree.  If git fails, the output
+# can lack some lines.
+#
+# Each `git diff-tree` compares the empty tree with each tree of TREES, which
+# lists every file of that tree as added; the pathnames limit it to the files
+# in question.  The pathnames are taken literally, not as patterns, and they
+# are passed in batches, each well within the limit on a command line's
+# size.  TREES goes to standard input, which has no such limit.  A pathname
+# that git quotes, which `keyed_blobs` never asks about, matches nothing.
+tree_files() {
+  tree_files_dir="$1"
+  tree_files_paths="$3"
+  if [ -z "$2" ] || [ -z "${tree_files_paths}" ]; then
+    return 0
+  fi
+  if ! tree_files_empty="$(git -C "${tree_files_dir}" hash-object -t tree \
+    /dev/null 2> /dev/null)"; then
+    return 0
+  fi
+  tree_files_pairs="$(printf '%s\n' "$2" | sed "s/^/${tree_files_empty} /")"
+  printf '%s\n' "${tree_files_paths}" | {
+    set --
+    tree_files_size=0
+    while IFS= read -r tree_files_path; do
+      set -- "$@" "${tree_files_path}"
+      tree_files_size=$((tree_files_size + ${#tree_files_path} + 1))
+      if [ "${tree_files_size}" -gt 65536 ]; then
+        tree_files_batch "$@"
+        set --
+        tree_files_size=0
+      fi
+    done
+    if [ "$#" -gt 0 ]; then
+      tree_files_batch "$@"
+    fi
+  } | awk '/^:/ {
+      path = $0
+      sub(/^[^\t]*\t/, "", path)
+      print $2 " " $4 " " path
+    }'
+}
+
+# Usage: tree_files_batch PATHNAME...
+# Prints the raw `git diff-tree` lines that `tree_files` reads for the given
+# pathnames.  It uses the variables that `tree_files` sets.
+tree_files_batch() {
+  printf '%s\n' "${tree_files_pairs}" \
+    | git -C "${tree_files_dir}" --literal-pathspecs -c core.quotePath=false \
+      diff-tree --stdin -r --raw --no-abbrev -- "$@" 2> /dev/null
+}
+
+# Usage: saved_keys DIRECTORY KEYED-BLOBS HELD-REV-PARSE-ARGS...
+# Prints, one per line, the keys of KEYED-BLOBS, an output of `keyed_blobs`,
+# that are saved in the repository of DIRECTORY, the top of a working tree.  A key is saved if, for each
+# line that KEYED-BLOBS has for it, some commit that `git rev-parse
+# HELD-REV-PARSE-ARGS` names, such as `--remotes --tags`, has a file at that
+# pathname with that mode and those contents.  Different lines can be matched
+# by different commits:  a file whose staged contents are in one
+# remote-tracking branch and whose working-tree contents are in another is
+# saved.  A key with a "-" is never saved.  Prints nothing if the repository
+# cannot be read.
+#
+# Only the named commits count, not their history:  the contents that a file
+# had long ago, such as those that a revert restores, are not saved by being
+# in some old commit.
+saved_keys() {
+  saved_keys_dir="$1"
+  saved_keys_keyed="$2"
+  shift 2
+  saved_keys_paths="$(printf '%s\n' "${saved_keys_keyed}" \
+    | awk -F '\t' 'NF == 4 && $3 != "-" { print $4 }' | sort -u)"
+  if [ -z "${saved_keys_paths}" ]; then
+    return 0
+  fi
+  if ! saved_keys_tips="$(git -C "${saved_keys_dir}" rev-parse "$@" \
+    2> /dev/null)" || [ -z "${saved_keys_tips}" ]; then
+    return 0
+  fi
+  # Commits that share a tree are looked up once.  A line of `cat-file` for
+  # a ref that names no commit, such as a tag of a blob, is not a hash.
+  if ! saved_keys_trees="$(printf '%s\n' "${saved_keys_tips}" \
+    | sed 's/$/^{tree}/' | git -C "${saved_keys_dir}" cat-file \
+      --batch-check='%(objectname)' 2> /dev/null)"; then
+    return 0
+  fi
+  saved_keys_trees="$(printf '%s\n' "${saved_keys_trees}" \
+    | grep -E '^[0-9a-f]+$' | sort -u)"
+  # A held line is "MODE BLOB PATHNAME" and has no tab, because git quotes a
+  # pathname that has one; a keyed line has tabs.
+  {
+    tree_files "${saved_keys_dir}" "${saved_keys_trees}" "${saved_keys_paths}"
+    printf '%s\n' "${saved_keys_keyed}"
+  } | awk '
+      index($0, "\t") == 0 { held[$0] = 1; next }
+      {
+        if (split($0, field, "\t") != 4) next
+        key = field[1]
+        if (!(key in unsaved)) { unsaved[key] = 0; order[++keys] = key }
+        if (field[3] == "-" || !((field[2] " " field[3] " " field[4]) in held)) {
+          unsaved[key] = 1
+        }
+      }
+      END { for (i = 1; i <= keys; i++) if (!unsaved[order[i]]) print order[i] }'
+}
+
+# Usage: saved_changes DIRECTORY HELD-REV-PARSE-ARGS...
+# Prints, one per line, the pathnames, relative to the top of the working
+# tree, of the tracked files in DIRECTORY, a working tree or a directory
+# within one, whose uncommitted changes are saved:  each of the file's new
+# versions, in the index and in the working tree, is the file at the same
+# pathname in a commit that `git rev-parse HELD-REV-PARSE-ARGS` names, as
+# `saved_keys` decides.  Prints nothing if the repository cannot be read.
+#
+# This writes nothing to the repository:  `git hash-object` without `-w`
+# computes the hashes of working-tree contents, applying the same filters,
+# such as end-of-line conversion, that `git add` would.  An entry that
+# `git add -N` made counts only for its working-tree contents, and an
+# unmerged entry is never saved.
+saved_changes() {
+  saved_changes_dir="$1"
+  shift
+  if ! saved_changes_top="$(git -C "${saved_changes_dir}" rev-parse \
+    --show-toplevel 2> /dev/null)" || [ -z "${saved_changes_top}" ]; then
+    return 0
+  fi
+  if ! saved_changes_raw="$(git -C "${saved_changes_dir}" \
+    -c core.quotePath=false diff-index --cached --ita-invisible-in-index \
+    --raw --no-abbrev --no-renames --ignore-submodules=none HEAD -- . \
+    && git -C "${saved_changes_dir}" -c core.quotePath=false diff-index \
+      --ita-invisible-in-index --raw --no-abbrev --no-renames \
+      --ignore-submodules=none HEAD -- .)"; then
+    return 0
+  fi
+  if ! saved_changes_hashes="$(printf '%s\n' "${saved_changes_raw}" \
+    | keyed_blobs --unhashed \
+    | git -C "${saved_changes_top}" hash-object --stdin-paths 2> /dev/null)"; then
+    return 0
+  fi
+  saved_keys "${saved_changes_top}" \
+    "$({ printf '%s\n' "${saved_changes_hashes}" | sed 's/^/H/'
+      printf '%s\n' "${saved_changes_raw}"; } | keyed_blobs)" "$@"
+}
+
 # Prints the number of live linked worktrees of the repository in directory
 # $1:  those whose directory still exists, and those that are locked.
 #
@@ -597,16 +821,12 @@ worktree_admin_dir() {
 # on that branch if its changes have landed, as `count_unlanded` explains.
 # Not `--all`, which in a repository with worktrees includes every worktree's
 # HEAD -- among them the HEAD of the worktree being removed -- so that the
-# count is always 0.  `--exclude` applies only to the option that follows it,
-# and a pattern for `--branches` omits `refs/heads/`.
+# count is always 0.  `surviving_refs` names the refs that hold commits.
 check_worktree_unpushed() {
-  if [ -n "$3" ]; then
-    set -- "$1" "$2" "$3" "$4" "refs/heads/$3" "--exclude=$3"
-  else
-    set -- "$1" "$2" "$3" "$4"
-  fi
   check_worktree_unpushed_dir="$4"
-  count_unlanded "$1" "$3" "$2" ${5:+"$5"} --not ${6:+"$6"} --branches --tags --remotes
+  # shellcheck disable=SC2046 # surviving_refs is meant to be split.
+  count_unlanded "$1" "$3" "$2" ${3:+"refs/heads/$3"} \
+    --not $(surviving_refs linked-worktree "$3")
   report_unlanded "${check_worktree_unpushed_dir}" "${count_unlanded_listed}" \
     "${count_unlanded_lost}" 'other branch, remote-tracking ref, or tag' \
     "; until \`git gc\` runs, \`git fsck --lost-found\` can recover them"
@@ -1124,6 +1344,20 @@ remove_branch_directory() {
   # afterward the information is gone.
   remove_refusals=0
 
+  # The branch that removing a linked worktree deletes, if any.
+  remove_doomed=''
+  if [ "${remove_kind}" = 'linked-worktree' ]; then
+    remove_kept=''
+    remove_doomed="${remove_branch}"
+    if [ -n "${remove_branch}" ]; then
+      remove_kept="$(worktree_branch_kept "${remove_common}" \
+        "${remove_branch}" "${remove_registered%/.git}")"
+      if [ -n "${remove_kept}" ]; then
+        remove_doomed=''
+      fi
+    fi
+  fi
+
   if [ "${remove_kind}" = 'working-tree' ] \
     || [ "${remove_kind}" = 'linked-worktree' ] \
     || [ "${remove_kind}" = 'within-working-tree' ]; then
@@ -1132,15 +1366,39 @@ remove_branch_directory() {
     # files, and refusing on account of those would refuse nearly every
     # directory.  For a directory within a working tree, ask only about that
     # directory, which is all that the removal would take.
+    # `--no-renames` makes a renamed file two lines, a deletion and an
+    # addition, as `saved_changes` sees it.  Each line is "XY PATHNAME", with
+    # the pathname relative to the top of the working tree, as `saved_changes`
+    # prints it; `core.quotePath=false` keeps git from quoting a pathname
+    # merely because it contains non-ASCII characters.
     remove_status_failed=0
     if [ "${remove_kind}" != 'within-working-tree' ]; then
-      remove_modified="$(git -C "${remove_dir}" status --porcelain \
-        --untracked-files=no --ignore-submodules=none 2> /dev/null)" || remove_status_failed=1
+      remove_modified="$(git -C "${remove_dir}" -c core.quotePath=false \
+        status --porcelain --no-renames --untracked-files=no \
+        --ignore-submodules=none 2> /dev/null)" || remove_status_failed=1
     else
-      remove_modified="$(git -C "${remove_dir}" status --porcelain \
-        --untracked-files=no --ignore-submodules=none -- . 2> /dev/null)" || remove_status_failed=1
+      remove_modified="$(git -C "${remove_dir}" -c core.quotePath=false \
+        status --porcelain --no-renames --untracked-files=no \
+        --ignore-submodules=none -- . 2> /dev/null)" || remove_status_failed=1
     fi
     remove_modified_count="$(line_count "${remove_modified}")"
+    # Discount the files whose changes are saved by refs that the removal
+    # leaves, as `surviving_refs` lists them.  Only a file that `git status`
+    # lists and `saved_changes` prints is discounted.
+    if [ "${remove_status_failed}" -eq 0 ] && [ "${remove_modified_count}" -gt 0 ] \
+      && [ "${force_uncommitted}" -eq 0 ]; then
+      # shellcheck disable=SC2046 # surviving_refs is meant to be split.
+      remove_saved="$(saved_changes "${remove_dir}" \
+        $(surviving_refs "${remove_kind}" "${remove_doomed}"))"
+      # Each line is marked:  "S" for a saved pathname and "M" for a line of
+      # `git status`.
+      remove_modified_count="$({ printf '%s\n' "${remove_saved}" | sed 's/^/S/'
+          printf '%s\n' "${remove_modified}" | sed 's/^/M/'; } \
+        | awk '
+            /^S./ { saved[substr($0, 2)] = 1; next }
+            /^M/ && length($0) > 4 && !(substr($0, 5) in saved) { n++ }
+            END { print n + 0 }')"
+    fi
     if [ "${remove_status_failed}" -ne 0 ]; then
       # `git status` failed, so its empty output says nothing about the
       # working tree.  Reading it as "no modified files" would remove a
@@ -1182,21 +1440,14 @@ remove_branch_directory() {
     # A tag counts as holding them too.  With this code, work that a local tag
     # alone names is not caught; however, a commit is nearly always also on a
     # branch, HEAD, or the stash, and each of those still counts.
-    count_unlanded "${remove_dir}" --all --all --not --remotes --tags
+    # shellcheck disable=SC2046 # surviving_refs is meant to be split.
+    count_unlanded "${remove_dir}" --all --all --not \
+      $(surviving_refs "${remove_kind}")
     report_unlanded "${remove_dir}" "${count_unlanded_listed}" \
       "${count_unlanded_lost}" 'remote-tracking ref or tag'
   fi
 
   if [ "${remove_kind}" = 'linked-worktree' ]; then
-    remove_kept=''
-    remove_doomed="${remove_branch}"
-    if [ -n "${remove_branch}" ]; then
-      remove_kept="$(worktree_branch_kept "${remove_common}" \
-        "${remove_branch}" "${remove_registered%/.git}")"
-      if [ -n "${remove_kept}" ]; then
-        remove_doomed=''
-      fi
-    fi
     check_worktree_unpushed "${remove_common}" "${remove_head}" \
       "${remove_doomed}" "${remove_dir}"
   fi
