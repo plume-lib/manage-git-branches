@@ -199,8 +199,9 @@ set_variables_in() {
         if (at_command && is_declaration(words[i])) {
           # A declaration sets each variable that it assigns, as in
           # "export VAR=value".  It sets a variable that it names without a
-          # value only if it makes that variable an array, as "declare -A
-          # ARRAY" does; neither "declare -p VAR" nor "export VAR" sets VAR.
+          # value only if it makes that variable an array, as
+          # "declare -A ARRAY" does; neither "declare -p VAR" nor
+          # "export VAR" sets VAR.
           array = 0
           for (i++; i <= nwords && words[i] ~ /^[-+]/; i++) {
             if (words[i] ~ /^-[A-Za-z]*[aA]/) { array = 1 }
