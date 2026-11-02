@@ -20,7 +20,9 @@
 # check is recomputed only when a branch moves.  When the run covers all the open
 # PRs (no PR number is given, or --prune is given), it removes the cache lines
 # that refer to a commit that is no longer the head of an open PR or master, so
-# repositories must not share a cache file.
+# repositories must not share a cache file.  Runs at the same time do not
+# corrupt the cache, but one run's pruning can discard the lines that another
+# run adds, which a later run then recomputes.
 # Cache lines:
 #   merge<TAB>SHA1<TAB>SHA2<TAB>clean|conflict<TAB>conflicting files
 #     (SHA1 < SHA2, so the order of the two branches does not matter)
@@ -65,6 +67,12 @@ done
 G=(git -C "$1")
 CACHE="${PR_MERGE_ANALYSIS_CACHE:-$PWD/.pr-merge-analysis-cache-${2//\//-}.tsv}"
 touch "$CACHE"
+# The standard error of "git merge-tree", which merge_result keeps apart from
+# its standard output.
+MERGE_TREE_ERR=$(mktemp) || exit 1
+# The pruned cache, before it replaces the cache.
+NEW_CACHE=
+trap 'rm -f "$MERGE_TREE_ERR" ${NEW_CACHE:+"$NEW_CACHE"}' EXIT
 
 if [ $# -gt 2 ]; then
   P=$(printf '%s\n' "${@:3}" | sort -n)
@@ -95,11 +103,25 @@ if [ -n "$P" ]; then
     CURRENT[${SHA[$n]}]=1
   done
 fi
+# Matches a commit's object ID, which is a SHA-1 or SHA-256 hash in hexadecimal.
+OID_RE='^[0-9a-f]{40}([0-9a-f]{24})?$'
+# Read only well-formed lines; a line that another run is still writing is
+# incomplete.
 while IFS=$'\t' read -r kind k1 k2 k3 rest; do
-  if [ "$kind" = merge ]; then
+  if [ "$kind" = merge ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE ]] \
+    && [[ $k3 = clean || $k3 = conflict ]]; then
     CACHED["merge $k1 $k2"]="$k3	$rest"
-  elif [ "$kind" = contains ]; then CACHED["contains $k1 $k2 $k3"]="$rest"; fi
+  elif [ "$kind" = contains ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE && $k3 =~ $OID_RE ]] \
+    && [[ $rest = yes || $rest = no ]]; then
+    CACHED["contains $k1 $k2 $k3"]="$rest"
+  fi
 done < "$CACHE"
+
+# Prints its arguments as an error message, and exits with status 1.
+die() {
+  echo "$0: $*" >&2
+  exit 1
+}
 
 # These functions set RESULT rather than printing it, because a command
 # substitution per call would fork a subshell for each of thousands of pairs.
@@ -115,12 +137,15 @@ merge_result() {
   local key="merge $x $y"
   if [ -z "${CACHED[$key]+set}" ]; then
     local out code status files
-    out=$("${G[@]}" merge-tree --write-tree --name-only "$x" "$y" 2>&1)
+    # Standard error is kept apart, so that a warning, such as one about
+    # merge.renameLimit, does not precede the tree's object ID or appear among
+    # the files.
+    out=$("${G[@]}" merge-tree --write-tree --name-only "$x" "$y" 2> "$MERGE_TREE_ERR")
     code=$?
-    # A conflict yields exit status 1 and output that starts with the tree's
-    # object ID.  Any other failure, including exit status 1 with other output,
-    # as for an argument that is not a commit, is an error.
-    if [ $code -eq 1 ] && ! [[ ${out%%$'\n'*} =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+    # A conflict yields exit status 1 and standard output that starts with the
+    # tree's object ID.  Any other failure, including exit status 1 with other
+    # output, as for an argument that is not a commit, is an error.
+    if [ $code -eq 1 ] && ! [[ ${out%%$'\n'*} =~ $OID_RE ]]; then
       code=error
     fi
     case $code in
@@ -134,7 +159,8 @@ merge_result() {
         ;;
       *)
         echo "$0: git merge-tree $x $y failed:" >&2
-        echo "$out" >&2
+        cat "$MERGE_TREE_ERR" >&2
+        [ -z "$out" ] || echo "$out" >&2
         exit 1
         ;;
     esac
@@ -149,10 +175,15 @@ merge_result() {
 contains_result() {
   local key="contains $MSHA $1 $2"
   if [ -z "${CACHED[$key]+set}" ]; then
-    local ok=no
-    if [ -n "$("${G[@]}" rev-list --no-merges -n1 "$2" "^$MSHA")" ] \
-      && [ -z "$("${G[@]}" rev-list --no-merges -n1 "$2" "^$MSHA" "^$1")" ]; then
-      ok=yes
+    local ok=no own missing
+    # The non-merge commits of $2 that are not in master, and those of them
+    # that are not in $1.  A failure is an error, not an answer to cache.
+    own=$("${G[@]}" rev-list --no-merges -n1 "$2" "^$MSHA") \
+      || die "git rev-list $2 ^$MSHA failed"
+    if [ -n "$own" ]; then
+      missing=$("${G[@]}" rev-list --no-merges -n1 "$2" "^$MSHA" "^$1") \
+        || die "git rev-list $2 ^$MSHA ^$1 failed"
+      [ -n "$missing" ] || ok=yes
     fi
     CACHED[$key]=$ok
     printf 'contains\t%s\t%s\t%s\t%s\n' "$MSHA" "$1" "$2" "$ok" >> "$CACHE"
@@ -183,6 +214,8 @@ fi
 # Prune the cache to the lines about current commits.  A run on only some of the
 # open PRs does not know the other PRs' heads, so it must not prune.
 [ $PRUNE = yes ] || exit 0
+# A file of its own, so that runs at the same time do not write the same file.
+NEW_CACHE=$(mktemp "$CACHE.XXXXXX") || exit 1
 for key in "${!CACHED[@]}"; do
   # shellcheck disable=SC2206 # A key is words without glob characters; "read <<<" would be slow.
   k=($key)
@@ -193,4 +226,4 @@ for key in "${!CACHED[@]}"; do
   elif [ "${k[1]}" = "$MSHA" ] && [ -n "${CURRENT[${k[2]}]+set}" ] && [ -n "${CURRENT[${k[3]}]+set}" ]; then
     printf 'contains\t%s\t%s\t%s\t%s\n' "${k[1]}" "${k[2]}" "${k[3]}" "${CACHED[$key]}"
   fi
-done > "$CACHE.new" && mv "$CACHE.new" "$CACHE"
+done > "$NEW_CACHE" && mv "$NEW_CACHE" "$CACHE"

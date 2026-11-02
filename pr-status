@@ -2446,17 +2446,41 @@ def default_config(base):
     }
 
 
-def dependency_document_name():
+def read_config_file():
+    """Return the contents of the config file in the current directory.
+
+    Returns:
+        The config, as a dict parsed from the config file's JSON, with keys such as "repos"
+        and "documents"; or None if there is no config file.
+    """
+    if not pathlib.Path(CONFIG).exists():
+        return None
+    with pathlib.Path(CONFIG).open() as f:
+        return json.load(f)
+
+
+def dependency_document_name(program):
     """Return the file name of the dependency document in the current directory.
+
+    Exit with an error message if the config file names no dependency document.
+
+    Args:
+        program: the name of a running program; used for diagnostics.
 
     Returns:
         The file name, such as "pr-status.md", that the config file names, or
         DEFAULT_DEPENDENCY_DOCUMENT if there is no config file.
     """
-    if pathlib.Path(CONFIG).exists():
-        with pathlib.Path(CONFIG).open() as f:
-            return json.load(f)["documents"]["dependencies"]
-    return DEFAULT_DEPENDENCY_DOCUMENT
+    cfg = read_config_file()
+    if cfg is None:
+        return DEFAULT_DEPENDENCY_DOCUMENT
+    name = cfg.get("documents", {}).get("dependencies")
+    if not isinstance(name, str) or not name:
+        sys.exit(
+            f"{program}: {CONFIG} names no dependency document"
+            ' ("documents": {"dependencies": ...})'
+        )
+    return name
 
 
 def load_config(program):
@@ -2482,9 +2506,9 @@ def load_config(program):
             f"{program}: {base} is in the git working copy {toplevel.stdout.strip()}; "
             f"run {program} in the directory that holds the working copy directories"
         )
-    if pathlib.Path(CONFIG).exists():
-        with pathlib.Path(CONFIG).open() as f:
-            return json.load(f)
+    cfg = read_config_file()
+    if cfg is not None:
+        return cfg
     try:
         return default_config(base)
     except ConfigError as error:
@@ -2611,7 +2635,7 @@ def main():
         except OSError as error:
             sys.exit(f"pr-status: cannot change to directory {args.directory}: {error.strerror}")
     if args.print_document:
-        print(dependency_document_name())
+        print(dependency_document_name("pr-status"))
         return
     base = str(pathlib.Path.cwd())
     cfg = load_config("pr-status")
