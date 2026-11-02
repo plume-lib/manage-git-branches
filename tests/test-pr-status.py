@@ -365,6 +365,65 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model.unblocked(), [])
         self.assertEqual(model.independent(), [])
 
+    def conflicting_model(self):
+        """Return the model of open PRs 1 to 4, whose branches conflict.
+
+        PR 1 depends on 2, which depends on 3; PR 4 depends on 3.  PRs 1 and 3 conflict with
+        the default branch in c.txt.  PR 2 conflicts with 1 in b.txt and with 3 in a.txt, and
+        PR 1 conflicts with 3 in c.txt.
+
+        Returns:
+            The model, whose repository has no review threads and no CI results.
+        """
+        model = self.model(
+            {1: "Land after #2.", 2: "Land after #3.", 3: "", 4: "Land after #3."}, set()
+        )
+        repo = model.repo
+        repo.review_threads, repo.ci_failed, repo.ci_passed = {}, set(), set()
+        repo.master_conflicts = {1: ["c.txt"], 3: ["c.txt"]}
+        repo.pair_conflicts = {(1, 2): ["b.txt"], (1, 3): ["c.txt"], (2, 3): ["a.txt"]}
+        repo.link = lambda n: f"#{n}"
+        repo.links = lambda ns: pr_status.and_list(f"#{n}" for n in sorted(ns))
+        return model
+
+    def test_unresolved_threads_shows_conflict_with_direct_prerequisite(self):
+        """The cell shows 🔀 only if merging the default branch or a direct prerequisite conflicts.
+
+        PR 1's conflict with 3 is not with a direct prerequisite.  2 vs 3 is reported for 2,
+        the dependent, not for 3.
+        """
+        model = self.conflicting_model()
+        self.assertEqual(
+            [model.unresolved_threads(n) for n in (1, 2, 3, 4)], [" 🔀", " 🔀", " 🔀", ""]
+        )
+        model.repo.master_conflicts = {}
+        model.repo.pair_conflicts = {(1, 3): ["c.txt"], (2, 3): ["a.txt"]}
+        self.assertEqual([model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["", " 🔀", "", ""])
+
+    def test_depends_on_marks_conflicting_direct_prerequisites(self):
+        """The cell shows 🔀 after each conflicting direct prerequisite, or else after master."""
+        model = self.conflicting_model()
+        self.assertEqual(
+            [pr_status.depends_on(model, n) for n in (1, 2, 4)],
+            ["#2 🔀 (and transitively #3)", "#3 🔀", "#3"],
+        )
+        model.repo.pair_conflicts = {(1, 3): ["c.txt"], (2, 3): ["a.txt"]}
+        self.assertEqual(
+            pr_status.depends_on(model, 1), "#2 (and transitively #3) (and `master` 🔀)"
+        )
+
+    def test_textual_conflicts_names_routine_conflicts_with_master(self):
+        """The cell names the default branch if PR 3 conflicts with it only in routine files."""
+        model = self.conflicting_model()
+        cfg = {"repos": {model.repo.name: {"routine_files": ["a.txt"]}}}
+        model.repo.master_conflicts[3] = ["a.txt"]
+        self.assertEqual(
+            pr_status.textual_conflicts(model, cfg, 3),
+            "`c.txt` with #1; routine files in `master` 🔀",
+        )
+        model.repo.master_conflicts[3] = ["a.txt", "c.txt"]
+        self.assertEqual(pr_status.textual_conflicts(model, cfg, 3), "`c.txt` with `master`")
+
 
 class HighlightTest(unittest.TestCase):
     """Tests for resolve_pr_names, needed_to_land, and highlight."""

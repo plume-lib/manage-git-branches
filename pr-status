@@ -266,6 +266,20 @@ def load_repo(repo, pairwise=True):
             repo.pair_conflicts[int(m[1]), int(m[2])] = m[3].split()
 
 
+def branches_conflict(repo, a, b):
+    """Return whether merging the branches of PRs a and b would conflict.
+
+    Args:
+        repo: a Repo, which load_repo has read with pairwise conflicts.
+        a: the number of an open PR of repo, such as 123.
+        b: the number of another open PR of repo.
+
+    Returns:
+        True if the merge analysis found a textual conflict between the 2 branches.
+    """
+    return (min(a, b), max(a, b)) in repo.pair_conflicts
+
+
 REVIEW_THREAD_FIELDS = "isResolved isOutdated"
 
 REVIEW_THREADS_QUERY = """
@@ -969,13 +983,24 @@ class Model:
         """
         return and_list(self.assignees(n))
 
+    def conflicting_prerequisites(self, n):
+        """Return the direct prerequisites of PR n whose branches conflict with PR n's.
+
+        Returns:
+            The numbers of the direct prerequisites of PR n whose branches cannot be merged
+            cleanly into PR n's branch.
+        """
+        return {d for d in self.direct[n] if branches_conflict(self.repo, n, d)}
+
     def unresolved_threads(self, n):
         """Return the "Unresolved threads" cell of PR n.
 
         Returns:
             The number of the PR's unresolved review threads and how many of them are
             outdated, followed by a red X if the PR's CI failed or a green checkmark if it
-            completed and passed; or "" if none of these applies.
+            completed and passed, followed by shuffle arrows (🔀) if merging the default
+            branch or a direct prerequisite into the PR would conflict, in any file; or "" if
+            none of these applies.
         """
         load_reviews_and_ci(self.repo)
         threads = self.repo.review_threads.get(n, [])
@@ -987,6 +1012,8 @@ class Model:
             cell.append(FAILED_MARK)
         elif n in self.repo.ci_passed:
             cell.append(" ✅")
+        if n in self.repo.master_conflicts or self.conflicting_prerequisites(n):
+            cell.append(" 🔀")
         return "".join(cell)
 
     def head_status(self, a, b):
@@ -1230,7 +1257,10 @@ def depends_on(model, n, mark_failed=False):
     If mark_failed is true, each prerequisite whose CI failed is followed by a red X.
 
     Returns:
-        The PR's direct prerequisites, followed by its transitive ones.
+        The PR's direct prerequisites, followed by its transitive ones.  Shuffle arrows (🔀)
+        follow each direct prerequisite whose branch cannot be merged cleanly into the PR's.
+        If there is none but the PR conflicts with the default branch, such as master, the
+        cell ends with "(and `master` 🔀)".
     """
     r = model.repo
 
@@ -1240,14 +1270,17 @@ def depends_on(model, n, mark_failed=False):
     def ext_link(e):
         return external_link(e) + (external_failed_mark(model, e) if mark_failed else "")
 
-    items = [link(d) for d in sorted(model.direct[n])] + [ext_link(e) for e in model.external[n]]
+    conflicting = model.conflicting_prerequisites(n)
+    items = [link(d) + (" 🔀" if d in conflicting else "") for d in sorted(model.direct[n])] + [
+        ext_link(e) for e in model.external[n]
+    ]
     more = and_list(link(d) for d in sorted(model.all_deps[n] - model.direct[n]))
-    if not items:
-        # In a cycle of dependencies, a PR can have no direct prerequisite.
-        return more
-    text = and_list(items)
-    if more:
+    # In a cycle of dependencies, a PR can have no direct prerequisite.
+    text = and_list(items) if items else more
+    if items and more:
         text += f" (and transitively {more})"
+    if not conflicting and n in r.master_conflicts:
+        text += f" (and `{r.default_branch}` 🔀)"
     return text
 
 
@@ -1255,7 +1288,8 @@ def auto_notes(model, n, master=True):
     """Generate the notes about PR n that do not come from the config.
 
     If master is false, omit the note about conflicts with the default branch, which the
-    table that contains the notes gives in its "Textual conflicts" column.
+    table that contains the notes gives in another column, such as "Textual conflicts" or
+    "Depends on".
 
     Returns:
         Note fragments, each starting with a lowercase letter.
@@ -1326,14 +1360,18 @@ def unblocked_notes(model, cfg, n, master=True):
     return capitalize("; ".join(parts))
 
 
-def detail_notes(model, cfg, n):
+def detail_notes(model, cfg, n, master=True):
     """Return the "Notes" cell of PR n in a table of PRs that have dependencies.
+
+    If master is false, omit the note about conflicts with the default branch.
 
     Returns:
         The PR's notes from the config, followed by the generated ones, as sentences.
     """
     manual = cfg["repos"][model.repo.name].get("detail_notes", {}).get(str(n), "")
-    parts = ([manual] if manual else []) + [capitalize(s) + "." for s in auto_notes(model, n)]
+    parts = ([manual] if manual else []) + [
+        capitalize(s) + "." for s in auto_notes(model, n, master)
+    ]
     return "  ".join(parts)
 
 
@@ -1975,15 +2013,15 @@ def gen_details(model, cfg):
         if not model.in_graph(n) and not model.external[n]:
             continue
         t = title(model, cfg, n)
-        if not model.direct[n] and not model.external[n]:
-            cells = ["none", "not applicable", "not applicable"]
-        else:
+        has_prerequisite = bool(model.direct[n] or model.external[n])
+        if has_prerequisite:
             cells = dependency_cells(model, n)
-        lines.append(
-            table_row(
-                [r.link(n) + " " + t, model.assigned_to(n), *cells, detail_notes(model, cfg, n)]
-            )
-        )
+        else:
+            cells = ["none", "not applicable", "not applicable"]
+        # The "Depends on" cell of a PR that has a prerequisite marks the PR's conflict with
+        # the default branch, unless a direct prerequisite conflicts too.
+        notes = detail_notes(model, cfg, n, master=not has_prerequisite)
+        lines.append(table_row([r.link(n) + " " + t, model.assigned_to(n), *cells, notes]))
     return lines
 
 
@@ -2016,7 +2054,8 @@ def textual_conflicts(model, cfg, n):
         The non-routine files in which PR n conflicts with the default branch and with other
         open PRs, grouped by partner, or "none".  A group of more than 4 files is given as a
         count.  The default branch comes first, both among the groups and within each group's
-        partners.
+        partners.  If PR n conflicts with the default branch, such as master, only in
+        routine files, a final group says so:  "routine files in `master` 🔀".
     """
     r = model.repo
     routine = set(cfg["repos"][r.name].get("routine_files", []))
@@ -2045,14 +2084,16 @@ def textual_conflicts(model, cfg, n):
         prs = [r.link(m) for m in sorted(partners - {None})]
         return and_list(([f"`{r.default_branch}`"] if None in partners else []) + prs)
 
-    conflicts = "; ".join(
+    groups = [
         (f"{len(files)}+ files" if len(files) > 4 else and_list(f"`{f}`" for f in sorted(files)))
         + f" with {partner_list(partners)}"
         for partners, files in sorted(
             by_partners.items(), key=lambda kv: (None not in kv[0], sorted(kv[1]))
         )
-    )
-    return conflicts or "none"
+    ]
+    if n in r.master_conflicts and None not in set().union(*by_file.values()):
+        groups.append(f"routine files in `{r.default_branch}` 🔀")
+    return "; ".join(groups) or "none"
 
 
 def gen_independent(model, cfg):
@@ -2156,7 +2197,13 @@ def gen_blocked(model, cfg, base):
         base,
         ["Depends on", "Stated in description", "Branch contains prerequisites' commits", "Notes"],
         [
-            (n, [*dependency_cells(model, n, mark_failed=True), detail_notes(model, cfg, n)])
+            (
+                n,
+                [
+                    *dependency_cells(model, n, mark_failed=True),
+                    detail_notes(model, cfg, n, master=False),
+                ],
+            )
             for n in model.blocked()
         ],
     )
@@ -2311,7 +2358,7 @@ def chain_has_conflict(repo, prs, has_upstream):
         True if at least one merge in the chain would conflict.
     """
     return (has_upstream and any(n in repo.master_conflicts for n in prs)) or any(
-        tuple(sorted(pair)) in repo.pair_conflicts for pair in itertools.combinations(prs, 2)
+        branches_conflict(repo, a, b) for a, b in itertools.combinations(prs, 2)
     )
 
 
