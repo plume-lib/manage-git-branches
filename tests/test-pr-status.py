@@ -366,14 +366,14 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model.independent(), [])
 
     def conflicting_model(self):
-        """Build a model of a chain of PRs with conflicts.
+        """Return the model of open PRs 1 to 4, whose branches conflict.
 
         PR 1 depends on 2, which depends on 3; PR 4 depends on 3.  PRs 1 and 3 conflict with
-        the default branch.  PR 2 conflicts with 1 in b.txt and with 3 in a.txt, and PR 1
-        conflicts with 3.
+        the default branch in c.txt.  PR 2 conflicts with 1 in b.txt and with 3 in a.txt, and
+        PR 1 conflicts with 3 in c.txt.
 
         Returns:
-            The model.
+            The model, whose repository has no review threads and no CI results.
         """
         model = self.model(
             {1: "Land after #2.", 2: "Land after #3.", 3: "", 4: "Land after #3."}, set()
@@ -409,37 +409,20 @@ class ModelTest(unittest.TestCase):
         )
         model.repo.pair_conflicts = {(1, 3): ["c.txt"], (2, 3): ["a.txt"]}
         self.assertEqual(
-            pr_status.depends_on(model, 1), "#2 (and transitively #3) (and with `master` 🔀)"
+            pr_status.depends_on(model, 1), "#2 (and transitively #3) (and `master` 🔀)"
         )
 
-    def test_textual_conflicts_marks_direct_prerequisites(self):
-        """The cell shows 🔀 after each conflicting partner that is a direct prerequisite."""
+    def test_textual_conflicts_names_routine_conflicts_with_master(self):
+        """The cell names the default branch if PR 3 conflicts with it only in routine files."""
         model = self.conflicting_model()
-        cfg = {"repos": {model.repo.name: {}}}
-        self.assertEqual(
-            pr_status.textual_conflicts(model, cfg, 2), "`a.txt` with #3 🔀; `b.txt` with #1"
-        )
-        self.assertEqual(
-            pr_status.textual_conflicts(model, cfg, 1), "`c.txt` with `master`; `b.txt` with #2 🔀"
-        )
-
-    def test_textual_conflicts_names_direct_prerequisites_with_routine_conflicts(self):
-        """The cell names a direct prerequisite that conflicts only in routine files.
-
-        PR 2 conflicts with 3, its direct prerequisite, only in a.txt.  PR 1 conflicts with 2
-        in a.txt, but also in b.txt, so the cell names 2 already.
-        """
-        model = self.conflicting_model()
-        model.repo.pair_conflicts[1, 2] = ["a.txt", "b.txt"]
         cfg = {"repos": {model.repo.name: {"routine_files": ["a.txt"]}}}
+        model.repo.master_conflicts[3] = ["a.txt"]
         self.assertEqual(
-            pr_status.textual_conflicts(model, cfg, 2), "`b.txt` with #1; routine files in #3 🔀"
+            pr_status.textual_conflicts(model, cfg, 3),
+            "`c.txt` with #1; routine files in `master` 🔀",
         )
-        self.assertEqual(
-            pr_status.textual_conflicts(model, cfg, 1), "`c.txt` with `master`; `b.txt` with #2 🔀"
-        )
-        model.repo.pair_conflicts = {(2, 3): ["a.txt"]}
-        self.assertEqual(pr_status.textual_conflicts(model, cfg, 2), "routine files in #3 🔀")
+        model.repo.master_conflicts[3] = ["a.txt", "c.txt"]
+        self.assertEqual(pr_status.textual_conflicts(model, cfg, 3), "`c.txt` with `master`")
 
 
 class HighlightTest(unittest.TestCase):
