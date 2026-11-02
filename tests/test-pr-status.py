@@ -503,6 +503,70 @@ class HighlightTest(unittest.TestCase):
             )
 
 
+class DependsOnTest(unittest.TestCase):
+    """Tests for depends_on."""
+
+    @staticmethod
+    def repo(gh, failed):
+        """Build a Repo whose CI results are loaded.
+
+        Returns:
+            A Repo with GitHub slug gh, whose PRs in failed failed CI.
+        """
+        repo = pr_status.Repo(
+            {
+                "name": gh,
+                "gh": gh,
+                "clone": "/base/repo",
+                "prefix": "#",
+                "label": gh,
+                "node_prefix": "pr",
+            }
+        )
+        repo.review_threads = {}
+        repo.ci_failed = set(failed)
+        repo.ci_passed = set()
+        return repo
+
+    def test_marks_failed_prerequisites(self):
+        """A direct, transitive, or external prerequisite whose CI failed has a red X."""
+        repo = self.repo("owner/repo", {3})
+        repo.prs = {
+            n: {"body": body, "baseRefName": "master", "owner": "owner", "headRefName": f"b{n}"}
+            for n, body in {
+                1: "Land after #2.",
+                2: "Land after #3.\nLand after other/repo#5.",
+                3: "",
+            }.items()
+        }
+        other = self.repo("other/repo", {5})
+        other.prs = {
+            5: {"body": "", "baseRefName": "master", "owner": "owner", "headRefName": "b5"}
+        }
+        with mock.patch.dict(pr_status.EXTERNAL_STATE, {"other/repo#5": "open"}):
+            model = pr_status.Model(repo, {"repos": {"owner/repo": {}}})
+        other_model = pr_status.Model(other, {"repos": {"other/repo": {}}})
+        pr_status.unite_partners([model, other_model])
+
+        def link(gh, n):
+            return (
+                f"[{'#' if gh == 'owner/repo' else gh + '#'}{n}](https://github.com/{gh}/pull/{n})"
+            )
+
+        self.assertEqual(
+            pr_status.depends_on(model, 2, mark_failed=True),
+            f"{link('owner/repo', 3)} ❌ and {link('other/repo', 5)} ❌",
+        )
+        self.assertEqual(
+            pr_status.depends_on(model, 1, mark_failed=True),
+            f"{link('owner/repo', 2)} (and transitively {link('owner/repo', 3)} ❌)",
+        )
+        self.assertEqual(
+            pr_status.depends_on(model, 2),
+            f"{link('owner/repo', 3)} and {link('other/repo', 5)}",
+        )
+
+
 class ShellWordTest(unittest.TestCase):
     """Tests for shell_word."""
 

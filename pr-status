@@ -163,6 +163,15 @@ class Repo:
         """
         return highlight(self.gh, n, f"[{self.ref(n)}]({self.url(n)})")
 
+    def failed_mark(self, n):
+        """Return the mark that a link to PR n carries if the PR's CI failed.
+
+        Returns:
+            FAILED_MARK if the PR's CI failed, or "" otherwise.
+        """
+        load_reviews_and_ci(self)
+        return FAILED_MARK if n in self.ci_failed else ""
+
     def refs(self, ns):
         """Return how documents refer to the PRs ns.
 
@@ -424,6 +433,10 @@ def external_link(ref):
     """
     gh, n = ref.split("#")
     return highlight(gh, int(n), f"[{ref}](https://github.com/{gh}/pull/{n})")
+
+
+# The mark that follows a PR whose CI failed.
+FAILED_MARK = " ❌"
 
 
 # The PRs that the documents highlight, as pairs of a lowercase GitHub slug, such as
@@ -792,6 +805,9 @@ class Model:
         self.external_partners = {}
         self.stated_closed = {}
         self.external = {}
+        # This model and the models that unite_partners unites it with, as a map from each
+        # one's lowercase GitHub slug, such as "org/repo", to the model.
+        self.by_gh = {repo.gh.lower(): self}
         prereqs = {n: stated_prerequisites(repo.prs[n]["body"], repo) for n in open_prs}
         # Look up all the states at once; state_of and external_state look up any that remain.
         external = {e for _, ext, _, _, _ in prereqs.values() for e in ext} | {
@@ -993,7 +1009,7 @@ class Model:
             outdated = sum(threads)
             cell.append(str(len(threads)) + (f" ({outdated} outdated)" if outdated else ""))
         if n in self.repo.ci_failed:
-            cell.append(" ❌")
+            cell.append(FAILED_MARK)
         elif n in self.repo.ci_passed:
             cell.append(" ✅")
         if n in self.repo.master_conflicts or self.conflicting_prerequisites(n):
@@ -1070,6 +1086,8 @@ def unite_partners(models):
     depends on every prerequisite of every member, and on no member.
     """
     by_gh = {m.repo.gh.lower(): m for m in models}
+    for model in models:
+        model.by_gh = by_gh
     neighbors = defaultdict(set)  # (model, PR number) -> partners
     for model in models:
         for n in model.open:
@@ -1217,8 +1235,26 @@ def needed_by(model, n):
     return text
 
 
-def depends_on(model, n):
+def external_failed_mark(model, ref):
+    """Return the mark that a link to the PR ref carries if the PR's CI failed.
+
+    Args:
+        model: a Model.
+        ref: a PR in another repository, such as "owner/repo#5".
+
+    Returns:
+        FAILED_MARK if the PR's repository is one of the models that unite_partners united
+        with model and the PR's CI failed, or "" otherwise.
+    """
+    gh, n = ref.split("#")
+    other = model.by_gh.get(gh.lower())
+    return other.repo.failed_mark(int(n)) if other else ""
+
+
+def depends_on(model, n, mark_failed=False):
     """Return the "Depends on" cell of PR n.
+
+    If mark_failed is true, each prerequisite whose CI failed is followed by a red X.
 
     Returns:
         The PR's direct prerequisites, followed by its transitive ones.  Shuffle arrows (🔀)
@@ -1227,15 +1263,22 @@ def depends_on(model, n):
         cell ends with "(and `master` 🔀)".
     """
     r = model.repo
+
+    def link(d):
+        return r.link(d) + (r.failed_mark(d) if mark_failed else "")
+
+    def ext_link(e):
+        return external_link(e) + (external_failed_mark(model, e) if mark_failed else "")
+
     conflicting = model.conflicting_prerequisites(n)
-    items = [r.link(d) + (" 🔀" if d in conflicting else "") for d in sorted(model.direct[n])] + [
-        external_link(e) for e in model.external[n]
+    items = [link(d) + (" 🔀" if d in conflicting else "") for d in sorted(model.direct[n])] + [
+        ext_link(e) for e in model.external[n]
     ]
-    more = model.all_deps[n] - model.direct[n]
+    more = and_list(link(d) for d in sorted(model.all_deps[n] - model.direct[n]))
     # In a cycle of dependencies, a PR can have no direct prerequisite.
-    text = and_list(items) if items else r.links(more)
+    text = and_list(items) if items else more
     if items and more:
-        text += f" (and transitively {r.links(more)})"
+        text += f" (and transitively {more})"
     if not conflicting and n in r.master_conflicts:
         text += f" (and `{r.default_branch}` 🔀)"
     return text
@@ -1905,8 +1948,11 @@ def gen_graph(models, cfg):
     return lines
 
 
-def dependency_cells(model, n):
+def dependency_cells(model, n, mark_failed=False):
     """Return the dependency cells of PR n, which has a prerequisite.
+
+    If mark_failed is true, each prerequisite in the "Depends on" cell whose CI failed is
+    followed by a red X.
 
     Returns:
         The "Depends on", "Stated in description", and
@@ -1946,7 +1992,7 @@ def dependency_cells(model, n):
         if none:
             parts.append(f"lacks every commit of {r.links(none)}")
         contains = f"no ({'; '.join(parts)})"
-    return [depends_on(model, n), stated_text, contains]
+    return [depends_on(model, n, mark_failed), stated_text, contains]
 
 
 def gen_details(model, cfg):
@@ -2151,7 +2197,13 @@ def gen_blocked(model, cfg, base):
         base,
         ["Depends on", "Stated in description", "Branch contains prerequisites' commits", "Notes"],
         [
-            (n, [*dependency_cells(model, n), detail_notes(model, cfg, n, master=False)])
+            (
+                n,
+                [
+                    *dependency_cells(model, n, mark_failed=True),
+                    detail_notes(model, cfg, n, master=False),
+                ],
+            )
             for n in model.blocked()
         ],
     )
