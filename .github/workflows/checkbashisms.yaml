@@ -1,6 +1,11 @@
 name: checkbashisms
 
-"on": [push, pull_request]
+# Pushes to branches other than `main` are tested by the `pull_request` event.
+# Running on every push would test each pull request commit twice.
+"on":
+  push:
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read

@@ -1,5 +1,10 @@
 name: Tests
-"on": [push, pull_request]
+# Pushes to branches other than `main` are tested by the `pull_request` event.
+# Running on every push would test each pull request commit twice.
+"on":
+  push:
+    branches: [main]
+  pull_request:
 permissions:
   contents: read
 jobs:
@@ -7,11 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # A commit pushed to a pull request's branch triggers both a `push` and
-        # a `pull_request` event.  macOS runners are slow and expensive, so run
-        # the macOS tests only for the `pull_request` event.  (A job-level `if`
-        # cannot refer to the matrix, so the matrix itself depends on the event.)
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
