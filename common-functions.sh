@@ -1875,17 +1875,29 @@ parse_llm_option() {
 
 ## Usage: pull_resolving RESOLVER DIRECTORY PULL-ARGUMENT...
 ## Runs `git -C DIRECTORY pull --no-edit PULL-ARGUMENT...`; `--no-edit` keeps
-## a merge from stopping at an editor.  If the pull merges and the merge has
-## conflicts, resolves them with `resolve_merge_conflicts`, asking RESOLVER,
-## if it is not empty, about any that `git rerere` did not resolve, and
-## commits the merge with the message that `git pull` composed.  (A pull that
-## rebases cannot be resolved this way.)
+## a merge from stopping at an editor.  Each PULL-ARGUMENT is an option, such
+## as "-q"; none names a repository or a refspec, so the pull fetches the
+## upstream branch of the branch checked out in DIRECTORY.  If the pull merges
+## and the merge has conflicts, resolves them with `resolve_merge_conflicts`,
+## asking RESOLVER, if it is not empty, about any that `git rerere` did not
+## resolve, and commits the merge with the message that `git pull` composed.
+## (A pull that rebases cannot be resolved this way.)
+## Sets ${pull_fetched} to the head of the upstream branch that the pull
+## fetched, which it merged, fast-forwarded to, rebased onto, or found already
+## in the branch, as a full hash such as
+## "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b".  That commit's history was
+## built where it was pushed, even if no remote-tracking branch records it,
+## as when `branch.BRANCH.remote` is a URL.  Sets ${pull_fetched} to the empty
+## string instead if the branches of the upstream branch's repository need
+## not have been built (see `is_built_remote`), or if the pull did not record
+## the head in FETCH_HEAD.
 ## Returns 1, after printing a diagnostic, if a merge is already in progress
 ## in DIRECTORY, or if the pull fails and its conflicts are not resolved.
 pull_resolving() {
   pull_resolver="$1"
   pull_dir="$2"
   shift 2
+  pull_fetched=''
   # Otherwise, `git pull` would refuse to run, and the merge in progress would
   # seem to be the pull's.
   if git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
@@ -1895,11 +1907,27 @@ pull_resolving() {
   # `rerere.autoUpdate` false and the configured conflict style are as for
   # the merge in `merge_build_push`.
   if git -C "${pull_dir}" -c rerere.autoUpdate=false pull --no-edit "$@"; then
-    return 0
+    pull_conflicted=0
+  else
+    echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
+    if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+      return 1
+    fi
+    pull_conflicted=1
   fi
-  echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
-  if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
-    return 1
+  # FETCH_HEAD is read now, before `resolve_merge_conflicts` runs an agent,
+  # which might fetch and so overwrite it.  FETCH_HEAD names first the commit
+  # that `git pull` merges, fast-forwards to, or rebases onto.
+  # Strip the known prefix ourselves, because `symbolic-ref --short` can return
+  # "heads/BRANCH" when a tag and the branch have the same name.
+  if pull_ref="$(git -C "${pull_dir}" symbolic-ref --quiet HEAD)" \
+    && pull_remote="$(git -C "${pull_dir}" config --get "branch.${pull_ref#refs/heads/}.remote")" \
+    && is_built_remote "${pull_dir}" "${pull_remote}"; then
+    # shellcheck disable=SC2034 # used by the commands that source this file
+    pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
+  fi
+  if [ "${pull_conflicted}" -eq 0 ]; then
+    return 0
   fi
   # Git names the conflicted files relative to the top level of the working
   # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
@@ -1945,19 +1973,86 @@ upstream_description() {
   esac
 }
 
+## Usage: is_built_remote DIRECTORY REMOTE
+## Returns 0 if the branches of the repository that REMOTE names in the clone
+## in DIRECTORY were built where they were pushed, and returns 1 otherwise.
+## REMOTE is a remote's name, such as "origin", or a URL or a pathname, which
+## git accepts in place of a remote's name.  The branches of a repository that
+## is not in the local file system, such as one on GitHub, were built where
+## they were pushed, and so were those of a bare repository in the local file
+## system that has no linked worktree.  The branches of any other repository
+## need not have been pushed:  of the local repository, which the remote "."
+## names; of a non-bare repository, such as another working clone; of a bare
+## repository with a linked worktree, where commits are made; and of a
+## repository whose location is not known, as when its pathname names no
+## directory or begins with "~".
+## Remembers its result for each top level of a working tree and REMOTE in
+## ${built_remote_cache}, so it does not notice a later change, such as a
+## worktree added to the bare repository, unless that variable is cleared.
+is_built_remote() {
+  if [ "$2" = . ]; then
+    return 1
+  fi
+  # Git resolves a relative pathname in the top level of the working tree,
+  # not in a subdirectory such as DIRECTORY.
+  built_remote_top="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" \
+    || built_remote_top="$1"
+  # Each entry is 3 lines:  the result, the top level, and REMOTE.
+  built_remote_entry="${built_remote_top}
+$2
+"
+  case "
+${built_remote_cache:-}" in
+    *"
+0
+${built_remote_entry}"*) return 0 ;;
+    *"
+1
+${built_remote_entry}"*) return 1 ;;
+  esac
+  if is_built_remote_uncached "${built_remote_top}" "$2"; then
+    built_remote_result=0
+  else
+    built_remote_result=1
+  fi
+  built_remote_cache="${built_remote_cache:-}${built_remote_result}
+${built_remote_entry}"
+  return "${built_remote_result}"
+}
+
+## Usage: is_built_remote_uncached TOP REMOTE
+## Returns 0 if the branches of the repository that REMOTE names in the clone
+## whose working tree has the top level TOP were built where they were pushed,
+## and returns 1 otherwise; see `is_built_remote`, which remembers the result.
+is_built_remote_uncached() {
+  built_remote_key="$(repository_key "$1" "$2")"
+  case "${built_remote_key}" in
+    '' | '~'*) return 1 ;;
+    /*) ;;
+    *) return 0 ;;
+  esac
+  [ "$(git -C "${built_remote_key}" rev-parse --is-bare-repository 2> /dev/null)" = true ] \
+    && [ "$(git -C "${built_remote_key}" worktree list --porcelain 2> /dev/null | grep -c '^worktree ')" -eq 1 ]
+}
+
 ## Usage: remote_branch_refs DIRECTORY
 ## Prints the full names, separated by spaces, of the remote-tracking branches
 ## that the branch checked out in DIRECTORY pushes to and pulls from, such as
-## "refs/remotes/origin/feature".  Omits any that does not exist or that is a
-## local branch rather than a remote-tracking branch, and prints each only
-## once.  If the branch pushes to a remote other than the one that it pulls
-## from, first fetches the branch that it pushes to, because `git pull`
-## fetches only the remote that it pulls from; if that fetch fails, prints a
-## warning and uses the remote-tracking branch as it is.
+## "refs/remotes/origin/feature", and whose histories were built where they
+## were pushed.  Omits any that does not exist, that is a local branch rather
+## than a remote-tracking branch, or whose remote's branches need not have
+## been built (see `is_built_remote`), and prints each only once.  If the
+## branch pushes to a remote other than the one that it pulls from, first
+## fetches the branch that it pushes to, because `git pull` fetches only the
+## remote that it pulls from; if that fetch fails, prints a warning and uses
+## the remote-tracking branch as it is.
 remote_branch_refs() {
   remote_refs_list=''
-  if remote_refs_branch="$(git -C "$1" symbolic-ref --quiet HEAD)" \
-    && remote_refs_push="$(git -C "$1" rev-parse --symbolic-full-name '@{push}' 2> /dev/null)" \
+  if ! remote_refs_branch="$(git -C "$1" symbolic-ref --quiet HEAD)"; then
+    printf '\n'
+    return 0
+  fi
+  if remote_refs_push="$(git -C "$1" rev-parse --symbolic-full-name '@{push}' 2> /dev/null)" \
     && git -C "$1" rev-parse --verify --quiet "${remote_refs_push}" > /dev/null; then
     remote_refs_push_remote="$(git -C "$1" for-each-ref --format='%(push:remotename)' "${remote_refs_branch}")"
     # `%(push:remoteref)` is empty unless the remote has push refspecs; then
@@ -1967,6 +2062,7 @@ remote_branch_refs() {
       refs/remotes/*)
         if [ -n "${remote_refs_push_remote}" ] \
           && [ "${remote_refs_push_remote}" != "$(git -C "$1" for-each-ref --format='%(upstream:remotename)' "${remote_refs_branch}")" ] \
+          && is_built_remote "$1" "${remote_refs_push_remote}" \
           && ! git -C "$1" fetch -q "${remote_refs_push_remote}" \
             "+${remote_refs_push_branch:-${remote_refs_branch}}:${remote_refs_push}" < /dev/null; then
           echo "${SCRIPT_NAME}: cannot fetch ${remote_refs_push#refs/remotes/} in $1; it might be out of date" >&2
@@ -1981,7 +2077,12 @@ remote_branch_refs() {
         *" ${remote_refs_ref} "*) ;;
         *)
           case "${remote_refs_ref}" in
-            refs/remotes/*) remote_refs_list="${remote_refs_list:+${remote_refs_list} }${remote_refs_ref}" ;;
+            refs/remotes/*)
+              if is_built_remote "$1" "$(git -C "$1" for-each-ref \
+                --format="%(${remote_refs_kind}:remotename)" "${remote_refs_branch}")"; then
+                remote_refs_list="${remote_refs_list:+${remote_refs_list} }${remote_refs_ref}"
+              fi
+              ;;
           esac
           ;;
       esac
@@ -2031,21 +2132,66 @@ built_commits() {
 ## agent would merely work around it.  For example, a pull that
 ## fast-forwarded the branch brought only commits that the remote already
 ## had.  Prints a diagnostic if it returns 1 because git fails.
+## The account in ${merge_fix_account} omits each commit in BUILT that is in
+## the history of a remote branch or of another commit in BUILT, because it
+## excludes no more commits, but that commit's tree still counts.  Of commits
+## in BUILT that are the same commit, the account keeps the first.
 has_unbuilt_merge() {
   merge_fix_remotes="$(remote_branch_refs .)"
-  merge_fix_built=''
+  # The commits in BUILT that are in the repository, each named once:  of two
+  # names of one commit, such as a ref and a hash, only the first.
+  merge_fix_present=''
+  merge_fix_hashes=' '
   for merge_fix_commit in $1; do
-    if git rev-parse --verify --quiet "${merge_fix_commit}^{commit}" > /dev/null; then
-      merge_fix_built="${merge_fix_built:+${merge_fix_built} }${merge_fix_commit}"
+    if merge_fix_hash="$(git rev-parse --verify --quiet "${merge_fix_commit}^{commit}")"; then
+      case "${merge_fix_hashes}" in
+        *" ${merge_fix_hash} "*) ;;
+        *)
+          merge_fix_hashes="${merge_fix_hashes}${merge_fix_hash} "
+          merge_fix_present="${merge_fix_present:+${merge_fix_present} }${merge_fix_commit}"
+          ;;
+      esac
     fi
   done
+  # A commit in the history of a remote branch or of another commit in BUILT,
+  # such as the head that a pull fetched, excludes nothing more, and would
+  # only lengthen the account.  The other names in ${merge_fix_present} name
+  # other commits.
+  # `git merge-base --independent` prints, one per line, the commits that
+  # are in the history of no other commit given, but it prints a commit that
+  # a remote branch is at, so such a commit is excluded separately.
+  merge_fix_built=''
+  if [ -n "${merge_fix_present}" ]; then
+    # shellcheck disable=SC2086 # the variables are lists of commits
+    if ! merge_fix_independent="$(git merge-base --independent ${merge_fix_remotes} ${merge_fix_hashes})" \
+      || ! merge_fix_remote_hashes="$(git rev-parse ${merge_fix_remotes})"; then
+      echo "${SCRIPT_NAME}: cannot compare the built commits in $(pwd), so no AI agent is asked to fix the build" >&2
+      return 1
+    fi
+    merge_fix_independent=" $(printf '%s' "${merge_fix_independent}" | tr '\n' ' ') "
+    merge_fix_remote_hashes=" $(printf '%s' "${merge_fix_remote_hashes}" | tr '\n' ' ') "
+    # ${merge_fix_hashes} holds the hashes of ${merge_fix_present}, in order.
+    # shellcheck disable=SC2086 # the variable is a list of commits
+    set -- ${merge_fix_hashes}
+    for merge_fix_commit in ${merge_fix_present}; do
+      case "${merge_fix_independent}" in
+        *" $1 "*)
+          case "${merge_fix_remote_hashes}" in
+            *" $1 "*) ;;
+            *) merge_fix_built="${merge_fix_built:+${merge_fix_built} }${merge_fix_commit}" ;;
+          esac
+          ;;
+      esac
+      shift
+    done
+  fi
   if ! merge_fix_tree="$(git rev-parse --verify --quiet 'HEAD^{tree}')"; then
     echo "${SCRIPT_NAME}: cannot read the tree of HEAD in $(pwd), so no AI agent is asked to fix the build" >&2
     return 1
   fi
   # The build of a tree that a remote branch, or a commit in BUILT, has is
   # not a merge's doing.
-  for merge_fix_commit in ${merge_fix_remotes} ${merge_fix_built}; do
+  for merge_fix_commit in ${merge_fix_remotes} ${merge_fix_present}; do
     if [ "$(git rev-parse --verify --quiet "${merge_fix_commit}^{tree}")" = "${merge_fix_tree}" ]; then
       return 1
     fi
@@ -2126,15 +2272,25 @@ has_unbuilt_merge() {
     return 1
   fi
   merge_fix_branch="$(git symbolic-ref --quiet --short HEAD)" || merge_fix_branch=HEAD
+  case "${merge_fix_built}" in
+    '') merge_fix_built_history='' ;;
+    *' '*) merge_fix_built_history="the histories of $(printf '%s' "${merge_fix_built}" | sed -e 's/ / and /g'), which were built elsewhere" ;;
+    *) merge_fix_built_history="the history of ${merge_fix_built}, which was built elsewhere" ;;
+  esac
+  merge_fix_other=''
   case "${merge_fix_remotes}" in
-    '') merge_fix_lack="Git cannot name a remote branch that branch ${merge_fix_branch} pushes to or pulls from, so its commits might not have been built" ;;
+    '')
+      if [ -n "${merge_fix_built}" ]; then
+        merge_fix_lack="Branch ${merge_fix_branch} has commits that are not in ${merge_fix_built_history}"
+      else
+        merge_fix_lack="Branch ${merge_fix_branch} pushes to and pulls from no remote branch whose history is known to have been built, so its commits might not have been built"
+      fi
+      ;;
     *' '*) merge_fix_lack="Branch ${merge_fix_branch} has commits that the remote branches $(printf '%s' "${merge_fix_remotes}" | sed -e 's/ / and /') lack" ;;
     *) merge_fix_lack="Branch ${merge_fix_branch} has commits that the remote branch ${merge_fix_remotes} lacks" ;;
   esac
-  if [ -n "${merge_fix_built}" ]; then
-    merge_fix_other="other than those in the history of ${merge_fix_built}, which were built elsewhere"
-  else
-    merge_fix_other=''
+  if [ -n "${merge_fix_remotes}" ] && [ -n "${merge_fix_built}" ]; then
+    merge_fix_other="other than those in ${merge_fix_built_history}"
   fi
   merge_fix_excluded="${merge_fix_remotes}${merge_fix_remotes:+${merge_fix_built:+ }}${merge_fix_built}"
   merge_fix_account="${merge_fix_lack}${merge_fix_other:+, ${merge_fix_other}}.  Among those commits are these merges, oldest first, any of which might have combined changes that do not fit together:
@@ -2176,11 +2332,12 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
 ## it, but only if a merge on the current branch might have broken the
 ## build, as `has_unbuilt_merge` determines.  Its argument is BUILT, a list
 ## of commits, separated by spaces, whose histories were built elsewhere,
-## such as "refs/remotes/upstream/main", together with the `built_commits`
-## of DIRECTORY, a working tree such as the one that COMMIT comes from, if
-## DIRECTORY is given and not empty.  The merge commit can be the one that
-## this call made, one that a pull made, or one that an earlier call made
-## but did not push, as when its build failed.
+## such as "refs/remotes/upstream/main" or the head that a pull fetched (see
+## `pull_resolving`), together with the
+## `built_commits` of DIRECTORY, a working tree such as the one that COMMIT
+## comes from, if DIRECTORY is given and not empty.  The merge commit can be
+## the one that this call made, one that a pull made, or one that an earlier
+## call made but did not push, as when its build failed.
 ## Returns 1, after printing a diagnostic, on failure.
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 merge_build_push() {
@@ -3101,40 +3258,82 @@ remote_heads() {
   return "${remote_heads_status}"
 }
 
-## Usage: only_dot_project DIRECTORY
-## Returns 0 (true) if DIRECTORY holds nothing but Eclipse `.project` files:
-## that is, if every entry of DIRECTORY is a `.project` file or is a directory
-## that itself holds nothing but `.project` files.  A directory that holds
-## nothing at all satisfies this, which is what lets an empty subdirectory --
-## such as the `bin` that Eclipse makes for a project's build output -- count
-## as nothing.
+## Usage: is_build_output_name NAME
+## Returns 0 (true) if NAME, the last component of a directory's pathname, is
+## the name of a directory of Python build output:  `.venv`, a virtual
+## environment, or a name that ends in `.egg-info`, such as
+## `myproject.egg-info`, which holds package metadata.  Such a directory holds
+## no branch directory and no work, except as `holds_no_checkout` tests.
+is_build_output_name() {
+  case "$1" in
+    '.venv' | *.egg-info) return 0 ;;
+  esac
+  return 1
+}
+
+## Usage: holds_no_checkout DIRECTORY
+## Returns 0 (true) if a directory DIRECTORY holds no version-control
+## checkout:  that is, if nothing in DIRECTORY, at any depth, is named `.git`,
+## `.hg`, `.svn`, or `.bzr`.  Returns 1 (false) if the user cannot read some
+## directory in DIRECTORY, which might hold a checkout.
+##
+## `find` writes newline-separated text, which cannot represent a file name
+## that contains a newline, but this function needs only whether `find` wrote
+## anything, which such a name does not obscure.
+holds_no_checkout() {
+  holds_no_checkout_found="$(find "$1" \( -name .git -o -name .hg -o -name .svn \
+    -o -name .bzr \) -prune -print 2> /dev/null)" || return 1
+  [ -z "${holds_no_checkout_found}" ]
+}
+
+## Usage: only_leftovers DIRECTORY
+## Returns 0 (true) if DIRECTORY holds nothing but leftovers:  files and
+## directories that tools other than git create in a working tree and that
+## remain after the working tree itself is gone.  A leftover is one of these:
+##  * an Eclipse `.project` file, which is a regular file;
+##  * a directory of Python build output that holds no version-control
+##    checkout, as `holds_no_checkout` tests:  either a Python virtual environment, which is a directory named `.venv`,
+##    or Python package metadata, which is a directory whose name ends in
+##    `.egg-info`, such as `myproject.egg-info`.
+## That is, every entry of DIRECTORY is a leftover or is a directory that
+## itself holds nothing but leftovers.  A directory that holds nothing at all
+## satisfies this, which is what lets an empty subdirectory -- such as the
+## `bin` that Eclipse makes for a project's build output -- count as nothing.
+##
+## Such a directory's contents are build output, which a build re-creates, so
+## they need not be leftovers themselves.  Nor need they belong to the user:
+## a container that runs as root creates them owned by root, and they are
+## what remains when the user's `rm -rf` of a branch directory cannot remove
+## them.  A `.venv` or `*.egg-info` directory that holds a version-control
+## checkout is not a leftover, because `pip install -e git+URL#egg=NAME`
+## clones a repository into `.venv/src/`, and that clone can hold unpushed
+## work.
 ##
 ## This says only what is in DIRECTORY; the caller decides what that means.
 ## A directory that holds nothing satisfies this test only vacuously, so the
-## variable `only_dot_project_found` is set to a nonempty value if at least
-## one `.project` file was seen, and is left alone otherwise.  A caller that
-## distinguishes a tree of `.project` files from a tree of nothing -- as
-## `is_deleted_branch` does -- sets that variable to the empty string before
+## variable `only_leftovers_found` is set to a nonempty value if at least one
+## leftover was seen, and is left alone otherwise.  A caller that
+## distinguishes a tree of leftovers from a tree of nothing -- as
+## `is_leftover_tree` does -- sets that variable to the empty string before
 ## the call and tests it after.  A shell function has no local variables, so
 ## the recursive calls below all set the one variable, and it therefore
 ## reports about the whole tree.
 ##
 ## A symbolic link is content, whether it names a directory, a file, or
-## nothing:  it is neither skipped as a `.project` file nor descended into.
-## Following one that names an ancestor would not terminate, and a link is
-## something that the user put there.
+## nothing:  it is never a leftover, and it is not descended into.  Following
+## one that names an ancestor would not terminate, and a link is something
+## that the user put there.
 ##
-## `find "$1" ! -name .project ! -type d` would be simpler, but `find`
-## communicates through newline-separated text, which cannot represent a file
-## name that contains a newline, whereas the globs and the positional
-## parameters below can hold any file name.
+## `find` would be simpler, but `find` communicates through newline-separated
+## text, which cannot represent a file name that contains a newline, whereas
+## the globs and the positional parameters below can hold any file name.
 ##
 ## The entries that remain to be examined are held in the positional
 ## parameters, which a shell makes local to a function call, so the recursive
 ## call below gets its own and this call's are intact when it returns.  A
 ## `for` loop over a variable could not recurse, because a shell function has
 ## no local variables.
-only_dot_project() {
+only_leftovers() {
   # In a directory that cannot be listed (but can be searched, such as one with
   # mode 711), every glob below expands to nothing, which is indistinguishable
   # from an empty directory.  Do not claim that such a directory holds nothing.
@@ -3149,28 +3348,52 @@ only_dot_project() {
         continue
         ;;
       '.project')
-        # Skip the Eclipse metadata itself.  A *directory* named `.project`
-        # can hold anything, so leave it to the test below, which descends
-        # into it like any other directory.
+        # A *directory* named `.project` can hold anything, so leave it to the
+        # test below, which descends into it like any other directory.
         if [ -f "$1" ] && [ ! -L "$1" ]; then
-          only_dot_project_found=1
+          only_leftovers_found=1
           shift
           continue
         fi
         ;;
     esac
+    # A *file* with the name of a directory of build output can hold anything,
+    # so leave it to the test below, which treats it as content.
+    if is_build_output_name "${1##*/}" && [ -d "$1" ] && [ ! -L "$1" ]; then
+      if ! holds_no_checkout "$1"; then
+        return 1
+      fi
+      only_leftovers_found=1
+      shift
+      continue
+    fi
     # When a pattern matches nothing, the shell leaves it unexpanded.  Such a
     # pathname names no entry, so it is not content.
     if [ ! -e "$1" ] && [ ! -L "$1" ]; then
       shift
       continue
     fi
-    if [ ! -d "$1" ] || [ -L "$1" ] || ! only_dot_project "$1"; then
+    if [ ! -d "$1" ] || [ -L "$1" ] || ! only_leftovers "$1"; then
       return 1
     fi
     shift
   done
   return 0
+}
+
+## Usage: is_leftover_tree DIRECTORY
+## Returns 0 (true) if a directory DIRECTORY holds nothing but leftovers, as
+## `only_leftovers` tests, and holds at least one leftover.
+##
+## `only_leftovers` is satisfied by a directory that holds nothing at all, and
+## a tree of nothing but empty directories is not evidence of a working tree
+## that a branch directory once held.  The leftover need not be in DIRECTORY
+## itself:  a branch whose Eclipse projects were all below its top level, such
+## as a `java/lib` that Eclipse knew as a project, leaves its metadata there
+## and none at the top.
+is_leftover_tree() {
+  only_leftovers_found=
+  only_leftovers "$1" && [ -n "${only_leftovers_found}" ]
 }
 
 ## Usage: is_deleted_branch DIRECTORY
@@ -3211,33 +3434,24 @@ is_deleted_branch() {
     return 2
   fi
 
-  # A directory that holds nothing but Eclipse `.project` files is the
-  # leftover of a branch directory whose working tree is gone:  what remains
-  # is metadata, a `.project` file for each Eclipse project of the branch and
-  # the directories that hold them, and none of the branch itself.  Such a
-  # directory is as removable as one whose branch was deleted in its remote,
-  # so answer 0 for it.
+  # A directory that holds nothing but leftovers, such as Eclipse `.project`
+  # files and a Python `.venv` directory, is the leftover of a branch directory
+  # whose working tree is gone:  what remains is what other tools made, and
+  # none of the branch itself.  Such a directory is as removable as one whose
+  # branch was deleted in its remote, so answer 0 for it.  `only_leftovers`
+  # says which files and directories are leftovers.  The tests below would
+  # call such a directory "not the top level of a working tree" (status 2):
+  # that is true, and it would leave the caller's question -- may this
+  # directory be removed? -- unanswered when it has an answer.
   #
-  # Answer it before the tests below, which would call such a directory "not
-  # the top level of a working tree" (status 2):  that is true, and it would
-  # leave the caller's question -- may this directory be removed? -- unanswered
-  # when it has an answer.  The tests below still decide every directory that
-  # holds anything else, including a working tree, whose `.git` is not a
-  # `.project` file and which `only_dot_project` therefore rejects at its
-  # first entry.
-  #
-  # Require a `.project` file somewhere in the tree.  `only_dot_project` is
-  # satisfied by a directory that holds nothing at all, and a tree of nothing
-  # but empty directories is not evidence of an Eclipse project that a branch
-  # directory once held.  The `.project` file need not be in DIRECTORY
-  # itself:  a branch whose Eclipse projects were all below its top level,
-  # such as a `java/lib` that Eclipse knew as a project, leaves its metadata
-  # there and none at the top.
-  only_dot_project_found=
-  if only_dot_project "${is_deleted_branch_dir}" \
-    && [ -n "${only_dot_project_found}" ]; then
-    return 0
-  fi
+  # Answer 0 only for a directory of leftovers that no working tree claims:
+  # one at which git can use no repository, or one in a working tree that
+  # tracks none of its files, such as a leftover in a home directory that is a
+  # repository of configuration files.  A directory in a working tree that
+  # tracks a file in it, such as a test fixture that holds a `*.egg-info`
+  # directory, is part of that working tree, and removing it would delete
+  # tracked files.  The top level of a working tree holds its `.git`, which is
+  # not a leftover.
 
   # `git -C DIR rev-parse` succeeds for every directory within a working tree,
   # so also require that DIRECTORY is that working tree's top level.  A
@@ -3253,6 +3467,9 @@ is_deleted_branch() {
   if ! is_deleted_branch_toplevel="$(git -C "${is_deleted_branch_dir}" rev-parse \
     --is-bare-repository --show-toplevel 2> /dev/null)"; then
     if [ -z "${is_deleted_branch_toplevel}" ]; then
+      if is_leftover_tree "${is_deleted_branch_dir}"; then
+        return 0
+      fi
       # shellcheck disable=SC2034 # Callers read it; see the documentation above.
       is_deleted_branch_no_usable_repository=1
     fi
@@ -3286,7 +3503,15 @@ is_deleted_branch() {
   fi
   if [ "${is_deleted_branch_dir_real}" != "${is_deleted_branch_top_real}" ]; then
     # Not the top level of a working tree, so it is not on any branch, deleted
-    # or otherwise.
+    # or otherwise.  It is a leftover if the working tree tracks no file in it,
+    # which is status 1 of `git ls-files --error-unmatch`.
+    if is_leftover_tree "${is_deleted_branch_dir}"; then
+      git -C "${is_deleted_branch_dir}" ls-files --error-unmatch -- . \
+        > /dev/null 2>&1
+      if [ "$?" -eq 1 ]; then
+        return 0
+      fi
+    fi
     return 2
   fi
 
