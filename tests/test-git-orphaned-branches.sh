@@ -154,7 +154,14 @@ if [ "$(id -u)" -ne 0 ]; then
   chmod 111 "${work}/dot-project/p-branch-unlistable"
 fi
 
-if ! output="$(cd "${work}/dot-project" && "${GIT_ORPHANED_BRANCHES}")"; then
+# A `*-branch-*` directory that is a subdirectory of a working tree is part of
+# that working tree, not a leftover, so it is neither listed nor warned about.
+git init -q -b main "${work}/dot-project/p-repo"
+mkdir -p "${work}/dot-project/p-repo/r-branch-subdir"
+touch "${work}/dot-project/p-repo/r-branch-subdir/other"
+
+if ! output="$(cd "${work}/dot-project" && "${GIT_ORPHANED_BRANCHES}" \
+  2> "${work}/dot-project.stderr")"; then
   fail "git-orphaned-branches exited with a failure status"
 fi
 
@@ -190,8 +197,50 @@ if printf '%s\n' "${output}" | grep -q -F -- 'p-branch-behind-link'; then
   echo "FAIL: git-orphaned-branches followed a symbolic link to a directory"
   status=1
 fi
+check "p-repo/r-branch-subdir" "unlisted"
 if [ "${unlistable}" -eq 1 ]; then
   check "p-branch-unlistable" "unlisted"
+fi
+
+# Checks whether `git-orphaned-branches` warned that a directory is in no git
+# working tree.
+# Arguments: DIRECTORY-NAME  "warned" or "unwarned"
+check_warned() {
+  if grep -q -F -- "warning: not listing ${work}/dot-project/$1, which is not in a git working tree" \
+    "${work}/dot-project.stderr"; then
+    actual="warned"
+  else
+    actual="unwarned"
+  fi
+  if [ "${actual}" != "$2" ]; then
+    echo "FAIL: git-orphaned-branches left $1 ${actual} rather than $2"
+    status=1
+  fi
+}
+
+# Each `*-branch-*` directory that holds more than `.project` files and is in
+# no working tree is warned about; each listed one is not.
+check_warned "p-branch-only-project" "unwarned"
+check_warned "p-branch-plus-file" "warned"
+check_warned "p-branch-plus-hidden" "warned"
+check_warned "p-branch-leftover" "unwarned"
+check_warned "p-branch-deep-file" "warned"
+check_warned "p-branch-plus-dangling-symlink" "warned"
+check_warned "p-branch-empty" "warned"
+check_warned "p-branch-no-project" "warned"
+check_warned "p-plain-project" "unwarned"
+check_warned "p-branch-outer" "warned"
+check_warned "p-branch-outer/q-branch-inner" "unwarned"
+check_warned "p-branch-empty-tree" "warned"
+check_warned "p-repo/r-branch-subdir" "unwarned"
+if [ "${unlistable}" -eq 1 ]; then
+  check_warned "p-branch-unlistable" "warned"
+fi
+# Every file in the test's directories belongs to the user who runs it.
+if grep -q -F -- 'files that you do not own' "${work}/dot-project.stderr"; then
+  echo "FAIL: git-orphaned-branches claimed that a file that the user owns is another user's:"
+  cat "${work}/dot-project.stderr"
+  status=1
 fi
 
 ###########################################################################
@@ -767,14 +816,14 @@ if ! grep -q -F -- 'contains a directory that was not removed' \
 fi
 
 # A scan that finds nothing removes nothing and exits with status 0.
-mkdir -p "${work}/removal-empty/not-a-branch-directory"
+mkdir -p "${work}/removal-empty/unrelated-directory"
 if ! output="$(cd "${work}/removal-empty" && "${GIT_ORPHANED_BRANCHES}" --remove)"; then
   fail "--remove exited with a failure status although it found nothing"
 fi
 if [ -n "${output}" ]; then
   fail "--remove printed [${output}], expected no output"
 fi
-if [ ! -d "${work}/removal-empty/not-a-branch-directory" ]; then
+if [ ! -d "${work}/removal-empty/unrelated-directory" ]; then
   fail "--remove removed a directory that it does not list"
 fi
 

@@ -165,6 +165,9 @@ The commands are:
   A directory whose branch still exists in the remote, but whose GitHub pull
   requests are all closed or merged, is neither listed nor removed; a warning
   about it is printed instead.  (This needs the `gh` command.)
+  Likewise, a warning is printed about a directory named `*-branch-*` that
+  is in no git working tree and holds more than `.project` files, such as one
+  whose removal failed on files that another user owns.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
   alias below).
 * [`git-remove-branch-directory`](git-remove-branch-directory)

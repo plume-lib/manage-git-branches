@@ -10,6 +10,10 @@
 # it is printed on standard error.  (This needs the `gh` command.)
 # Also lists directories that hold nothing but Eclipse `.project` files,
 # which is what a branch directory leaves behind when its working tree is gone.
+# A directory named *-branch-* that holds anything else and is in no git
+# working tree, such as one whose removal failed on files owned by another
+# user, is not listed; instead, a warning about it is printed on standard
+# error.
 #
 # A directory that another live working tree depends on -- one that hosts a
 # linked worktree, or one that is a submodule of a superproject -- is never
@@ -468,8 +472,41 @@ rest_pr_states() {
     < /dev/null 2> /dev/null
 }
 
+# Warns, on standard error, about directory $1, whose name matches
+# `*-branch-*`, if it is in no git working tree.  Says nothing about a
+# directory that is in one, such as a subdirectory of a source tree that
+# happens to be named `*-branch-*`.
+#
+# Such a directory is usually what a failed removal of a branch directory left
+# behind.  For example, `rm -rf` removes the `.git` directory and every file
+# that the user can delete, but not the contents of a directory that another
+# user owns, such as a `.venv` that a container running as root created.
+# `is_deleted_branch` recognizes only one kind of leftover, a tree of Eclipse
+# `.project` files, so without this warning any other kind would go
+# unmentioned.  The directory is not listed, because with no repository,
+# nothing tells whether it holds work.
+warn_if_not_in_working_tree() {
+  if git -C "$1" rev-parse --git-dir > /dev/null 2>&1; then
+    return 0
+  fi
+  wnwt_dir="$(absolute_path "$1")" || wnwt_dir="$1"
+  # Files that the user does not own are the likeliest reason that the
+  # directory is still here, so name one.  `-prune` keeps `find` out of a
+  # directory that another user owns:  that directory is itself the example.
+  # `find` writes one pathname per line, so the example is truncated at a
+  # newline in its pathname, which is harmless in a diagnostic.
+  wnwt_foreign="$(find "${wnwt_dir}" ! -user "$(id -u)" -prune -print 2> /dev/null \
+    | head -n 1)"
+  if [ -n "${wnwt_foreign}" ]; then
+    echo "${SCRIPT_NAME}: warning: not listing ${wnwt_dir}, which is not in a git working tree and holds files that you do not own, such as ${wnwt_foreign}" >&2
+  else
+    echo "${SCRIPT_NAME}: warning: not listing ${wnwt_dir}, which is not in a git working tree" >&2
+  fi
+}
+
 # Reports directory $1, whose name matches `*-branch-*`, if its branch was
 # deleted in the remote or if it holds nothing but Eclipse `.project` files.
+# Warns about it if it is in no git working tree.
 #
 # `is_deleted_branch` answers about both:  it reports a directory that holds
 # nothing but `.project` files as deleted (status 0), which is why this
@@ -526,7 +563,8 @@ check_directory() {
       fi
       ;;
     1) note_pr_candidate "$dir" < /dev/null ;;
-    2 | 3) ;;
+    2) warn_if_not_in_working_tree "$dir" ;;
+    3) ;;
     *)
       echo "${SCRIPT_NAME}: is_deleted_branch returned status ${is_deleted_status} on: $dir" >&2
       status=1
