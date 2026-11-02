@@ -1875,11 +1875,13 @@ parse_llm_option() {
 
 ## Usage: pull_resolving RESOLVER DIRECTORY PULL-ARGUMENT...
 ## Runs `git -C DIRECTORY pull --no-edit PULL-ARGUMENT...`; `--no-edit` keeps
-## a merge from stopping at an editor.  If the pull merges and the merge has
-## conflicts, resolves them with `resolve_merge_conflicts`, asking RESOLVER,
-## if it is not empty, about any that `git rerere` did not resolve, and
-## commits the merge with the message that `git pull` composed.  (A pull that
-## rebases cannot be resolved this way.)
+## a merge from stopping at an editor.  Each PULL-ARGUMENT is an option, such
+## as "-q"; none names a repository or a refspec, so the pull fetches the
+## upstream branch of the branch checked out in DIRECTORY.  If the pull merges
+## and the merge has conflicts, resolves them with `resolve_merge_conflicts`,
+## asking RESOLVER, if it is not empty, about any that `git rerere` did not
+## resolve, and commits the merge with the message that `git pull` composed.
+## (A pull that rebases cannot be resolved this way.)
 ## Sets ${pull_fetched} to the head of the upstream branch that the pull
 ## fetched, which it merged, fast-forwarded to, rebased onto, or found already
 ## in the branch, as a full hash such as
@@ -2102,40 +2104,36 @@ built_commits() {
 ## in BUILT that are the same commit, the account keeps the first.
 has_unbuilt_merge() {
   merge_fix_remotes="$(remote_branch_refs .)"
-  # Every commit in BUILT that is in the repository, for the comparison of
-  # trees below.
+  # The commits in BUILT that are in the repository, each named once:  of two
+  # names of one commit, such as a ref and a hash, only the first.
   merge_fix_present=''
+  merge_fix_hashes=' '
   for merge_fix_commit in $1; do
-    if git rev-parse --verify --quiet "${merge_fix_commit}^{commit}" > /dev/null; then
-      merge_fix_present="${merge_fix_present:+${merge_fix_present} }${merge_fix_commit}"
+    if merge_fix_hash="$(git rev-parse --verify --quiet "${merge_fix_commit}^{commit}")"; then
+      case "${merge_fix_hashes}" in
+        *" ${merge_fix_hash} "*) ;;
+        *)
+          merge_fix_hashes="${merge_fix_hashes}${merge_fix_hash} "
+          merge_fix_present="${merge_fix_present:+${merge_fix_present} }${merge_fix_commit}"
+          ;;
+      esac
     fi
   done
   # A commit in the history of a remote branch or of another commit in BUILT,
   # such as the head that a pull fetched, excludes nothing more, and would
-  # only lengthen the account.  Each commit has a position in
-  # ${merge_fix_present}, so that of two names of one commit, such as a ref
-  # and a hash, only the later is omitted.
+  # only lengthen the account.  The other names in ${merge_fix_present} name
+  # other commits.
   merge_fix_built=''
-  merge_fix_position=0
   for merge_fix_commit in ${merge_fix_present}; do
-    merge_fix_position=$((merge_fix_position + 1))
     merge_fix_redundant=0
-    for merge_fix_remote in ${merge_fix_remotes}; do
-      if git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_remote}"; then
+    for merge_fix_other in ${merge_fix_remotes}; do
+      if git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_other}"; then
         merge_fix_redundant=1
-        break
       fi
     done
-    merge_fix_other_position=0
     for merge_fix_other in ${merge_fix_present}; do
-      merge_fix_other_position=$((merge_fix_other_position + 1))
-      if [ "${merge_fix_redundant}" -eq 1 ]; then
-        break
-      fi
-      if [ "${merge_fix_other_position}" -ne "${merge_fix_position}" ] \
-        && git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_other}" \
-        && { [ "${merge_fix_other_position}" -lt "${merge_fix_position}" ] \
-          || ! git merge-base --is-ancestor "${merge_fix_other}" "${merge_fix_commit}"; }; then
+      if [ "${merge_fix_other}" != "${merge_fix_commit}" ] \
+        && git merge-base --is-ancestor "${merge_fix_commit}" "${merge_fix_other}"; then
         merge_fix_redundant=1
       fi
     done
@@ -2199,7 +2197,7 @@ has_unbuilt_merge() {
   fi
   merge_fix_branch="$(git symbolic-ref --quiet --short HEAD)" || merge_fix_branch=HEAD
   case "${merge_fix_remotes}" in
-    '') merge_fix_lack="Git cannot name a remote branch that branch ${merge_fix_branch} pushes to or pulls from, so its commits might not have been built" ;;
+    '') merge_fix_lack="Branch ${merge_fix_branch} pushes to and pulls from no remote branch whose history is known to have been built, so its commits might not have been built" ;;
     *' '*) merge_fix_lack="Branch ${merge_fix_branch} has commits that the remote branches $(printf '%s' "${merge_fix_remotes}" | sed -e 's/ / and /') lack" ;;
     *) merge_fix_lack="Branch ${merge_fix_branch} has commits that the remote branch ${merge_fix_remotes} lacks" ;;
   esac

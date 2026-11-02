@@ -1177,8 +1177,8 @@ fi
 if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
   fail "build fix with a URL remote: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
 fi
-if ! grep -q 'Git cannot name a remote branch' "${STUB_PROMPT}"; then
-  fail "build fix with a URL remote: the instructions do not say that git cannot name a remote branch: $(cat "${STUB_PROMPT}")"
+if ! grep -q 'pushes to and pulls from no remote branch whose history is known to have been built' "${STUB_PROMPT}"; then
+  fail "build fix with a URL remote: the instructions do not say that no remote branch is known to have been built: $(cat "${STUB_PROMPT}")"
 fi
 message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
 if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
