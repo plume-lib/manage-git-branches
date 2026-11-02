@@ -484,16 +484,23 @@ class SectionGeneratorsTest(unittest.TestCase):
 class GenPushCommandsTest(unittest.TestCase):
     """Tests for gen_push_commands."""
 
-    CHAIN = ("cd /base && \\", "(cd pr1 && git-push-to ../pr2) && \\", 'echo "success"')
+    CHAIN = ("cd /base && \\", "git-push-to \\", "  pr1 \\", "  pr2 && \\", 'echo "success"')
     NO_CHAIN = ("cd /base && \\", 'echo "success"')
 
     def generate(self, commands, conflicts_only):
         """Run gen_push_commands, with push_commands returning the given commands and no notes.
 
+        Args:
+            commands: the commands' lines, either CHAIN or NO_CHAIN
+            conflicts_only: True to generate the "conflicting-push-commands" section; False
+                to generate the "push-commands" section
+
         Returns:
             The section's lines.
         """
-        with mock.patch.object(pr_status, "push_commands", return_value=(list(commands), [])):
+        chain_count = 1 if commands == self.CHAIN else 0
+        result = pr_status.PushCommands(list(commands), [], chain_count)
+        with mock.patch.object(pr_status, "push_commands", return_value=result):
             return pr_status.gen_push_commands([], "/base", conflicts_only)
 
     def test_suggests_resolve_conflicts_first(self):

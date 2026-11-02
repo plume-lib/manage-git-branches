@@ -303,7 +303,8 @@ takes effect when it is set to a non-empty value.
   means no limit.
 * `PR_MERGE_ANALYSIS_CACHE`: the file in which `pr-merge-analysis` caches its
   results.  The default is `.pr-merge-analysis-cache-OWNER__REPO.tsv` in the
-  current directory.  Repositories must not share a cache file.
+  current directory.  Repositories must not share a cache file, so do not set
+  this variable for a `pr-status` run whose config names several repositories.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
 * `AZURE_DEVOPS_EXT_PAT`: the commands that use the Azure DevOps API use this

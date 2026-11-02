@@ -45,12 +45,15 @@ import re
 import shlex
 import subprocess
 import sys
+import typing
 from collections import Counter, defaultdict
 
 CONFIG = "pr-status-config.json"
 # The dependency document's file name when there is no config file.
 DEFAULT_DEPENDENCY_DOCUMENT = "pr-status.md"
 SNAPSHOT = ".pr-status-snapshot.json"
+# The most open PRs of a repository that load_repo reads.
+PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
 
 
@@ -210,7 +213,7 @@ def load_repo(repo, pairwise=True):
                 "--state",
                 "open",
                 "--limit",
-                "300",
+                str(PR_LIMIT),
                 "--json",
                 fields,
             ]
@@ -228,8 +231,9 @@ def load_repo(repo, pairwise=True):
             *([] if pairwise else ["--no-pairwise"]),
             "--default-branch",
             repo.default_branch,
-            # repo.prs holds every open PR.
-            "--prune",
+            # Prune only if repo.prs holds every open PR.  "gh pr list" lists at most
+            # PR_LIMIT of them.
+            *(["--prune"] if len(repo.prs) < PR_LIMIT else []),
             repo.clone,
             repo.gh,
             *map(str, sorted(repo.prs)),
@@ -2199,17 +2203,30 @@ def push_chains(model, base, conflicts_only=False):
     return chains, missing, bool(upstream)
 
 
+class PushCommands(typing.NamedTuple):
+    """The shell commands that update the PRs' branches, as push_commands generates them."""
+
+    lines: list
+    """The commands' lines, such as "git-push-to \\"."""
+    notes: list
+    """Notes about what the commands omit."""
+    chain_count: int
+    """The number of `git-push-to` chains that the commands run."""
+
+
 def push_commands(models, base, conflicts_only=False):
-    """Generate the shell commands that update each PR's branch from upstream and its prerequisites.
+    """Return the shell commands that update each PR's branch from upstream and its prerequisites.
 
     Returns:
-        The commands' lines, and notes about what the commands omit.
+        The commands, as a PushCommands.
     """
     lines = [f"cd {base} && \\"]
     notes = []
+    chain_count = 0
     for m in models:
         r = m.repo
         chains, missing, has_upstream = push_chains(m, base, conflicts_only)
+        chain_count += len(chains)
         for chain in chains:
             lines += ["git-push-to \\", *(f"  {d} \\" for d in chain[:-1]), f"  {chain[-1]}"]
             lines[-1] += " && \\"
@@ -2228,7 +2245,7 @@ def push_commands(models, base, conflicts_only=False):
                 " so these commands do not push it"
             )
     lines.append('echo "success"')
-    return lines, notes
+    return PushCommands(lines, notes, chain_count)
 
 
 def gen_push_commands(models, base, conflicts_only=False):
@@ -2245,10 +2262,9 @@ def gen_push_commands(models, base, conflicts_only=False):
         The section's lines:  with conflicts_only, if there is a chain, a suggestion to run
         resolve-conflicts; then notes; then the commands in a fenced code block.
     """
-    commands, notes = push_commands(models, base, conflicts_only)
+    commands = push_commands(models, base, conflicts_only)
     lines = []
-    # The commands are "cd", one per chain, and "echo".
-    if conflicts_only and len(commands) > 2:
+    if conflicts_only and commands.chain_count > 0:
         lines += [
             (
                 f"Run `cd {base} && resolve-conflicts`, which runs these commands with an AI"
@@ -2257,8 +2273,8 @@ def gen_push_commands(models, base, conflicts_only=False):
             "Alternatively, run the commands yourself.",
             "",
         ]
-    lines += [f"{note}." for note in notes] + ([""] if notes else [])
-    return [*lines, "```sh", *commands, "```"]
+    lines += [f"{note}." for note in commands.notes] + ([""] if commands.notes else [])
+    return [*lines, "```sh", *commands.lines, "```"]
 
 
 # ---------- snapshot and changes ----------
@@ -2459,22 +2475,24 @@ def read_config_file():
         return json.load(f)
 
 
-def dependency_document_name(program):
-    """Return the file name of the dependency document in the current directory.
+def dependency_document_name(cfg, program):
+    """Return the file name of the dependency document that the given config names.
 
-    Exit with an error message if the config file names no dependency document.
+    Exit with an error message if the config names no dependency document.
 
     Args:
+        cfg: a config, as a dict parsed from the config file's JSON, with keys such as
+            "repos" and "documents"; or None if there is no config file
         program: the name of a running program; used for diagnostics.
 
     Returns:
-        The file name, such as "pr-status.md", that the config file names, or
-        DEFAULT_DEPENDENCY_DOCUMENT if there is no config file.
+        The file name, such as "pr-status.md", that cfg names, or
+        DEFAULT_DEPENDENCY_DOCUMENT if cfg is None.
     """
-    cfg = read_config_file()
     if cfg is None:
         return DEFAULT_DEPENDENCY_DOCUMENT
-    name = cfg.get("documents", {}).get("dependencies")
+    docs = cfg.get("documents")
+    name = docs.get("dependencies") if isinstance(docs, dict) else None
     if not isinstance(name, str) or not name:
         sys.exit(
             f"{program}: {CONFIG} names no dependency document"
@@ -2635,10 +2653,11 @@ def main():
         except OSError as error:
             sys.exit(f"pr-status: cannot change to directory {args.directory}: {error.strerror}")
     if args.print_document:
-        print(dependency_document_name("pr-status"))
+        print(dependency_document_name(read_config_file(), "pr-status"))
         return
     base = str(pathlib.Path.cwd())
     cfg = load_config("pr-status")
+    dependencies = pathlib.Path(dependency_document_name(cfg, "pr-status"))
     models = load_models(cfg)
     updates = description_updates(models)
     failed_updates = []
@@ -2693,22 +2712,20 @@ def main():
             print(m.repo.ref(n))
     if check_only:
         return
-    docs = cfg["documents"]
-    unblocked_docs = docs.get("unblocked", [])
+    unblocked_docs = cfg["documents"].get("unblocked", [])
     for doc in unblocked_docs:
         pathlib.Path(doc["file"]).write_text(unblocked_doc(models, cfg, base, doc, as_of))
-    dependencies = pathlib.Path(docs["dependencies"])
     if dependencies.exists():
         text = dependencies.read_text()
     else:
         text = default_dependency_document(models)
     text = add_as_of_section(text)
     text = replace_sections(text, section_generators(models, cfg, base, as_of))
-    pathlib.Path(docs["dependencies"]).write_text(text)
+    dependencies.write_text(text)
     with pathlib.Path(SNAPSHOT).open("w") as f:
         json.dump({"time": now.isoformat(timespec="seconds"), "facts": new}, f, indent=1)
     written = [d["file"] for d in unblocked_docs]
-    written += [f"the generated sections of {docs['dependencies']}", SNAPSHOT]
+    written += [f"the generated sections of {dependencies}", SNAPSHOT]
     print(f"## Wrote {and_list(written)}")
     if failed_updates:
         sys.exit(1)

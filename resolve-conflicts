@@ -7,8 +7,8 @@
 #   resolve-conflicts [--nocompile] [--claude | --codex] [-C DIR]
 #
 # Run it in the directory that holds the dependency document (by default,
-# pr-status.md; see `pr-status --print-document`) and the working copies, as
-# for `pr-status`, or pass that directory with "-C".
+# pr-status.md; see `pr-status --print-document`) and the working copy
+# directories, as for `pr-status`, or pass that directory with "-C".
 #
 # This script does the following:
 #  * run `pr-status`, which regenerates the dependency document,
@@ -145,6 +145,10 @@ while [ "$#" -ge 1 ]; do
 done
 
 pr_status="${SCRIPT_DIR}/pr-status"
+if [ ! -x "${pr_status}" ]; then
+  echo "${SCRIPT_NAME}: cannot find pr-status in ${SCRIPT_DIR}" >&2
+  exit 1
+fi
 if ! document="$("${pr_status}" --print-document)" || [ -z "${document}" ]; then
   echo "${SCRIPT_NAME}: ${pr_status} --print-document failed in $(pwd)" >&2
   exit 1
