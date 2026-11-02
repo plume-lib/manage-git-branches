@@ -640,4 +640,120 @@ check_resolution_raw reject "CRLF line endings, and a separator remains" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\na\r\n=======\r\nA\r\nb\r\n'
 rm "${WORK_DIR}/ccr/.gitattributes"
 
+## Usage: hum_commit DIRECTORY FILE MESSAGE
+## Writes MESSAGE to FILE in DIRECTORY and commits it with that message.
+hum_commit() {
+  printf '%s\n' "$3" > "$1/$2"
+  git -C "$1" add -- "$2"
+  git -C "$1" commit -q -m "$3"
+}
+
+## Tests of has_unbuilt_merge.  A commit in BUILT that is in the history of a
+## remote branch is omitted from the account, but its tree still counts:
+## when the current branch's tree is that of such a commit, upstream/main,
+## no merge broke the build, although an unpushed merge combined changes.
+git init -q -b main "${WORK_DIR}/hum"
+hum_commit "${WORK_DIR}/hum" base.txt "Initial commit"
+hum_commit "${WORK_DIR}/hum" upstream.txt "Change upstream"
+git -C "${WORK_DIR}/hum" update-ref refs/remotes/upstream/main HEAD
+git -C "${WORK_DIR}/hum" switch -q -c feature
+hum_commit "${WORK_DIR}/hum" feature.txt "Change feature"
+git init -q --bare -b main "${WORK_DIR}/hum.git"
+git -C "${WORK_DIR}/hum" remote add origin "${WORK_DIR}/hum.git"
+git -C "${WORK_DIR}/hum" update-ref refs/remotes/origin/feature HEAD
+git -C "${WORK_DIR}/hum" config branch.feature.remote origin
+git -C "${WORK_DIR}/hum" config branch.feature.merge refs/heads/feature
+git -C "${WORK_DIR}/hum" switch -q -c side
+hum_commit "${WORK_DIR}/hum" side.txt "Change side"
+git -C "${WORK_DIR}/hum" switch -q feature
+hum_commit "${WORK_DIR}/hum" other.txt "Change feature again"
+git -C "${WORK_DIR}/hum" merge -q --no-edit side
+git -C "${WORK_DIR}/hum" rm -q feature.txt side.txt other.txt
+git -C "${WORK_DIR}/hum" commit -q -m "Match upstream"
+if (cd "${WORK_DIR}/hum" && has_unbuilt_merge refs/remotes/upstream/main); then
+  fail "has_unbuilt_merge: a tree that upstream/main has is blamed on a merge"
+fi
+## Without that tree, the merge might have broken the build.
+hum_commit "${WORK_DIR}/hum" new.txt "Differ from upstream"
+if ! (cd "${WORK_DIR}/hum" && has_unbuilt_merge refs/remotes/upstream/main); then
+  fail "has_unbuilt_merge: the unpushed merge is not blamed"
+fi
+## The account omits a commit in BUILT that is in the history of a remote
+## branch, such as upstream/main, or of another commit in BUILT, whether
+## earlier or later, and keeps only the first of two names of one commit.
+git -C "${WORK_DIR}/hum" switch -q -c side2 side
+hum_commit "${WORK_DIR}/hum" side2.txt "Change side2"
+git -C "${WORK_DIR}/hum" switch -q feature
+## Usage: check_account BUILT EXCLUDED
+## Checks that `has_unbuilt_merge BUILT` returns 0 and that its account tells
+## the agent to exclude EXCLUDED.
+check_account() {
+  # shellcheck disable=SC2154 # has_unbuilt_merge sets merge_fix_account
+  if ! (cd "${WORK_DIR}/hum" && has_unbuilt_merge "$1" \
+    && printf '%s\n' "${merge_fix_account}" > "${WORK_DIR}/hum-account"); then
+    fail "has_unbuilt_merge $1: the unpushed merge is not blamed"
+  elif ! grep -q -F "git log --graph --stat HEAD --not $2\`" "${WORK_DIR}/hum-account"; then
+    fail "has_unbuilt_merge $1: the account does not exclude exactly $2: $(cat "${WORK_DIR}/hum-account")"
+  fi
+}
+check_account "refs/remotes/upstream/main side side2" "refs/remotes/origin/feature side2"
+check_account "side2 side" "refs/remotes/origin/feature side2"
+check_account "side2 refs/heads/side2 side" "refs/remotes/origin/feature side2"
+
+## Tests of is_built_remote.  A relative pathname is resolved in the top
+## level of the working tree, even from a subdirectory.
+git init -q --bare -b main "${WORK_DIR}/ibr/bare.git"
+git init -q -b main "${WORK_DIR}/ibr/working"
+git init -q -b main "${WORK_DIR}/ibr/clone"
+mkdir "${WORK_DIR}/ibr/clone/sub"
+git -C "${WORK_DIR}/ibr/clone" commit -q --allow-empty -m "Initial commit"
+git -C "${WORK_DIR}/ibr/clone" remote add bare ../bare.git
+git -C "${WORK_DIR}/ibr/clone" remote add working ../working
+git -C "${WORK_DIR}/ibr/clone" remote add missing ../missing.git
+git -C "${WORK_DIR}/ibr/clone" remote add github https://github.com/org/repo.git
+## Usage: check_built_remote DIRECTORY REMOTE EXPECTED
+## Checks that `is_built_remote DIRECTORY REMOTE` returns EXPECTED.
+check_built_remote() {
+  if is_built_remote "$1" "$2"; then
+    check_built_remote_status=0
+  else
+    check_built_remote_status=1
+  fi
+  if [ "${check_built_remote_status}" -ne "$3" ]; then
+    fail "is_built_remote $1 $2 returned ${check_built_remote_status}, not $3"
+  fi
+}
+for ibr_dir in "${WORK_DIR}/ibr/clone" "${WORK_DIR}/ibr/clone/sub"; do
+  # is_built_remote remembers its results for the top level, which both
+  # directories have.
+  built_remote_cache=''
+  check_built_remote "${ibr_dir}" bare 0
+  check_built_remote "${ibr_dir}" ../bare.git 0
+  check_built_remote "${ibr_dir}" github 0
+  check_built_remote "${ibr_dir}" working 1
+  check_built_remote "${ibr_dir}" missing 1
+  check_built_remote "${ibr_dir}" . 1
+done
+## A bare repository with a linked worktree is committed to locally.
+git -C "${WORK_DIR}/ibr/clone" push -q bare main
+git -C "${WORK_DIR}/ibr/bare.git" worktree add -q ../bare-worktree main 2> /dev/null
+built_remote_cache=''
+check_built_remote "${WORK_DIR}/ibr/clone" bare 1
+
+## Tests of remote_branch_refs.  It omits the remote-tracking branch of a
+## remote whose branches need not have been built.
+git -C "${WORK_DIR}/ibr/working" commit -q --allow-empty -m "Initial commit"
+git -C "${WORK_DIR}/ibr/clone" fetch -q working
+git -C "${WORK_DIR}/ibr/clone" fetch -q bare
+git -C "${WORK_DIR}/ibr/clone" branch -q --set-upstream-to=working/main
+if [ -n "$(remote_branch_refs "${WORK_DIR}/ibr/clone")" ]; then
+  fail "remote_branch_refs: a working clone's branch counts as built: $(remote_branch_refs "${WORK_DIR}/ibr/clone")"
+fi
+git -C "${WORK_DIR}/ibr/bare.git" worktree remove ../bare-worktree
+built_remote_cache=''
+git -C "${WORK_DIR}/ibr/clone" branch -q --set-upstream-to=bare/main
+if [ "$(remote_branch_refs "${WORK_DIR}/ibr/clone")" != refs/remotes/bare/main ]; then
+  fail "remote_branch_refs: a bare repository's branch does not count as built: $(remote_branch_refs "${WORK_DIR}/ibr/clone")"
+fi
+
 echo "${SCRIPT_NAME}: OK"
