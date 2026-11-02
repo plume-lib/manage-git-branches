@@ -1203,6 +1203,13 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
 fi
 check_pull_fixed "pull that breaks the build" \
   "Fix the build after merging ${pull_description}"
+## The agent is told what each side of the pull's merge changed.
+pull_ours="$(git -C "${feature_dir}" rev-parse --short "${local_head}")"
+pull_theirs="$(git -C "${feature_dir}" rev-parse --short "${feature_head}")"
+pull_base="$(git -C "${feature_dir}" rev-parse --short "$(git -C "${feature_dir}" merge-base "${local_head}" "${feature_head}")")"
+if ! grep -q -F "It merged commit ${pull_theirs} into commit ${pull_ours}; the two had diverged at commit ${pull_base}.  \`git diff ${pull_base} ${pull_ours}\`" "${STUB_PROMPT}"; then
+  fail "pull that breaks the build: the instructions do not say what each side of the pull's merge changed: $(cat "${STUB_PROMPT}")"
+fi
 
 ## When both the pull and the merge change the branch, the fix's message
 ## lists both merges.

@@ -1820,9 +1820,10 @@ built_commits() {
 ## Commits in BUILT that are not in the repository are ignored.  If it
 ## returns 0, it sets ${merge_fix_branch} to the current branch's name, such
 ## as "feature"; ${merge_fix_account} to an account, for an AI agent, of the
-## merge commits that might have broken the build and of the commands that
-## show them; and ${merge_fix_message} to the message of a commit that fixes
-## the build, such as "Fix the build after merging branch 'main'".  If it
+## merge commits that might have broken the build, of what each side of each
+## of them changed, and of the commands that show them; and
+## ${merge_fix_message} to the message of a commit that fixes the build, such
+## as "Fix the build after merging branch 'main'".  If it
 ## returns 1, a failure of the build is not one that a merge on the branch
 ## caused, and the agent would merely work around it.  For example, a pull
 ## that fast-forwarded the branch brought only commits that the remote
@@ -1854,8 +1855,9 @@ has_unbuilt_merge() {
     echo "${SCRIPT_NAME}: cannot list the merge commits in $(pwd), so no AI agent is asked to fix the build" >&2
     return 1
   fi
-  # The merges that combined changes:  their subjects, and lines
-  # "* ABBREVIATION SUBJECT", one per merge.
+  # The merges that combined changes:  their subjects, and, one per merge,
+  # a line "* ABBREVIATION SUBJECT" followed, for a merge of two commits, by
+  # an indented account of what each side changed.
   merge_fix_subjects=''
   merge_fix_list=''
   for merge_fix_commit in ${merge_fix_log}; do
@@ -1884,6 +1886,29 @@ has_unbuilt_merge() {
 }${merge_fix_subject}"
       merge_fix_list="${merge_fix_list:+${merge_fix_list}
 }* ${merge_fix_abbrev} ${merge_fix_subject}"
+      # An octopus merge, or one whose parents share no history, gets only
+      # its line.  Two parents with several merge bases, as after
+      # criss-cross merges, diverged at no single commit, so a diff from one
+      # of the bases would show changes that both parents had as if only one
+      # had them; `git log` lists the commits that only one parent had.
+      if merge_fix_ours="$(git rev-parse --short --verify --quiet "${merge_fix_commit}^1")" \
+        && merge_fix_theirs="$(git rev-parse --short --verify --quiet "${merge_fix_commit}^2")" \
+        && ! git rev-parse --verify --quiet "${merge_fix_commit}^3" > /dev/null \
+        && merge_fix_bases="$(git merge-base --all "${merge_fix_ours}" "${merge_fix_theirs}")"; then
+        case "${merge_fix_bases}" in
+          *"
+"*)
+            merge_fix_list="${merge_fix_list}
+  It merged commit ${merge_fix_theirs} into commit ${merge_fix_ours}, which have several merge bases.  \`git log -p ${merge_fix_theirs}..${merge_fix_ours}\` shows the commits that only ${merge_fix_ours} had, and \`git log -p ${merge_fix_ours}..${merge_fix_theirs}\` shows those that only ${merge_fix_theirs} had."
+            ;;
+          *)
+            if merge_fix_base="$(git rev-parse --short "${merge_fix_bases}")"; then
+              merge_fix_list="${merge_fix_list}
+  It merged commit ${merge_fix_theirs} into commit ${merge_fix_ours}; the two had diverged at commit ${merge_fix_base}.  \`git diff ${merge_fix_base} ${merge_fix_ours}\` shows the changes of the commits that only ${merge_fix_ours} had, and \`git diff ${merge_fix_base} ${merge_fix_theirs}\` shows those of the commits that only ${merge_fix_theirs} had."
+            fi
+            ;;
+        esac
+      fi
     fi
   done
   if [ -z "${merge_fix_subjects}" ]; then
