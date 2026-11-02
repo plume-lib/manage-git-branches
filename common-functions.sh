@@ -1249,7 +1249,7 @@ working_tree_changes() {
     }' | LC_ALL=C sort
 }
 
-## Usage: wait_for_later_time FILE DIR
+## Usage: wait_for_later_time FILE DIR [TRIES]
 ## Returns 0 once every file in DIR, an absolute pathname of a directory,
 ## that changes from now on has a later status-change time (ctime) than the
 ## modification time of FILE, an absolute pathname, as `find -cnewer`
@@ -1258,35 +1258,56 @@ working_tree_changes() {
 ## DIR and FILE can be on different file systems.
 ##
 ## Writes, and then removes, the file DIR/.manage-git-branches-time-probe,
-## which must not already exist.  Returns 1, after printing a diagnostic, if
-## it cannot write that file, or if the time does not advance within about
-## 10 seconds.
-wait_for_later_time() {
+## which must not already exist.  It removes the file even if a signal such
+## as SIGINT ends the wait.  Returns 1, after printing a diagnostic, if it
+## cannot write that file, or if the time does not advance within TRIES
+## checks, 20 if TRIES is not given; each check after the 10th first sleeps
+## 1 second, so 20 checks take about 10 seconds.
+##
+## The function runs in a subshell, so that its traps do not replace the
+## caller's.
+wait_for_later_time() (
   wait_probe="$2/.manage-git-branches-time-probe"
+  wait_max_tries="${3:-20}"
   # `set -C` keeps the redirection from overwriting an existing file.
   if ! (set -C && : > "${wait_probe}"); then
     echo "${SCRIPT_NAME}: cannot create the file ${wait_probe}, which must not already exist" >&2
-    return 1
+    exit 1
   fi
+  # A probe left behind would make every later wait in DIR fail.
+  trap 'rm -f -- "${wait_probe}"' EXIT
+  trap 'wait_end_by_signal HUP "${wait_probe}"' HUP
+  trap 'wait_end_by_signal INT "${wait_probe}"' INT
+  trap 'wait_end_by_signal TERM "${wait_probe}"' TERM
   wait_tries=1
   until [ -n "$(find "${wait_probe}" -cnewer "$1" -print)" ]; do
-    if [ "${wait_tries}" -ge 20 ]; then
-      rm -f -- "${wait_probe}"
+    if [ "${wait_tries}" -ge "${wait_max_tries}" ]; then
       echo "${SCRIPT_NAME}: after ${wait_tries} tries, the time that the file system records in $2 is not later than the modification time of $1" >&2
-      return 1
+      exit 1
     fi
     # A file system whose clock advances every few milliseconds needs no
     # sleep:  each try takes about that long.  POSIX `sleep` accepts only a
     # whole number of seconds.
     if [ "${wait_tries}" -ge 10 ]; then sleep 1; fi
     if ! touch -- "${wait_probe}"; then
-      rm -f -- "${wait_probe}"
       echo "${SCRIPT_NAME}: cannot change the time of the file ${wait_probe}" >&2
-      return 1
+      exit 1
     fi
     wait_tries=$((wait_tries + 1))
   done
-  rm -f -- "${wait_probe}"
+)
+
+## Usage: wait_end_by_signal SIGNAL FILE
+## For the traps of `wait_for_later_time`.  Removes FILE, a probe file;
+## restores the default disposition of SIGNAL, a signal name such as INT; and
+## re-sends SIGNAL to the subshell that runs `wait_for_later_time`, so that
+## the caller sees that the signal ended the wait.  If the subshell merely
+## exited, bash would continue the caller.  `$$` would name the main shell,
+## not the subshell.
+wait_end_by_signal() {
+  rm -f -- "$2"
+  trap - "$1" EXIT
+  kill -s "$1" "$(exec sh -c 'echo "$PPID"')"
 }
 
 ## Usage: report_unresolved FILES

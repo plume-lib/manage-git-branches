@@ -191,6 +191,9 @@ setup_case() {
     echo "setup_case: ${case_dir} already exists" >&2
     exit 1
   fi
+  remote="${case_dir}/myrepo.git"
+  main_dir="${case_dir}/myrepo-branch-main"
+  feature_dir="${case_dir}/myrepo-branch-feature"
   if [ -n "${case_last_line}" ]; then
     create_case_repositories "${case_dir}" "${2:-}" "${case_last_line}"
   else
@@ -200,17 +203,14 @@ setup_case() {
       create_case_repositories "${case_template}" "${2:-}" ""
     fi
     cp -R "${case_template}" "${case_dir}"
+    # A copied clone's origin is still the template's remote, and its index
+    # records the template's files' inode numbers and times, so that git
+    # would consider each file possibly changed.
+    for case_clone in "${main_dir}" "${feature_dir}"; do
+      git -C "${case_clone}" remote set-url origin "${remote}"
+      git -C "${case_clone}" update-index -q --refresh
+    done
   fi
-  remote="${case_dir}/myrepo.git"
-  main_dir="${case_dir}/myrepo-branch-main"
-  feature_dir="${case_dir}/myrepo-branch-feature"
-  # A copied clone's origin is still the template's remote, and its index
-  # records the template's files' inode numbers and times, so that git would
-  # consider each file possibly changed.
-  for case_clone in "${main_dir}" "${feature_dir}"; do
-    git -C "${case_clone}" remote set-url origin "${remote}"
-    git -C "${case_clone}" update-index -q --refresh
-  done
   read -r feature_head < "${case_dir}/feature-head"
   : > "${STUB_LOG}"
 }

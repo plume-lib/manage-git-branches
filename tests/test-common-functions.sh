@@ -654,17 +654,17 @@ check_wflt_probe_removed() {
 }
 
 # The time never passes a marker whose modification time is far in the
-# future, so the function gives up after about 10 seconds.  That runs in the
-# background, while the other tests run.
+# future, so the function gives up.  A limit of 3 tries keeps it from
+# sleeping.
 touch -t 209901010000 "${WORK_DIR}/wflt/never-marker"
-(
-  if wait_for_later_time "${WORK_DIR}/wflt/never-marker" "${WORK_DIR}/wflt/never"; then
-    echo 0
-  else
-    echo 1
-  fi > "${WORK_DIR}/wflt/never-status"
-) 2> "${WORK_DIR}/wflt/never-err" &
-wflt_never_pid=$!
+if wflt_err="$(wait_for_later_time "${WORK_DIR}/wflt/never-marker" "${WORK_DIR}/wflt/never" 3 2>&1)"; then
+  fail "wait_for_later_time succeeded for a marker far in the future"
+fi
+case "${wflt_err}" in
+  *"after 3 tries"*) ;;
+  *) fail "wait_for_later_time for a marker far in the future: wrong diagnostic: ${wflt_err}" ;;
+esac
+check_wflt_probe_removed "${WORK_DIR}/wflt/never" "a marker far in the future"
 
 # A file that changes immediately after the function returns is newer than
 # the marker.
@@ -711,15 +711,5 @@ esac
 if [ "$(cat "${WORK_DIR}/wflt/exists/.manage-git-branches-time-probe")" != "user data" ]; then
   fail "wait_for_later_time changed an existing file whose name is the probe's"
 fi
-
-wait "${wflt_never_pid}"
-if [ "$(cat "${WORK_DIR}/wflt/never-status")" != 1 ]; then
-  fail "wait_for_later_time succeeded for a marker far in the future"
-fi
-case "$(cat "${WORK_DIR}/wflt/never-err")" in
-  *"after 20 tries"*) ;;
-  *) fail "wait_for_later_time for a marker far in the future: wrong diagnostic: $(cat "${WORK_DIR}/wflt/never-err")" ;;
-esac
-check_wflt_probe_removed "${WORK_DIR}/wflt/never" "a marker far in the future"
 
 echo "${SCRIPT_NAME}: OK"
