@@ -1671,21 +1671,22 @@ parse_llm_option() {
 }
 
 ## Usage: pull_resolving RESOLVER DIRECTORY PULL-ARGUMENT...
-## Runs `git -C DIRECTORY pull --no-edit PULL-ARGUMENT...`; `--no-edit` keeps
-## a merge from stopping at an editor.  If the pull merges and the merge has
-## conflicts, resolves them with `resolve_merge_conflicts`, asking RESOLVER,
-## if it is not empty, about any that `git rerere` did not resolve, and
-## commits the merge with the message that `git pull` composed.  (A pull that
-## rebases cannot be resolved this way.)
+## Runs `git -C DIRECTORY pull --no-commit PULL-ARGUMENT...`.  If the pull
+## merges, resolves any conflicts with `resolve_merge_conflicts`, asking
+## RESOLVER, if it is not empty, about any that `git rerere` did not resolve,
+## and commits the merge with the message that `pull_merge_message` composes,
+## which names the source of the merge by its remote-tracking branch rather
+## than by its URL.  (A pull that rebases cannot be resolved this way.)
 ## Sets ${pull_fetched} to the head of the upstream branch that the pull
 ## fetched, which it merged, fast-forwarded to, rebased onto, or found already
 ## in the branch, as a full hash such as the 40 hexadecimal digits that
 ## `git rev-parse HEAD` prints.  That commit's history was built where it
 ## was pushed, even if no remote-tracking branch records it, as when
 ## `branch.BRANCH.remote` is a URL.  Sets ${pull_fetched} to the empty string
-## instead if the upstream branch is a branch of the local repository, which
-## need not have been pushed, or if the pull did not record the head in
-## FETCH_HEAD.
+## instead if the upstream branch is in the local repository or in a non-bare
+## repository in the local file system, such as another working clone, whose
+## branches need not have been pushed, or if the pull did not record the head
+## in FETCH_HEAD.
 ## Returns 1, after printing a diagnostic, if a merge is already in progress
 ## in DIRECTORY, or if the pull fails and its conflicts are not resolved.
 pull_resolving() {
@@ -1700,41 +1701,104 @@ pull_resolving() {
     return 1
   fi
   # `rerere.autoUpdate` false and the configured conflict style are as for
-  # the merge in `merge_build_push`.
-  if ! git -C "${pull_dir}" -c rerere.autoUpdate=false pull --no-edit "$@"; then
+  # the merge in `merge_build_push`.  `--no-commit` leaves a merge
+  # uncommitted, so that its message can be replaced; a pull that
+  # fast-forwards or rebases ignores it.
+  if git -C "${pull_dir}" -c rerere.autoUpdate=false pull --no-commit "$@"; then
+    pull_conflicted=0
+  else
     echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
     if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
       return 1
     fi
-    # Git names the conflicted files relative to the top level of the working
-    # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
-    # the current directory unchanged.
-    if ! (
+    pull_conflicted=1
+  fi
+  # Git names the conflicted files relative to the top level of the working
+  # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
+  # the current directory unchanged.
+  if git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null \
+    && ! (
       if ! pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)" \
         || ! cd "${pull_top}"; then
         echo "${SCRIPT_NAME}: cannot cd to the top level of ${pull_dir}" >&2
         exit 1
       fi
       pull_source="$(upstream_description)"
-      if ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
+      if [ "${pull_conflicted}" -eq 1 ] \
+        && ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
         exit 1
       fi
-      # MERGE_MSG ends with comment lines that list the conflicts.
-      if ! git commit -q --no-edit --cleanup=strip; then
+      if ! pull_message="$(pull_merge_message)"; then
+        echo "${SCRIPT_NAME}: cannot compose a message for the merge of ${pull_source} in $(pwd)" >&2
+        exit 1
+      fi
+      # `-F` supplies the message, rather than MERGE_MSG, which names the
+      # source by its URL and, after conflicts, lists them.
+      if ! printf '%s\n' "${pull_message}" | git commit -q --cleanup=whitespace -F -; then
         echo "${SCRIPT_NAME}: cannot commit the merge of ${pull_source} in $(pwd)" >&2
         exit 1
       fi
     ); then
-      return 1
-    fi
+    return 1
   fi
   # FETCH_HEAD names first the commit that `git pull` merges, fast-forwards
   # to, or rebases onto.  The remote "." is the local repository.
-  if pull_branch="$(git -C "${pull_dir}" symbolic-ref --quiet --short HEAD)" \
-    && [ "$(git -C "${pull_dir}" config --get "branch.${pull_branch}.remote")" != . ]; then
-    # shellcheck disable=SC2034 # used by the commands that source this file
-    pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
+  if ! pull_branch="$(git -C "${pull_dir}" symbolic-ref --quiet --short HEAD)" \
+    || ! pull_remote="$(git -C "${pull_dir}" config --get "branch.${pull_branch}.remote")" \
+    || [ "${pull_remote}" = . ]; then
+    return 0
   fi
+  pull_key="$(repository_key "${pull_dir}" "${pull_remote}")"
+  case "${pull_key}" in
+    /*)
+      if [ "$(git -C "${pull_key}" rev-parse --is-bare-repository 2> /dev/null)" != true ]; then
+        return 0
+      fi
+      ;;
+  esac
+  # shellcheck disable=SC2034 # used by the commands that source this file
+  pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
+}
+
+## Usage: pull_merge_message
+## Prints the message of the merge commit that `git pull` would make in the
+## current repository from the commits in FETCH_HEAD, as
+## `git fmt-merge-msg` composes it, but with each source of the form
+## "branch 'BRANCH' of URL" that a remote-tracking branch tracks (see
+## `tracking_branch_of`) named by that remote-tracking branch:  for example,
+## "Merge remote-tracking branch 'origin/feature' into feature" rather than
+## "Merge branch 'feature' of /home/me/repos/proj into feature".  The URL of
+## a pull can be a pathname in the local file system, which a pushed commit
+## message would otherwise reveal.  The message has no comment lines.
+pull_merge_message() {
+  if ! pull_message_fetch_head="$(git rev-parse --git-path FETCH_HEAD)" \
+    || ! pull_message_lines="$(cat "${pull_message_fetch_head}")"; then
+    return 1
+  fi
+  # Each line of FETCH_HEAD is "HASH<TAB>not-for-merge<TAB>SOURCE", where
+  # "not-for-merge" can be empty.  `merge_build_push` explains the comment
+  # character and the source "... of .".
+  if ! pull_message_composed="$(printf '%s\n' "${pull_message_lines}" \
+    | while IFS= read -r pull_message_line; do
+      pull_message_hash="${pull_message_line%%"	"*}"
+      pull_message_rest="${pull_message_line#*"	"}"
+      pull_message_flag="${pull_message_rest%%"	"*}"
+      pull_message_source="${pull_message_rest#*"	"}"
+      case "${pull_message_source}" in
+        "branch '"*"' of "*)
+          pull_message_branch="${pull_message_source#"branch '"}"
+          pull_message_branch="${pull_message_branch%%"' of "*}"
+          if pull_message_tracking="$(tracking_branch_of "${pull_message_branch}" \
+            "${pull_message_source#*"' of "}")"; then
+            pull_message_source="remote-tracking branch '${pull_message_tracking}' of ."
+          fi
+          ;;
+      esac
+      printf '%s\t%s\t%s\n' "${pull_message_hash}" "${pull_message_flag}" "${pull_message_source}"
+    done | git -c core.commentChar='#' fmt-merge-msg)"; then
+    return 1
+  fi
+  printf '%s\n' "${pull_message_composed}" | git -c core.commentChar='#' stripspace --strip-comments
 }
 
 ## Usage: upstream_description
@@ -1763,15 +1827,16 @@ upstream_description() {
 ## Usage: subject_with_tracking_branch SUBJECT
 ## Prints SUBJECT, the subject of a merge commit, with the source that
 ## `git pull` wrote in it, "branch 'BRANCH' of URL", replaced by the
-## remote-tracking branch of the current repository that tracks that branch:
-## for example, prints "Merge remote-tracking branch 'origin/feature' into
-## feature" for "Merge branch 'feature' of github.com:org/proj into feature"
-## if the remote "origin" has the URL "git@github.com:org/proj.git" and the
-## remote-tracking branch "origin/feature" exists.  A URL that names the same
-## repository in another spelling (see `url_key`) matches too.  Prints SUBJECT
-## unchanged if it has no such source or no remote-tracking branch tracks it.
-## A pull's URL can be a pathname in the local file system, which a pushed
-## commit message would otherwise reveal.
+## remote-tracking branch of the current repository that tracks that branch
+## (see `tracking_branch_of`):  for example, prints "Merge remote-tracking
+## branch 'origin/feature' into feature" for "Merge branch 'feature' of
+## github.com:org/proj into feature" if the remote "origin" has the URL
+## "git@github.com:org/proj.git" and the remote-tracking branch
+## "origin/feature" exists.  Prints SUBJECT unchanged if it has no such source
+## or no remote-tracking branch tracks it.  A merge that a pull other than
+## `pull_resolving`'s made has such a subject, and its URL can be a pathname
+## in the local file system, which a pushed commit message would otherwise
+## reveal.
 subject_with_tracking_branch() {
   case "$1" in
     "Merge branch '"*"' of "*) ;;
@@ -1796,26 +1861,42 @@ subject_with_tracking_branch() {
       tracking_into=''
       ;;
   esac
-  tracking_key="$(url_key . "${tracking_url}")"
-  for tracking_remote in $(git remote); do
+  if tracking_ref="$(tracking_branch_of "${tracking_branch}" "${tracking_url}")"; then
+    printf "Merge remote-tracking branch '%s'%s\n" "${tracking_ref}" "${tracking_into}"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+## Usage: tracking_branch_of BRANCH URL
+## Prints the remote-tracking branch of the current repository, such as
+## "origin/feature", that tracks BRANCH of the repository at URL, as
+## `git pull` writes both in FETCH_HEAD and in a merge message, such as
+## "branch 'feature' of github.com:org/proj".  It is the remote-tracking
+## branch REMOTE/BRANCH of a remote REMOTE whose URL is URL, or names the
+## same repository in another spelling (see `url_key`), such as
+## "git@github.com:org/proj.git".  Returns 1, printing nothing, if no
+## remote-tracking branch tracks it.
+tracking_branch_of() {
+  tracking_of_key="$(url_key . "$2")"
+  for tracking_of_remote in $(git remote); do
     if ! git rev-parse --verify --quiet \
-      "refs/remotes/${tracking_remote}/${tracking_branch}" > /dev/null \
-      || ! tracking_remote_url="$(git ls-remote --get-url "${tracking_remote}" 2> /dev/null)"; then
+      "refs/remotes/${tracking_of_remote}/$1" > /dev/null \
+      || ! tracking_of_url="$(git ls-remote --get-url "${tracking_of_remote}" 2> /dev/null)"; then
       continue
     fi
     # `git pull` writes the URL without trailing slashes and then without a
     # trailing ".git".  A pathname that it wrote has no key, because no
     # directory has that name.
-    tracking_stripped="$(printf '%s\n' "${tracking_remote_url}" | sed -e 's#/*$##' -e 's#\.git$##')"
-    if [ "${tracking_stripped}" = "${tracking_url}" ] \
-      || { [ -n "${tracking_key}" ] \
-        && [ "$(url_key . "${tracking_remote_url}")" = "${tracking_key}" ]; }; then
-      printf "Merge remote-tracking branch '%s/%s'%s\n" \
-        "${tracking_remote}" "${tracking_branch}" "${tracking_into}"
+    tracking_of_stripped="$(printf '%s\n' "${tracking_of_url}" | sed -e 's#/*$##' -e 's#\.git$##')"
+    if [ "${tracking_of_stripped}" = "$2" ] \
+      || { [ -n "${tracking_of_key}" ] \
+        && [ "$(url_key . "${tracking_of_url}")" = "${tracking_of_key}" ]; }; then
+      printf '%s/%s\n' "${tracking_of_remote}" "$1"
       return 0
     fi
   done
-  printf '%s\n' "$1"
+  return 1
 }
 
 ## Usage: remote_branch_refs DIRECTORY
@@ -1893,9 +1974,10 @@ built_commits() {
 ##    that the merge combined changes, and
 ##  * the current branch's tree differs from those remote branches' and
 ##    BUILT's trees.
-## Commits in BUILT that are not in the repository are ignored, and so are
-## those in the history of a remote branch or of another commit in BUILT.  If
-## it returns 0, it sets ${merge_fix_branch} to the current branch's name,
+## Commits in BUILT that are not in the repository are ignored.  The account
+## in ${merge_fix_account} omits each commit in BUILT that is in the history
+## of a remote branch or of an earlier commit in BUILT, because it excludes no
+## more commits, but that commit's tree still counts.  If it returns 0, it sets ${merge_fix_branch} to the current branch's name,
 ## such as "feature"; ${merge_fix_account} to an account, for an AI agent, of
 ## the merge commits that might have broken the build, of what each side of
 ## each of them changed, and of the commands that show them; and
@@ -1910,10 +1992,14 @@ built_commits() {
 has_unbuilt_merge() {
   merge_fix_remotes="$(remote_branch_refs .)"
   merge_fix_built=''
+  # Every commit in BUILT that is in the repository, for the comparison of
+  # trees below.
+  merge_fix_trees=''
   for merge_fix_commit in $1; do
     if ! git rev-parse --verify --quiet "${merge_fix_commit}^{commit}" > /dev/null; then
       continue
     fi
+    merge_fix_trees="${merge_fix_trees:+${merge_fix_trees} }${merge_fix_commit}"
     # A commit in a remote branch's history, such as the head that a pull
     # fetched, excludes nothing more, and would only lengthen the account.
     merge_fix_redundant=0
@@ -1933,7 +2019,7 @@ has_unbuilt_merge() {
   fi
   # The build of a tree that a remote branch, or a commit in BUILT, has is
   # not a merge's doing.
-  for merge_fix_commit in ${merge_fix_remotes} ${merge_fix_built}; do
+  for merge_fix_commit in ${merge_fix_remotes} ${merge_fix_trees}; do
     if [ "$(git rev-parse --verify --quiet "${merge_fix_commit}^{tree}")" = "${merge_fix_tree}" ]; then
       return 1
     fi
@@ -1979,14 +2065,27 @@ has_unbuilt_merge() {
       merge_fix_list="${merge_fix_list:+${merge_fix_list}
 }* ${merge_fix_abbrev} ${merge_fix_subject}"
       # An octopus merge, or one whose parents share no history, gets only
-      # its line.
+      # its line.  Two parents with several merge bases, as after
+      # criss-cross merges, diverged at no single commit, so a diff from one
+      # of the bases would show changes that both parents had as if only one
+      # had them; `git log` lists the commits that only one parent had.
       if merge_fix_ours="$(git rev-parse --short --verify --quiet "${merge_fix_commit}^1")" \
         && merge_fix_theirs="$(git rev-parse --short --verify --quiet "${merge_fix_commit}^2")" \
         && ! git rev-parse --verify --quiet "${merge_fix_commit}^3" > /dev/null \
-        && merge_fix_base="$(git merge-base "${merge_fix_ours}" "${merge_fix_theirs}")" \
-        && merge_fix_base="$(git rev-parse --short "${merge_fix_base}")"; then
-        merge_fix_list="${merge_fix_list}
+        && merge_fix_bases="$(git merge-base --all "${merge_fix_ours}" "${merge_fix_theirs}")"; then
+        case "${merge_fix_bases}" in
+          *"
+"*)
+            merge_fix_list="${merge_fix_list}
+  It merged commit ${merge_fix_theirs} into commit ${merge_fix_ours}, which have several merge bases.  \`git log -p ${merge_fix_theirs}..${merge_fix_ours}\` shows the commits that only ${merge_fix_ours} had, and \`git log -p ${merge_fix_ours}..${merge_fix_theirs}\` shows those that only ${merge_fix_theirs} had."
+            ;;
+          *)
+            if merge_fix_base="$(git rev-parse --short "${merge_fix_bases}")"; then
+              merge_fix_list="${merge_fix_list}
   It merged commit ${merge_fix_theirs} into commit ${merge_fix_ours}; the two had diverged at commit ${merge_fix_base}.  \`git diff ${merge_fix_base} ${merge_fix_ours}\` shows the changes of the commits that only ${merge_fix_ours} had, and \`git diff ${merge_fix_base} ${merge_fix_theirs}\` shows those of the commits that only ${merge_fix_theirs} had."
+            fi
+            ;;
+        esac
       fi
     fi
   done
