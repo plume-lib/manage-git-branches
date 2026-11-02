@@ -173,6 +173,8 @@ The commands are:
   Removes a branch directory, unless the removal would lose work.
   Commits on a branch whose changes have landed in a remote's default branch,
   as after a squash-merge, do not count as work that would be lost.
+  Nor does a commit or an uncommitted change whose resulting file contents
+  are all in commits that the removal leaves, such as those of a remote.
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
