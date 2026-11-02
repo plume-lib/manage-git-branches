@@ -2046,6 +2046,9 @@ built_commits() {
 ## branch caused, and the agent would merely work around it.  For example, a
 ## pull that fast-forwarded the branch brought only commits that the remote
 ## already had.  Prints a diagnostic if it returns 1 because git fails.
+## The account in ${merge_fix_account} omits each commit in BUILT that is in
+## the history of a remote branch or of an earlier commit in BUILT, because it
+## excludes no more commits, but that commit's tree still counts.
 has_unbuilt_merge() {
   merge_fix_remotes="$(remote_branch_refs .)"
   merge_fix_built=''
