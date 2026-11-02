@@ -355,18 +355,19 @@ git clone -q -b main "${WORK_DIR}/idb-remote.git" "${WORK_DIR}/idb-live"
 git -C "${WORK_DIR}/idb-seed" push -q origin --delete doomed
 check_is_deleted_branch "${WORK_DIR}/idb-dead" 0 'a branch deleted in its remote'
 check_is_deleted_branch "${WORK_DIR}/idb-live" 1 'a branch that still exists'
-# It holds a file, because an empty directory that is in no working tree is
-# the leftover of a branch directory, which is status 0.
 mkdir -p "${WORK_DIR}/idb-plain-directory"
-echo 'content' > "${WORK_DIR}/idb-plain-directory/file.txt"
 check_is_deleted_branch "${WORK_DIR}/idb-plain-directory" 2 'no working tree'
-if [ -z "${is_deleted_branch_no_working_tree}" ]; then
-  fail "is_deleted_branch did not record that a directory is in no working tree"
+if [ -z "${is_deleted_branch_no_usable_repository}" ]; then
+  fail "is_deleted_branch did not record that git can use no repository at a plain directory"
 fi
 mkdir -p "${WORK_DIR}/idb-live/subdirectory"
 check_is_deleted_branch "${WORK_DIR}/idb-live/subdirectory" 2 'a subdirectory of a working tree'
-if [ -n "${is_deleted_branch_no_working_tree}" ]; then
-  fail "is_deleted_branch recorded that a subdirectory of a working tree is in no working tree"
+if [ -n "${is_deleted_branch_no_usable_repository}" ]; then
+  fail "is_deleted_branch recorded that git can use no repository at a subdirectory of a working tree"
+fi
+check_is_deleted_branch "${WORK_DIR}/idb-remote.git" 2 'a bare repository'
+if [ -n "${is_deleted_branch_no_usable_repository}" ]; then
+  fail "is_deleted_branch recorded that git can use no repository at a bare repository"
 fi
 
 # `check_is_deleted_branch` calls the function on the left of `||`, which

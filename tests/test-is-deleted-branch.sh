@@ -344,10 +344,8 @@ git init -q --bare -b main "${testdir}/myrepo-empty.git"
 git clone -q "${testdir}/myrepo-empty.git" "${testdir}/myrepo-branch-unborn" \
   2> /dev/null
 
-## A directory that is not a clone.  It holds a file, because an empty
-## directory that is in no working tree is the leftover of a branch directory.
+## A directory that is not a clone.
 mkdir "${testdir}/myrepo-branch-notaclone"
-: > "${testdir}/myrepo-branch-notaclone/file"
 
 ## Directories that hold nothing but Eclipse `.project` files, which is what a
 ## branch directory leaves behind when its working tree is gone, and
@@ -385,8 +383,8 @@ mkdir "${testdir}/dotproject-plus-symlink"
 : > "${testdir}/dotproject-plus-symlink/.project"
 ln -s no-such-file "${testdir}/dotproject-plus-symlink/dangling"
 
-## An empty directory, which holds no work, as when the creation of a branch
-## directory failed partway.
+## An empty directory, which holds no `.project` file and is the leftover of
+## nothing.
 mkdir "${testdir}/dotproject-empty"
 
 ## A `.project` file below the directory but not in it, which is what a
@@ -394,7 +392,8 @@ mkdir "${testdir}/dotproject-empty"
 mkdir -p "${testdir}/dotproject-nested-only/sub"
 : > "${testdir}/dotproject-nested-only/sub/.project"
 
-## A tree of nothing but empty directories, which holds no work either.
+## A tree of nothing but empty directories, which holds no `.project` file
+## anywhere and is the leftover of nothing.
 mkdir -p "${testdir}/dotproject-empty-tree/sub/deeper"
 
 ## Python build output, which is what remains when `rm -rf` of a branch
@@ -441,9 +440,6 @@ if [ "$(id -u)" -ne 0 ]; then
   : > "${testdir}/python-venv-unwritable/.venv/lib/module.py"
   chmod 555 "${testdir}/python-venv-unwritable/.venv/lib"
 fi
-
-## An empty directory in a working tree, which is part of that working tree.
-mkdir "${testdir}/myrepo-branch-dead/empty-subdirectory"
 
 ## A working tree that holds a `.project` file, as an Eclipse project's clone
 ## does.  Its branch still exists in the remote, and the `.git` directory
@@ -520,10 +516,10 @@ expect_status 2 "${testdir}/dotproject-deep-file" \
   'directory that holds a file that is not a .project file, below its top level'
 expect_status 2 "${testdir}/dotproject-plus-symlink" \
   'directory that holds a .project file and a symbolic link'
-expect_status 0 "${testdir}/dotproject-empty" 'directory that holds nothing'
+expect_status 2 "${testdir}/dotproject-empty" 'directory that holds nothing'
 expect_status 0 "${testdir}/dotproject-nested-only" \
   'directory with no .project file of its own, below which there is one'
-expect_status 0 "${testdir}/dotproject-empty-tree" \
+expect_status 2 "${testdir}/dotproject-empty-tree" \
   'directory that holds nothing but empty directories'
 expect_status 0 "${testdir}/python-leftover" \
   'directory that holds nothing but a .venv directory and a *.egg-info directory'
@@ -541,8 +537,6 @@ if [ "${unwritable}" -eq 1 ]; then
   expect_status 2 "${testdir}/python-venv-unwritable" \
     'directory that holds a .venv directory that rm -rf cannot remove'
 fi
-expect_status 2 "${testdir}/myrepo-branch-dead/empty-subdirectory" \
-  'empty directory in a working tree'
 expect_status 1 "${testdir}/myrepo-live-project" \
   'working tree that holds a .project file and whose branch exists in the remote'
 expect_status 2 "${nonexistent}" 'path that does not exist'

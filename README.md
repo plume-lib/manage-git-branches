@@ -158,22 +158,21 @@ The commands are:
   branch directory can leave behind when its working tree is gone:  Eclipse
   `.project` files, Python `.venv` directories, and `*.egg-info`
   directories.  A `.venv` or `*.egg-info` directory is a leftover only if
-  the user can remove it and it holds no version-control checkout.  It is
-  also true of a directory that is in no git working tree and holds nothing
-  but empty directories.
+  the user can remove it and it holds no version-control checkout.
 * [`git-orphaned-branches`](git-orphaned-branches) `[--print0] [--remove]`:
   Lists directories named `*-branch-*`, below the current directory, that are
   working trees for branches that were deleted in the remote repository, or
-  that hold nothing but leftovers, as for `is-deleted-branch`, or that are in
-  no git working tree and hold nothing but empty directories.
+  that hold nothing but leftovers, as for `is-deleted-branch`.
   With `--remove`, removes each of them instead of printing them.
   A directory whose branch still exists in the remote, but whose GitHub pull
   requests are all closed or merged, is neither listed nor removed; a warning
   about it is printed instead.  (This needs the `gh` command.)
   Likewise, a warning is printed about a directory named `*-branch-*` that
-  is in no git working tree and holds anything besides leftovers, such as one
-  whose removal failed on files that another user owns, and about one that is
-  in a working tree that git cannot use, such as a linked worktree whose main
+  is in no git working tree and either holds more than leftovers, such as
+  one whose removal failed on files that another user owns, or holds no
+  leftover at all, such as an empty directory; about one that is in a git
+  working tree that tracks none of its files; and about one that is in a
+  working tree that git cannot use, such as a linked worktree whose main
   working tree was moved.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
   alias below).
