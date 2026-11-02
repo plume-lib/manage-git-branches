@@ -2946,14 +2946,15 @@ only_dot_project() {
 ## its documentation is the documentation of this answer.
 ##
 ## Also sets the variable `is_deleted_branch_no_usable_repository` to a
-## nonempty value (true) if this returns status 2 because git can use no
-## repository at DIRECTORY, and to the empty string (false) otherwise.  Git can
-## use no repository at DIRECTORY if no repository contains DIRECTORY; if the
-## one that contains it is broken, such as a linked worktree whose `.git` file
-## names a git directory that no longer exists; if git refuses it, such as one
-## that another user owns and that `safe.directory` does not allow; or if git
-## cannot enter DIRECTORY.  The variable lets a caller explain status 2
-## without asking git again.
+## nonempty value (true) if this returns status 2 because DIRECTORY is a
+## directory at which git can use no repository, and to the empty string
+## (false) otherwise, including when DIRECTORY does not exist or is not a
+## directory.  Git can use no repository at DIRECTORY if no repository
+## contains DIRECTORY; if the one that contains it is broken, such as a linked
+## worktree whose `.git` file names a git directory that no longer exists; if
+## git refuses it, such as one that another user owns and that
+## `safe.directory` does not allow; or if git cannot enter DIRECTORY.  The
+## variable lets a caller explain status 2 without asking git again.
 ##
 ## The body lives here rather than in the command so that the other commands
 ## of this package can ask the question directly.

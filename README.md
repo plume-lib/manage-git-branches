@@ -168,8 +168,9 @@ The commands are:
   Likewise, a warning is printed about a directory named `*-branch-*` that
   is in no git working tree and either holds more than `.project` files, such
   as one whose removal failed on files that another user owns, or holds no
-  `.project` file at all, such as an empty directory, and about one that is
-  in a working tree that git cannot use, such as a linked worktree whose main
+  `.project` file at all, such as an empty directory; about one that is in a
+  git working tree that tracks none of its files; and about one that is in a
+  working tree that git cannot use, such as a linked worktree whose main
   working tree was moved.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
   alias below).
