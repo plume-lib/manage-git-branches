@@ -75,6 +75,8 @@ fail() {
 ##   auto-merge: as "good", but also makes AUTO_MERGE name HEAD's tree
 ##   sandbox-dirs: as "good", but also creates the empty directories that
 ##           Codex's sandbox creates
+##   fetch:  as "good", but also fetches main from origin, which overwrites
+##           FETCH_HEAD
 ##   hang:   runs for 60 seconds, changing nothing
 ## Otherwise, it is fixing a build, and it acts according to ${STUB_BUILD}:
 ##   fix:    removes the lines of other.txt that break the build
@@ -138,6 +140,7 @@ case "${STUB_MODE}" in
   change-nested) echo "changed" >> nested/file.txt ;;
   auto-merge) git update-ref AUTO_MERGE "$(git rev-parse 'HEAD^{tree}')" ;;
   sandbox-dirs) mkdir .agents .aws .codex ;;
+  fetch) git fetch -q origin main ;;
 esac
 if [ "${STUB_MODE}" = clean ]; then
   sed -e 's/^three$/THREE/' file.txt > file.txt.new
@@ -707,29 +710,33 @@ for auto_update in false true; do
   check_resolved "" "rerere (autoUpdate ${auto_update})"
 done
 
-## A conflict in pulling TO_DIR from its remote is resolved too.
-setup_case pull
-git clone -q -b feature "${remote}" "${case_dir}/other-clone"
-printf '%s\n' one two three-remote four five six SEVEN-feature eight nine > "${case_dir}/other-clone/file.txt"
-git -C "${case_dir}/other-clone" commit -q -a -m "Change feature remotely"
-git -C "${case_dir}/other-clone" push -q
-printf '%s\n' one two three-local four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
-git -C "${feature_dir}" commit -q -a -m "Change feature locally"
-push_to good --llm
-if [ "${push_status}" -ne 0 ]; then
-  fail "conflict in pulling: git-push-to failed: ${push_output}"
-fi
-if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
-  fail "conflict in pulling: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
-fi
-expected="$(printf '%s\n' ONE two three-local three-remote four five six SEVEN-feature SEVEN-main eight nine)"
-if [ "$(git -C "${remote}" show refs/heads/feature:file.txt)" != "${expected}" ]; then
-  fail "conflict in pulling: wrong result: $(git -C "${remote}" show refs/heads/feature:file.txt)"
-fi
-message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature^1)"
-if [ "${message}" != "Merge remote-tracking branch 'origin/feature' into feature" ]; then
-  fail "conflict in pulling: wrong message for the merge of the pull: ${message}"
-fi
+## A conflict in pulling TO_DIR from its remote is resolved too.  The merge's
+## message names the source that the pull fetched, even if the agent fetches
+## something else while it resolves the conflict.
+for pull_mode in good fetch; do
+  setup_case "pull-${pull_mode}"
+  git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+  printf '%s\n' one two three-remote four five six SEVEN-feature eight nine > "${case_dir}/other-clone/file.txt"
+  git -C "${case_dir}/other-clone" commit -q -a -m "Change feature remotely"
+  git -C "${case_dir}/other-clone" push -q
+  printf '%s\n' one two three-local four five six SEVEN-feature eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Change feature locally"
+  push_to "${pull_mode}" --llm
+  if [ "${push_status}" -ne 0 ]; then
+    fail "conflict in pulling (${pull_mode}): git-push-to failed: ${push_output}"
+  fi
+  if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+    fail "conflict in pulling (${pull_mode}): expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+  fi
+  expected="$(printf '%s\n' ONE two three-local three-remote four five six SEVEN-feature SEVEN-main eight nine)"
+  if [ "$(git -C "${remote}" show refs/heads/feature:file.txt)" != "${expected}" ]; then
+    fail "conflict in pulling (${pull_mode}): wrong result: $(git -C "${remote}" show refs/heads/feature:file.txt)"
+  fi
+  message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature^1)"
+  if [ "${message}" != "Merge remote-tracking branch 'origin/feature' into feature" ]; then
+    fail "conflict in pulling (${pull_mode}): wrong message for the merge of the pull: ${message}"
+  fi
+done
 
 ## A conflict in pulling that `git rerere` resolves needs no agent, even when
 ## rerere stages the files that it resolves.
@@ -1276,6 +1283,35 @@ case "${push_output}" in
 esac
 if [ -s "${STUB_LOG}" ]; then
   fail "pull with a URL remote to a broken build: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## When the branch's remote is a URL, the pull updates no remote-tracking
+## branch, so origin/feature lacks the commit that the pull merged and does
+## not name it.  The merge's message names the remote by the last component of
+## its pathname, which it does not reveal.  A clean merge does not report that
+## it stopped before committing.
+setup_pull_breaks pull-build-url-merge
+git -C "${feature_dir}" config branch.feature.remote "${remote}"
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "pull with a URL remote that breaks the build: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "pull with a URL remote that breaks the build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"stopped before committing"*)
+    fail "pull with a URL remote that breaks the build: the output says that the merge stopped: ${push_output}"
+    ;;
+esac
+url_remote_name="${remote%.git}"
+url_remote_name="${url_remote_name##*/}"
+message="$(git -C "${remote}" log -1 --format=%s refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'feature' of ${url_remote_name}" ]; then
+  fail "pull with a URL remote that breaks the build: wrong message for the fix: ${message}"
+fi
+if git -C "${remote}" log --format=%B refs/heads/feature | grep -q -F "${remote%.git}"; then
+  fail "pull with a URL remote that breaks the build: a pushed commit message names the remote by its pathname: $(git -C "${remote}" log --format=%B refs/heads/feature)"
 fi
 
 ## A working clone in the local file system, unlike a bare repository, need
