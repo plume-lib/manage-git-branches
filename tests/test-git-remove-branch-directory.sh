@@ -108,7 +108,7 @@ git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
   stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost \
   squashed empty landedwaived landedforced savedchange partlysaved deletion \
-  chmodded; do
+  chmodded localsaved submodulesaved; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -320,6 +320,37 @@ check_present 'an uncommitted change of mode' "${chmodded}"
 check_message 'an uncommitted change of mode' \
   "refusing to remove ${chmodded}: 1 tracked file(s) have uncommitted changes"
 chmod -x "${chmodded}/file.txt"
+
+# A clone's local branch does not save a change, because the removal deletes
+# the branch with the clone.  `--force-unpushed` waives the refusal on
+# account of the branch's commit, which leaves only the uncommitted change.
+localsaved="$(make_clone localsaved)"
+echo 'a change that a local branch holds' >> "${localsaved}/file.txt"
+git -C "${localsaved}" commit -q -a -m 'Hold the change'
+git -C "${localsaved}" branch localsaved-copy
+git -C "${localsaved}" reset -q --soft HEAD~1
+run_command 'a change that only a local branch holds' 1 --force-unpushed \
+  "${localsaved}"
+check_present 'a change that only a local branch holds' "${localsaved}"
+check_message 'a change that only a local branch holds' \
+  "refusing to remove ${localsaved}: 1 tracked file(s) have uncommitted changes"
+
+# A change to a submodule is never saved, even when a remote-tracking ref
+# holds the commit that the submodule has checked out.  Every commit, in the
+# clone and in the submodule, is on a remote-tracking ref.
+submodulesaved="$(make_clone submodulesaved)"
+git -C "${submodulesaved}" -c protocol.file.allow=always submodule add -q \
+  "${remote}" sub
+git -C "${submodulesaved}" commit -q -m 'Add a submodule'
+git -C "${submodulesaved}/sub" checkout -q origin/savedchange-elsewhere
+git -C "${submodulesaved}" commit -q -a -m 'Change the submodule'
+git -C "${submodulesaved}" push -q origin HEAD:submodulesaved-elsewhere
+git -C "${submodulesaved}" reset -q --soft HEAD~1
+run_command 'an uncommitted change to a submodule' 1 "${submodulesaved}"
+check_present 'an uncommitted change to a submodule' "${submodulesaved}"
+check_message 'an uncommitted change to a submodule' \
+  "refusing to remove ${submodulesaved}: 1 tracked file(s) have uncommitted changes"
+check_no_message 'an uncommitted change to a submodule' 'commit(s)'
 
 # Within a working tree, any ref saves a change, but a ref's history does not,
 # and files outside the directory do not count.

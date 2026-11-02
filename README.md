@@ -210,10 +210,15 @@ The commands are:
   never prevent a removal.  When other commits would be lost, the message
   that refuses the removal, or that reports its waiver by `--force-unpushed`,
   counts the landed commits among those that the removal would delete.
-  Nor does an uncommitted change each of whose resulting files, with its
-  pathname, mode, and contents, is in a commit that some ref that the removal
-  leaves names, such as a remote-tracking ref; the ref can differ from file to
-  file.
+  An uncommitted change to a tracked file does not count as work that would
+  be lost if it is saved:  if each new version of the file, in the index and
+  in the working tree, has the same pathname, mode, and contents as the file
+  in the commit that some ref that the removal leaves names, such as a
+  remote-tracking ref.  The ref can differ from version to version and from
+  file to file, and only the commit that the ref names counts, not its
+  history.  A clone's local branches do not save a change, because the
+  removal deletes them.  A deleted file, a submodule, and a symbolic link are
+  never saved.
   It removes a worktree with `git worktree remove` and deletes its branch, if
   `git-new-branch` or `git-checkout-branch` created that branch and no other
   worktree has it checked out, and it removes anything else with `rm -rf`.
