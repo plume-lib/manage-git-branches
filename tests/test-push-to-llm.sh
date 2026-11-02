@@ -1248,23 +1248,32 @@ for ff in true false; do
   fi
 done
 
+## Usage: setup_broken_clone_merge CASE
+## Sets up a case named CASE, in which the feature branch of
+## ${case_dir}/other-clone, a working clone of the remote, has a merge, not
+## yet pushed, that combines a commit that adds remote.txt with one that adds
+## "BROKEN" to other.txt.  Main is reset to the initial commit, which feature
+## already contains, so that merging main changes nothing.
+setup_broken_clone_merge() {
+  setup_case "$1" build
+  git -C "${main_dir}" reset -q --hard HEAD^
+  git -C "${main_dir}" push -q --force
+  git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+  git -C "${case_dir}/other-clone" switch -q -c side
+  echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
+  git -C "${case_dir}/other-clone" commit -q -a -m "Break the build on side"
+  git -C "${case_dir}/other-clone" switch -q feature
+  echo "remote" > "${case_dir}/other-clone/remote.txt"
+  git -C "${case_dir}/other-clone" add remote.txt
+  git -C "${case_dir}/other-clone" commit -q -m "Add remote.txt"
+  git -C "${case_dir}/other-clone" merge -q --no-ff --no-edit side
+}
+
 ## When the branch's remote is a URL, no remote-tracking branch records the
 ## remote's feature, but the head that the pull fetched was built there too.
 ## So a pull that fast-forwards to a merge of the remote that breaks the
-## build does not ask the agent.  Main is reset to the initial commit, which
-## feature already contains, so that merging main changes nothing.
-setup_case pull-build-fast-forward-url build
-git -C "${main_dir}" reset -q --hard HEAD^
-git -C "${main_dir}" push -q --force
-git clone -q -b feature "${remote}" "${case_dir}/other-clone"
-git -C "${case_dir}/other-clone" switch -q -c side
-echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
-git -C "${case_dir}/other-clone" commit -q -a -m "Break the build on side"
-git -C "${case_dir}/other-clone" switch -q feature
-echo "remote" > "${case_dir}/other-clone/remote.txt"
-git -C "${case_dir}/other-clone" add remote.txt
-git -C "${case_dir}/other-clone" commit -q -m "Add remote.txt"
-git -C "${case_dir}/other-clone" merge -q --no-ff --no-edit side
+## build does not ask the agent.
+setup_broken_clone_merge pull-build-fast-forward-url
 git -C "${case_dir}/other-clone" push -q
 feature_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
 git -C "${feature_dir}" config branch.feature.remote "${remote}"
@@ -1310,32 +1319,30 @@ fi
 ## A working clone in the local file system, unlike a bare repository, need
 ## not have pushed its branches, so the head that a pull from it fetched was
 ## not necessarily built.  A pull that fast-forwards to an unpushed merge of
-## that clone that breaks the build asks the agent.
-setup_case pull-build-fast-forward-clone build
-git -C "${main_dir}" reset -q --hard HEAD^
-git -C "${main_dir}" push -q --force
-git clone -q -b feature "${remote}" "${case_dir}/other-clone"
-git -C "${case_dir}/other-clone" switch -q -c side
-echo "BROKEN" >> "${case_dir}/other-clone/other.txt"
-git -C "${case_dir}/other-clone" commit -q -a -m "Break the build on side"
-git -C "${case_dir}/other-clone" switch -q feature
-echo "remote" > "${case_dir}/other-clone/remote.txt"
-git -C "${case_dir}/other-clone" add remote.txt
-git -C "${case_dir}/other-clone" commit -q -m "Add remote.txt"
-git -C "${case_dir}/other-clone" merge -q --no-ff --no-edit side
-git -C "${feature_dir}" config branch.feature.remote "${case_dir}/other-clone"
-git -C "${feature_dir}" config branch.feature.pushRemote origin
-git -C "${feature_dir}" config push.default current
-STUB_BUILD=fix push_to good --llm
-if [ "${push_status}" -ne 0 ]; then
-  fail "pull from a working clone to a broken build: git-push-to failed: ${push_output}"
-fi
-if [ "$(cat "${STUB_LOG}")" != claude ]; then
-  fail "pull from a working clone to a broken build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
-fi
-if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
-  fail "pull from a working clone to a broken build: the build is not fixed"
-fi
+## that clone that breaks the build asks the agent, whether the branch's
+## remote is the clone's pathname or the name of a remote, whose
+## remote-tracking branch then records the clone's feature.
+for clone_remote in pathname name; do
+  setup_broken_clone_merge "pull-build-fast-forward-clone-${clone_remote}"
+  if [ "${clone_remote}" = name ]; then
+    git -C "${feature_dir}" remote add clone "${case_dir}/other-clone"
+    git -C "${feature_dir}" config branch.feature.remote clone
+  else
+    git -C "${feature_dir}" config branch.feature.remote "${case_dir}/other-clone"
+  fi
+  git -C "${feature_dir}" config branch.feature.pushRemote origin
+  git -C "${feature_dir}" config push.default current
+  STUB_BUILD=fix push_to good --llm
+  if [ "${push_status}" -ne 0 ]; then
+    fail "pull from a working clone, by ${clone_remote}, to a broken build: git-push-to failed: ${push_output}"
+  fi
+  if [ "$(cat "${STUB_LOG}")" != claude ]; then
+    fail "pull from a working clone, by ${clone_remote}, to a broken build: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+  fi
+  if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+    fail "pull from a working clone, by ${clone_remote}, to a broken build: the build is not fixed"
+  fi
+done
 
 ## A merge that a pull makes, although it could have fast-forwarded,
 ## combines no changes, so the fix's message does not list it.

@@ -179,9 +179,6 @@ fi
 if ! pull_resolving "${llm_agent}" "$(pwd)" -q --no-rebase; then
   exit 1
 fi
-# The head that the pull fetched was built where it was pushed, even if no
-# remote-tracking branch records it.
-pulled_fetched="${pull_fetched}"
 
 # Stop if there is nothing to merge and nothing to push.  If there is nothing
 # to merge, still build and push if the branch has commits that are not
@@ -219,8 +216,10 @@ if ! upstream_head="$(git rev-parse --verify --quiet "${upstream_ref}")"; then
   echo "${SCRIPT_NAME}: cannot read ${upstream_ref}" >&2
   exit 1
 fi
+# The head that the pull fetched was built where it was pushed, even if no
+# remote-tracking branch records it.
 if ! merge_build_push "${upstream_head}" \
   "remote-tracking branch '${upstream_ref#refs/remotes/}'" "${upstream_ref}" \
-  "${nocompile}" "${llm_agent}" "${upstream_ref} ${pulled_fetched}"; then
+  "${nocompile}" "${llm_agent}" "${upstream_ref} ${pull_fetched}"; then
   exit 1
 fi
