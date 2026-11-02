@@ -166,8 +166,9 @@ The commands are:
   requests are all closed or merged, is neither listed nor removed; a warning
   about it is printed instead.  (This needs the `gh` command.)
   Likewise, a warning is printed about a directory named `*-branch-*` that
-  is in no git working tree and holds more than `.project` files, such as one
-  whose removal failed on files that another user owns, and about one that is
+  is in no git working tree and either holds more than `.project` files, such
+  as one whose removal failed on files that another user owns, or holds no
+  `.project` file at all, such as an empty directory, and about one that is
   in a working tree that git cannot use, such as a linked worktree whose main
   working tree was moved.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see

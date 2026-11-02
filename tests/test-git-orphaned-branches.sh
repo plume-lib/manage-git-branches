@@ -242,8 +242,9 @@ check_warned() {
   fi
 }
 
-# Each `*-branch-*` directory that holds more than `.project` files and is in
-# no working tree is warned about; each listed one is not.
+# Each `*-branch-*` directory that is in no working tree and either holds
+# more than `.project` files or holds no `.project` file at all, such as an
+# empty directory, is warned about; each listed one is not.
 check_warned "p-branch-only-project" "unwarned"
 check_warned "p-branch-plus-file" "warned"
 check_warned "p-branch-plus-hidden" "warned"
