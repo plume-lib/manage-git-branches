@@ -683,6 +683,34 @@ check_swu "branch 'main'" "branch 'main'"
 check_swu "remote-tracking branch 'origin/main'" \
   "remote-tracking branch 'origin/main'"
 
+## Tests of subject_without_url, in the same clone as those of
+## source_without_url.
+
+## Usage: check_subject SUBJECT EXPECTED [COMMIT]
+## Checks that `subject_without_url`, in ${WORK_DIR}/swu, prints EXPECTED for
+## SUBJECT and COMMIT, which is ${swu_head} by default.
+check_subject() {
+  check_subject_actual="$(cd "${WORK_DIR}/swu" && subject_without_url "$1" "${3:-${swu_head}}")"
+  if [ "${check_subject_actual}" != "$2" ]; then
+    fail "subject_without_url [$1] printed [${check_subject_actual}], not [$2]"
+  fi
+}
+
+check_subject "Merge branch 'feature' of github.com:org/proj into feature" \
+  "Merge remote-tracking branch 'origin/feature' into feature"
+# On the default branch, `git merge` omits " into BRANCH".
+check_subject "Merge branch 'feature' of https://github.com/Org/Proj" \
+  "Merge remote-tracking branch 'origin/feature'"
+check_subject "Merge branch 'main' of /nonexistent/repo into feature" \
+  "Merge branch 'main' of repo into feature" "${swu_other}"
+check_subject "Merge branch 'feature' of github.com:org/proj into feature" \
+  "Merge branch 'feature' of github.com:org/proj into feature" "${swu_other}"
+# A merge that no pull made.
+check_subject "Merge branch 'main' into feature" \
+  "Merge branch 'main' into feature"
+check_subject "Merge remote-tracking branch 'origin/main' into feature" \
+  "Merge remote-tracking branch 'origin/main' into feature"
+
 ## Usage: hum_commit DIRECTORY FILE MESSAGE
 ## Writes MESSAGE to FILE in DIRECTORY and commits it with that message.
 hum_commit() {

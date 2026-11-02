@@ -1838,6 +1838,40 @@ upstream_description() {
   esac
 }
 
+## Usage: subject_without_url SUBJECT COMMIT
+## Prints SUBJECT, the subject of a merge commit, with the source that
+## `git pull` wrote in it, "branch 'BRANCH' of URL", named without its URL
+## where `source_without_url` can, given COMMIT, the commit that the merge
+## merged from that source.  For example, prints "Merge remote-tracking
+## branch 'origin/feature' into feature" for "Merge branch 'feature' of
+## github.com:org/proj into feature".  Prints SUBJECT unchanged if it has no
+## such source.  A merge that a pull other than `pull_resolving`'s made has
+## such a subject.
+subject_without_url() {
+  case "$1" in
+    "Merge branch '"*"' of "*) ;;
+    *)
+      printf '%s\n' "$1"
+      return 0
+      ;;
+  esac
+  subject_url_rest="${1#Merge }"
+  # A branch name contains no space, so the last " into " precedes the
+  # destination branch.  `git merge` omits " into BRANCH" on the default
+  # branch.
+  case "${subject_url_rest}" in
+    *" into "*)
+      subject_url_source="${subject_url_rest% into *}"
+      subject_url_into=" into ${subject_url_rest##* into }"
+      ;;
+    *)
+      subject_url_source="${subject_url_rest}"
+      subject_url_into=''
+      ;;
+  esac
+  printf 'Merge %s%s\n' "$(source_without_url "${subject_url_source}" "$2")" "${subject_url_into}"
+}
+
 ## Usage: source_without_url SOURCE COMMIT
 ## Prints SOURCE, a source that `git pull` merges, as it writes one in
 ## FETCH_HEAD and in a merge message, such as "branch 'feature' of
@@ -1997,15 +2031,17 @@ built_commits() {
 ##    that the merge combined changes, and
 ##  * the current branch's tree differs from those remote branches' and
 ##    BUILT's trees.
-## Commits in BUILT that are not in the repository are ignored.  If it
-## returns 0, it sets ${merge_fix_branch} to the current branch's name, such
-## as "feature"; ${merge_fix_account} to an account, for an AI agent, of the
-## merge commits that might have broken the build and of the commands that
+## Commits in BUILT that are not in the repository are ignored.
+## If it returns 0, it sets ${merge_fix_branch} to the current branch's name,
+## such as "feature"; ${merge_fix_account} to an account, for an AI agent, of
+## the merge commits that might have broken the build and of the commands that
 ## show them; and ${merge_fix_message} to the message of a commit that fixes
-## the build, such as "Fix the build after merging branch 'main'".  If it
-## returns 1, a failure of the build is not one that a merge on the branch
-## caused, and the agent would merely work around it.  For example, a pull
-## that fast-forwarded the branch brought only commits that the remote
+## the build, such as "Fix the build after merging branch 'main'", which names
+## a merge that a pull made without the pull's URL where it can (see
+## `subject_without_url`).
+## If it returns 1, a failure of the build is not one that a merge on the
+## branch caused, and the agent would merely work around it.  For example, a
+## pull that fast-forwarded the branch brought only commits that the remote
 ## already had.  Prints a diagnostic if it returns 1 because git fails.
 ## The account in ${merge_fix_account} omits each commit in BUILT that is in
 ## the history of a remote branch or of an earlier commit in BUILT, because it
@@ -2053,7 +2089,8 @@ has_unbuilt_merge() {
     echo "${SCRIPT_NAME}: cannot list the merge commits in $(pwd), so no AI agent is asked to fix the build" >&2
     return 1
   fi
-  # The merges that combined changes:  their subjects, and lines
+  # The merges that combined changes:  their subjects, as the message of the
+  # fix names them (see `subject_without_url`), and lines
   # "* ABBREVIATION SUBJECT", one per merge.
   merge_fix_subjects=''
   merge_fix_list=''
@@ -2080,7 +2117,7 @@ has_unbuilt_merge() {
         return 1
       fi
       merge_fix_subjects="${merge_fix_subjects:+${merge_fix_subjects}
-}${merge_fix_subject}"
+}$(subject_without_url "${merge_fix_subject}" "${merge_fix_commit}^2")"
       merge_fix_list="${merge_fix_list:+${merge_fix_list}
 }* ${merge_fix_abbrev} ${merge_fix_subject}"
     fi
