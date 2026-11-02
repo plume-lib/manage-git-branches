@@ -56,6 +56,12 @@
 #    with later work that has not landed, nor of a branch none of whose
 #    commits, other than merges, changes a file, such as one whose only
 #    commits are empty.
+#    A commit also counts as held if it is on a local branch whose remote
+#    branch is gone and whose last commit GitHub holds in a landed pull
+#    request from the branch:  a squash-merged pull request that gained
+#    commits that the local branch lacks, from another clone, for example,
+#    which `git-outgoing` cannot recognize.  Asking GitHub needs the `gh`
+#    command; without it, or if GitHub cannot be reached, such commits count.
 #
 # `--force` waives both.  Each refusal names the check, says how much would be
 # lost, and quotes the flag that waives it; each waiver says on standard error
@@ -233,59 +239,201 @@ line_count() {
 }
 
 # Usage: count_unlanded DIRECTORY LANDABLE REV-LIST-ARGS...
-# Prints the number of commits that `git rev-list REV-LIST-ARGS` lists in the
-# repository of DIRECTORY, other than those on a local branch whose changes
-# have landed in a remote's default branch.  LANDABLE names the local branches
-# that may have landed:  `--all` for every one, a branch name for that one
-# alone, or the empty string for none.  Prints nothing if `git rev-list`
-# fails.
+# Sets ${count_unlanded_result} to the number of commits that
+# `git rev-list REV-LIST-ARGS` lists in the repository of DIRECTORY, other
+# than those on a local branch whose changes have landed in a remote's default
+# branch, or that GitHub holds in a landed pull request.  LANDABLE names the
+# local branches that may have landed:  `--all` for every one, a branch name
+# for that one alone, or the empty string for none.  Sets it to the empty
+# string if `git rev-list` fails.
 #
 # A squash-merged pull request is the reason:  its commits are on no remote,
 # because the squash commit replaces them, and its remote branch is deleted,
 # but its changes are in the remote's default branch, so removing the only
-# copy of its commits loses nothing.  `git-outgoing --omitted` names the
-# branches whose changes have landed, and their commits are not counted.  If
-# `git-outgoing` fails, every commit counts.
+# local copy of its commits loses nothing.  `git-outgoing --omitted` names
+# the branches whose changes have landed, and their commits are not counted.
+# If `git-outgoing` fails, it names no branch.  `count_pr_unlanded` excludes
+# the commits of the branches that GitHub holds.
 #
 # `git-outgoing` examines each branch that it is asked about, which is most
 # of its work, so LANDABLE should name no more branches than matter.  It is
 # not run where it cannot find anything:  when `git rev-list` lists no commit,
 # when LANDABLE is empty, when git is older than 2.40, which `git-outgoing`
 # requires, or when no remote has a default branch (`REMOTE/HEAD`).
+# `count_pr_unlanded`, which queries GitHub, is run only when commits remain
+# to be counted after `git-outgoing` has run or failed.
+#
+# The answer is a variable rather than output so that the caller does not run
+# this function in a subshell, which would forget the answers that
+# `pr_repositories` remembers before the next call.
 count_unlanded() {
   count_unlanded_dir="$1"
   count_unlanded_landable="$2"
   shift 2
-  count_unlanded_count="$(git -C "${count_unlanded_dir}" rev-list --count \
-    "$@" 2> /dev/null)" || return 0
-  if [ "${count_unlanded_count}" -eq 0 ] || [ -z "${count_unlanded_landable}" ] \
-    || [ "${outgoing_works}" -eq 0 ] \
-    || ! git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
+  if ! count_unlanded_result="$(git -C "${count_unlanded_dir}" rev-list \
+    --count "$@" 2> /dev/null)"; then
+    count_unlanded_result=''
+    return 0
+  fi
+  if [ "${count_unlanded_result}" -eq 0 ] || [ -z "${count_unlanded_landable}" ]; then
+    return 0
+  fi
+  count_unlanded_omitted=''
+  if [ "${outgoing_works}" -eq 1 ] \
+    && git -C "${count_unlanded_dir}" for-each-ref --format='%(refname)' \
       refs/remotes 2> /dev/null | grep -q '/HEAD$'; then
-    echo "${count_unlanded_count}"
-    return 0
+    if [ "${count_unlanded_landable}" = --all ]; then
+      count_unlanded_only=
+    else
+      count_unlanded_only="--only-branch=${count_unlanded_landable}"
+    fi
+    if ! count_unlanded_omitted="$(cd -- "${count_unlanded_dir}" \
+      && "${SCRIPT_DIR}"/git-outgoing ${count_unlanded_only:+"${count_unlanded_only}"} --omitted)"; then
+      echo "${SCRIPT_NAME}: cannot tell whether the changes of the commits in ${count_unlanded_dir} have landed in a remote's default branch" >&2
+      count_unlanded_omitted=''
+    elif [ -n "${count_unlanded_omitted}" ]; then
+      count_unlanded_result="$(count_excluding "${count_unlanded_dir}" \
+        "${count_unlanded_omitted}" "$@")"
+      if [ -z "${count_unlanded_result}" ] || [ "${count_unlanded_result}" -eq 0 ]; then
+        return 0
+      fi
+    fi
   fi
-  if [ "${count_unlanded_landable}" = --all ]; then
-    count_unlanded_only=
+  count_pr_unlanded "${count_unlanded_dir}" "${count_unlanded_landable}" \
+    "${count_unlanded_omitted}" "${count_unlanded_result}" "$@"
+  count_unlanded_result="${count_pr_unlanded_result}"
+}
+
+# Usage: count_excluding DIRECTORY REFS REV-LIST-ARGS...
+# Prints the number of commits that `git rev-list REV-LIST-ARGS` lists in the
+# repository of DIRECTORY and that none of REFS, full ref names such as
+# `refs/heads/main`, one per line, holds.  Empty lines of REFS are ignored.
+# Prints nothing if `git rev-list` fails.
+#
+# A `--not` in REV-LIST-ARGS does not apply to the revisions that git reads
+# from standard input, so each ref is negated by its `^`.  The refs are passed
+# that way rather than as arguments, which might exceed the limit on a command
+# line's size.
+count_excluding() {
+  count_excluding_dir="$1"
+  count_excluding_refs="$2"
+  shift 2
+  printf '%s\n' "${count_excluding_refs}" | sed -e '/^$/d' -e 's/^/^/' \
+    | git -C "${count_excluding_dir}" rev-list --count --stdin "$@" 2> /dev/null
+}
+
+# Usage: count_pr_unlanded DIRECTORY LANDABLE OMITTED COUNT REV-LIST-ARGS...
+# Sets ${count_pr_unlanded_result} to the number of commits that
+# `git rev-list REV-LIST-ARGS` lists in the repository of DIRECTORY and that
+# none of OMITTED, full ref names such as `refs/heads/feature`, one per line,
+# holds, other than those on a local branch among LANDABLE, as for
+# `count_unlanded`, whose commits GitHub holds in a landed pull request.
+# COUNT is the number of commits that `git rev-list REV-LIST-ARGS` lists and
+# that none of OMITTED holds.  Sets it to the empty string if `git rev-list`
+# fails.
+#
+# GitHub holds a branch's commits if the branch's last commit is, or is an
+# ancestor of, the last commit of a pull request from the branch, because
+# GitHub keeps every pull request's last commit after the pull request's
+# branch is deleted.  This finds a squash-merged pull request that
+# `git-outgoing` misses:  one that gained commits that the local branch
+# lacks, from another clone or from GitHub's "Update branch" button, for
+# example.  Merging the local branch then does not reproduce the squash
+# commit, but nothing that the local branch holds is lost.  A pull request
+# that was closed without landing holds its commits too, but its work did
+# not land, and the user is likely to want the branch, so only a landed pull
+# request counts.  The pull requests from a branch are the ones that
+# `pr_repositories` describes.  GitHub's answer about whether one commit is
+# an ancestor of another is used, rather than git's, because the pull
+# request's last commit is often missing from the local repository.
+#
+# Each query of GitHub takes time, so GitHub is asked only about a branch
+# that holds some of the commits that are counted, and only if the clone has
+# no remote-tracking ref for the branch's head branch, the remote branch that
+# `pr_repositories` names.  A remote-tracking ref would mean that the remote
+# branch still exists, and since the remote branch does not hold all of the
+# local branch's commits, GitHub does not hold them either.  Without one, the
+# remote branch was deleted, or the branch was never pushed, which GitHub's
+# answer reveals.  A branch's commits count when nothing is known about its
+# pull requests:  when it has none on GitHub, or when GitHub cannot be asked.
+count_pr_unlanded() {
+  count_pr_unlanded_dir="$1"
+  count_pr_unlanded_excluded="$3"
+  count_pr_unlanded_result="$4"
+  if [ "$2" = --all ]; then
+    count_pr_unlanded_pattern=refs/heads
   else
-    count_unlanded_only="--only-branch=${count_unlanded_landable}"
+    count_pr_unlanded_pattern="refs/heads/$2"
   fi
-  if ! count_unlanded_omitted="$(cd -- "${count_unlanded_dir}" \
-    && "${SCRIPT_DIR}"/git-outgoing ${count_unlanded_only:+"${count_unlanded_only}"} --omitted)"; then
-    echo "${SCRIPT_NAME}: cannot tell whether the changes of the commits in ${count_unlanded_dir} have landed, so counting them all" >&2
-    echo "${count_unlanded_count}"
-    return 0
-  fi
-  if [ -z "${count_unlanded_omitted}" ]; then
-    echo "${count_unlanded_count}"
-    return 0
-  fi
-  # A `--not` in REV-LIST-ARGS does not apply to the revisions that git reads
-  # from standard input, so each omitted branch is negated by its `^`.  The
-  # branches are passed that way rather than as arguments, which might exceed
-  # the limit on a command line's size.
-  printf '%s\n' "${count_unlanded_omitted}" | sed 's/^/^/' \
-    | git -C "${count_unlanded_dir}" rev-list --count --stdin "$@" 2> /dev/null
+  shift 4
+  count_pr_unlanded_refs="$(git -C "${count_pr_unlanded_dir}" for-each-ref \
+    --format='%(refname)' "${count_pr_unlanded_pattern}" 2> /dev/null)"
+  # A ref name contains no whitespace and no pattern character, so splitting
+  # the list yields each ref name intact.
+  for count_pr_unlanded_ref in ${count_pr_unlanded_refs}; do
+    if printf '%s\n' "${count_pr_unlanded_excluded}" \
+      | grep -q -x -F -e "${count_pr_unlanded_ref}"; then
+      continue
+    fi
+    count_pr_unlanded_without="$(count_excluding "${count_pr_unlanded_dir}" \
+      "${count_pr_unlanded_excluded}
+${count_pr_unlanded_ref}" "$@")"
+    if [ -z "${count_pr_unlanded_without}" ] \
+      || [ "${count_pr_unlanded_without}" -ge "${count_pr_unlanded_result}" ]; then
+      continue
+    fi
+    pr_repositories "${count_pr_unlanded_dir}" \
+      "${count_pr_unlanded_ref#refs/heads/}" || continue
+    count_pr_unlanded_tracked=0
+    for count_pr_unlanded_tracking in $(is_deleted_branch_tracking_refs \
+      "${count_pr_unlanded_dir}" "${pr_head_remote}" "refs/heads/${pr_head_branch}"); do
+      if git -C "${count_pr_unlanded_dir}" rev-parse --verify --quiet \
+        "${count_pr_unlanded_tracking}" > /dev/null; then
+        count_pr_unlanded_tracked=1
+      fi
+    done
+    [ "${count_pr_unlanded_tracked}" -eq 0 ] || continue
+    count_pr_unlanded_tip="$(git -C "${count_pr_unlanded_dir}" rev-parse \
+      --verify --quiet "${count_pr_unlanded_ref}^{commit}")" || continue
+    # Each line is "COMMIT HEAD" for one landed pull request, where COMMIT is
+    # its last commit and HEAD its head repository, or "-" if that was
+    # deleted.  The `head` parameter names only the head repository's owner,
+    # who might have both the base repository and a fork of it.
+    count_pr_unlanded_prs="$(with_timeout "${github_query_seconds}" \
+      gh api -X GET "repos/${pr_base_repo}/pulls" \
+      -f "head=${pr_head_repo%%/*}:${pr_head_branch}" -f state=closed -f per_page=100 \
+      --hostname github.com --paginate \
+      --jq '.[] | select(.merged_at) | "\(.head.sha) \(.head.repo.full_name // "-")"' \
+      < /dev/null 2> /dev/null)" || continue
+    count_pr_unlanded_held=0
+    # GitHub ignores the case of a repository's name, so a remote URL might
+    # spell it differently than GitHub's answer does.
+    for count_pr_unlanded_commit in $(printf '%s\n' "${count_pr_unlanded_prs}" \
+      | awk -v head="${pr_head_repo}" 'tolower($2) == tolower(head) { print $1 }'); do
+      if [ "${count_pr_unlanded_commit}" = "${count_pr_unlanded_tip}" ]; then
+        count_pr_unlanded_held=1
+        break
+      fi
+      # "ahead" means that the pull request's last commit descends from the
+      # branch's.  GitHub fails if it lacks the branch's last commit.
+      case "$(with_timeout "${github_query_seconds}" \
+        gh api -X GET "repos/${pr_base_repo}/compare/${count_pr_unlanded_tip}...${count_pr_unlanded_commit}" \
+        -f per_page=1 --hostname github.com --jq .status < /dev/null 2> /dev/null)" in
+        ahead | identical)
+          count_pr_unlanded_held=1
+          break
+          ;;
+      esac
+    done
+    if [ "${count_pr_unlanded_held}" -eq 1 ]; then
+      count_pr_unlanded_excluded="${count_pr_unlanded_excluded}
+${count_pr_unlanded_ref}"
+      count_pr_unlanded_result="${count_pr_unlanded_without}"
+      if [ "${count_pr_unlanded_result}" -eq 0 ]; then
+        return 0
+      fi
+    fi
+  done
 }
 
 # Prints the number of live linked worktrees of the repository in directory
@@ -399,8 +547,8 @@ check_worktree_unpushed() {
     set -- "$1" "$2" "$3" "$4"
   fi
   check_worktree_unpushed_dir="$4"
-  check_worktree_unpushed_count="$(count_unlanded "$1" "$3" "$2" ${5:+"$5"} \
-    --not ${6:+"$6"} --branches --tags --remotes)"
+  count_unlanded "$1" "$3" "$2" ${5:+"$5"} --not ${6:+"$6"} --branches --tags --remotes
+  check_worktree_unpushed_count="${count_unlanded_result}"
   if [ -z "${check_worktree_unpushed_count}" ]; then
     echo "${SCRIPT_NAME}: refusing to remove ${check_worktree_unpushed_dir}: cannot tell whether it holds commits that no other ref holds" >&2
     remove_refusals=1
@@ -920,8 +1068,8 @@ remove_branch_directory() {
     # A tag counts as holding them too.  With this code, work that a local tag
     # alone names is not caught; however, a commit is nearly always also on a
     # branch, HEAD, or the stash, and each of those still counts.
-    remove_unpushed="$(count_unlanded "${remove_dir}" --all --all \
-      --not --remotes --tags)"
+    count_unlanded "${remove_dir}" --all --all --not --remotes --tags
+    remove_unpushed="${count_unlanded_result}"
     if [ -z "${remove_unpushed}" ]; then
       echo "${SCRIPT_NAME}: refusing to remove ${remove_dir}: cannot tell whether it holds commits that no other ref holds" >&2
       remove_refusals=1
