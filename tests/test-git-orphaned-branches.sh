@@ -135,6 +135,14 @@ touch "${work}/dot-project/p-branch-nested-project/java/lib/.project"
 # anywhere and is the leftover of nothing.
 mkdir -p "${work}/dot-project/p-branch-empty-tree/sub/deeper"
 
+# Contains nothing but Python build output, which is what remains when
+# `rm -rf` cannot remove the files that a container running as root created.
+# A `*-branch-*` directory within its `.venv` is build output, so it is
+# neither listed nor warned about.
+mkdir -p "${work}/dot-project/p-branch-python/.venv/lib/x-branch-y" \
+  "${work}/dot-project/p-branch-python/myproject.egg-info"
+touch "${work}/dot-project/p-branch-python/.venv/lib/x-branch-y/other"
+
 # A `*-branch-*` directory behind a symbolic link to a directory.  The walk
 # does not follow such a link, which is what keeps a link to an ancestor from
 # sending it around forever.
@@ -193,6 +201,8 @@ check "p-branch-outer" "unlisted"
 check "p-branch-outer/q-branch-inner" "listed"
 check "p-branch-nested-project" "listed"
 check "p-branch-empty-tree" "unlisted"
+check "p-branch-python" "listed"
+check "p-branch-python/.venv/lib/x-branch-y" "unlisted"
 if printf '%s\n' "${output}" | grep -q -F -- 'p-branch-behind-link'; then
   echo "FAIL: git-orphaned-branches followed a symbolic link to a directory"
   status=1
@@ -232,6 +242,8 @@ check_warned "p-plain-project" "unwarned"
 check_warned "p-branch-outer" "warned"
 check_warned "p-branch-outer/q-branch-inner" "unwarned"
 check_warned "p-branch-empty-tree" "warned"
+check_warned "p-branch-python" "unwarned"
+check_warned "p-branch-python/.venv/lib/x-branch-y" "unwarned"
 check_warned "p-repo/r-branch-subdir" "unwarned"
 if [ "${unlistable}" -eq 1 ]; then
   check_warned "p-branch-unlistable" "warned"

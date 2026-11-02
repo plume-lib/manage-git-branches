@@ -8,7 +8,8 @@
 # The status code is:
 #  * 0 (true) if the directory is on a branch that was deleted in its remote,
 #    or if the directory is the leftover of such a branch's directory:  it
-#    holds nothing but Eclipse `.project` files (see below),
+#    holds nothing but files that tools other than git leave behind, such as
+#    Eclipse `.project` files (see below),
 #  * 1 (false) if the directory is on a branch that still exists in its remote,
 #  * 2 (false) if the directory is not the top level of a working tree, so
 #    the question does not apply,
@@ -22,24 +23,30 @@
 # A caller must not treat every nonzero status as "the branch still exists";
 # only status 1 means that.
 #
-# A directory that holds nothing but Eclipse `.project` files is status 0,
-# even though it is no working tree and is on no branch at all.  What remains
-# after a branch directory's working tree is gone is Eclipse metadata:  a
-# `.project` file for each Eclipse project that the branch held, and the
-# directories that hold them, which are otherwise empty.  Nothing of the
-# branch survives in such a directory, so it is as removable as a working tree
-# whose branch was deleted in its remote, which is the question that callers
-# ask this command.
+# A directory that holds nothing but leftovers is status 0, even though it is
+# no working tree and is on no branch at all.  A leftover is a file or
+# directory that a tool other than git creates in a working tree, and that can
+# remain after the working tree is gone:
+#  * an Eclipse `.project` file, which is a regular file, one for each Eclipse
+#    project that the branch held;
+#  * a Python virtual environment, which is a directory named `.venv`;
+#  * Python package metadata, which is a directory whose name ends in
+#    `.egg-info`, such as `myproject.egg-info`.
+# A `.venv` or `*.egg-info` directory is a leftover whatever it holds.  It
+# often survives because a container that runs as root created it, so that the
+# user's `rm -rf` of the working tree cannot remove its contents.  Nothing of
+# the branch survives in a directory of leftovers, so it is as removable as a
+# working tree whose branch was deleted in its remote, which is the question
+# that callers ask this command.
 #
 # The criterion applies to the whole tree below the directory:  every entry is
-# either a `.project` file or a directory that itself holds nothing but
-# `.project` files.  An empty directory counts as nothing, which is what lets
-# the empty `bin` that Eclipse leaves behind qualify.  Anything else -- a
-# regular file that is not named `.project`, a symbolic link, or a directory
-# that holds either -- is content, and the directory is then judged as a
-# working tree or not, like any other.  At least one `.project` file must
-# appear somewhere in the tree, though not necessarily in the directory
-# itself:  a tree of nothing but empty directories is the leftover of
+# either a leftover or a directory that itself holds nothing but leftovers.  An
+# empty directory counts as nothing, which is what lets the empty `bin` that
+# Eclipse leaves behind qualify.  Anything else -- any other regular file, a
+# symbolic link, or a directory that holds either -- is content, and the
+# directory is then judged as a working tree or not, like any other.  At least
+# one leftover must appear somewhere in the tree, though not necessarily in the
+# directory itself:  a tree of nothing but empty directories is the leftover of
 # nothing, whereas a branch whose Eclipse projects were all below its top
 # level leaves its `.project` files there and none at the top.
 #

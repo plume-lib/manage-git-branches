@@ -394,6 +394,33 @@ mkdir -p "${testdir}/dotproject-nested-only/sub"
 ## anywhere and is the leftover of nothing.
 mkdir -p "${testdir}/dotproject-empty-tree/sub/deeper"
 
+## Python build output, which is what remains when `rm -rf` of a branch
+## directory cannot remove files that a container running as root created:  a
+## `.venv` directory and a `*.egg-info` directory.  Their contents are not
+## examined, so the file inside each would otherwise be content.
+mkdir -p "${testdir}/python-leftover/.venv/bin" \
+  "${testdir}/python-leftover/myproject.egg-info"
+: > "${testdir}/python-leftover/.venv/bin/python"
+: > "${testdir}/python-leftover/myproject.egg-info/PKG-INFO"
+
+## A `*.egg-info` directory below the directory, beside a `.project` file, as
+## in a `src` layout.
+mkdir -p "${testdir}/python-nested-egg-info/src/myproject.egg-info"
+: > "${testdir}/python-nested-egg-info/.project"
+
+## A `.venv` directory beside a file that is not a leftover.
+mkdir -p "${testdir}/python-plus-file/.venv"
+: > "${testdir}/python-plus-file/other"
+
+## A regular file named `.venv`, which is not a virtual environment.
+mkdir "${testdir}/python-venv-file"
+: > "${testdir}/python-venv-file/.venv"
+
+## A symbolic link named `.venv` to a directory, which is content like any
+## other link.
+mkdir -p "${testdir}/python-venv-symlink" "${testdir}/venv-target"
+ln -s ../venv-target "${testdir}/python-venv-symlink/.venv"
+
 ## A working tree that holds a `.project` file, as an Eclipse project's clone
 ## does.  Its branch still exists in the remote, and the `.git` directory
 ## beside the `.project` file is what keeps the criterion above from applying.
@@ -474,6 +501,16 @@ expect_status 0 "${testdir}/dotproject-nested-only" \
   'directory with no .project file of its own, below which there is one'
 expect_status 2 "${testdir}/dotproject-empty-tree" \
   'directory that holds nothing but empty directories'
+expect_status 0 "${testdir}/python-leftover" \
+  'directory that holds nothing but a .venv directory and a *.egg-info directory'
+expect_status 0 "${testdir}/python-nested-egg-info" \
+  'directory that holds a .project file and, below its top level, a *.egg-info directory'
+expect_status 2 "${testdir}/python-plus-file" \
+  'directory that holds a .venv directory and a file that is not a leftover'
+expect_status 2 "${testdir}/python-venv-file" \
+  'directory that holds a regular file named .venv'
+expect_status 2 "${testdir}/python-venv-symlink" \
+  'directory that holds a symbolic link named .venv'
 expect_status 1 "${testdir}/myrepo-live-project" \
   'working tree that holds a .project file and whose branch exists in the remote'
 expect_status 2 "${nonexistent}" 'path that does not exist'
