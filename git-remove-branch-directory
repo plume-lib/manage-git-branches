@@ -703,7 +703,7 @@ move_tree_beneath() {
     return 1
   fi
   # shellcheck disable=SC2016 # The single-quoted text is Perl, not shell.
-  if ! move_tree_error="$(perl -e 'rename($ARGV[0], $ARGV[1]) or die "$!\n"' \
+  if ! move_tree_error="$(perl -e 'my ($from, $to) = @ARGV; rename($from, $to) or die "$!\n"' \
     -- "$1" "${move_tree_dest}/$(basename -- "$1")" 2>&1)"; then
     rmdir -- "${move_tree_dest}"
     move_tree_reason="cannot move it to $2${move_tree_error:+: ${move_tree_error}}"
