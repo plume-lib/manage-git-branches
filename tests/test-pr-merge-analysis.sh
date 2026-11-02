@@ -1,7 +1,8 @@
 #!/bin/sh
 
 # Tests `pr-merge-analysis`:  its report of conflicts and containment, its
-# cache, when it prunes the cache, and how it handles failures of git.
+# cache, when it prunes the cache and the PR refs, how it handles failures of
+# git, and how it handles its arguments.
 #
 # Usage:
 #   tests/test-pr-merge-analysis.sh
@@ -122,7 +123,7 @@ clone="${WORK_DIR}/my clone"
 git clone -q "${STUB_REMOTE}" "${clone}"
 run_dir="${WORK_DIR}/run"
 mkdir "${run_dir}"
-cache="${run_dir}/.pr-merge-analysis-cache-test-repo.tsv"
+cache="${run_dir}/.pr-merge-analysis-cache-test__repo.tsv"
 
 expected='## master conflicts
 4: m.txt
@@ -132,23 +133,33 @@ expected='## master conflicts
 1 vs 2: f.txt
 2 vs 3: f.txt'
 
-## Usage: analyze ARGUMENT...
-## Runs `pr-merge-analysis --default-branch main ARGUMENT... "${clone}"
-## test/repo` with the stub git, in ${run_dir}, with PR numbers ${prs}.
-## Sets ${analysis_status} and ${analysis_output}.
+## Usage: analyze STUB_GIT_FAIL ARGUMENT...
+## Runs `pr-merge-analysis ARGUMENT... "${clone}" test/repo` with the stub
+## git, in ${run_dir}, with PR numbers ${prs}.  STUB_GIT_FAIL, which can be
+## empty, is the stub git's ${STUB_GIT_FAIL}.  Sets ${analysis_status} and
+## ${analysis_output}.
+##
+## STUB_GIT_FAIL is an argument, rather than an assignment before the call,
+## because POSIX does not say whether an assignment before a call of a
+## function persists after the function returns.
 prs='1 2 3 4'
 analyze() {
+  analyze_stub_git_fail="$1"
+  shift
   # shellcheck disable=SC2086 # ${prs} is several words.
   if analysis_output="$(cd "${run_dir}" && PATH="${WORK_DIR}/test-bin:${PATH}" \
-    "${ANALYSIS}" --default-branch main "$@" "${clone}" test/repo ${prs} 2>&1)"; then
+    STUB_GIT_FAIL="${analyze_stub_git_fail}" \
+    "${ANALYSIS}" "$@" "${clone}" test/repo ${prs} 2>&1)"; then
     analysis_status=0
   else
     analysis_status=$?
   fi
 }
 
-## The report, in a clone whose name contains a space.
-analyze --prune
+## The report, in a clone whose name contains a space.  Without
+## --default-branch, the run compares against the remote's default branch,
+## "main".
+analyze '' --prune
 if [ "${analysis_status}" -ne 0 ]; then
   fail "report: pr-merge-analysis failed: ${analysis_output}"
 fi
@@ -157,32 +168,86 @@ if [ "${analysis_output}" != "${expected}" ]; then
 fi
 
 ## A second run uses the cache:  it runs no merge-tree, so a failing one does
-## not matter.
-STUB_GIT_FAIL=merge-tree analyze --prune
+## not matter.  It names the default branch explicitly.
+analyze merge-tree --default-branch main --prune
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
   fail "cache: the second run did not use the cache: ${analysis_output}"
 fi
 
+## A PR number that is given twice is reported once.
+prs='4 4 3 1 2'
+analyze '' --prune
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
+  fail "duplicates: wrong report: ${analysis_output}"
+fi
+
+## An argument that is not a PR number is an error.
+prs='1 #2'
+analyze '' --prune
+if [ "${analysis_status}" -eq 0 ]; then
+  fail "not a number: pr-merge-analysis succeeded: ${analysis_output}"
+fi
+case "${analysis_output}" in
+  *"not a pull request number: #2"*) ;;
+  *) fail "not a number: wrong diagnostic: ${analysis_output}" ;;
+esac
+
 ## A run on only some PRs, without --prune, keeps the other PRs' cache lines.
 sha2="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/2/head)"
 prs='1'
-analyze
+analyze ''
 if [ "${analysis_status}" -ne 0 ]; then
   fail "partial: pr-merge-analysis failed: ${analysis_output}"
 fi
 if ! grep -q "${sha2}" "${cache}"; then
   fail "partial: a run without --prune pruned PR 2's cache lines"
 fi
+if ! git -C "${clone}" rev-parse -q --verify refs/remotes/pr/2 > /dev/null; then
+  fail "partial: a run without --prune deleted PR 2's ref"
+fi
 
-## With --prune, the run removes the lines about other PRs' commits.
-analyze --prune
+## With --prune, the run removes the lines about other PRs' commits, and the
+## other PRs' refs.  It keeps the cache's permissions.
+chmod 664 "${cache}"
+analyze '' --prune
 if [ "${analysis_status}" -ne 0 ]; then
   fail "prune: pr-merge-analysis failed: ${analysis_output}"
 fi
 if grep -q "${sha2}" "${cache}"; then
   fail "prune: a run with --prune kept PR 2's cache lines"
 fi
+if git -C "${clone}" rev-parse -q --verify refs/remotes/pr/2 > /dev/null; then
+  fail "prune: a run with --prune kept PR 2's ref"
+fi
+if ! git -C "${clone}" rev-parse -q --verify refs/remotes/pr/1 > /dev/null; then
+  fail "prune: a run with --prune deleted PR 1's ref"
+fi
+# shellcheck disable=SC2012 # POSIX has no portable "stat"; the file name is known.
+cache_mode="$(ls -l "${cache}" | cut -c 1-10)"
+if [ "${cache_mode}" != "-rw-rw-r--" ]; then
+  fail "prune: the cache's permissions changed to ${cache_mode}"
+fi
 prs='1 2 3 4'
+
+## Pruning a cache that ${PR_MERGE_ANALYSIS_CACHE} names through a symbolic
+## link replaces the link's target, not the link.
+mv "${cache}" "${cache}.target"
+ln -s "$(basename -- "${cache}").target" "${cache}"
+PR_MERGE_ANALYSIS_CACHE="${cache}"
+export PR_MERGE_ANALYSIS_CACHE
+analyze '' --prune
+unset PR_MERGE_ANALYSIS_CACHE
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
+  fail "symbolic link: wrong report: ${analysis_output}"
+fi
+if [ ! -L "${cache}" ]; then
+  fail "symbolic link: pruning replaced the link"
+fi
+if ! grep -q "${sha2}" "${cache}.target"; then
+  fail "symbolic link: the link's target lacks PR 2's cache lines"
+fi
+rm "${cache}"
+mv "${cache}.target" "${cache}"
 
 ## A malformed cache line, such as one that another run is still writing, is
 ## ignored, and pruning removes it.  Here, the line about PRs 1 and 2 is
@@ -191,7 +256,7 @@ pair="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/1/head refs/pull/2/head | so
 grep -v "^merge	${pair}" "${cache}" > "${cache}.edited"
 printf 'merge\t%sconfl\n' "${pair}" >> "${cache}.edited"
 mv "${cache}.edited" "${cache}"
-analyze --prune
+analyze '' --prune
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
   fail "malformed: wrong report: ${analysis_output}"
 fi
@@ -201,14 +266,14 @@ fi
 
 ## A warning from merge-tree does not change the report.
 : > "${cache}"
-STUB_GIT_FAIL=warn analyze --prune
+analyze warn --prune
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
   fail "warning: wrong report: ${analysis_output}"
 fi
 
 ## A failure of merge-tree is an error, and is not cached as a conflict.
 : > "${cache}"
-STUB_GIT_FAIL=merge-tree analyze --prune
+analyze merge-tree --prune
 if [ "${analysis_status}" -eq 0 ]; then
   fail "merge-tree failure: pr-merge-analysis succeeded: ${analysis_output}"
 fi
@@ -219,7 +284,7 @@ fi
 ## A failure of rev-list is an error, and is not cached as a containment
 ## result.
 : > "${cache}"
-STUB_GIT_FAIL=rev-list analyze --prune
+analyze rev-list --prune
 if [ "${analysis_status}" -eq 0 ]; then
   fail "rev-list failure: pr-merge-analysis succeeded: ${analysis_output}"
 fi
@@ -228,7 +293,7 @@ if grep -q '^contains' "${cache}"; then
 fi
 
 ## No run leaves a temporary file behind.
-leftovers="$(find "${run_dir}" -name '.pr-merge-analysis-cache-test-repo.tsv.*')"
+leftovers="$(find "${run_dir}" -name '.pr-merge-analysis-cache-test__repo.tsv.*')"
 if [ -n "${leftovers}" ]; then
   fail "temporary files remain: ${leftovers}"
 fi

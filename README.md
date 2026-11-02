@@ -159,7 +159,9 @@ The commands are:
   results in the current directory.  When the run covers every open pull
   request (no PR number is given, or `--prune` says that the given ones are
   all of them), it removes the cached results for commits that are no longer
-  the head of an open pull request.
+  the head of an open pull request, and it deletes from REPO_DIR the refs of
+  the pull requests that are not open.  `--default-branch BRANCH` compares
+  against BRANCH rather than the repository's default branch.
   This command needs Git 2.38 or later, `gh`, and Bash 4 or later as the
   first `bash` on the PATH.  On macOS, `/bin/bash` is Bash 3.2, so put a
   newer Bash, such as Homebrew's, earlier on the PATH.
@@ -283,7 +285,7 @@ takes effect when it is set to a non-empty value.
   and the merge is left in progress.  The default is 1800 (30 minutes); 0
   means no limit.
 * `PR_MERGE_ANALYSIS_CACHE`: the file in which `pr-merge-analysis` caches its
-  results.  The default is `.pr-merge-analysis-cache-OWNER-REPO.tsv` in the
+  results.  The default is `.pr-merge-analysis-cache-OWNER__REPO.tsv` in the
   current directory.  Repositories must not share a cache file.
 * `DEBUG`: `git-orphaned-branches` prints a message about each directory that
   it examines.
