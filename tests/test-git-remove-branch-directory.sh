@@ -107,7 +107,8 @@ git -C "${work}/seed" commit -q -m "Initial commit"
 git -C "${work}/seed" push -q -u origin main
 for branch in clean dirty unpushed both several1 several2 host inside \
   stashed detached localtag corrupt stale lockedstale envgitdir indexfile wthost \
-  squashed empty landedwaived landedforced; do
+  squashed empty landedwaived landedforced savedchange partlysaved deletion \
+  chmodded localsaved submodulesaved manytags; do
   git -C "${work}/seed" push -q origin "main:refs/heads/${branch}"
 done
 
@@ -257,6 +258,131 @@ check_present 'a subdirectory with uncommitted changes' "${inside}/subdir"
 run_command 'a subdirectory with uncommitted changes, waived' 0 \
   --force-uncommitted "${inside}/subdir"
 check_gone 'a subdirectory with uncommitted changes, waived' "${inside}/subdir"
+
+###########################################################################
+## Uncommitted changes that a remote holds.
+###########################################################################
+
+## Usage: push_elsewhere BRANCH LINE
+## Pushes to the remote's branch "BRANCH-elsewhere" a commit that appends LINE
+## to file.txt, as if the change had landed by way of some other branch.
+push_elsewhere() {
+  git -C "${work}/seed" checkout -q -b "$1-elsewhere" main
+  echo "$2" >> "${work}/seed/file.txt"
+  git -C "${work}/seed" commit -q -a -m "$2"
+  git -C "${work}/seed" push -q origin "$1-elsewhere"
+  git -C "${work}/seed" checkout -q main
+}
+
+# A file whose uncommitted contents a remote-tracking ref holds is saved.
+# That holds for staged contents too.
+savedchange="$(make_clone savedchange)"
+push_elsewhere savedchange 'a change that is saved'
+git -C "${savedchange}" fetch -q origin
+echo 'a change that is saved' >> "${savedchange}/file.txt"
+git -C "${savedchange}" add file.txt
+run_command 'a saved uncommitted change' 0 "${savedchange}"
+check_gone 'a saved uncommitted change' "${savedchange}"
+
+# A change is saved among many tags, whose trees' hashes, one per line, are
+# longer than a single argument to a command can be.
+manytags="$(make_clone manytags)"
+push_elsewhere manytags 'a change among many tags'
+git -C "${manytags}" fetch -q origin
+awk 'BEGIN {
+    for (i = 0; i < 2000; i++) {
+      printf "commit refs/tags/many-%d\n", i
+      printf "committer Tester <tester@example.com> 0 +0000\ndata 0\n"
+      printf "M 644 inline tag.txt\ndata <<END\n%d\nEND\n\n", i
+    }
+  }' | git -C "${manytags}" fast-import --quiet
+echo 'a change among many tags' >> "${manytags}/file.txt"
+run_command 'a saved uncommitted change among many tags' 0 "${manytags}"
+check_gone 'a saved uncommitted change among many tags' "${manytags}"
+
+# Only the files whose changes are saved are discounted.
+partlysaved="$(make_clone partlysaved)"
+push_elsewhere partlysaved 'another change that is saved'
+git -C "${partlysaved}" fetch -q origin
+echo 'another change that is saved' >> "${partlysaved}/file.txt"
+echo 'a tracked file' > "${partlysaved}/other.txt"
+git -C "${partlysaved}" add other.txt
+run_command 'a partly saved uncommitted change' 1 "${partlysaved}"
+check_present 'a partly saved uncommitted change' "${partlysaved}"
+check_message 'a partly saved uncommitted change' \
+  "refusing to remove ${partlysaved}: 1 tracked file(s) have uncommitted changes"
+# Contents in the index that differ from the working tree's are work too.
+git -C "${partlysaved}" rm -q --cached other.txt
+echo 'staged contents that are not saved' >> "${partlysaved}/file.txt"
+git -C "${partlysaved}" add file.txt
+git -C "${partlysaved}" show origin/partlysaved-elsewhere:file.txt \
+  > "${partlysaved}/file.txt"
+run_command 'unsaved staged contents' 1 "${partlysaved}"
+check_present 'unsaved staged contents' "${partlysaved}"
+
+# A deletion is never saved, though every remaining file is unchanged.
+deletion="$(make_clone deletion)"
+git -C "${deletion}" rm -q file.txt
+run_command 'an uncommitted deletion' 1 "${deletion}"
+check_present 'an uncommitted deletion' "${deletion}"
+check_message 'an uncommitted deletion' \
+  "refusing to remove ${deletion}: 1 tracked file(s) have uncommitted changes"
+
+# An uncommitted change of mode alone is not saved by the file's contents.
+chmodded="$(make_clone chmodded)"
+chmod +x "${chmodded}/file.txt"
+run_command 'an uncommitted change of mode' 1 "${chmodded}"
+check_present 'an uncommitted change of mode' "${chmodded}"
+check_message 'an uncommitted change of mode' \
+  "refusing to remove ${chmodded}: 1 tracked file(s) have uncommitted changes"
+chmod -x "${chmodded}/file.txt"
+
+# A clone's local branch does not save a change, because the removal deletes
+# the branch with the clone.  `--force-unpushed` waives the refusal on
+# account of the branch's commit, which leaves only the uncommitted change.
+localsaved="$(make_clone localsaved)"
+echo 'a change that a local branch holds' >> "${localsaved}/file.txt"
+git -C "${localsaved}" commit -q -a -m 'Hold the change'
+git -C "${localsaved}" branch localsaved-copy
+git -C "${localsaved}" reset -q --soft HEAD~1
+run_command 'a change that only a local branch holds' 1 --force-unpushed \
+  "${localsaved}"
+check_present 'a change that only a local branch holds' "${localsaved}"
+check_message 'a change that only a local branch holds' \
+  "refusing to remove ${localsaved}: 1 tracked file(s) have uncommitted changes"
+
+# A change to a submodule is never saved, even when a remote-tracking ref
+# holds the commit that the submodule has checked out.  Every commit, in the
+# clone and in the submodule, is on a remote-tracking ref.
+submodulesaved="$(make_clone submodulesaved)"
+git -C "${submodulesaved}" -c protocol.file.allow=always submodule add -q \
+  "${remote}" sub
+git -C "${submodulesaved}" commit -q -m 'Add a submodule'
+git -C "${submodulesaved}/sub" checkout -q origin/savedchange-elsewhere
+git -C "${submodulesaved}" commit -q -a -m 'Change the submodule'
+git -C "${submodulesaved}" push -q origin HEAD:submodulesaved-elsewhere
+git -C "${submodulesaved}" reset -q --soft HEAD~1
+run_command 'an uncommitted change to a submodule' 1 "${submodulesaved}"
+check_present 'an uncommitted change to a submodule' "${submodulesaved}"
+check_message 'an uncommitted change to a submodule' \
+  "refusing to remove ${submodulesaved}: 1 tracked file(s) have uncommitted changes"
+check_no_message 'an uncommitted change to a submodule' 'commit(s)'
+
+# Within a working tree, any ref saves a change, but a ref's history does not,
+# and files outside the directory do not count.
+mkdir -p "${inside}/saved"
+echo 'old contents' > "${inside}/saved/tracked.txt"
+git -C "${inside}" add saved/tracked.txt
+git -C "${inside}" commit -q -m "Add a file"
+echo 'new contents' > "${inside}/saved/tracked.txt"
+git -C "${inside}" commit -q -a -m "Change the file"
+echo 'old contents' > "${inside}/saved/tracked.txt"
+run_command 'a subdirectory with changes that history holds' 1 "${inside}/saved"
+check_present 'a subdirectory with changes that history holds' "${inside}/saved"
+git -C "${inside}" branch saved-elsewhere HEAD~1
+echo 'an unsaved change outside the directory' >> "${inside}/file.txt"
+run_command 'a subdirectory with saved changes' 0 "${inside}/saved"
+check_gone 'a subdirectory with saved changes' "${inside}/saved"
 
 ###########################################################################
 ## Commits that no remote-tracking ref and no tag holds.
@@ -656,6 +782,19 @@ run_command 'a linked worktree with uncommitted changes, waived' 0 \
   --force-uncommitted "${work}/myrepo-branch-wtdirty"
 check_gone 'a linked worktree with uncommitted changes, waived' \
   "${work}/myrepo-branch-wtdirty"
+
+# Uncommitted changes in a linked worktree that another local branch holds,
+# though no remote does, are saved.
+git -C "${wthost}" worktree add -q -b wtsaved "${work}/myrepo-branch-wtsaved"
+mark_created wtsaved
+echo 'saved on a branch' >> "${work}/myrepo-branch-wtsaved/file.txt"
+git -C "${work}/myrepo-branch-wtsaved" commit -q -a -m 'Saved on a branch'
+git -C "${work}/myrepo-branch-wtsaved" branch wtsaved-copy
+git -C "${work}/myrepo-branch-wtsaved" reset -q --soft HEAD~1
+run_command 'a linked worktree with saved uncommitted changes' 0 \
+  "${work}/myrepo-branch-wtsaved"
+check_unregistered 'a linked worktree with saved uncommitted changes' \
+  "${wthost}" "${work}/myrepo-branch-wtsaved" wtsaved
 
 # A locked linked worktree is refused, even with `--force`, and its lock
 # reason is reported.  `git worktree remove --force` refuses it too, and the
