@@ -628,4 +628,43 @@ check_resolution_raw reject "CRLF line endings, and a separator remains" \
   'x\n<<<<<<< HEAD\na\n=======\nA\n>>>>>>> other\nb\n' 'x\r\na\r\n=======\r\nA\r\nb\r\n'
 rm "${WORK_DIR}/ccr/.gitattributes"
 
+## Tests of subject_with_tracking_branch.  The clone has the remote "origin",
+## an scp-style URL with the remote-tracking branch "origin/feature", and the
+## remote "local", a pathname with the remote-tracking branch "local/main".
+git init -q -b main "${WORK_DIR}/swtb"
+git -C "${WORK_DIR}/swtb" commit -q --allow-empty -m "Initial commit"
+git -C "${WORK_DIR}/swtb" remote add origin 'git@github.com:org/proj.git'
+git -C "${WORK_DIR}/swtb" remote add local '/nonexistent/repo.git/'
+git -C "${WORK_DIR}/swtb" update-ref refs/remotes/origin/feature HEAD
+git -C "${WORK_DIR}/swtb" update-ref refs/remotes/local/main HEAD
+
+## Usage: check_swtb SUBJECT EXPECTED
+## Checks that `subject_with_tracking_branch`, in ${WORK_DIR}/swtb, prints
+## EXPECTED for SUBJECT.
+check_swtb() {
+  check_swtb_actual="$(cd "${WORK_DIR}/swtb" && subject_with_tracking_branch "$1")"
+  if [ "${check_swtb_actual}" != "$2" ]; then
+    fail "subject_with_tracking_branch [$1] printed [${check_swtb_actual}], not [$2]"
+  fi
+}
+
+# `git pull` writes the URL without its user and its trailing ".git".
+check_swtb "Merge branch 'feature' of github.com:org/proj into feature" \
+  "Merge remote-tracking branch 'origin/feature' into feature"
+# Another spelling of the URL, on the default branch, which has no " into ".
+check_swtb "Merge branch 'feature' of https://github.com/Org/Proj" \
+  "Merge remote-tracking branch 'origin/feature'"
+# A pathname, which names no directory, without its trailing "/" and ".git".
+check_swtb "Merge branch 'main' of /nonexistent/repo into feature" \
+  "Merge remote-tracking branch 'local/main' into feature"
+# No remote-tracking branch tracks the source.
+check_swtb "Merge branch 'other' of github.com:org/proj into feature" \
+  "Merge branch 'other' of github.com:org/proj into feature"
+check_swtb "Merge branch 'feature' of github.com:org/elsewhere into feature" \
+  "Merge branch 'feature' of github.com:org/elsewhere into feature"
+# A merge that no pull made.
+check_swtb "Merge branch 'main' into feature" "Merge branch 'main' into feature"
+check_swtb "Merge remote-tracking branch 'origin/main' into feature" \
+  "Merge remote-tracking branch 'origin/main' into feature"
+
 echo "${SCRIPT_NAME}: OK"
