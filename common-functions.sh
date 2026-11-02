@@ -1104,18 +1104,26 @@ resolve_with_agent() {
   # many large files, such as build output, is compared by its pathnames and
   # by the time at which each file last changed (its "ctime").  Unlike a
   # file's modification time, an unprivileged process cannot set its ctime.
-  # A file changed after the marker file was written, so the marker is in
-  # the git directory, which neither agent can write.  A file system can
-  # record times to the second, so the agent starts at least a second after
-  # the marker is written, and a file that it changes has a later time.
+  # A file changed since the marker file was written if its ctime is later
+  # than the marker's modification time.  The marker is in the git
+  # directory, which neither agent can write, so the agent cannot change the
+  # marker's time.  The agent starts only once the working tree's file
+  # system records a later time than the marker's, so that a file that it
+  # changes has a later ctime.  The working tree and the git directory can
+  # be on different file systems.  The working tree's pathnames are listed
+  # after the wait, which creates a directory in the working tree and then
+  # removes it.
   resolve_index="$(git ls-files --stage -z | cksum)"
-  resolve_paths="$(working_tree_paths)"
   if ! resolve_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-start)" \
     || ! : > "${resolve_marker}"; then
     echo "${SCRIPT_NAME}: cannot write a file in the git directory of $(pwd)" >&2
     return 1
   fi
-  sleep 1
+  if ! wait_for_later_time "${resolve_marker}" "$(pwd)"; then
+    rm -f -- "${resolve_marker}"
+    return 1
+  fi
+  resolve_paths="$(working_tree_paths)"
   resolve_branch="$(git symbolic-ref --quiet --short HEAD)" || resolve_branch="HEAD"
   resolve_prompt="You are resolving merge conflicts in the git working tree $(pwd).
 \`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts in these files:
@@ -1242,6 +1250,48 @@ working_tree_changes() {
         if (count[file] == 0) print "changed a file: " relative(file)
       }
     }' | LC_ALL=C sort
+}
+
+## Usage: wait_for_later_time FILE DIR
+## Returns 0 once every file in DIR, an absolute pathname of a directory,
+## that changes from now on has a later status-change time (ctime) than the
+## modification time of FILE, an absolute pathname, as `find -cnewer`
+## compares them.  A file system can record times to the second, or it can
+## record finer times but advance its clock only every few milliseconds.
+## DIR and FILE can be on different file systems.
+##
+## Creates, and then removes, the directory
+## DIR/.manage-git-branches-time-probe, which must not already exist.
+## Returns 1, after printing a diagnostic, if it cannot create that
+## directory, or if the time does not advance within about 10 seconds.
+wait_for_later_time() {
+  wait_probe="$2/.manage-git-branches-time-probe"
+  # `mkdir` fails if anything, even a symbolic link, already has that name.
+  # By contrast, `set -C` lets a redirection open an existing file that is
+  # not a regular file, such as a FIFO or a symbolic link to /dev/null.
+  if ! mkdir -- "${wait_probe}"; then
+    echo "${SCRIPT_NAME}: cannot create the directory ${wait_probe}, which must not already exist" >&2
+    return 1
+  fi
+  wait_tries=1
+  until [ -n "$(find "${wait_probe}" -cnewer "$1" -print)" ]; do
+    if [ "${wait_tries}" -ge 20 ]; then
+      rmdir -- "${wait_probe}"
+      echo "${SCRIPT_NAME}: after ${wait_tries} tries, the time that the file system records in $2 is not later than the modification time of $1" >&2
+      return 1
+    fi
+    # A file system whose clock advances every few milliseconds needs no
+    # sleep:  each try takes about that long.  POSIX `sleep` accepts only a
+    # whole number of seconds.
+    if [ "${wait_tries}" -ge 10 ]; then sleep 1; fi
+    if ! touch -- "${wait_probe}"; then
+      rmdir -- "${wait_probe}"
+      echo "${SCRIPT_NAME}: cannot change the time of the directory ${wait_probe}" >&2
+      return 1
+    fi
+    wait_tries=$((wait_tries + 1))
+  done
+  rmdir -- "${wait_probe}"
 }
 
 ## Usage: report_unresolved FILES
