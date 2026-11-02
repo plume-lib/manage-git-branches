@@ -231,10 +231,10 @@ The commands are:
   removal deletes them.  A deleted file, a submodule, and a symbolic link are
   never saved.
   A commit does not count either if each of its resulting files is saved in
-  the same way; the ref can differ from file to file.  A commit's resulting files are
-  as the last unpushed commit of its branch has them, so a branch whose final
-  result has landed loses no work, even if the branch changes a file more
-  than once.
+  the same way; the ref can differ from file to file.  A commit's resulting
+  files are as the last unpushed commit of its branch has them, so a branch
+  whose final result has landed loses no work, even if the branch changes a
+  file more than once.
   Such landed and saved commits never prevent a removal.  When other commits
   would be lost, the message that refuses the removal, or that reports its
   waiver by `--force-unpushed`, counts the landed and saved commits among
