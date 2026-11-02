@@ -983,4 +983,20 @@ if [ "$(remote_branch_refs "${WORK_DIR}/ibr/clone")" != refs/remotes/bare/main ]
   fail "remote_branch_refs: a bare repository's branch does not count as built: $(remote_branch_refs "${WORK_DIR}/ibr/clone")"
 fi
 
+## Tests of current_branch.  A tag with the branch's name does not change the
+## name that it prints.
+git init -q -b main "${WORK_DIR}/cb"
+git -C "${WORK_DIR}/cb" commit -q --allow-empty -m "Initial commit"
+git -C "${WORK_DIR}/cb" tag main
+if [ "$(current_branch "${WORK_DIR}/cb")" != main ]; then
+  fail "current_branch: printed $(current_branch "${WORK_DIR}/cb"), not main"
+fi
+if [ "$(cd "${WORK_DIR}/cb" && current_branch)" != main ]; then
+  fail "current_branch with no directory: printed $(cd "${WORK_DIR}/cb" && current_branch), not main"
+fi
+git -C "${WORK_DIR}/cb" checkout -q --detach
+if cb_output="$(current_branch "${WORK_DIR}/cb")" || [ -n "${cb_output}" ]; then
+  fail "current_branch: a detached HEAD was named ${cb_output}"
+fi
+
 echo "${SCRIPT_NAME}: OK"

@@ -651,10 +651,8 @@ git_rebase_onto() {
   to_absolute="$(absolute_path "$2")"
   old_from_head="$3"
 
-  from_branch_ref="$(git -C "${from_absolute}" symbolic-ref --quiet HEAD)" || return 1
-  from_branch="${from_branch_ref#refs/heads/}"
-  to_branch_ref="$(git -C "${to_absolute}" symbolic-ref --quiet HEAD)" || return 1
-  to_branch="${to_branch_ref#refs/heads/}"
+  from_branch="$(current_branch "${from_absolute}")" || return 1
+  to_branch="$(current_branch "${to_absolute}")" || return 1
 
   orig_dir=$(pwd)
 
@@ -678,7 +676,7 @@ git_rebase_onto() {
     echo "${SCRIPT_NAME}: ${from_branch} at ${old_from_head} is not an ancestor of ${to_branch} in $(pwd)" >&2
     return 1
   fi
-  if ! compute_replay_base "${from_absolute}" "${from_branch_ref}" "${old_from_head}"; then
+  if ! compute_replay_base "${from_absolute}" "refs/heads/${from_branch}" "${old_from_head}"; then
     return 1
   fi
 
@@ -807,8 +805,7 @@ is_slug() {
 
 ## Returns 0 if the given directory has the given branch checked out.
 has_branch_checked_out() {
-  has_branch_ref="$(git -C "$1" symbolic-ref --quiet HEAD 2> /dev/null)" || return 1
-  [ "${has_branch_ref}" = "refs/heads/$2" ]
+  has_branch_actual="$(current_branch "$1")" && [ "${has_branch_actual}" = "$2" ]
 }
 
 ## Prints the directory that the slug ORG:BRANCH names for the given project,
@@ -848,11 +845,11 @@ slug_dir() {
 ## Returns 0 if the given directory has ${slug_branch} checked out.  Otherwise,
 ## prints an error message and returns 1.
 check_branch_dir() {
-  if has_branch_checked_out "$1" "${slug_branch}"; then
+  if ! check_actual="$(current_branch "$1")"; then
+    check_actual="a detached HEAD"
+  elif [ "${check_actual}" = "${slug_branch}" ]; then
     return 0
   fi
-  check_actual="$(git -C "$1" symbolic-ref --quiet --short HEAD 2> /dev/null)" \
-    || check_actual="a detached HEAD"
   echo "${SCRIPT_NAME}: ${1#./} has ${check_actual} checked out, not ${slug_branch}" >&2
   return 1
 }
