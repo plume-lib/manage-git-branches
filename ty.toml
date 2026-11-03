@@ -2,6 +2,5 @@
 # See https://docs.astral.sh/ty/reference/configuration/ for more information.
 
 [src]
-# ty discovers only files whose names end in ".py", so this names the Python scripts too.
 # The tests are not type-checked.
-include = ["*.py", "cancel-blocked-ci", "pr-status", "rerun-failed-ci"]
+exclude = ["tests"]

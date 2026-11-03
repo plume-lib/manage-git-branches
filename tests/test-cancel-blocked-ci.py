@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
-import importlib.machinery
-import importlib.util
 import io
 import json
 import sys
@@ -17,39 +15,18 @@ import unittest
 import urllib.error
 from email.message import Message
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest import mock
 
 TOPLEVEL = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(TOPLEVEL))
 
+import cancel_blocked_ci  # ruff: ignore[module-import-not-at-top-of-file]
 import ci_build  # ruff: ignore[module-import-not-at-top-of-file]
 import request_util  # ruff: ignore[module-import-not-at-top-of-file]
 
-if TYPE_CHECKING:
-    import types
-
 CIRCLECI = "https://circleci.com/api/v2"
 
-
-def load_script() -> types.ModuleType:
-    """Import cancel-blocked-ci, whose name is not a legal module name.
-
-    Returns:
-        The imported module.
-    """
-    loader = importlib.machinery.SourceFileLoader(
-        "cancel_blocked_ci", str(TOPLEVEL / "cancel-blocked-ci")
-    )
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[loader.name] = module
-    loader.exec_module(module)
-    return module
-
-
-cancel_blocked_ci = load_script()
 Check = cancel_blocked_ci.Check
 BuildState = cancel_blocked_ci.BuildState
 
