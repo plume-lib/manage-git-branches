@@ -15,19 +15,20 @@
 #   --prune states that the given PR numbers are all the open PRs, so that the
 #   cache and the refs/remotes/pr/N refs can be pruned (see below).
 #
-# Results are cached in .pr-merge-analysis-cache-OWNER__REPO.tsv in the current
-# directory (or in $PR_MERGE_ANALYSIS_CACHE, if set), keyed by commit SHAs, so a
-# check is recomputed only when a branch moves.  When the run covers all the open
-# PRs (no PR number is given, or --prune is given), it removes the cache lines
-# that refer to a commit that is no longer the head of an open PR or master, so
-# repositories must not share a cache file.  It also deletes the refs
+# Results are cached in .pr-merge-analysis-cache.tsv in the current directory
+# (or in $PR_MERGE_ANALYSIS_CACHE, if set), keyed by OWNER/REPO and commit SHAs,
+# so a check is recomputed only when a branch moves.  Several repositories can
+# share the cache file.  When the run covers all the open PRs (no PR number is
+# given, or --prune is given), it removes the cache lines of OWNER/REPO that
+# refer to a commit that is no longer the head of an open PR or master, and it
+# keeps the lines of other repositories.  It also deletes the refs
 # refs/remotes/pr/N of the PRs that are not open.  Runs at the same time do not
 # corrupt the cache, but one run's pruning can discard the lines that another
 # run adds, which a later run then recomputes.
-# Cache lines:
-#   merge<TAB>SHA1<TAB>SHA2<TAB>clean|conflict<TAB>conflicting files
+# Cache lines, each of which starts with the GitHub slug OWNER/REPO:
+#   OWNER/REPO<TAB>merge<TAB>SHA1<TAB>SHA2<TAB>clean|conflict<TAB>conflicting files
 #     (SHA1 < SHA2, so the order of the two branches does not matter)
-#   contains<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>yes|no
+#   OWNER/REPO<TAB>contains<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>yes|no
 #
 # Requires Git 2.38 or later, gh, and Bash 4 or later as the first "bash" on
 # the PATH.  On macOS, /bin/bash is Bash 3.2, so put a newer Bash, such as
@@ -119,9 +120,10 @@ while true; do
 done
 [ $# -ge 2 ] || usage
 G=(git -C "$1")
-# GitHub forbids "_" in an owner's name, so the first "__" in the file name ends
-# the owner's name, and no two repositories share the file name.
-CACHE="${PR_MERGE_ANALYSIS_CACHE:-$PWD/.pr-merge-analysis-cache-${2/\//__}.tsv}"
+# The GitHub slug, such as "plume-lib/manage-git-branches", that starts each of
+# this repository's cache lines.
+REPO=$2
+CACHE="${PR_MERGE_ANALYSIS_CACHE:-$PWD/.pr-merge-analysis-cache.tsv}"
 # Resolve any symbolic links, so that pruning replaces the file that a link
 # names rather than the link.
 links=0
@@ -191,10 +193,12 @@ if [ -n "$P" ]; then
     CURRENT[${SHA[$n]}]=1
   done
 fi
-# Read only well-formed lines; a line that another run is still writing is
-# incomplete.
-while IFS=$'\t' read -r kind k1 k2 k3 rest; do
-  if [ "$kind" = merge ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE ]] \
+# Read only this repository's well-formed lines; a line that another run is
+# still writing is incomplete.
+while IFS=$'\t' read -r repo kind k1 k2 k3 rest; do
+  if [ "$repo" != "$REPO" ]; then
+    continue
+  elif [ "$kind" = merge ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE ]] \
     && [[ $k3 = clean || $k3 = conflict ]]; then
     CACHED["merge $k1 $k2"]="$k3	$rest"
   elif [ "$kind" = contains ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE && $k3 =~ $OID_RE ]] \
@@ -245,7 +249,7 @@ merge_result() {
         ;;
     esac
     CACHED[$key]="$status	$files"
-    printf 'merge\t%s\t%s\t%s\t%s\n' "$x" "$y" "$status" "$files" >> "$CACHE"
+    printf '%s\tmerge\t%s\t%s\t%s\t%s\n' "$REPO" "$x" "$y" "$status" "$files" >> "$CACHE"
   fi
   RESULT=${CACHED[$key]}
 }
@@ -269,7 +273,7 @@ contains_result() {
       [ -n "$missing" ] || ok=yes
     fi
     CACHED[$key]=$ok
-    printf 'contains\t%s\t%s\t%s\t%s\n' "$MSHA" "$1" "$2" "$ok" >> "$CACHE"
+    printf '%s\tcontains\t%s\t%s\t%s\t%s\n' "$REPO" "$MSHA" "$1" "$2" "$ok" >> "$CACHE"
   fi
   RESULT=${CACHED[$key]}
 }
@@ -313,14 +317,19 @@ fi
 NEW_CACHE=$(mktemp "$CACHE.XXXXXX") || exit 1
 # Give it the cache's permissions, rather than mktemp's 0600.
 cp -p "$CACHE" "$NEW_CACHE" || exit 1
-for key in "${!CACHED[@]}"; do
-  # shellcheck disable=SC2206 # A key is words without glob characters; "read <<<" would be slow.
-  k=($key)
-  if [ "${k[0]}" = merge ]; then
-    if [ -n "${CURRENT[${k[1]}]+set}" ] && [ -n "${CURRENT[${k[2]}]+set}" ]; then
-      printf 'merge\t%s\t%s\t%s\n' "${k[1]}" "${k[2]}" "${CACHED[$key]}"
+{
+  # The other repositories' lines, read now rather than at the start, so that
+  # pruning keeps the lines that other runs added meanwhile.
+  awk -F '\t' -v repo="$REPO" '$1 != repo' "$CACHE" || die "awk failed to copy the cache"
+  for key in "${!CACHED[@]}"; do
+    # shellcheck disable=SC2206 # A key is words without glob characters; "read <<<" would be slow.
+    k=($key)
+    if [ "${k[0]}" = merge ]; then
+      if [ -n "${CURRENT[${k[1]}]+set}" ] && [ -n "${CURRENT[${k[2]}]+set}" ]; then
+        printf '%s\tmerge\t%s\t%s\t%s\n' "$REPO" "${k[1]}" "${k[2]}" "${CACHED[$key]}"
+      fi
+    elif [ "${k[1]}" = "$MSHA" ] && [ -n "${CURRENT[${k[2]}]+set}" ] && [ -n "${CURRENT[${k[3]}]+set}" ]; then
+      printf '%s\tcontains\t%s\t%s\t%s\t%s\n' "$REPO" "${k[1]}" "${k[2]}" "${k[3]}" "${CACHED[$key]}"
     fi
-  elif [ "${k[1]}" = "$MSHA" ] && [ -n "${CURRENT[${k[2]}]+set}" ] && [ -n "${CURRENT[${k[3]}]+set}" ]; then
-    printf 'contains\t%s\t%s\t%s\t%s\n' "${k[1]}" "${k[2]}" "${k[3]}" "${CACHED[$key]}"
-  fi
-done > "$NEW_CACHE" && mv "$NEW_CACHE" "$CACHE"
+  done
+} > "$NEW_CACHE" && mv "$NEW_CACHE" "$CACHE"

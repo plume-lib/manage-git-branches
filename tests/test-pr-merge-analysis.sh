@@ -123,7 +123,7 @@ clone="${WORK_DIR}/my clone"
 git clone -q "${STUB_REMOTE}" "${clone}"
 run_dir="${WORK_DIR}/run"
 mkdir "${run_dir}"
-cache="${run_dir}/.pr-merge-analysis-cache-test__repo.tsv"
+cache="${run_dir}/.pr-merge-analysis-cache.tsv"
 
 expected='## master conflicts
 4: m.txt
@@ -173,6 +173,27 @@ analyze merge-tree --default-branch main --prune
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
   fail "cache: the second run did not use the cache: ${analysis_output}"
 fi
+
+## Another repository's cache lines are not used, and pruning keeps them.  The
+## other repository's lines are those of test/repo, relabeled; a run of
+## test/repo that uses them would run no merge-tree, but this run must run
+## merge-tree, so a failing one is an error.
+sed 's|^test/repo	|other/repo	|' "${cache}" > "${cache}.edited"
+mv "${cache}.edited" "${cache}"
+other_lines="$(cat "${cache}")"
+analyze merge-tree --prune
+if [ "${analysis_status}" -eq 0 ]; then
+  fail "other repository: a run used its cache lines: ${analysis_output}"
+fi
+analyze '' --prune
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
+  fail "other repository: wrong report: ${analysis_output}"
+fi
+if [ "$(grep '^other/repo	' "${cache}")" != "${other_lines}" ]; then
+  fail "other repository: pruning changed its cache lines: $(cat "${cache}")"
+fi
+grep -v '^other/repo	' "${cache}" > "${cache}.edited"
+mv "${cache}.edited" "${cache}"
 
 ## A PR number that is given twice is reported once.
 prs='4 4 3 1 2'
@@ -253,8 +274,8 @@ mv "${cache}.target" "${cache}"
 ## ignored, and pruning removes it.  Here, the line about PRs 1 and 2 is
 ## truncated within "conflict", and is the only line about them.
 pair="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/1/head refs/pull/2/head | sort | tr '\n' '\t')"
-grep -v "^merge	${pair}" "${cache}" > "${cache}.edited"
-printf 'merge\t%sconfl\n' "${pair}" >> "${cache}.edited"
+grep -v "^test/repo	merge	${pair}" "${cache}" > "${cache}.edited"
+printf 'test/repo\tmerge\t%sconfl\n' "${pair}" >> "${cache}.edited"
 mv "${cache}.edited" "${cache}"
 analyze '' --prune
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
@@ -288,12 +309,12 @@ analyze rev-list --prune
 if [ "${analysis_status}" -eq 0 ]; then
   fail "rev-list failure: pr-merge-analysis succeeded: ${analysis_output}"
 fi
-if grep -q '^contains' "${cache}"; then
+if grep -q '	contains	' "${cache}"; then
   fail "rev-list failure: cached a containment result: $(cat "${cache}")"
 fi
 
 ## No run leaves a temporary file behind.
-leftovers="$(find "${run_dir}" -name '.pr-merge-analysis-cache-test__repo.tsv.*')"
+leftovers="$(find "${run_dir}" -name '.pr-merge-analysis-cache.tsv.*')"
 if [ -n "${leftovers}" ]; then
   fail "temporary files remain: ${leftovers}"
 fi
