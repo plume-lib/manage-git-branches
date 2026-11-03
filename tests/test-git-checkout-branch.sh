@@ -743,13 +743,17 @@ fi
 # then checks out the branch there.  The fork's URL is that of the clone
 # PROJECT's remote with the owner replaced.  The remotes' URLs are GitHub's,
 # which `url.<base>.insteadOf` rewrites to local repositories, so that the
-# clone's `remote.origin.gh-resolved` is set to the upstream repository.
+# clone's `remote.origin.gh-resolved` is set to the upstream repository.  The
+# rewritten URLs use the "file" protocol rather than pathnames, so that a
+# clone fetches its objects as it does from GitHub, rather than copying them,
+# and so that a partial clone can be made.
 hub="${tmpdir}/hub"
 mkdir -p "${hub}/up" "${hub}/me" "${tmpdir}/forks"
 hub="$(cd "${hub}" && pwd -P)"
 forks="$(cd "${tmpdir}/forks" && pwd -P)"
-git config --global "url.${hub}/.insteadOf" 'git@github.com:'
+git config --global "url.file://${hub}/.insteadOf" 'git@github.com:'
 git init -q --bare -b main "${hub}/up/proj.git"
+git -C "${hub}/up/proj.git" config uploadpack.allowFilter true
 git clone -q git@github.com:up/proj.git "${forks}/proj" 2> /dev/null
 (
   cd "${forks}/proj" || exit 1
@@ -812,6 +816,84 @@ esac
 if [ -e "${forks}/proj-fork-other" ]; then
   fail "a slug whose fork lacks the branch made ${forks}/proj-fork-other"
 fi
+
+# A slug whose clone has the branch checked out names that clone, whether
+# the clone already existed or was just made with its fork's default branch
+# checked out.
+for org in me other; do
+  if ! out="$(cd "${forks}/proj" && "${GIT_CHECKOUT_BRANCH}" "${org}:main" 2>&1)"; then
+    fail "nonzero exit status for the slug ${org}:main, whose clone has main checked out: ${out}"
+  fi
+  case "${out}" in
+    *"Success: ${forks}/proj-fork-${org} has branch main checked out"*) ;;
+    *) fail "unexpected message for the slug ${org}:main, whose clone has main checked out: ${out}" ;;
+  esac
+  if [ -e "${forks}/proj-fork-${org}-branch-main" ]; then
+    fail "the slug ${org}:main made ${forks}/proj-fork-${org}-branch-main"
+  fi
+done
+
+# A slug whose ORG owns the upstream repository names the clone PROJECT, as
+# ORG "-" does, rather than making a second clone of the upstream repository.
+git -C "${forks}/proj" push -q origin HEAD:refs/heads/upbranch
+if ! out="$(cd "${forks}/proj" && "${GIT_CHECKOUT_BRANCH}" up:upbranch 2>&1)"; then
+  fail "nonzero exit status for the slug up:upbranch: ${out}"
+fi
+if [ "$(git -C "${forks}/proj-branch-upbranch" symbolic-ref HEAD 2> /dev/null)" != 'refs/heads/upbranch' ]; then
+  fail "the slug up:upbranch did not check out upbranch in ${forks}/proj-branch-upbranch: ${out}"
+fi
+if [ -e "${forks}/proj-fork-up" ]; then
+  fail "the slug up:upbranch made ${forks}/proj-fork-up: ${out}"
+fi
+
+# A clone PROJECT that is shallow, or partial, cannot lend its objects to the
+# new clone, which then downloads them all.  The partial clone checks out
+# nothing, so that it lacks every blob, as a partial clone of a real project
+# lacks those of older commits; a checkout would download the only commit's
+# blobs.
+for kind in shallow partial; do
+  case "${kind}" in
+    shallow) set -- --depth 1 ;;
+    partial) set -- --filter=blob:none --no-checkout ;;
+  esac
+  git clone -q "$@" git@github.com:up/proj.git "${tmpdir}/${kind}/proj"
+  if ! out="$(cd "${tmpdir}/${kind}/proj" && "${GIT_CHECKOUT_BRANCH}" me:pr 2>&1)"; then
+    fail "nonzero exit status for a slug whose fork has no clone, in a ${kind} clone PROJECT: ${out}"
+  elif [ "$(git -C "${tmpdir}/${kind}/proj-fork-me-branch-pr" rev-parse HEAD 2> /dev/null)" != "${pr_commit}" ]; then
+    fail "a slug in a ${kind} clone PROJECT did not check out the commit of the fork's branch: ${out}"
+  fi
+done
+
+# Without a clone PROJECT, the fork's URL comes from the current clone.  A
+# directory PROJECT that is not a clone does not count, even within another
+# repository.  The upstream repository is the one that the current clone
+# fetches from, unless that is its own fork.
+git init -q "${tmpdir}/encl"
+encl="$(cd "${tmpdir}/encl" && pwd -P)"
+mkdir "${encl}/proj"
+git clone -q git@github.com:me/proj.git "${encl}/proj-fork-me"
+git -C "${encl}/proj-fork-me" remote add upstream git@github.com:up/proj.git
+git -C "${encl}/proj-fork-me" fetch -q upstream
+git -C "${encl}/proj-fork-me" branch -q --set-upstream-to upstream/main main
+git clone -q --bare "${hub}/up/proj.git" "${hub}/third/proj.git"
+for org in other third; do
+  if [ "${org}" = third ]; then
+    git -C "${encl}/proj-fork-me" branch -q --set-upstream-to origin/main main
+    expected_resolved=''
+  else
+    expected_resolved='up/proj'
+  fi
+  if ! out="$(cd "${encl}/proj-fork-me" && "${GIT_CHECKOUT_BRANCH}" "${org}:main" 2>&1)"; then
+    fail "nonzero exit status for the slug ${org}:main without a clone PROJECT: ${out}"
+  fi
+  if [ "$(git -C "${encl}/proj-fork-${org}" config --get remote.origin.url)" != "git@github.com:${org}/proj.git" ]; then
+    fail "the slug ${org}:main without a clone PROJECT did not clone ${org}'s fork: ${out}"
+  fi
+  actual_resolved="$(git -C "${encl}/proj-fork-${org}" config --get remote.origin.gh-resolved)"
+  if [ "${actual_resolved}" != "${expected_resolved}" ]; then
+    fail "the slug ${org}:main without a clone PROJECT set remote.origin.gh-resolved to [${actual_resolved}], not [${expected_resolved}]"
+  fi
+done
 
 # A slug whose branch is not a valid branch name is an error, with the usage
 # message.

@@ -1040,4 +1040,35 @@ if cb_output="$(current_branch "${WORK_DIR}/cb")" || [ -n "${cb_output}" ]; then
   fail "current_branch: a detached HEAD was named ${cb_output}"
 fi
 
+## Tests of fork_url, and so of split_repository_url, which it calls.
+## Usage: check_fork_url URL ORG EXPECTED
+## Checks that `fork_url URL ORG` prints EXPECTED, or fails if EXPECTED is
+## empty.
+check_fork_url() {
+  if check_fork_url_actual="$(fork_url "$1" "$2")"; then
+    check_fork_url_status=0
+  else
+    check_fork_url_status=1
+  fi
+  if [ -z "$3" ]; then
+    if [ "${check_fork_url_status}" -eq 0 ] || [ -n "${check_fork_url_actual}" ]; then
+      fail "fork_url [$1] [$2] printed [${check_fork_url_actual}] and returned ${check_fork_url_status}, rather than failing"
+    fi
+  elif [ "${check_fork_url_status}" -ne 0 ] || [ "${check_fork_url_actual}" != "$3" ]; then
+    fail "fork_url [$1] [$2] printed [${check_fork_url_actual}] and returned ${check_fork_url_status}, not [$3]"
+  fi
+}
+check_fork_url 'git@github.com:typetools/cf.git' cushon 'git@github.com:cushon/cf.git'
+check_fork_url 'https://github.com/typetools/cf.git/' cushon 'https://github.com/cushon/cf.git'
+check_fork_url 'ssh://git@github.com/typetools/cf' cushon 'ssh://git@github.com/cushon/cf'
+check_fork_url 'file:///srv/git/typetools/cf.git' cushon 'file:///srv/git/cushon/cf.git'
+check_fork_url '/srv/git/typetools/cf.git' cushon '/srv/git/cushon/cf.git'
+# A URL whose path has only one component has no owner.  What precedes that
+# component is the host, possibly with a port.
+check_fork_url 'cf.git' cushon ''
+check_fork_url 'host:cf.git' cushon ''
+check_fork_url 'https://github.com/cf.git' cushon ''
+check_fork_url 'ssh://git@host:22/cf.git' cushon ''
+check_fork_url 'ssh://host/cf.git' cushon ''
+
 echo "${SCRIPT_NAME}: OK"

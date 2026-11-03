@@ -47,6 +47,10 @@ The commands are:
   `PROJECT-fork-ORG` pushes to, and not on another remote such as
   `upstream`.  As for `git-new-branch` and `git-push-to`, ORG `-` stands for
   the clone `PROJECT` itself.
+  If ORG owns the repository of the clone `PROJECT` and there is no clone
+  `PROJECT-fork-ORG`, then `ORG:BRANCH` acts as `-:BRANCH` does.  If the
+  clone that the slug names has the branch checked out, the command does
+  nothing else.
   If there is no clone `PROJECT-fork-ORG`, the command first makes one, if
   ORG's fork has the branch.  The fork's URL is that of the clone
   `PROJECT`'s remote with the owner replaced by ORG, so
