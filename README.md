@@ -285,10 +285,13 @@ The commands are:
   working tree that tracks none of its files; and about one that is in a
   working tree that git cannot use, such as a linked worktree whose main
   working tree was moved.
-  The `projects` directory of a Claude Code configuration directory, such as
-  `~/.claude/projects`, is not examined:  it holds a directory, named for a
-  path such as `-home-me-repo-branch-feature`, for each directory that
-  Claude Code has run in.
+  A directory named `.cache` or `.claude`, such as `~/.cache` or a
+  repository's `.claude`, is not examined, nor is anything below it.
+  Neither is the `projects` directory of a Claude Code configuration
+  directory that has some other name, such as the directory that
+  `CLAUDE_CONFIG_DIR` names:  it holds a directory, named for a path such as
+  `-home-me-repo-branch-feature`, for each directory that Claude Code has run
+  in.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
   alias below).
 * [`git-remove-branch-directory`](git-remove-branch-directory)

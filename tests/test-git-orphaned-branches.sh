@@ -157,12 +157,20 @@ touch "${work}/dot-project/p-branch-python-checkout/.venv/src/mylib/setup.py"
 mkdir -p "${work}/dot-project/p-plain-python/.venv/src/mylib-branch-fix/.git"
 touch "${work}/dot-project/p-plain-python/.venv/src/mylib-branch-fix/setup.py"
 
-# A Claude Code configuration directory, whose `projects` directory holds a
+# The walk examines nothing below a directory named `.cache` or `.claude`.
+# Each `*-branch-*` directory here would otherwise be warned about.
+mkdir -p "${work}/dot-project/.cache/c-branch-cached" \
+  "${work}/dot-project/sub/.claude/worktrees/c-branch-claude"
+touch "${work}/dot-project/.cache/c-branch-cached/other" \
+  "${work}/dot-project/sub/.claude/worktrees/c-branch-claude/other"
+
+# A Claude Code configuration directory that is not named `.claude`, such as
+# one that `CLAUDE_CONFIG_DIR` names, whose `projects` directory holds a
 # directory named for each directory that Claude Code has run in.  The walk
 # does not examine that `projects` directory.
-mkdir -p "${work}/dot-project/.claude/projects/-home-me-repo-branch-feature"
-touch "${work}/dot-project/.claude/history.jsonl" \
-  "${work}/dot-project/.claude/projects/-home-me-repo-branch-feature/a.jsonl"
+mkdir -p "${work}/dot-project/.claude-alt/projects/-home-me-repo-branch-feature"
+touch "${work}/dot-project/.claude-alt/history.jsonl" \
+  "${work}/dot-project/.claude-alt/projects/-home-me-repo-branch-feature/a.jsonl"
 # A `projects` directory whose parent holds no `history.jsonl` file is not
 # part of a Claude Code configuration directory, so the walk examines it.
 mkdir -p "${work}/dot-project/p-plain-projects/projects/-home-me-repo-branch-other"
@@ -355,6 +363,11 @@ if grep -q -F -- '-home-me-repo-branch-feature' "${work}/dot-project.stderr" \
   status=1
 fi
 check_warned "p-plain-projects/projects/-home-me-repo-branch-other" "warned"
+if grep -q -e 'c-branch-cached' -e 'c-branch-claude' "${work}/dot-project.stderr" \
+  || printf '%s\n' "${output}" | grep -q -e 'c-branch-cached' -e 'c-branch-claude'; then
+  echo "FAIL: git-orphaned-branches examined a directory below .cache or .claude"
+  status=1
+fi
 if [ "${unlistable}" -eq 1 ]; then
   check_warned "p-branch-unlistable" "warned"
   # A directory that the user cannot enter is warned about as such.

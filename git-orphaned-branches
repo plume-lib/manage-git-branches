@@ -23,10 +23,14 @@
 # of its files, and a directory in a working tree that git cannot use, such
 # as a linked worktree whose main working tree was moved.
 #
-# The `projects` directory of a Claude Code configuration directory, such as
-# `~/.claude/projects`, is not examined.  It holds a directory for each
-# directory that Claude Code has run in, named for that directory's absolute
-# path, so its names match `*-branch-*`, but it holds no working tree.
+# A directory named `.cache` or `.claude`, such as `~/.cache` or a
+# repository's `.claude`, is not examined, nor is anything below it.  It holds
+# caches or Claude Code's state, not the user's branch directories.
+# Likewise, the `projects` directory of a Claude Code configuration directory
+# that has some other name, such as the directory that `CLAUDE_CONFIG_DIR`
+# names, is not examined.  It holds a directory for each directory that
+# Claude Code has run in, named for that directory's absolute path, so its
+# names match `*-branch-*`, but it holds no working tree.
 #
 # A directory that another live working tree depends on -- one that hosts a
 # linked worktree, or one that is a submodule of a superproject -- is never
@@ -784,12 +788,18 @@ examine_directory() {
       # branch directory unless it holds a version-control checkout, such as
       # one that `pip install -e git+URL#egg=NAME` makes in `.venv/src/`.  So
       # skip the entries of one that holds none, which can number in the
-      # thousands.  Also skip the entries of a Claude Code configuration
-      # directory's `projects` directory, which holds no branch directory.
-      if ! is_claude_projects_dir "$1" \
-        && { ! is_build_output_name "${1##*/}" || ! holds_no_checkout "$1"; }; then
-        examine_directory "$1"
-      fi
+      # thousands.  Also skip the entries of a `.cache` or `.claude`
+      # directory and of a Claude Code configuration directory's `projects`
+      # directory, which hold no branch directory of the user's.
+      case "${1##*/}" in
+        .cache | .claude) ;;
+        *)
+          if ! is_claude_projects_dir "$1" \
+            && { ! is_build_output_name "${1##*/}" || ! holds_no_checkout "$1"; }; then
+            examine_directory "$1"
+          fi
+          ;;
+      esac
     fi
     shift
   done
