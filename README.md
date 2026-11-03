@@ -217,8 +217,9 @@ The commands are:
   working copy directory has that branch.  Claude either commits a fix, which this
   command pushes to the pull request's branch, or explains why the CI
   cannot pass, which this command posts as a comment on the pull request.
-  A pull request whose CI is running is skipped, as is one for which such a
-  comment was posted at its current head commit.  The last thing that this
+  A pull request whose CI is running or waits for a human to approve a
+  check is skipped, as is one for which such a comment was posted at its
+  current head commit.  The last thing that this
   command prints is the list of the pull requests that it acted on, which a
   human should review, and of those that it could not handle.  With
   `--dry-run`, it prints the failing pull requests and the directories but

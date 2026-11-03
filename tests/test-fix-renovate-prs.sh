@@ -80,6 +80,7 @@ oid_diverged="$(renovate_branch diverged)"
 oid_nocommit="$(renovate_branch nocommit)"
 oid_rewritten="$(renovate_branch rewritten)"
 oid_resumed="$(renovate_branch resumed)"
+oid_untracked="$(renovate_branch untracked)"
 
 scan="${work}/scan"
 mkdir "${scan}"
@@ -135,6 +136,7 @@ check_run() {
 success="$(check_run SUCCESS lint)"
 failure="$(check_run FAILURE build)"
 startup_failure="$(check_run STARTUP_FAILURE setup)"
+approval="$(check_run ACTION_REQUIRED deploy)"
 running="$(check_run null build)"
 cancelled="$(check_run CANCELLED deploy)"
 error_status='{"__typename": "StatusContext", "context": "legacy", "targetUrl": "https://example.com/legacy", "state": "ERROR"}'
@@ -147,31 +149,40 @@ pr() {
   echo "{\"url\": \"https://github.com/someone/proj/pull/$1\", \"headRefName\": \"renovate/$2\", \"headRefOid\": \"$3\", \"isCrossRepository\": ${5:-false}, \"statusCheckRollup\": [$4]}"
 }
 mkdir -p "${work}/bin" "${work}/pr" "${work}/posted"
-{
-  echo "["
-  pr 1 fixable "${oid_fixable}" "${success}, ${failure}"
-  echo ","
-  pr 2 impossible "${oid_impossible}" "${error_status}, ${cancelled}"
-  echo ","
-  pr 3 reported "${oid_reported}" "${failure}"
-  echo ","
-  pr 4 running "${oid_running}" "${failure}, ${running}"
-  echo ","
-  pr 5 passing "${oid_passing}" "${success}, ${cancelled}"
-  echo ","
-  pr 6 rerun "${oid_rerun}" "${failure}"
-  echo ","
-  pr 7 diverged "${oid_diverged}" "${failure}"
-  echo ","
-  pr 8 nocommit "${oid_nocommit}" "${failure}"
-  echo ","
-  pr 9 forked 0000000000000000000000000000000000000000 "${failure}" true
-  echo ","
-  pr 10 rewritten "${oid_rewritten}" "${failure}"
-  echo ","
-  pr 11 resumed "${oid_resumed}" "${failure}"
-  echo "]"
-} > "${work}/pr-list.json"
+# Usage: pr_list
+# Writes the list of pull requests for `gh pr list`.
+pr_list() {
+  {
+    echo "["
+    pr 1 fixable "${oid_fixable}" "${success}, ${failure}"
+    echo ","
+    pr 2 impossible "${oid_impossible}" "${error_status}, ${cancelled}"
+    echo ","
+    pr 3 reported "${oid_reported}" "${failure}"
+    echo ","
+    pr 4 running "${oid_running}" "${failure}, ${running}"
+    echo ","
+    pr 5 passing "${oid_passing}" "${success}, ${cancelled}"
+    echo ","
+    pr 6 rerun "${oid_rerun}" "${failure}"
+    echo ","
+    pr 7 diverged "${oid_diverged}" "${failure}"
+    echo ","
+    pr 8 nocommit "${oid_nocommit}" "${failure}"
+    echo ","
+    pr 9 forked 0000000000000000000000000000000000000000 "${failure}" true
+    echo ","
+    pr 10 rewritten "${oid_rewritten}" "${failure}"
+    echo ","
+    pr 11 resumed "${oid_resumed}" "${failure}"
+    echo ","
+    pr 12 approval 0000000000000000000000000000000000000000 "${failure}, ${approval}"
+    echo ","
+    pr 13 untracked "${oid_untracked}" "${failure}"
+    echo "]"
+  } > "${work}/pr-list.json"
+}
+pr_list
 # Usage: pr_view NUMBER CHECKS [COMMENT]
 # Records what `gh pr view` says about pull request NUMBER:  that it is open,
 # that its checks are CHECKS, and that its only comment, if any, is COMMENT.
@@ -196,6 +207,7 @@ pr_view 7 "${failure}"
 pr_view 8 "${failure}"
 pr_view 10 "${failure}"
 pr_view 11 "${failure}"
+pr_view 13 "${failure}"
 
 # The fake `gh` appends its arguments to ${work}/gh.log.  `gh pr list` prints
 # ${work}/pr-list.json and `gh pr view URL` prints ${work}/pr/NUMBER.json,
@@ -269,8 +281,10 @@ EOF
 # ${work}/claude.log, and copies its instructions to
 # ${work}/prompt.BRANCHDIR.  What it does depends on its directory's branch,
 # renovate/NAME:  for "fixable" and "rewritten", it commits a fix and reports
-# FIXED; for "impossible", it reports IMPOSSIBLE; for "nocommit" and
-# "resumed", it reports FIXED without committing.  It reports with Markdown
+# FIXED; for "impossible", it commits a partial fix and reports IMPOSSIBLE;
+# for "nocommit" and "resumed", it reports FIXED without committing; for
+# "untracked", it commits a fix but not the new file that the fix needs, and
+# reports FIXED.  It reports with Markdown
 # emphasis, blank lines, and a carriage return, as Claude might.
 cat > "${work}/bin/claude" << EOF
 #!/bin/sh
@@ -285,7 +299,15 @@ case "\$(git symbolic-ref --short HEAD)" in
     printf '\n**FIXED** \r\nThe build needed a fix.\n' > "\${outcome}"
     ;;
   renovate/impossible)
+    echo "partly fixed" >> deps
+    git commit -q -a -m "Partial fix"
     printf '\n# IMPOSSIBLE\nThe new version has a bug.\n' > "\${outcome}"
+    ;;
+  renovate/untracked)
+    echo "fixed" >> deps
+    echo "needed" > needed
+    git commit -q -a -m "Fix the build"
+    printf 'FIXED\nThe build needed a new file.\n' > "\${outcome}"
     ;;
   renovate/nocommit | renovate/resumed)
     printf 'FIXED\nNothing to do.\n' > "\${outcome}"
@@ -306,7 +328,8 @@ expected="proj-branch-renovate-fixable -p --permission-mode bypassPermissions --
 proj-branch-renovate-impossible -p --permission-mode bypassPermissions --session-id
 proj-branch-renovate-nocommit -p --permission-mode bypassPermissions --session-id
 proj-branch-renovate-rewritten -p --permission-mode bypassPermissions --session-id
-proj-branch-renovate-resumed -p --permission-mode bypassPermissions --session-id"
+proj-branch-renovate-resumed -p --permission-mode bypassPermissions --session-id
+proj-branch-renovate-untracked -p --permission-mode bypassPermissions --session-id"
 actual="$(sed -e 's/ [0-9a-f-]*$//' "${work}/claude.log")"
 if [ "${actual}" != "${expected}" ]; then
   fail "claude ran:
@@ -350,7 +373,7 @@ done
 if [ "$(git -C "${remote}" log -1 --format='%s %P' renovate/resumed)" != "Earlier fix ${oid_resumed}" ]; then
   fail "the earlier fix of renovate/resumed was not pushed"
 fi
-for name in impossible nocommit diverged; do
+for name in impossible nocommit diverged untracked; do
   oid="$(eval "printf '%s' \"\${oid_${name}}\"")"
   if [ "$(git -C "${remote}" rev-parse "renovate/${name}")" != "${oid}" ]; then
     fail "renovate/${name} was pushed"
@@ -375,6 +398,10 @@ case "${output}" in
   *) fail "the output does not report the running pull request: ${output}" ;;
 esac
 case "${output}" in
+  *"skipping https://github.com/someone/proj/pull/12, whose CI waits for a human to act"*) ;;
+  *) fail "the output does not report the pull request that waits for approval: ${output}" ;;
+esac
+case "${output}" in
   *"pull/5"* | *"pull/9"*) fail "the output mentions a passing pull request or one from a fork: ${output}" ;;
 esac
 
@@ -384,17 +411,41 @@ https://github.com/someone/proj/pull/6
 Could not handle; a human must look:
 https://github.com/someone/proj/pull/7  ${scan}/proj-branch-renovate-diverged has diverged from the pull request's head commit ${oid_diverged}, and it has commits that the pull request's branch never had; move them onto ${oid_diverged}, or remove ${scan}/proj-branch-renovate-diverged with git-remove-branch-directory
 https://github.com/someone/proj/pull/8  claude reported a fix but committed nothing in ${scan}/proj-branch-renovate-nocommit
+https://github.com/someone/proj/pull/13  claude reported a fix but left new files uncommitted in ${scan}/proj-branch-renovate-untracked:
+needed
 Commented that CI cannot pass; review the comments:
-https://github.com/someone/proj/pull/2  ${scan}/proj-branch-renovate-impossible
+https://github.com/someone/proj/pull/2  ${scan}/proj-branch-renovate-impossible (1 unpushed commits)
 Pushed fixes; review them:
 https://github.com/someone/proj/pull/1  ${scan}/proj-branch-renovate-fixable
 https://github.com/someone/proj/pull/10  ${scan}/proj-branch-renovate-rewritten
 https://github.com/someone/proj/pull/11  ${scan}/proj-branch-renovate-resumed"
-if [ "$(printf '%s\n' "${output}" | tail -n 11)" != "${expected}" ]; then
+if [ "$(printf '%s\n' "${output}" | tail -n 13)" != "${expected}" ]; then
   fail "the report is:
-$(printf '%s\n' "${output}" | tail -n 11)
+$(printf '%s\n' "${output}" | tail -n 13)
 not:
 ${expected}"
+fi
+
+# The ref refs/fix-renovate-prs/BRANCH keeps the commits that were not pushed,
+# and no others.
+if [ "$(git -C "${scan}/proj" rev-parse --verify --quiet refs/fix-renovate-prs/renovate/impossible)" \
+  != "$(git -C "${scan}/proj-branch-renovate-impossible" rev-parse HEAD)" ]; then
+  fail "refs/fix-renovate-prs/renovate/impossible does not keep the partial fix"
+fi
+for name in fixable rewritten resumed; do
+  if git -C "${scan}/proj" rev-parse --verify --quiet "refs/fix-renovate-prs/renovate/${name}" > /dev/null; then
+    fail "refs/fix-renovate-prs/renovate/${name} remains after the push"
+  fi
+done
+
+# The command to continue a failed session is written in the directory that
+# holds the working copy directories, not in the branch directory.
+case "$(cat "${scan}/AGENT-TODO.md" 2> /dev/null)" in
+  *"cd ${scan}/proj-branch-renovate-nocommit && claude --resume "*) ;;
+  *) fail "${scan}/AGENT-TODO.md does not have the command: $(cat "${scan}/AGENT-TODO.md" 2> /dev/null)" ;;
+esac
+if [ -e "${scan}/proj-branch-renovate-nocommit/AGENT-TODO.md" ]; then
+  fail "AGENT-TODO.md was written in the branch directory"
 fi
 
 # --dry-run runs nothing.
@@ -420,6 +471,31 @@ case "${output}" in
   *"Would run claude in a new directory proj-branch-renovate-fixable, made in proj, for https://github.com/someone/proj/pull/1"*) ;;
   *) fail "--dry-run does not report the new directory: ${output}" ;;
 esac
+
+# After Renovate rewrites a branch, the directory that holds a partial fix that
+# was not pushed is reset to the new head commit, and Claude is told about the
+# partial fix.
+git -C "${seed}" checkout -q renovate/impossible
+git -C "${seed}" commit -q --amend -m "Update dependencies for impossible, again"
+git -C "${seed}" push -q -f origin renovate/impossible
+oid_impossible="$(git -C "${seed}" rev-parse HEAD)"
+partial="$(git -C "${scan}/proj-branch-renovate-impossible" rev-parse HEAD)"
+{
+  echo "["
+  pr 2 impossible "${oid_impossible}" "${failure}"
+  echo "]"
+} > "${work}/pr-list.json"
+pr_view 2 "${failure}"
+if ! output="$("${FIX_RENOVATE_PRS}" -C "${scan}" < /dev/null 2>&1)"; then
+  fail "the run after the rewrite fails: ${output}"
+fi
+case "$(cat "${work}/prompt.proj-branch-renovate-impossible")" in
+  *"An earlier attempt"*"  ${partial} Partial fix"*) ;;
+  *) fail "the instructions do not mention the partial fix: $(cat "${work}/prompt.proj-branch-renovate-impossible")" ;;
+esac
+if [ "$(git -C "${scan}/proj-branch-renovate-impossible" rev-parse HEAD~1)" != "${oid_impossible}" ]; then
+  fail "the directory was not reset to the new head commit: ${output}"
+fi
 
 # Usage errors.
 "${FIX_RENOVATE_PRS}" --bogus -C "${scan}" > /dev/null 2>&1
