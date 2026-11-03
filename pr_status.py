@@ -2550,9 +2550,9 @@ def set_header(text: str, title: str) -> str:
     The header is YAML front matter whose "title" entry is title, followed by a "# " heading
     of title, followed by an "as-of" generated section.  The title replaces the "title" entry
     of the front matter, including the indented continuation lines (and blank lines among them)
-    of a multi-line value, and the "# " heading that starts the text after the front matter.  Text that lacks any part
-    of the header gains it.  The rest of the front matter, and an existing "as-of" section
-    wherever it is, are retained.
+    of a multi-line value, and the "# " heading that starts the text after the front matter.
+    Text that lacks any part of the header gains it.  The rest of the front matter, and an
+    existing "as-of" section wherever it is, are retained.
 
     Args:
         text: a Markdown document, possibly starting with YAML front matter.
