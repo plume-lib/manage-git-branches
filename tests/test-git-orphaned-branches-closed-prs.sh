@@ -142,10 +142,11 @@ if ! grep -q -F -- 'repo view github.com/someone/proj ' "${work}/gh.log" \
 fi
 
 # The directory matches the remote branch, so the warning gives the commands
-# that delete both.
+# that delete both.  The deletion holds a lease on the directory's HEAD.
+head="$(git -C "${dir}" rev-parse HEAD)"
 case "${err}" in
   *"; to delete the remote branch and the directory, run:
-  git -C ${dir} push origin --delete feature
+  git -C ${dir} push --force-with-lease=refs/heads/feature:${head} origin --delete feature
   git-remove-branch-directory ${dir}") ;;
   *) fail "no removal commands for a directory that matches the remote branch: [${err}]" ;;
 esac
@@ -319,10 +320,26 @@ mv "${dir}" "${quoted_dir}"
 scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
 commands="$(printf '%s\n' "${err}" | sed -n -e 's/^  //p')"
 case "${commands}" in
-  "git -C '${work}/scan/proj-branch-it'\\''s here' push origin --delete feature
+  "git -C '${work}/scan/proj-branch-it'\\''s here' push --force-with-lease=refs/heads/feature:${head} origin --delete feature
 git-remove-branch-directory '${work}/scan/proj-branch-it'\\''s here'") ;;
   *) fail "unexpected removal commands for a directory whose name needs quotes: [${err}]" ;;
 esac
+
+# The lease makes the deletion refuse if the remote branch has moved since the
+# scan.
+echo "later" >> "${work}/seed/file.txt"
+git -C "${work}/seed" commit -q -a -m "Commit pushed after the scan"
+git -C "${work}/seed" push -q origin HEAD:refs/heads/feature
+push_command="$(printf '%s\n' "${commands}" | head -n 1)"
+if (eval "${push_command}") > /dev/null 2>&1; then
+  fail "the deletion succeeded although the remote branch moved: [${push_command}]"
+fi
+if [ "$(git -C "${work}/remote.git" rev-parse --verify --quiet refs/heads/feature)" \
+  != "$(git -C "${work}/seed" rev-parse HEAD)" ]; then
+  fail "the refused deletion changed the remote branch feature"
+fi
+git -C "${work}/seed" reset -q --hard HEAD^
+git -C "${work}/seed" push -q -f origin HEAD:refs/heads/feature
 (PATH="${TESTS_DIR}/..:${PATH}" && eval "${commands}") > /dev/null 2>&1 \
   || fail "the removal commands failed: [${commands}]"
 [ ! -e "${quoted_dir}" ] || fail "the removal commands left ${quoted_dir}"
