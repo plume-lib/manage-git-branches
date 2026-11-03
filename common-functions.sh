@@ -3025,6 +3025,93 @@ main_working_tree() {
   esac
 }
 
+## Usage: enter_slug_clone SLUG
+## SLUG is a slug ORG:BRANCH, such as "mernst:feature"; it contains ":".
+## Changes the current directory to the clone that SLUG names:  the sibling
+## clone PROJECT-fork-ORG of the project that the current directory belongs
+## to, or the clone PROJECT itself if ORG is "-".  The current directory can
+## be any working tree of the project, such as PROJECT, PROJECT-fork-OTHERORG,
+## or one of their branch directories, so a command that runs this and then
+## acts on BRANCH in the current directory does the same thing in all of them.
+## Sets ${SLUG_CLONE} to the clone's pathname, sets the variables that
+## `parse_slug` sets, and sets ${clone_project} and ${clone_org} as
+## `parse_clone_name` does for the clone that holds the current directory.
+##
+## Returns 0 on success.  Otherwise prints an error on standard error and
+## leaves the current directory as it was.  Returns 2 if ORG cannot name a
+## clone or BRANCH is not a valid branch name, so that the caller can print
+## its usage message, and returns 1 if the slug names no clone.
+##
+## This must not run in a subshell, such as in `$(...)`, because then the
+## change of directory would not reach the caller.
+##
+## The project's directories are named PROJECT, PROJECT-fork-ORG, and each of
+## those followed by -branch-BRANCH, side by side.  A linked worktree might
+## lie elsewhere, as in PROJECT/.claude/worktrees/NAME, so the names are those
+## of its main working tree, which holds the `.git` directory.  A bare
+## repository, or a git directory outside its working tree, has no main
+## working tree that this naming convention could describe, so then they are
+## those of the current working tree.
+##
+## The variables that this function sets for its own use are prefixed with an
+## abbreviation of its name, so that they cannot collide with a sourcing
+## script's variables.
+enter_slug_clone() {
+  SLUG_CLONE=''
+  if ! check_slug_org "$1"; then
+    return 2
+  fi
+  # Reject a bad branch name, such as one that contains another ":" or starts
+  # with "-", before the caller does anything in the clone, rather than when
+  # the branch is used.  A name that `--branch` rewrites, such as "@{-1}", is a
+  # reference to a branch rather than a branch's name.
+  if [ -z "${slug_branch}" ] \
+    || [ "$(git check-ref-format --branch "${slug_branch}" 2> /dev/null)" != "${slug_branch}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: not a valid branch name: ${slug_branch}" >&2
+    return 2
+  fi
+  if ! esc_toplevel="$(git rev-parse --show-toplevel 2> /dev/null)" \
+    || [ -z "${esc_toplevel}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: a slug must be given in a working tree of the project, such as PROJECT, PROJECT-fork-ORG, or one of their branch directories" >&2
+    return 1
+  fi
+  esc_main="$(main_working_tree)" || esc_main="${esc_toplevel}"
+  esc_main_name="$(basename -- "${esc_main}")"
+  parse_clone_name "${esc_main_name%%-branch-*}"
+  if [ "${slug_org}" = '-' ]; then
+    esc_clone="$(dirname -- "${esc_main}")/${clone_project}"
+    esc_description="clone of ${clone_project}"
+  else
+    esc_clone="$(dirname -- "${esc_main}")/${clone_project}-fork-${slug_org}"
+    esc_description="clone of ${slug_org}'s fork of ${clone_project}"
+  fi
+  if [ ! -d "${esc_clone}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: there is no ${esc_description}:  directory does not exist: ${esc_clone}" >&2
+    return 1
+  fi
+  # A directory that is not the top level of a working tree would make the
+  # caller act on whatever repository contains it.  Both pathnames are
+  # canonicalized, because git can spell a pathname differently than `pwd -P`
+  # does, as Git for Windows does.
+  if ! esc_clone_real="$(physical_path "${esc_clone}")" \
+    || [ -z "${esc_clone_real}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: cannot canonicalize: ${esc_clone}" >&2
+    return 1
+  fi
+  if ! esc_clone_toplevel="$(git -C "${esc_clone}" rev-parse --show-toplevel 2> /dev/null)" \
+    || [ -z "${esc_clone_toplevel}" ] \
+    || [ "$(physical_path "${esc_clone_toplevel}" 2> /dev/null)" != "${esc_clone_real}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: not the top level of a working tree: ${esc_clone}" >&2
+    return 1
+  fi
+  if ! cd -- "${esc_clone}"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot cd to ${esc_clone}" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2034 # set for the caller
+  SLUG_CLONE="${esc_clone}"
+}
+
 ## Usage: main_clone_for DIRECTORY
 ## DIRECTORY is the top level of a working tree.  Prints the main working tree
 ## in which a new worktree of DIRECTORY's repository should be registered, if
