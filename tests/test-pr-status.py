@@ -200,39 +200,39 @@ class LandingLineTest(unittest.TestCase):
 
 
 class StatedPrerequisitesTest(unittest.TestCase):
-    """Tests for stated_prerequisites."""
+    """Tests for stated_relations."""
 
     repo = types.SimpleNamespace(gh="owner/repo", keywords=[])
 
     def test_land_with_is_partner(self):
         """A land-with PR is a partner, not a prerequisite."""
         self.assertEqual(
-            pr_status.stated_prerequisites("Land with #5.", self.repo),
+            pr_status.stated_relations("Land with #5.", self.repo),
             (set(), set(), set(), {5}, set()),
         )
 
     def test_after_with_before(self):
         """One sentence can name a prerequisite, a partner, and a dependent."""
         self.assertEqual(
-            pr_status.stated_prerequisites("Land it after #1, with #2, and before #3.", self.repo),
+            pr_status.stated_relations("Land it after #1, with #2, and before #3.", self.repo),
             ({1}, set(), {3}, {2}, set()),
         )
 
     def test_this_pr_as_object(self):
         """In "land after it", the named PRs land after this PR."""
         self.assertEqual(
-            pr_status.stated_prerequisites("To land after it: #1 and #2.", self.repo),
+            pr_status.stated_relations("To land after it: #1 and #2.", self.repo),
             (set(), set(), {1, 2}, set(), set()),
         )
         self.assertEqual(
-            pr_status.stated_prerequisites("To land before this PR: #3.", self.repo),
+            pr_status.stated_relations("To land before this PR: #3.", self.repo),
             ({3}, set(), set(), set(), set()),
         )
 
     def test_land_with_other_repository(self):
         """A land-with PR in another repository is an external partner."""
         self.assertEqual(
-            pr_status.stated_prerequisites("Land with other/repo#5.", self.repo),
+            pr_status.stated_relations("Land with other/repo#5.", self.repo),
             (set(), set(), set(), set(), {"other/repo#5"}),
         )
 
@@ -247,9 +247,9 @@ class StatedPrerequisitesTest(unittest.TestCase):
             "Do not land after #5.",
         ]:
             with self.subTest(body=body):
-                self.assertEqual(pr_status.stated_prerequisites(body, self.repo), none)
+                self.assertEqual(pr_status.stated_relations(body, self.repo), none)
         self.assertEqual(
-            pr_status.stated_prerequisites("It is not new, but it depends on #5.", self.repo),
+            pr_status.stated_relations("It is not new, but it depends on #5.", self.repo),
             ({5}, set(), set(), set(), set()),
         )
 
@@ -634,7 +634,7 @@ class PushChainsTest(unittest.TestCase):
         # pr_directories receives the PR's data, so look up the PR's number by identity.
         ids = {id(repo.prs[n]): n for n in direct}
         with (
-            mock.patch.object(pr_status, "scan_directories", return_value=upstream),
+            mock.patch.object(pr_status, "git_entries", return_value=upstream),
             mock.patch.object(
                 pr_status, "pr_directories", lambda _r, pr, _base: [f"pr{ids[id(pr)]}"]
             ),
@@ -744,12 +744,40 @@ class KeepTest(unittest.TestCase):
         self.assertTrue(pr_status.keep(self.model(["a", "b"]), 1, flt))
         self.assertFalse(pr_status.keep(self.model(["b"]), 1, flt))
 
+    def test_valid_filters(self):
+        """is_valid_filter accepts each form of filter."""
+        for flt in ["all", "unassigned", {"unassigned_or": []}, {"unassigned_or": ["a", "b"]}]:
+            with self.subTest(flt=flt):
+                self.assertTrue(pr_status.is_valid_filter(flt))
+
+    def test_invalid_filters(self):
+        """is_valid_filter rejects a misspelled or malformed filter."""
+        for flt in [
+            "unasigned",
+            None,
+            ["a"],
+            {},
+            {"unassigned-or": ["a"]},
+            {"unassigned_or": "a"},
+            {"unassigned_or": [1]},
+            {"unassigned_or": ["a"], "extra": 1},
+        ]:
+            with self.subTest(flt=flt):
+                self.assertFalse(pr_status.is_valid_filter(flt))
+
     def test_unknown_filter(self):
         """An unblocked document with an unknown filter is an error."""
         doc = {"file": "unblocked.md", "title": "Unblocked", "filter": "unasigned"}
+        cfg = {"documents": {"dependencies": "pr-status.md", "unblocked": [doc]}}
         with self.assertRaises(SystemExit) as cm:
-            pr_status.unblocked_doc([], {}, "/base", doc, "today")
+            pr_status.check_unblocked_filters(cfg, "pr-status")
         self.assertIn('the filter of unblocked.md is "unasigned"', str(cm.exception))
+
+    def test_no_filter(self):
+        """An unblocked document with no filter is not an error."""
+        doc = {"file": "unblocked.md", "title": "Unblocked"}
+        cfg = {"documents": {"dependencies": "pr-status.md", "unblocked": [doc]}}
+        pr_status.check_unblocked_filters(cfg, "pr-status")
 
 
 if __name__ == "__main__":

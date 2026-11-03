@@ -616,11 +616,27 @@ LANDING_START = re.compile(
 )
 
 
-def pr_refs(text: str, repo: Repo) -> tuple[set[int], set[str]]:
-    """Find the PRs that text names.
+class PrRefs(NamedTuple):
+    """The PRs that a text names.
+
+    Attributes:
+        numbers: the numbers, such as 123, of the named PRs in a given repository.
+        external: the named PRs in other repositories, such as "owner/repo#123".
+    """
+
+    numbers: set[int]
+    external: set[str]
+
+
+def pr_refs(text: str, repo: Repo) -> PrRefs:
+    """Return the PRs that the given text names.
+
+    Args:
+        text: a part of a PR description, such as "Land after #12 and other/repo#34".
+        repo: the repository whose PRs text can name by number alone, as in "#12".
 
     Returns:
-        A set of numbers in repo, and a set of "owner/repo#N" in other repositories.
+        The PRs that text names, as a PrRefs whose numbers are of PRs in repo.
     """
     numbers = {int(n) for n in re.findall(r"(?<![\w/])#(\d+)\b", text)}
     external = set()
@@ -631,7 +647,7 @@ def pr_refs(text: str, repo: Repo) -> tuple[set[int], set[str]]:
             numbers.add(int(n))
         else:
             external.add(f"{gh}#{n}")
-    return numbers, external
+    return PrRefs(numbers, external)
 
 
 class StatedRelations(NamedTuple):
@@ -657,7 +673,19 @@ class StatedRelations(NamedTuple):
     external_partners: set[str]
 
 
-def stated_prerequisites(body: str, repo: Repo) -> StatedRelations:
+class ClosedPr(NamedTuple):
+    """A PR that is no longer open.
+
+    Attributes:
+        number: the PR's number, such as 123.
+        state: "landed" or "closed".
+    """
+
+    number: int
+    state: str
+
+
+def stated_relations(body: str, repo: Repo) -> StatedRelations:
     """Return the PRs that the given description of a PR in repo names as related to the PR.
 
     Returns:
@@ -677,9 +705,9 @@ def stated_prerequisites(body: str, repo: Repo) -> StatedRelations:
             if keyword not in ("land", "merge"):
                 if re.match(r"\s*(this|it)\b", rest, re.IGNORECASE):
                     continue  # "#N depends on this PR":  #N is a dependent
-                ns, ext = pr_refs(rest, repo)
-                numbers |= ns
-                external |= ext
+                refs = pr_refs(rest, repo)
+                numbers |= refs.numbers
+                external |= refs.external
                 continue
             if not (
                 re.search(r"\b(first|after)\b", rest, re.IGNORECASE)
@@ -694,7 +722,7 @@ def stated_prerequisites(body: str, repo: Repo) -> StatedRelations:
             # land-with partner, and #C is a dependent.
             parts = re.split(r"\b(after|before|with)\b", rest, flags=re.IGNORECASE)
             for i in range(0, len(parts), 2):
-                ns, ext = pr_refs(parts[i], repo)
+                refs = pr_refs(parts[i], repo)
                 preposition = parts[i - 1].lower() if i else None
                 # In "To land after it:  #A", this PR is the object, so #A is a dependent.
                 if preposition in ("after", "before") and re.match(
@@ -702,13 +730,13 @@ def stated_prerequisites(body: str, repo: Repo) -> StatedRelations:
                 ):
                     preposition = "before" if preposition == "after" else "after"
                 if preposition == "before":
-                    dependents |= ns
+                    dependents |= refs.numbers
                 elif preposition == "with":
-                    partners |= ns
-                    external_partners |= ext
+                    partners |= refs.numbers
+                    external_partners |= refs.external
                 else:
-                    numbers |= ns
-                    external |= ext
+                    numbers |= refs.numbers
+                    external |= refs.external
     return StatedRelations(numbers, external, dependents, partners, external_partners)
 
 
@@ -727,10 +755,10 @@ def landing_line(line: str, repo: Repo) -> tuple[str, str] | None:
     m = LANDING_START.match(line)
     if not m:
         return None
-    numbers, external = pr_refs(line, repo)
-    if len(numbers) + len(external) != 1:
+    refs = pr_refs(line, repo)
+    if len(refs.numbers) + len(refs.external) != 1:
         return None
-    return m[1], (f"#{numbers.pop()}" if numbers else external.pop())
+    return m[1], (f"#{refs.numbers.pop()}" if refs.numbers else refs.external.pop())
 
 
 def malformed_landing_lines(body: str, repo: Repo) -> list[str]:
@@ -850,12 +878,12 @@ class Model:
         self.stated_dependents: dict[int, set[int]] = {}
         self.stated_partners: dict[int, set[int]] = {}
         self.external_partners: dict[int, set[str]] = {}
-        self.stated_closed: dict[int, list[tuple[int, str]]] = {}
+        self.stated_closed: dict[int, list[ClosedPr]] = {}
         self.external: dict[int, list[str]] = {}
         # This model and the models that unite_partners unites it with, as a map from each
         # one's lowercase GitHub slug, such as "org/repo", to the model.
         self.by_gh: dict[str, Model] = {repo.gh.lower(): self}
-        relations = {n: stated_prerequisites(repo.prs[n]["body"], repo) for n in open_prs}
+        relations = {n: stated_relations(repo.prs[n]["body"], repo) for n in open_prs}
         # Look up all the states at once; state_of and external_state look up any that remain.
         external = {e for s in relations.values() for e in s.external_prerequisites} | {
             e for refs in rc.get("extra_external_dependencies", {}).values() for e in refs
@@ -876,7 +904,7 @@ class Model:
             self.stated_partners[n] = (s.partners - {n}) & open_prs
             self.external_partners[n] = s.external_partners
             self.stated_closed[n] = sorted(
-                (m, state) for m in names - set(repo.prs) if (state := repo.state_of(m))
+                ClosedPr(m, state) for m in names - set(repo.prs) if (state := repo.state_of(m))
             )
             self.external[n] = sorted(
                 e for e in s.external_prerequisites if external_state(e) == "open"
@@ -1256,14 +1284,14 @@ def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
 def refresh_description_facts(model: Model, cfg: dict[str, Any], n: int) -> None:
     """Refresh the facts derived from one locally updated PR description."""
     r = model.repo
-    s = stated_prerequisites(r.prs[n]["body"], r)
+    s = stated_relations(r.prs[n]["body"], r)
     names = s.prerequisites - {n}
     model.stated[n] = names & model.open
     model.stated_dependents[n] = (s.dependents - {n}) & model.open
     model.stated_partners[n] = (s.partners - {n}) & model.open
     model.external_partners[n] = s.external_partners
     model.stated_closed[n] = sorted(
-        (m, state) for m in names - set(r.prs) if (state := r.state_of(m))
+        ClosedPr(m, state) for m in names - set(r.prs) if (state := r.state_of(m))
     )
     configured = cfg["repos"][r.name].get("extra_external_dependencies", {}).get(str(n), [])
     model.external[n] = sorted(
@@ -1377,7 +1405,7 @@ def auto_notes(model: Model, n: int, master: bool = True) -> list[str]:
         notes.append("it depends on a cycle of dependencies")
     if n in model.base_pr:
         notes.append(f"its base branch is {r.link(model.base_pr[n])}'s branch")
-    landed = [m for m, s in model.stated_closed[n] if s == "landed"]
+    landed = [c.number for c in model.stated_closed[n] if c.state == "landed"]
     if landed:
         notes.append(
             f"its description still names the landed {r.links(landed)} as "
@@ -1528,13 +1556,23 @@ def scan_directories(base: str) -> dict[str, DirectoryEntry]:
     return DIRECTORIES
 
 
+# The git clones among DIRECTORIES, or None if they have not been computed since
+# DIRECTORIES changed.
+GIT_ENTRIES: dict[str, GitEntry] | None = None
+
+
 def git_entries(base: str) -> dict[str, GitEntry]:
-    """Return the git clones among the entries of base.
+    """Return the git clones among the entries of base, once.
 
     Returns:
         A map from each entry of base that is a git clone to its GitEntry.
     """
-    return {d: info for d, info in scan_directories(base).items() if isinstance(info, GitEntry)}
+    global GIT_ENTRIES
+    if GIT_ENTRIES is None:
+        GIT_ENTRIES = {
+            d: info for d, info in scan_directories(base).items() if isinstance(info, GitEntry)
+        }
+    return GIT_ENTRIES
 
 
 def pr_directories(repo: Repo, pr: dict[str, Any], base: str) -> list[str]:
@@ -1688,11 +1726,12 @@ def rename_obstacle(models: list[Model], base: str, d: str, new: str, owner: str
 
 def record_directory(base: str, d: str, new: str, info: DirectoryEntry) -> None:
     """Record in the result of scan_directories that entry d of base is now new, with info."""
-    global DIRECTORIES
+    global DIRECTORIES, GIT_ENTRIES
     entries = scan_directories(base)
     del entries[d]
     entries[new] = info
     DIRECTORIES = dict(sorted(entries.items()))
+    GIT_ENTRIES = None
 
 
 def fix_directory(base: str, d: str, new: str, owner: str) -> str | None:
@@ -1869,6 +1908,43 @@ def keep(model: Model, n: int, flt: str | dict[str, list[str]]) -> bool:
     return True
 
 
+def is_valid_filter(flt: Any) -> bool:
+    """Return True if the given value is a valid filter of an unblocked document.
+
+    Args:
+        flt: a value parsed from the config file's JSON, such as "unassigned".
+
+    Returns:
+        True if flt is "all", "unassigned", or a dict whose only key "unassigned_or" maps
+        to a list of GitHub logins, such as {"unassigned_or": ["mernst"]}.
+    """
+    if flt in ("all", "unassigned"):
+        return True
+    if not isinstance(flt, dict) or flt.keys() != {"unassigned_or"}:
+        return False
+    logins = flt["unassigned_or"]
+    return isinstance(logins, list) and all(isinstance(w, str) for w in logins)
+
+
+def check_unblocked_filters(cfg: dict[str, Any], program: str) -> None:
+    """Exit with an error message if an unblocked document of cfg has an invalid filter.
+
+    An unblocked document with no filter uses the filter "all".
+
+    Args:
+        cfg: a config, as a dict parsed from the config file's JSON, with keys such as
+            "repos" and "documents".
+        program: the name of the running program; used for diagnostics.
+    """
+    for doc in cfg["documents"].get("unblocked", []):
+        flt = doc.get("filter", "all")
+        if not is_valid_filter(flt):
+            sys.exit(
+                f"{program}: {CONFIG}: the filter of {doc.get('file')} is {json.dumps(flt)},"
+                ' not "all", "unassigned", or {"unassigned_or": [LOGIN...]}'
+            )
+
+
 def unblocked_doc(
     models: list[Model], cfg: dict[str, Any], base: str, doc: dict[str, Any], as_of: str
 ) -> str:
@@ -1878,11 +1954,6 @@ def unblocked_doc(
         The text of the document that doc describes.
     """
     flt = doc.get("filter", "all")
-    if not isinstance(flt, dict) and flt not in ("all", "unassigned"):
-        sys.exit(
-            f"pr-status: {CONFIG}: the filter of {doc['file']} is {json.dumps(flt)}, not"
-            ' "all", "unassigned", or {"unassigned_or": [...]}'
-        )
     show_author = any(m.repo.show_author for m in models)
     lines = [
         f"# {doc['title']}",
@@ -2541,7 +2612,9 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     r = model.repo
     owner, name = r.gh.lower().split("/")
     upstream = [
-        d for d, info in git_entries(base).items() if info == (owner, name, r.default_branch)
+        d
+        for d, info in git_entries(base).items()
+        if info == GitEntry(owner, name, r.default_branch)
     ][:1]
     dirs = {n: pr_directories(r, r.prs[n], base) for n in model.open}
     missing = sorted(n for n in model.open if not dirs[n])
@@ -3067,6 +3140,7 @@ def main() -> None:
     base = str(pathlib.Path.cwd())
     cfg = load_config("pr-status")
     dependencies = pathlib.Path(dependency_document_name(cfg, "pr-status"))
+    check_unblocked_filters(cfg, "pr-status")
     models = load_models(cfg)
     try:
         HIGHLIGHTED.update(needed_to_land(models, resolve_pr_names(models, args.highlight)))
@@ -3120,7 +3194,7 @@ def main() -> None:
             for m, n in stale_descriptions:
                 print(
                     f"{m.repo.ref(n)}: "
-                    + ", ".join(f"{m.repo.ref(k)} ({s})" for k, s in m.stated_closed[n])
+                    + ", ".join(f"{m.repo.ref(c.number)} ({c.state})" for c in m.stated_closed[n])
                 )
     if updates and check_only:
         print("## GitHub PR descriptions need updates")
@@ -3145,3 +3219,7 @@ def main() -> None:
     print(f"## Wrote {and_list(written)}")
     if failed_updates:
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

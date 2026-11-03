@@ -979,3 +979,7 @@ def main() -> int:
         if not rerunner.url_rerun_failed(arg):
             rerunner.pr_rerun_failed(arg)
     return rerunner.status
+
+
+if __name__ == "__main__":
+    sys.exit(main())

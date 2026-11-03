@@ -61,8 +61,17 @@ import urllib.parse
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import ci_build
-import pr_status
 import request_util
+
+try:
+    import pr_status
+except ModuleNotFoundError as error:
+    if error.name != "pr_status":
+        raise
+    sys.exit(
+        f"{pathlib.Path(sys.argv[0]).name}: cannot find pr_status.py"
+        f" in {pathlib.Path(__file__).resolve().parent}"
+    )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable
@@ -1408,3 +1417,7 @@ def main() -> None:
         concurrently(lambda item: item[1].cancel(item[0]), to_cancel)
     if failed:
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
