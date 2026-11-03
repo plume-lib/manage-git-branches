@@ -3235,10 +3235,14 @@ def main() -> None:
         print("## Directories whose name or origin does not match their branch's PR")
         for line in problems:
             print(line)
+    # Print each distinct error once, listing every PR that it affected.
+    refs_by_detail: dict[str, list[str]] = {}
     for m, n, error in failed_updates:
-        detail = error.stderr.strip()
+        refs_by_detail.setdefault(error.stderr.strip(), []).append(m.repo.ref(n))
+    for detail, refs in refs_by_detail.items():
         print(
-            f"pr-status: could not update {m.repo.ref(n)}" + (f": {detail}" if detail else ""),
+            f"pr-status: in {base}: could not update the description of {and_list(refs)}"
+            + (f": {detail}" if detail else ""),
             file=sys.stderr,
         )
     if failed_updates:
