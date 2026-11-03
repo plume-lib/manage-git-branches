@@ -141,6 +141,57 @@ if ! grep -q -F -- 'repo view github.com/someone/proj ' "${work}/gh.log" \
   fail "gh was not told the host github.com: $(cat "${work}/gh.log")"
 fi
 
+# The directory matches the remote branch, so the warning gives the commands
+# that delete both.
+case "${err}" in
+  *"; to delete the remote branch and the directory, run:
+  git -C ${dir} push origin --delete feature
+  git-remove-branch-directory ${dir}") ;;
+  *) fail "no removal commands for a directory that matches the remote branch: [${err}]" ;;
+esac
+
+# Usage: expect_no_commands DESCRIPTION
+# Scans, with a closed pull request, and fails if the warning gives removal
+# commands; DESCRIPTION describes the directory; used for diagnostics.
+expect_no_commands() {
+  scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
+  case "${err}" in
+    *"warning: not listing ${dir}:  every pull request for branch feature of someone/proj is closed or merged (someone/proj #7 (closed)), but the branch still exists in the remote") ;;
+    *) fail "unexpected warning for $1: [${err}]" ;;
+  esac
+}
+
+# An untracked file does not prevent the commands.
+echo "scratch" > "${dir}/untracked.txt"
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
+case "${err}" in
+  *"git-remove-branch-directory ${dir}") ;;
+  *) fail "no removal commands for a directory with an untracked file: [${err}]" ;;
+esac
+rm -f "${dir}/untracked.txt"
+
+# An uncommitted change to a tracked file, staged or not, prevents them.
+echo "changed" >> "${dir}/file.txt"
+expect_no_commands "a directory with an uncommitted change"
+git -C "${dir}" add file.txt
+expect_no_commands "a directory with a staged change"
+git -C "${dir}" reset -q --hard
+
+# So does a commit that the remote branch lacks.
+echo "local" >> "${dir}/file.txt"
+git -C "${dir}" commit -q -a -m "Unpushed commit"
+expect_no_commands "a directory with an unpushed commit"
+git -C "${dir}" reset -q --hard origin/feature
+
+# So does a commit of the remote branch that the directory lacks, which
+# deleting the remote branch would lose.
+echo "remote" >> "${work}/seed/file.txt"
+git -C "${work}/seed" commit -q -a -m "Commit that only the remote has"
+git -C "${work}/seed" push -q origin HEAD:refs/heads/feature
+expect_no_commands "a directory that lacks a commit of the remote branch"
+git -C "${work}/seed" reset -q --hard HEAD^
+git -C "${work}/seed" push -q -f origin HEAD:refs/heads/feature
+
 # A pull request from a branch of the same name in the base repository is
 # someone else's, so it does not count.
 scan FAKE_GH_PARENT='upstream/proj' FAKE_GH_PRS="$(prs b0 false 'MERGED 9 upstream/proj')"
@@ -259,6 +310,25 @@ git -C "${dir}" config remote.origin.url "${work}/remote.git"
 scan FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
 [ -z "${err}" ] || fail "warned for a remote that is not on GitHub: [${err}]"
 [ ! -s "${work}/gh.log" ] || fail "asked gh about a remote that is not on GitHub: $(cat "${work}/gh.log")"
+
+# The removal commands work, even for a directory whose name the shell must
+# quote.
+git -C "${dir}" config remote.origin.url 'https://github.com/someone/proj'
+quoted_dir="${work}/scan/proj-branch-it's here"
+mv "${dir}" "${quoted_dir}"
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
+commands="$(printf '%s\n' "${err}" | sed -n -e 's/^  //p')"
+case "${commands}" in
+  "git -C '${work}/scan/proj-branch-it'\\''s here' push origin --delete feature
+git-remove-branch-directory '${work}/scan/proj-branch-it'\\''s here'") ;;
+  *) fail "unexpected removal commands for a directory whose name needs quotes: [${err}]" ;;
+esac
+(PATH="${TESTS_DIR}/..:${PATH}" && eval "${commands}") > /dev/null 2>&1 \
+  || fail "the removal commands failed: [${commands}]"
+[ ! -e "${quoted_dir}" ] || fail "the removal commands left ${quoted_dir}"
+if git -C "${work}/remote.git" rev-parse --verify --quiet refs/heads/feature > /dev/null; then
+  fail "the removal commands left the remote branch feature"
+fi
 
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
