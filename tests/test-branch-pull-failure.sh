@@ -1,7 +1,8 @@
 #!/bin/sh
 
 # Tests that `git-checkout-branch` and `git-new-branch` report a failure of the
-# `git pull` that they run in the current working tree, rather than ignoring it.
+# `git pull` that they run in the current working tree, rather than ignoring it,
+# and that `git-checkout-branch --no-pull` runs no `git pull`.
 #
 # Usage:
 #   tests/test-branch-pull-failure.sh
@@ -31,8 +32,8 @@ REMOTE="${WORK_DIR}/myrepo.git"
 MAIN_DIR="${WORK_DIR}/myrepo-branch-main"
 STDERR_FILE="${WORK_DIR}/stderr.txt"
 
-## Creates a remote repository with a `main`, a `feature1`, and a `feature2`
-## branch, and a clone of it in MAIN_DIR.
+## Creates a remote repository with a `main`, a `feature1`, a `feature2`, and a
+## `feature3` branch, and a clone of it in MAIN_DIR.
 create_repositories() {
   git init -q --bare -b main "${REMOTE}"
   git init -q -b main "${WORK_DIR}/seed"
@@ -43,6 +44,7 @@ create_repositories() {
   git -C "${WORK_DIR}/seed" push -q --set-upstream origin main
   git -C "${WORK_DIR}/seed" push -q origin main:feature1
   git -C "${WORK_DIR}/seed" push -q origin main:feature2
+  git -C "${WORK_DIR}/seed" push -q origin main:feature3
   rm -rf "${WORK_DIR}/seed"
   git clone -q "${REMOTE}" "${MAIN_DIR}"
   git -C "${MAIN_DIR}" config pull.rebase false
@@ -163,6 +165,29 @@ check_pull_reported git-checkout-branch
 check_conflict_reported git-checkout-branch
 if [ -e "${WORK_DIR}/myrepo-branch-feature2" ]; then
   fail "git-checkout-branch created ${WORK_DIR}/myrepo-branch-feature2 after a conflicted pull"
+fi
+
+# With --no-pull, git-checkout-branch neither pulls nor changes the current
+# working tree, so the pull that would conflict does not stop it.
+git -C "${MAIN_DIR}" rebase --abort
+main_head="$(git -C "${MAIN_DIR}" rev-parse HEAD)"
+status=0
+(cd "${MAIN_DIR}" && "${COMMANDS_DIR}/git-checkout-branch" --no-pull feature3) \
+  > /dev/null 2> "${STDERR_FILE}" || status="$?"
+if [ "${status}" -ne 0 ]; then
+  fail "git-checkout-branch --no-pull exited with status ${status}:
+$(cat "${STDERR_FILE}")"
+fi
+if grep -q 'git pull. failed' "${STDERR_FILE}"; then
+  fail "git-checkout-branch --no-pull pulled; its stderr was:
+$(cat "${STDERR_FILE}")"
+fi
+if [ ! -d "${WORK_DIR}/myrepo-branch-feature3" ]; then
+  fail "git-checkout-branch --no-pull did not create ${WORK_DIR}/myrepo-branch-feature3"
+fi
+if [ "$(git -C "${MAIN_DIR}" rev-parse HEAD)" != "${main_head}" ] \
+  || [ -n "$(git -C "${MAIN_DIR}" status --porcelain)" ]; then
+  fail "git-checkout-branch --no-pull changed ${MAIN_DIR}"
 fi
 
 echo "${SCRIPT_NAME}: PASS"

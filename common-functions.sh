@@ -4160,6 +4160,70 @@ with_timeout() {
   fi
 }
 
+## Usage: gh_query DESCRIPTION COMMAND [ARGUMENT...]
+## Runs COMMAND, such as `gh`, with the ARGUMENTs and with the time limit
+## ${github_query_seconds}, and prints its standard output.  If COMMAND fails,
+## prints a diagnostic that says that DESCRIPTION failed, followed by
+## COMMAND's error output, and returns 1.  If COMMAND succeeds, its error
+## output, such as a warning that gh prints, is discarded, so that it is not
+## mistaken for output.  DESCRIPTION is what COMMAND does, phrased as a
+## failure, such as "cannot list the pull requests of ORG/REPO"; used for
+## diagnostics.
+gh_query() {
+  gh_query_description="$1"
+  shift
+  if ! gh_query_errors_file="$(mktemp "${TMPDIR:-/tmp}/${SCRIPT_NAME}-gh.XXXXXX")" \
+    || [ -z "${gh_query_errors_file}" ]; then
+    printf '%s: %s:\ncannot create a temporary file\n' "${SCRIPT_NAME}" "${gh_query_description}" >&2
+    return 1
+  fi
+  if ! gh_query_output="$(with_timeout "${github_query_seconds}" "$@" < /dev/null 2> "${gh_query_errors_file}")"; then
+    gh_query_errors="$(cat -- "${gh_query_errors_file}")"
+    rm -f -- "${gh_query_errors_file}"
+    if [ -z "${gh_query_errors}" ]; then
+      gh_query_errors="$1 failed without a message, perhaps after timing out after ${github_query_seconds} seconds"
+    fi
+    printf '%s: %s:\n%s\n' "${SCRIPT_NAME}" "${gh_query_description}" "${gh_query_errors}" >&2
+    return 1
+  fi
+  rm -f -- "${gh_query_errors_file}"
+  printf '%s\n' "${gh_query_output}"
+}
+
+## Usage: working_copy_directories DIRECTORY
+## Prints the name of each working copy directory in DIRECTORY, one per line,
+## in the order of the C locale, in which, for example, "Z" precedes "a", so
+## that the order does not depend on the user's locale.  A working copy
+## directory is an entry of DIRECTORY that is the top level of a git working
+## tree.  Entries whose names start with "." are ignored, as are symbolic
+## links, which could name a working tree twice, and directories that are not
+## the top level of a working tree, such as an ordinary directory inside a
+## clone.  An entry whose name contains a newline or a tab is skipped, with a
+## warning, so that a caller can store each name as a field of a line whose
+## fields are separated by tabs.  DIRECTORY must be a physical path, such as
+## `physical_path` prints, such as "/home/me/projects".
+working_copy_directories() {
+  for working_copy_directories_path in "$1"/*; do
+    working_copy_directories_name="$(basename -- "${working_copy_directories_path}")"
+    case "${working_copy_directories_name}" in
+      *'
+'* | *"$(printf '\t')"*)
+        echo "${SCRIPT_NAME}: skipping ${working_copy_directories_path}, whose name contains a newline or a tab" >&2
+        continue
+        ;;
+    esac
+    # `git rev-parse --show-toplevel` prints a physical path, which differs
+    # from the entry's path if the entry is a symbolic link or is not the top
+    # level of a working tree.  git fails if the entry is not a directory, as
+    # when the pattern matches no entry.
+    working_copy_directories_toplevel="$(git -C "${working_copy_directories_path}" \
+      rev-parse --show-toplevel 2> /dev/null)" || continue
+    if [ "${working_copy_directories_toplevel}" = "${working_copy_directories_path}" ]; then
+      printf '%s\n' "${working_copy_directories_name}"
+    fi
+  done | LC_ALL=C sort
+}
+
 ## Usage: pr_repositories DIRECTORY BRANCH
 ## Sets ${pr_base_repo} and ${pr_head_repo} to the GitHub slugs, such as
 ## "ORG/REPO", of the base and head repositories of the pull requests from a

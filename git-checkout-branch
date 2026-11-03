@@ -4,8 +4,14 @@
 # in a sibling directory named REPONAME-branch-BRANCHNAME/.
 #
 # Usage:
-#   git-checkout-branch BRANCHNAME
-#   git-checkout-branch ORG:BRANCHNAME
+#   git-checkout-branch [--no-pull] BRANCHNAME
+#   git-checkout-branch [--no-pull] ORG:BRANCHNAME
+#
+# First, this command runs `git pull` in the current working tree, which
+# updates the current branch as well as fetching the branch BRANCHNAME.  With
+# `--no-pull`, it does not, so it changes nothing in the current working tree;
+# the new directory then holds the branch as this clone last fetched it, or as
+# the remote has it if this clone has never fetched it.
 #
 # With a slug ORG:BRANCHNAME, such as `mernst:feature`, the branch is checked
 # out from the clone of ORG's fork, PROJECT-fork-ORG, rather than from the
@@ -111,10 +117,15 @@ fi
 unset_git_location_variables
 
 usage() {
-  echo "Usage: ${SCRIPT_NAME} BRANCHNAME" >&2
-  echo "   or: ${SCRIPT_NAME} ORG:BRANCHNAME" >&2
+  echo "Usage: ${SCRIPT_NAME} [--no-pull] BRANCHNAME" >&2
+  echo "   or: ${SCRIPT_NAME} [--no-pull] ORG:BRANCHNAME" >&2
 }
 
+PULL=true
+if [ "$#" -eq 2 ] && [ "$1" = '--no-pull' ]; then
+  PULL=false
+  shift
+fi
 if [ "$#" -ne 1 ]; then
   usage
   exit 1
@@ -187,7 +198,8 @@ BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 # there the pull only fast-forwards.  `--no-rebase` is needed too:  in some
 # versions of git, a configured `pull.rebase` or `branch.BRANCH.rebase`
 # overrides `--ff-only`.
-if ! PULL_OUTPUT="$(git pull -q ${SLUG_CLONE:+--no-rebase --ff-only} 2>&1)"; then
+if [ "${PULL}" = true ] \
+  && ! PULL_OUTPUT="$(git pull -q ${SLUG_CLONE:+--no-rebase --ff-only} 2>&1)"; then
   echo "${SCRIPT_NAME}: warning: \`git pull\` failed in ${TOPLEVEL}:" >&2
   if [ -n "${PULL_OUTPUT}" ]; then
     echo "${PULL_OUTPUT}" >&2
