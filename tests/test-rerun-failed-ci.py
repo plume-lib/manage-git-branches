@@ -704,6 +704,13 @@ class GithubActionsTest(RerunTestCase):
         # A job that the latest attempt does not include has been rerun.
         self.assert_reruns([], f"{self.RUN}/job/999")
 
+    def test_exit_3_if_reran(self) -> None:
+        """With --exit-3-if-reran, the exit status is 3 if and only if a job was rerun."""
+        self.assert_reruns(
+            ["gh run rerun --repo org/repo --failed 100"], "--exit-3-if-reran", self.RUN, status=3
+        )
+        self.assert_reruns([], "--exit-3-if-reran", "--dry-run", self.RUN)
+
     def test_lost_runner(self) -> None:
         """A job whose log cannot be read failed transiently if an annotation says so."""
         self.server.gh_logs.pop(103)

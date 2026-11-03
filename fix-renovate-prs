@@ -43,31 +43,43 @@
 #
 # For each failing pull request, this command:
 #  1. Runs `rerun-failed-ci` on it, which reruns the CI jobs whose failure
-#     appears to be transient, such as a network error.  If a check is running
-#     afterward, the pull request is skipped; run this command again after the
-#     check finishes.
+#     appears to be transient, such as a network error.  If it reran a job,
+#     or if a check is running afterward, the pull request is skipped; run
+#     this command again after the checks finish.
 #  2. Finds or makes the directory for the pull request's branch.  That is a
 #     working copy directory whose branch `git push` pushes to the pull
 #     request's branch, if there is one, and otherwise a new sibling
-#     directory, PROJECT-branch-BRANCH, that `git-checkout-branch` makes in a
-#     clone of the repository.  A clone whose name does not contain "-branch-"
-#     is preferred.  The directory must have no uncommitted changes to
-#     tracked files, and its HEAD must be the pull request's head commit or an
-#     ancestor of it, to which this command fast-forwards it.  Otherwise the
-#     pull request is skipped and reported; a directory whose branch Renovate
-#     has since rewritten can be removed with `git-remove-branch-directory`.
+#     directory, PROJECT-branch-BRANCH, that `git-checkout-branch --no-pull`
+#     makes in a clone of the repository, without changing the clone's
+#     working tree.  A clone whose name does not contain "-branch-" is
+#     preferred.  The directory must have no uncommitted changes to tracked
+#     files.  This command fetches the pull request's branch into it, and
+#     then:
+#      * If its HEAD is the pull request's head commit or an ancestor of it,
+#        this command fast-forwards it to the head commit.
+#      * If its HEAD has commits on top of the head commit, such as those of
+#        an earlier run of this command that were not pushed, Claude is told
+#        to build on them, and they are pushed along with Claude's commits.
+#      * If its HEAD has diverged from the head commit, as after Renovate
+#        rewrites the branch, and every commit of HEAD was once on the pull
+#        request's branch, as the reflog of the directory's remote-tracking
+#        branch shows, this command resets it to the head commit, which loses
+#        no commit.
+#      * Otherwise, the pull request is skipped and reported.
 #  3. Runs Claude Code non-interactively in that directory, with permission to
 #     run any command (`--permission-mode bypassPermissions`), because making
 #     the CI pass usually requires building and testing the project.  Claude
 #     is told to commit its changes and not to push.  It writes its outcome to
 #     a file:  either that it made the CI pass, or that the CI cannot pass, and
-#     why.
-#  4. If Claude made the CI pass and committed its changes, pushes the commits
-#     to the pull request's branch, with `git push`.  Renovate does not
-#     rebase or update a branch that someone else has pushed to.  If Claude
-#     reported that the CI cannot pass, posts Claude's explanation as a
-#     comment on the pull request.  Commits that Claude made then are not
-#     pushed, but they remain in the directory.
+#     why.  The outcome's first line that is not blank says which; white
+#     space and the Markdown characters "*", "_", "#", and "`" in it are
+#     ignored.
+#  4. If Claude made the CI pass and the directory has commits that the pull
+#     request does not, pushes the commits to the pull request's branch, with
+#     `git push`.  Renovate does not rebase or update a branch that someone
+#     else has pushed to.  If Claude reported that the CI cannot pass, posts
+#     Claude's explanation as a comment on the pull request.  Commits that
+#     Claude made then are not pushed, but they remain in the directory.
 # Claude runs for at most MANAGE_GIT_BRANCHES_RENOVATE_TIMEOUT seconds (by
 # default, 7200); 0 means no limit.  The pull requests are handled one at a
 # time.  This command continues after one of them fails.
@@ -198,8 +210,6 @@ trap 'rm -rf "${work}"' EXIT
 trap 'rm -rf "${work}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${work}"; trap - TERM; kill -s TERM "$$"' TERM
 
-newline='
-'
 tab="$(printf '\t')"
 status=0
 
@@ -210,12 +220,13 @@ impossible_marker() {
   printf '<!-- %s: CI cannot pass at %s -->\n' "${SCRIPT_NAME}" "$1"
 }
 
-# A jq filter that maps the `statusCheckRollup` of a pull request, as a list
-# of dicts parsed from the GitHub API's JSON with keys such as "__typename",
-# "status", "conclusion", and "state", to the state of its CI:  "running",
-# "failing", or "passing".  A check run has the "__typename" "CheckRun" and a
-# commit status has "StatusContext".
-ci_state_jq='[.statusCheckRollup[]? |
+# A jq function definition, which must precede the filters below that use it.
+# The function `check_state` maps a check of a pull request's
+# `statusCheckRollup`, as a dict parsed from the GitHub API's JSON with keys
+# such as "__typename", "status", "conclusion", and "state", to its state:
+# "running", "failing", or "passing".  A check run has the "__typename"
+# "CheckRun" and a commit status has "StatusContext".
+check_state_def='def check_state:
     if .__typename == "CheckRun" then
       if .status != "COMPLETED" then "running"
       elif (.conclusion | IN("ACTION_REQUIRED", "FAILURE", "STARTUP_FAILURE", "TIMED_OUT")) then "failing"
@@ -224,29 +235,20 @@ ci_state_jq='[.statusCheckRollup[]? |
       if (.state | IN("PENDING", "EXPECTED")) then "running"
       elif (.state | IN("ERROR", "FAILURE")) then "failing"
       else "passing" end
-    end]
+    end;'
+
+# A jq filter that maps a pull request, as a dict parsed from the GitHub API's
+# JSON with the key "statusCheckRollup", to the state of its CI:  "running",
+# "failing", or "passing".
+ci_state_jq='[.statusCheckRollup[]? | check_state]
   | if index("running") then "running" elif index("failing") then "failing" else "passing" end'
 
-# Usage: gh_query DESCRIPTION COMMAND [ARGUMENT...]
-# Runs the `gh` command COMMAND with the ARGUMENTs, with a time limit, and
-# prints its standard output.  If it fails, prints a diagnostic that says that
-# DESCRIPTION, such as "cannot list the pull requests of ORG/REPO", failed, and
-# returns 1.  The error output goes to a file, so that a warning that gh
-# prints when it succeeds is not mistaken for output.  DESCRIPTION is used
-# for diagnostics.
-gh_query() {
-  gh_query_description="$1"
-  shift
-  if ! gh_query_output="$(with_timeout "${github_query_seconds}" "$@" < /dev/null 2> "${work}/gh-errors")"; then
-    gh_query_errors="$(cat "${work}/gh-errors")"
-    if [ -z "${gh_query_errors}" ]; then
-      gh_query_errors="gh failed without a message, perhaps after timing out after ${github_query_seconds} seconds"
-    fi
-    printf '%s: %s:\n%s\n' "${SCRIPT_NAME}" "${gh_query_description}" "${gh_query_errors}" >&2
-    return 1
-  fi
-  printf '%s\n' "${gh_query_output}"
-}
+# A jq filter that maps a pull request, as a dict parsed from the GitHub API's
+# JSON with the key "statusCheckRollup", to a line for each failing check:
+# two spaces, the check's name, a colon and a space, and the check's URL.
+failed_checks_jq='.statusCheckRollup[]? | select(check_state == "failing")
+  | if .__typename == "CheckRun" then "  \(.name): \(.detailsUrl // "")"
+    else "  \(.context): \(.targetUrl // "")" end'
 
 # The lists of pull requests for the final report.  Each is a sequence of
 # lines, each of which is a pull request's URL, then two spaces and a
@@ -266,18 +268,7 @@ problem() {
   status=1
 }
 
-# The files below hold one record per line, with fields separated by tabs, so
-# skip an entry whose name contains a newline or a tab.
-for path in "${base}"/*; do
-  dir="$(basename -- "${path}")"
-  case "${dir}" in
-    *"${newline}"* | *"${tab}"*)
-      echo "${SCRIPT_NAME}: skipping ${path}, whose name contains a newline or a tab" >&2
-      continue
-      ;;
-  esac
-  printf '%s\n' "${dir}"
-done | LC_ALL=C sort > "${work}/entries"
+working_copy_directories "${base}" > "${work}/entries"
 
 # Find each working copy directory's repository, and the pull request branch,
 # if any, that `git push` in it pushes to.  Each line of ${work}/clones is a
@@ -291,12 +282,6 @@ done | LC_ALL=C sort > "${work}/entries"
 : > "${work}/holders"
 while IFS= read -r dir <&3; do
   path="${base}/${dir}"
-  # `git rev-parse --show-toplevel` prints a physical path, which differs
-  # from ${path} if ${path} is a symbolic link or is not the top level of a
-  # working tree.  git fails if ${path} is not a directory, as when the
-  # pattern matches no entry.
-  toplevel="$(git -C "${path}" rev-parse --show-toplevel 2> /dev/null)" || continue
-  if [ "${toplevel}" != "${path}" ]; then continue; fi
   branch="$(current_branch "${path}")" || branch=""
   remote="$(fetch_remote "${path}" "${branch}")"
   if [ -n "${remote}" ]; then
@@ -338,7 +323,7 @@ while IFS="${tab}" read -r slug clone <&3; do
   if ! prs="$(gh_query "cannot list the Renovate pull requests of ${slug}" \
     gh pr list -R "github.com/${slug}" --app renovate --state open --limit 200 \
     --json url,headRefName,headRefOid,isCrossRepository,statusCheckRollup \
-    --jq ".[] | select(.isCrossRepository | not) | [.url, .headRefName, .headRefOid, (${ci_state_jq})] | @tsv")"; then
+    --jq "${check_state_def} .[] | select(.isCrossRepository | not) | [.url, .headRefName, .headRefOid, (${ci_state_jq})] | @tsv")"; then
     problem "https://github.com/${slug}" "cannot list its Renovate pull requests"
     continue
   fi
@@ -354,48 +339,85 @@ while IFS="${tab}" read -r slug clone <&3; do
   done
 done 3< "${work}/repos"
 
-# Usage: sync_directory URL PATH OID REMOTE
-# Makes the working copy directory PATH, whose branch is the head branch of
-# the pull request URL, ready for work on the pull request, whose head commit
-# is OID:  fetches OID from PATH's remote REMOTE if necessary, and
-# fast-forwards to it.  Calls `problem`
-# and returns 1 if that is impossible.
+# Usage: sync_directory URL DIRECTORY OID REMOTE BRANCH
+# Makes the working copy directory DIRECTORY ready for work on a pull request
+# whose head branch is the branch BRANCH of DIRECTORY's remote REMOTE and whose
+# head commit is OID, as step 2 of the comment at the top of this file
+# describes, and sets ${unpushed} to the number of commits of the resulting
+# HEAD that OID does not have.  Calls `problem` and returns 1 if DIRECTORY
+# cannot be made ready.  URL is the pull request's URL; used for diagnostics.
 sync_directory() {
   if [ -n "$(git -C "$2" status --porcelain --untracked-files=no)" ]; then
     problem "$1" "$2 has uncommitted changes"
     return 1
   fi
+  # The fetch of BRANCH updates the remote-tracking branch, whose reflog
+  # records each commit that BRANCH has had.  OID is fetched by itself if
+  # BRANCH no longer has it.
+  git_batch_ssh "$2" fetch -q "$4" "refs/heads/$5" < /dev/null
   if ! git -C "$2" cat-file -e "$3^{commit}" 2> /dev/null \
     && ! git_batch_ssh "$2" fetch -q "$4" "$3" < /dev/null; then
     problem "$1" "cannot fetch the pull request's head commit $3 into $2"
     return 1
   fi
+  unpushed=0
   if [ "$(git -C "$2" rev-parse HEAD)" = "$3" ]; then
     return 0
   fi
-  if ! git -C "$2" merge-base --is-ancestor HEAD "$3"; then
-    problem "$1" "$2 has commits that are not in the pull request, perhaps because Renovate rewrote the branch; remove it with git-remove-branch-directory, or push its commits"
+  if git -C "$2" merge-base --is-ancestor HEAD "$3"; then
+    if ! git -C "$2" merge -q --ff-only "$3" < /dev/null; then
+      problem "$1" "cannot fast-forward $2 to the pull request's head commit $3"
+      return 1
+    fi
+    return 0
+  fi
+  if git -C "$2" merge-base --is-ancestor "$3" HEAD; then
+    unpushed="$(git -C "$2" rev-list --count "$3..HEAD")"
+    return 0
+  fi
+  # HEAD has diverged from OID.  Count the commits of HEAD that the
+  # remote-tracking branch never had, at any of the values that its reflog
+  # records.  The reflog's oldest entry records the value before it, too,
+  # which is the one that `git clone` gave the branch, because `git clone`
+  # writes no reflog for a remote-tracking branch.  If the remote-tracking
+  # branch does not exist, the count is that of every commit of HEAD.
+  sync_ref="refs/remotes/$4/$5"
+  sync_entries="$(git -C "$2" log -g --format=%H "${sync_ref}" 2> /dev/null | wc -l)"
+  if [ "$({
+    git -C "$2" log -g --format=%H "${sync_ref}" 2> /dev/null
+    git -C "$2" rev-parse --verify --quiet "${sync_ref}@{$((sync_entries))}"
+    git -C "$2" rev-parse --verify --quiet "${sync_ref}"
+  } | sed -e 's/^/^/' | git -C "$2" rev-list --count --stdin HEAD)" != 0 ]; then
+    problem "$1" "$2 has diverged from the pull request's head commit $3, and it has commits that the pull request's branch never had; move them onto $3, or remove $2 with git-remove-branch-directory"
     return 1
   fi
-  if ! git -C "$2" merge -q --ff-only "$3" < /dev/null; then
-    problem "$1" "cannot fast-forward $2 to the pull request's head commit $3"
+  if ! git -C "$2" reset -q --keep "$3" < /dev/null; then
+    problem "$1" "cannot reset $2 to the pull request's head commit $3"
     return 1
   fi
 }
 
-# Usage: prompt URL SLUG BRANCH CHECKS OUTCOME
-# Prints the instructions for Claude for the pull request URL in the GitHub
-# repository SLUG, whose head branch is BRANCH and whose failed checks are
-# CHECKS, one per line.  OUTCOME is the file to which Claude writes its
-# outcome.
+# Usage: prompt URL SLUG BRANCH CHECKS OUTCOME OID UNPUSHED
+# Prints the instructions for Claude for a pull request URL in the GitHub
+# repository SLUG, whose head branch is BRANCH, whose failed checks are
+# CHECKS, one per line, and whose head commit is OID.  OUTCOME is the file to
+# which Claude writes its outcome, and UNPUSHED is the number of commits on
+# top of OID in the current directory.
 prompt() {
   printf '%s\n' "The current directory is a clone of the GitHub repository $2, on the branch
 $3.  That branch is the head branch of the pull request $1, which Renovate
 opened to update dependencies.  The pull request's CI fails.  These checks
 failed:
 $4
-
-Your task is to make the pull request's CI pass, or to determine that that
+"
+  if [ "$7" -ne 0 ]; then
+    printf '%s\n' "The current branch has commits that the pull request does not have yet,
+such as commits of an earlier attempt at this task that were not pushed;
+\`git log $6..HEAD\` shows them.  Build on them:  keep those that help, and
+undo any others with new commits.
+"
+  fi
+  printf '%s\n' "Your task is to make the pull request's CI pass, or to determine that that
 is impossible.
 
 * Find out why each check failed, for example with \`gh pr checks $1\` and
@@ -465,21 +487,29 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     continue
   fi
 
-  # Rerun the transient failures, then skip the pull request if CI is
-  # running.
-  if ! "${SCRIPT_DIR}/rerun-failed-ci" "${url}" < /dev/null; then
-    echo "${SCRIPT_NAME}: rerun-failed-ci failed for ${url}; continuing" >&2
-  fi
+  # Rerun the transient failures.  GitHub might not show a rerun job as
+  # running until some time after the rerun, so skip the pull request if a
+  # job was rerun, whatever its checks say.  Then skip it if its CI is
+  # running, as it might be after a rerun by someone else.
+  "${SCRIPT_DIR}/rerun-failed-ci" --exit-3-if-reran "${url}" < /dev/null
+  case "$?" in
+    0) ;;
+    3)
+      echo "${SCRIPT_NAME}: skipping ${url}, whose transient CI failures were rerun"
+      reran="${reran}${url}
+"
+      continue
+      ;;
+    *) echo "${SCRIPT_NAME}: rerun-failed-ci failed for ${url}; continuing" >&2 ;;
+  esac
   if ! ci="$(gh_query "cannot read the checks of ${url}" \
-    gh pr view "${url}" --json statusCheckRollup --jq "${ci_state_jq}")"; then
+    gh pr view "${url}" --json statusCheckRollup --jq "${check_state_def} ${ci_state_jq}")"; then
     problem "${url}" "cannot read its checks"
     continue
   fi
   case "${ci}" in
     running)
-      echo "${SCRIPT_NAME}: skipping ${url}, whose CI is running after rerunning transient failures"
-      reran="${reran}${url}
-"
+      echo "${SCRIPT_NAME}: skipping ${url}, whose CI is running"
       continue
       ;;
     passing)
@@ -495,8 +525,8 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
       problem "${url}" "${base}/${branch_dir} exists but does not push to the pull request's branch"
       continue
     fi
-    if ! (cd -- "${base}/${clone}" && "${SCRIPT_DIR}/git-checkout-branch" "${head_branch}") < /dev/null; then
-      problem "${url}" "git-checkout-branch ${head_branch} failed in ${clone}"
+    if ! (cd -- "${base}/${clone}" && "${SCRIPT_DIR}/git-checkout-branch" --no-pull "${head_branch}") < /dev/null; then
+      problem "${url}" "git-checkout-branch --no-pull ${head_branch} failed in ${clone}"
       continue
     fi
   fi
@@ -509,14 +539,13 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     continue
   fi
   push_to="${pr_head_remote}"
-  if ! sync_directory "${url}" "${branch_path}" "${head_oid}" "${push_to}"; then
+  if ! sync_directory "${url}" "${branch_path}" "${head_oid}" "${push_to}" "${head_branch}"; then
     continue
   fi
 
   # The failed checks, for Claude's instructions.
   if ! checks="$(gh_query "cannot read the checks of ${url}" \
-    gh pr checks "${url}" --json name,bucket,link \
-    --jq '.[] | select(.bucket == "fail") | "  \(.name): \(.link)"')"; then
+    gh pr view "${url}" --json statusCheckRollup --jq "${check_state_def} ${failed_checks_jq}")"; then
     problem "${url}" "cannot read its checks"
     continue
   fi
@@ -541,7 +570,7 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   # The UUID contains no character that field splitting or globbing would
   # change, so the unquoted expansion is one option and its value.
   # shellcheck disable=SC2086
-  prompt "${url}" "${slug}" "${head_branch}" "${checks}" "${outcome}" \
+  prompt "${url}" "${slug}" "${head_branch}" "${checks}" "${outcome}" "${head_oid}" "${unpushed}" \
     | (cd -- "${branch_path}" && run_with_time_limit "${time_limit}" \
       claude -p --permission-mode bypassPermissions ${session:+--session-id ${session}})
   claude_status=$?
@@ -555,8 +584,13 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     continue
   fi
 
-  # Check Claude's work.
-  result="$(head -n 1 -- "${outcome}" 2> /dev/null)"
+  # Check Claude's work.  ${result} is the first line of the outcome that is
+  # not blank, without white space and Markdown emphasis, and ${explanation}
+  # is the lines after it.
+  result="$(awk '{ line = $0; gsub(/[[:space:]*_#`]/, "", line) } line != "" { print line; exit }' \
+    "${outcome}" 2> /dev/null)"
+  explanation="$(awk 'found { print; next } { line = $0; gsub(/[[:space:]*_#`]/, "", line) } line != "" { found = 1 }' \
+    "${outcome}" 2> /dev/null)"
   if [ "$(current_branch "${branch_path}")" != "${local_branch}" ]; then
     problem "${url}" "claude switched ${branch_path} away from branch ${local_branch}"
     report_agent_session "Make the CI of ${url} pass"
@@ -603,14 +637,14 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
       {
         echo "Claude Code, run by \`${SCRIPT_NAME}\`, could not make this pull request's CI pass:"
         echo
-        tail -n +2 -- "${outcome}"
+        printf '%s\n' "${explanation}"
         echo
         impossible_marker "${head_oid}"
       } > "${work}/comment.md"
       if ! gh_query "cannot comment on ${url}" \
         gh pr comment "${url}" --body-file "${work}/comment.md" > /dev/null; then
         problem "${url}" "cannot post claude's explanation, which is:
-$(tail -n +2 -- "${outcome}")"
+${explanation}"
         continue
       fi
       if [ "${new_commits}" -eq 0 ]; then
@@ -622,7 +656,7 @@ $(tail -n +2 -- "${outcome}")"
       fi
       ;;
     *)
-      problem "${url}" "claude did not write FIXED or IMPOSSIBLE as the first line of its outcome, in ${branch_path}"
+      problem "${url}" "claude did not write FIXED or IMPOSSIBLE as the first line of its outcome that is not blank, in ${branch_path}"
       report_agent_session "Make the CI of ${url} pass"
       continue
       ;;

@@ -3,7 +3,9 @@
 # Tests that `fix-renovate-prs` runs Claude for each failing Renovate pull
 # request, pushes Claude's fixes, comments when Claude reports that the CI
 # cannot pass, skips the pull requests that it should skip, and lists, last,
-# the pull requests that it acted on.
+# the pull requests that it acted on.  It also tests how `fix-renovate-prs`
+# brings an existing directory to a pull request's head commit, and that it
+# does not pull in the clone where it makes a new directory.
 #
 # Usage:
 #   tests/test-fix-renovate-prs.sh
@@ -76,6 +78,8 @@ oid_passing="$(renovate_branch passing)"
 oid_rerun="$(renovate_branch rerun)"
 oid_diverged="$(renovate_branch diverged)"
 oid_nocommit="$(renovate_branch nocommit)"
+oid_rewritten="$(renovate_branch rewritten)"
+oid_resumed="$(renovate_branch resumed)"
 
 scan="${work}/scan"
 mkdir "${scan}"
@@ -83,27 +87,57 @@ git clone -q https://github.com/someone/proj "${scan}/proj"
 # A branch directory of the same repository, which is not chosen to make new
 # branch directories in.
 git -C "${scan}/proj" worktree add -q -b feature "${scan}/proj-branch-feature"
-# A directory for the branch renovate/diverged with a commit that the pull
-# request does not have.
-git -C "${scan}/proj" worktree add -q --track -b renovate/diverged \
-  "${scan}/proj-branch-renovate-diverged" origin/renovate/diverged
+# Usage: branch_directory NAME
+# Makes the directory for the branch renovate/NAME, at the pull request's
+# head commit.
+branch_directory() {
+  git -C "${scan}/proj" worktree add -q --track -b "renovate/$1" \
+    "${scan}/proj-branch-renovate-$1" "origin/renovate/$1"
+}
+# A directory for the branch renovate/diverged whose HEAD has diverged from
+# the pull request, with a commit that the pull request never had.
+branch_directory diverged
+git -C "${scan}/proj-branch-renovate-diverged" reset -q --hard origin/main
 git -C "${scan}/proj-branch-renovate-diverged" commit -q --allow-empty -m "Local commit"
+# A directory for the branch renovate/rewritten at a commit that Renovate then
+# replaced, so that the directory has no commit that the branch never had.
+branch_directory rewritten
+git -C "${seed}" checkout -q renovate/rewritten
+git -C "${seed}" commit -q --amend -m "Update dependencies for rewritten, again"
+git -C "${seed}" push -q -f origin renovate/rewritten
+oid_rewritten="$(git -C "${seed}" rev-parse HEAD)"
+# A directory for the branch renovate/resumed with a commit, on top of the pull
+# request's head, that an earlier run did not push.
+branch_directory resumed
+git -C "${scan}/proj-branch-renovate-resumed" commit -q --allow-empty -m "Earlier fix"
+# A commit on main that the clone proj does not have, which a pull in proj
+# would bring in.
+git -C "${seed}" checkout -q main
+echo "news" > "${seed}/news"
+git -C "${seed}" add news
+git -C "${seed}" commit -q -m "News"
+git -C "${seed}" push -q origin main
+proj_head="$(git -C "${scan}/proj" rev-parse HEAD)"
 
-# Usage: check_run CONCLUSION
-# Prints a check run, as the GitHub API's JSON describes it, whose conclusion
-# is CONCLUSION, or that has not finished if CONCLUSION is "null".
+# Usage: check_run CONCLUSION NAME
+# Prints a check run named NAME, as the GitHub API's JSON describes it, whose
+# conclusion is CONCLUSION, or that has not finished if CONCLUSION is "null".
 check_run() {
   if [ "$1" = null ]; then
-    echo '{"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": null}'
+    status=IN_PROGRESS
+    conclusion=null
   else
-    echo "{\"__typename\": \"CheckRun\", \"status\": \"COMPLETED\", \"conclusion\": \"$1\"}"
+    status=COMPLETED
+    conclusion="\"$1\""
   fi
+  echo "{\"__typename\": \"CheckRun\", \"name\": \"$2\", \"detailsUrl\": \"https://example.com/$2\", \"status\": \"${status}\", \"conclusion\": ${conclusion}}"
 }
-success="$(check_run SUCCESS)"
-failure="$(check_run FAILURE)"
-running="$(check_run null)"
-cancelled="$(check_run CANCELLED)"
-error_status='{"__typename": "StatusContext", "state": "ERROR"}'
+success="$(check_run SUCCESS lint)"
+failure="$(check_run FAILURE build)"
+startup_failure="$(check_run STARTUP_FAILURE setup)"
+running="$(check_run null build)"
+cancelled="$(check_run CANCELLED deploy)"
+error_status='{"__typename": "StatusContext", "context": "legacy", "targetUrl": "https://example.com/legacy", "state": "ERROR"}'
 
 # Usage: pr NUMBER NAME OID CHECKS [CROSS]
 # Prints a pull request, as the GitHub API's JSON describes it, from the
@@ -132,6 +166,10 @@ mkdir -p "${work}/bin" "${work}/pr" "${work}/posted"
   pr 8 nocommit "${oid_nocommit}" "${failure}"
   echo ","
   pr 9 forked 0000000000000000000000000000000000000000 "${failure}" true
+  echo ","
+  pr 10 rewritten "${oid_rewritten}" "${failure}"
+  echo ","
+  pr 11 resumed "${oid_resumed}" "${failure}"
   echo "]"
 } > "${work}/pr-list.json"
 # Usage: pr_view NUMBER CHECKS [COMMENT]
@@ -148,24 +186,50 @@ pr_view() {
   printf '{"state": "OPEN", "statusCheckRollup": [%s], "comments": %s}\n' "$2" "${comments}" \
     > "${work}/pr/$1.json"
 }
-pr_view 1 "${failure}"
+pr_view 1 "${success}, ${failure}, ${startup_failure}"
 pr_view 2 "${error_status}" "An unrelated comment"
 pr_view 3 "${failure}" "Explanation
 <!-- fix-renovate-prs: CI cannot pass at ${oid_reported} -->"
-pr_view 6 "${running}"
+# GitHub does not yet show the rerun of pull request 6's failed check.
+pr_view 6 "${failure}"
 pr_view 7 "${failure}"
 pr_view 8 "${failure}"
+pr_view 10 "${failure}"
+pr_view 11 "${failure}"
 
 # The fake `gh` appends its arguments to ${work}/gh.log.  `gh pr list` prints
-# ${work}/pr-list.json, `gh pr view URL` prints ${work}/pr/NUMBER.json, and
-# `gh pr checks URL` prints one failed check, each filtered by the `--jq`
-# filter, if any.  `gh pr checks` without `--jq`, as `rerun-failed-ci` runs
-# it, prints no checks.  `gh repo view` reports that someone/proj is not a
-# fork and that its default branch is "main".  `gh pr comment URL --body-file
-# FILE` copies FILE to ${work}/posted/NUMBER.
+# ${work}/pr-list.json and `gh pr view URL` prints ${work}/pr/NUMBER.json,
+# each filtered by the `--jq` filter, if any.  `gh repo view` reports that
+# someone/proj is not a fork and that its default branch is "main".
+# `gh pr comment URL --body-file FILE` copies FILE to ${work}/posted/NUMBER.
+#
+# The rest serves `rerun-failed-ci`.  `gh pr checks URL` prints no checks,
+# except for pull request 6, whose failed check is GitHub Actions workflow
+# run 60.  Its one job, 61, failed transiently.  `gh run rerun` appends its
+# arguments to ${work}/reruns.
 cat > "${work}/bin/gh" << EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "${work}/gh.log"
+case "\$1" in
+  api)
+    for arg; do path="\${arg}"; done
+    case "\${path}" in
+      */actions/runs/60) echo '{"name": "ci", "status": "completed", "conclusion": "failure"}' ;;
+      */actions/runs/60/jobs*) echo '[{"jobs": [{"id": 61, "name": "build", "conclusion": "failure", "started_at": "2026-01-01T00:00:00Z"}]}]' ;;
+      */check-runs/61/annotations*) echo '[[]]' ;;
+      *) echo "unexpected gh api request: \${path}" >&2; exit 1 ;;
+    esac
+    exit 0
+    ;;
+  run)
+    case "\$2" in
+      view) printf 'build\tstep\tConnection reset by peer\n' ;;
+      rerun) printf '%s\n' "\$*" >> "${work}/reruns" ;;
+      *) echo "unexpected gh command: \$*" >&2; exit 1 ;;
+    esac
+    exit 0
+    ;;
+esac
 cmd="\$1 \$2"
 shift 2
 filter=""
@@ -186,8 +250,11 @@ case "\${cmd}" in
   'pr list') json="\$(cat "${work}/pr-list.json")" ;;
   'pr view') json="\$(cat "${work}/pr/\${number}.json")" || exit 1 ;;
   'pr checks')
-    if [ -z "\${filter}" ]; then echo '[]'; exit 0; fi
-    json='[{"name": "build", "bucket": "fail", "link": "https://example.com/build"}, {"name": "lint", "bucket": "pass", "link": "https://example.com/lint"}]'
+    if [ "\${number}" = 6 ]; then
+      json='[{"name": "build", "bucket": "fail", "state": "FAILURE", "link": "https://github.com/someone/proj/actions/runs/60/job/61"}]'
+    else
+      json='[]'
+    fi
     ;;
   'pr comment') cp "\${body}" "${work}/posted/\${number}"; exit 0 ;;
   *) echo "unexpected gh command: \${cmd}" >&2; exit 1 ;;
@@ -201,9 +268,10 @@ EOF
 # The fake `claude` appends the name of its directory and its arguments to
 # ${work}/claude.log, and copies its instructions to
 # ${work}/prompt.BRANCHDIR.  What it does depends on its directory's branch,
-# renovate/NAME:  for "fixable", it commits a fix and reports FIXED; for
-# "impossible", it reports IMPOSSIBLE; for "nocommit", it reports FIXED without
-# committing.
+# renovate/NAME:  for "fixable" and "rewritten", it commits a fix and reports
+# FIXED; for "impossible", it reports IMPOSSIBLE; for "nocommit" and
+# "resumed", it reports FIXED without committing.  It reports with Markdown
+# emphasis, blank lines, and a carriage return, as Claude might.
 cat > "${work}/bin/claude" << EOF
 #!/bin/sh
 dir="\$(basename -- "\$(pwd)")"
@@ -211,15 +279,15 @@ echo "\${dir} \$*" >> "${work}/claude.log"
 cat > "${work}/prompt.\${dir}"
 outcome="\$(sed -n -e 's/^\* Finally, write the file \(.*\)\.  Its first line.*/\1/p' "${work}/prompt.\${dir}")"
 case "\$(git symbolic-ref --short HEAD)" in
-  renovate/fixable)
+  renovate/fixable | renovate/rewritten)
     echo "fixed" >> deps
     git commit -q -a -m "Fix the build"
-    printf 'FIXED\nThe build needed a fix.\n' > "\${outcome}"
+    printf '\n**FIXED** \r\nThe build needed a fix.\n' > "\${outcome}"
     ;;
   renovate/impossible)
-    printf 'IMPOSSIBLE\nThe new version has a bug.\n' > "\${outcome}"
+    printf '\n# IMPOSSIBLE\nThe new version has a bug.\n' > "\${outcome}"
     ;;
-  renovate/nocommit)
+  renovate/nocommit | renovate/resumed)
     printf 'FIXED\nNothing to do.\n' > "\${outcome}"
     ;;
 esac
@@ -236,7 +304,9 @@ fi
 # order of the pull requests, with every permission.
 expected="proj-branch-renovate-fixable -p --permission-mode bypassPermissions --session-id
 proj-branch-renovate-impossible -p --permission-mode bypassPermissions --session-id
-proj-branch-renovate-nocommit -p --permission-mode bypassPermissions --session-id"
+proj-branch-renovate-nocommit -p --permission-mode bypassPermissions --session-id
+proj-branch-renovate-rewritten -p --permission-mode bypassPermissions --session-id
+proj-branch-renovate-resumed -p --permission-mode bypassPermissions --session-id"
 actual="$(sed -e 's/ [0-9a-f-]*$//' "${work}/claude.log")"
 if [ "${actual}" != "${expected}" ]; then
   fail "claude ran:
@@ -245,16 +315,40 @@ not:
 ${expected}"
 fi
 case "$(cat "${work}/prompt.proj-branch-renovate-fixable")" in
-  *"https://github.com/someone/proj/pull/1"*"  build: https://example.com/build"*) ;;
-  *) fail "the instructions do not name the pull request and its failed check: $(cat "${work}/prompt.proj-branch-renovate-fixable")" ;;
+  *"https://github.com/someone/proj/pull/1"*"  build: https://example.com/build
+  setup: https://example.com/setup
+"*) ;;
+  *) fail "the instructions do not name the pull request and its failed checks: $(cat "${work}/prompt.proj-branch-renovate-fixable")" ;;
 esac
 case "$(cat "${work}/prompt.proj-branch-renovate-fixable")" in
-  *"lint"*) fail "the instructions name a check that passed" ;;
+  *"lint"* | *"earlier attempt"*) fail "the instructions name a check that passed, or earlier commits" ;;
+esac
+case "$(cat "${work}/prompt.proj-branch-renovate-resumed")" in
+  *"earlier attempt"*"git log ${oid_resumed}..HEAD"*) ;;
+  *) fail "the instructions do not mention the earlier commits: $(cat "${work}/prompt.proj-branch-renovate-resumed")" ;;
 esac
 
-# The fix is pushed; nothing else is.
-if [ "$(git -C "${remote}" log -1 --format=%s renovate/fixable)" != "Fix the build" ]; then
-  fail "the fix was not pushed"
+# The transient failure is rerun, and the pull request is then skipped,
+# although GitHub still shows the failure.
+if [ "$(cat "${work}/reruns" 2> /dev/null)" != "run rerun --repo someone/proj --failed 60" ]; then
+  fail "the reruns are: $(cat "${work}/reruns" 2> /dev/null)"
+fi
+
+# The new directory was made without pulling in proj.
+if [ "$(git -C "${scan}/proj" rev-parse HEAD)" != "${proj_head}" ]; then
+  fail "proj was pulled"
+fi
+
+# The fixes are pushed, on top of the pull requests' head commits; nothing
+# else is.
+for name in fixable rewritten; do
+  oid="$(eval "printf '%s' \"\${oid_${name}}\"")"
+  if [ "$(git -C "${remote}" log -1 --format='%s %P' "renovate/${name}")" != "Fix the build ${oid}" ]; then
+    fail "the fix of renovate/${name} was not pushed on top of ${oid}"
+  fi
+done
+if [ "$(git -C "${remote}" log -1 --format='%s %P' renovate/resumed)" != "Earlier fix ${oid_resumed}" ]; then
+  fail "the earlier fix of renovate/resumed was not pushed"
 fi
 for name in impossible nocommit diverged; do
   oid="$(eval "printf '%s' \"\${oid_${name}}\"")"
@@ -288,15 +382,17 @@ esac
 expected="Reran transient CI failures; run fix-renovate-prs again after CI finishes:
 https://github.com/someone/proj/pull/6
 Could not handle; a human must look:
-https://github.com/someone/proj/pull/7  ${scan}/proj-branch-renovate-diverged has commits that are not in the pull request, perhaps because Renovate rewrote the branch; remove it with git-remove-branch-directory, or push its commits
+https://github.com/someone/proj/pull/7  ${scan}/proj-branch-renovate-diverged has diverged from the pull request's head commit ${oid_diverged}, and it has commits that the pull request's branch never had; move them onto ${oid_diverged}, or remove ${scan}/proj-branch-renovate-diverged with git-remove-branch-directory
 https://github.com/someone/proj/pull/8  claude reported a fix but committed nothing in ${scan}/proj-branch-renovate-nocommit
 Commented that CI cannot pass; review the comments:
 https://github.com/someone/proj/pull/2  ${scan}/proj-branch-renovate-impossible
 Pushed fixes; review them:
-https://github.com/someone/proj/pull/1  ${scan}/proj-branch-renovate-fixable"
-if [ "$(printf '%s\n' "${output}" | tail -n 9)" != "${expected}" ]; then
+https://github.com/someone/proj/pull/1  ${scan}/proj-branch-renovate-fixable
+https://github.com/someone/proj/pull/10  ${scan}/proj-branch-renovate-rewritten
+https://github.com/someone/proj/pull/11  ${scan}/proj-branch-renovate-resumed"
+if [ "$(printf '%s\n' "${output}" | tail -n 11)" != "${expected}" ]; then
   fail "the report is:
-$(printf '%s\n' "${output}" | tail -n 9)
+$(printf '%s\n' "${output}" | tail -n 11)
 not:
 ${expected}"
 fi

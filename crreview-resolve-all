@@ -183,23 +183,10 @@ if ! me="$(with_timeout "${github_query_seconds}" gh api user --jq .login < /dev
   exit 1
 fi
 
-newline='
-'
 tab="$(printf '\t')"
 status=0
 
-# The files below hold one record per line, with fields separated by tabs, so
-# skip an entry whose name contains a newline or a tab.
-for path in "${base}"/*; do
-  dir="$(basename -- "${path}")"
-  case "${dir}" in
-    *"${newline}"* | *"${tab}"*)
-      echo "${SCRIPT_NAME}: skipping ${path}, whose name contains a newline or a tab" >&2
-      continue
-      ;;
-  esac
-  printf '%s\n' "${dir}"
-done | LC_ALL=C sort > "${work}/entries"
+working_copy_directories "${base}" > "${work}/entries"
 
 # Find each working copy directory's pull request.  Each line of
 # ${work}/holders is a pull request's URL, its head commit, the directory's
@@ -208,28 +195,15 @@ done | LC_ALL=C sort > "${work}/entries"
 : > "${work}/holders"
 while IFS= read -r dir <&3; do
   path="${base}/${dir}"
-  # `git rev-parse --show-toplevel` prints a physical path, which differs
-  # from ${path} if ${path} is a symbolic link or is not the top level of a
-  # working tree.  git fails if ${path} is not a directory, as when the
-  # pattern matches no entry.
-  toplevel="$(git -C "${path}" rev-parse --show-toplevel 2> /dev/null)" || continue
-  if [ "${toplevel}" != "${path}" ]; then continue; fi
   branch="$(current_branch "${path}")" || continue
   pr_repositories "${path}" "${branch}" || continue
   # `gh pr list --head` matches a branch of that name in any repository, so
   # select the pull request whose head repository is ${pr_head_repo}.  The
-  # repository is named with its host, which overrides ${GH_REPO}.  The error
-  # output goes to a file, so that a warning that gh prints when it succeeds
-  # is not mistaken for a pull request.
-  if ! prs="$(with_timeout "${github_query_seconds}" gh pr list -R "github.com/${pr_base_repo}" \
+  # repository is named with its host, which overrides ${GH_REPO}.
+  if ! prs="$(gh_query "cannot find the pull request of ${dir}" \
+    gh pr list -R "github.com/${pr_base_repo}" \
     --head "${pr_head_branch}" --state open --json headRepositoryOwner,author,headRefOid,url \
-    --jq '.[] | "\(.headRepositoryOwner.login) \(.author.login) \(.headRefOid) \(.url)"' \
-    < /dev/null 2> "${work}/gh-errors")"; then
-    gh_errors="$(cat "${work}/gh-errors")"
-    if [ -z "${gh_errors}" ]; then
-      gh_errors="gh failed without a message, perhaps after timing out after ${github_query_seconds} seconds"
-    fi
-    printf '%s: cannot find the pull request of %s:\n%s\n' "${SCRIPT_NAME}" "${dir}" "${gh_errors}" >&2
+    --jq '.[] | "\(.headRepositoryOwner.login) \(.author.login) \(.headRefOid) \(.url)"')"; then
     status=1
     continue
   fi

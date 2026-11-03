@@ -4,7 +4,7 @@ A transient failure is one such as a network error or a rate limit, rather than 
 problem with the code.
 
 Usage:
-  rerun-failed-ci [--dry-run] [--max-attempts N] [PR | BRANCH | URL]...
+  rerun-failed-ci [--dry-run] [--max-attempts N] [--exit-3-if-reran] [PR | BRANCH | URL]...
   rerun-failed-ci --classify [LOG-FILE]...
 
 With no PR, BRANCH, or URL, this command examines the GitHub pull request for the
@@ -52,6 +52,12 @@ this command, when it is run repeatedly, from rerunning a job forever whose fail
 resembles a transient one but is not.
 
 With `--dry-run`, this command reports what it would rerun but does not rerun anything.
+
+The exit status is 1 if some build could not be examined or rerun, and 0 otherwise.
+With `--exit-3-if-reran`, the exit status is instead 3 if this command reran some job,
+even if some other build could not be examined or rerun.  A caller can use it to tell
+that some check of a pull request is about to run again, which GitHub might not show
+until some time after the rerun.
 
 With `--classify`, this command reruns nothing and contacts no server.  It reads each
 LOG-FILE (or standard input), and for each one that shows a transient failure, it
@@ -246,6 +252,7 @@ class Rerunner:
         max_attempts: the most times that a job can have been run before this reruns it.
         status: the exit status so far:  1 if some build could not be examined or
             rerun, and 0 otherwise.
+        reran: True if some job has been rerun.
         examined: the keys, as for record_if_unexamined, of the builds that have been
             examined, so that a build that a pull request has several failed checks for
             is examined only once.
@@ -256,6 +263,7 @@ class Rerunner:
         self.dry_run = dry_run
         self.max_attempts = max_attempts
         self.status = 0
+        self.reran = False
         self.examined: set[tuple[Any, ...]] = set()
 
     def warn(self, message: str) -> None:
@@ -296,6 +304,7 @@ class Rerunner:
             print(f"  Would rerun {what}.")
             return
         url = rerunning()
+        self.reran = True
         print(f"  Reran {what}: {url}" if url else f"  Reran {what}.")
 
     ###########################################################################
@@ -962,6 +971,9 @@ def main() -> int:
         "--max-attempts", type=positive_integer, default=3, help="the most runs of a job"
     )
     parser.add_argument(
+        "--exit-3-if-reran", action="store_true", help="exit with status 3 if a job was rerun"
+    )
+    parser.add_argument(
         "--classify", action="store_true", help="classify log files; contact no server"
     )
     parser.add_argument("args", nargs="*", metavar="PR | BRANCH | URL | LOG-FILE")
@@ -978,6 +990,8 @@ def main() -> int:
     for arg in args.args:
         if not rerunner.url_rerun_failed(arg):
             rerunner.pr_rerun_failed(arg)
+    if args.exit_3_if_reran and rerunner.reran:
+        return 3
     return rerunner.status
 
 
