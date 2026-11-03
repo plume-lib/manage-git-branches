@@ -1211,6 +1211,11 @@ for mode in '' --copy; do
     *"library.jar"*) fail "${mode:-the default mode} examined a file whose name says that it is compressed: ${out}" ;;
     *"notes.txt"*) fail "${mode:-the default mode} named an Emacs auto-save or backup file: ${out}" ;;
   esac
+  for kept_file in 'out/#notes.txt#' 'out/notes.txt~' 'out/notes.txt.~1~'; do
+    if [ ! -f "${stale_parent}/stale-branch-${branch}/${kept_file}" ]; then
+      fail "${mode:-the default mode} did not keep ${kept_file}"
+    fi
+  done
   case "${out}" in
     *"Or remove ${stale_parent}/stale-branch-${branch} with git-remove-branch-directory, and run \`git-new-branch --clean ${branch}\`"*) ;;
     *) fail "${mode:-the default mode} did not suggest --clean: ${out}" ;;
