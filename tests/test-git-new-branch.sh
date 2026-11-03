@@ -1712,6 +1712,21 @@ if [ "$(git -C "${slugs}/proj-branch-in-upstream" symbolic-ref HEAD 2> /dev/null
   fail "-:in-upstream did not make ${slugs}/proj-branch-in-upstream"
 fi
 
+# A slug ORG:BRANCH whose ORG owns the upstream repository of the clone
+# PROJECT acts as -:BRANCH does, when there is no clone PROJECT-fork-ORG.  The
+# upstream repository is the one that `remote.origin.gh-resolved` names.
+git -C "${slugs}/proj" config remote.origin.gh-resolved uporg/proj
+if ! out="$(cd "${slugs}/proj-fork-other" && "${GIT_NEW_BRANCH}" uporg:in-upstream2 2>&1)"; then
+  fail "nonzero exit status for uporg:in-upstream2: ${out}"
+fi
+if [ "$(git -C "${slugs}/proj-branch-in-upstream2" symbolic-ref HEAD 2> /dev/null)" != refs/heads/in-upstream2 ]; then
+  fail "uporg:in-upstream2 did not make ${slugs}/proj-branch-in-upstream2: ${out}"
+fi
+if [ -e "${slugs}/proj-fork-uporg-branch-in-upstream2" ]; then
+  fail "uporg:in-upstream2 made ${slugs}/proj-fork-uporg-branch-in-upstream2"
+fi
+git -C "${slugs}/proj" config --unset remote.origin.gh-resolved
+
 # A slug's pull in a clone whose branch has diverged from its upstream does
 # not merge, which would leave conflicts in a clone other than the current
 # directory.  The new branch starts at that clone's own commit.

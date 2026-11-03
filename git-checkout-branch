@@ -23,14 +23,15 @@
 # GitHub shows a pull request's branch in this form, as in
 # "mernst:feature".
 #
-# If ORG owns the repository of the clone PROJECT, and there is no clone
-# PROJECT-fork-ORG, then ORG:BRANCHNAME acts as -:BRANCHNAME does.  If the
-# clone that the slug names has the branch checked out, the command does
-# nothing else, because that clone is the branch's directory.
+# If there is no clone PROJECT-fork-ORG, and ORG owns the project's upstream
+# repository, as typetools owns typetools/checker-framework, then
+# ORG:BRANCHNAME acts as -:BRANCHNAME does.  If the clone that the slug names
+# has the branch checked out, the command does nothing else, because that
+# clone is the branch's directory.
 #
-# If there is no clone PROJECT-fork-ORG, the command first makes one, if
-# ORG's fork has the branch.  The fork's URL is that of the clone PROJECT's
-# remote, with the owner replaced by ORG:  for example,
+# Otherwise, if there is no clone PROJECT-fork-ORG, the command first makes
+# one, if ORG's fork has the branch.  The fork's URL is that of the clone
+# PROJECT's upstream remote, with the owner replaced by ORG:  for example,
 # git@github.com:typetools/checker-framework.git becomes
 # git@github.com:cushon/checker-framework.git.  The new clone borrows the
 # objects of PROJECT while it is made, so that only the others are
@@ -233,11 +234,16 @@ fi
 # "upstream" instead.  ORG's fork is the remote that the clone pushes its
 # branches to, so then ${REMOTE} is the remote that `git push` would use for a
 # branch with no configuration, as `push_remote` determines it, and
-# `find_branch` looks only there.
+# `find_branch` looks only there.  If ORG owns the upstream repository, the
+# slug names the clone PROJECT, and ORG's branch is on the upstream
+# repository, whichever remote the clone pushes to; `enter_slug_clone` names
+# that remote.
 #
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
 # asked, and only the local tests in `find_branch` apply.
-if [ -n "${SLUG_CLONE}" ]; then
+if [ -n "${SLUG_UPSTREAM_REMOTE}" ]; then
+  REMOTE="${SLUG_UPSTREAM_REMOTE}"
+elif [ -n "${SLUG_CLONE}" ]; then
   REMOTE="$(push_remote . '')"
 else
   CURRENT_BRANCH="$(current_branch)" || CURRENT_BRANCH=''

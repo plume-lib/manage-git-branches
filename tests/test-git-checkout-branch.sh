@@ -866,23 +866,32 @@ done
 
 # Without a clone PROJECT, the fork's URL comes from the current clone.  A
 # directory PROJECT that is not a clone does not count, even within another
-# repository.  The upstream repository is the one that the current clone
-# fetches from, unless that is its own fork.
+# repository.  The upstream repository is the current clone's remote
+# "upstream", whichever remote its branch is fetched from.  Without that
+# remote, the upstream repository is the one that `remote.origin.gh-resolved`
+# names, and it is unknown if that is unset, because "origin" is the current
+# clone's own fork.
 git init -q "${tmpdir}/encl"
 encl="$(cd "${tmpdir}/encl" && pwd -P)"
 mkdir "${encl}/proj"
 git clone -q git@github.com:me/proj.git "${encl}/proj-fork-me"
 git -C "${encl}/proj-fork-me" remote add upstream git@github.com:up/proj.git
 git -C "${encl}/proj-fork-me" fetch -q upstream
-git -C "${encl}/proj-fork-me" branch -q --set-upstream-to upstream/main main
-git clone -q --bare "${hub}/up/proj.git" "${hub}/third/proj.git"
-for org in other third; do
-  if [ "${org}" = third ]; then
-    git -C "${encl}/proj-fork-me" branch -q --set-upstream-to origin/main main
-    expected_resolved=''
-  else
-    expected_resolved='up/proj'
-  fi
+for org in third fourth; do
+  git clone -q --bare "${hub}/up/proj.git" "${hub}/${org}/proj.git"
+done
+for org in other third fourth; do
+  case "${org}" in
+    other) expected_resolved='up/proj' ;;
+    third)
+      git -C "${encl}/proj-fork-me" remote remove upstream
+      expected_resolved=''
+      ;;
+    fourth)
+      git -C "${encl}/proj-fork-me" config remote.origin.gh-resolved up/proj
+      expected_resolved='up/proj'
+      ;;
+  esac
   if ! out="$(cd "${encl}/proj-fork-me" && "${GIT_CHECKOUT_BRANCH}" "${org}:main" 2>&1)"; then
     fail "nonzero exit status for the slug ${org}:main without a clone PROJECT: ${out}"
   fi
@@ -894,6 +903,33 @@ for org in other third; do
     fail "the slug ${org}:main without a clone PROJECT set remote.origin.gh-resolved to [${actual_resolved}], not [${expected_resolved}]"
   fi
 done
+
+# Without a clone PROJECT, a slug whose ORG owns the upstream repository names
+# PROJECT, which is not a clone, rather than making a second clone of the
+# upstream repository.
+if out="$(cd "${encl}/proj-fork-me" && "${GIT_CHECKOUT_BRANCH}" up:main 2>&1)"; then
+  fail "zero exit status for the slug up:main without a clone PROJECT"
+fi
+case "${out}" in
+  *"names the clone ${encl}/proj"*"not the top level of a working tree: ${encl}/proj"*) ;;
+  *) fail "unexpected message for the slug up:main without a clone PROJECT: ${out}" ;;
+esac
+if [ -e "${encl}/proj-fork-up" ]; then
+  fail "the slug up:main without a clone PROJECT made ${encl}/proj-fork-up"
+fi
+
+# A slug whose ORG owns the upstream repository looks for the branch on the
+# upstream remote, even if the clone PROJECT pushes to some other remote.
+git -C "${forks}/proj" push -q origin HEAD:refs/heads/upbranch2
+git -C "${forks}/proj" remote add mine git@github.com:me/proj.git
+git -C "${forks}/proj" config remote.pushDefault mine
+if ! out="$(cd "${forks}/proj" && "${GIT_CHECKOUT_BRANCH}" up:upbranch2 2>&1)"; then
+  fail "nonzero exit status for the slug up:upbranch2 in a clone PROJECT that pushes to a fork: ${out}"
+elif [ "$(git -C "${forks}/proj-branch-upbranch2" config --get branch.upbranch2.remote)" != 'origin' ]; then
+  fail "the slug up:upbranch2 did not check out the upstream remote's branch: ${out}"
+fi
+git -C "${forks}/proj" config --unset remote.pushDefault
+git -C "${forks}/proj" remote remove mine
 
 # A slug whose branch is not a valid branch name is an error, with the usage
 # message.

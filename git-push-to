@@ -24,7 +24,10 @@
 # Alternately, each argument may be a slug of the form ORG:BRANCH, which names
 # a directory in the current directory:  PROJECT-fork-ORG-branch-BRANCH, or
 # PROJECT-fork-ORG if that directory has BRANCH checked out and the former
-# does not exist.  A "/" in BRANCH is written as "-" in the directory name, as
+# does not exist.  If there is no clone PROJECT-fork-ORG and ORG owns the
+# upstream repository of the clone PROJECT, as typetools owns
+# typetools/checker-framework, then ORG:BRANCH names what -:BRANCH names,
+# described below.  A "/" in BRANCH is written as "-" in the directory name, as
 # `git-new-branch` does.  Every PROJECT that has a directory for any of the
 # slugs gets its own chain, made of the slugs' directories that exist for that
 # PROJECT.  For example,
@@ -803,6 +806,18 @@ is_slug() {
   [ -n "${is_slug_matches}" ]
 }
 
+## Usage: names_project PROJECT
+## Returns 0 if ${slug_org}, the ORG of a slug ORG:BRANCH, names the clone
+## PROJECT in the current directory, as ORG "-" does, because there is no
+## clone PROJECT-fork-ORG and ORG owns the upstream repository of the clone
+## PROJECT, as typetools owns typetools/checker-framework.  `enter_slug_clone`
+## in common-functions.sh applies the same rule.
+names_project() {
+  [ -n "${slug_org}" ] && [ "${slug_org}" != '-' ] \
+    && [ ! -d "$1-fork-${slug_org}" ] && [ -e "$1/.git" ] \
+    && owns_upstream "${slug_org}" "$1"
+}
+
 ## Returns 0 if the given directory has the given branch checked out.
 has_branch_checked_out() {
   has_branch_actual="$(current_branch "$1")" && [ "${has_branch_actual}" = "$2" ]
@@ -811,9 +826,15 @@ has_branch_checked_out() {
 ## Prints the directory that the slug ORG:BRANCH names for the given project,
 ## or prints nothing and returns 1 if there is none.  ORG "-" stands for a
 ## directory whose name has no ORG:  PROJECT-branch-BRANCH, or PROJECT if it
-## has BRANCH checked out and the former does not exist.
+## has BRANCH checked out and the former does not exist.  So does an ORG that
+## owns the upstream repository of the clone PROJECT, if there is no clone
+## PROJECT-fork-ORG; see `names_project`.
 slug_dir() {
   parse_slug "$2"
+  if names_project "$1"; then
+    slug_dir "$1" "-:${slug_branch}"
+    return
+  fi
   if [ "${slug_org}" = "-" ]; then
     if [ -d "$1-branch-${slug_branch_dir}" ] \
       && has_branch_checked_out "$1-branch-${slug_branch_dir}" "${slug_branch}"; then
@@ -857,7 +878,8 @@ check_branch_dir() {
 ## Prints, one per line, PROJECT:ORG for each directory in the current
 ## directory that the slug names.  If the slug has no ORG, every ORG matches,
 ## and so do PROJECT-branch-BRANCH and a clone PROJECT that has BRANCH
-## checked out, for which ORG is "-".  ORG "-" matches only those two.
+## checked out, for which ORG is "-".  ORG "-" matches only those two, and so
+## does an ORG that names the clone PROJECT (see `names_project`).
 ## Returns 1, after printing an error message, if a directory
 ## PROJECT[-fork-ORG]-branch-BRANCH that the slug names has some other branch
 ## checked out, because merging into that directory would merge into the wrong
@@ -900,6 +922,23 @@ slug_matches() {
       if [ -d "${name}-branch-${slug_branch_dir}" ]; then continue; fi
       if has_branch_checked_out "${dir}" "${slug_branch}"; then
         printf '%s:-\n' "${name}"
+      fi
+    done
+  fi
+  if [ -n "${slug_org}" ] && [ "${slug_org}" != '-' ]; then
+    for dir in ./*; do
+      name="${dir#./}"
+      case "${name}" in *-fork-* | *-branch-*) continue ;; esac
+      if ! names_project "${name}"; then continue; fi
+      # As for ORG "-", a PROJECT-branch-BRANCH directory takes precedence.
+      if [ -d "${name}-branch-${slug_branch_dir}" ]; then
+        if ! check_branch_dir "${name}-branch-${slug_branch_dir}"; then
+          match_status=1
+          continue
+        fi
+        printf '%s:%s\n' "${name}" "${slug_org}"
+      elif has_branch_checked_out "${dir}" "${slug_branch}"; then
+        printf '%s:%s\n' "${name}" "${slug_org}"
       fi
     done
   fi

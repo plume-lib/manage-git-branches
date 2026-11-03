@@ -47,13 +47,14 @@ The commands are:
   `PROJECT-fork-ORG` pushes to, and not on another remote such as
   `upstream`.  As for `git-new-branch` and `git-push-to`, ORG `-` stands for
   the clone `PROJECT` itself.
-  If ORG owns the repository of the clone `PROJECT` and there is no clone
-  `PROJECT-fork-ORG`, then `ORG:BRANCH` acts as `-:BRANCH` does.  If the
-  clone that the slug names has the branch checked out, the command does
-  nothing else.
-  If there is no clone `PROJECT-fork-ORG`, the command first makes one, if
-  ORG's fork has the branch.  The fork's URL is that of the clone
-  `PROJECT`'s remote with the owner replaced by ORG, so
+  If there is no clone `PROJECT-fork-ORG` and ORG owns the project's
+  upstream repository, as `typetools` owns `typetools/checker-framework`,
+  then `ORG:BRANCH` acts as `-:BRANCH` does; `git-new-branch` and
+  `git-push-to` follow the same rule.  If the clone that the slug names has
+  the branch checked out, the command does nothing else.
+  Otherwise, if there is no clone `PROJECT-fork-ORG`, the command first makes
+  one, if ORG's fork has the branch.  The fork's URL is that of the clone
+  `PROJECT`'s upstream remote with the owner replaced by ORG, so
   `git@github.com:typetools/checker-framework.git` becomes
   `git@github.com:cushon/checker-framework.git`.  The new clone borrows
   `PROJECT`'s objects while it is made, so that only the others are
@@ -81,7 +82,8 @@ The commands are:
   pull can fast-forward), then makes the directory
   `PROJECT-fork-ORG-branch-BRANCHNAME` at the commit of `PROJECT-fork-ORG`,
   with none of the current directory's changes.  As for `git-push-to`, ORG
-  `-` stands for the clone `PROJECT` itself.
+  `-` stands for the clone `PROJECT` itself, and so does an ORG that owns the
+  project's upstream repository if there is no clone `PROJECT-fork-ORG`.
   In a clone of an upstream repository whose fork is in a sibling directory
   `PROJECT-fork-ORG`, the command refuses, because a branch for a pull
   request belongs in the fork; `--allow-upstream` overrides the refusal.
@@ -107,7 +109,9 @@ The commands are:
   Instead of directories, you may pass slugs of the form `ORG:BRANCH`, such as
   `git-push-to upstream:main myname:feature`.  Each slug names the
   directory `PROJECT-fork-ORG-branch-BRANCH` (or `PROJECT-fork-ORG`, if it has
-  BRANCH checked out) in the current directory.  Each PROJECT that has
+  BRANCH checked out) in the current directory.  If there is no clone
+  `PROJECT-fork-ORG` and ORG owns the upstream repository of the clone
+  `PROJECT`, the slug names what `-:BRANCH` names.  Each PROJECT that has
   directories for two or more of the slugs gets its own chain.
   A slug may also be just `BRANCH`, as in `git-push-to main feature`.
   It matches every ORG; each PROJECT and ORG gets its own chain.

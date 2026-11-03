@@ -46,7 +46,9 @@
 # a `--clean` worktree, and the new branch starts instead at the commit of
 # PROJECT-fork-ORG, after a `git pull` there.  As for `git-push-to`, ORG "-"
 # stands for the clone PROJECT itself, so `-:NEWBRANCHNAME` makes
-# PROJECT-branch-NEWBRANCHNAME.
+# PROJECT-branch-NEWBRANCHNAME.  So does an ORG that owns the project's
+# upstream repository, as typetools owns typetools/checker-framework, if there
+# is no clone PROJECT-fork-ORG.
 #
 # In a clone of an upstream repository whose fork is in a sibling directory,
 # this command refuses, unless `--allow-upstream` is given, because a branch
