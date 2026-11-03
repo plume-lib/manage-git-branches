@@ -198,9 +198,11 @@ The commands are:
   Runs
   [`crreview-resolve`](https://github.com/mernst/mdedots/blob/main/share/crreview-resolve),
   which addresses the unresolved CodeRabbit review comments on the current
-  branch's pull request, in each working copy directory whose branch has an
-  open pull request that you opened.  It runs once per pull request, even if
-  several directories hold that pull request.  With `--dry-run`, it prints
+  branch's pull request, in each working copy directory that holds an open
+  pull request that you opened:  one whose head is the branch that
+  `git push` in the directory pushes to.  It runs once per pull request,
+  even if several directories hold that pull request; it prefers one that
+  is at the pull request's head commit.  With `--dry-run`, it prints
   the directories and pull requests but runs nothing.  `--agent` is passed
   to `crreview-resolve`.  Run it in a directory that holds the working copy
   directories, or pass that directory with `-C`.  This command needs `gh`

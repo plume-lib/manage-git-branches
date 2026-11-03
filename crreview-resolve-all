@@ -1,10 +1,10 @@
 #!/bin/sh
 
-# Runs `crreview-resolve` once for each open pull request that is checked out
-# in a working copy directory of the directory that holds the working copy
-# directories.  `crreview-resolve` addresses the unresolved CodeRabbit review
-# comments on the pull request of the current branch, then pushes and
-# resolves the comments' review threads; it is in
+# Runs `crreview-resolve` once for each open pull request that you opened and
+# that is checked out in a working copy directory of the directory that holds
+# the working copy directories.  `crreview-resolve` addresses the unresolved
+# CodeRabbit review comments on the pull request of the current branch, then
+# pushes and resolves the comments' review threads; it is in
 # https://github.com/mernst/mdedots/blob/main/share/crreview-resolve .
 #
 # Usage:
@@ -15,17 +15,27 @@
 # top level of a git working tree whose HEAD is a branch.  This command
 # ignores entries whose names start with ".", symbolic links, which could
 # name a working tree twice, and directories that are not the top level of a
-# working tree, such as an ordinary directory inside a clone.
+# working tree, such as an ordinary directory inside a clone.  It examines
+# the working copy directories in the order of the C locale, in which, for
+# example, "Z" precedes "a", so that the order does not depend on the user's
+# locale.
 #
-# For each working copy directory, `gh pr view` finds the pull request for the
-# directory's branch.  A directory is skipped if its branch has no pull
-# request, if its clone has no GitHub remote, if the pull request is closed or
-# landed, or if someone else opened the pull request.  Addressing the comments
-# on another person's pull request is that person's job, and the push would
-# usually be refused, after the AI agent session had run.  If several
-# directories hold the same pull request, `crreview-resolve` runs only in the
-# first of them, in alphabetical order, so that it does not address the same
-# comments twice.
+# A working copy directory holds a pull request if the pull request's head is
+# the branch that `git push` in the directory pushes the directory's branch
+# to, as `pr_repositories` in common-functions.sh determines it.  A branch of
+# the same name in another repository, even the upstream repository of a
+# fork, does not count.  A directory is skipped if it holds no open pull
+# request, for example because its clone has no GitHub remote or because its
+# branch is the default branch, or if someone else opened its pull request.
+# Addressing the comments on another person's pull request is that person's
+# job, and the push would usually be refused, after the AI agent session had
+# run.
+#
+# If several directories hold the same pull request, `crreview-resolve` runs
+# in only one of them, so that it does not address the same comments twice:
+# the first one whose HEAD is the pull request's head commit, or else the
+# first one.  A directory whose HEAD is an older commit would make commits
+# that the push rejects.
 #
 # `crreview-resolve` runs in one directory at a time, because each run can
 # start an AI agent session.  A run that finds no CodeRabbit comments to
@@ -106,23 +116,27 @@ while [ "$#" -ne 0 ]; do
       dry_run=true
       shift
       ;;
-    --agent | -C)
+    --agent)
       if [ "$#" -lt 2 ]; then
         usage >&2
         exit 2
       fi
-      if [ "$1" = -C ]; then
-        base_arg="$2"
-      else
-        agent="$2"
-        agent_given=true
-      fi
+      agent="$2"
+      agent_given=true
       shift 2
       ;;
     --agent=*)
       agent="${1#--agent=}"
       agent_given=true
       shift
+      ;;
+    -C)
+      if [ "$#" -lt 2 ]; then
+        usage >&2
+        exit 2
+      fi
+      base_arg="$2"
+      shift 2
       ;;
     *)
       usage >&2
@@ -169,68 +183,124 @@ if ! me="$(with_timeout "${github_query_seconds}" gh api user --jq .login < /dev
   exit 1
 fi
 
+newline='
+'
+tab="$(printf '\t')"
 status=0
-# Each pull request that is checked out in an earlier directory:  its URL, a
-# space, and the directory, one per line.
-seen=""
-# The directories where `crreview-resolve` failed, one per line.
-failed=""
+
+# The files below hold one record per line, with fields separated by tabs, so
+# skip an entry whose name contains a newline or a tab.
 for path in "${base}"/*; do
   dir="$(basename -- "${path}")"
-  # The physical path of the top level differs from ${path} if ${path} is a
-  # symbolic link or is not the top level of a working tree.  git fails if
-  # ${path} is not a directory, as when the pattern matches no entry.
+  case "${dir}" in
+    *"${newline}"* | *"${tab}"*)
+      echo "${SCRIPT_NAME}: skipping ${path}, whose name contains a newline or a tab" >&2
+      continue
+      ;;
+  esac
+  printf '%s\n' "${dir}"
+done | LC_ALL=C sort > "${work}/entries"
+
+# Find each working copy directory's pull request.  Each line of
+# ${work}/holders is a pull request's URL, its head commit, the directory's
+# HEAD commit, and the directory.  The loop reads the entries from file
+# descriptor 3, so that its commands can use the standard input.
+: > "${work}/holders"
+while IFS= read -r dir <&3; do
+  path="${base}/${dir}"
+  # `git rev-parse --show-toplevel` prints a physical path, which differs
+  # from ${path} if ${path} is a symbolic link or is not the top level of a
+  # working tree.  git fails if ${path} is not a directory, as when the
+  # pattern matches no entry.
   toplevel="$(git -C "${path}" rev-parse --show-toplevel 2> /dev/null)" || continue
-  if [ "$(physical_path "${toplevel}")" != "${path}" ]; then continue; fi
-  current_branch "${path}" > /dev/null || continue
-  # `gh pr view` finds the pull request of the current directory's branch.
-  # Its error output goes to a file, so that a warning that it prints when it
-  # succeeds is not mistaken for the pull request.
-  if ! pr="$(cd -- "${path}" \
-    && with_timeout "${github_query_seconds}" gh pr view --json state,author,url \
-      --jq '"\(.state) \(.author.login) \(.url)"' < /dev/null 2> "${work}/gh-errors")"; then
+  if [ "${toplevel}" != "${path}" ]; then continue; fi
+  branch="$(current_branch "${path}")" || continue
+  pr_repositories "${path}" "${branch}" || continue
+  # `gh pr list --head` matches a branch of that name in any repository, so
+  # select the pull request whose head repository is ${pr_head_repo}.  The
+  # repository is named with its host, which overrides ${GH_REPO}.  The error
+  # output goes to a file, so that a warning that gh prints when it succeeds
+  # is not mistaken for a pull request.
+  if ! prs="$(with_timeout "${github_query_seconds}" gh pr list -R "github.com/${pr_base_repo}" \
+    --head "${pr_head_branch}" --state open --json headRepositoryOwner,author,headRefOid,url \
+    --jq '.[] | "\(.headRepositoryOwner.login) \(.author.login) \(.headRefOid) \(.url)"' \
+    < /dev/null 2> "${work}/gh-errors")"; then
     gh_errors="$(cat "${work}/gh-errors")"
-    case "${gh_errors}" in
-      *"no pull requests found"* | *"no git remotes found"* | *"point to a known GitHub host"*) ;;
-      *)
-        if [ -z "${gh_errors}" ]; then
-          gh_errors="gh failed without a message, perhaps after timing out after ${github_query_seconds} seconds"
-        fi
-        printf '%s: cannot find the pull request of %s:\n%s\n' "${SCRIPT_NAME}" "${dir}" "${gh_errors}" >&2
-        status=1
-        ;;
-    esac
+    if [ -z "${gh_errors}" ]; then
+      gh_errors="gh failed without a message, perhaps after timing out after ${github_query_seconds} seconds"
+    fi
+    printf '%s: cannot find the pull request of %s:\n%s\n' "${SCRIPT_NAME}" "${dir}" "${gh_errors}" >&2
+    status=1
     continue
   fi
-  state="${pr%% *}"
-  pr="${pr#* }"
+  pr="$(printf '%s\n' "${prs}" \
+    | awk -v owner="${pr_head_repo%%/*}" 'tolower($1) == tolower(owner) { print $2, $3, $4; exit }')"
+  if [ -z "${pr}" ]; then continue; fi
   author="${pr%% *}"
+  pr="${pr#* }"
+  pr_oid="${pr%% *}"
   url="${pr#* }"
-  # `crreview-resolve` refuses a pull request that is not open, so skip it
-  # here rather than report a failure.
-  if [ "${state}" != OPEN ]; then continue; fi
   if [ "${author}" != "${me}" ]; then
     echo "${SCRIPT_NAME}: skipping ${dir}, whose pull request ${url} is by ${author}"
     continue
   fi
-  earlier="$(printf '%s' "${seen}" | awk -v url="${url}" '$1 == url { print substr($0, length(url) + 2); exit }')"
-  if [ -n "${earlier}" ]; then
-    echo "${SCRIPT_NAME}: skipping ${dir}, whose pull request ${url} is also in ${earlier}"
+  printf '%s\t%s\t%s\t%s\n' "${url}" "${pr_oid}" "$(git -C "${path}" rev-parse HEAD)" "${dir}" \
+    >> "${work}/holders"
+done 3< "${work}/entries"
+
+# Choose one directory for each pull request.  Each line of ${work}/plan is
+# "skip", a URL, a directory, and the directory chosen for the URL; or "run",
+# a URL, and the chosen directory.  The "run" lines are in the order of the
+# chosen directories.
+awk -F "${tab}" '
+  {
+    n++
+    url[n] = $1
+    dir[n] = $4
+    if (!($1 in chosen)) {
+      order[++urls] = $1
+      chosen[$1] = $4
+    }
+    if ($2 == $3 && !($1 in current)) {
+      current[$1] = $4
+    }
+  }
+  END {
+    for (i = 1; i <= urls; i++) {
+      if (order[i] in current) {
+        chosen[order[i]] = current[order[i]]
+      }
+    }
+    for (i = 1; i <= n; i++) {
+      if (dir[i] != chosen[url[i]]) {
+        printf "skip\t%s\t%s\t%s\n", url[i], dir[i], chosen[url[i]]
+      }
+    }
+    for (i = 1; i <= n; i++) {
+      if (dir[i] == chosen[url[i]]) {
+        printf "run\t%s\t%s\n", url[i], dir[i]
+      }
+    }
+  }' "${work}/holders" > "${work}/plan"
+
+# The directories where `crreview-resolve` failed, one per line.
+failed=""
+while IFS="${tab}" read -r action url dir chosen <&3; do
+  if [ "${action}" = skip ]; then
+    echo "${SCRIPT_NAME}: skipping ${dir}, whose pull request ${url} is also in ${chosen}"
     continue
   fi
-  seen="${seen}${url} ${dir}
-"
   if [ "${dry_run}" = true ]; then
     echo "Would run crreview-resolve in ${dir} for ${url}"
     continue
   fi
   echo "===== ${dir}: ${url}"
-  if ! (cd -- "${path}" && crreview-resolve "$@"); then
+  if ! (cd -- "${base}/${dir}" && crreview-resolve "$@"); then
     failed="${failed}${dir}
 "
     status=1
   fi
-done
+done 3< "${work}/plan"
 
 if [ -n "${failed}" ]; then
   echo "${SCRIPT_NAME}: crreview-resolve failed in:" >&2

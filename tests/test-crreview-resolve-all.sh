@@ -36,43 +36,55 @@ work="$(CDPATH='' cd -- "${work}" && pwd -P)"
 
 sanitize_git_env "${work}"
 
-# The fake `gh api user` prints the user's login, "me".  The fake `gh pr view`
-# prints, as the real one would after applying the `--jq` filter, the line in
-# ${work}/prs/BRANCH, where BRANCH is the current branch; for BRANCH "warns",
-# it also prints a warning on standard error.  It fails as the real one does
-# if HEAD is detached or the clone has no remote.  If there is no such file,
-# it fails as the real one does for a branch with no pull request, unless
-# ${work}/gh-error exists, in which case it prints that file's contents and
-# fails.
+# The fake `gh api user` prints the user's login, "me".  The fake `gh repo
+# view` reports that someone/outer is a repository and that someone/proj is a
+# repository whose fork is me/proj; the default branch of each is "main".  The
+# fake `gh pr list -R github.com/BASE --head BRANCH` prints, as the real one
+# would after applying the `--jq` filter, the lines of ${work}/prs/BRANCH,
+# which describe the open pull requests whose head branch, in any repository,
+# is BRANCH.  For BRANCH "warns", it also prints a warning on standard error.
+# It fails, printing the contents of ${work}/prs/BRANCH.error, if that file
+# exists, and it fails if its repository is not named with its host, which
+# would let ${GH_REPO} choose the repository.  Each call's arguments are
+# appended to ${work}/gh.log.
 # The fake `crreview-resolve` appends the name of its directory and its
 # arguments to ${work}/runs.log, and fails if the directory's name ends in
 # "-fails".
 mkdir -p "${work}/bin" "${work}/prs"
 cat > "${work}/bin/gh" << EOF
 #!/bin/sh
-if [ "\$1 \$2" = "api user" ]; then
-  echo me
-  exit 0
-fi
-branch="\$(git branch --show-current)"
-if [ "\${branch}" = warns ]; then
-  echo "A new release of gh is available" >&2
-fi
-if [ -z "\$(git remote)" ]; then
-  echo "no git remotes found" >&2
-  exit 1
-elif [ -z "\${branch}" ]; then
-  echo "could not determine current branch: not on any branch" >&2
-  exit 1
-elif [ -f "${work}/prs/\${branch}" ]; then
-  cat "${work}/prs/\${branch}"
-elif [ -f "${work}/gh-error" ]; then
-  cat "${work}/gh-error" >&2
-  exit 1
-else
-  echo "no pull requests found for branch \"\${branch}\"" >&2
-  exit 1
-fi
+printf '%s\n' "\$*" >> "${work}/gh.log"
+case "\$1 \$2" in
+  'api user') echo me ;;
+  'repo view')
+    case "\$3" in
+      github.com/someone/outer) echo "someone/outer main" ;;
+      github.com/someone/proj | github.com/me/proj) echo "someone/proj main" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  'pr list')
+    case "\$3 \$4 \$5" in
+      '-R github.com/'*' --head') ;;
+      *)
+        echo "unexpected arguments: \$*" >&2
+        exit 1
+        ;;
+    esac
+    branch="\$6"
+    if [ "\${branch}" = warns ]; then
+      echo "A new release of gh is available" >&2
+    fi
+    if [ -f "${work}/prs/\${branch}.error" ]; then
+      cat "${work}/prs/\${branch}.error" >&2
+      exit 1
+    fi
+    if [ -f "${work}/prs/\${branch}" ]; then
+      cat "${work}/prs/\${branch}"
+    fi
+    ;;
+  *) exit 1 ;;
+esac
 EOF
 cat > "${work}/bin/crreview-resolve" << EOF
 #!/bin/sh
@@ -91,14 +103,16 @@ export PATH
 scan="${work}/scan"
 git init -q -b outer "${scan}"
 git -C "${scan}" remote add origin https://github.com/someone/outer
+git -C "${scan}" commit -q --allow-empty -m "Outer commit"
 
-# Usage: make_clone NAME BRANCH
-# Creates a clone ${scan}/NAME, with a GitHub remote, whose current branch is
-# BRANCH.
+# Usage: make_clone NAME BRANCH [ORG]
+# Creates a clone ${scan}/NAME, whose remote is ORG's repository proj on
+# GitHub (by default, someone's), and whose current branch is BRANCH.  Each
+# clone's commit differs from every other's.
 make_clone() {
   git init -q -b "$2" "${scan}/$1"
-  git -C "${scan}/$1" remote add origin https://github.com/someone/proj
-  git -C "${scan}/$1" commit -q --allow-empty -m "Initial commit"
+  git -C "${scan}/$1" remote add origin "https://github.com/${3:-someone}/proj"
+  git -C "${scan}/$1" commit -q --allow-empty -m "Commit of $1"
 }
 
 make_clone proj main
@@ -107,37 +121,73 @@ make_clone proj-branch-landed landed
 make_clone proj-branch-feature-copy feature
 make_clone proj-branch-other-fails other
 make_clone proj-branch-detached detached
+git -C "${scan}/proj-branch-detached" checkout -q --detach
 make_clone proj-branch-theirs theirs
 make_clone proj-branch-warns warns
+make_clone proj-branch-broken broken
 make_clone proj-local local
 git -C "${scan}/proj-local" remote remove origin
-git -C "${scan}/proj-branch-detached" checkout -q --detach
+# A clone of the upstream repository on a branch of the same name as a pull
+# request's head branch in the fork.
+make_clone proj-branch-forked forked
+make_clone proj-fork-me-branch-forked forked me
+# Two directories hold the same pull request; the second one, in the C
+# locale's order, is at its head commit.
+make_clone Proj-stale current
+make_clone proj-branch-current current
+# Two directories hold the same pull request, and neither is at its head
+# commit.  "Zed-dup" precedes "alpha-dup" in the C locale's order, but not in
+# the order of a locale such as en_US.UTF-8.
+make_clone Zed-dup dup
+make_clone alpha-dup dup
 git -C "${scan}/proj" worktree add -q -b wt "${scan}/proj-branch-wt"
 ln -s proj-branch-feature "${scan}/link-to-feature"
 mkdir "${scan}/plain"
 make_clone .hidden hidden
 
-echo "OPEN me https://github.com/someone/proj/pull/1" > "${work}/prs/feature"
-echo "MERGED me https://github.com/someone/proj/pull/2" > "${work}/prs/landed"
-echo "OPEN me https://github.com/someone/proj/pull/3" > "${work}/prs/other"
-echo "OPEN me https://github.com/someone/proj/pull/4" > "${work}/prs/wt"
-echo "OPEN me https://github.com/someone/proj/pull/5" > "${work}/prs/detached"
-echo "OPEN me https://github.com/someone/proj/pull/6" > "${work}/prs/hidden"
-echo "OPEN me https://github.com/someone/outer/pull/7" > "${work}/prs/outer"
-echo "OPEN alice https://github.com/someone/proj/pull/8" > "${work}/prs/theirs"
-echo "OPEN me https://github.com/someone/proj/pull/9" > "${work}/prs/warns"
-echo "OPEN me https://github.com/someone/proj/pull/10" > "${work}/prs/local"
+# Usage: open_pr BRANCH OWNER AUTHOR NUMBER [OID]
+# Records the open pull request NUMBER, which AUTHOR opened, from OWNER's
+# branch BRANCH, whose head commit is OID (by default, one that no directory
+# has).
+open_pr() {
+  echo "$2 $3 ${5:-0000000000000000000000000000000000000000} https://github.com/someone/proj/pull/$4" \
+    >> "${work}/prs/$1"
+}
+open_pr feature someone me 1
+open_pr other someone me 3
+open_pr wt someone me 4
+open_pr detached someone me 5
+# A detached HEAD would be mistaken for a branch named "HEAD".
+open_pr HEAD someone me 15
+open_pr hidden someone me 6
+echo "someone me 0000000000000000000000000000000000000000 https://github.com/someone/outer/pull/7" \
+  > "${work}/prs/outer"
+open_pr theirs someone alice 8
+open_pr warns someone me 9
+open_pr local someone me 10
+open_pr forked me me 11
+open_pr current someone me 12 "$(git -C "${scan}/proj-branch-current" rev-parse HEAD)"
+open_pr main someone me 13
+open_pr dup someone me 14
+echo "HTTP 502: Bad Gateway" > "${work}/prs/broken.error"
+
+# A locale whose order differs from the C locale's, if one is installed.
+locale="$(locale -a 2> /dev/null | grep -i -x -m 1 'en_US\.utf-*8')"
 
 # A run in each directory that holds an open pull request, once per pull
-# request, despite a failure.
+# request, despite failures.
 : > "${work}/runs.log"
-if output="$(CDPATH='' cd -- "${scan}" && "${CRREVIEW_RESOLVE_ALL}" --agent codex < /dev/null 2>&1)"; then
+if output="$(CDPATH='' cd -- "${scan}" \
+  && LC_ALL="${locale}" GH_REPO=someone/outer "${CRREVIEW_RESOLVE_ALL}" --agent codex < /dev/null 2>&1)"; then
   fail "the exit status is 0 although a crreview-resolve run failed"
 fi
-expected="proj-branch-feature --agent codex
+expected="Zed-dup --agent codex
+proj-branch-current --agent codex
+proj-branch-feature --agent codex
 proj-branch-other-fails --agent codex
 proj-branch-warns --agent codex
-proj-branch-wt --agent codex"
+proj-branch-wt --agent codex
+proj-fork-me-branch-forked --agent codex"
 if [ "$(cat "${work}/runs.log")" != "${expected}" ]; then
   fail "the runs are:
 $(cat "${work}/runs.log")
@@ -149,27 +199,46 @@ case "${output}" in
   *) fail "the output does not report the duplicate pull request: ${output}" ;;
 esac
 case "${output}" in
+  *"skipping Proj-stale, whose pull request https://github.com/someone/proj/pull/12 is also in proj-branch-current"*) ;;
+  *) fail "the output does not report the stale duplicate: ${output}" ;;
+esac
+case "${output}" in
+  *"skipping alpha-dup, whose pull request https://github.com/someone/proj/pull/14 is also in Zed-dup"*) ;;
+  *) fail "the output does not report the duplicate in locale order: ${output}" ;;
+esac
+case "${output}" in
   *"skipping proj-branch-theirs, whose pull request https://github.com/someone/proj/pull/8 is by alice"*) ;;
   *) fail "the output does not report the pull request by someone else: ${output}" ;;
 esac
 case "${output}" in
-  *"cannot find the pull request"*) fail "a clone without a GitHub remote is reported: ${output}" ;;
+  *"cannot find the pull request of proj-branch-broken:
+HTTP 502: Bad Gateway"*) ;;
+  *) fail "the output does not report the failure of gh: ${output}" ;;
+esac
+case "${output}" in
+  *"cannot find the pull request of proj-local"*) fail "a clone without a GitHub remote is reported: ${output}" ;;
 esac
 case "${output}" in
   *"crreview-resolve failed in:
 proj-branch-other-fails"*) ;;
   *) fail "the output does not report the failed run: ${output}" ;;
 esac
+if grep -q -- '--head main' "${work}/gh.log"; then
+  fail "the pull requests of the default branch were queried"
+fi
 
 # -C, and no --agent.
-rm -rf "${scan}/proj-branch-other-fails"
+rm -rf "${scan}/proj-branch-other-fails" "${work}/prs/broken.error"
 : > "${work}/runs.log"
 if ! output="$("${CRREVIEW_RESOLVE_ALL}" -C "${scan}" 2>&1)"; then
   fail "the exit status is nonzero although every run succeeded: ${output}"
 fi
-expected="proj-branch-feature
+expected="Zed-dup
+proj-branch-current
+proj-branch-feature
 proj-branch-warns
-proj-branch-wt"
+proj-branch-wt
+proj-fork-me-branch-forked"
 if [ "$(cat "${work}/runs.log")" != "${expected}" ]; then
   fail "with -C, the runs are:
 $(cat "${work}/runs.log")
@@ -189,25 +258,6 @@ case "${output}" in
   *"Would run crreview-resolve in proj-branch-wt for https://github.com/someone/proj/pull/4"*) ;;
   *) fail "--dry-run does not report a run: ${output}" ;;
 esac
-
-# An unexpected failure of `gh` is reported, and does not stop the other runs.
-echo "HTTP 502: Bad Gateway" > "${work}/gh-error"
-: > "${work}/runs.log"
-if output="$("${CRREVIEW_RESOLVE_ALL}" -C "${scan}" 2>&1)"; then
-  fail "the exit status is 0 although gh failed"
-fi
-case "${output}" in
-  *"cannot find the pull request of proj:
-HTTP 502: Bad Gateway"*) ;;
-  *) fail "the output does not report the failure of gh: ${output}" ;;
-esac
-if [ "$(cat "${work}/runs.log")" != "${expected}" ]; then
-  fail "after a failure of gh, the runs are:
-$(cat "${work}/runs.log")
-not:
-${expected}"
-fi
-rm -f "${work}/gh-error"
 
 # Usage errors.
 "${CRREVIEW_RESOLVE_ALL}" --agent gemini -C "${scan}" > /dev/null 2>&1
