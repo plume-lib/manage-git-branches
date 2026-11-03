@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import functools
 import hashlib
 import itertools
 import json
@@ -137,13 +138,14 @@ class Repo:
         self.pair_conflicts: dict[tuple[int, int], list[str]] = {}  # (a, b) with a < b -> files
         # number -> "landed" | "closed" | None (not a PR)
         self.closed_state: dict[int, str | None] = {}
-        # number -> list of whether each unresolved review thread is outdated;
-        # None until load_reviews_and_ci runs.
-        self.review_threads: dict[int, list[bool]] | None = None
-        # The numbers of the PRs whose CI failed; None until load_reviews_and_ci runs.
-        self.ci_failed: set[int] | None = None
-        # The numbers of the PRs whose CI completed and passed; None until load_reviews_and_ci runs.
-        self.ci_passed: set[int] | None = None
+
+    @functools.cached_property
+    def reviews_and_ci(self) -> ReviewsAndCi:
+        """The unresolved review threads and the CI results of the open PRs.
+
+        They are read from GitHub when first used.
+        """
+        return load_reviews_and_ci(self)
 
     def ref(self, n: int | str) -> str:
         """Return how documents refer to PR n.
@@ -175,9 +177,7 @@ class Repo:
         Returns:
             FAILED_MARK if the PR's CI failed, or "" otherwise.
         """
-        load_reviews_and_ci(self)
-        assert self.ci_failed is not None
-        return FAILED_MARK if n in self.ci_failed else ""
+        return FAILED_MARK if n in self.reviews_and_ci.ci_failed else ""
 
     def refs(self, ns: Iterable[int]) -> str:
         """Return how documents refer to the PRs ns.
@@ -376,16 +376,32 @@ def ci_failed(checks: Iterable[dict[str, Any]]) -> bool:
     )
 
 
-def load_reviews_and_ci(repo: Repo) -> None:
-    """Read the unresolved review threads and the CI results of the open PRs.
+class ReviewsAndCi(NamedTuple):
+    """The unresolved review threads and the CI results of a repository's open PRs.
 
-    Sets repo.review_threads, repo.ci_failed, and repo.ci_passed.
+    Attributes:
+        review_threads: a map from the number of each open PR, such as 123, to a list with
+            an element for each of the PR's unresolved review threads:  True if the thread
+            is outdated.
+        ci_failed: the numbers of the PRs whose CI failed.
+        ci_passed: the numbers of the PRs whose CI completed and passed.
     """
-    if repo.review_threads is not None:
-        return
-    repo.review_threads = {}
-    repo.ci_failed = set()
-    repo.ci_passed = set()
+
+    review_threads: dict[int, list[bool]]
+    ci_failed: set[int]
+    ci_passed: set[int]
+
+
+def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
+    """Return the unresolved review threads and the CI results of the open PRs of repo.
+
+    Args:
+        repo: a Repo.
+
+    Returns:
+        The unresolved review threads and the CI results, read from GitHub.
+    """
+    result = ReviewsAndCi({}, set(), set())
     for pr in review_thread_query(
         repo, REVIEW_THREADS_QUERY, ".data.repository.pullRequests.nodes[]"
     ):
@@ -398,16 +414,17 @@ def load_reviews_and_ci(repo: Repo) -> None:
                 ".data.repository.pullRequest.reviewThreads.nodes[]",
                 f"number={pr['number']}",
             )
-        repo.review_threads[pr["number"]] = [
+        result.review_threads[pr["number"]] = [
             t["isOutdated"] for t in threads if not t["isResolved"]
         ]
         commits = pr["commits"]["nodes"]
         rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
         if rollup and ci_failed(rollup["contexts"]["nodes"]):
-            repo.ci_failed.add(pr["number"])
+            result.ci_failed.add(pr["number"])
         # The rollup's state is SUCCESS only if every check has completed and passed.
         elif rollup and rollup["state"] == "SUCCESS":
-            repo.ci_passed.add(pr["number"])
+            result.ci_passed.add(pr["number"])
+    return result
 
 
 PR_STATES = {"OPEN": "open", "MERGED": "landed", "CLOSED": "closed"}
@@ -1017,18 +1034,15 @@ class Model:
             branch or a direct prerequisite into the PR would conflict, in any file; or "" if
             none of these applies.
         """
-        load_reviews_and_ci(self.repo)
-        assert self.repo.review_threads is not None
-        assert self.repo.ci_failed is not None
-        assert self.repo.ci_passed is not None
-        threads = self.repo.review_threads.get(n, [])
+        reviews_and_ci = self.repo.reviews_and_ci
+        threads = reviews_and_ci.review_threads.get(n, [])
         cell = []
         if threads:
             outdated = sum(threads)
             cell.append(str(len(threads)) + (f" ({outdated} outdated)" if outdated else ""))
-        if n in self.repo.ci_failed:
+        if n in reviews_and_ci.ci_failed:
             cell.append(FAILED_MARK)
-        elif n in self.repo.ci_passed:
+        elif n in reviews_and_ci.ci_passed:
             cell.append(" ✅")
         if n in self.repo.master_conflicts or self.conflicting_prerequisites(n):
             cell.append(" 🔀")

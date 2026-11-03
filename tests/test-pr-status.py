@@ -362,7 +362,7 @@ class ModelTest(unittest.TestCase):
             {1: "Land after #2.", 2: "Land after #3.", 3: "", 4: "Land after #3."}, set()
         )
         repo = model.repo
-        repo.review_threads, repo.ci_failed, repo.ci_passed = {}, set(), set()
+        repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set())
         repo.master_conflicts = {1: ["c.txt"], 3: ["c.txt"]}
         repo.pair_conflicts = {(1, 2): ["b.txt"], (1, 3): ["c.txt"], (2, 3): ["a.txt"]}
         repo.link = lambda n: f"#{n}"
@@ -506,9 +506,7 @@ class DependsOnTest(unittest.TestCase):
                 "node_prefix": "pr",
             }
         )
-        repo.review_threads = {}
-        repo.ci_failed = set(failed)
-        repo.ci_passed = set()
+        repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(failed), set())
         return repo
 
     def test_marks_failed_prerequisites(self):
