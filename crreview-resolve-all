@@ -39,8 +39,11 @@
 #
 # `crreview-resolve` runs in one directory at a time, because each run can
 # start an AI agent session.  A run that finds no CodeRabbit comments to
-# address starts no session.  This command continues after a run fails, and
-# at the end it lists the directories where `crreview-resolve` failed.
+# address starts no session and prints nothing.  The output of each other run
+# is preceded by a line that names its directory and pull request.  This
+# command prints both the standard output and the standard error of
+# `crreview-resolve` on its standard output.  It continues after a run fails,
+# and at the end it lists the directories where `crreview-resolve` failed.
 #
 #   --dry-run  run nothing; just print each directory where this command
 #              would run `crreview-resolve`, and its pull request
@@ -257,6 +260,16 @@ awk -F "${tab}" '
     }
   }' "${work}/holders" > "${work}/plan"
 
+# Copy the standard input to the standard output, preceded by the line $1, or
+# print nothing if the standard input is empty.  A final line that lacks a
+# newline gets one if it is the only line.
+print_with_header() {
+  if IFS= read -r line || [ -n "${line}" ]; then
+    printf '%s\n' "$1" "${line}"
+    cat
+  fi
+}
+
 # The directories where `crreview-resolve` failed, one per line.
 failed=""
 while IFS="${tab}" read -r action url dir chosen <&3; do
@@ -268,8 +281,14 @@ while IFS="${tab}" read -r action url dir chosen <&3; do
     echo "Would run crreview-resolve in ${dir} for ${url}"
     continue
   fi
-  echo "===== ${dir}: ${url}"
-  if ! (cd -- "${base}/${dir}" && crreview-resolve "$@"); then
+  # The pipeline's status is that of print_with_header, so the run writes its
+  # own status to a file.
+  echo 1 > "${work}/run-status"
+  {
+    (cd -- "${base}/${dir}" && crreview-resolve --quiet "$@") 2>&1
+    echo "$?" > "${work}/run-status"
+  } | print_with_header "===== ${dir}: ${url}"
+  if [ "$(cat "${work}/run-status")" -ne 0 ]; then
     failed="${failed}${dir}
 "
     status=1

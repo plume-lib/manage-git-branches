@@ -233,7 +233,8 @@ The commands are:
   pull request that you opened:  one whose head is the branch that
   `git push` in the directory pushes to.  It runs once per pull request,
   even if several directories hold that pull request; it prefers one that
-  is at the pull request's head commit.  With `--dry-run`, it prints
+  is at the pull request's head commit.  It prints nothing for a pull
+  request that has no comments to address.  With `--dry-run`, it prints
   the directories and pull requests but runs nothing.  `--agent` is passed
   to `crreview-resolve`.  Run it in a directory that holds the working copy
   directories, or pass that directory with `-C`.  This command needs `gh`

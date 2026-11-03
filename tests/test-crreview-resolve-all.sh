@@ -48,8 +48,10 @@ sanitize_git_env "${work}"
 # would let ${GH_REPO} choose the repository.  Each call's arguments are
 # appended to ${work}/gh.log.
 # The fake `crreview-resolve` appends the name of its directory and its
-# arguments to ${work}/runs.log, and fails if the directory's name ends in
-# "-fails".
+# arguments to ${work}/runs.log.  If the directory's name ends in "-fails", it
+# prints a message on standard error and fails.  In proj-branch-feature, it
+# prints a message on standard output.  Elsewhere, it prints nothing, as
+# `crreview-resolve --quiet` does when there are no comments to address.
 mkdir -p "${work}/bin" "${work}/prs"
 cat > "${work}/bin/gh" << EOF
 #!/bin/sh
@@ -90,7 +92,13 @@ cat > "${work}/bin/crreview-resolve" << EOF
 #!/bin/sh
 dir="\$(basename -- "\$(pwd)")"
 echo "\${dir}" "\$@" >> "${work}/runs.log"
-case "\${dir}" in *-fails) exit 1 ;; esac
+case "\${dir}" in
+  *-fails)
+    echo "crreview-resolve: failing in \${dir}" >&2
+    exit 1
+    ;;
+  proj-branch-feature) echo "crreview-resolve: addressing comments in \${dir}" ;;
+esac
 exit 0
 EOF
 chmod +x "${work}/bin/gh" "${work}/bin/crreview-resolve"
@@ -181,13 +189,13 @@ if output="$(CDPATH='' cd -- "${scan}" \
   && LC_ALL="${locale}" GH_REPO=someone/outer "${CRREVIEW_RESOLVE_ALL}" --agent codex < /dev/null 2>&1)"; then
   fail "the exit status is 0 although a crreview-resolve run failed"
 fi
-expected="Zed-dup --agent codex
-proj-branch-current --agent codex
-proj-branch-feature --agent codex
-proj-branch-other-fails --agent codex
-proj-branch-warns --agent codex
-proj-branch-wt --agent codex
-proj-fork-me-branch-forked --agent codex"
+expected="Zed-dup --quiet --agent codex
+proj-branch-current --quiet --agent codex
+proj-branch-feature --quiet --agent codex
+proj-branch-other-fails --quiet --agent codex
+proj-branch-warns --quiet --agent codex
+proj-branch-wt --quiet --agent codex
+proj-fork-me-branch-forked --quiet --agent codex"
 if [ "$(cat "${work}/runs.log")" != "${expected}" ]; then
   fail "the runs are:
 $(cat "${work}/runs.log")
@@ -223,6 +231,21 @@ case "${output}" in
 proj-branch-other-fails"*) ;;
   *) fail "the output does not report the failed run: ${output}" ;;
 esac
+# A header precedes the output of each run that prints something, and only
+# such a run.
+case "${output}" in
+  *"===== proj-branch-feature: https://github.com/someone/proj/pull/1
+crreview-resolve: addressing comments in proj-branch-feature"*) ;;
+  *) fail "the output of a run is not preceded by its header: ${output}" ;;
+esac
+case "${output}" in
+  *"===== proj-branch-other-fails: https://github.com/someone/proj/pull/3
+crreview-resolve: failing in proj-branch-other-fails"*) ;;
+  *) fail "the error output of a run is not preceded by its header: ${output}" ;;
+esac
+case "${output}" in
+  *"===== proj-branch-wt:"*) fail "a run that printed nothing has a header: ${output}" ;;
+esac
 if grep -q -- '--head main' "${work}/gh.log"; then
   fail "the pull requests of the default branch were queried"
 fi
@@ -233,12 +256,12 @@ rm -rf "${scan}/proj-branch-other-fails" "${work}/prs/broken.error"
 if ! output="$("${CRREVIEW_RESOLVE_ALL}" -C "${scan}" 2>&1)"; then
   fail "the exit status is nonzero although every run succeeded: ${output}"
 fi
-expected="Zed-dup
-proj-branch-current
-proj-branch-feature
-proj-branch-warns
-proj-branch-wt
-proj-fork-me-branch-forked"
+expected="Zed-dup --quiet
+proj-branch-current --quiet
+proj-branch-feature --quiet
+proj-branch-warns --quiet
+proj-branch-wt --quiet
+proj-fork-me-branch-forked --quiet"
 if [ "$(cat "${work}/runs.log")" != "${expected}" ]; then
   fail "with -C, the runs are:
 $(cat "${work}/runs.log")
