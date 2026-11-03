@@ -636,8 +636,74 @@ if [ "$(git -C "${slugs}/proj-branch-upother" symbolic-ref HEAD 2> /dev/null)" !
   fail "the slug -:upother did not check out upother in ${slugs}/proj-branch-upother: ${out}"
 fi
 
+# In the fork's clone, a pull that can fast-forward does.
+git -C "${slugs}/pusher" checkout -q main
+echo "fast-forward" > "${slugs}/pusher/file.txt"
+git -C "${slugs}/pusher" commit -q -a -m "Fast-forward"
+git -C "${slugs}/pusher" push -q origin main
+git -C "${slugs}/pusher" push -q origin main:ffbranch
+ff_commit="$(git -C "${slugs}/pusher" rev-parse HEAD)"
+if ! out="$(cd "${slugs}/proj" && "${GIT_CHECKOUT_BRANCH}" me:ffbranch 2>&1)"; then
+  fail "nonzero exit status for a slug whose fork's clone can fast-forward: ${out}"
+fi
+if [ "$(git -C "${slugs}/proj-fork-me" rev-parse HEAD)" != "${ff_commit}" ]; then
+  fail "the pull in a fork's clone that can fast-forward did not fast-forward it: ${out}"
+fi
+
+# The slug names ORG's branch, so it is looked for on ORG's fork, the remote
+# that the fork's clone pushes to, even when the fork's clone's current branch
+# is fetched from "upstream".
+git -C "${slugs}/proj-fork-me" fetch -q upstream
+git -C "${slugs}/proj-fork-me" branch -q -u upstream/main main
+(
+  cd "${slugs}/pusher" || exit 1
+  git checkout -q -b forkonly
+  echo "fork only" > file.txt
+  git commit -q -a -m "Fork only"
+  git push -q origin forkonly
+) || exit 1
+forkonly_commit="$(git -C "${slugs}/pusher" rev-parse HEAD)"
+if ! out="$(cd "${slugs}/proj" && "${GIT_CHECKOUT_BRANCH}" me:forkonly 2>&1)"; then
+  fail "nonzero exit status for a slug whose branch is only on the fork, when the fork's clone tracks upstream: ${out}"
+elif [ "$(git -C "${slugs}/proj-fork-me-branch-forkonly" rev-parse HEAD)" != "${forkonly_commit}" ]; then
+  fail "the slug me:forkonly did not check out the commit of the fork's branch"
+fi
+
+# When both the fork and upstream have a branch of that name, the slug checks
+# out the fork's.
+(
+  cd "${slugs}/proj" || exit 1
+  git checkout -q -b both
+  echo "upstream both" > file.txt
+  git commit -q -a -m "Upstream both"
+  git push -q origin both
+  git checkout -q main
+) || exit 1
+(
+  cd "${slugs}/pusher" || exit 1
+  git checkout -q -b both main
+  echo "fork both" > file.txt
+  git commit -q -a -m "Fork both"
+  git push -q origin both
+) || exit 1
+both_commit="$(git -C "${slugs}/pusher" rev-parse HEAD)"
+git -C "${slugs}/proj-fork-me" fetch -q upstream
+git -C "${slugs}/proj-fork-me" fetch -q origin
+if ! out="$(cd "${slugs}/proj" && "${GIT_CHECKOUT_BRANCH}" me:both 2>&1)"; then
+  fail "nonzero exit status for a slug whose branch is on both the fork and upstream: ${out}"
+else
+  if [ "$(git -C "${slugs}/proj-fork-me-branch-both" rev-parse HEAD)" != "${both_commit}" ]; then
+    fail "the slug me:both did not check out the commit of the fork's branch"
+  fi
+  if [ "$(git -C "${slugs}/proj-fork-me-branch-both" rev-parse --abbrev-ref '@{upstream}')" != 'origin/both' ]; then
+    fail "the slug me:both did not give the branch the fork's remote as upstream"
+  fi
+fi
+git -C "${slugs}/proj-fork-me" branch -q -u origin/main main
+
 # In the fork's clone, the pull only fast-forwards, so a branch that has
-# diverged from its upstream is left as it is, with no merge commit.
+# diverged from its upstream is left as it is, with no merge commit, and the
+# failed pull is reported.
 git -C "${slugs}/pusher" checkout -q main
 echo "on the remote" > "${slugs}/pusher/file.txt"
 git -C "${slugs}/pusher" commit -q -a -m "On the remote"
@@ -649,6 +715,10 @@ fork_head="$(git -C "${slugs}/proj-fork-me" rev-parse HEAD)"
 if ! out="$(cd "${slugs}/proj" && "${GIT_CHECKOUT_BRANCH}" me:localfeature 2>&1)"; then
   fail "nonzero exit status for a slug whose fork's clone has diverged: ${out}"
 fi
+case "${out}" in
+  *"warning: \`git pull\` failed in ${slugs}/proj-fork-me"*) ;;
+  *) fail "the failed pull in a fork's clone that has diverged was not reported: ${out}" ;;
+esac
 if [ "$(git -C "${slugs}/proj-fork-me" rev-parse HEAD)" != "${fork_head}" ]; then
   fail "the pull in a fork's clone that has diverged did not leave it as it was"
 fi

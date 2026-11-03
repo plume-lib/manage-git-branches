@@ -12,10 +12,13 @@
 # current repository, into PROJECT-fork-ORG-branch-BRANCHNAME.  That is, the
 # command acts as `git-checkout-branch BRANCHNAME` does when run in
 # PROJECT-fork-ORG, a sibling of the current repository's main working tree,
-# except that the pull there only fast-forwards.  So the result is the same
-# whichever of the project's directories it is run in:  PROJECT,
-# PROJECT-fork-OTHERORG, a branch directory of either, or a worktree of any of
-# those.  As for `git-new-branch` and `git-push-to`, ORG "-" stands for the
+# except in two ways.  First, the pull there only fast-forwards; a pull that
+# cannot is reported as a warning, and the command continues.  Second, the
+# branch is looked for only on the remote that the clone pushes its branches
+# to, which is ORG's fork, and not on another remote such as "upstream".  So
+# the result is the same whichever of the project's directories it is run in:
+# PROJECT, PROJECT-fork-OTHERORG, a branch directory of either, or a worktree
+# of any of those.  As for `git-new-branch` and `git-push-to`, ORG "-" stands for the
 # clone PROJECT itself, so `-:BRANCHNAME` makes PROJECT-branch-BRANCHNAME.
 # GitHub shows a pull request's branch in this form, as in
 # "mernst:feature".
@@ -131,15 +134,10 @@ trap_branch_cleanup
 SLUG_CLONE=''
 case "$1" in
   *:*)
-    enter_slug_clone "$1"
-    case "$?" in
-      0) ;;
-      2)
-        usage
-        exit 1
-        ;;
-      *) exit 1 ;;
-    esac
+    enter_slug_clone "$1" || {
+      [ "$?" -eq 2 ] && usage
+      exit 1
+    }
     # The clone is not the current directory, so say which one is used.
     echo "${SCRIPT_NAME}: checking out branch ${slug_branch} from ${SLUG_CLONE}" >&2
     set -- "${slug_branch}"
@@ -208,10 +206,21 @@ fi
 # use, which is the one that `git push` would use; in the fork workflow the
 # two differ, and a branch of the project exists on this one.
 #
+# A slug is different:  it names ORG's branch, which is on ORG's fork, and in
+# the clone PROJECT-fork-ORG the current branch often is fetched from
+# "upstream" instead.  ORG's fork is the remote that the clone pushes its
+# branches to, so then ${REMOTE} is the remote that `git push` would use for a
+# branch with no configuration, as `push_remote` determines it, and
+# `find_branch` looks only there.
+#
 # ${REMOTE} is empty if no remote can be determined; then no remote can be
 # asked, and only the local tests in `find_branch` apply.
-CURRENT_BRANCH="$(current_branch)" || CURRENT_BRANCH=''
-REMOTE="$(fetch_remote . "${CURRENT_BRANCH}")"
+if [ -n "${SLUG_CLONE}" ]; then
+  REMOTE="$(push_remote . '')"
+else
+  CURRENT_BRANCH="$(current_branch)" || CURRENT_BRANCH=''
+  REMOTE="$(fetch_remote . "${CURRENT_BRANCH}")"
+fi
 
 # How the `git checkout` below creates the branch, set by `find_branch`:
 # ${CHECKOUT_START_POINT} is the ref or commit to create it from, or empty to
@@ -292,6 +301,10 @@ remotes_with_branch() {
 # saying so is more use than either guessing or letting the checkout fail
 # after the new directory has been made.
 #
+# For a slug, only ${REMOTE}'s remote-tracking branch is consulted, because
+# the slug names the branch on ORG's fork, which ${REMOTE} is.  A branch of
+# the same name on another remote, such as "upstream", is a different branch.
+#
 # A branch that only ${REMOTE} has is fetched, not merely queried with
 # `ls-remote`.  A successful query does not make the checkout succeed:  the
 # checkout needs a ref in this clone, and there is none, or the
@@ -310,6 +323,13 @@ find_branch() {
     return 0
   fi
   find_branch_remotes="$(remotes_with_branch "$1")"
+  if [ -n "${SLUG_CLONE}" ]; then
+    if contains_line "${find_branch_remotes}" "${REMOTE}"; then
+      find_branch_remotes="${REMOTE}"
+    else
+      find_branch_remotes=''
+    fi
+  fi
   if [ -n "${find_branch_remotes}" ]; then
     find_branch_chosen=''
     find_branch_default="$(git config --get checkout.defaultRemote)"

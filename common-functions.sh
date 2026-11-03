@@ -3026,19 +3026,21 @@ main_working_tree() {
 }
 
 ## Usage: enter_slug_clone SLUG
-## Changes the current directory to the clone that the slug ORG:BRANCH, such
-## as "mernst:feature", names:  the sibling clone PROJECT-fork-ORG of the
-## project that the current directory belongs to, or the clone PROJECT itself
-## if ORG is "-".  The current directory can be any working tree of the
-## project, such as PROJECT, PROJECT-fork-OTHERORG, or one of their branch
-## directories, so a command that runs this and then acts on BRANCH in the
-## current directory does the same thing in all of them.  Sets ${SLUG_CLONE}
-## to the clone's pathname, and sets the variables that `parse_slug` sets.
+## SLUG is a slug ORG:BRANCH, such as "mernst:feature"; it contains ":".
+## Changes the current directory to the clone that SLUG names:  the sibling
+## clone PROJECT-fork-ORG of the project that the current directory belongs
+## to, or the clone PROJECT itself if ORG is "-".  The current directory can
+## be any working tree of the project, such as PROJECT, PROJECT-fork-OTHERORG,
+## or one of their branch directories, so a command that runs this and then
+## acts on BRANCH in the current directory does the same thing in all of them.
+## Sets ${SLUG_CLONE} to the clone's pathname, sets the variables that
+## `parse_slug` sets, and sets ${clone_project} and ${clone_org} as
+## `parse_clone_name` does for the clone that holds the current directory.
 ##
 ## Returns 0 on success.  Otherwise prints an error on standard error and
-## leaves the current directory as it was.  Returns 2 if SLUG is not a slug
-## ORG:BRANCH whose BRANCH is a valid branch name, so that the caller can
-## print its usage message, and returns 1 if the slug names no clone.
+## leaves the current directory as it was.  Returns 2 if ORG cannot name a
+## clone or BRANCH is not a valid branch name, so that the caller can print
+## its usage message, and returns 1 if the slug names no clone.
 ##
 ## This must not run in a subshell, such as in `$(...)`, because then the
 ## change of directory would not reach the caller.
@@ -3051,18 +3053,11 @@ main_working_tree() {
 ## working tree that this naming convention could describe, so then they are
 ## those of the current working tree.
 ##
-## The variables other than ${SLUG_CLONE} are prefixed with an abbreviation of
-## this function's name, so that they cannot collide with a sourcing script's
-## variables.
+## The variables that this function sets for its own use are prefixed with an
+## abbreviation of its name, so that they cannot collide with a sourcing
+## script's variables.
 enter_slug_clone() {
   SLUG_CLONE=''
-  case "$1" in
-    *:*) ;;
-    *)
-      echo "${SCRIPT_NAME}: ERROR: not a slug ORG:BRANCH: $1" >&2
-      return 2
-      ;;
-  esac
   if ! check_slug_org "$1"; then
     return 2
   fi

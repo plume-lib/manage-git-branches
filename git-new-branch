@@ -313,15 +313,10 @@ case "$1" in
       exit 1
     fi
     MODE='clean'
-    enter_slug_clone "$1"
-    case "$?" in
-      0) ;;
-      2)
-        usage
-        exit 1
-        ;;
-      *) exit 1 ;;
-    esac
+    enter_slug_clone "$1" || {
+      [ "$?" -eq 2 ] && usage
+      exit 1
+    }
     set -- "${slug_branch}"
     ;;
 esac

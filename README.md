@@ -41,9 +41,12 @@ The commands are:
   tree of the project, such as `PROJECT`, `PROJECT-fork-OTHERORG`, or one of
   their branch directories.  It does what `git-checkout-branch BRANCHNAME`
   does in the sibling clone `PROJECT-fork-ORG`:  it pulls there (only if the
-  pull can fast-forward), then makes the directory
-  `PROJECT-fork-ORG-branch-BRANCHNAME`.  As for `git-push-to`, ORG `-`
-  stands for the clone `PROJECT` itself.
+  pull can fast-forward; otherwise it warns and uses the clone's current
+  commit), then makes the directory `PROJECT-fork-ORG-branch-BRANCHNAME`.
+  It looks for the branch only on ORG's fork, the remote that
+  `PROJECT-fork-ORG` pushes to, and not on another remote such as
+  `upstream`.  As for `git-new-branch` and `git-push-to`, ORG `-` stands for
+  the clone `PROJECT` itself.
   Below is a definition for an alias `gcb`.
 * [`git-new-branch`](git-new-branch)
   `[--clean | --copy] [--verbose] [--allow-upstream] BRANCHNAME`:
