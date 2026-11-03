@@ -726,14 +726,92 @@ if [ -n "$(git -C "${slugs}/proj-fork-me" ls-files --unmerged)" ]; then
   fail "the pull in a fork's clone that has diverged left conflicts"
 fi
 
-# A slug whose fork has no clone is an error that names the missing directory.
+# A slug whose fork has no clone, and that names no fork that can be cloned,
+# is an error that names the directory that was not made.
 if out="$(cd "${slugs}/proj" && "${GIT_CHECKOUT_BRANCH}" nosuchorg:feature 2>&1)"; then
-  fail "zero exit status for a slug whose fork has no clone"
+  fail "zero exit status for a slug whose fork has no clone and does not exist"
 fi
 case "${out}" in
-  *"directory does not exist: ${slugs}/proj-fork-nosuchorg"*) ;;
-  *) fail "unexpected message for a slug whose fork has no clone: ${out}" ;;
+  *"so ${slugs}/proj-fork-nosuchorg was not made"*) ;;
+  *) fail "unexpected message for a slug whose fork has no clone and does not exist: ${out}" ;;
 esac
+if [ -e "${slugs}/proj-fork-nosuchorg" ]; then
+  fail "a slug whose fork does not exist made ${slugs}/proj-fork-nosuchorg"
+fi
+
+# A slug whose fork has no clone clones the fork into PROJECT-fork-ORG, and
+# then checks out the branch there.  The fork's URL is that of the clone
+# PROJECT's remote with the owner replaced.  The remotes' URLs are GitHub's,
+# which `url.<base>.insteadOf` rewrites to local repositories, so that the
+# clone's `remote.origin.gh-resolved` is set to the upstream repository.
+hub="${tmpdir}/hub"
+mkdir -p "${hub}/up" "${hub}/me" "${tmpdir}/forks"
+hub="$(cd "${hub}" && pwd -P)"
+forks="$(cd "${tmpdir}/forks" && pwd -P)"
+git config --global "url.${hub}/.insteadOf" 'git@github.com:'
+git init -q --bare -b main "${hub}/up/proj.git"
+git clone -q git@github.com:up/proj.git "${forks}/proj" 2> /dev/null
+(
+  cd "${forks}/proj" || exit 1
+  echo "hello" > file.txt
+  git add file.txt
+  git commit -q -m "Initial commit"
+  git push -q origin main
+) || exit 1
+git clone -q --bare "${hub}/up/proj.git" "${hub}/me/proj.git"
+(
+  cd "${tmpdir}" || exit 1
+  git clone -q "${hub}/me/proj.git" forkpusher
+  cd forkpusher || exit 1
+  git checkout -q -b pr
+  echo "pr" > file.txt
+  git commit -q -a -m "PR"
+  git push -q origin pr
+) || exit 1
+pr_commit="$(git -C "${tmpdir}/forkpusher" rev-parse HEAD)"
+if ! out="$(cd "${forks}/proj" && "${GIT_CHECKOUT_BRANCH}" me:pr 2>&1)"; then
+  fail "nonzero exit status for a slug whose fork has no clone: ${out}"
+fi
+case "${out}" in
+  *"cloning git@github.com:me/proj.git into ${forks}/proj-fork-me"*) ;;
+  *) fail "a slug whose fork has no clone did not say that it cloned the fork: ${out}" ;;
+esac
+new_clone="${forks}/proj-fork-me"
+if [ ! -d "${new_clone}" ]; then
+  fail "a slug whose fork has no clone did not make ${new_clone}: ${out}"
+else
+  if [ "$(git -C "${new_clone}" remote)" != 'origin' ]; then
+    fail "the new clone ${new_clone} has remotes other than origin: $(git -C "${new_clone}" remote)"
+  fi
+  if [ "$(git -C "${new_clone}" config --get remote.origin.url)" != 'git@github.com:me/proj.git' ]; then
+    fail "the new clone's origin is not the fork: $(git -C "${new_clone}" config --get remote.origin.url)"
+  fi
+  if [ "$(git -C "${new_clone}" config --get remote.origin.gh-resolved)" != 'up/proj' ]; then
+    fail "the new clone's remote.origin.gh-resolved is not up/proj: $(git -C "${new_clone}" config --get remote.origin.gh-resolved)"
+  fi
+  if [ -s "${new_clone}/.git/objects/info/alternates" ]; then
+    fail "the new clone depends on another repository's objects: $(cat "${new_clone}/.git/objects/info/alternates")"
+  fi
+fi
+new_branch_dir="${forks}/proj-fork-me-branch-pr"
+if [ "$(git -C "${new_branch_dir}" symbolic-ref HEAD 2> /dev/null)" != 'refs/heads/pr' ]; then
+  fail "a slug whose fork has no clone did not check out pr in ${new_branch_dir}: ${out}"
+elif [ "$(git -C "${new_branch_dir}" rev-parse HEAD)" != "${pr_commit}" ]; then
+  fail "a slug whose fork has no clone did not check out the commit of the fork's branch"
+fi
+
+# A slug whose fork exists but lacks the branch clones nothing.
+git clone -q --bare "${hub}/up/proj.git" "${hub}/other/proj.git"
+if out="$(cd "${forks}/proj" && "${GIT_CHECKOUT_BRANCH}" other:nosuchbranch 2>&1)"; then
+  fail "zero exit status for a slug whose fork lacks the branch"
+fi
+case "${out}" in
+  *"fork git@github.com:other/proj.git has no branch nosuchbranch"*) ;;
+  *) fail "unexpected message for a slug whose fork lacks the branch: ${out}" ;;
+esac
+if [ -e "${forks}/proj-fork-other" ]; then
+  fail "a slug whose fork lacks the branch made ${forks}/proj-fork-other"
+fi
 
 # A slug whose branch is not a valid branch name is an error, with the usage
 # message.

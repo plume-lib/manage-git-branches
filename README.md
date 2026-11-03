@@ -47,6 +47,13 @@ The commands are:
   `PROJECT-fork-ORG` pushes to, and not on another remote such as
   `upstream`.  As for `git-new-branch` and `git-push-to`, ORG `-` stands for
   the clone `PROJECT` itself.
+  If there is no clone `PROJECT-fork-ORG`, the command first makes one, if
+  ORG's fork has the branch.  The fork's URL is that of the clone
+  `PROJECT`'s remote with the owner replaced by ORG, so
+  `git@github.com:typetools/checker-framework.git` becomes
+  `git@github.com:cushon/checker-framework.git`.  The new clone borrows
+  `PROJECT`'s objects while it is made, so that only the others are
+  downloaded, but it does not depend on `PROJECT` afterward.
   Below is a definition for an alias `gcb`.
 * [`git-new-branch`](git-new-branch)
   `[--clean | --copy] [--verbose] [--allow-upstream] BRANCHNAME`:

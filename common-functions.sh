@@ -3025,7 +3025,7 @@ main_working_tree() {
   esac
 }
 
-## Usage: enter_slug_clone SLUG
+## Usage: enter_slug_clone SLUG [--clone]
 ## SLUG is a slug ORG:BRANCH, such as "mernst:feature"; it contains ":".
 ## Changes the current directory to the clone that SLUG names:  the sibling
 ## clone PROJECT-fork-ORG of the project that the current directory belongs
@@ -3037,10 +3037,17 @@ main_working_tree() {
 ## `parse_slug` sets, and sets ${clone_project} and ${clone_org} as
 ## `parse_clone_name` does for the clone that holds the current directory.
 ##
+## With --clone, a clone PROJECT-fork-ORG that does not exist is first made
+## by `clone_fork`, if ORG's fork has the branch BRANCH.  The fork's URL is
+## derived from the clone PROJECT, or from the current directory's clone if
+## there is no clone PROJECT.  Without --clone, or if ORG is "-", a missing
+## clone is an error.
+##
 ## Returns 0 on success.  Otherwise prints an error on standard error and
 ## leaves the current directory as it was.  Returns 2 if ORG cannot name a
 ## clone or BRANCH is not a valid branch name, so that the caller can print
-## its usage message, and returns 1 if the slug names no clone.
+## its usage message, and returns 1 if the slug names no clone, or names one
+## that --clone cannot make.
 ##
 ## This must not run in a subshell, such as in `$(...)`, because then the
 ## change of directory would not reach the caller.
@@ -3086,8 +3093,19 @@ enter_slug_clone() {
     esc_description="clone of ${slug_org}'s fork of ${clone_project}"
   fi
   if [ ! -d "${esc_clone}" ]; then
-    echo "${SCRIPT_NAME}: ERROR: there is no ${esc_description}:  directory does not exist: ${esc_clone}" >&2
-    return 1
+    if [ "${2:-}" != '--clone' ] || [ "${slug_org}" = '-' ]; then
+      echo "${SCRIPT_NAME}: ERROR: there is no ${esc_description}:  directory does not exist: ${esc_clone}" >&2
+      return 1
+    fi
+    # The clone PROJECT is the one whose remote is the upstream repository, so
+    # prefer it to a clone of some other fork.
+    esc_source="$(dirname -- "${esc_main}")/${clone_project}"
+    if ! git -C "${esc_source}" rev-parse --show-toplevel > /dev/null 2>&1; then
+      esc_source="${esc_main}"
+    fi
+    if ! clone_fork "${esc_clone}" "${slug_org}" "${slug_branch}" "${esc_source}"; then
+      return 1
+    fi
   fi
   # A directory that is not the top level of a working tree would make the
   # caller act on whatever repository contains it.  Both pathnames are
@@ -3110,6 +3128,136 @@ enter_slug_clone() {
   fi
   # shellcheck disable=SC2034 # set for the caller
   SLUG_CLONE="${esc_clone}"
+}
+
+## Usage: fork_url URL ORG
+## Prints URL, the URL or pathname of a repository OWNER/REPO, with OWNER
+## replaced by ORG.  For example, `fork_url
+## git@github.com:typetools/checker-framework.git cushon` prints
+## "git@github.com:cushon/checker-framework.git".  OWNER is the component of
+## URL's path that precedes the last one, after any trailing "/" is removed.
+## Prints nothing and returns 1 if URL has no such component, as
+## "proj.git" does not.
+fork_url() {
+  fork_url_url="$(printf '%s\n' "$1" | sed -e 's|/*$||')"
+  fork_url_repo="${fork_url_url##*/}"
+  fork_url_rest="${fork_url_url%/*}"
+  if [ "${fork_url_rest}" = "${fork_url_url}" ] || [ -z "${fork_url_repo}" ]; then
+    return 1
+  fi
+  # What precedes OWNER, which ends with the ":" of an scp-style URL or with a
+  # "/".
+  fork_url_prefix="$(printf '%s\n' "${fork_url_rest}" \
+    | sed -n -e 's|^\(.*[:/]\)[^:/][^:/]*$|\1|p')"
+  if [ -z "${fork_url_prefix}" ]; then
+    return 1
+  fi
+  printf '%s%s/%s\n' "${fork_url_prefix}" "$2" "${fork_url_repo}"
+}
+
+## Usage: clone_fork DIRECTORY ORG BRANCH SOURCE
+## Clones ORG's fork of a project into DIRECTORY, which does not exist, if
+## that fork has the branch BRANCH, so that a caller that then checks out
+## BRANCH there clones nothing for a mistyped ORG or BRANCH.  SOURCE is a
+## working tree of a clone of the project, such as PROJECT.  The fork's URL is
+## that of SOURCE's fetch remote (see `fetch_remote`), with its owner replaced
+## by ORG (see `fork_url`), so `git@github.com:typetools/proj.git` gives
+## `git@github.com:ORG/proj.git`.  Returns 0 on success.  Otherwise prints an
+## error on standard error and returns 1.
+##
+## The clone borrows the objects that SOURCE has, so that only the others are
+## downloaded, and then copies the borrowed ones (`git clone --reference
+## --dissociate`), so that it does not depend on SOURCE afterward.  Its only
+## remote is "origin", ORG's fork.  If the GitHub slug ("ORG/REPO") of the
+## upstream repository can be determined, the clone's
+## `remote.origin.gh-resolved` is set to it, so that `gh` acts on pull
+## requests of the upstream repository, as it does in a clone of a fork in
+## which `gh repo set-default` has been run.  The upstream repository is the
+## one that SOURCE's `remote.REMOTE.gh-resolved` names, or SOURCE's fetch
+## remote itself if that setting is "base", or if it is unset and SOURCE is
+## not the clone of a fork, PROJECT-fork-OTHERORG.
+##
+## The queries of the fork disable interactive prompts, as `git_batch_ssh`
+## does, so that this function cannot block forever when run from a script.
+##
+## The variables that this function sets for its own use are prefixed with an
+## abbreviation of its name, so that they cannot collide with a sourcing
+## script's variables.
+clone_fork() {
+  cf_dir="$1"
+  cf_org="$2"
+  cf_branch="$3"
+  cf_source="$4"
+  cf_remote="$(fetch_remote "${cf_source}" "$(current_branch "${cf_source}")")"
+  if [ -z "${cf_remote}" ]; then
+    echo "${SCRIPT_NAME}: ERROR: cannot determine the URL of ${cf_org}'s fork, because ${cf_source} determines no remote to fetch from" >&2
+    return 1
+  fi
+  cf_resolved=''
+  if is_remote_name "${cf_source}" "${cf_remote}"; then
+    # The URL as configured, rather than as `url.<base>.insteadOf` rewrites
+    # it, so that the rewriting applies in the new clone as it does here.
+    cf_url="$(git -C "${cf_source}" config --get "remote.${cf_remote}.url")"
+    cf_resolved="$(git -C "${cf_source}" config --get "remote.${cf_remote}.gh-resolved")"
+  else
+    cf_url="${cf_remote}"
+  fi
+  if ! cf_fork="$(fork_url "${cf_url}" "${cf_org}")"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot determine the URL of ${cf_org}'s fork from ${cf_url}, the URL of remote ${cf_remote} of ${cf_source}" >&2
+    return 1
+  fi
+  case "${cf_resolved}" in
+    */*) cf_upstream_slug="${cf_resolved}" ;;
+    base) cf_upstream_slug="$(github_slug "${cf_url}")" ;;
+    *)
+      case "$(basename -- "$(main_working_tree "${cf_source}" || printf '%s\n' "${cf_source}")")" in
+        *-fork-*) cf_upstream_slug='' ;;
+        *) cf_upstream_slug="$(github_slug "${cf_url}")" ;;
+      esac
+      ;;
+  esac
+
+  # Run git in DIRECTORY's parent, which `enter_slug_clone` requires to exist,
+  # rather than in SOURCE, so that SOURCE's configuration does not apply to the
+  # new clone.
+  cf_parent="$(dirname -- "${cf_dir}")"
+  # `git ls-remote --exit-code` exits with status 2 if the fork has no such
+  # branch, and with some other nonzero status if the fork could not be asked
+  # at all, as for a fork that does not exist.
+  cf_error="$(git_batch_ssh "${cf_parent}" ls-remote --exit-code "${cf_fork}" \
+    "refs/heads/${cf_branch}" 2>&1 > /dev/null)"
+  case "$?" in
+    0) ;;
+    2)
+      echo "${SCRIPT_NAME}: ERROR: ${cf_org}'s fork ${cf_fork} has no branch ${cf_branch}, so ${cf_dir} was not made" >&2
+      return 1
+      ;;
+    *)
+      echo "${SCRIPT_NAME}: ERROR: cannot ask ${cf_fork} about branch ${cf_branch}, so ${cf_dir} was not made:" >&2
+      if [ -n "${cf_error}" ]; then
+        echo "${cf_error}" >&2
+      fi
+      return 1
+      ;;
+  esac
+
+  # A shallow repository cannot serve as a reference.
+  set --
+  if [ "$(git -C "${cf_source}" rev-parse --is-shallow-repository 2> /dev/null)" = 'false' ] \
+    && cf_reference="$(git -C "${cf_source}" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" \
+    && [ -n "${cf_reference}" ]; then
+    set -- --reference-if-able "${cf_reference}" --dissociate
+  fi
+  echo "${SCRIPT_NAME}: cloning ${cf_fork} into ${cf_dir}" >&2
+  # If the clone fails, `git clone` removes the directory that it made.
+  if ! git_batch_ssh "${cf_parent}" clone --origin origin "$@" -- "${cf_fork}" "${cf_dir}"; then
+    echo "${SCRIPT_NAME}: ERROR: cannot clone ${cf_fork} into ${cf_dir}" >&2
+    return 1
+  fi
+  if [ -n "${cf_upstream_slug}" ] \
+    && ! git -C "${cf_dir}" config remote.origin.gh-resolved "${cf_upstream_slug}"; then
+    echo "${SCRIPT_NAME}: warning: cannot set remote.origin.gh-resolved in ${cf_dir}" >&2
+  fi
 }
 
 ## Usage: main_clone_for DIRECTORY
