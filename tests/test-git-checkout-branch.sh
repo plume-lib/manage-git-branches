@@ -551,6 +551,139 @@ if [ ! -f "${submodule_parent}/super-branch-nosub-super/.git" ]; then
   fail "the checkout of a branch without submodules is not a worktree"
 fi
 
+# A slug ORG:BRANCH checks out the branch from the clone of ORG's fork,
+# proj-fork-me, into proj-fork-me-branch-BRANCH, whichever of the project's
+# directories it is run in.  The branch "feature" exists only on the fork's
+# remote, me.git, so it is found by asking that remote, which the upstream
+# clone proj does not have.
+slugs="${tmpdir}/slugs"
+mkdir "${slugs}"
+slugs="$(cd "${slugs}" && pwd -P)"
+git init -q --bare -b main "${slugs}/up.git"
+(
+  cd "${slugs}" || exit 1
+  git clone -q up.git proj 2> /dev/null
+  cd proj || exit 1
+  echo "hello" > file.txt
+  git add file.txt
+  git commit -q -m "Initial commit"
+  git push -q origin main
+  git branch upbranch
+) || exit 1
+git clone -q --bare "${slugs}/up.git" "${slugs}/me.git"
+git clone -q "${slugs}/me.git" "${slugs}/proj-fork-me"
+git -C "${slugs}/proj-fork-me" remote add upstream ../up.git
+(
+  cd "${slugs}" || exit 1
+  git clone -q me.git pusher
+  cd pusher || exit 1
+  git checkout -q -b feature
+  echo "feature" > file.txt
+  git commit -q -a -m "Feature"
+  git push -q origin feature
+) || exit 1
+feature_commit="$(git -C "${slugs}/pusher" rev-parse HEAD)"
+mkdir "${slugs}/proj/subdir"
+fork_head="$(git -C "${slugs}/proj-fork-me" rev-parse HEAD)"
+if ! out="$(cd "${slugs}/proj/subdir" && "${GIT_CHECKOUT_BRANCH}" me:feature 2>&1)"; then
+  fail "nonzero exit status for the slug me:feature: ${out}"
+fi
+case "${out}" in
+  *"checking out branch feature from ${slugs}/proj-fork-me"*) ;;
+  *) fail "the slug me:feature did not say which clone it used: ${out}" ;;
+esac
+slug_dir="${slugs}/proj-fork-me-branch-feature"
+if [ ! -d "${slug_dir}" ]; then
+  fail "the slug me:feature did not create ${slug_dir}: ${out}"
+else
+  if [ "$(git -C "${slug_dir}" symbolic-ref HEAD)" != 'refs/heads/feature' ]; then
+    fail "the slug me:feature did not check out feature in ${slug_dir}"
+  fi
+  if [ "$(git -C "${slug_dir}" rev-parse HEAD)" != "${feature_commit}" ]; then
+    fail "the slug me:feature did not check out the commit of the fork's branch"
+  fi
+  if [ "$(git -C "${slug_dir}" rev-parse --abbrev-ref '@{upstream}')" != 'origin/feature' ]; then
+    fail "the slug me:feature did not give the branch the fork's remote as upstream"
+  fi
+fi
+if git -C "${slugs}/proj" rev-parse --verify --quiet refs/heads/feature > /dev/null; then
+  fail "the slug me:feature made a branch in the clone that it was run in"
+fi
+if [ -e "${slugs}/proj-branch-feature" ]; then
+  fail "the slug me:feature created a directory for the clone that it was run in"
+fi
+if [ "$(git -C "${slugs}/proj-fork-me" rev-parse HEAD)" != "${fork_head}" ]; then
+  fail "the slug me:feature changed the commit of the fork's clone"
+fi
+
+# The slug names the same directory from a branch directory of another clone,
+# so a second checkout of the same branch is refused.
+git -C "${slugs}/proj" worktree add -q "${slugs}/proj-branch-upbranch" upbranch
+if out="$(cd "${slugs}/proj-branch-upbranch" && "${GIT_CHECKOUT_BRANCH}" me:feature 2>&1)"; then
+  fail "zero exit status for a slug whose directory exists"
+fi
+case "${out}" in
+  *"directory exists: ${slug_dir}"*) ;;
+  *) fail "unexpected message for a slug whose directory exists: ${out}" ;;
+esac
+
+# ORG "-" stands for the clone PROJECT itself.
+git -C "${slugs}/proj" branch upother
+if ! out="$(cd "${slugs}/proj-fork-me" && "${GIT_CHECKOUT_BRANCH}" -:upother 2>&1)"; then
+  fail "nonzero exit status for the slug -:upother: ${out}"
+fi
+if [ "$(git -C "${slugs}/proj-branch-upother" symbolic-ref HEAD 2> /dev/null)" != 'refs/heads/upother' ]; then
+  fail "the slug -:upother did not check out upother in ${slugs}/proj-branch-upother: ${out}"
+fi
+
+# In the fork's clone, the pull only fast-forwards, so a branch that has
+# diverged from its upstream is left as it is, with no merge commit.
+git -C "${slugs}/pusher" checkout -q main
+echo "on the remote" > "${slugs}/pusher/file.txt"
+git -C "${slugs}/pusher" commit -q -a -m "On the remote"
+git -C "${slugs}/pusher" push -q origin main
+echo "local" > "${slugs}/proj-fork-me/file.txt"
+git -C "${slugs}/proj-fork-me" commit -q -a -m "Local"
+git -C "${slugs}/proj-fork-me" branch localfeature
+fork_head="$(git -C "${slugs}/proj-fork-me" rev-parse HEAD)"
+if ! out="$(cd "${slugs}/proj" && "${GIT_CHECKOUT_BRANCH}" me:localfeature 2>&1)"; then
+  fail "nonzero exit status for a slug whose fork's clone has diverged: ${out}"
+fi
+if [ "$(git -C "${slugs}/proj-fork-me" rev-parse HEAD)" != "${fork_head}" ]; then
+  fail "the pull in a fork's clone that has diverged did not leave it as it was"
+fi
+if [ -n "$(git -C "${slugs}/proj-fork-me" ls-files --unmerged)" ]; then
+  fail "the pull in a fork's clone that has diverged left conflicts"
+fi
+
+# A slug whose fork has no clone is an error that names the missing directory.
+if out="$(cd "${slugs}/proj" && "${GIT_CHECKOUT_BRANCH}" nosuchorg:feature 2>&1)"; then
+  fail "zero exit status for a slug whose fork has no clone"
+fi
+case "${out}" in
+  *"directory does not exist: ${slugs}/proj-fork-nosuchorg"*) ;;
+  *) fail "unexpected message for a slug whose fork has no clone: ${out}" ;;
+esac
+
+# A slug whose branch is not a valid branch name is an error, with the usage
+# message.
+if out="$(cd "${slugs}/proj" && "${GIT_CHECKOUT_BRANCH}" me:a:b 2>&1)"; then
+  fail "zero exit status for a slug whose branch is not a valid name"
+fi
+case "${out}" in
+  *"not a valid branch name: a:b"*"Usage:"*) ;;
+  *) fail "unexpected message for a slug whose branch is not a valid name: ${out}" ;;
+esac
+
+# A slug given outside any working tree is an error.
+if out="$(cd "${slugs}" && "${GIT_CHECKOUT_BRANCH}" me:feature 2>&1)"; then
+  fail "zero exit status for a slug given outside a working tree"
+fi
+case "${out}" in
+  *"a slug must be given in a working tree"*) ;;
+  *) fail "unexpected message for a slug given outside a working tree: ${out}" ;;
+esac
+
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_CHECKOUT_BRANCH}" > /dev/null 2>&1); then
   fail "zero exit status when given no argument"

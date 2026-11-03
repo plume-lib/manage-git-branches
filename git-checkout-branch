@@ -5,6 +5,20 @@
 #
 # Usage:
 #   git-checkout-branch BRANCHNAME
+#   git-checkout-branch ORG:BRANCHNAME
+#
+# With a slug ORG:BRANCHNAME, such as `mernst:feature`, the branch is checked
+# out from the clone of ORG's fork, PROJECT-fork-ORG, rather than from the
+# current repository, into PROJECT-fork-ORG-branch-BRANCHNAME.  That is, the
+# command acts as `git-checkout-branch BRANCHNAME` does when run in
+# PROJECT-fork-ORG, a sibling of the current repository's main working tree,
+# except that the pull there only fast-forwards.  So the result is the same
+# whichever of the project's directories it is run in:  PROJECT,
+# PROJECT-fork-OTHERORG, a branch directory of either, or a worktree of any of
+# those.  As for `git-new-branch` and `git-push-to`, ORG "-" stands for the
+# clone PROJECT itself, so `-:BRANCHNAME` makes PROJECT-branch-BRANCHNAME.
+# GitHub shows a pull request's branch in this form, as in
+# "mernst:feature".
 #
 # The new directory is a linked worktree of the current repository, made by
 # `git worktree add`, so that it shares the repository's object store.  (If
@@ -93,8 +107,13 @@ fi
 # discarding the changes that are staged there.
 unset_git_location_variables
 
-if [ "$#" -ne 1 ]; then
+usage() {
   echo "Usage: ${SCRIPT_NAME} BRANCHNAME" >&2
+  echo "   or: ${SCRIPT_NAME} ORG:BRANCHNAME" >&2
+}
+
+if [ "$#" -ne 1 ]; then
+  usage
   exit 1
 fi
 
@@ -102,6 +121,30 @@ fi
 require_git 31
 
 trap_branch_cleanup
+
+# A slug ORG:BRANCHNAME checks out the branch from the clone of ORG's fork, as
+# if this script had been run with BRANCHNAME in that clone.  Git forbids ":"
+# in a branch name, so an argument that contains one is a slug.
+#
+# ${SLUG_CLONE} is the clone that the slug names, or is empty if the argument
+# is not a slug.
+SLUG_CLONE=''
+case "$1" in
+  *:*)
+    enter_slug_clone "$1"
+    case "$?" in
+      0) ;;
+      2)
+        usage
+        exit 1
+        ;;
+      *) exit 1 ;;
+    esac
+    # The clone is not the current directory, so say which one is used.
+    echo "${SCRIPT_NAME}: checking out branch ${slug_branch} from ${SLUG_CLONE}" >&2
+    set -- "${slug_branch}"
+    ;;
+esac
 
 # Capture the top level first: under a POSIX `sh` (e.g., dash), `cd ""` succeeds
 # as a no-op, so testing `cd "$(...)"` directly would not catch an empty result.
@@ -140,7 +183,13 @@ BRANCH_TMPDIR="${BRANCHDIR}-TMP"
 # recent commit.  A failed pull is not fatal, because the repository might have
 # no remote or the current branch might have no upstream, but it is reported:
 # the branch will be based on a possibly stale commit.
-if ! PULL_OUTPUT="$(git pull -q 2>&1)"; then
+#
+# A slug pulls in a clone other than the current directory, where a merge or
+# rebase that stopped on conflicts would be left for the user to find, so
+# there the pull only fast-forwards.  `--no-rebase` is needed too:  in some
+# versions of git, a configured `pull.rebase` or `branch.BRANCH.rebase`
+# overrides `--ff-only`.
+if ! PULL_OUTPUT="$(git pull -q ${SLUG_CLONE:+--no-rebase --ff-only} 2>&1)"; then
   echo "${SCRIPT_NAME}: warning: \`git pull\` failed in ${TOPLEVEL}:" >&2
   if [ -n "${PULL_OUTPUT}" ]; then
     echo "${PULL_OUTPUT}" >&2

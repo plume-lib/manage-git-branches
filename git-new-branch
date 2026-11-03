@@ -307,74 +307,21 @@ require_git 31
 SLUG_CLONE=''
 case "$1" in
   *:*)
-    # This sets ${slug_org} and ${slug_branch}.
-    if ! check_slug_org "$1"; then
-      usage
-      exit 1
-    fi
-    # Reject a bad branch name, such as one that contains another ":" or
-    # starts with "-", before the `git pull` in the fork's clone and the
-    # query to its remote, rather than when the branch is created.  A name
-    # that `--branch` rewrites, such as "@{-1}", is a reference to a branch
-    # rather than a new name.
-    if [ -z "${slug_branch}" ] \
-      || [ "$(git check-ref-format --branch "${slug_branch}" 2> /dev/null)" != "${slug_branch}" ]; then
-      echo "${SCRIPT_NAME}: ERROR: not a valid branch name: ${slug_branch}" >&2
-      usage
-      exit 1
-    fi
     if [ "${MODE}" = 'copy' ]; then
       echo "${SCRIPT_NAME}: ERROR: --copy cannot be used with a slug, which always makes a clean worktree" >&2
       usage
       exit 1
     fi
     MODE='clean'
-    if ! SLUG_TOPLEVEL="$(git rev-parse --show-toplevel 2> /dev/null)" \
-      || [ -z "${SLUG_TOPLEVEL}" ]; then
-      echo "${SCRIPT_NAME}: ERROR: a slug must be given in a working tree of the project, such as PROJECT, PROJECT-fork-ORG, or one of their branch directories" >&2
-      exit 1
-    fi
-    # The project's directories are named PROJECT, PROJECT-fork-ORG, and each
-    # of those followed by -branch-BRANCH, side by side.  A linked worktree
-    # might lie elsewhere, as in PROJECT/.claude/worktrees/NAME, so the names
-    # are those of its main working tree, which holds the `.git` directory.
-    # A bare repository, or a git directory outside its working tree, has no
-    # main working tree that this naming convention could describe, so then
-    # they are those of the current working tree.
-    SLUG_MAIN="$(main_working_tree)" || SLUG_MAIN="${SLUG_TOPLEVEL}"
-    SLUG_MAIN_NAME="$(basename -- "${SLUG_MAIN}")"
-    parse_clone_name "${SLUG_MAIN_NAME%%-branch-*}"
-    SLUG_PROJECT="${clone_project}"
-    if [ "${slug_org}" = '-' ]; then
-      SLUG_CLONE="$(dirname -- "${SLUG_MAIN}")/${SLUG_PROJECT}"
-      SLUG_CLONE_DESCRIPTION="clone of ${SLUG_PROJECT}"
-    else
-      SLUG_CLONE="$(dirname -- "${SLUG_MAIN}")/${SLUG_PROJECT}-fork-${slug_org}"
-      SLUG_CLONE_DESCRIPTION="clone of ${slug_org}'s fork of ${SLUG_PROJECT}"
-    fi
-    if [ ! -d "${SLUG_CLONE}" ]; then
-      echo "${SCRIPT_NAME}: ERROR: there is no ${SLUG_CLONE_DESCRIPTION}:  directory does not exist: ${SLUG_CLONE}" >&2
-      exit 1
-    fi
-    # A directory that is not the top level of a working tree would make the
-    # branch in whatever repository contains it.  Both pathnames are
-    # canonicalized, because git can spell a pathname differently than
-    # `pwd -P` does, as Git for Windows does.
-    if ! SLUG_CLONE_REAL="$(physical_path "${SLUG_CLONE}")" \
-      || [ -z "${SLUG_CLONE_REAL}" ]; then
-      echo "${SCRIPT_NAME}: ERROR: cannot canonicalize: ${SLUG_CLONE}" >&2
-      exit 1
-    fi
-    if ! SLUG_CLONE_TOPLEVEL="$(git -C "${SLUG_CLONE}" rev-parse --show-toplevel 2> /dev/null)" \
-      || [ -z "${SLUG_CLONE_TOPLEVEL}" ] \
-      || [ "$(physical_path "${SLUG_CLONE_TOPLEVEL}" 2> /dev/null)" != "${SLUG_CLONE_REAL}" ]; then
-      echo "${SCRIPT_NAME}: ERROR: not the top level of a working tree: ${SLUG_CLONE}" >&2
-      exit 1
-    fi
-    if ! cd -- "${SLUG_CLONE}"; then
-      echo "${SCRIPT_NAME}: ERROR: cannot cd to ${SLUG_CLONE}" >&2
-      exit 1
-    fi
+    enter_slug_clone "$1"
+    case "$?" in
+      0) ;;
+      2)
+        usage
+        exit 1
+        ;;
+      *) exit 1 ;;
+    esac
     set -- "${slug_branch}"
     ;;
 esac
