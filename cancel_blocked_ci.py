@@ -111,11 +111,23 @@ CIRCLECI_WINDOW = dt.timedelta(days=1)
 # Matches a branch that holds a PR, such as "refs/pull/123/merge" or "pull/123".
 PULL_BRANCH = re.compile(r"(?:refs/)?pull/(\d+)(?:/merge|/head)?")
 
-# The unfinished GitHub Actions runs of a repository, as unfinished_runs returns them:  a map
-# from (head repository owner, in lower case, or None if the head repository is gone,
-# branch) to the runs of that branch, each as a dict parsed from the GitHub API's JSON, with
-# keys such as "id", "status", and "event".
-RunsByBranch = dict[tuple[str | None, str], list[dict[str, Any]]]
+
+class RunBranch(NamedTuple):
+    """The branch that a GitHub Actions run tests.
+
+    Attributes:
+        owner: the lowercase owner of the branch's repository, such as "plume-lib", or None
+            if the repository is gone.
+        branch: the branch, such as "main".
+    """
+
+    owner: str | None
+    branch: str
+
+
+# GitHub Actions runs, as a map from each RunBranch to its runs, each as a dict parsed from
+# the GitHub API's JSON, with keys such as "id", "status", and "event".
+RunsByBranch = dict[RunBranch, list[dict[str, Any]]]
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -1062,8 +1074,7 @@ def unfinished_runs(gh: str) -> RunsByBranch:
         gh: a repository's GitHub slug, such as "ORG/REPO".
 
     Returns:
-        A map from (head repository owner, in lower case, branch) to the unfinished runs of
-        that branch.  The owner is None for a run whose head repository is gone.
+        The unfinished runs, as a RunsByBranch.
     """
     # GitHub's API takes one status per query.  A run whose status changes between the
     # queries can appear in the results of two of them, so the runs are keyed by run id.
@@ -1078,11 +1089,11 @@ def unfinished_runs(gh: str) -> RunsByBranch:
         for page in pages:
             for r in page["workflow_runs"]:
                 runs[r["id"]] = r
-    result = {}
+    result: RunsByBranch = {}
     for r in runs.values():
         owner = run_owner(r)
         # GitHub logins are case-insensitive.
-        key = (owner and owner.lower(), r["head_branch"])
+        key = RunBranch(owner and owner.lower(), r["head_branch"])
         result.setdefault(key, []).append(r)
     return result
 
@@ -1121,7 +1132,7 @@ def blocked_pr_runs(
         A list of the runs.
     """
     events = {"pull_request"} if on_shared_branch else {"pull_request", "push"}
-    branch_runs = runs.get((pr["owner"].lower(), pr["headRefName"]), [])
+    branch_runs = runs.get(RunBranch(pr["owner"].lower(), pr["headRefName"]), [])
     return [r for r in branch_runs if r["event"] in events]
 
 
@@ -1131,8 +1142,7 @@ def redundant_runs(label: str, gh: str, runs: RunsByBranch) -> list[RedundantBui
     Args:
         label: the repository's label.
         gh: a repository's GitHub slug, such as "ORG/REPO".
-        runs: the repository's unfinished runs, as a map from (head repository owner,
-            branch) to the unfinished runs of that branch, as unfinished_runs returns it.
+        runs: the repository's unfinished runs, as unfinished_runs returns them.
 
     Returns:
         The RedundantBuild of each redundant run.

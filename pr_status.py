@@ -634,19 +634,34 @@ def pr_refs(text: str, repo: Repo) -> tuple[set[int], set[str]]:
     return numbers, external
 
 
-def stated_prerequisites(
-    body: str, repo: Repo
-) -> tuple[set[int], set[str], set[int], set[int], set[str]]:
-    """Find the PRs that a description names as related to its PR.
+class StatedRelations(NamedTuple):
+    """The PRs that a PR's description names as related to the PR.
 
     A land-with partner, as in "Land with #N", lands together with the PR.  It is neither a
     prerequisite nor a dependent.
 
+    Attributes:
+        prerequisites: the numbers, such as 123, of the PR's prerequisites in its repository.
+        external_prerequisites: the PR's prerequisites in other repositories, such as
+            "owner/repo#123".
+        dependents: the numbers of the PR's dependents in its repository.
+        partners: the numbers of the PR's land-with partners in its repository.
+        external_partners: the PR's land-with partners in other repositories, such as
+            "owner/repo#123".
+    """
+
+    prerequisites: set[int]
+    external_prerequisites: set[str]
+    dependents: set[int]
+    partners: set[int]
+    external_partners: set[str]
+
+
+def stated_prerequisites(body: str, repo: Repo) -> StatedRelations:
+    """Return the PRs that the given description of a PR in repo names as related to the PR.
+
     Returns:
-        A set of numbers in repo and a set of "owner/repo#N" in other repositories, which
-        are prerequisites, a set of numbers in repo, which are dependents, and a set of
-        numbers in repo and a set of "owner/repo#N" in other repositories, which are
-        land-with partners.
+        The PRs that body names, as a StatedRelations.
     """
     keywords = BASE_KEYWORDS + repo.keywords
     pattern = re.compile(r"\b(" + "|".join(re.escape(k) for k in keywords) + r")\b", re.IGNORECASE)
@@ -694,7 +709,7 @@ def stated_prerequisites(
                 else:
                     numbers |= ns
                     external |= ext
-    return numbers, external, dependents, partners, external_partners
+    return StatedRelations(numbers, external, dependents, partners, external_partners)
 
 
 def landing_line(line: str, repo: Repo) -> tuple[str, str] | None:
@@ -840,15 +855,13 @@ class Model:
         # This model and the models that unite_partners unites it with, as a map from each
         # one's lowercase GitHub slug, such as "org/repo", to the model.
         self.by_gh: dict[str, Model] = {repo.gh.lower(): self}
-        prereqs = {n: stated_prerequisites(repo.prs[n]["body"], repo) for n in open_prs}
+        relations = {n: stated_prerequisites(repo.prs[n]["body"], repo) for n in open_prs}
         # Look up all the states at once; state_of and external_state look up any that remain.
-        external = {e for _, ext, _, _, _ in prereqs.values() for e in ext} | {
+        external = {e for s in relations.values() for e in s.external_prerequisites} | {
             e for refs in rc.get("extra_external_dependencies", {}).values() for e in refs
         }
         internal = {
-            f"{repo.gh}#{m}"
-            for names, _, _, _, _ in prereqs.values()
-            for m in names - set(repo.prs)
+            f"{repo.gh}#{m}" for s in relations.values() for m in s.prerequisites - set(repo.prs)
         }
         for ref, state in query_pr_states((external - set(EXTERNAL_STATE)) | internal).items():
             if ref in external:
@@ -856,16 +869,18 @@ class Model:
             else:
                 repo.closed_state[int(ref.split("#")[1])] = state if state != "open" else None
         for n in open_prs:
-            names, external, dependents, partners, external_partners = prereqs[n]
-            names -= {n}
+            s = relations[n]
+            names = s.prerequisites - {n}
             self.stated[n] = names & open_prs
-            self.stated_dependents[n] = (dependents - {n}) & open_prs
-            self.stated_partners[n] = (partners - {n}) & open_prs
-            self.external_partners[n] = external_partners
+            self.stated_dependents[n] = (s.dependents - {n}) & open_prs
+            self.stated_partners[n] = (s.partners - {n}) & open_prs
+            self.external_partners[n] = s.external_partners
             self.stated_closed[n] = sorted(
                 (m, repo.state_of(m)) for m in names - set(repo.prs) if repo.state_of(m)
             )
-            self.external[n] = sorted(e for e in external if external_state(e) == "open")
+            self.external[n] = sorted(
+                e for e in s.external_prerequisites if external_state(e) == "open"
+            )
         for n, refs in rc.get("extra_external_dependencies", {}).items():
             if int(n) in open_prs:
                 self.external[int(n)] = sorted(
@@ -1181,11 +1196,39 @@ def load_models(cfg: dict[str, Any], pairwise: bool = True) -> list[Model]:
     return models
 
 
-def description_updates(models: list[Model]) -> list[tuple[Model, int, str]]:
-    """Find the PR descriptions whose conventional landing-order lines are stale.
+class DescriptionUpdate(NamedTuple):
+    """An update of a PR's description.
+
+    Attributes:
+        model: the Model of the PR's repository.
+        number: the PR's number, such as 123.
+        body: the PR's updated description.
+    """
+
+    model: Model
+    number: int
+    body: str
+
+
+class FailedDescriptionUpdate(NamedTuple):
+    """An update of a PR's description that GitHub rejected.
+
+    Attributes:
+        model: the Model of the PR's repository.
+        number: the PR's number, such as 123.
+        error: the error of the `gh` command that tried to update the description.
+    """
+
+    model: Model
+    number: int
+    error: subprocess.CalledProcessError
+
+
+def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
+    """Return the updates of the PR descriptions whose conventional landing-order lines are stale.
 
     Returns:
-        Tuples of the model, PR number, and updated description.
+        A DescriptionUpdate for each such PR description.
     """
     updates = []
     for model in models:
@@ -1206,38 +1249,36 @@ def description_updates(models: list[Model]) -> list[tuple[Model, int, str]]:
                 model.external[n],
             )
             if updated != body:
-                updates.append((model, n, updated))
+                updates.append(DescriptionUpdate(model, n, updated))
     return updates
 
 
 def refresh_description_facts(model: Model, cfg: dict[str, Any], n: int) -> None:
     """Refresh the facts derived from one locally updated PR description."""
     r = model.repo
-    names, external, dependents, partners, external_partners = stated_prerequisites(
-        r.prs[n]["body"], r
-    )
-    names -= {n}
+    s = stated_prerequisites(r.prs[n]["body"], r)
+    names = s.prerequisites - {n}
     model.stated[n] = names & model.open
-    model.stated_dependents[n] = (dependents - {n}) & model.open
-    model.stated_partners[n] = (partners - {n}) & model.open
-    model.external_partners[n] = external_partners
+    model.stated_dependents[n] = (s.dependents - {n}) & model.open
+    model.stated_partners[n] = (s.partners - {n}) & model.open
+    model.external_partners[n] = s.external_partners
     model.stated_closed[n] = sorted(
         (m, state) for m in names - set(r.prs) if (state := r.state_of(m))
     )
     configured = cfg["repos"][r.name].get("extra_external_dependencies", {}).get(str(n), [])
     model.external[n] = sorted(
-        {ref for ref in external | set(configured) if external_state(ref) == "open"}
+        {ref for ref in s.external_prerequisites | set(configured) if external_state(ref) == "open"}
         | model.inherited_external.get(n, set())
     )
 
 
 def apply_description_updates(
-    updates: Iterable[tuple[Model, int, str]], cfg: dict[str, Any]
-) -> list[tuple[Model, int, subprocess.CalledProcessError]]:
+    updates: Iterable[DescriptionUpdate], cfg: dict[str, Any]
+) -> list[FailedDescriptionUpdate]:
     """Write PR description updates to GitHub and reflect them in the in-memory facts.
 
     Returns:
-        The updates that GitHub rejected, paired with their errors.
+        The updates that GitHub rejected.
     """
     failures = []
     for model, n, body in updates:
@@ -1245,7 +1286,7 @@ def apply_description_updates(
         try:
             run(["gh", "pr", "edit", str(n), "-R", r.gh, "--body", body])
         except subprocess.CalledProcessError as error:
-            failures.append((model, n, error))
+            failures.append(FailedDescriptionUpdate(model, n, error))
             continue
         r.prs[n]["body"] = body
         refresh_description_facts(model, cfg, n)
@@ -2455,9 +2496,22 @@ def chain_has_conflict(repo: Repo, prs: list[int], has_upstream: bool) -> bool:
     )
 
 
-def push_chains(
-    model: Model, base: str, conflicts_only: bool = False
-) -> tuple[list[list[str]], list[int], bool]:
+class PushChains(NamedTuple):
+    """The `git-push-to` chains of a repository, as push_chains computes them.
+
+    Attributes:
+        chains: the chains, each a list of directories, such as ["daikon", "daikon-branch-a"],
+            each of which `git-push-to` pushes into the next.
+        missing: the numbers, such as 123, of the PRs that have no working copy.
+        has_upstream: True if there is a working copy of the upstream default branch.
+    """
+
+    chains: list[list[str]]
+    missing: list[int]
+    has_upstream: bool
+
+
+def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushChains:
     """Compute the `git-push-to` chains that update every PR from upstream and its prerequisites.
 
     Each chain is a list of directories, each of which `git-push-to` pushes into the next.
@@ -2471,8 +2525,7 @@ def push_chains(
     No chain contains a PR that is in, or depends on, a cycle of dependencies.
 
     Returns:
-        The chains, the PRs that have no working copy, and whether there is a working copy of
-        the upstream default branch.
+        The chains, as a PushChains.
     """
     r = model.repo
     owner, name = r.gh.lower().split("/")
@@ -2509,7 +2562,7 @@ def push_chains(
         for chain in pr_chains
         if not conflicts_only or chain_has_conflict(r, chain, bool(upstream))
     ]
-    return chains, missing, bool(upstream)
+    return PushChains(chains, missing, bool(upstream))
 
 
 class PushCommands(NamedTuple):

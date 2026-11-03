@@ -572,8 +572,9 @@ class ApplyDescriptionUpdatesTest(unittest.TestCase):
             mock.patch.object(pr_status, "run", side_effect=error),
             mock.patch.object(pr_status, "refresh_description_facts") as refresh,
         ):
-            failures = pr_status.apply_description_updates([(model, 1, "new")], {})
-        self.assertEqual(failures, [(model, 1, error)])
+            update = pr_status.DescriptionUpdate(model, 1, "new")
+            failures = pr_status.apply_description_updates([update], {})
+        self.assertEqual(failures, [pr_status.FailedDescriptionUpdate(model, 1, error)])
         self.assertEqual(repo.prs[1]["body"], "old")
         refresh.assert_not_called()
 
@@ -638,7 +639,7 @@ class PushChainsTest(unittest.TestCase):
                 pr_status, "pr_directories", lambda _r, pr, _base: [f"pr{ids[id(pr)]}"]
             ),
         ):
-            return pr_status.push_chains(model, "/base", conflicts_only)[0]
+            return pr_status.push_chains(model, "/base", conflicts_only).chains
 
     def test_single_pr_chain(self):
         """A PR with no prerequisite or dependent forms a chain with upstream."""
