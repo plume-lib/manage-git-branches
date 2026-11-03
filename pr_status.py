@@ -30,7 +30,9 @@ Each run:
   * rewrites the unblocked documents (if the config names any) entirely, and the parts
     of the dependency document between <!-- BEGIN GENERATED: name --> and
     <!-- END GENERATED: name --> (or creates the dependency document, if it does not
-    exist).
+    exist),
+  * sets the dependency document's title, in its YAML front matter and its "# " heading,
+    to the current directory's basename followed by "PR status", as in "src PR status".
 """
 
 from __future__ import annotations
@@ -58,6 +60,13 @@ CONFIG = "pr-status-config.json"
 # The dependency document's file name when there is no config file.
 DEFAULT_DEPENDENCY_DOCUMENT = "pr-status.md"
 SNAPSHOT = ".pr-status-snapshot.json"
+# Matches the YAML front matter that starts a Markdown document, such as
+# "---\ntitle: src PR status\n---\n", and the blank lines that follow it.  The front matter
+# ends at its first "---" line.  Group 1 is the front matter's contents, such as
+# "title: src PR status\n", or "" if it is empty.
+FRONT_MATTER = re.compile(r"---\n((?:(?!---\n).*\n)*)---\n+")
+# The start of a top-level "title" entry of YAML front matter, whose key may be quoted.
+TITLE_KEY = re.compile(r"""(?:title|"title"|'title')[ \t]*:(?:[ \t]|$)""")
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -2517,20 +2526,65 @@ def replace_sections(text: str, generators: Mapping[str, Callable[[], list[str]]
     )
 
 
-def add_as_of_section(text: str) -> str:
-    """Add an empty "as-of" generated section after the title of text, if text lacks one.
+def yaml_string(s: str) -> str:
+    """Return a YAML scalar that YAML reads as the given string.
+
+    The scalar is plain (unquoted) if s consists of words, made of letters, digits, "_", and
+    ".", separated by spaces and "-", and contains a space, as in "src PR status".  A plain
+    scalar without a space, such as "true", "null", or "123", might be read as a boolean, null,
+    or number, so the scalar is quoted otherwise.
 
     Returns:
-        text, with an "as-of" generated section.
+        s, or s quoted for YAML.
     """
-    if "<!-- BEGIN GENERATED: as-of -->" in text:
-        return text
-    section = "\n".join(generated("as-of")) + "\n"
-    if text.startswith("# "):
-        title, _, rest = text.partition("\n")
-        rest = rest.lstrip("\n")
-        return title + "\n\n" + section + ("\n" + rest if rest else "")
-    return section + "\n" + text
+    if " " in s and re.fullmatch(r"[\w.]([\w. -]*[\w.])?", s):
+        return s
+    # A JSON string is a YAML double-quoted scalar.  Escaping a character outside the Basic
+    # Multilingual Plane, as ensure_ascii does, would yield a surrogate pair, which YAML rejects.
+    return json.dumps(s, ensure_ascii=False)
+
+
+def set_header(text: str, title: str) -> str:
+    """Return the given Markdown text, with a header that has the given title.
+
+    The header is YAML front matter whose "title" entry is title, followed by a "# " heading
+    of title, followed by an "as-of" generated section.  The title replaces the "title" entry
+    of the front matter, including the indented continuation lines (and blank lines among them)
+    of a multi-line value, and the "# " heading that starts the text after the front matter.
+    Text that lacks any part of the header gains it.  The rest of the front matter, and an
+    existing "as-of" section wherever it is, are retained.
+
+    Args:
+        text: a Markdown document, possibly starting with YAML front matter.
+        title: a title, such as "src PR status".
+
+    Returns:
+        text, starting with a header that has title.
+    """
+    title_entry = f"title: {yaml_string(title)}"
+    m = FRONT_MATTER.match(text)
+    entries = m[1].splitlines() if m else []
+    body = text[m.end() :] if m else text.lstrip("\n")
+    for i, entry in enumerate(entries):
+        if TITLE_KEY.match(entry):
+            # The value continues through indented lines, and through blank lines that precede
+            # an indented line.
+            end = i + 1
+            for j in range(i + 1, len(entries)):
+                if not entries[j].strip():
+                    continue
+                if entries[j][:1] not in (" ", "\t"):
+                    break
+                end = j + 1
+            entries[i:end] = [title_entry]
+            break
+    else:
+        entries.insert(0, title_entry)
+    if body.startswith(("# ", "#\t")):
+        body = body.partition("\n")[2].lstrip("\n")
+    if "<!-- BEGIN GENERATED: as-of -->" not in body:
+        body = "\n".join(generated("as-of")) + "\n" + ("\n" + body if body else "")
+    return "\n".join(["---", *entries, "---", "", f"# {title}", "", body])
 
 
 def section_generators(
@@ -2998,18 +3052,18 @@ def default_dependency_document(models: list[Model]) -> str:
     """Generate the dependency document to use when it does not exist.
 
     Returns:
-        The text of a dependency document whose generated sections are empty.
+        The text of a dependency document that has no header (set_header adds it) and whose
+        generated sections are empty.
     """
     if len(models) == 1:
         upstream = f"upstream `{models[0].repo.default_branch}`"
     else:
         upstream = "the upstream default branch"
     lines = [
-        "# PR dependencies",
-        "",
-        *generated("as-of"),
-        "",
-        "Generated sections are regenerated by `pr-status`; text outside them is retained.",
+        (
+            "The title and the generated sections are regenerated by `pr-status`;"
+            " other text is retained."
+        ),
         "",
         "## How dependencies are determined",
         "",
@@ -3209,13 +3263,13 @@ def main() -> None:
         text = dependencies.read_text()
     else:
         text = default_dependency_document(models)
-    text = add_as_of_section(text)
+    text = set_header(text, f"{pathlib.Path(base).name} PR status")
     text = replace_sections(text, section_generators(models, cfg, base, as_of))
     dependencies.write_text(text)
     with pathlib.Path(SNAPSHOT).open("w") as f:
         json.dump({"time": now.isoformat(timespec="seconds"), "facts": new}, f, indent=1)
     written = [d["file"] for d in unblocked_docs]
-    written += [f"the generated sections of {dependencies}", SNAPSHOT]
+    written += [f"the title and generated sections of {dependencies}", SNAPSHOT]
     print(f"## Wrote {and_list(written)}")
     if failed_updates:
         sys.exit(1)

@@ -183,7 +183,10 @@ The commands are:
   after" and "Land before" lines of their descriptions, and regenerates
   `pr-status.md` (or the documents that `pr-status-config.json` names),
   which lists the dependencies and the `git-push-to` commands that update
-  each dependency chain.  It prints what changed since its previous run.
+  each dependency chain.  It sets the dependency document's title, in its
+  front matter and its heading, to the current directory's basename followed
+  by "PR status", as in "src PR status".
+  It prints what changed since its previous run.
   With `--check`, it writes no document.  With `--print-document`, it prints
   the file name of the dependency document and does nothing else.
   `--highlight PR...` highlights, wherever the documents name it, each
