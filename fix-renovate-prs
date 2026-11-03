@@ -76,10 +76,12 @@
 #     run any command (`--permission-mode bypassPermissions`), because making
 #     the CI pass usually requires building and testing the project.  Claude
 #     is told to commit its changes, including any new files, and not to
-#     push.  It writes its outcome to a file:  either that it made the CI
-#     pass, or that the CI cannot pass, and why.  The outcome's first line that is not blank says which; white
-#     space and the Markdown characters "*", "_", "#", and "`" in it are
-#     ignored.
+#     push.  Claude is told not to upgrade the JDK that the project uses, and
+#     to report that the CI cannot pass if the only fix is to upgrade it.  It
+#     writes its outcome to a file:  either that it made the CI pass, or that
+#     the CI cannot pass, and why.  The outcome's first line that is not
+#     blank says which; white space and the Markdown characters "*", "_",
+#     "#", and "`" in it are ignored.
 #  4. If Claude made the CI pass, the directory has commits that the pull
 #     request does not, and Claude left no new file uncommitted, pushes the
 #     commits to the pull request's branch, with
@@ -462,7 +464,10 @@ is impossible.
   files, or configuration, so that it works with the updated dependencies.
   Do not revert, downgrade, or exclude any of the dependency updates that the
   pull request makes, and do not disable, skip, or weaken tests or checks.
-  If the only way to make the CI pass is one of those, the task is
+  Do not upgrade the JDK that the project builds with, runs on, or targets,
+  for example by raising a Java version in build files, CI configuration,
+  or toolchain settings, even if a new dependency version requires a newer
+  JDK.  If the only way to make the CI pass is one of those, the task is
   impossible.
 * Where practical, run the failing CI commands locally before and after the
   fix, to confirm that the fix works.

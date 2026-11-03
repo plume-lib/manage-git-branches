@@ -247,6 +247,8 @@ The commands are:
   working copy directory has that branch.  Claude either commits a fix, which this
   command pushes to the pull request's branch, or explains why the CI
   cannot pass, which this command posts as a comment on the pull request.
+  Claude does not upgrade the JDK that the project uses; if the only fix is
+  to upgrade it, Claude explains that the CI cannot pass.
   A pull request whose CI is running or waits for a human to approve a
   check is skipped, as is one for which such a comment was posted at its
   current head commit.  The last thing that this
