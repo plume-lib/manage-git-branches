@@ -311,4 +311,19 @@ if ! grep -q "whose name has no ORG" "${WORK_DIR}/stderr"; then
   fail "git-push-to did not report the missing directory for -:nosuch: $(cat "${WORK_DIR}/stderr")"
 fi
 
+# A slug ORG:BRANCH whose ORG owns the upstream repository of the clone
+# PROJECT names what -:BRANCH names, when there is no clone PROJECT-fork-ORG.
+# The upstream repository is the one that `remote.origin.gh-resolved` names.
+git -C "${WORK_DIR}/work4/solo" config remote.origin.gh-resolved solorg/solo
+add_line solo "owner line"
+git -C "${WORK_DIR}/work4/solo-branch-main" pull -q
+git -C "${WORK_DIR}/work4/solo-fork-me-branch-main" pull -q
+if ! (cd "${WORK_DIR}/work4" && "${COMMANDS_DIR}/git-push-to" solorg:main solorg:feature) 2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to failed on slugs whose ORG owns the upstream repository: $(cat "${WORK_DIR}/stderr")"
+fi
+check_contains ../work4/solo-branch-feature "owner line"
+if grep -q "owner line" "${WORK_DIR}/work4/solo-fork-me-branch-feature/file.txt"; then
+  fail "solo-fork-me-branch-feature was changed, but the slugs solorg:BRANCH name no fork"
+fi
+
 echo "${SCRIPT_NAME}: OK"
