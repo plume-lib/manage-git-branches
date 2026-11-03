@@ -250,8 +250,9 @@ The commands are:
   A pull request whose CI is running or waits for a human to approve a
   check is skipped, as is one for which such a comment was posted at its
   current head commit.  The last thing that this
-  command prints is the list of the pull requests that it acted on, which a
-  human should review, and of those that it could not handle.  With
+  command prints is the list of the pull requests that it acted on, each
+  with its URL and its directory, which a human should review, and of those
+  that it could not handle.  With
   `--dry-run`, it prints the failing pull requests and the directories but
   changes nothing.  Run it in a directory that holds the working copy
   directories, or pass that directory with `-C`.  This command needs `gh`,

@@ -99,8 +99,12 @@
 # versions themselves run during the build, as they do in CI.
 #
 # The last thing that this command prints is the list of pull requests that
-# it acted on, grouped by what it did, with the directory of each.  It also
-# lists the pull requests that it could not handle.
+# it acted on, grouped by what it did.  Each line is a pull request's URL and
+# its directory.  For a pull request whose CI jobs were rerun, the directory
+# is the one that a later run of this command would use, and it is marked
+# "(not made yet)" if it does not exist yet.  This command also lists the
+# pull requests that it could not handle, each with an explanation that names
+# its directory if this command found or made one.
 #
 #   --dry-run  run nothing, push nothing, and post nothing; just print each
 #              failing pull request and the directory where Claude would run.
@@ -260,8 +264,8 @@ failed_checks_jq='.statusCheckRollup[]? | select(check_state == "failing")
     else "  \(.context): \(.targetUrl // "")" end'
 
 # The lists of pull requests for the final report.  Each is a sequence of
-# lines, each of which is a pull request's URL, then two spaces and a
-# directory or an explanation.
+# lines, each of which is a pull request's URL, then two spaces and its
+# directory, or, in ${problems}, an explanation.
 pushed=""
 commented=""
 reran=""
@@ -533,8 +537,13 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     0) ;;
     3)
       echo "${SCRIPT_NAME}: skipping ${url}, whose transient CI failures were rerun"
-      reran="${reran}${url}
+      if [ -n "${holder}" ]; then
+        reran="${reran}${url}  ${base}/${branch_dir}
 "
+      else
+        reran="${reran}${url}  ${base}/${branch_dir} (not made yet)
+"
+      fi
       continue
       ;;
     *) echo "${SCRIPT_NAME}: rerun-failed-ci failed for ${url}; continuing" >&2 ;;
@@ -706,7 +715,7 @@ ${new_files}"
       } > "${work}/comment.md"
       if ! gh_query "cannot comment on ${url}" \
         gh pr comment "${url}" --body-file "${work}/comment.md" > /dev/null; then
-        problem "${url}" "cannot post claude's explanation, which is:
+        problem "${url}" "cannot post the explanation of claude, which ran in ${branch_path}:
 ${explanation}"
         continue
       fi

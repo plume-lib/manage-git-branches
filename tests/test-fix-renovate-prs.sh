@@ -407,7 +407,7 @@ esac
 
 # The report is last, and lists each pull request in its group.
 expected="Reran transient CI failures; run fix-renovate-prs again after CI finishes:
-https://github.com/someone/proj/pull/6
+https://github.com/someone/proj/pull/6  ${scan}/proj-branch-renovate-rerun (not made yet)
 Could not handle; a human must look:
 https://github.com/someone/proj/pull/7  ${scan}/proj-branch-renovate-diverged has diverged from the pull request's head commit ${oid_diverged}, and it has commits that the pull request's branch never had; move them onto ${oid_diverged}, or remove ${scan}/proj-branch-renovate-diverged with git-remove-branch-directory
 https://github.com/someone/proj/pull/8  claude reported a fix but committed nothing in ${scan}/proj-branch-renovate-nocommit
