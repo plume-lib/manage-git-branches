@@ -1206,40 +1206,49 @@ dir_list() {
 # one per line.  Deletes each stale file that a tool presumably
 # regenerates, and sets these variables:
 #  * ${stale_kept_count} is the number of other stale files, including each
-#    one that cannot be deleted.
+#    one that cannot be deleted, but not an Emacs auto-save or backup file.
 #  * ${stale_kept} lists the pathnames of the first 5 of those other stale
 #    files, each preceded by a newline.
 #  * ${stale_count} is the number of files that it deleted.
 #  * ${stale_names} lists the names of the directories that it deleted files
-#    from, each followed by a newline.
+#    from, each followed by a newline.  The name of ${BRANCHDIR} itself is
+#    ".".
 #  * ${stale_configured} lists the directories, relative to ${BRANCHDIR},
 #    that it deleted files from and that CMake or autotools configured, as
 #    shown by a `CMakeCache.txt` or `config.status` file in them, each
 #    preceded by a newline.
 #
-# Whether a tool regenerates a file is not knowable, so it is judged by the
-# directory that contains the file.  A tool presumably regenerates the files
-# in a `build/` directory, in Gradle's `.gradle/` directory, and in a cache
-# directory, as `is_cache_dir` defines it, such as Ruff's `.ruff_cache/` or
-# Cargo's `target/`, whether at the top level, in a subproject, or in a
-# submodule, if git ignores that directory.  Some tools write into a cache
-# directory a `.gitignore` file that ignores the directory's contents but not
-# the directory itself, so a cache directory also qualifies if git ignores
-# its `CACHEDIR.TAG` file.  No file is deleted from a directory that:
+# Whether a tool regenerates a file is not knowable, so it is usually judged
+# by the directory that contains the file.  A tool presumably regenerates the
+# files in a `build/` directory, in Gradle's `.gradle/` directory, in Python's
+# `__pycache__/` directory, and in a cache directory, as `is_cache_dir`
+# defines it, such as Ruff's `.ruff_cache/` or Cargo's `target/`, whether at
+# the top level, in a subproject, or in a submodule, if git ignores that
+# directory.  Some tools write into a cache directory a `.gitignore` file that
+# ignores the directory's contents but not the directory itself, so a cache
+# directory also qualifies if git ignores its `CACHEDIR.TAG` file.  No file is
+# deleted from a directory that:
 #  * git does not ignore, because the directory might hold hand-written files,
 #    such as local configuration;
 #  * is within another directory that git ignores, such as a dependency's
 #    directory in `node_modules/`, because no build of the project
 #    regenerates the dependency's files; or
 #  * is a submodule, because the submodule's files are not in a `build/`,
-#    `.gradle/`, or cache directory of the submodule's own repository.
+#    `.gradle/`, `__pycache__/`, or cache directory of the submodule's own
+#    repository.
+# A compiled Emacs Lisp file outside those directories, such as `foo.elc`, is
+# deleted if its source file, such as `foo.el`, is beside it and git ignores
+# the compiled file but not its directory.  Emacs loads the source file in
+# its place, and a build that byte-compiles the source file regenerates it.
 delete_stale_build_output() {
   stale_kept=''
   stale_kept_count=0
   stale_count=0
   stale_names=''
   stale_configured=''
-  stale_last_dir=''
+  stale_last_root=''
+  stale_last_owner=''
+  stale_owner_status=1
   # The loop splits STALE-FILES at newlines rather than reading it from a pipe,
   # because a pipe would run the loop in a subshell, which would lose the
   # variables that the loop sets.
@@ -1248,14 +1257,17 @@ delete_stale_build_output() {
 '
   set -f
   for stale_file in $1; do
-    # ${stale_dir} is the outermost `build/`, `.gradle/`, or cache directory
-    # that contains the file, or is empty if there is none, and
-    # ${stale_owner} is the directory that contains ${stale_dir}, or is empty
-    # for ${BRANCHDIR}, which git never ignores.
-    stale_dir=''
+    # ${stale_root} is what a tool presumably regenerates:  the outermost
+    # `build/`, `.gradle/`, `__pycache__/`, or cache directory that contains
+    # the file, or else the file itself if it is a compiled Emacs Lisp file
+    # whose source file is beside it, or else empty.  ${stale_owner} is the
+    # directory that contains ${stale_root}, or is empty for ${BRANCHDIR},
+    # which git never ignores.  ${stale_name} is the name of the directory
+    # that the file is deleted from, if it is deleted.
+    stale_root=''
     stale_owner=''
     stale_rest="${stale_file}"
-    while [ -z "${stale_dir}" ]; do
+    while [ -z "${stale_root}" ]; do
       case "${stale_rest}" in
         */*) ;;
         *) break ;;
@@ -1264,49 +1276,70 @@ delete_stale_build_output() {
       stale_rest="${stale_rest#*/}"
       stale_candidate="${stale_owner:+${stale_owner}/}${stale_component}"
       case "${stale_component}" in
-        build | .gradle) stale_dir="${stale_candidate}" ;;
+        build | .gradle | __pycache__) stale_root="${stale_candidate}" ;;
         *)
           if is_cache_dir "${BRANCHDIR}/${stale_candidate}"; then
-            stale_dir="${stale_candidate}"
+            stale_root="${stale_candidate}"
           else
             stale_owner="${stale_candidate}"
           fi
           ;;
       esac
     done
-    # ${stale_delete} is "yes" if the files in ${stale_dir} are deleted and
-    # "no" if they are not.  It is computed again only when ${stale_dir}
-    # differs from the previous non-empty one, which saves the
+    if [ -n "${stale_root}" ]; then
+      stale_name="${stale_root##*/}"
+    else
+      # The loop left in ${stale_owner} the directory that contains the file.
+      case "${stale_file}" in
+        *.elc)
+          if [ -f "${BRANCHDIR}/${stale_file%c}" ]; then
+            stale_root="${stale_file}"
+            stale_name="${stale_owner##*/}"
+            stale_name="${stale_name:-.}"
+          fi
+          ;;
+      esac
+    fi
+    # ${stale_delete} is "yes" if the stale files in ${stale_root} are deleted
+    # and "no" if they are not.  It is computed again only when ${stale_root}
+    # differs from the previous non-empty one, and ${stale_owner_status}, the
+    # exit status of `check_ignore` for ${stale_owner}, only when
+    # ${stale_owner} differs from the previous one; that saves the
     # `git check-ignore` processes.  The order of the input affects only how
-    # often it is computed, not its value.
-    if [ -z "${stale_dir}" ]; then
+    # often they are computed, not their values.
+    if [ -z "${stale_root}" ]; then
       stale_delete=no
-    elif [ "${stale_dir}" != "${stale_last_dir}" ]; then
-      stale_last_dir="${stale_dir}"
-      if [ -e "${BRANCHDIR}/${stale_dir}/.git" ]; then
+    elif [ "${stale_root}" != "${stale_last_root}" ]; then
+      stale_last_root="${stale_root}"
+      if [ "${stale_owner}" != "${stale_last_owner}" ]; then
+        stale_last_owner="${stale_owner}"
+        stale_owner_status=1
+        if [ -n "${stale_owner}" ]; then
+          check_ignore "${stale_owner}"
+          stale_owner_status=$?
+        fi
+      fi
+      if [ -e "${BRANCHDIR}/${stale_root}/.git" ]; then
         stale_delete=no
-      elif [ -n "${stale_owner}" ] && {
-        check_ignore "${stale_owner}"
-        [ $? -ne 1 ]
-      }; then
+      elif [ "${stale_owner_status}" -ne 1 ]; then
         stale_delete=no
-      elif check_ignore "${stale_dir}"; then
+      elif check_ignore "${stale_root}"; then
         stale_delete=yes
-      elif is_cache_dir "${BRANCHDIR}/${stale_dir}" \
-        && check_ignore "${stale_dir}/CACHEDIR.TAG"; then
+      elif is_cache_dir "${BRANCHDIR}/${stale_root}" \
+        && check_ignore "${stale_root}/CACHEDIR.TAG"; then
         stale_delete=yes
       else
         stale_delete=no
       fi
       # ${stale_markers} lists the directories, relative to ${BRANCHDIR}, in
-      # ${stale_dir} or below it that hold a `CMakeCache.txt` or
+      # ${stale_root} or below it that hold a `CMakeCache.txt` or
       # `config.status` file, each followed by a newline.  The search precedes
-      # the deletion of any file in ${stale_dir}, because those files contain
+      # the deletion of any file in ${stale_root}, because those files contain
       # the pathname of the source directory and so are deleted too.
       stale_markers=''
-      if [ "${stale_delete}" = yes ]; then
+      if [ "${stale_delete}" = yes ] && [ -d "${BRANCHDIR}/${stale_root}" ]; then
         stale_markers="$(cd "${BRANCHDIR}" \
-          && find "./${stale_dir}" \( -name CMakeCache.txt -o -name config.status \) -type f -print 2> /dev/null \
+          && find "./${stale_root}" \( -name CMakeCache.txt -o -name config.status \) -type f -print 2> /dev/null \
           | sed -e 's|^\./||' -e 's|/[^/]*$||' | sort -u)"
         if [ -n "${stale_markers}" ]; then
           stale_markers="${stale_markers}
@@ -1317,7 +1350,7 @@ delete_stale_build_output() {
     if [ "${stale_delete}" = yes ] \
       && rm -f -- "${BRANCHDIR}/${stale_file}" 2> /dev/null; then
       stale_count=$((stale_count + 1))
-      stale_names="${stale_names}${stale_dir##*/}
+      stale_names="${stale_names}${stale_name}
 "
       # Each configured directory that contains the file needs to be
       # reconfigured.
@@ -1342,6 +1375,12 @@ ${stale_marker}" ;;
       done
       continue
     fi
+    # An Emacs auto-save file, such as `#foo#`, or backup file, such as `foo~`
+    # or `foo.~1~`, is not build output, but a copy of a file that is being or
+    # was edited, so it is kept without being named.
+    case "${stale_file}" in
+      \#*\# | */\#*\# | *~) continue ;;
+    esac
     stale_kept_count=$((stale_kept_count + 1))
     if [ "${stale_kept_count}" -le 5 ]; then
       stale_kept="${stale_kept}
