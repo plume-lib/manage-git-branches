@@ -1,0 +1,151 @@
+#!/bin/sh
+
+# Runs `crreview-resolve` once for each open pull request that is checked out
+# in a working copy directory of the directory that holds the working copy
+# directories.  `crreview-resolve` addresses the unresolved CodeRabbit review
+# comments on the pull request of the current branch, then pushes and
+# resolves the comments' review threads; it is in
+# https://github.com/mernst/mdedots/blob/main/share/crreview-resolve .
+#
+# Usage:
+#   crreview-resolve-all [--dry-run] [--agent claude|codex] [-C DIR]
+#
+# The directory that holds the working copy directories is DIR, or the
+# current directory.  A working copy directory is an entry of it that is the
+# top level of a git working tree whose HEAD is a branch.  This command
+# ignores entries whose names start with ".", symbolic links, which could
+# name a working tree twice, and directories that are not the top level of a
+# working tree, such as an ordinary directory inside a clone.
+#
+# For each working copy directory, `gh pr view` finds the pull request for the
+# directory's branch.  A directory is skipped if its branch has no pull
+# request, or if the pull request is closed or landed.  If several
+# directories hold the same pull request, `crreview-resolve` runs only in the
+# first of them, in alphabetical order, so that it does not address the same
+# comments twice.
+#
+# `crreview-resolve` runs in one directory at a time, because each run can
+# start an AI agent session.  A run that finds no CodeRabbit comments to
+# address starts no session.  This command continues after a run fails, and
+# at the end it lists the directories where `crreview-resolve` failed.
+#
+#   --dry-run  run nothing; just print each directory where this command
+#              would run `crreview-resolve`, and its pull request
+#   --agent    the AI agent, which is passed to `crreview-resolve`
+#   -C DIR     the directory that holds the working copy directories
+#
+# The exit status is 0 if every run of `crreview-resolve` succeeded and the
+# pull request of every working copy directory could be determined, and 1
+# otherwise.  It is 2 for a usage error.
+
+SCRIPT_NAME="$(basename -- "$0")"
+
+usage() {
+  echo "Usage: ${SCRIPT_NAME} [--dry-run] [--agent claude|codex] [-C DIR]"
+}
+
+dry_run=false
+agent=""
+base="."
+while [ "$#" -ne 0 ]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    --agent | -C)
+      if [ "$#" -lt 2 ]; then
+        usage >&2
+        exit 2
+      fi
+      if [ "$1" = -C ]; then base="$2"; else agent="$2"; fi
+      shift 2
+      ;;
+    --agent=*)
+      agent="${1#--agent=}"
+      shift
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+case "${agent}" in
+  "" | claude | codex) ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+if ! base="$(CDPATH='' cd -- "${base}" && pwd -P)"; then
+  echo "${SCRIPT_NAME}: cannot change to directory ${base}" >&2
+  exit 2
+fi
+if [ "${dry_run}" = false ] && ! command -v crreview-resolve > /dev/null; then
+  echo "${SCRIPT_NAME}: crreview-resolve is not on the PATH;" \
+    "get it from https://github.com/mernst/mdedots/blob/main/share/crreview-resolve" >&2
+  exit 1
+fi
+if [ -n "${agent}" ]; then
+  set -- --agent "${agent}"
+else
+  set --
+fi
+
+status=0
+# Each pull request that is checked out in an earlier directory:  its URL, a
+# space, and the directory, one per line.
+seen=""
+# The directories where `crreview-resolve` failed, one per line.
+failed=""
+for path in "${base}"/*; do
+  dir="$(basename -- "${path}")"
+  # The physical path of the top level differs from ${path} if ${path} is a
+  # symbolic link or is not the top level of a working tree.  git fails if
+  # ${path} is not a directory, as when the pattern matches no entry.
+  toplevel="$(git -C "${path}" rev-parse --show-toplevel 2> /dev/null)" || continue
+  if [ "$(CDPATH='' cd -- "${toplevel}" && pwd -P)" != "${path}" ]; then continue; fi
+  git -C "${path}" symbolic-ref --quiet HEAD > /dev/null || continue
+  # `gh pr view` finds the pull request of the current directory's branch.
+  if ! pr="$(cd -- "${path}" && gh pr view --json state,url --jq '"\(.state) \(.url)"' 2>&1)"; then
+    case "${pr}" in
+      *"no pull requests found"*) ;;
+      *)
+        printf '%s: cannot find the pull request of %s:\n%s\n' "${SCRIPT_NAME}" "${dir}" "${pr}" >&2
+        status=1
+        ;;
+    esac
+    continue
+  fi
+  state="${pr%% *}"
+  url="${pr#* }"
+  if [ "${state}" != OPEN ]; then continue; fi
+  earlier="$(printf '%s' "${seen}" | awk -v url="${url}" '$1 == url { print substr($0, length(url) + 2); exit }')"
+  if [ -n "${earlier}" ]; then
+    echo "${SCRIPT_NAME}: skipping ${dir}, whose pull request ${url} is also in ${earlier}"
+    continue
+  fi
+  seen="${seen}${url} ${dir}
+"
+  if [ "${dry_run}" = true ]; then
+    echo "Would run crreview-resolve in ${dir} for ${url}"
+    continue
+  fi
+  echo "===== ${dir}: ${url}"
+  if ! (cd -- "${path}" && crreview-resolve "$@"); then
+    failed="${failed}${dir}
+"
+    status=1
+  fi
+done
+
+if [ -n "${failed}" ]; then
+  echo "${SCRIPT_NAME}: crreview-resolve failed in:" >&2
+  printf '%s' "${failed}" >&2
+fi
+exit "${status}"
