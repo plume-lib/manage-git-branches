@@ -193,6 +193,20 @@ The commands are:
   until no chain has conflicts, for up to 3 rounds; stops after a round in
   which a chain fails.  It runs only the commands that `pr-status` writes,
   and refuses any other.
+* [`crreview-resolve-all`](crreview-resolve-all)
+  `[--dry-run] [--agent claude|codex] [-C DIR]`:
+  Runs
+  [`crreview-resolve`](https://github.com/mernst/mdedots/blob/main/share/crreview-resolve),
+  which addresses the unresolved CodeRabbit review comments on the current
+  branch's pull request, in each working copy directory that holds an open
+  pull request that you opened:  one whose head is the branch that
+  `git push` in the directory pushes to.  It runs once per pull request,
+  even if several directories hold that pull request; it prefers one that
+  is at the pull request's head commit.  With `--dry-run`, it prints
+  the directories and pull requests but runs nothing.  `--agent` is passed
+  to `crreview-resolve`.  Run it in a directory that holds the working copy
+  directories, or pass that directory with `-C`.  This command needs `gh`
+  and `crreview-resolve`.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but leftovers, which a
