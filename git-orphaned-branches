@@ -19,10 +19,10 @@
 # of its files, and a directory in a working tree that git cannot use, such
 # as a linked worktree whose main working tree was moved.
 #
-# A Claude Code configuration directory, such as `~/.claude`, is not
-# examined.  It holds a directory for each directory that Claude Code has run
-# in, named for that directory's absolute path, so its names match
-# `*-branch-*`, but it holds no working tree.
+# The `projects` directory of a Claude Code configuration directory, such as
+# `~/.claude/projects`, is not examined.  It holds a directory for each
+# directory that Claude Code has run in, named for that directory's absolute
+# path, so its names match `*-branch-*`, but it holds no working tree.
 #
 # A directory that another live working tree depends on -- one that hosts a
 # linked worktree, or one that is a submodule of a superproject -- is never
@@ -625,6 +625,19 @@ check_directory() {
   # git -C "$dir" remote prune origin 2>&1 > /dev/null
 }
 
+# Returns 0 (true) if directory $1 is the `projects` directory of a Claude Code
+# configuration directory, such as `~/.claude` or the directory that
+# `CLAUDE_CONFIG_DIR` names:  a directory named `projects` whose parent holds a
+# `history.jsonl` file.  It holds a directory for each directory that Claude
+# Code has run in, named for that directory's absolute path, such as
+# `-home-me-repo-branch-feature` for `/home/me/repo-branch-feature`.  Such a
+# name matches `*-branch-*`, but the directory holds session transcripts, not
+# a working tree.  $1 has the form PARENT/NAME, as `examine_directory` forms
+# it.
+is_claude_projects_dir() {
+  [ "${1##*/}" = projects ] && [ -f "${1%/*}/history.jsonl" ]
+}
+
 # Examines directory $1 and every directory below it.
 #
 # The entries that remain to be examined are held in the positional
@@ -641,18 +654,6 @@ check_directory() {
 # entries of one directory and so is quadratic in a large one -- seconds rather
 # than milliseconds for a directory of a few thousand entries, such as a
 # `node_modules` or a package cache anywhere below the current directory.
-# Returns 0 (true) if directory $1 is a Claude Code configuration directory,
-# such as `~/.claude` or the directory that `CLAUDE_CONFIG_DIR` names:  one
-# that holds a `projects` directory and a `history.jsonl` file.  Its
-# `projects` directory holds a directory for each directory that Claude Code
-# has run in, named for that directory's absolute path, such as
-# `-home-me-repo-branch-feature` for `/home/me/repo-branch-feature`.  Such a
-# name matches `*-branch-*`, but the directory holds session transcripts, not
-# a working tree.
-is_claude_config_dir() {
-  [ -d "$1/projects" ] && [ -f "$1/history.jsonl" ]
-}
-
 examine_directory() {
   set -- "$1"/* "$1"/.*
   while [ "$#" -gt 0 ]; do
@@ -666,8 +667,7 @@ examine_directory() {
     # no directory, so this test skips it as well.  A symbolic link is not
     # followed, which is what `find` does by default and which prevents an
     # endless descent through a link to an ancestor.
-    # A Claude Code configuration directory holds no branch directory.
-    if [ -d "$1" ] && [ ! -L "$1" ] && ! is_claude_config_dir "$1"; then
+    if [ -d "$1" ] && [ ! -L "$1" ]; then
       case "${1##*/}" in
         *-branch-*) check_directory "$1" ;;
       esac
@@ -677,8 +677,10 @@ examine_directory() {
       # branch directory unless it holds a version-control checkout, such as
       # one that `pip install -e git+URL#egg=NAME` makes in `.venv/src/`.  So
       # skip the entries of one that holds none, which can number in the
-      # thousands.
-      if ! is_build_output_name "${1##*/}" || ! holds_no_checkout "$1"; then
+      # thousands.  Also skip the entries of a Claude Code configuration
+      # directory's `projects` directory, which holds no branch directory.
+      if ! is_claude_projects_dir "$1" \
+        && { ! is_build_output_name "${1##*/}" || ! holds_no_checkout "$1"; }; then
         examine_directory "$1"
       fi
     fi
