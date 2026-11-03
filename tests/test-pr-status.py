@@ -675,85 +675,110 @@ class SectionGeneratorsTest(unittest.TestCase):
         self.assertIn("conflicting-push-commands", generators)
 
 
-class SetTitleTest(unittest.TestCase):
-    """Tests for set_title."""
+AS_OF = "<!-- BEGIN GENERATED: as-of -->\n<!-- END GENERATED: as-of -->\n"
+HEADER = "---\ntitle: src PR status\n---\n\n# src PR status\n\n" + AS_OF
 
-    def test_adds_front_matter_and_heading(self):
-        """A document without front matter or a heading gains both."""
-        self.assertEqual(
-            pr_status.set_title("Body.\n", "src PR status"),
-            "---\ntitle: src PR status\n---\n\n# src PR status\n\nBody.\n",
-        )
+
+class YamlStringTest(unittest.TestCase):
+    """Tests for yaml_string."""
+
+    def test_plain(self):
+        """Words separated by spaces are not quoted."""
+        self.assertEqual(pr_status.yaml_string("src PR status"), "src PR status")
+
+    def test_quotes_non_strings(self):
+        """A scalar that YAML would read as a boolean, null, or number is quoted."""
+        for s in ["true", "null", "123", "1.5", "yes"]:
+            self.assertEqual(pr_status.yaml_string(s), f'"{s}"')
+
+    def test_does_not_escape_astral_characters(self):
+        """A character outside the Basic Multilingual Plane is not escaped."""
+        self.assertEqual(pr_status.yaml_string("src-\U0001f600"), '"src-\U0001f600"')
+
+
+class SetHeaderTest(unittest.TestCase):
+    """Tests for set_header."""
+
+    def test_adds_header(self):
+        """A document without front matter, a heading, or an as-of section gains them."""
+        self.assertEqual(pr_status.set_header("Body.\n", "src PR status"), HEADER + "\nBody.\n")
 
     def test_replaces_heading(self):
         """A document's heading is replaced."""
         self.assertEqual(
-            pr_status.set_title("# PR dependencies\n\nBody.\n", "src PR status"),
-            "---\ntitle: src PR status\n---\n\n# src PR status\n\nBody.\n",
+            pr_status.set_header("# PR dependencies\n\nBody.\n", "src PR status"),
+            HEADER + "\nBody.\n",
         )
 
     def test_replaces_title_and_retains_other_entries(self):
         """The front matter's title is replaced, and its other entries are retained."""
         text = "---\nauthor: me\ntitle: old\n---\n\n# old\n\nBody.\n"
         self.assertEqual(
-            pr_status.set_title(text, "src PR status"),
-            "---\nauthor: me\ntitle: src PR status\n---\n\n# src PR status\n\nBody.\n",
+            pr_status.set_header(text, "src PR status"),
+            "---\nauthor: me\ntitle: src PR status\n---\n\n# src PR status\n\n"
+            + AS_OF
+            + "\nBody.\n",
+        )
+
+    def test_replaces_multi_line_title(self):
+        """The continuation lines of a multi-line title are replaced too."""
+        text = "---\ntitle: >\n  long\n  title\nauthor: me\n---\n\nBody.\n"
+        self.assertEqual(
+            pr_status.set_header(text, "src PR status"),
+            "---\ntitle: src PR status\nauthor: me\n---\n\n# src PR status\n\n"
+            + AS_OF
+            + "\nBody.\n",
         )
 
     def test_adds_title_to_front_matter(self):
         """Front matter without a title gains one."""
         self.assertEqual(
-            pr_status.set_title("---\nauthor: me\n---\nBody.\n", "src PR status"),
-            "---\ntitle: src PR status\nauthor: me\n---\n\n# src PR status\n\nBody.\n",
+            pr_status.set_header("---\nauthor: me\n---\nBody.\n", "src PR status"),
+            "---\ntitle: src PR status\nauthor: me\n---\n\n# src PR status\n\n"
+            + AS_OF
+            + "\nBody.\n",
         )
 
     def test_empty_front_matter(self):
         """Empty front matter gains a title."""
+        self.assertEqual(pr_status.set_header("---\n---\n", "src PR status"), HEADER)
+
+    def test_front_matter_ends_at_first_delimiter(self):
+        """A thematic break in the body does not end the front matter."""
+        text = "---\n---\n\n# Old\n\nText\n\n---\n\nMore\n"
         self.assertEqual(
-            pr_status.set_title("---\n---\n", "src PR status"),
-            "---\ntitle: src PR status\n---\n\n# src PR status\n",
+            pr_status.set_header(text, "src PR status"),
+            HEADER + "\nText\n\n---\n\nMore\n",
+        )
+
+    def test_retains_as_of_section(self):
+        """An existing as-of section is retained, even if it does not follow the heading."""
+        text = "# Old\n\nIntro.\n\n" + AS_OF
+        self.assertEqual(
+            pr_status.set_header(text, "src PR status"),
+            "---\ntitle: src PR status\n---\n\n# src PR status\n\nIntro.\n\n" + AS_OF,
         )
 
     def test_idempotent(self):
         """Setting the same title again changes nothing."""
-        text = pr_status.set_title("# PR dependencies\n\nBody.\n", "src PR status")
-        self.assertEqual(pr_status.set_title(text, "src PR status"), text)
+        text = pr_status.set_header("# PR dependencies\n\nBody.\n", "src PR status")
+        self.assertEqual(pr_status.set_header(text, "src PR status"), text)
 
     def test_quotes_title(self):
         """A title that YAML would misread unquoted is quoted."""
         self.assertEqual(
-            pr_status.set_title("", "a: #b PR status"),
-            '---\ntitle: "a: #b PR status"\n---\n\n# a: #b PR status\n',
-        )
-
-
-class AddAsOfSectionTest(unittest.TestCase):
-    """Tests for add_as_of_section."""
-
-    def test_after_front_matter_and_heading(self):
-        """The section follows the heading that follows the front matter."""
-        self.assertEqual(
-            pr_status.add_as_of_section("---\ntitle: t\n---\n\n# t\n\nBody.\n"),
-            "---\ntitle: t\n---\n\n# t\n\n"
-            "<!-- BEGIN GENERATED: as-of -->\n<!-- END GENERATED: as-of -->\n\nBody.\n",
+            pr_status.set_header("", "a: #b PR status"),
+            '---\ntitle: "a: #b PR status"\n---\n\n# a: #b PR status\n\n' + AS_OF,
         )
 
 
 class DefaultDependencyDocumentTest(unittest.TestCase):
-    """Tests for the title of a new dependency document."""
+    """Tests for the header of a new dependency document."""
 
-    def test_title(self):
-        """A new dependency document gets front matter and a heading, then the as-of section."""
-        text = pr_status.add_as_of_section(
-            pr_status.set_title(pr_status.default_dependency_document([]), "src PR status")
-        )
-        self.assertTrue(
-            text.startswith(
-                "---\ntitle: src PR status\n---\n\n# src PR status\n\n"
-                "<!-- BEGIN GENERATED: as-of -->\n"
-            ),
-            text,
-        )
+    def test_header(self):
+        """A new dependency document gets front matter, a heading, and an as-of section."""
+        text = pr_status.set_header(pr_status.default_dependency_document([]), "src PR status")
+        self.assertTrue(text.startswith(HEADER + "\nThe title and the generated"), text)
 
 
 class GenPushCommandsTest(unittest.TestCase):
