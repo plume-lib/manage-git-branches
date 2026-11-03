@@ -207,6 +207,23 @@ The commands are:
   to `crreview-resolve`.  Run it in a directory that holds the working copy
   directories, or pass that directory with `-C`.  This command needs `gh`
   and `crreview-resolve`.
+* [`fix-renovate-prs`](fix-renovate-prs) `[--dry-run] [-C DIR]`:
+  For each open pull request that Renovate opened and whose CI fails, in a
+  repository that a working copy directory is a clone of, runs
+  `rerun-failed-ci` and then, unless that reran a transient failure, runs
+  Claude Code (with every permission) in the directory of the pull
+  request's branch, which it makes with `git-checkout-branch` if no working
+  copy directory has that branch.  Claude either commits a fix, which this
+  command pushes to the pull request's branch, or explains why the CI
+  cannot pass, which this command posts as a comment on the pull request.
+  A pull request whose CI is running is skipped, as is one for which such a
+  comment was posted at its current head commit.  The last thing that this
+  command prints is the list of the pull requests that it acted on, which a
+  human should review, and of those that it could not handle.  With
+  `--dry-run`, it prints the failing pull requests and the directories but
+  changes nothing.  Run it in a directory that holds the working copy
+  directories, or pass that directory with `-C`.  This command needs `gh`,
+  `claude`, and Python 3.9 or later.
 * [`is-deleted-branch`](is-deleted-branch) `DIRECTORY`:
   Tests whether the given directory is the top level of a deleted branch.
   It is also true of a directory that holds nothing but leftovers, which a
@@ -344,6 +361,10 @@ takes effect when it is set to a non-empty value.
   run when it resolves merge conflicts.  An agent that runs longer is stopped,
   and the merge is left in progress.  The default is 1800 (30 minutes); 0
   means no limit.
+* `MANAGE_GIT_BRANCHES_RENOVATE_TIMEOUT`: the number of seconds that
+  `fix-renovate-prs` lets Claude Code run on one pull request.  A session
+  that runs longer is stopped, and nothing is pushed.  The default is 7200
+  (2 hours); 0 means no limit.
 * `PR_MERGE_ANALYSIS_CACHE`: the file in which `pr-merge-analysis` caches its
   results.  The default is `.pr-merge-analysis-cache.tsv` in the current
   directory.  Several repositories can share the cache file.
