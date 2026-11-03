@@ -19,6 +19,11 @@
 # of its files, and a directory in a working tree that git cannot use, such
 # as a linked worktree whose main working tree was moved.
 #
+# A Claude Code configuration directory, such as `~/.claude`, is not
+# examined.  It holds a directory for each directory that Claude Code has run
+# in, named for that directory's absolute path, so its names match
+# `*-branch-*`, but it holds no working tree.
+#
 # A directory that another live working tree depends on -- one that hosts a
 # linked worktree, or one that is a submodule of a superproject -- is never
 # listed, even when its own branch was deleted:  deleting it would damage a
@@ -636,6 +641,18 @@ check_directory() {
 # entries of one directory and so is quadratic in a large one -- seconds rather
 # than milliseconds for a directory of a few thousand entries, such as a
 # `node_modules` or a package cache anywhere below the current directory.
+# Returns 0 (true) if directory $1 is a Claude Code configuration directory,
+# such as `~/.claude` or the directory that `CLAUDE_CONFIG_DIR` names:  one
+# that holds a `projects` directory and a `history.jsonl` file.  Its
+# `projects` directory holds a directory for each directory that Claude Code
+# has run in, named for that directory's absolute path, such as
+# `-home-me-repo-branch-feature` for `/home/me/repo-branch-feature`.  Such a
+# name matches `*-branch-*`, but the directory holds session transcripts, not
+# a working tree.
+is_claude_config_dir() {
+  [ -d "$1/projects" ] && [ -f "$1/history.jsonl" ]
+}
+
 examine_directory() {
   set -- "$1"/* "$1"/.*
   while [ "$#" -gt 0 ]; do
@@ -649,7 +666,8 @@ examine_directory() {
     # no directory, so this test skips it as well.  A symbolic link is not
     # followed, which is what `find` does by default and which prevents an
     # endless descent through a link to an ancestor.
-    if [ -d "$1" ] && [ ! -L "$1" ]; then
+    # A Claude Code configuration directory holds no branch directory.
+    if [ -d "$1" ] && [ ! -L "$1" ] && ! is_claude_config_dir "$1"; then
       case "${1##*/}" in
         *-branch-*) check_directory "$1" ;;
       esac

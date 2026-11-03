@@ -157,6 +157,13 @@ touch "${work}/dot-project/p-branch-python-checkout/.venv/src/mylib/setup.py"
 mkdir -p "${work}/dot-project/p-plain-python/.venv/src/mylib-branch-fix/.git"
 touch "${work}/dot-project/p-plain-python/.venv/src/mylib-branch-fix/setup.py"
 
+# A Claude Code configuration directory, whose `projects` directory holds a
+# directory named for each directory that Claude Code has run in.  The walk
+# does not examine it.
+mkdir -p "${work}/dot-project/.claude/projects/-home-me-repo-branch-feature"
+touch "${work}/dot-project/.claude/history.jsonl" \
+  "${work}/dot-project/.claude/projects/-home-me-repo-branch-feature/a.jsonl"
+
 # A `*-branch-*` directory behind a symbolic link to a directory.  The walk
 # does not follow such a link, which is what keeps a link to an ancestor from
 # sending it around forever.
@@ -338,6 +345,11 @@ check_warned "p-branch-git-leftover" "warned"
 check_warned "p-repo/.git/refs/heads/r-branch-ref" "unwarned"
 check_warned "p-branch-bare.git" "unwarned"
 check_warned "p-branch-broken-worktree" "unwarned"
+if grep -q -F -- '-home-me-repo-branch-feature' "${work}/dot-project.stderr" \
+  || printf '%s\n' "${output}" | grep -q -F -- '-home-me-repo-branch-feature'; then
+  echo "FAIL: git-orphaned-branches examined a Claude Code configuration directory"
+  status=1
+fi
 if [ "${unlistable}" -eq 1 ]; then
   check_warned "p-branch-unlistable" "warned"
   # A directory that the user cannot enter is warned about as such.
