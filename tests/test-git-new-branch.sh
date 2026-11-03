@@ -1163,8 +1163,8 @@ esac
 # the source's name does not contain the source's pathname.  A symbolic link
 # to a FIFO does not make the scan block.  A file whose name says that its
 # contents are compressed is not examined; this one is not compressed, so
-# that examining it would name it.  Neither is an Emacs auto-save or backup
-# file.
+# that examining it would name it.  An Emacs auto-save or backup file is not
+# named.
 stale_parent="${tmpdir}/stale"
 mkdir -p "${stale_parent}" || exit 1
 stale_parent="$(CDPATH='' cd -- "${stale_parent}" && pwd -P)" || exit 1
@@ -1209,7 +1209,7 @@ for mode in '' --copy; do
   case "${out}" in
     *"sibling.txt"* | *"fifo"*) fail "${mode:-the default mode} named a file that does not refer to the source: ${out}" ;;
     *"library.jar"*) fail "${mode:-the default mode} examined a file whose name says that it is compressed: ${out}" ;;
-    *"notes.txt"*) fail "${mode:-the default mode} examined an Emacs auto-save or backup file: ${out}" ;;
+    *"notes.txt"*) fail "${mode:-the default mode} named an Emacs auto-save or backup file: ${out}" ;;
   esac
   case "${out}" in
     *"Or remove ${stale_parent}/stale-branch-${branch} with git-remove-branch-directory, and run \`git-new-branch --clean ${branch}\`"*) ;;
@@ -1225,17 +1225,19 @@ esac
 
 # A stale file (one that contains the source's pathname) is deleted from the
 # new directory rather than named if it is in a `build/` directory, Gradle's
-# `.gradle/` directory, Python's `__pycache__/` directory, or a cache directory (one that contains a
-# `CACHEDIR.TAG` file), at the top level or below it, that git ignores.  A
-# cache directory also qualifies if only its contents are ignored, as by the
-# `.gitignore` file that Ruff writes into `.ruff_cache/`.  These stale files
-# are named:  one outside those directories, in a directory whose
-# `CACHEDIR.TAG` file lacks the signature; one in a `build/` directory that
-# git does not ignore, whether or not git ignores the file; one in a cache
-# directory whose contents git does not ignore; and one in a `build/`
-# directory within an ignored directory.  A file in `build/` that does not contain the
-# source's pathname is kept.  A compiled Emacs Lisp file is deleted if git
-# ignores it and its source file is beside it.
+# `.gradle/` directory, Python's `__pycache__/` directory, or a cache
+# directory (one that contains a `CACHEDIR.TAG` file), at the top level or
+# below it, that git ignores.  A cache directory also qualifies if only its
+# contents are ignored, as by the `.gitignore` file that Ruff writes into
+# `.ruff_cache/`.  These stale files are named:  one outside those
+# directories, in a directory whose `CACHEDIR.TAG` file lacks the signature;
+# one in a `build/` directory that git does not ignore, whether or not git
+# ignores the file; one in a cache directory whose contents git does not
+# ignore; and one in a `build/` directory within an ignored directory.  A file
+# in `build/` that does not contain the source's pathname is kept.  A compiled
+# Emacs Lisp file is deleted if git ignores it and its source file is beside
+# it.  An Emacs backup file in `build/` is deleted like the directory's other
+# stale files.
 deleted="${stale_parent}/deleted-branch-main"
 make_repo "${deleted}" || exit 1
 printf 'build/\n!tools/build/\nlocal.properties\n.gradle/\nout/\nnode_modules/\ntarget/\n__pycache__/\n*.elc\n' \
@@ -1257,6 +1259,7 @@ printf '%s/src\n' "${deleted_top}" > "${deleted}/tools/build/deploy.conf"
 printf 'sdk.dir=%s/sdk\n' "${deleted_top}" > "${deleted}/tools/build/local.properties"
 printf '%s/src\n' "${deleted_top}" > "${deleted}/node_modules/addon/build/config.gypi"
 printf '%s/src\n' "${deleted_top}" > "${deleted}/build/classes/Main.class"
+printf '%s/src\n' "${deleted_top}" > "${deleted}/build/config.h~"
 ln -s "${deleted_top}/build" "${deleted}/build/current" || exit 1
 printf 'no pathname\n' > "${deleted}/build/unrelated.txt"
 printf 'history\000%s/src\000' "${deleted_top}" \
@@ -1287,8 +1290,8 @@ for mode in '' --copy; do
     fail "nonzero exit status for ${mode:-the default mode} with build output to delete: ${out}"
   fi
   case "${out}" in
-    *": 10 files in \`.gradle/\`, \`.ruff_cache/\`, \`__pycache__/\`, \`build/\`, \`lisp/\`, \`target/\`."*) ;;
-    *) fail "${mode:-the default mode} did not say that it deleted 10 files: ${out}" ;;
+    *": 11 files in \`.gradle/\`, \`.ruff_cache/\`, \`__pycache__/\`, \`build/\`, \`lisp/\`, \`target/\`."*) ;;
+    *) fail "${mode:-the default mode} did not say that it deleted 11 files: ${out}" ;;
   esac
   for deleted_file in out/cache/entry \
     tools/build/deploy.conf tools/build/local.properties \
@@ -1308,7 +1311,7 @@ for mode in '' --copy; do
     .gradle/buildOutputCleanup/outputFiles.bin sub/build/output.txt \
     sub/.gradle/8.14/executionHistory/executionHistory.bin \
     .ruff_cache/0.14.7/14439530856958427592 sub/target/debug/main.d \
-    py/__pycache__/mod.cpython-314.pyc lisp/mode.elc; do
+    py/__pycache__/mod.cpython-314.pyc lisp/mode.elc build/config.h~; do
     case "${out}" in
       *"  ${deleted_file}
 "*) fail "${mode:-the default mode} named ${deleted_file} rather than deleting it: ${out}" ;;
@@ -1346,28 +1349,43 @@ for mode in '' --copy; do
   fi
 done
 
-# A stale compiled Emacs Lisp file is named rather than deleted if its source
-# file is missing, or if git ignores its directory.
+# A stale compiled Emacs Lisp file is deleted if git ignores it and its source
+# file is beside it, at the top level as well as below it, and the top level
+# is named "./".  A stale compiled file in an ignored `build/` directory is
+# deleted with the directory's other stale files.  A stale compiled file is
+# named rather than deleted if its source file is missing, if git ignores its
+# directory, or if git does not ignore it.
 elc="${stale_parent}/elc-branch-main"
 make_repo "${elc}" || exit 1
-printf 'out/\n*.elc\n' > "${elc}/.gitignore"
+printf 'build/\nout/\n*.elc\n!lisp/unignored.elc\n' > "${elc}/.gitignore"
 git -C "${elc}" add .gitignore
 git -C "${elc}" commit -q -m 'Ignore build output'
 elc_top="$(git -C "${elc}" rev-parse --show-toplevel)"
-mkdir -p "${elc}/lisp" "${elc}/out" || exit 1
+mkdir -p "${elc}/lisp" "${elc}/out" "${elc}/build" || exit 1
+for elc_file in top build/built out/legacy lisp/unignored; do
+  printf '(provide (quote %s))\n' "${elc_file##*/}" > "${elc}/${elc_file}.el"
+  printf ';; %s/%s.el\n' "${elc_top}" "${elc_file}" > "${elc}/${elc_file}.elc"
+done
 printf ';; %s/lisp/gone.el\n' "${elc_top}" > "${elc}/lisp/gone.elc"
-printf '(provide (quote legacy))\n' > "${elc}/out/legacy.el"
-printf ';; %s/out/legacy.el\n' "${elc_top}" > "${elc}/out/legacy.elc"
-if ! out="$(cd "${elc}" && "${GIT_NEW_BRANCH}" elckept 2>&1)"; then
-  fail "nonzero exit status with compiled Emacs Lisp files to keep: ${out}"
+if ! out="$(cd "${elc}" && "${GIT_NEW_BRANCH}" --verbose elcbranch 2>&1)"; then
+  fail "nonzero exit status with compiled Emacs Lisp files: ${out}"
 fi
-for elc_file in lisp/gone.elc out/legacy.elc; do
+case "${out}" in
+  *": 2 files in \`./\`, \`build/\`."*) ;;
+  *) fail "did not say that it deleted 2 compiled Emacs Lisp files: ${out}" ;;
+esac
+for elc_file in top.elc build/built.elc; do
+  if [ -e "${stale_parent}/elc-branch-elcbranch/${elc_file}" ]; then
+    fail "did not delete ${elc_file}"
+  fi
+done
+for elc_file in lisp/gone.elc out/legacy.elc lisp/unignored.elc; do
   case "${out}" in
     *"  ${elc_file}
 "*) ;;
     *) fail "did not name ${elc_file}: ${out}" ;;
   esac
-  if [ ! -f "${stale_parent}/elc-branch-elckept/${elc_file}" ]; then
+  if [ ! -f "${stale_parent}/elc-branch-elcbranch/${elc_file}" ]; then
     fail "deleted ${elc_file}"
   fi
 done
