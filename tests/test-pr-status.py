@@ -730,6 +730,34 @@ class SetHeaderTest(unittest.TestCase):
             + "\nBody.\n",
         )
 
+    def test_replaces_multi_line_title_with_blank_line(self):
+        """A blank line within a multi-line title is replaced, but one after it is retained."""
+        text = "---\ntitle: >\n  long\n\n  title\n\nauthor: me\n---\n\nBody.\n"
+        self.assertEqual(
+            pr_status.set_header(text, "src PR status"),
+            "---\ntitle: src PR status\n\nauthor: me\n---\n\n# src PR status\n\n"
+            + AS_OF
+            + "\nBody.\n",
+        )
+
+    def test_replaces_title_with_other_key_spelling(self):
+        """A title whose key is quoted or followed by a space is replaced."""
+        for key in ["title :", '"title":', "'title' :"]:
+            text = f"---\n{key} old\nauthor: me\n---\n\nBody.\n"
+            self.assertEqual(
+                pr_status.set_header(text, "src PR status"),
+                "---\ntitle: src PR status\nauthor: me\n---\n\n# src PR status\n\n"
+                + AS_OF
+                + "\nBody.\n",
+            )
+
+    def test_replaces_tab_separated_heading(self):
+        """A heading whose "#" is followed by a tab is replaced."""
+        self.assertEqual(
+            pr_status.set_header("#\tPR dependencies\n\nBody.\n", "src PR status"),
+            HEADER + "\nBody.\n",
+        )
+
     def test_adds_title_to_front_matter(self):
         """Front matter without a title gains one."""
         self.assertEqual(

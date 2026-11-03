@@ -65,6 +65,8 @@ SNAPSHOT = ".pr-status-snapshot.json"
 # ends at its first "---" line.  Group 1 is the front matter's contents, such as
 # "title: src PR status\n", or "" if it is empty.
 FRONT_MATTER = re.compile(r"---\n((?:(?!---\n).*\n)*)---\n+")
+# The start of a top-level "title" entry of YAML front matter, whose key may be quoted.
+TITLE_KEY = re.compile(r"""(?:title|"title"|'title')[ \t]*:(?:[ \t]|$)""")
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -2547,8 +2549,8 @@ def set_header(text: str, title: str) -> str:
 
     The header is YAML front matter whose "title" entry is title, followed by a "# " heading
     of title, followed by an "as-of" generated section.  The title replaces the "title" entry
-    of the front matter, including the indented continuation lines of a multi-line value, and
-    the "# " heading that starts the text after the front matter.  Text that lacks any part
+    of the front matter, including the indented continuation lines (and blank lines among them)
+    of a multi-line value, and the "# " heading that starts the text after the front matter.  Text that lacks any part
     of the header gains it.  The rest of the front matter, and an existing "as-of" section
     wherever it is, are retained.
 
@@ -2564,15 +2566,21 @@ def set_header(text: str, title: str) -> str:
     entries = m[1].splitlines() if m else []
     body = text[m.end() :] if m else text.lstrip("\n")
     for i, entry in enumerate(entries):
-        if entry.startswith("title:"):
+        if TITLE_KEY.match(entry):
+            # The value continues through indented lines, and through blank lines that precede
+            # an indented line.
             end = i + 1
-            while end < len(entries) and entries[end][:1] in (" ", "\t"):
-                end += 1
+            for j in range(i + 1, len(entries)):
+                if not entries[j].strip():
+                    continue
+                if entries[j][:1] not in (" ", "\t"):
+                    break
+                end = j + 1
             entries[i:end] = [title_entry]
             break
     else:
         entries.insert(0, title_entry)
-    if body.startswith("# "):
+    if body.startswith(("# ", "#\t")):
         body = body.partition("\n")[2].lstrip("\n")
     if "<!-- BEGIN GENERATED: as-of -->" not in body:
         body = "\n".join(generated("as-of")) + "\n" + ("\n" + body if body else "")
