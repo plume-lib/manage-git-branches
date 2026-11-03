@@ -101,8 +101,10 @@
 # The last thing that this command prints is the list of pull requests that
 # it acted on, grouped by what it did.  Each line is a pull request's URL and
 # its directory.  For a pull request whose CI jobs were rerun, the directory
-# is the one that a later run of this command would use, and it is marked
-# "(not made yet)" if it does not exist yet.  This command also lists the
+# is the one that a later run of this command would use.  It is marked
+# "(not made yet)" if it does not exist yet, and "(exists, but does not push
+# to the pull request's branch)" if it exists but `git push` in it pushes
+# elsewhere, so that a later run would not use it.  This command also lists the
 # pull requests that it could not handle, each with an explanation that names
 # its directory if this command found or made one.
 #
@@ -517,6 +519,7 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   else
     branch_dir="${clone%%-branch-*}-branch-$(branch_dir_name "${head_branch}")"
   fi
+  branch_path="${base}/${branch_dir}"
 
   if [ "${dry_run}" = true ]; then
     if [ -n "${holder}" ]; then
@@ -538,12 +541,14 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     3)
       echo "${SCRIPT_NAME}: skipping ${url}, whose transient CI failures were rerun"
       if [ -n "${holder}" ]; then
-        reran="${reran}${url}  ${base}/${branch_dir}
-"
+        note=""
+      elif [ -e "${branch_path}" ] || [ -L "${branch_path}" ]; then
+        note=" (exists, but does not push to the pull request's branch)"
       else
-        reran="${reran}${url}  ${base}/${branch_dir} (not made yet)
-"
+        note=" (not made yet)"
       fi
+      reran="${reran}${url}  ${branch_path}${note}
+"
       continue
       ;;
     *) echo "${SCRIPT_NAME}: rerun-failed-ci failed for ${url}; continuing" >&2 ;;
@@ -553,7 +558,11 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   if ! checks="$(gh_query "cannot read the checks of ${url}" \
     gh pr view "${url}" --json statusCheckRollup \
     --jq "${check_state_def} (${ci_state_jq}), (${failed_checks_jq})")"; then
-    problem "${url}" "cannot read its checks"
+    if [ -n "${holder}" ]; then
+      problem "${url}" "cannot read its checks, so claude did not run in ${branch_path}"
+    else
+      problem "${url}" "cannot read its checks"
+    fi
     continue
   fi
   ci="$(printf '%s\n' "${checks}" | sed -n -e 1p)"
@@ -576,16 +585,15 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
 
   # Find or make the directory, and bring it to the pull request's head.
   if [ -z "${holder}" ]; then
-    if [ -e "${base}/${branch_dir}" ] || [ -L "${base}/${branch_dir}" ]; then
-      problem "${url}" "${base}/${branch_dir} exists but does not push to the pull request's branch"
+    if [ -e "${branch_path}" ] || [ -L "${branch_path}" ]; then
+      problem "${url}" "${branch_path} exists but does not push to the pull request's branch"
       continue
     fi
     if ! (cd -- "${base}/${clone}" && "${SCRIPT_DIR}/git-checkout-branch" --no-pull "${head_branch}") < /dev/null; then
-      problem "${url}" "git-checkout-branch --no-pull ${head_branch} failed in ${clone}"
+      problem "${url}" "git-checkout-branch --no-pull ${head_branch} failed in ${base}/${clone}"
       continue
     fi
   fi
-  branch_path="${base}/${branch_dir}"
   local_branch="$(current_branch "${branch_path}")"
   if [ -z "${local_branch}" ] || ! pr_repositories "${branch_path}" "${local_branch}" \
     || [ "$(printf '%s\n' "${pr_head_repo}" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s\n' "${slug}" | tr '[:upper:]' '[:lower:]')" ] \
@@ -715,7 +723,7 @@ ${new_files}"
       } > "${work}/comment.md"
       if ! gh_query "cannot comment on ${url}" \
         gh pr comment "${url}" --body-file "${work}/comment.md" > /dev/null; then
-        problem "${url}" "cannot post the explanation of claude, which ran in ${branch_path}:
+        problem "${url}" "cannot post the explanation that claude wrote in ${branch_path}:
 ${explanation}"
         continue
       fi
