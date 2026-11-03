@@ -165,7 +165,7 @@ The commands are:
   nodes in the dependency graph.
   Run it in a directory that holds the working copy directories, or pass
   that directory with `-C`.
-  This command needs Python 3.9 or later, and the programs that
+  This command needs Python 3.10 or later, and the programs that
   `pr-merge-analysis` needs.
 * [`pr-merge-analysis`](pr-merge-analysis)
   `[--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]`:
@@ -274,7 +274,7 @@ The commands are:
   pull request), and ones that are redundant because of a more recent build
   of the same branch.  Run it in a directory that holds the working copy
   directories.  Works for Azure Pipelines, CircleCI, and GitHub Actions.
-  This command needs Python 3.11 or later, `gh`, and `pr-status`.
+  This command needs Python 3.11 or later, `gh`, and `pr_status.py`.
 * [`rerun-failed-ci`](rerun-failed-ci)
   `[--dry-run] [--max-attempts N] [PR | BRANCH | URL]...`:
   For each transient failure of a CI job, reruns it.  Works on the given

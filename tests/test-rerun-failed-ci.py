@@ -7,8 +7,6 @@ that the script makes, serving canned responses and recording the reruns.
 from __future__ import annotations
 
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import json
 import subprocess
@@ -27,28 +25,11 @@ sys.path.insert(0, str(TOPLEVEL))
 
 import ci_build  # ruff: ignore[module-import-not-at-top-of-file]
 import request_util  # ruff: ignore[module-import-not-at-top-of-file]
+import rerun_failed_ci  # ruff: ignore[module-import-not-at-top-of-file]
 
 if TYPE_CHECKING:
-    import types
     from collections.abc import Mapping
 
-
-def load_script() -> types.ModuleType:
-    """Import rerun-failed-ci, whose name is not a legal module name.
-
-    Returns:
-        The imported module.
-    """
-    loader = importlib.machinery.SourceFileLoader("rerun_failed_ci", str(RERUN))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[loader.name] = module
-    loader.exec_module(module)
-    return module
-
-
-rerun_failed_ci = load_script()
 
 GRADLE_429 = (
     "   > Could not GET 'https://repo.maven.apache.org/x.pom'. Received status code 429"

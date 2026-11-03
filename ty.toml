@@ -1,0 +1,6 @@
+# Configuration file for ty, a Python type checker.
+# See https://docs.astral.sh/ty/reference/configuration/ for more information.
+
+[src]
+# The tests are not type-checked.
+exclude = ["tests"]

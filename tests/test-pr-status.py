@@ -1,7 +1,5 @@
 """Tests for the pr-status script that do not access GitHub or local repositories."""
 
-import importlib.machinery
-import importlib.util
 import sys
 import types
 import unittest
@@ -9,24 +7,9 @@ from pathlib import Path
 from unittest import mock
 
 TOPLEVEL = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(TOPLEVEL))
 
-
-def load_script() -> types.ModuleType:
-    """Import pr-status, whose name is not a legal module name.
-
-    Returns:
-        The imported module.
-    """
-    loader = importlib.machinery.SourceFileLoader("pr_status", str(TOPLEVEL / "pr-status"))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[loader.name] = module
-    loader.exec_module(module)
-    return module
-
-
-pr_status = load_script()
+import pr_status  # ruff: ignore[module-import-not-at-top-of-file]
 
 REPO = types.SimpleNamespace(gh="owner/repo", keywords=[])
 
@@ -217,39 +200,39 @@ class LandingLineTest(unittest.TestCase):
 
 
 class StatedPrerequisitesTest(unittest.TestCase):
-    """Tests for stated_prerequisites."""
+    """Tests for stated_relations."""
 
     repo = types.SimpleNamespace(gh="owner/repo", keywords=[])
 
     def test_land_with_is_partner(self):
         """A land-with PR is a partner, not a prerequisite."""
         self.assertEqual(
-            pr_status.stated_prerequisites("Land with #5.", self.repo),
+            pr_status.stated_relations("Land with #5.", self.repo),
             (set(), set(), set(), {5}, set()),
         )
 
     def test_after_with_before(self):
         """One sentence can name a prerequisite, a partner, and a dependent."""
         self.assertEqual(
-            pr_status.stated_prerequisites("Land it after #1, with #2, and before #3.", self.repo),
+            pr_status.stated_relations("Land it after #1, with #2, and before #3.", self.repo),
             ({1}, set(), {3}, {2}, set()),
         )
 
     def test_this_pr_as_object(self):
         """In "land after it", the named PRs land after this PR."""
         self.assertEqual(
-            pr_status.stated_prerequisites("To land after it: #1 and #2.", self.repo),
+            pr_status.stated_relations("To land after it: #1 and #2.", self.repo),
             (set(), set(), {1, 2}, set(), set()),
         )
         self.assertEqual(
-            pr_status.stated_prerequisites("To land before this PR: #3.", self.repo),
+            pr_status.stated_relations("To land before this PR: #3.", self.repo),
             ({3}, set(), set(), set(), set()),
         )
 
     def test_land_with_other_repository(self):
         """A land-with PR in another repository is an external partner."""
         self.assertEqual(
-            pr_status.stated_prerequisites("Land with other/repo#5.", self.repo),
+            pr_status.stated_relations("Land with other/repo#5.", self.repo),
             (set(), set(), set(), set(), {"other/repo#5"}),
         )
 
@@ -264,9 +247,9 @@ class StatedPrerequisitesTest(unittest.TestCase):
             "Do not land after #5.",
         ]:
             with self.subTest(body=body):
-                self.assertEqual(pr_status.stated_prerequisites(body, self.repo), none)
+                self.assertEqual(pr_status.stated_relations(body, self.repo), none)
         self.assertEqual(
-            pr_status.stated_prerequisites("It is not new, but it depends on #5.", self.repo),
+            pr_status.stated_relations("It is not new, but it depends on #5.", self.repo),
             ({5}, set(), set(), set(), set()),
         )
 
@@ -379,7 +362,7 @@ class ModelTest(unittest.TestCase):
             {1: "Land after #2.", 2: "Land after #3.", 3: "", 4: "Land after #3."}, set()
         )
         repo = model.repo
-        repo.review_threads, repo.ci_failed, repo.ci_passed = {}, set(), set()
+        repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set())
         repo.master_conflicts = {1: ["c.txt"], 3: ["c.txt"]}
         repo.pair_conflicts = {(1, 2): ["b.txt"], (1, 3): ["c.txt"], (2, 3): ["a.txt"]}
         repo.link = lambda n: f"#{n}"
@@ -523,9 +506,7 @@ class DependsOnTest(unittest.TestCase):
                 "node_prefix": "pr",
             }
         )
-        repo.review_threads = {}
-        repo.ci_failed = set(failed)
-        repo.ci_passed = set()
+        repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(failed), set())
         return repo
 
     def test_marks_failed_prerequisites(self):
@@ -591,8 +572,9 @@ class ApplyDescriptionUpdatesTest(unittest.TestCase):
             mock.patch.object(pr_status, "run", side_effect=error),
             mock.patch.object(pr_status, "refresh_description_facts") as refresh,
         ):
-            failures = pr_status.apply_description_updates([(model, 1, "new")], {})
-        self.assertEqual(failures, [(model, 1, error)])
+            update = pr_status.DescriptionUpdate(model, 1, "new")
+            failures = pr_status.apply_description_updates([update], {})
+        self.assertEqual(failures, [pr_status.FailedDescriptionUpdate(model, 1, error)])
         self.assertEqual(repo.prs[1]["body"], "old")
         refresh.assert_not_called()
 
@@ -648,16 +630,16 @@ class PushChainsTest(unittest.TestCase):
             levels=lambda: levels,
             cycle_affected=set(cycle_affected),
         )
-        upstream = {"master": ("git", "owner", "repo", "master")} if has_upstream else {}
+        upstream = {"master": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}
         # pr_directories receives the PR's data, so look up the PR's number by identity.
         ids = {id(repo.prs[n]): n for n in direct}
         with (
-            mock.patch.object(pr_status, "scan_directories", return_value=upstream),
+            mock.patch.object(pr_status, "git_entries", return_value=upstream),
             mock.patch.object(
                 pr_status, "pr_directories", lambda _r, pr, _base: [f"pr{ids[id(pr)]}"]
             ),
         ):
-            return pr_status.push_chains(model, "/base", conflicts_only)[0]
+            return pr_status.push_chains(model, "/base", conflicts_only).chains
 
     def test_single_pr_chain(self):
         """A PR with no prerequisite or dependent forms a chain with upstream."""
@@ -732,6 +714,70 @@ class GenPushCommandsTest(unittest.TestCase):
         self.assertEqual(
             self.generate(self.CHAIN, conflicts_only=False), ["```sh", *self.CHAIN, "```"]
         )
+
+
+class KeepTest(unittest.TestCase):
+    """Tests for keep and for the filter of an unblocked document."""
+
+    @staticmethod
+    def model(assignees):
+        """Return a model whose PR 1 has the given assignees.
+
+        Returns:
+            The model.
+        """
+        return types.SimpleNamespace(assignees=lambda _n: assignees)
+
+    def test_all(self):
+        """The filter "all" keeps every PR."""
+        self.assertTrue(pr_status.keep(self.model(["a"]), 1, "all"))
+
+    def test_unassigned(self):
+        """The filter "unassigned" keeps only unassigned PRs."""
+        self.assertTrue(pr_status.keep(self.model([]), 1, "unassigned"))
+        self.assertFalse(pr_status.keep(self.model(["a"]), 1, "unassigned"))
+
+    def test_unassigned_or(self):
+        """The filter "unassigned_or" also keeps PRs assigned to one of its logins."""
+        flt = {"unassigned_or": ["a"]}
+        self.assertTrue(pr_status.keep(self.model([]), 1, flt))
+        self.assertTrue(pr_status.keep(self.model(["a", "b"]), 1, flt))
+        self.assertFalse(pr_status.keep(self.model(["b"]), 1, flt))
+
+    def test_valid_filters(self):
+        """is_valid_filter accepts each form of filter."""
+        for flt in ["all", "unassigned", {"unassigned_or": []}, {"unassigned_or": ["a", "b"]}]:
+            with self.subTest(flt=flt):
+                self.assertTrue(pr_status.is_valid_filter(flt))
+
+    def test_invalid_filters(self):
+        """is_valid_filter rejects a misspelled or malformed filter."""
+        for flt in [
+            "unasigned",
+            None,
+            ["a"],
+            {},
+            {"unassigned-or": ["a"]},
+            {"unassigned_or": "a"},
+            {"unassigned_or": [1]},
+            {"unassigned_or": ["a"], "extra": 1},
+        ]:
+            with self.subTest(flt=flt):
+                self.assertFalse(pr_status.is_valid_filter(flt))
+
+    def test_unknown_filter(self):
+        """An unblocked document with an unknown filter is an error."""
+        doc = {"file": "unblocked.md", "title": "Unblocked", "filter": "unasigned"}
+        cfg = {"documents": {"dependencies": "pr-status.md", "unblocked": [doc]}}
+        with self.assertRaises(SystemExit) as cm:
+            pr_status.check_unblocked_filters(cfg, "pr-status")
+        self.assertIn('the filter of unblocked.md is "unasigned"', str(cm.exception))
+
+    def test_no_filter(self):
+        """An unblocked document with no filter is not an error."""
+        doc = {"file": "unblocked.md", "title": "Unblocked"}
+        cfg = {"documents": {"dependencies": "pr-status.md", "unblocked": [doc]}}
+        pr_status.check_unblocked_filters(cfg, "pr-status")
 
 
 if __name__ == "__main__":
