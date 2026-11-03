@@ -1217,10 +1217,10 @@ dir_list() {
 #    shown by a `CMakeCache.txt` or `config.status` file in them, each
 #    preceded by a newline.
 #
-# Whether a tool regenerates a file is not knowable, so it is judged by the
-# directory that contains the file.  A tool presumably regenerates the files
-# in a `build/` directory, in Gradle's `.gradle/` directory, and in a cache
-# directory, as `is_cache_dir` defines it, such as Ruff's `.ruff_cache/` or
+# Whether a tool regenerates a file is not knowable, so it is usually judged
+# by the directory that contains the file.  A tool presumably regenerates the
+# files in a `build/` directory, in Gradle's `.gradle/` directory, in Python's
+# `__pycache__/` directory, and in a cache directory, as `is_cache_dir` defines it, such as Ruff's `.ruff_cache/` or
 # Cargo's `target/`, whether at the top level, in a subproject, or in a
 # submodule, if git ignores that directory.  Some tools write into a cache
 # directory a `.gitignore` file that ignores the directory's contents but not
@@ -1232,7 +1232,12 @@ dir_list() {
 #    directory in `node_modules/`, because no build of the project
 #    regenerates the dependency's files; or
 #  * is a submodule, because the submodule's files are not in a `build/`,
-#    `.gradle/`, or cache directory of the submodule's own repository.
+#    `.gradle/`, `__pycache__/`, or cache directory of the submodule's own
+#    repository.
+# A compiled Emacs Lisp file, such as `foo.elc`, is also deleted if its source
+# file, such as `foo.el`, is beside it and git ignores the compiled file but
+# not its directory.  Emacs loads the source file in its place, and a build
+# that byte-compiles the source file regenerates it.
 delete_stale_build_output() {
   stale_kept=''
   stale_kept_count=0
@@ -1248,10 +1253,32 @@ delete_stale_build_output() {
 '
   set -f
   for stale_file in $1; do
-    # ${stale_dir} is the outermost `build/`, `.gradle/`, or cache directory
-    # that contains the file, or is empty if there is none, and
-    # ${stale_owner} is the directory that contains ${stale_dir}, or is empty
-    # for ${BRANCHDIR}, which git never ignores.
+    case "${stale_file}" in
+      *.elc)
+        stale_elc_dir="${BRANCHDIR}/${stale_file}"
+        stale_elc_dir="${stale_elc_dir%/*}"
+        if [ -f "${BRANCHDIR}/${stale_file%c}" ] \
+          && check_ignore "${stale_file}" \
+          && {
+            case "${stale_file}" in
+              */*)
+                check_ignore "${stale_file%/*}"
+                [ $? -eq 1 ]
+                ;;
+            esac
+          } \
+          && rm -f -- "${BRANCHDIR}/${stale_file}" 2> /dev/null; then
+          stale_count=$((stale_count + 1))
+          stale_names="${stale_names}${stale_elc_dir##*/}
+"
+          continue
+        fi
+        ;;
+    esac
+    # ${stale_dir} is the outermost `build/`, `.gradle/`, `__pycache__/`, or
+    # cache directory that contains the file, or is empty if there is none,
+    # and ${stale_owner} is the directory that contains ${stale_dir}, or is
+    # empty for ${BRANCHDIR}, which git never ignores.
     stale_dir=''
     stale_owner=''
     stale_rest="${stale_file}"
@@ -1264,7 +1291,7 @@ delete_stale_build_output() {
       stale_rest="${stale_rest#*/}"
       stale_candidate="${stale_owner:+${stale_owner}/}${stale_component}"
       case "${stale_component}" in
-        build | .gradle) stale_dir="${stale_candidate}" ;;
+        build | .gradle | __pycache__) stale_dir="${stale_candidate}" ;;
         *)
           if is_cache_dir "${BRANCHDIR}/${stale_candidate}"; then
             stale_dir="${stale_candidate}"
@@ -1385,9 +1412,12 @@ delete_or_warn_about_old_pathname() {
   # grep would follow it instead, and read the target, which might be a file in
   # ${TOPLEVEL}, a directory, or a FIFO that blocks grep.  The second pass
   # examines the contents of every other file, except one whose name says
-  # that its contents are compressed, such as an archive or an image:
-  # compressed contents do not hold the pathname as plain text, and such files
-  # are often the largest that the copy made.  xargs runs grep with its
+  # that its contents are compressed, such as an archive or an image, and an
+  # Emacs auto-save file, such as `#foo#`, or backup file, such as `foo~` or
+  # `foo.~1~`.  Compressed contents do not hold the pathname as plain text, and
+  # such files are often the largest that the copy made.  An auto-save or
+  # backup file is not build output, but a copy of a file that is being or was
+  # edited.  xargs runs grep with its
   # standard input from /dev/null or not at all, so if there is no file to
   # examine, grep does not wait for input.
   # shellcheck disable=SC2016 # The shells that xargs runs expand the scripts.
@@ -1421,6 +1451,7 @@ delete_or_warn_about_old_pathname() {
                 | *.jpg | *.lz | *.lzma | *.mkv | *.mov | *.mp3 | *.mp4 | *.png \
                 | *.rar | *.tbz2 | *.tgz | *.txz | *.war | *.webm | *.webp \
                 | *.whl | *.xz | *.zip | *.zst) ;;
+              \#*\# | */\#*\# | *~) ;;
               *) printf "%s\000" "${file}" ;;
             esac
           fi
