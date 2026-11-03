@@ -1404,17 +1404,50 @@ def title(model: Model, cfg: dict[str, Any], n: int) -> str:
     return cfg["repos"][model.repo.name].get("titles", {}).get(str(n), model.repo.prs[n]["title"])
 
 
-DIRECTORIES: dict[str, tuple[str, ...]] | None = None
+class LinkEntry(NamedTuple):
+    """An entry of the directory that holds the working copy directories that is a symbolic link.
+
+    Attributes:
+        target: the link's target, such as "daikon-branch-main".
+    """
+
+    target: str
 
 
-def scan_directories(base: str) -> dict[str, tuple[str, ...]]:
+class GitEntry(NamedTuple):
+    """An entry of the directory that holds the working copy directories that is a git clone.
+
+    Attributes:
+        owner: the lowercase owner of the clone's origin on GitHub, such as "plume-lib", or ""
+            if the origin is not on GitHub.
+        repo_name: the lowercase name of the clone's origin on GitHub, such as "daikon", or the
+            origin's URL if it is not on GitHub.
+        branch: the clone's current branch, such as "main", or "" if HEAD is detached.
+    """
+
+    owner: str
+    repo_name: str
+    branch: str
+
+
+class PlainEntry(NamedTuple):
+    """A plain directory in the directory that holds the working copy directories.
+
+    A plain directory is neither a symbolic link nor a git clone.
+    """
+
+
+# An entry of the directory that holds the working copy directories.
+DirectoryEntry = LinkEntry | GitEntry | PlainEntry
+
+DIRECTORIES: dict[str, DirectoryEntry] | None = None
+
+
+def scan_directories(base: str) -> dict[str, DirectoryEntry]:
     """Classify each entry of base, once.
 
-    Owner and repo are lowercase; branch is the current branch, or "" if HEAD is detached.
-
     Returns:
-        A map from each entry of base to ("link", target), ("git", owner, repo, branch),
-        or ("plain",).
+        A map from each entry of base to a LinkEntry, a GitEntry, or a PlainEntry.
     """
     global DIRECTORIES
     if DIRECTORIES is None:
@@ -1424,20 +1457,29 @@ def scan_directories(base: str) -> dict[str, tuple[str, ...]]:
             if d.startswith(".") or not (path.is_dir() or path.is_symlink()):
                 continue
             if path.is_symlink():
-                DIRECTORIES[d] = ("link", str(path.readlink()))
+                DIRECTORIES[d] = LinkEntry(str(path.readlink()))
                 continue
             try:
                 url = run(["git", "-C", str(path), "remote", "get-url", "origin"]).strip()
                 branch = run(["git", "-C", str(path), "branch", "--show-current"]).strip()
             except subprocess.CalledProcessError:
-                DIRECTORIES[d] = ("plain",)
+                DIRECTORIES[d] = PlainEntry()
                 continue
             m = re.search(r"github\.com[:/]+([^/]+)/(.+?)(?:\.git)?/?$", url)
             if m:
-                DIRECTORIES[d] = ("git", m[1].lower(), m[2].lower(), branch)
+                DIRECTORIES[d] = GitEntry(m[1].lower(), m[2].lower(), branch)
             else:
-                DIRECTORIES[d] = ("git", "", url, branch)
+                DIRECTORIES[d] = GitEntry("", url, branch)
     return DIRECTORIES
+
+
+def git_entries(base: str) -> dict[str, GitEntry]:
+    """Return the git clones among the entries of base.
+
+    Returns:
+        A map from each entry of base that is a git clone to its GitEntry.
+    """
+    return {d: info for d, info in scan_directories(base).items() if isinstance(info, GitEntry)}
 
 
 def pr_directories(repo: Repo, pr: dict[str, Any], base: str) -> list[str]:
@@ -1449,14 +1491,13 @@ def pr_directories(repo: Repo, pr: dict[str, Any], base: str) -> list[str]:
     """
     owner, name = repo.gh.lower().split("/")
     result = []
-    for d, info in scan_directories(base).items():
+    for d, info in git_entries(base).items():
         if (
-            info[0] == "git"
-            and info[2] == name
-            and info[3] == pr["headRefName"]
+            info.repo_name == name
+            and info.branch == pr["headRefName"]
             and (
-                info[1] == pr["owner"].lower()
-                or (info[1] == owner and info[3] != repo.default_branch)
+                info.owner == pr["owner"].lower()
+                or (info.owner == owner and info.branch != repo.default_branch)
             )
         ):
             result.append(d)
@@ -1551,9 +1592,7 @@ def fork_clone(base: str, owner: str, name: str) -> str | None:
         An entry of base whose origin is owner/name, or None.
     """
     clones = [
-        d
-        for d, info in scan_directories(base).items()
-        if info[0] == "git" and info[1:3] == (owner, name)
+        d for d, info in git_entries(base).items() if (info.owner, info.repo_name) == (owner, name)
     ]
     return clones[0] if clones else None
 
@@ -1569,28 +1608,30 @@ def rename_obstacle(models: list[Model], base: str, d: str, new: str, owner: str
         The reason, or None if d can be renamed.
     """
     path = pathlib.Path(base, d)
-    info = scan_directories(base)[d]
+    info = git_entries(base)[d]
     if any(pathlib.Path(m.repo.clone).resolve() == path.resolve() for m in models):
         return "it is the clone that pr-status analyzes"
     if new != d:
         if pathlib.Path(base, new).exists() or pathlib.Path(base, new).is_symlink():
             return f"{new} exists"
         for e, other in scan_directories(base).items():
-            if other[0] == "link" and pathlib.Path(base, other[1]).resolve() == path.resolve():
+            if (
+                isinstance(other, LinkEntry)
+                and pathlib.Path(base, other.target).resolve() == path.resolve()
+            ):
                 return f"{e} links to it"
-    if info[1] != owner:
+    if info.owner != owner:
+        origin = f"{info.owner}/{info.repo_name}"
         if not is_linked_worktree(path):
-            return f"its origin is {info[1]}/{info[2]}, and it is not a linked working tree"
-        if fork_clone(base, owner, info[2]) is None:
-            return (
-                f"its origin is {info[1]}/{info[2]}, and no entry is a clone of {owner}/{info[2]}"
-            )
+            return f"its origin is {origin}, and it is not a linked working tree"
+        if fork_clone(base, owner, info.repo_name) is None:
+            return f"its origin is {origin}, and no entry is a clone of {owner}/{info.repo_name}"
         if not succeeds(["git", "-C", str(path), "diff", "--cached", "--quiet"]):
-            return f"its origin is {info[1]}/{info[2]}, and it has staged changes"
+            return f"its origin is {origin}, and it has staged changes"
     return None
 
 
-def record_directory(base: str, d: str, new: str, info: tuple[str, ...]) -> None:
+def record_directory(base: str, d: str, new: str, info: DirectoryEntry) -> None:
     """Record in the result of scan_directories that entry d of base is now new, with info."""
     global DIRECTORIES
     entries = scan_directories(base)
@@ -1610,9 +1651,9 @@ def fix_directory(base: str, d: str, new: str, owner: str) -> str | None:
     Returns:
         None, or a problem that prevented completing the fix.
     """
-    info = scan_directories(base)[d]
+    info = git_entries(base)[d]
     path, new_path = pathlib.Path(base, d), pathlib.Path(base, new)
-    if info[1] == owner:
+    if info.owner == owner:
         if is_linked_worktree(path):
             run(["git", "-C", str(path), "worktree", "move", str(path), str(new_path)])
         else:
@@ -1622,9 +1663,9 @@ def fix_directory(base: str, d: str, new: str, owner: str) -> str | None:
                 run(["git", "-C", str(new_path), "worktree", "repair"])
         record_directory(base, d, new, info)
         return None
-    branch = info[3]
+    branch = info.branch
     old = ["git", "-C", str(path)]
-    clone = fork_clone(base, owner, info[2])
+    clone = fork_clone(base, owner, info.repo_name)
     assert clone is not None, "rename_obstacle checks that there is a clone"
     fork = ["git", "-C", str(pathlib.Path(base, clone))]
     head = run([*old, "rev-parse", "HEAD"])
@@ -1648,7 +1689,7 @@ def fix_directory(base: str, d: str, new: str, owner: str) -> str | None:
             if entry.name != ".git":
                 entry.rename(new_path / entry.name)
         run([*new_git, "reset", "--quiet"])
-        record_directory(base, d, new, ("git", owner, info[2], branch))
+        record_directory(base, d, new, GitEntry(owner, info.repo_name, branch))
         if (
             run([*new_git, "rev-parse", "HEAD"]) != head
             or run([*new_git, "status", "--porcelain"]) != status
@@ -1688,8 +1729,8 @@ def directory_problems(
         """Fix entry d of base, the working copy of ref; report problem if that fails."""
         obstacle = rename_obstacle(models, base, d, new, owner)
         if obstacle is None:
-            info = scan_directories(base)[d]
-            clone = fork_clone(base, owner, info[2]) if info[1] != owner else None
+            info = git_entries(base)[d]
+            clone = fork_clone(base, owner, info.repo_name) if info.owner != owner else None
             try:
                 obstacle = fix_directory(base, d, new, owner)
             except subprocess.CalledProcessError as error:
@@ -1725,24 +1766,24 @@ def directory_problems(
             )
             continue
         problems += [f"{d}: the working copy of {ref} should be named {new}" for ref, new, _ in prs]
-    for d, info in list(scan_directories(base).items()):
-        r = by_repo.get(info[2]) if info[0] == "git" else None
-        if r is None or info[1] != r.owner.lower() or info[3] in (r.default_branch, ""):
+    for d, info in git_entries(base).items():
+        r = by_repo.get(info.repo_name)
+        if r is None or info.owner != r.owner.lower() or info.branch in (r.default_branch, ""):
             continue
-        prs = prs_with_head(r, info[3])
-        if any(head_owner(p) == info[1] for p in prs):
+        prs = prs_with_head(r, info.branch)
+        if any(head_owner(p) == info.owner for p in prs):
             continue
         prs = sorted((p for p in prs if head_owner(p)), key=operator.itemgetter("number"))
         lines = [
-            f"{d}: its origin is {r.gh}, but the branch {info[3]} of the {pr_state(p)} "
-            f"{r.ref(p['number'])} is in {head_owner(p)}/{info[2]}"
+            f"{d}: its origin is {r.gh}, but the branch {info.branch} of the {pr_state(p)} "
+            f"{r.ref(p['number'])} is in {head_owner(p)}/{info.repo_name}"
             for p in prs
         ]
         owners = {head_owner(p) for p in prs}
         # A misnamed directory has already been fixed, or reported, above.
         if fix and len(owners) == 1 and d not in wanted:
             (owner,) = owners
-            new = f"{r.dir_name}-fork-{owner}-branch-{info[3].replace('/', '-')}"
+            new = f"{r.dir_name}-fork-{owner}-branch-{info.branch.replace('/', '-')}"
             ref = r.refs(p["number"] for p in prs)
             fix_or_report(d, ref, new, owner, "; ".join(lines))
             continue
@@ -2267,26 +2308,28 @@ def gen_directories(models: list[Model], cfg: dict[str, Any], base: str) -> list
     for d, info in dirs_info.items():
         if d in working or d in covered:
             continue
-        if info[0] == "link":
-            groups[f"a symbolic link to `{info[1]}`", "none"].append(d)
-        elif info[0] == "plain":
+        if isinstance(info, LinkEntry):
+            groups[f"a symbolic link to `{info.target}`", "none"].append(d)
+        elif isinstance(info, PlainEntry):
             groups["not a git repository", "none"].append(d)
-        elif info[2] not in by_repo:
-            where = f"{info[1]}/{info[2]}" if info[1] else info[2]
+        elif info.repo_name not in by_repo:
+            where = f"{info.owner}/{info.repo_name}" if info.owner else info.repo_name
             groups[
-                f"`{where}`, branch `{info[3]}`" if info[3] else f"`{where}`", "another repository"
+                f"`{where}`, branch `{info.branch}`" if info.branch else f"`{where}`",
+                "another repository",
             ].append(d)
         else:
-            m = by_repo[info[2]]
+            m = by_repo[info.repo_name]
             r = m.repo
-            if info[3] in (r.default_branch, ""):
+            if info.branch in (r.default_branch, ""):
                 branch = f"`{r.default_branch}`"
-                state = f"upstream {branch}" if info[1] == r.owner.lower() else f"a fork's {branch}"
+                is_upstream = info.owner == r.owner.lower()
+                state = f"upstream {branch}" if is_upstream else f"a fork's {branch}"
                 groups[state, "none"].append(d)
                 continue
-            prs = prs_with_head(r, info[3])
-            found = [p for p in prs if head_owner(p) in (info[1], r.owner.lower())]
-            if not found and info[1] == r.owner.lower():
+            prs = prs_with_head(r, info.branch)
+            found = [p for p in prs if head_owner(p) in (info.owner, r.owner.lower())]
+            if not found and info.owner == r.owner.lower():
                 # A clone of the upstream repository that holds a fork's branch, which
                 # directory_problems reports.
                 found = [p for p in prs if head_owner(p)]
@@ -2420,9 +2463,7 @@ def push_chains(
     r = model.repo
     owner, name = r.gh.lower().split("/")
     upstream = [
-        d
-        for d, info in scan_directories(base).items()
-        if info[0] == "git" and info[1:] == (owner, name, r.default_branch)
+        d for d, info in git_entries(base).items() if info == (owner, name, r.default_branch)
     ][:1]
     dirs = {n: pr_directories(r, r.prs[n], base) for n in model.open}
     missing = sorted(n for n in model.open if not dirs[n])
@@ -2647,20 +2688,20 @@ def default_config(base: str) -> dict[str, Any]:
     Raises:
         ConfigError: if base contains no clone of a GitHub repository that gh can view.
     """
-    clones = [
-        (d, info) for d, info in scan_directories(base).items() if info[0] == "git" and info[1]
-    ]
+    # The clones of repositories on GitHub.
+    clones = {d: info for d, info in git_entries(base).items() if info.owner}
     if not clones:
         msg = f"no {CONFIG} and no clone of a GitHub repository in {base}"
         raise ConfigError(msg)
-    counts = Counter(info[2] for _, info in clones).most_common()
+    counts = Counter(info.repo_name for info in clones.values()).most_common()
     names = [name for name, count in counts if count >= 2] or [counts[0][0]]
     fields = ["--json", "nameWithOwner,parent,defaultBranchRef"]
     repos = {}
     for name in names:
-        name_clones = [(d, info) for d, info in clones if info[2] == name]
+        name_clones = {d: info for d, info in clones.items() if info.repo_name == name}
+        first_owner = next(iter(name_clones.values())).owner
         try:
-            j = json.loads(run(["gh", "repo", "view", f"{name_clones[0][1][1]}/{name}", *fields]))
+            j = json.loads(run(["gh", "repo", "view", f"{first_owner}/{name}", *fields]))
             parent = j["parent"]
             # A renamed fork, such as of a large project, is a project of its own.
             if parent and parent["name"].lower() == name:
@@ -2687,9 +2728,14 @@ def default_config(base: str) -> dict[str, Any]:
         default_branch = j["defaultBranchRef"]["name"]
         owner = gh.split("/")[0].lower()
         # Prefer a clone of the upstream default branch, which has no branch of its own to disturb.
-        clone = min(name_clones, key=lambda c: (c[1][1] != owner, c[1][3] != default_branch, c[0]))[
-            0
-        ]
+        clone = min(
+            name_clones,
+            key=lambda d: (
+                name_clones[d].owner != owner,
+                name_clones[d].branch != default_branch,
+                d,
+            ),
+        )
         repo_name = gh.split("/")[1]
         repos[repo_name] = {
             "name": repo_name,

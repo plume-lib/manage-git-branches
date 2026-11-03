@@ -631,7 +631,7 @@ class PushChainsTest(unittest.TestCase):
             levels=lambda: levels,
             cycle_affected=set(cycle_affected),
         )
-        upstream = {"master": ("git", "owner", "repo", "master")} if has_upstream else {}
+        upstream = {"master": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}
         # pr_directories receives the PR's data, so look up the PR's number by identity.
         ids = {id(repo.prs[n]): n for n in direct}
         with (
