@@ -19,7 +19,10 @@
 #
 # For each working copy directory, `gh pr view` finds the pull request for the
 # directory's branch.  A directory is skipped if its branch has no pull
-# request, or if the pull request is closed or landed.  If several
+# request, if its clone has no GitHub remote, if the pull request is closed or
+# landed, or if someone else opened the pull request.  Addressing the comments
+# on another person's pull request is that person's job, and the push would
+# usually be refused, after the AI agent session had run.  If several
 # directories hold the same pull request, `crreview-resolve` runs only in the
 # first of them, in alphabetical order, so that it does not address the same
 # comments twice.
@@ -40,13 +43,59 @@
 
 SCRIPT_NAME="$(basename -- "$0")"
 
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
+
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+
 usage() {
   echo "Usage: ${SCRIPT_NAME} [--dry-run] [--agent claude|codex] [-C DIR]"
 }
 
 dry_run=false
 agent=""
-base="."
+agent_given=false
+base_arg="."
 while [ "$#" -ne 0 ]; do
   case "$1" in
     -h | --help)
@@ -62,11 +111,17 @@ while [ "$#" -ne 0 ]; do
         usage >&2
         exit 2
       fi
-      if [ "$1" = -C ]; then base="$2"; else agent="$2"; fi
+      if [ "$1" = -C ]; then
+        base_arg="$2"
+      else
+        agent="$2"
+        agent_given=true
+      fi
       shift 2
       ;;
     --agent=*)
       agent="${1#--agent=}"
+      agent_given=true
       shift
       ;;
     *)
@@ -75,15 +130,17 @@ while [ "$#" -ne 0 ]; do
       ;;
   esac
 done
-case "${agent}" in
-  "" | claude | codex) ;;
-  *)
-    usage >&2
-    exit 2
-    ;;
-esac
-if ! base="$(CDPATH='' cd -- "${base}" && pwd -P)"; then
-  echo "${SCRIPT_NAME}: cannot change to directory ${base}" >&2
+if [ "${agent_given}" = true ]; then
+  case "${agent}" in
+    claude | codex) ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+fi
+if ! base="$(physical_path "${base_arg}")"; then
+  echo "${SCRIPT_NAME}: cannot change to directory ${base_arg}" >&2
   exit 2
 fi
 if [ "${dry_run}" = false ] && ! command -v crreview-resolve > /dev/null; then
@@ -91,10 +148,25 @@ if [ "${dry_run}" = false ] && ! command -v crreview-resolve > /dev/null; then
     "get it from https://github.com/mernst/mdedots/blob/main/share/crreview-resolve" >&2
   exit 1
 fi
-if [ -n "${agent}" ]; then
+if [ "${agent_given}" = true ]; then
   set -- --agent "${agent}"
 else
   set --
+fi
+
+if ! work="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" || [ -z "${work}" ]; then
+  echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
+  exit 1
+fi
+trap 'rm -rf "${work}"' EXIT
+trap 'rm -rf "${work}"; trap - INT; kill -s INT "$$"' INT
+trap 'rm -rf "${work}"; trap - TERM; kill -s TERM "$$"' TERM
+
+# The GitHub login of the user, such as "octocat".
+if ! me="$(with_timeout "${github_query_seconds}" gh api user --jq .login < /dev/null)" \
+  || [ -z "${me}" ]; then
+  echo "${SCRIPT_NAME}: cannot determine your GitHub login" >&2
+  exit 1
 fi
 
 status=0
@@ -109,22 +181,38 @@ for path in "${base}"/*; do
   # symbolic link or is not the top level of a working tree.  git fails if
   # ${path} is not a directory, as when the pattern matches no entry.
   toplevel="$(git -C "${path}" rev-parse --show-toplevel 2> /dev/null)" || continue
-  if [ "$(CDPATH='' cd -- "${toplevel}" && pwd -P)" != "${path}" ]; then continue; fi
-  git -C "${path}" symbolic-ref --quiet HEAD > /dev/null || continue
+  if [ "$(physical_path "${toplevel}")" != "${path}" ]; then continue; fi
+  current_branch "${path}" > /dev/null || continue
   # `gh pr view` finds the pull request of the current directory's branch.
-  if ! pr="$(cd -- "${path}" && gh pr view --json state,url --jq '"\(.state) \(.url)"' 2>&1)"; then
-    case "${pr}" in
-      *"no pull requests found"*) ;;
+  # Its error output goes to a file, so that a warning that it prints when it
+  # succeeds is not mistaken for the pull request.
+  if ! pr="$(cd -- "${path}" \
+    && with_timeout "${github_query_seconds}" gh pr view --json state,author,url \
+      --jq '"\(.state) \(.author.login) \(.url)"' < /dev/null 2> "${work}/gh-errors")"; then
+    gh_errors="$(cat "${work}/gh-errors")"
+    case "${gh_errors}" in
+      *"no pull requests found"* | *"no git remotes found"* | *"point to a known GitHub host"*) ;;
       *)
-        printf '%s: cannot find the pull request of %s:\n%s\n' "${SCRIPT_NAME}" "${dir}" "${pr}" >&2
+        if [ -z "${gh_errors}" ]; then
+          gh_errors="gh failed without a message, perhaps after timing out after ${github_query_seconds} seconds"
+        fi
+        printf '%s: cannot find the pull request of %s:\n%s\n' "${SCRIPT_NAME}" "${dir}" "${gh_errors}" >&2
         status=1
         ;;
     esac
     continue
   fi
   state="${pr%% *}"
+  pr="${pr#* }"
+  author="${pr%% *}"
   url="${pr#* }"
+  # `crreview-resolve` refuses a pull request that is not open, so skip it
+  # here rather than report a failure.
   if [ "${state}" != OPEN ]; then continue; fi
+  if [ "${author}" != "${me}" ]; then
+    echo "${SCRIPT_NAME}: skipping ${dir}, whose pull request ${url} is by ${author}"
+    continue
+  fi
   earlier="$(printf '%s' "${seen}" | awk -v url="${url}" '$1 == url { print substr($0, length(url) + 2); exit }')"
   if [ -n "${earlier}" ]; then
     echo "${SCRIPT_NAME}: skipping ${dir}, whose pull request ${url} is also in ${earlier}"
