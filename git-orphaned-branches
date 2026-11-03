@@ -7,7 +7,11 @@
 # because a pull request has been merged).
 # A directory whose branch still exists in the remote, but whose GitHub pull
 # requests are all closed or merged, is not listed; instead, a warning about
-# it is printed on standard error.  (This needs the `gh` command.)
+# it is printed on standard error.  (This needs the `gh` command.)  If one of
+# the pull requests was merged, the directory has no uncommitted changes to
+# tracked files, and its HEAD is the commit that the remote branch names, the
+# warning also gives the commands that delete the remote branch and then
+# remove the directory.
 # Also lists directories that hold nothing but leftovers, such as Eclipse
 # `.project` files and Python `.venv` directories, which is what a branch
 # directory leaves behind when its working tree is gone; `is-deleted-branch`
@@ -273,22 +277,32 @@ live_superproject() {
 # known about the pull requests; the scan's other answers do not depend on
 # GitHub.  Nor is a directory whose pathname contains a newline, which
 # ${pr_candidates} cannot represent.
+#
+# Call this just after `is_deleted_branch` has returned 1 for $1, because it
+# reads ${is_deleted_branch_heads}.
 note_pr_candidate() {
   prs_branch="$(current_branch "$1")" || return 0
   pr_repositories "$1" "${prs_branch}" || return 0
+  # Each line of the listing is "SHA<TAB>refname".
+  prs_commit="$(printf '%s\n' "${is_deleted_branch_heads}" \
+    | awk -F '\t' -v ref="refs/heads/${pr_head_branch}" '$2 == ref { print $1; exit }')"
   prs_dir="$(absolute_path "$1")" || prs_dir="$1"
   case "${prs_dir}" in
     *'
 '*) return 0 ;;
   esac
-  pr_candidates="${pr_candidates}${pr_base_repo}	${pr_head_repo}	${pr_head_branch}	${prs_dir}
+  pr_candidates="${pr_candidates}${pr_base_repo}	${pr_head_repo}	${pr_head_remote}	${pr_head_branch}	${prs_commit}	${prs_dir}
 "
 }
 
 # The directories that `note_pr_candidate` has recorded, one per line, each
-# line "BASE<TAB>HEAD<TAB>BRANCH<TAB>DIRECTORY", where BRANCH is the branch in
-# the remote, which is the head of the pull requests.  A branch name contains no
-# control character, and neither does the name of a GitHub repository.
+# line "BASE<TAB>HEAD<TAB>REMOTE<TAB>BRANCH<TAB>COMMIT<TAB>DIRECTORY", where
+# REMOTE is the name of the directory's remote for HEAD, such as "origin";
+# BRANCH is the branch in the remote, which is the head of the pull requests;
+# and COMMIT is the commit, such as "3f2a9c...", that BRANCH named in the
+# remote when the scan asked, or empty if the remote's answer did not say.  A
+# remote's name and a branch name contain no control character, and neither
+# does the name of a GitHub repository.
 pr_candidates=''
 
 # Warns, on standard error, about each directory that `note_pr_candidate`
@@ -296,7 +310,11 @@ pr_candidates=''
 # merged.  Such a directory is very likely obsolete, but it is not reported:
 # the branch is still in the remote, so its removal is a decision for the
 # user, who may want to reopen the pull request or to delete the remote branch
-# first.
+# first.  If one of the pull requests was merged, the warning gives the
+# commands that do both, when `removal_commands` prints them.  A pull request
+# that was closed without landing leaves its work in no other ref, so
+# `git-remove-branch-directory` would refuse to remove the directory after the
+# first command had deleted the remote branch.
 #
 # One GraphQL query asks about up to 50 branches of one base repository, so
 # that a scan of many branch directories costs a few round trips rather than
@@ -378,15 +396,26 @@ warn_about_closed_prs_in() {
     fi
     wacpi_numbers="$(printf '%s\n' "${wacpi_states}" | sed -e 's/^\([A-Z]*\) \(.*\)/#\2 (\1)/' \
       | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')"
-    echo "${SCRIPT_NAME}: warning: not listing ${wacpi_dir}:  every pull request for branch ${wacpi_branch} of ${wacpi_head_repo} is closed or merged (${wacpi_base} ${wacpi_numbers% }), but the branch still exists in the remote" >&2
+    wacpi_warning="${SCRIPT_NAME}: warning: not listing ${wacpi_dir}:  every pull request for branch ${wacpi_branch} of ${wacpi_head_repo} is closed or merged (${wacpi_base} ${wacpi_numbers% }), but the branch still exists in the remote"
+    wacpi_commands=''
+    if printf '%s\n' "${wacpi_states}" | grep -q '^MERGED '; then
+      wacpi_commands="$(removal_commands "${wacpi_dir}" "${wacpi_remote}" \
+        "${wacpi_branch}" "${wacpi_commit}" < /dev/null)"
+    fi
+    if [ -n "${wacpi_commands}" ]; then
+      printf '%s; to delete the remote branch and then the directory, run the following (the second command refuses if the directory would then hold the only copy of some work):\n%s\n' \
+        "${wacpi_warning}" "${wacpi_commands}" >&2
+    else
+      printf '%s\n' "${wacpi_warning}" >&2
+    fi
   done
 }
 
 # Usage: next_pr_candidate
 # A helper for `warn_about_closed_prs_in`:  removes the first line from
 # ${wacpi_rest}, which holds lines of ${pr_candidates}, each followed by a
-# newline, and sets ${wacpi_head_repo}, ${wacpi_branch}, and ${wacpi_dir} to
-# its fields.
+# newline, and sets ${wacpi_head_repo}, ${wacpi_remote}, ${wacpi_branch},
+# ${wacpi_commit}, and ${wacpi_dir} to its fields.
 next_pr_candidate() {
   npc_line="${wacpi_rest%%
 *}"
@@ -395,8 +424,86 @@ next_pr_candidate() {
   npc_line="${npc_line#*	}"
   wacpi_head_repo="${npc_line%%	*}"
   npc_line="${npc_line#*	}"
+  wacpi_remote="${npc_line%%	*}"
+  npc_line="${npc_line#*	}"
   wacpi_branch="${npc_line%%	*}"
+  npc_line="${npc_line#*	}"
+  wacpi_commit="${npc_line%%	*}"
   wacpi_dir="${npc_line#*	}"
+}
+
+# Usage: removal_commands DIRECTORY REMOTE BRANCH COMMIT
+# Prints the commands that delete the branch BRANCH from a remote REMOTE, such
+# as "origin", of the working tree DIRECTORY, and then remove DIRECTORY, one
+# per line and each indented by two spaces.  COMMIT is the commit, such as
+# "3f2a9c...", that BRANCH named in the remote when the scan asked, or the
+# empty string if that is unknown.  Prints nothing unless DIRECTORY has no
+# uncommitted change to a tracked file and its HEAD is COMMIT.
+#
+# Prints nothing, either, for a directory that `git-remove-branch-directory`,
+# which the second command runs, refuses to remove whatever flags it is
+# given:  one that hosts a linked worktree, one that is a submodule's working
+# tree, and one that is a locked linked worktree.  That refusal would come
+# after the first command had deleted the remote branch.  The scan reports a
+# directory whose branch was deleted, and that hosts a linked worktree or is a
+# submodule's working tree, with the same tests.
+#
+# Untracked files do not count, just as for `git-remove-branch-directory`.
+# HEAD must be the remote branch's commit, not
+# merely its ancestor:  a remote branch that is ahead of HEAD holds commits
+# that the first command would delete from the remote, and that
+# `git-remove-branch-directory`, which examines only local refs, would not
+# protect.
+#
+# The remote branch is deleted first, which deletes its remote-tracking ref
+# too, so that `git-remove-branch-directory` then refuses if no other ref
+# holds the directory's commits.  In the other order, that remote-tracking
+# ref would hold them, and the work of a pull request that was closed without
+# landing would be lost without a word.
+#
+# The first command holds a lease on COMMIT, so that git refuses the deletion
+# unless the branch still names COMMIT where the push goes.  Otherwise the
+# deletion would lose commits that were pushed to the branch after the scan
+# asked, and commits of a branch at a push URL (`remote.<name>.pushurl`) that
+# differs from the URL that the scan asked.
+removal_commands() {
+  [ -n "$4" ] || return 0
+  rc_head="$(git -C "$1" rev-parse --verify --quiet HEAD)" || return 0
+  [ "${rc_head}" = "$4" ] || return 0
+  rc_changes="$(git -C "$1" status --porcelain --untracked-files=no 2> /dev/null)" \
+    || return 0
+  [ -z "${rc_changes}" ] || return 0
+  [ -z "$(live_dependent_worktree "$1")" ] || return 0
+  [ -z "$(live_superproject "$1")" ] || return 0
+  # `git worktree lock` writes `locked` in the worktree's administrative
+  # directory, which is its git directory.  A clone's git directory has none.
+  rc_git_dir="$(git -C "$1" rev-parse --git-dir 2> /dev/null)" || return 0
+  case "${rc_git_dir}" in
+    /*) ;;
+    *) rc_git_dir="$1/${rc_git_dir}" ;;
+  esac
+  [ ! -e "${rc_git_dir}/locked" ] || return 0
+  rc_dir="$(shell_quote "$1")"
+  # The full name of the branch, because a short name that is also the name
+  # of a tag would be ambiguous.
+  printf '  git -C %s push %s %s --delete %s\n' "${rc_dir}" \
+    "$(shell_quote "--force-with-lease=refs/heads/$3:${rc_head}")" \
+    "$(shell_quote "$2")" "$(shell_quote "refs/heads/$3")"
+  printf '  git-remove-branch-directory %s\n' "${rc_dir}"
+}
+
+# Usage: shell_quote STRING
+# Prints STRING as one word of shell syntax:  unchanged if it consists of
+# characters to which the shell gives no special meaning, such as
+# "/home/me/proj-branch-x", and in single quotes otherwise, such as
+# "'/home/me/my proj'" for "/home/me/my proj".  STRING contains no newline.
+shell_quote() {
+  case "$1" in
+    '' | *[!A-Za-z0-9_./:@%+=,-]*)
+      printf "'%s'\n" "$(printf '%s' "$1" | sed -e "s/'/'\\\\''/g")"
+      ;;
+    *) printf '%s\n' "$1" ;;
+  esac
 }
 
 # Usage: rest_pr_states BASE HEAD BRANCH

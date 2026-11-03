@@ -3769,11 +3769,19 @@ is_leftover_tree() {
 ## `safe.directory` does not allow; or if git cannot enter DIRECTORY.  The
 ## variable lets a caller explain status 2 without asking git again.
 ##
+## Also sets the variable `is_deleted_branch_heads`, when this returns status
+## 1, to lines "SHA<TAB>refname" that the remote listed, such as
+## "3f2a9c...<TAB>refs/heads/feature", among which is one for each upstream
+## ref of the branch that exists in the remote; and sets it to the empty
+## string otherwise.  The variable lets a caller learn the commit that the
+## remote branch names without asking the remote again.
+##
 ## The body lives here rather than in the command so that the other commands
 ## of this package can ask the question directly.
 is_deleted_branch() {
   is_deleted_branch_dir="$1"
   is_deleted_branch_no_usable_repository=
+  is_deleted_branch_heads=
 
   # A path that does not exist -- or that exists but is not a directory -- is
   # certainly not a working tree.  Reject it here rather than leaving it to
@@ -3987,6 +3995,8 @@ is_deleted_branch() {
       if printf '%s\n' "${is_deleted_branch_listed}" \
         | grep -q -x -F -- "${is_deleted_branch_ref_arg}"; then
         # The branch still exists in the remote.
+        # shellcheck disable=SC2034 # Callers read it; see the documentation above.
+        is_deleted_branch_heads="${remote_heads_output}"
         return 1
       fi
     done
@@ -4002,8 +4012,8 @@ is_deleted_branch() {
   # which would abort a caller that runs under `set -e` -- and would do so in
   # the very case that this function exists to report, since a deleted branch
   # is what makes the command exit nonzero.
-  if git_batch_ssh "${is_deleted_branch_dir}" ls-remote --exit-code \
-    "${is_deleted_branch_remote}" "$@" > /dev/null 2>&1; then
+  if is_deleted_branch_listing="$(git_batch_ssh "${is_deleted_branch_dir}" \
+    ls-remote --exit-code "${is_deleted_branch_remote}" "$@" 2> /dev/null)"; then
     is_deleted_branch_status=0
   else
     is_deleted_branch_status="$?"
@@ -4011,6 +4021,8 @@ is_deleted_branch() {
   case "${is_deleted_branch_status}" in
     0)
       # The branch still exists in the remote.
+      # shellcheck disable=SC2034 # Callers read it; see the documentation above.
+      is_deleted_branch_heads="${is_deleted_branch_listing}"
       return 1
       ;;
     2)

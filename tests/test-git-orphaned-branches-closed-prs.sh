@@ -141,6 +141,74 @@ if ! grep -q -F -- 'repo view github.com/someone/proj ' "${work}/gh.log" \
   fail "gh was not told the host github.com: $(cat "${work}/gh.log")"
 fi
 
+# No pull request was merged, so the warning gives no commands, though the
+# directory matches the remote branch:  `git-remove-branch-directory` would
+# refuse to remove a directory that held the only copy of the work.
+case "${err}" in
+  *"to delete the remote branch"*) fail "removal commands for a pull request closed without landing: [${err}]" ;;
+esac
+
+# A pull request was merged, and the directory matches the remote branch, so
+# the warning gives the commands that delete both.  The deletion holds a lease
+# on the directory's HEAD.
+head="$(git -C "${dir}" rev-parse HEAD)"
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj' 'MERGED 8 someone/proj')"
+case "${err}" in
+  *"; to delete the remote branch and then the directory, run the following (the second command refuses if the directory would then hold the only copy of some work):
+  git -C ${dir} push --force-with-lease=refs/heads/feature:${head} origin --delete refs/heads/feature
+  git-remove-branch-directory ${dir}") ;;
+  *) fail "no removal commands for a directory that matches the remote branch: [${err}]" ;;
+esac
+
+# Usage: expect_no_commands DESCRIPTION
+# Scans, with a merged pull request, and fails if the warning gives removal
+# commands; DESCRIPTION describes the directory; used for diagnostics.
+expect_no_commands() {
+  scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'MERGED 7 someone/proj')"
+  case "${err}" in
+    *"warning: not listing ${dir}:  every pull request for branch feature of someone/proj is closed or merged (someone/proj #7 (merged)), but the branch still exists in the remote") ;;
+    *) fail "unexpected warning for $1: [${err}]" ;;
+  esac
+}
+
+# An untracked file does not prevent the commands.
+echo "scratch" > "${dir}/untracked.txt"
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'MERGED 7 someone/proj')"
+case "${err}" in
+  *"git-remove-branch-directory ${dir}") ;;
+  *) fail "no removal commands for a directory with an untracked file: [${err}]" ;;
+esac
+rm -f "${dir}/untracked.txt"
+
+# An uncommitted change to a tracked file, staged or not, prevents them.
+echo "changed" >> "${dir}/file.txt"
+expect_no_commands "a directory with an uncommitted change"
+git -C "${dir}" add file.txt
+expect_no_commands "a directory with a staged change"
+git -C "${dir}" reset -q --hard
+
+# So does a commit that the remote branch lacks.
+echo "local" >> "${dir}/file.txt"
+git -C "${dir}" commit -q -a -m "Unpushed commit"
+expect_no_commands "a directory with an unpushed commit"
+git -C "${dir}" reset -q --hard origin/feature
+
+# So does a commit of the remote branch that the directory lacks, which
+# deleting the remote branch would lose.
+echo "remote" >> "${work}/seed/file.txt"
+git -C "${work}/seed" commit -q -a -m "Commit that only the remote has"
+git -C "${work}/seed" push -q origin HEAD:refs/heads/feature
+expect_no_commands "a directory that lacks a commit of the remote branch"
+git -C "${work}/seed" reset -q --hard HEAD^
+git -C "${work}/seed" push -q -f origin HEAD:refs/heads/feature
+
+# So does a linked worktree that the directory hosts, because
+# `git-remove-branch-directory` refuses, whatever its flags, to remove the
+# repository that the worktree depends on.
+git -C "${dir}" worktree add -q --detach "${work}/hosted" 2> /dev/null
+expect_no_commands "a directory that hosts a linked worktree"
+git -C "${dir}" worktree remove "${work}/hosted"
+
 # A pull request from a branch of the same name in the base repository is
 # someone else's, so it does not count.
 scan FAKE_GH_PARENT='upstream/proj' FAKE_GH_PRS="$(prs b0 false 'MERGED 9 upstream/proj')"
@@ -259,6 +327,70 @@ git -C "${dir}" config remote.origin.url "${work}/remote.git"
 scan FAKE_GH_PRS="$(prs b0 false 'CLOSED 7 someone/proj')"
 [ -z "${err}" ] || fail "warned for a remote that is not on GitHub: [${err}]"
 [ ! -s "${work}/gh.log" ] || fail "asked gh about a remote that is not on GitHub: $(cat "${work}/gh.log")"
+
+# Usage: run_commands COMMANDS
+# Runs COMMANDS, lines of shell syntax such as a warning gives, with this
+# package's commands on the path, and returns the status of the last one.
+run_commands() {
+  (PATH="${TESTS_DIR}/..:${PATH}" && eval "$1")
+}
+
+# The removal commands work, even for a directory whose name the shell must
+# quote.
+git -C "${dir}" config remote.origin.url 'https://github.com/someone/proj'
+quoted_dir="${work}/scan/proj-branch-it's here"
+mv "${dir}" "${quoted_dir}"
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'MERGED 7 someone/proj')"
+commands="$(printf '%s\n' "${err}" | sed -n -e 's/^  //p')"
+case "${commands}" in
+  "git -C '${work}/scan/proj-branch-it'\\''s here' push --force-with-lease=refs/heads/feature:${head} origin --delete refs/heads/feature
+git-remove-branch-directory '${work}/scan/proj-branch-it'\\''s here'") ;;
+  *) fail "unexpected removal commands for a directory whose name needs quotes: [${err}]" ;;
+esac
+
+# The lease makes the deletion refuse if the remote branch has moved since the
+# scan.
+echo "later" >> "${work}/seed/file.txt"
+git -C "${work}/seed" commit -q -a -m "Commit pushed after the scan"
+git -C "${work}/seed" push -q origin HEAD:refs/heads/feature
+push_command="$(printf '%s\n' "${commands}" | head -n 1)"
+if (eval "${push_command}") > /dev/null 2>&1; then
+  fail "the deletion succeeded although the remote branch moved: [${push_command}]"
+fi
+if [ "$(git -C "${work}/remote.git" rev-parse --verify --quiet refs/heads/feature)" \
+  != "$(git -C "${work}/seed" rev-parse HEAD)" ]; then
+  fail "the refused deletion changed the remote branch feature"
+fi
+git -C "${work}/seed" reset -q --hard HEAD^
+git -C "${work}/seed" push -q -f origin HEAD:refs/heads/feature
+# A tag with the name of the branch does not confuse the deletion.
+git -C "${work}/seed" push -q origin HEAD:refs/tags/feature
+run_commands "${commands}" > /dev/null 2>&1 \
+  || fail "the removal commands failed: [${commands}]"
+[ ! -e "${quoted_dir}" ] || fail "the removal commands left ${quoted_dir}"
+if git -C "${work}/remote.git" rev-parse --verify --quiet refs/heads/feature > /dev/null; then
+  fail "the removal commands left the remote branch feature"
+fi
+
+# A branch with a commit that nothing else holds, such as one pushed after its
+# pull request landed:  the first command deletes the remote branch, and then
+# `git-remove-branch-directory` refuses, because the directory holds the only
+# copy of that commit.  The fake `gh` reports no landed pull request at that
+# commit.
+echo "after landing" >> "${work}/seed/file.txt"
+git -C "${work}/seed" commit -q -a -m "Commit pushed after the pull request landed"
+git -C "${work}/seed" push -q origin HEAD:refs/heads/feature3
+dir3="${work}/scan/proj-branch-feature3"
+git clone -q -b feature3 'https://github.com/someone/proj' "${dir3}"
+scan FAKE_GH_PARENT='' FAKE_GH_PRS="$(prs b0 false 'MERGED 11 someone/proj')"
+commands="$(printf '%s\n' "${err}" | sed -n -e 's/^  //p')"
+[ -n "${commands}" ] || fail "no removal commands for ${dir3}: [${err}]"
+run_commands "${commands}" > /dev/null 2>&1 \
+  && fail "the removal commands succeeded for a directory that holds the only copy of a commit"
+if git -C "${work}/remote.git" rev-parse --verify --quiet refs/heads/feature3 > /dev/null; then
+  fail "the removal commands left the remote branch feature3"
+fi
+[ -e "${dir3}/file.txt" ] || fail "the removal commands removed ${dir3}, which holds the only copy of a commit"
 
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
