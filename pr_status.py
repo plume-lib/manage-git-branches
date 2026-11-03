@@ -850,7 +850,7 @@ class Model:
         self.stated_dependents: dict[int, set[int]] = {}
         self.stated_partners: dict[int, set[int]] = {}
         self.external_partners: dict[int, set[str]] = {}
-        self.stated_closed: dict[int, list[tuple[int, str | None]]] = {}
+        self.stated_closed: dict[int, list[tuple[int, str]]] = {}
         self.external: dict[int, list[str]] = {}
         # This model and the models that unite_partners unites it with, as a map from each
         # one's lowercase GitHub slug, such as "org/repo", to the model.
@@ -876,7 +876,7 @@ class Model:
             self.stated_partners[n] = (s.partners - {n}) & open_prs
             self.external_partners[n] = s.external_partners
             self.stated_closed[n] = sorted(
-                (m, repo.state_of(m)) for m in names - set(repo.prs) if repo.state_of(m)
+                (m, state) for m in names - set(repo.prs) if (state := repo.state_of(m))
             )
             self.external[n] = sorted(
                 e for e in s.external_prerequisites if external_state(e) == "open"
@@ -1849,18 +1849,24 @@ def directory_problems(
 # ---------- unblocked documents ----------
 
 
-def keep(model: Model, n: int, flt: Any) -> bool:
+def keep(model: Model, n: int, flt: str | dict[str, list[str]]) -> bool:
     """Return whether PR n passes a document's filter.
+
+    Args:
+        model: a Model.
+        n: the number of an open PR of model's repository, such as 123.
+        flt: an unblocked document's filter:  "all", "unassigned", or a dict whose key
+            "unassigned_or" maps to GitHub logins, such as {"unassigned_or": ["mernst"]}.
 
     Returns:
         True if the document should list PR n.
     """
     who = model.assignees(n)
-    if flt == "all":
-        return True
+    if isinstance(flt, dict):
+        return not who or any(w in flt["unassigned_or"] for w in who)
     if flt == "unassigned":
         return not who
-    return not who or any(w in flt["unassigned_or"] for w in who)
+    return True
 
 
 def unblocked_doc(
@@ -1872,6 +1878,11 @@ def unblocked_doc(
         The text of the document that doc describes.
     """
     flt = doc.get("filter", "all")
+    if not isinstance(flt, dict) and flt not in ("all", "unassigned"):
+        sys.exit(
+            f"pr-status: {CONFIG}: the filter of {doc['file']} is {json.dumps(flt)}, not"
+            ' "all", "unassigned", or {"unassigned_or": [...]}'
+        )
     show_author = any(m.repo.show_author for m in models)
     lines = [
         f"# {doc['title']}",

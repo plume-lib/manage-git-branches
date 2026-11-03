@@ -716,5 +716,41 @@ class GenPushCommandsTest(unittest.TestCase):
         )
 
 
+class KeepTest(unittest.TestCase):
+    """Tests for keep and for the filter of an unblocked document."""
+
+    @staticmethod
+    def model(assignees):
+        """Return a model whose PR 1 has the given assignees.
+
+        Returns:
+            The model.
+        """
+        return types.SimpleNamespace(assignees=lambda _n: assignees)
+
+    def test_all(self):
+        """The filter "all" keeps every PR."""
+        self.assertTrue(pr_status.keep(self.model(["a"]), 1, "all"))
+
+    def test_unassigned(self):
+        """The filter "unassigned" keeps only unassigned PRs."""
+        self.assertTrue(pr_status.keep(self.model([]), 1, "unassigned"))
+        self.assertFalse(pr_status.keep(self.model(["a"]), 1, "unassigned"))
+
+    def test_unassigned_or(self):
+        """The filter "unassigned_or" also keeps PRs assigned to one of its logins."""
+        flt = {"unassigned_or": ["a"]}
+        self.assertTrue(pr_status.keep(self.model([]), 1, flt))
+        self.assertTrue(pr_status.keep(self.model(["a", "b"]), 1, flt))
+        self.assertFalse(pr_status.keep(self.model(["b"]), 1, flt))
+
+    def test_unknown_filter(self):
+        """An unblocked document with an unknown filter is an error."""
+        doc = {"file": "unblocked.md", "title": "Unblocked", "filter": "unasigned"}
+        with self.assertRaises(SystemExit) as cm:
+            pr_status.unblocked_doc([], {}, "/base", doc, "today")
+        self.assertIn('the filter of unblocked.md is "unasigned"', str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
