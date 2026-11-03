@@ -154,7 +154,7 @@ if [ $# -gt 2 ]; then
 else
   # Unlike "gh pr list", which stops at its --limit, this lists every open PR,
   # as pruning requires.
-  P=$(gh api --paginate "repos/$2/pulls?state=open&per_page=100" --jq '.[].number' | sort -nu) \
+  P=$(gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" --jq '.[].number' | sort -nu) \
     || exit 1
   PRUNE=yes
 fi
@@ -168,7 +168,7 @@ for n in $P; do REFSPECS+=("+refs/pull/$n/head:refs/remotes/pr/$n"); done
 # Authenticate as gh does, so that a private repository can be fetched, and never
 # prompt for a username.
 GIT_TERMINAL_PROMPT=0 "${G[@]}" -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
-  fetch -q "https://github.com/$2.git" "${REFSPECS[@]}" || exit 1
+  fetch -q "https://github.com/$REPO.git" "${REFSPECS[@]}" || exit 1
 MSHA=$("${G[@]}" rev-parse refs/remotes/csm/master) || exit 1
 
 # Matches a commit's object ID, which is a SHA-1 or SHA-256 hash in hexadecimal.
@@ -193,19 +193,27 @@ if [ -n "$P" ]; then
     CURRENT[${SHA[$n]}]=1
   done
 fi
-# Read only this repository's well-formed lines; a line that another run is
-# still writing is incomplete.
-while IFS=$'\t' read -r repo kind k1 k2 k3 rest; do
-  if [ "$repo" != "$REPO" ]; then
-    continue
-  elif [ "$kind" = merge ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE ]] \
+# Prints the complete lines of the cache whose first field is this repository's
+# slug, if $1 is 1, or is not, if $1 is 0.  A last line that lacks its newline,
+# such as one that another run is still writing, is incomplete, so it is not
+# printed.
+cache_lines() {
+  # The appended line "x" is the last record, either alone or after an
+  # incomplete line, so awk prints every record but the last.
+  { cat "$CACHE" && echo x; } | awk -F '\t' -v repo="$REPO" -v same="$1" \
+    'NR > 1 && (prev_repo == repo) == same { print prev } { prev = $0; prev_repo = $1 }'
+}
+own_lines=$(cache_lines 1) || die "cannot read the cache: $CACHE"
+# Read only the well-formed lines.
+while IFS=$'\t' read -r _ kind k1 k2 k3 rest; do
+  if [ "$kind" = merge ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE ]] \
     && [[ $k3 = clean || $k3 = conflict ]]; then
     CACHED["merge $k1 $k2"]="$k3	$rest"
   elif [ "$kind" = contains ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE && $k3 =~ $OID_RE ]] \
     && [[ $rest = yes || $rest = no ]]; then
     CACHED["contains $k1 $k2 $k3"]="$rest"
   fi
-done < "$CACHE"
+done <<< "$own_lines"
 
 # These functions set RESULT rather than printing it, because a command
 # substitution per call would fork a subshell for each of thousands of pairs.
@@ -318,9 +326,6 @@ NEW_CACHE=$(mktemp "$CACHE.XXXXXX") || exit 1
 # Give it the cache's permissions, rather than mktemp's 0600.
 cp -p "$CACHE" "$NEW_CACHE" || exit 1
 {
-  # The other repositories' lines, read now rather than at the start, so that
-  # pruning keeps the lines that other runs added meanwhile.
-  awk -F '\t' -v repo="$REPO" '$1 != repo' "$CACHE" || die "awk failed to copy the cache"
   for key in "${!CACHED[@]}"; do
     # shellcheck disable=SC2206 # A key is words without glob characters; "read <<<" would be slow.
     k=($key)
@@ -332,4 +337,8 @@ cp -p "$CACHE" "$NEW_CACHE" || exit 1
       printf '%s\tcontains\t%s\t%s\t%s\t%s\n' "$REPO" "${k[1]}" "${k[2]}" "${k[3]}" "${CACHED[$key]}"
     fi
   done
+  # The other repositories' lines, read last, just before the new cache replaces
+  # the cache, so that pruning discards as few as possible of the lines that
+  # other runs add meanwhile.
+  cache_lines 0 || die "cannot read the cache: $CACHE"
 } > "$NEW_CACHE" && mv "$NEW_CACHE" "$CACHE"

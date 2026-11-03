@@ -185,6 +185,10 @@ analyze merge-tree --prune
 if [ "${analysis_status}" -eq 0 ]; then
   fail "other repository: a run used its cache lines: ${analysis_output}"
 fi
+case "${analysis_output}" in
+  *"merge-tree: stub failure"*) ;;
+  *) fail "other repository: wrong diagnostic: ${analysis_output}" ;;
+esac
 analyze '' --prune
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
   fail "other repository: wrong report: ${analysis_output}"
@@ -283,6 +287,32 @@ if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; 
 fi
 if grep -q "confl$" "${cache}"; then
   fail "malformed: pruning kept a malformed line: $(cat "${cache}")"
+fi
+
+## A last line that lacks its newline, such as one that another run is still
+## writing, is ignored even if its fields are well-formed, and pruning removes
+## it.  Here, this repository's line about PRs 1 and 2 is truncated within its
+## file name, "f.txt"; a run that used it would report "1 vs 2: f.tx".  The
+## other repository's line is truncated likewise.  Pruning leaves the lines of
+## a complete run.
+complete_cache="$(sort "${cache}")"
+grep -v "^test/repo	merge	${pair}" "${cache}" > "${cache}.edited"
+printf 'test/repo\tmerge\t%sconflict\tf.tx' "${pair}" >> "${cache}.edited"
+mv "${cache}.edited" "${cache}"
+analyze '' --prune
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
+  fail "unterminated: wrong report: ${analysis_output}"
+fi
+if [ "$(sort "${cache}")" != "${complete_cache}" ]; then
+  fail "unterminated: wrong cache after pruning: $(cat "${cache}")"
+fi
+printf 'other/repo\tmerge\t%sconflict\tsrc/Fo' "${pair}" >> "${cache}"
+analyze merge-tree --prune
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected}" ]; then
+  fail "unterminated other repository: wrong report: ${analysis_output}"
+fi
+if [ "$(sort "${cache}")" != "${complete_cache}" ]; then
+  fail "unterminated other repository: pruning kept the line: $(cat "${cache}")"
 fi
 
 ## A warning from merge-tree does not change the report.
