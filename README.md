@@ -209,9 +209,10 @@ The commands are:
   A directory whose branch still exists in the remote, but whose GitHub pull
   requests are all closed or merged, is neither listed nor removed; a warning
   about it is printed instead.  (This needs the `gh` command.)
-  If the directory has no uncommitted changes to tracked files and its HEAD
-  is the commit that the remote branch names, the warning also gives the
-  commands that delete the remote branch and remove the directory.
+  If one of the pull requests was merged, the directory has no uncommitted
+  changes to tracked files, and its HEAD is the commit that the remote branch
+  names, the warning also gives the commands that delete the remote branch
+  and then remove the directory.
   Likewise, a warning is printed about a directory named `*-branch-*` that
   is in no git working tree and either holds more than leftovers, such as
   one whose removal failed on files that another user owns, or holds no
