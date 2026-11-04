@@ -835,6 +835,22 @@ if ! git -C "${gnbhost}" status > /dev/null 2>&1; then
   fail "git-orphaned-branches --remove broke the host ${gnbhost}"
 fi
 
+# A clone whose name matches `*-branch-*` only because it embeds the path of
+# an ancestor is still examined, because it is a working tree, so it is listed
+# once its branch is deleted.
+git -C "${work}/seed" push -q origin main:refs/heads/pathnamed
+mkdir -p "${work}/pathnamed/w-branch-x"
+pathnamed_flat="$(absolute_path "${work}/pathnamed/w-branch-x" | tr / -)"
+pathnamed="${work}/pathnamed/w-branch-x/[${pathnamed_flat}-tests]"
+git clone -q -b pathnamed "${work}/remote.git" "${pathnamed}"
+git -C "${work}/seed" push -q origin --delete pathnamed
+if ! output="$(cd "${work}/pathnamed" && "${GIT_ORPHANED_BRANCHES}" 2> /dev/null)"; then
+  fail "git-orphaned-branches exited with a failure status for a clone named for an ancestor's path"
+fi
+if [ "${output}" != "$(absolute_path "${pathnamed}")" ]; then
+  fail "git-orphaned-branches printed [${output}] for a clone named for an ancestor's path, expected ${pathnamed}"
+fi
+
 # A submodule's working tree is a working tree too, and its `.git` is a file
 # as well, so the same test decides it.  Its branch can be deleted in the
 # submodule's remote like any other, but the directory still must not be

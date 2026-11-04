@@ -912,7 +912,11 @@ examine_directory() {
     if [ -d "$1" ] && [ ! -L "$1" ]; then
       case "${1##*/}" in
         *-branch-*)
-          if ! names_ancestor_path "$1" "${examine_root}" ${examine_root_logical:+"${examine_root_logical}"}; then
+          # A directory that holds a `.git` is checked even if its name
+          # embeds the path of an ancestor, because it can be a working tree
+          # whose branch was deleted.
+          if [ -e "$1/.git" ] || [ -L "$1/.git" ] \
+            || ! names_ancestor_path "$1" "${examine_root}" ${examine_root_logical:+"${examine_root_logical}"}; then
             check_directory "$1"
           fi
           ;;
