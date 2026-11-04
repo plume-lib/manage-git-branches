@@ -5,6 +5,16 @@
 # Supports Gradle, Maven, and Make projects.  If no buildfile is found
 # at the top level, searches at (only) the next level down.
 #
+# Prints nothing unless a build fails, or writes to standard error, or no
+# buildfile is found and ERR_IF_NO_BUILDFILE is set.  Then it prints, to
+# standard error, the directory where it ran and the builds' standard output
+# and standard error together, in the order in which the builds wrote them.
+# That order is approximate:  a line of standard error written just before a
+# line of standard output can appear after it.  The output is printed after the
+# builds finish, or when this command is interrupted, not while they run.  If a
+# build starts a background process that keeps standard error open, this
+# command waits for that process to exit.
+#
 # The exit status is failure if any build fails, if <directory> is given
 # but is not a directory, or if the top-level directory cannot be
 # determined.  If no buildfile is found and ERR_IF_NO_BUILDFILE is set to
@@ -87,10 +97,10 @@ git_toplevel() {
 if [ "$#" -eq 0 ]; then
   toplevel="$(git_toplevel .)"
   case "$?" in
-    0) printf '%s\n' "Running ${SCRIPT_NAME} in $toplevel, called from $(pwd)" ;;
+    0) running_message="Running ${SCRIPT_NAME} in $toplevel, called from $(pwd)" ;;
     222)
       toplevel="$(pwd)"
-      printf '%s\n' "Running ${SCRIPT_NAME} in $toplevel"
+      running_message="Running ${SCRIPT_NAME} in $toplevel"
       ;;
     *) exit 1 ;;
   esac
@@ -101,7 +111,7 @@ elif [ "$#" -eq 1 ]; then
   fi
   toplevel="$(git_toplevel "$1")"
   case "$?" in
-    0) printf '%s\n' "Running ${SCRIPT_NAME} in $toplevel, called for $1" ;;
+    0) running_message="Running ${SCRIPT_NAME} in $toplevel, called for $1" ;;
     222)
       # The directory is its own top level.  Make it absolute, so that later
       # messages and `cd` commands do not depend on the current directory.
@@ -109,7 +119,7 @@ elif [ "$#" -eq 1 ]; then
       if ! toplevel="$(cd -- "$1" && pwd)"; then
         exit 1
       fi
-      printf '%s\n' "Running ${SCRIPT_NAME} in $toplevel"
+      running_message="Running ${SCRIPT_NAME} in $toplevel"
       ;;
     *) exit 1 ;;
   esac
@@ -170,14 +180,17 @@ compile_in_directory() {
   fi
 }
 
-compile_in_directory "$toplevel"
-result=$?
-
-if [ "$buildfile_found_here" = 1 ]; then
-  # A buildfile was found; exit with the exit code of the compilation step.
-  exit $result
-else
-  # Call compile_in_directory in subdirectories.
+# Compiles the project in $toplevel or, if $toplevel has no buildfile, in
+# each subdirectory of $toplevel that has one, stopping at the first build that
+# fails.  Returns the status of that build, or 0 if no build fails.  If no
+# buildfile is found and ERR_IF_NO_BUILDFILE is non-empty, prints a diagnostic
+# and returns 1.
+compile_project() {
+  compile_in_directory "$toplevel"
+  result=$?
+  if [ "$buildfile_found_here" = 1 ]; then
+    return $result
+  fi
   buildfile_found=0
   for subdir in "$toplevel"/*/; do
     compile_in_directory "$subdir"
@@ -187,11 +200,53 @@ else
     fi
     buildfile_found=1
     if [ "$result" -ne 0 ]; then
-      exit $result
+      return $result
     fi
   done
   if [ "$buildfile_found" = 0 ] && [ -n "$ERR_IF_NO_BUILDFILE" ]; then
     printf '%s\n' "${SCRIPT_NAME} did nothing in $toplevel or its subdirectories" >&2
-    exit 1
+    return 1
   fi
+  return 0
+}
+
+if ! tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/compile-project.XXXXXX")" || [ -z "$tmpdir" ]; then
+  printf '%s\n' "${SCRIPT_NAME}: cannot create a temporary directory" >&2
+  exit 1
 fi
+# The builds' standard output and standard error, together.
+output="$tmpdir/output"
+# The builds' standard error alone.
+errors="$tmpdir/errors"
+# The exit status of compile_project.
+status_file="$tmpdir/status"
+
+# When interrupted, print the output so far, which might show why the build
+# was slow or stuck.  Each signal handler removes itself and the EXIT trap,
+# and then re-raises the signal, so that this command dies of the signal.
+trap 'rm -rf "$tmpdir"' EXIT
+trap 'rm -rf "$tmpdir"; trap - HUP EXIT; kill -s HUP "$$"' HUP
+trap 'cat "$output" >&2; rm -rf "$tmpdir"; trap - INT EXIT; kill -s INT "$$"' INT
+trap 'cat "$output" >&2; rm -rf "$tmpdir"; trap - TERM EXIT; kill -s TERM "$$"' TERM
+
+printf '%s\n' "$running_message" > "$output"
+# The builds' standard output is appended to $output, and their standard error
+# goes through `tee`, which writes it to $errors and appends it to $output.
+# Both are opened for appending, so that neither write overwrites the other.
+# The order of lines in $output is exact only for writes that are separated in
+# time, because a line of standard error passes through `tee`.  A single file
+# descriptor for both would preserve the order exactly, but then this command
+# could not tell whether the builds wrote to standard error.  A pipeline does
+# not pass on the status of its first command in POSIX sh, so the status goes
+# through $status_file.
+{
+  compile_project
+  echo "$?" > "$status_file"
+} 2>&1 >> "$output" | tee "$errors" >> "$output"
+build_status="$(cat "$status_file" 2> /dev/null)"
+build_status="${build_status:-1}"
+
+if [ "$build_status" != 0 ] || [ -s "$errors" ]; then
+  cat "$output" >&2
+fi
+exit "$build_status"

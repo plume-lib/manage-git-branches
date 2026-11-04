@@ -375,6 +375,10 @@ The commands are:
   the given directory, which defaults to the current directory.
   The command-line arguments for the compilation can be customized, using the
   environment variables described below.
+  It prints nothing unless the build fails or writes to standard error, as if
+  it were run under [`cronic`](https://github.com/plume-lib/plume-scripts#cronic).
+  Then it prints, to standard error, the build's standard output and standard
+  error together, in order.
 * [`relative-path`](relative-path) `BASE TARGET`:
   Prints the pathname of TARGET, relative to BASE.  This is a portable
   replacement for GNU `realpath --relative-to=BASE TARGET`.
