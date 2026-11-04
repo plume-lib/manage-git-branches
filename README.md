@@ -295,6 +295,13 @@ The commands are:
   `CLAUDE_CONFIG_DIR` names:  it holds a directory, named for a path such as
   `-home-me-repo-branch-feature`, for each directory that Claude Code has run
   in.
+  Nor is a directory checked whose name matches `*-branch-*` only because it
+  embeds an absolute path, with each `/` written as `-`, such as the Gradle
+  test report `[-home-me-repo-branch-feature-tests-all]` in
+  `/home/me/repo-branch-feature/build/reports/`, or
+  `[-home-me-repo-branch-other-tests-all]` in a build directory copied from
+  the sibling working tree `/home/me/repo-branch-other`; the directories
+  below it are still examined.
   Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
   alias below).
 * [`git-remove-branch-directory`](git-remove-branch-directory)
