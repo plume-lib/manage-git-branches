@@ -542,6 +542,13 @@ $(printf '%s\n' "${output}" | tail -n 2)
 not:
 ${expected}"
 fi
+if ! output="$("${FIX_RENOVATE_PRS}" --dry-run -C "${scan}" < /dev/null 2>&1)"; then
+  fail "--dry-run fails: ${output}"
+fi
+case "${output}" in
+  *"Would not run claude for https://github.com/someone/proj/pull/6, because proj-branch-renovate-rerun exists but does not push to the pull request's branch"*) ;;
+  *) fail "--dry-run does not report the directory in the way: ${output}" ;;
+esac
 
 # Usage errors.
 "${FIX_RENOVATE_PRS}" --bogus -C "${scan}" > /dev/null 2>&1

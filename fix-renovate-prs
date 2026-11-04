@@ -515,6 +515,17 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     branch_dir="${clone%%-branch-*}-branch-$(branch_dir_name "${head_branch}")"
   fi
   branch_path="${base}/${branch_dir}"
+  # The state of ${branch_path}:  "usable" if `git push` in it pushes to the
+  # pull request's branch, "blocked" if something else exists at that path,
+  # such as a file or a working copy directory for another branch, and
+  # "absent" if nothing does.
+  if [ -n "${holder}" ]; then
+    dir_state=usable
+  elif [ -e "${branch_path}" ] || [ -L "${branch_path}" ]; then
+    dir_state=blocked
+  else
+    dir_state=absent
+  fi
 
   # Skip a pull request whose CI was already reported impossible at this
   # commit.
@@ -529,11 +540,11 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   fi
 
   if [ "${dry_run}" = true ]; then
-    if [ -n "${holder}" ]; then
-      echo "Would run claude in ${branch_dir} for ${url}"
-    else
-      echo "Would run claude in a new directory ${branch_dir}, made in ${clone}, for ${url}"
-    fi
+    case "${dir_state}" in
+      usable) echo "Would run claude in ${branch_dir} for ${url}" ;;
+      blocked) echo "Would not run claude for ${url}, because ${branch_dir} exists but does not push to the pull request's branch" ;;
+      absent) echo "Would run claude in a new directory ${branch_dir}, made in ${clone}, for ${url}" ;;
+    esac
     "${SCRIPT_DIR}/rerun-failed-ci" --dry-run "${url}" < /dev/null
     continue
   fi
@@ -547,13 +558,11 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     0) ;;
     3)
       echo "${SCRIPT_NAME}: skipping ${url}, whose transient CI failures were rerun"
-      if [ -n "${holder}" ]; then
-        note=""
-      elif [ -e "${branch_path}" ] || [ -L "${branch_path}" ]; then
-        note=" (exists, but does not push to the pull request's branch)"
-      else
-        note=" (not made yet)"
-      fi
+      case "${dir_state}" in
+        usable) note="" ;;
+        blocked) note=" (exists, but does not push to the pull request's branch)" ;;
+        absent) note=" (not made yet)" ;;
+      esac
       reran="${reran}${url}  ${branch_path}${note}
 "
       continue
@@ -587,11 +596,11 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   esac
 
   # Find or make the directory, and bring it to the pull request's head.
-  if [ -z "${holder}" ]; then
-    if [ -e "${branch_path}" ] || [ -L "${branch_path}" ]; then
-      problem "${url}" "${branch_path} exists but does not push to the pull request's branch"
-      continue
-    fi
+  if [ "${dir_state}" = blocked ]; then
+    problem "${url}" "${branch_path} exists but does not push to the pull request's branch"
+    continue
+  fi
+  if [ "${dir_state}" = absent ]; then
     if ! (cd -- "${base}/${clone}" && "${SCRIPT_DIR}/git-checkout-branch" --no-pull "${head_branch}") < /dev/null; then
       problem "${url}" "git-checkout-branch --no-pull ${head_branch} failed in ${base}/${clone}"
       continue
