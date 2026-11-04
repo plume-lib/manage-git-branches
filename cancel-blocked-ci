@@ -4,6 +4,10 @@
 The implementation is in cancel_blocked_ci.py, which other programs and the tests import.
 """
 
-import cancel_blocked_ci
+import python_version
+
+python_version.require((3, 11))
+
+import cancel_blocked_ci  # ruff: ignore[module-import-not-at-top-of-file]
 
 cancel_blocked_ci.main()

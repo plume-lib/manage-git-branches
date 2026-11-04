@@ -4,6 +4,10 @@
 The implementation is in pr_status.py, which other programs and the tests import.
 """
 
-import pr_status
+import python_version
+
+python_version.require((3, 10))
+
+import pr_status  # ruff: ignore[module-import-not-at-top-of-file]
 
 pr_status.main()

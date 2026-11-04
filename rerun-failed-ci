@@ -6,6 +6,10 @@ The implementation is in rerun_failed_ci.py, which other programs and the tests 
 
 import sys
 
-import rerun_failed_ci
+import python_version
+
+python_version.require((3, 9))
+
+import rerun_failed_ci  # ruff: ignore[module-import-not-at-top-of-file]
 
 sys.exit(rerun_failed_ci.main())

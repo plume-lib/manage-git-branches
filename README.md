@@ -446,6 +446,35 @@ alias gnb=git-new-branch
 alias rmgob='git-orphaned-branches --remove'
 ```
 
+### Python version
+
+If your Python version is too old to run one of the scripts, you have two
+options, both of which require
+[uv](https://docs.astral.sh/uv/).
+
+1. Install a newer Python.
+
+   1. Run this command:
+
+      ```sh
+      uv python install 3.15 --default
+      ```
+
+   2. Ensure that `~/.local/bin` appears early on your `PATH` (before any
+      other directory that contains a `python` or `python3` executable).
+
+2. Run the command with a newer Python:
+
+   ```sh
+   uv run --no-project --python 3.15 pr-status
+   ```
+
+   You can define an alias, such as:
+
+   ```sh
+   alias pr-status='uv run --no-project --python 3.15 pr-status'
+   ```
+
 ## Testing
 
 To run the tests, run `tests/run-tests.sh`.  Each test creates its
