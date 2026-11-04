@@ -509,60 +509,66 @@ fi
 # named `*-branch-*`, that name matches `*-branch-*` too, but only because of
 # the working tree's own name, so the directory is not warned about.  Nor is
 # a name that embeds the path of a sibling of the working tree, as a build
-# directory copied from that sibling holds, nor a name that continues an
-# embedded path with more components that match `*-branch-*`, since where the
-# embedded path ends is unknown.  A name in which the embedded path does not
-# begin at a boundary is warned about.
+# directory copied from that sibling holds, even if that path holds a
+# character such as `+`, nor a name that continues an embedded path with more
+# components that match `*-branch-*`, since where the embedded path ends is
+# unknown.  A name in which the embedded path does not begin at a boundary is
+# warned about, and so is one in which only the first component of the path,
+# such as `-tmp`, is followed by more components.
 #
-# Each run starts below the symbolic link `gradle-link`, so the names embed the
-# path with symbolic links resolved (${gradle_flat}) or the path without them
-# (${gradle_link_flat}).  The second run starts in a subdirectory of the
-# working tree, so the working tree is an ancestor of the directory that the
-# run starts in.
+# Where the system offers `/proc/self/cwd`, each run starts in it, so that
+# ${PWD} names the working tree by a path whose first two components differ
+# from those of the path with symbolic links resolved (${gradle_flat}).  A
+# name that embeds the former is not warned about either.  The second run
+# starts in a subdirectory of the working tree, so the working tree is an
+# ancestor of the directory that the run starts in.
 git init -q -b main "${work}/gradle/w-branch-x"
 printf 'build/\n' > "${work}/gradle/w-branch-x/.gitignore"
 git -C "${work}/gradle/w-branch-x" add .gitignore
 git -C "${work}/gradle/w-branch-x" commit -q -m 'Ignore build output'
-ln -s gradle "${work}/gradle-link"
 gradle_flat="$(printf '%s' "${work}/gradle/w-branch-x" | tr / -)"
-gradle_link_flat="$(printf '%s' "${work}/gradle-link/w-branch-x" | tr / -)"
 gradle_sibling_flat="$(printf '%s' "${work}/gradle/w-branch-other" | tr / -)"
+gradle_plus_flat="$(printf '%s' "${work}/gradle/w+1-branch-y" | tr / -)"
+gradle_top="${work#/}"
+gradle_top_flat="-${gradle_top%%/*}"
 gradle_reports="${work}/gradle/w-branch-x/build/reports/tests/test/MyTest"
+gradle_logical=
+if [ -d /proc/self/cwd ]; then
+  gradle_logical=/proc/self/cwd
+fi
+gradle_warned1="[x${gradle_flat}-tests]"
+gradle_warned2="[${gradle_top_flat}-other-branch-y-tests]"
 for d in "[${gradle_flat}-tests-all]" "[${gradle_flat}-tests-al-5NAR8S06TVEBO" \
-  "[${gradle_link_flat}-tests-al-link]" \
   "[${gradle_flat}-tests-al-z-branch-y]" "[${gradle_flat}yz-tests-al]" \
   "[${gradle_sibling_flat}-checker-tests-al-G1VNC8PMB8ADC" \
-  "[x${gradle_flat}-tests]"; do
+  "[${gradle_plus_flat}-tests-al]" \
+  ${gradle_logical:+"[-proc-self-cwd-z-branch-y-tests-al]"} \
+  "${gradle_warned1}" "${gradle_warned2}"; do
   mkdir -p "${gradle_reports}/$d"
   touch "${gradle_reports}/$d/index.html"
 done
-# The test directory `branch-q` does not match `*-branch-*`, but the name of
-# its report matches `*-branch-*` after the path of the working tree is
-# removed.  So the report is not warned about only if the path of the deeper
-# ancestor `branch-q` is removed first.
-mkdir -p "${work}/gradle/w-branch-x/branch-q/build/reports/[${gradle_flat}-branch-q-tests]"
-touch "${work}/gradle/w-branch-x/branch-q/build/reports/[${gradle_flat}-branch-q-tests]/index.html"
 for start in w-branch-x w-branch-x/build; do
-  if ! output="$(cd "${work}/gradle-link/${start}" && "${GIT_ORPHANED_BRANCHES}" \
-    2> "${work}/gradle.stderr")"; then
+  if ! output="$(cd "${work}/gradle/${start}" \
+    && { [ -z "${gradle_logical}" ] || cd "${gradle_logical}"; } \
+    && "${GIT_ORPHANED_BRANCHES}" 2> "${work}/gradle.stderr")"; then
     fail "git-orphaned-branches exited with a failure status in ${start} with Gradle test reports"
   fi
   if [ -n "${output}" ]; then
     fail "git-orphaned-branches printed [${output}] in ${start} with Gradle test reports, expected no output"
   fi
-  if grep -q -e '-tests-al' -e '-branch-q-tests' "${work}/gradle.stderr"; then
-    echo "FAIL: git-orphaned-branches in ${start} warned about a directory named for a path in its working tree:"
-    cat "${work}/gradle.stderr"
-    status=1
-  fi
-  d="[x${gradle_flat}-tests]"
-  if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${gradle_reports}/$d, which is in the git working tree ${work}/gradle/w-branch-x but holds no file that it tracks" \
-    "${work}/gradle.stderr"; then
-    echo "FAIL: git-orphaned-branches in ${start} did not warn about $d, in whose name the path of the working tree does not begin at a boundary:"
-    cat "${work}/gradle.stderr"
-    status=1
-  fi
-  if [ "$(wc -l < "${work}/gradle.stderr")" -ne 1 ]; then
+  gradle_expected1="git-orphaned-branches: warning: not listing ${gradle_reports}/${gradle_warned1}, which is in the git working tree ${work}/gradle/w-branch-x but holds no file that it tracks"
+  gradle_expected2="git-orphaned-branches: warning: not listing ${gradle_reports}/${gradle_warned2}, which is in the git working tree ${work}/gradle/w-branch-x but holds no file that it tracks"
+  for expected in "${gradle_expected1}" "${gradle_expected2}"; do
+    if ! grep -q -x -F -- "${expected}" "${work}/gradle.stderr"; then
+      echo "FAIL: git-orphaned-branches in ${start} did not print this warning:"
+      echo "${expected}"
+      echo "It printed:"
+      cat "${work}/gradle.stderr"
+      status=1
+    fi
+  done
+  if grep -v -x -F -e "${gradle_expected1}" -e "${gradle_expected2}" \
+    "${work}/gradle.stderr" > /dev/null; then
     echo "FAIL: git-orphaned-branches in ${start} warned about a directory named for a path:"
     cat "${work}/gradle.stderr"
     status=1

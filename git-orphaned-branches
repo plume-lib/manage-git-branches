@@ -32,18 +32,16 @@
 # Claude Code has run in, named for that directory's absolute path, so its
 # names match `*-branch-*`, but it holds no working tree.
 #
-# A directory whose name matches `*-branch-*` only because it embeds the
-# absolute path of an ancestor, with each `/` written as `-`, is not checked
-# either.  A tool that names a directory for a path makes such a name, as
-# Gradle does for a test report in `build/reports/`; for example, in the
-# working tree `/home/me/repo-branch-feature`, the name
-# `[-home-me-repo-branch-feature-tests-all]`.  Nor is a directory whose name
-# embeds the path of some other directory below an ancestor of two or more
-# components, such as a sibling working tree; copying a build directory from
-# one working tree to another makes such a name, such as
-# `[-home-me-repo-branch-other-tests-all]` in
-# `/home/me/repo-branch-feature/build/reports/`.  The directories below it are
-# still examined.
+# A directory whose name matches `*-branch-*` only because it embeds an
+# absolute path that begins with the first two components of the directory's
+# own path, with each `/` written as `-`, is not checked either.  A tool that
+# names a directory for a path makes such a name, as Gradle does for a test
+# report in `build/reports/`; for example, in the working tree
+# `/home/me/repo-branch-feature`, the name
+# `[-home-me-repo-branch-feature-tests-all]`, or, in a build directory copied
+# from the sibling working tree `/home/me/repo-branch-other`, the name
+# `[-home-me-repo-branch-other-tests-all]`.  `is_named_for_path` says which
+# names these are.  The directories below it are still examined.
 #
 # A directory that another live working tree depends on -- one that hosts a
 # linked worktree, or one that is a submodule of a superproject -- is never
@@ -763,156 +761,129 @@ is_claude_projects_dir() {
 }
 
 # Returns 0 (true) if the name of directory $1 matches `*-branch-*` only
-# because it embeds the flattened absolute path of one or more ancestors of $1.
-# The flattened form of a path writes each `/` as `-`, as in
-# `-home-me-repo-branch-feature` for `/home/me/repo-branch-feature`.  A tool
-# that names a directory for a path makes such a name, as when Gradle names
-# the report of a test that it ran on the directory
-# `/home/me/repo-branch-feature/tests/all` as
+# because it embeds the flattened form of an absolute path that shares its
+# beginning with the path of $1.  The flattened form of a path writes each `/`
+# as `-`, as in `-home-me-repo-branch-feature` for
+# `/home/me/repo-branch-feature`.  A tool that names a directory for a path
+# makes such a name, as when Gradle names the report of a test that it ran on
+# the directory `/home/me/repo-branch-feature/tests/all` as
 # `[-home-me-repo-branch-feature-tests-all]` and puts it in
-# `/home/me/repo-branch-feature/build/reports/`.  Such a directory is named
-# for a path in an ancestor, not for a branch.  An ancestor's own name need not
-# match `*-branch-*`:  flattening `/home/me/branch-x/repo` gives
-# `-home-me-branch-x-repo`, which matches `*-branch-*` across the boundary
-# between two components.
+# `/home/me/repo-branch-feature/build/reports/`.  The embedded path need not
+# be that of an ancestor of $1:  a build directory that is copied from one
+# working tree to another, as when a branch directory is made by copying
+# another one, holds names that embed the path of the first working tree, such
+# as `[-home-me-repo-branch-other-tests-all]` in
+# `/home/me/repo-branch-feature/build/reports/`.
+#
+# The name embeds a path wherever it contains, beginning and ending at a
+# boundary, the flattened form of the ancestor of $1 that has one component or
+# the one that has two, such as `-home` for `/home` or `-home-me` for
+# `/home/me`.  A boundary is the start or end of the name, or a character
+# other than a letter, a digit, `.`, or `_`.  So `[x-home-me-repo-branch-y]`
+# embeds no path.  An occurrence of the ancestor of two components that is
+# followed by `-` extends to the next `]` or to the end of the name, because
+# where the embedded path ends is unknown:  Gradle shortens a long name by
+# replacing its end with a hash, as in
+# `[-home-me-repo-branch-other-tests-al-5NAR8S06T`.  The flattened form of
+# each deeper ancestor begins with that of the ancestor of two components, so
+# this covers it too.  An occurrence of the ancestor of one component does not
+# extend, because a name is likelier to contain such a short path by chance.
+# Each embedded path is replaced by `/`, which no file name contains, so that
+# what precedes and what follows it cannot together form `-branch-`.
 #
 # $1 is a pathname, absolute or relative, such as `./build/reports/NAME`.  $2
 # is an absolute pathname of the directory that a relative $1 is relative to,
 # and $3, if present, is another spelling of that pathname that a tool could
-# have embedded instead, such as $2 without its symbolic links resolved.
-#
-# The ancestors' paths are removed from the longest to the shortest, so that a
-# name that embeds a long path is matched against that whole path rather than
-# against a shorter path that occurs within it, such as the path of a
-# shallower ancestor, or `/home/me/src` within `/home/me/src-link/repo`.  An
-# occurrence counts only if it begins and ends at a boundary:  the start or
-# end of the name, or a character other than a letter, a digit, `.`, or `_`.
-# So the path of a sibling such as `/home/me/repo-branch-featurex` does not
-# count as an occurrence of the path of the ancestor
-# `/home/me/repo-branch-feature`.
-#
-# But the path of an ancestor of two or more components, such as `/home/me`,
-# that is followed by `-` extends through the letters, digits, `.`, `_`, and
-# `-` that follow it, which are taken to be the rest of the path of a
-# directory below that ancestor.  So `/home/me/repo-branch-featurex` and
-# `/home/me/repo-branch-other/tests/all` count as occurrences of `/home/me`.
-# A name can embed the path of a directory that is no ancestor of it when a
-# tool's output is copied from one working tree to another, as when a branch
-# directory is made by copying another one, `build` directory and all.  Where
-# that path ends is unknown, because Gradle shortens a long name by replacing
-# its end with a hash, as in `[-home-me-repo-branch-other-tests-al-5NAR8S06T`.
-# The path of an ancestor of one component, such as `/home`, does not extend,
-# because a name is likelier to contain such a short path by chance.
-#
-# Each occurrence is replaced by `/`, which no file name contains, so that
-# what precedes and what follows an occurrence cannot together form
-# `-branch-`.
-names_ancestor_path() {
-  nap_name="${1##*/}"
+# have embedded instead, such as $2 without its symbolic links resolved.  The
+# ancestors of $1 are those of each spelling.
+is_named_for_path() {
+  inp_name="${1##*/}"
   case "$1" in
     /*)
-      nap_path1="$1"
-      nap_path2=
+      inp_path1="$1"
+      inp_path2=
       ;;
     *)
-      nap_path1="${2%/}/${1#./}"
+      inp_path1="${2%/}/${1#./}"
       if [ "$#" -ge 3 ]; then
-        nap_path2="${3%/}/${1#./}"
+        inp_path2="${3%/}/${1#./}"
       else
-        nap_path2=
+        inp_path2=
       fi
       ;;
   esac
-  nap_path1="${nap_path1%/*}"
-  nap_path2="${nap_path2%/*}"
-  # The flattened path of each shallower ancestor is a prefix of the flattened
-  # path of the parent, which the loop below gets by removing the flattened
-  # last component of the next deeper ancestor.
-  nap_flatten "${nap_path1}"
-  nap_flat1="${nap_flat}"
-  nap_flatten "${nap_path2}"
-  nap_flat2="${nap_flat}"
-  while [ -n "${nap_path1}" ] || [ -n "${nap_path2}" ]; do
-    if [ "${#nap_flat1}" -ge "${#nap_flat2}" ]; then
-      nap_remove "${nap_flat1}" "${nap_path1}"
-      nap_flat1="${nap_flat1%"-${nap_path1##*/}"}"
-      nap_path1="${nap_path1%/*}"
-    else
-      nap_remove "${nap_flat2}" "${nap_path2}"
-      nap_flat2="${nap_flat2%"-${nap_path2##*/}"}"
-      nap_path2="${nap_path2%/*}"
+  # An occurrence of the flattened form of an ancestor of one component, such
+  # as `-home`, is part of each occurrence of the one of two components, such
+  # as `-home-me`, so remove the latter first.
+  for inp_parent in "${inp_path1%/*}" "${inp_path2%/*}"; do
+    inp_components="${inp_parent#/}"
+    case "${inp_components}" in
+      */*)
+        inp_second="${inp_components#*/}"
+        inp_remove "-${inp_components%%/*}-${inp_second%%/*}" extend
+        ;;
+    esac
+  done
+  for inp_parent in "${inp_path1%/*}" "${inp_path2%/*}"; do
+    inp_components="${inp_parent#/}"
+    if [ -n "${inp_components}" ]; then
+      inp_remove "-${inp_components%%/*}" exact
     fi
   done
-  case "${nap_name}" in
+  case "${inp_name}" in
     *-branch-*) return 1 ;;
   esac
   return 0
 }
 
-# Sets ${nap_flat} to the flattened form of absolute path $1, as described at
-# `names_ancestor_path`, or to the empty string if $1 is empty or `/`.
-nap_flatten() {
-  nap_flat=
-  nap_rest="${1#/}"
-  while [ -n "${nap_rest}" ]; do
-    nap_flat="${nap_flat}-${nap_rest%%/*}"
-    case "${nap_rest}" in
-      */*) nap_rest="${nap_rest#*/}" ;;
-      *) nap_rest= ;;
-    esac
-  done
-}
-
-# Replaces by `/` each occurrence of $1 in ${nap_name} that begins and ends at
-# a boundary, as described at `names_ancestor_path`.  $1 is a flattened path,
-# so it begins with `-`.  $2 is the absolute path that $1 flattens.  If it has
-# two or more components, such as `/home/me`, an occurrence that is followed
-# by `-` extends through the letters, digits, `.`, `_`, and `-` that follow it.
-nap_remove() {
-  # ${nap_done} is the part of the name that has been searched, and
-  # ${nap_rest} is the part that remains.
-  nap_done=
-  nap_rest="${nap_name}"
+# Usage: inp_remove FLAT KIND
+# Replaces by `/` each occurrence of FLAT in ${inp_name} that is an embedded
+# path, as described at `is_named_for_path`.  FLAT is the flattened form of an
+# absolute path, such as `-home-me`.  KIND is `extend` if an occurrence that
+# is followed by `-` extends to the next `]` or to the end of the name, and
+# `exact` if every occurrence must end at a boundary.
+inp_remove() {
+  # ${inp_done} is the part of the name that has been searched, and
+  # ${inp_rest} is the part that remains.
+  inp_done=
+  inp_rest="${inp_name}"
   while :; do
-    case "${nap_rest}" in
+    case "${inp_rest}" in
       *"$1"*) ;;
       *) break ;;
     esac
-    nap_before="${nap_done}${nap_rest%%"$1"*}"
-    nap_after="${nap_rest#*"$1"}"
-    case "${nap_before}" in
-      *[[:alnum:]._]) nap_bounded=false ;;
+    inp_before="${inp_done}${inp_rest%%"$1"*}"
+    inp_after="${inp_rest#*"$1"}"
+    inp_bounded=false
+    case "${inp_before}" in
+      *[[:alnum:]._]) ;;
       *)
-        case "${nap_after}" in
-          [[:alnum:]._]*) nap_bounded=false ;;
+        case "${inp_after}" in
+          [[:alnum:]._]*) ;;
           -*)
-            nap_bounded=true
-            case "$2" in
-              /*/?*)
-                while :; do
-                  case "${nap_after}" in
-                    [[:alnum:]._-]*) nap_after="${nap_after#?}" ;;
-                    *) break ;;
-                  esac
-                done
-                ;;
-            esac
+            inp_bounded=true
+            if [ "$2" = extend ]; then
+              case "${inp_after}" in
+                *']'*) inp_after="]${inp_after#*]}" ;;
+                *) inp_after= ;;
+              esac
+            fi
             ;;
-          *) nap_bounded=true ;;
+          *) inp_bounded=true ;;
         esac
         ;;
     esac
-    if "${nap_bounded}"; then
-      nap_done="${nap_before}/"
-      nap_rest="${nap_after}"
+    if "${inp_bounded}"; then
+      inp_done="${inp_before}/"
+      inp_rest="${inp_after}"
     else
       # Search again from just after the start of this occurrence, which is a
       # `-`, because another occurrence can overlap it.
-      nap_done="${nap_before}-"
-      nap_rest="${1#-}${nap_after}"
+      inp_done="${inp_before}-"
+      inp_rest="${1#-}${inp_after}"
     fi
   done
-  nap_name="${nap_done}${nap_rest}"
+  inp_name="${inp_done}${inp_rest}"
 }
 
 # Examines directory $1 and every directory below it.
@@ -948,10 +919,10 @@ examine_directory() {
       case "${1##*/}" in
         *-branch-*)
           # A directory that holds a `.git` is checked even if its name
-          # embeds the path of an ancestor, because it can be a working tree
-          # whose branch was deleted.
+          # embeds a path, because it can be a working tree whose branch was
+          # deleted.
           if [ -e "$1/.git" ] || [ -L "$1/.git" ] \
-            || ! names_ancestor_path "$1" "${examine_root}" ${examine_root_logical:+"${examine_root_logical}"}; then
+            || ! is_named_for_path "$1" "${examine_root}" ${examine_root_logical:+"${examine_root_logical}"}; then
             check_directory "$1"
           fi
           ;;
@@ -980,7 +951,7 @@ examine_directory() {
 }
 
 # The current directory's absolute path with symbolic links resolved, and the
-# one without them if it differs, for `names_ancestor_path`.  The latter is
+# one without them if it differs, for `is_named_for_path`.  The latter is
 # ${PWD}, which the shell inherits from the caller if it names the current
 # directory.
 # `cd` prints its own diagnostic on failure.
