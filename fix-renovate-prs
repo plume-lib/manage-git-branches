@@ -103,10 +103,11 @@
 # its directory.  For a pull request whose CI jobs were rerun, the directory
 # is the one that a later run of this command would use.  It is marked
 # "(not made yet)" if it does not exist yet, and "(exists, but does not push
-# to the pull request's branch)" if it exists but `git push` in it pushes
-# elsewhere, so that a later run would not use it.  This command also lists the
-# pull requests that it could not handle, each with an explanation that names
-# its directory if this command found or made one.
+# to the pull request's branch)" if something exists at that path but it is
+# not a working copy directory from which `git push` pushes to the pull
+# request's branch, so that a later run would not use it.  This command also
+# lists the pull requests that it could not handle, each with an explanation
+# that names its directory if this command found or made one.
 #
 #   --dry-run  run nothing, push nothing, and post nothing; just print each
 #              failing pull request and the directory where Claude would run.
@@ -273,12 +274,18 @@ commented=""
 reran=""
 problems=""
 
-# Usage: problem URL EXPLANATION
+# Usage: problem URL EXPLANATION [DIRECTORY]
 # Records that the pull request URL could not be handled, for the reason
-# EXPLANATION, and prints EXPLANATION.
+# EXPLANATION, and prints EXPLANATION.  If DIRECTORY is given and is not
+# empty, EXPLANATION is extended to say that claude did not run in DIRECTORY,
+# such as "cannot read its checks, so claude did not run in /path/to/dir".
 problem() {
-  printf '%s: %s: %s\n' "${SCRIPT_NAME}" "$1" "$2" >&2
-  problems="${problems}$1  $2
+  problem_explanation="$2"
+  if [ -n "${3:-}" ]; then
+    problem_explanation="${problem_explanation}, so claude did not run in $3"
+  fi
+  printf '%s: %s: %s\n' "${SCRIPT_NAME}" "$1" "${problem_explanation}" >&2
+  problems="${problems}$1  ${problem_explanation}
 "
   status=1
 }
@@ -498,18 +505,6 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   count=$((count + 1))
   echo "===== ${url}"
 
-  # Skip a pull request whose CI was already reported impossible at this
-  # commit.
-  if ! comments="$(gh_query "cannot read the comments of ${url}" \
-    gh pr view "${url}" --json comments --jq '.comments[].body')"; then
-    problem "${url}" "cannot read its comments"
-    continue
-  fi
-  if printf '%s\n' "${comments}" | grep -q -x -F -- "$(impossible_marker "${head_oid}")"; then
-    echo "${SCRIPT_NAME}: skipping ${url}, whose CI was reported impossible to fix at ${head_oid}"
-    continue
-  fi
-
   # The directory, if any, whose branch `git push` pushes to the pull
   # request's branch.
   holder="$(awk -F "${tab}" -v repo="${slug}" -v branch="${head_branch}" \
@@ -520,6 +515,18 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     branch_dir="${clone%%-branch-*}-branch-$(branch_dir_name "${head_branch}")"
   fi
   branch_path="${base}/${branch_dir}"
+
+  # Skip a pull request whose CI was already reported impossible at this
+  # commit.
+  if ! comments="$(gh_query "cannot read the comments of ${url}" \
+    gh pr view "${url}" --json comments --jq '.comments[].body')"; then
+    problem "${url}" "cannot read its comments" "${holder:+${branch_path}}"
+    continue
+  fi
+  if printf '%s\n' "${comments}" | grep -q -x -F -- "$(impossible_marker "${head_oid}")"; then
+    echo "${SCRIPT_NAME}: skipping ${url}, whose CI was reported impossible to fix at ${head_oid}"
+    continue
+  fi
 
   if [ "${dry_run}" = true ]; then
     if [ -n "${holder}" ]; then
@@ -558,11 +565,7 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   if ! checks="$(gh_query "cannot read the checks of ${url}" \
     gh pr view "${url}" --json statusCheckRollup \
     --jq "${check_state_def} (${ci_state_jq}), (${failed_checks_jq})")"; then
-    if [ -n "${holder}" ]; then
-      problem "${url}" "cannot read its checks, so claude did not run in ${branch_path}"
-    else
-      problem "${url}" "cannot read its checks"
-    fi
+    problem "${url}" "cannot read its checks" "${holder:+${branch_path}}"
     continue
   fi
   ci="$(printf '%s\n' "${checks}" | sed -n -e 1p)"

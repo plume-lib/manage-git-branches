@@ -497,6 +497,52 @@ if [ "$(git -C "${scan}/proj-branch-renovate-impossible" rev-parse HEAD~1)" != "
   fail "the directory was not reset to the new head commit: ${output}"
 fi
 
+# For a pull request whose CI jobs were rerun, the report names the directory
+# that `git push` in it pushes to the pull request's branch, with no note.  A
+# pull request whose comments cannot be read is reported with its directory.
+oid_unreadable="$(renovate_branch unreadable)"
+git -C "${scan}/proj" fetch -q origin
+branch_directory rerun
+branch_directory unreadable
+{
+  echo "["
+  pr 6 rerun "${oid_rerun}" "${failure}"
+  echo ","
+  pr 14 unreadable "${oid_unreadable}" "${failure}"
+  echo "]"
+} > "${work}/pr-list.json"
+output="$("${FIX_RENOVATE_PRS}" -C "${scan}" < /dev/null 2>&1)"
+expected="Reran transient CI failures; run fix-renovate-prs again after CI finishes:
+https://github.com/someone/proj/pull/6  ${scan}/proj-branch-renovate-rerun
+Could not handle; a human must look:
+https://github.com/someone/proj/pull/14  cannot read its comments, so claude did not run in ${scan}/proj-branch-renovate-unreadable"
+if [ "$(printf '%s\n' "${output}" | tail -n 4)" != "${expected}" ]; then
+  fail "the report is:
+$(printf '%s\n' "${output}" | tail -n 4)
+not:
+${expected}"
+fi
+
+# For a pull request whose CI jobs were rerun, the report notes that something
+# that is not a working copy directory for the pull request's branch is in
+# the way of the directory that a later run would make.
+git -C "${scan}/proj" worktree remove --force "${scan}/proj-branch-renovate-rerun"
+mkdir "${scan}/proj-branch-renovate-rerun"
+{
+  echo "["
+  pr 6 rerun "${oid_rerun}" "${failure}"
+  echo "]"
+} > "${work}/pr-list.json"
+output="$("${FIX_RENOVATE_PRS}" -C "${scan}" < /dev/null 2>&1)"
+expected="Reran transient CI failures; run fix-renovate-prs again after CI finishes:
+https://github.com/someone/proj/pull/6  ${scan}/proj-branch-renovate-rerun (exists, but does not push to the pull request's branch)"
+if [ "$(printf '%s\n' "${output}" | tail -n 2)" != "${expected}" ]; then
+  fail "the report is:
+$(printf '%s\n' "${output}" | tail -n 2)
+not:
+${expected}"
+fi
+
 # Usage errors.
 "${FIX_RENOVATE_PRS}" --bogus -C "${scan}" > /dev/null 2>&1
 if [ "$?" -ne 2 ]; then
