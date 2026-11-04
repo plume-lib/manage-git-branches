@@ -501,6 +501,45 @@ if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${work}/dotfi
 fi
 
 ###########################################################################
+## Directories named for a path in a `*-branch-*` working tree.
+###########################################################################
+
+# Gradle names the report of a test that it ran on a test directory for that
+# directory's absolute path, with each `/` written as `-`.  In a working tree
+# named `*-branch-*`, that name matches `*-branch-*` too, but only because of
+# the working tree's own name, so the directory is not warned about.  A name
+# that matches `*-branch-*` apart from the path that it embeds is warned about.
+git init -q -b main "${work}/gradle/w-branch-x"
+printf 'build/\n' > "${work}/gradle/w-branch-x/.gitignore"
+git -C "${work}/gradle/w-branch-x" add .gitignore
+git -C "${work}/gradle/w-branch-x" commit -q -m 'Ignore build output'
+gradle_flat="$(printf '%s' "${work}/gradle/w-branch-x" | tr / -)"
+gradle_reports="${work}/gradle/w-branch-x/build/reports/tests/test/MyTest"
+for d in "[${gradle_flat}-tests-all]" "[${gradle_flat}-tests-al-5NAR8S06TVEBO" \
+  "[${gradle_flat}-tests-z-branch-y]"; do
+  mkdir -p "${gradle_reports}/$d"
+  touch "${gradle_reports}/$d/index.html"
+done
+if ! output="$(cd "${work}/gradle/w-branch-x" && "${GIT_ORPHANED_BRANCHES}" \
+  2> "${work}/gradle.stderr")"; then
+  fail "git-orphaned-branches exited with a failure status in a working tree with Gradle test reports"
+fi
+if [ -n "${output}" ]; then
+  fail "git-orphaned-branches printed [${output}] in a working tree with Gradle test reports, expected no output"
+fi
+if grep -q -F -- '-tests-al' "${work}/gradle.stderr"; then
+  echo "FAIL: git-orphaned-branches warned about a directory named for a path in its working tree:"
+  cat "${work}/gradle.stderr"
+  status=1
+fi
+if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${gradle_reports}/[${gradle_flat}-tests-z-branch-y], which is in the git working tree ${work}/gradle/w-branch-x but holds no file that it tracks" \
+  "${work}/gradle.stderr"; then
+  echo "FAIL: git-orphaned-branches did not warn about a directory whose name matches \`*-branch-*\` apart from the path that it embeds:"
+  cat "${work}/gradle.stderr"
+  status=1
+fi
+
+###########################################################################
 ## Working trees that git cannot use, whatever git's diagnostic.
 ###########################################################################
 

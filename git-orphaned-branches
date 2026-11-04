@@ -749,6 +749,56 @@ is_claude_projects_dir() {
   [ "${1##*/}" = projects ] && [ -f "${1%/*}/history.jsonl" ]
 }
 
+# Returns 0 (true) if the name of directory $1 matches `*-branch-*` only
+# because it embeds the flattened absolute path of an ancestor of $1 whose name
+# matches `*-branch-*`.  The flattened form of a path writes each `/` as `-`,
+# as in `-home-me-repo-branch-feature` for `/home/me/repo-branch-feature`.  A
+# tool that names a directory for a path makes such a name, as when Gradle
+# names the report of a test that it ran on the directory
+# `/home/me/repo-branch-feature/tests/all` as
+# `[-home-me-repo-branch-feature-tests-all]` and puts it in
+# `/home/me/repo-branch-feature/build/reports/`.  Such a directory is named
+# for a path in the ancestor, not for a branch.  $1 has the form PARENT/NAME,
+# as `examine_directory` forms it, and ${examine_root} is the absolute path of
+# the directory that `examine_directory` started from.
+#
+# The ancestors are examined from the deepest outward, so that a name that
+# embeds the flattened path of a deep ancestor is matched against that whole
+# path rather than against the shorter path of a shallower ancestor.  Each
+# occurrence is replaced by `/`, which no file name contains, so that what
+# precedes and what follows an occurrence cannot together form `-branch-`.
+names_ancestor_path() {
+  nap_name="${1##*/}"
+  nap_ancestor="${examine_root%/}${1#.}"
+  nap_ancestor="${nap_ancestor%/*}"
+  while [ -n "${nap_ancestor}" ]; do
+    case "${nap_ancestor##*/}" in
+      *-branch-*)
+        nap_flat=
+        nap_rest="${nap_ancestor#/}"
+        while :; do
+          nap_flat="${nap_flat}-${nap_rest%%/*}"
+          case "${nap_rest}" in
+            */*) nap_rest="${nap_rest#*/}" ;;
+            *) break ;;
+          esac
+        done
+        while :; do
+          case "${nap_name}" in
+            *"${nap_flat}"*) nap_name="${nap_name%%"${nap_flat}"*}/${nap_name#*"${nap_flat}"}" ;;
+            *) break ;;
+          esac
+        done
+        ;;
+    esac
+    nap_ancestor="${nap_ancestor%/*}"
+  done
+  case "${nap_name}" in
+    *-branch-*) return 1 ;;
+  esac
+  return 0
+}
+
 # Examines directory $1 and every directory below it.
 #
 # The entries that remain to be examined are held in the positional
@@ -780,7 +830,11 @@ examine_directory() {
     # endless descent through a link to an ancestor.
     if [ -d "$1" ] && [ ! -L "$1" ]; then
       case "${1##*/}" in
-        *-branch-*) check_directory "$1" ;;
+        *-branch-*)
+          if ! names_ancestor_path "$1"; then
+            check_directory "$1"
+          fi
+          ;;
       esac
       # Examine every directory's entries, even those of a directory that is
       # itself named `*-branch-*`, because such a directory can contain
@@ -805,6 +859,10 @@ examine_directory() {
   done
 }
 
+# `cd` prints its own diagnostic on failure.
+if ! examine_root="$(absolute_path .)"; then
+  exit 1
+fi
 examine_directory .
 warn_about_closed_prs
 
