@@ -292,8 +292,8 @@ problem() {
 
 working_copy_directories "${base}" > "${work}/entries"
 
-# Find each working copy directory's repository, and the pull request branch,
-# if any, that `git push` in it pushes to.  Each line of ${work}/clones is a
+# Find each working copy directory's repository, and the branch, if any,
+# that `git push` in it pushes to.  Each line of ${work}/clones is a
 # GitHub slug ORG/REPO, then 0 if the directory's name contains "-branch-"
 # and 1 otherwise, then the directory.  Each line of ${work}/holders is the
 # GitHub slug of the repository that `git push` pushes the directory's branch
@@ -321,8 +321,8 @@ while IFS= read -r dir <&3; do
       printf '%s\t%s\t%s\n' "${slug}" "${preferred}" "${dir}" >> "${work}/clones"
     fi
   fi
-  if [ -n "${branch}" ] && pr_repositories "${path}" "${branch}"; then
-    printf '%s\t%s\t%s\t%s\n' "${pr_head_repo}" "${pr_head_branch}" "${pr_head_remote}" "${dir}" \
+  if [ -n "${branch}" ] && push_destination "${path}" "${branch}"; then
+    printf '%s\t%s\t%s\t%s\n' "${push_destination_repo}" "${push_destination_branch}" "${push_destination_remote}" "${dir}" \
       >> "${work}/holders"
   fi
 done 3< "${work}/entries"
@@ -607,13 +607,13 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     fi
   fi
   local_branch="$(current_branch "${branch_path}")"
-  if [ -z "${local_branch}" ] || ! pr_repositories "${branch_path}" "${local_branch}" \
-    || [ "$(printf '%s\n' "${pr_head_repo}" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s\n' "${slug}" | tr '[:upper:]' '[:lower:]')" ] \
-    || [ "${pr_head_branch}" != "${head_branch}" ]; then
+  if [ -z "${local_branch}" ] || ! push_destination "${branch_path}" "${local_branch}" \
+    || [ "$(printf '%s\n' "${push_destination_repo}" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s\n' "${slug}" | tr '[:upper:]' '[:lower:]')" ] \
+    || [ "${push_destination_branch}" != "${head_branch}" ]; then
     problem "${url}" "git push in ${branch_path} does not push to the pull request's branch"
     continue
   fi
-  push_to="${pr_head_remote}"
+  push_to="${push_destination_remote}"
   if ! sync_directory "${url}" "${branch_path}" "${head_oid}" "${push_to}" "${head_branch}" "${local_branch}"; then
     continue
   fi

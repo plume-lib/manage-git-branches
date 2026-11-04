@@ -211,8 +211,9 @@ pr_view 13 "${failure}"
 
 # The fake `gh` appends its arguments to ${work}/gh.log.  `gh pr list` prints
 # ${work}/pr-list.json and `gh pr view URL` prints ${work}/pr/NUMBER.json,
-# each filtered by the `--jq` filter, if any.  `gh repo view` reports that
-# someone/proj is not a fork and that its default branch is "main".
+# each filtered by the `--jq` filter, if any.  `gh repo view` fails, because
+# `fix-renovate-prs` finds the directory that pushes to a pull request's branch
+# from the clones' configuration, without asking GitHub.
 # `gh pr comment URL --body-file FILE` copies FILE to ${work}/posted/NUMBER.
 #
 # The rest serves `rerun-failed-ci`.  `gh pr checks URL` prints no checks,
@@ -258,7 +259,6 @@ while [ "\$#" -ne 0 ]; do
 done
 number="\${url##*/}"
 case "\${cmd}" in
-  'repo view') echo "someone/proj main"; exit 0 ;;
   'pr list') json="\$(cat "${work}/pr-list.json")" ;;
   'pr view') json="\$(cat "${work}/pr/\${number}.json")" || exit 1 ;;
   'pr checks')
