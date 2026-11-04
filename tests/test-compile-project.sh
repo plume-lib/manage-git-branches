@@ -29,6 +29,12 @@ unset MAKE_FLAGS
 unset GRADLE_ASSEMBLE_FLAGS
 unset MVN_COMPILE_FLAGS
 unset ERR_IF_NO_BUILDFILE
+# A `make` that inherits these from a `make` that runs this test prints
+# "Entering directory" lines, which the checks of the output below do not
+# expect.
+unset MAKELEVEL
+unset MAKEFLAGS
+unset MFLAGS
 
 if ! tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${tmpdir}" ]; then
   echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2

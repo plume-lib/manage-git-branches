@@ -1814,7 +1814,12 @@ ignored_files() {
 ## standard output and standard error, to standard output and to the file LOG.
 ## Returns the exit status of `compile-project`.
 build_logged() {
-  { "${SCRIPT_DIR}"/compile-project 2>&1; echo "$?" > "$1.status"; } | tee "$1"
+  # `tee` ignores SIGINT, so that after a Ctrl-C, it still copies the output
+  # that `compile-project` prints when it is interrupted.
+  { "${SCRIPT_DIR}"/compile-project 2>&1; echo "$?" > "$1.status"; } | (
+    trap '' INT
+    exec tee "$1"
+  )
   build_logged_status="$(cat "$1.status")"
   return "${build_logged_status:-1}"
 }
