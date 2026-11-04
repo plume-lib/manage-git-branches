@@ -507,9 +507,12 @@ fi
 # Gradle names the report of a test that it ran on a test directory for that
 # directory's absolute path, with each `/` written as `-`.  In a working tree
 # named `*-branch-*`, that name matches `*-branch-*` too, but only because of
-# the working tree's own name, so the directory is not warned about.  A name
-# that matches `*-branch-*` apart from the path that it embeds is warned about,
-# and so is a name that embeds the path of a sibling of the working tree.
+# the working tree's own name, so the directory is not warned about.  Nor is
+# a name that embeds the path of a sibling of the working tree, as a build
+# directory copied from that sibling holds, nor a name that continues an
+# embedded path with more components that match `*-branch-*`, since where the
+# embedded path ends is unknown.  A name in which the embedded path does not
+# begin at a boundary is warned about.
 #
 # Each run starts below the symbolic link `gradle-link`, so the names embed the
 # path with symbolic links resolved (${gradle_flat}) or the path without them
@@ -523,10 +526,13 @@ git -C "${work}/gradle/w-branch-x" commit -q -m 'Ignore build output'
 ln -s gradle "${work}/gradle-link"
 gradle_flat="$(printf '%s' "${work}/gradle/w-branch-x" | tr / -)"
 gradle_link_flat="$(printf '%s' "${work}/gradle-link/w-branch-x" | tr / -)"
+gradle_sibling_flat="$(printf '%s' "${work}/gradle/w-branch-other" | tr / -)"
 gradle_reports="${work}/gradle/w-branch-x/build/reports/tests/test/MyTest"
 for d in "[${gradle_flat}-tests-all]" "[${gradle_flat}-tests-al-5NAR8S06TVEBO" \
   "[${gradle_link_flat}-tests-al-link]" \
-  "[${gradle_flat}-tests-z-branch-y]" "[${gradle_flat}yz-tests]"; do
+  "[${gradle_flat}-tests-al-z-branch-y]" "[${gradle_flat}yz-tests-al]" \
+  "[${gradle_sibling_flat}-checker-tests-al-G1VNC8PMB8ADC" \
+  "[x${gradle_flat}-tests]"; do
   mkdir -p "${gradle_reports}/$d"
   touch "${gradle_reports}/$d/index.html"
 done
@@ -549,14 +555,18 @@ for start in w-branch-x w-branch-x/build; do
     cat "${work}/gradle.stderr"
     status=1
   fi
-  for d in "[${gradle_flat}-tests-z-branch-y]" "[${gradle_flat}yz-tests]"; do
-    if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${gradle_reports}/$d, which is in the git working tree ${work}/gradle/w-branch-x but holds no file that it tracks" \
-      "${work}/gradle.stderr"; then
-      echo "FAIL: git-orphaned-branches in ${start} did not warn about $d, whose name matches \`*-branch-*\` apart from the path of an ancestor:"
-      cat "${work}/gradle.stderr"
-      status=1
-    fi
-  done
+  d="[x${gradle_flat}-tests]"
+  if ! grep -q -x -F -- "git-orphaned-branches: warning: not listing ${gradle_reports}/$d, which is in the git working tree ${work}/gradle/w-branch-x but holds no file that it tracks" \
+    "${work}/gradle.stderr"; then
+    echo "FAIL: git-orphaned-branches in ${start} did not warn about $d, in whose name the path of the working tree does not begin at a boundary:"
+    cat "${work}/gradle.stderr"
+    status=1
+  fi
+  if [ "$(wc -l < "${work}/gradle.stderr")" -ne 1 ]; then
+    echo "FAIL: git-orphaned-branches in ${start} warned about a directory named for a path:"
+    cat "${work}/gradle.stderr"
+    status=1
+  fi
 done
 
 # A working tree none of whose ancestors is named `*-branch-*`, but whose

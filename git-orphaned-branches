@@ -37,7 +37,12 @@
 # either.  A tool that names a directory for a path makes such a name, as
 # Gradle does for a test report in `build/reports/`; for example, in the
 # working tree `/home/me/repo-branch-feature`, the name
-# `[-home-me-repo-branch-feature-tests-all]`.  The directories below it are
+# `[-home-me-repo-branch-feature-tests-all]`.  Nor is a directory whose name
+# embeds the path of some other directory below an ancestor of two or more
+# components, such as a sibling working tree; copying a build directory from
+# one working tree to another makes such a name, such as
+# `[-home-me-repo-branch-other-tests-all]` in
+# `/home/me/repo-branch-feature/build/reports/`.  The directories below it are
 # still examined.
 #
 # A directory that another live working tree depends on -- one that hosts a
@@ -784,9 +789,24 @@ is_claude_projects_dir() {
 # end of the name, or a character other than a letter, a digit, `.`, or `_`.
 # So the path of a sibling such as `/home/me/repo-branch-featurex` does not
 # count as an occurrence of the path of the ancestor
-# `/home/me/repo-branch-feature`.  Each occurrence is replaced by `/`, which no
-# file name contains, so that what precedes and what follows an occurrence
-# cannot together form `-branch-`.
+# `/home/me/repo-branch-feature`.
+#
+# But the path of an ancestor of two or more components, such as `/home/me`,
+# that is followed by `-` extends through the letters, digits, `.`, `_`, and
+# `-` that follow it, which are taken to be the rest of the path of a
+# directory below that ancestor.  So `/home/me/repo-branch-featurex` and
+# `/home/me/repo-branch-other/tests/all` count as occurrences of `/home/me`.
+# A name can embed the path of a directory that is no ancestor of it when a
+# tool's output is copied from one working tree to another, as when a branch
+# directory is made by copying another one, `build` directory and all.  Where
+# that path ends is unknown, because Gradle shortens a long name by replacing
+# its end with a hash, as in `[-home-me-repo-branch-other-tests-al-5NAR8S06T`.
+# The path of an ancestor of one component, such as `/home`, does not extend,
+# because a name is likelier to contain such a short path by chance.
+#
+# Each occurrence is replaced by `/`, which no file name contains, so that
+# what precedes and what follows an occurrence cannot together form
+# `-branch-`.
 names_ancestor_path() {
   nap_name="${1##*/}"
   case "$1" in
@@ -814,11 +834,11 @@ names_ancestor_path() {
   nap_flat2="${nap_flat}"
   while [ -n "${nap_path1}" ] || [ -n "${nap_path2}" ]; do
     if [ "${#nap_flat1}" -ge "${#nap_flat2}" ]; then
-      nap_remove "${nap_flat1}"
+      nap_remove "${nap_flat1}" "${nap_path1}"
       nap_flat1="${nap_flat1%"-${nap_path1##*/}"}"
       nap_path1="${nap_path1%/*}"
     else
-      nap_remove "${nap_flat2}"
+      nap_remove "${nap_flat2}" "${nap_path2}"
       nap_flat2="${nap_flat2%"-${nap_path2##*/}"}"
       nap_path2="${nap_path2%/*}"
     fi
@@ -845,7 +865,9 @@ nap_flatten() {
 
 # Replaces by `/` each occurrence of $1 in ${nap_name} that begins and ends at
 # a boundary, as described at `names_ancestor_path`.  $1 is a flattened path,
-# so it begins with `-`.
+# so it begins with `-`.  $2 is the absolute path that $1 flattens.  If it has
+# two or more components, such as `/home/me`, an occurrence that is followed
+# by `-` extends through the letters, digits, `.`, `_`, and `-` that follow it.
 nap_remove() {
   # ${nap_done} is the part of the name that has been searched, and
   # ${nap_rest} is the part that remains.
@@ -863,6 +885,19 @@ nap_remove() {
       *)
         case "${nap_after}" in
           [[:alnum:]._]*) nap_bounded=false ;;
+          -*)
+            nap_bounded=true
+            case "$2" in
+              /*/?*)
+                while :; do
+                  case "${nap_after}" in
+                    [[:alnum:]._-]*) nap_after="${nap_after#?}" ;;
+                    *) break ;;
+                  esac
+                done
+                ;;
+            esac
+            ;;
           *) nap_bounded=true ;;
         esac
         ;;
