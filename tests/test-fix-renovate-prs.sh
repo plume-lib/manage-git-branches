@@ -211,8 +211,9 @@ pr_view 13 "${failure}"
 
 # The fake `gh` appends its arguments to ${work}/gh.log.  `gh pr list` prints
 # ${work}/pr-list.json and `gh pr view URL` prints ${work}/pr/NUMBER.json,
-# each filtered by the `--jq` filter, if any.  `gh repo view` reports that
-# someone/proj is not a fork and that its default branch is "main".
+# each filtered by the `--jq` filter, if any.  `gh repo view` fails, because
+# `fix-renovate-prs` finds the directory that pushes to a pull request's branch
+# from the clones' configuration, without asking GitHub.
 # `gh pr comment URL --body-file FILE` copies FILE to ${work}/posted/NUMBER.
 #
 # The rest serves `rerun-failed-ci`.  `gh pr checks URL` prints no checks,
@@ -258,7 +259,6 @@ while [ "\$#" -ne 0 ]; do
 done
 number="\${url##*/}"
 case "\${cmd}" in
-  'repo view') echo "someone/proj main"; exit 0 ;;
   'pr list') json="\$(cat "${work}/pr-list.json")" ;;
   'pr view') json="\$(cat "${work}/pr/\${number}.json")" || exit 1 ;;
   'pr checks')
@@ -407,7 +407,7 @@ esac
 
 # The report is last, and lists each pull request in its group.
 expected="Reran transient CI failures; run fix-renovate-prs again after CI finishes:
-https://github.com/someone/proj/pull/6
+https://github.com/someone/proj/pull/6  ${scan}/proj-branch-renovate-rerun (not made yet)
 Could not handle; a human must look:
 https://github.com/someone/proj/pull/7  ${scan}/proj-branch-renovate-diverged has diverged from the pull request's head commit ${oid_diverged}, and it has commits that the pull request's branch never had; move them onto ${oid_diverged}, or remove ${scan}/proj-branch-renovate-diverged with git-remove-branch-directory
 https://github.com/someone/proj/pull/8  claude reported a fix but committed nothing in ${scan}/proj-branch-renovate-nocommit
@@ -496,6 +496,59 @@ esac
 if [ "$(git -C "${scan}/proj-branch-renovate-impossible" rev-parse HEAD~1)" != "${oid_impossible}" ]; then
   fail "the directory was not reset to the new head commit: ${output}"
 fi
+
+# For a pull request whose CI jobs were rerun, the report names the directory
+# that `git push` in it pushes to the pull request's branch, with no note.  A
+# pull request whose comments cannot be read is reported with its directory.
+oid_unreadable="$(renovate_branch unreadable)"
+git -C "${scan}/proj" fetch -q origin
+branch_directory rerun
+branch_directory unreadable
+{
+  echo "["
+  pr 6 rerun "${oid_rerun}" "${failure}"
+  echo ","
+  pr 14 unreadable "${oid_unreadable}" "${failure}"
+  echo "]"
+} > "${work}/pr-list.json"
+output="$("${FIX_RENOVATE_PRS}" -C "${scan}" < /dev/null 2>&1)"
+expected="Reran transient CI failures; run fix-renovate-prs again after CI finishes:
+https://github.com/someone/proj/pull/6  ${scan}/proj-branch-renovate-rerun
+Could not handle; a human must look:
+https://github.com/someone/proj/pull/14  cannot read its comments, so claude did not run in ${scan}/proj-branch-renovate-unreadable"
+if [ "$(printf '%s\n' "${output}" | tail -n 4)" != "${expected}" ]; then
+  fail "the report is:
+$(printf '%s\n' "${output}" | tail -n 4)
+not:
+${expected}"
+fi
+
+# For a pull request whose CI jobs were rerun, the report notes that something
+# that is not a working copy directory for the pull request's branch is in
+# the way of the directory that a later run would make.
+git -C "${scan}/proj" worktree remove --force "${scan}/proj-branch-renovate-rerun"
+mkdir "${scan}/proj-branch-renovate-rerun"
+{
+  echo "["
+  pr 6 rerun "${oid_rerun}" "${failure}"
+  echo "]"
+} > "${work}/pr-list.json"
+output="$("${FIX_RENOVATE_PRS}" -C "${scan}" < /dev/null 2>&1)"
+expected="Reran transient CI failures; run fix-renovate-prs again after CI finishes:
+https://github.com/someone/proj/pull/6  ${scan}/proj-branch-renovate-rerun (exists, but does not push to the pull request's branch)"
+if [ "$(printf '%s\n' "${output}" | tail -n 2)" != "${expected}" ]; then
+  fail "the report is:
+$(printf '%s\n' "${output}" | tail -n 2)
+not:
+${expected}"
+fi
+if ! output="$("${FIX_RENOVATE_PRS}" --dry-run -C "${scan}" < /dev/null 2>&1)"; then
+  fail "--dry-run fails: ${output}"
+fi
+case "${output}" in
+  *"Would not run claude for https://github.com/someone/proj/pull/6, because proj-branch-renovate-rerun exists but does not push to the pull request's branch"*) ;;
+  *) fail "--dry-run does not report the directory in the way: ${output}" ;;
+esac
 
 # Usage errors.
 "${FIX_RENOVATE_PRS}" --bogus -C "${scan}" > /dev/null 2>&1

@@ -101,8 +101,15 @@
 # versions themselves run during the build, as they do in CI.
 #
 # The last thing that this command prints is the list of pull requests that
-# it acted on, grouped by what it did, with the directory of each.  It also
-# lists the pull requests that it could not handle.
+# it acted on, grouped by what it did.  Each line is a pull request's URL and
+# its directory.  For a pull request whose CI jobs were rerun, the directory
+# is the one that a later run of this command would use.  It is marked
+# "(not made yet)" if it does not exist yet, and "(exists, but does not push
+# to the pull request's branch)" if something exists at that path but it is
+# not a working copy directory from which `git push` pushes to the pull
+# request's branch, so that a later run would not use it.  This command also
+# lists the pull requests that it could not handle, each with an explanation
+# that names its directory if this command found or made one.
 #
 #   --dry-run  run nothing, push nothing, and post nothing; just print each
 #              failing pull request and the directory where Claude would run.
@@ -262,27 +269,33 @@ failed_checks_jq='.statusCheckRollup[]? | select(check_state == "failing")
     else "  \(.context): \(.targetUrl // "")" end'
 
 # The lists of pull requests for the final report.  Each is a sequence of
-# lines, each of which is a pull request's URL, then two spaces and a
-# directory or an explanation.
+# lines, each of which is a pull request's URL, then two spaces and its
+# directory, or, in ${problems}, an explanation.
 pushed=""
 commented=""
 reran=""
 problems=""
 
-# Usage: problem URL EXPLANATION
+# Usage: problem URL EXPLANATION [DIRECTORY]
 # Records that the pull request URL could not be handled, for the reason
-# EXPLANATION, and prints EXPLANATION.
+# EXPLANATION, and prints EXPLANATION.  If DIRECTORY is given and is not
+# empty, EXPLANATION is extended to say that claude did not run in DIRECTORY,
+# such as "cannot read its checks, so claude did not run in /path/to/dir".
 problem() {
-  printf '%s: %s: %s\n' "${SCRIPT_NAME}" "$1" "$2" >&2
-  problems="${problems}$1  $2
+  problem_explanation="$2"
+  if [ -n "${3:-}" ]; then
+    problem_explanation="${problem_explanation}, so claude did not run in $3"
+  fi
+  printf '%s: %s: %s\n' "${SCRIPT_NAME}" "$1" "${problem_explanation}" >&2
+  problems="${problems}$1  ${problem_explanation}
 "
   status=1
 }
 
 working_copy_directories "${base}" > "${work}/entries"
 
-# Find each working copy directory's repository, and the pull request branch,
-# if any, that `git push` in it pushes to.  Each line of ${work}/clones is a
+# Find each working copy directory's repository, and the branch, if any,
+# that `git push` in it pushes to.  Each line of ${work}/clones is a
 # GitHub slug ORG/REPO, then 0 if the directory's name contains "-branch-"
 # and 1 otherwise, then the directory.  Each line of ${work}/holders is the
 # GitHub slug of the repository that `git push` pushes the directory's branch
@@ -310,8 +323,8 @@ while IFS= read -r dir <&3; do
       printf '%s\t%s\t%s\n' "${slug}" "${preferred}" "${dir}" >> "${work}/clones"
     fi
   fi
-  if [ -n "${branch}" ] && pr_repositories "${path}" "${branch}"; then
-    printf '%s\t%s\t%s\t%s\n' "${pr_head_repo}" "${pr_head_branch}" "${pr_head_remote}" "${dir}" \
+  if [ -n "${branch}" ] && push_destination "${path}" "${branch}"; then
+    printf '%s\t%s\t%s\t%s\n' "${push_destination_repo}" "${push_destination_branch}" "${push_destination_remote}" "${dir}" \
       >> "${work}/holders"
   fi
 done 3< "${work}/entries"
@@ -497,18 +510,6 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   count=$((count + 1))
   echo "===== ${url}"
 
-  # Skip a pull request whose CI was already reported impossible at this
-  # commit.
-  if ! comments="$(gh_query "cannot read the comments of ${url}" \
-    gh pr view "${url}" --json comments --jq '.comments[].body')"; then
-    problem "${url}" "cannot read its comments"
-    continue
-  fi
-  if printf '%s\n' "${comments}" | grep -q -x -F -- "$(impossible_marker "${head_oid}")"; then
-    echo "${SCRIPT_NAME}: skipping ${url}, whose CI was reported impossible to fix at ${head_oid}"
-    continue
-  fi
-
   # The directory, if any, whose branch `git push` pushes to the pull
   # request's branch.
   holder="$(awk -F "${tab}" -v repo="${slug}" -v branch="${head_branch}" \
@@ -518,13 +519,37 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   else
     branch_dir="${clone%%-branch-*}-branch-$(branch_dir_name "${head_branch}")"
   fi
+  branch_path="${base}/${branch_dir}"
+  # The state of ${branch_path}:  "usable" if `git push` in it pushes to the
+  # pull request's branch, "blocked" if something else exists at that path,
+  # such as a file or a working copy directory for another branch, and
+  # "absent" if nothing does.
+  if [ -n "${holder}" ]; then
+    dir_state=usable
+  elif [ -e "${branch_path}" ] || [ -L "${branch_path}" ]; then
+    dir_state=blocked
+  else
+    dir_state=absent
+  fi
+
+  # Skip a pull request whose CI was already reported impossible at this
+  # commit.
+  if ! comments="$(gh_query "cannot read the comments of ${url}" \
+    gh pr view "${url}" --json comments --jq '.comments[].body')"; then
+    problem "${url}" "cannot read its comments" "${holder:+${branch_path}}"
+    continue
+  fi
+  if printf '%s\n' "${comments}" | grep -q -x -F -- "$(impossible_marker "${head_oid}")"; then
+    echo "${SCRIPT_NAME}: skipping ${url}, whose CI was reported impossible to fix at ${head_oid}"
+    continue
+  fi
 
   if [ "${dry_run}" = true ]; then
-    if [ -n "${holder}" ]; then
-      echo "Would run claude in ${branch_dir} for ${url}"
-    else
-      echo "Would run claude in a new directory ${branch_dir}, made in ${clone}, for ${url}"
-    fi
+    case "${dir_state}" in
+      usable) echo "Would run claude in ${branch_dir} for ${url}" ;;
+      blocked) echo "Would not run claude for ${url}, because ${branch_dir} exists but does not push to the pull request's branch" ;;
+      absent) echo "Would run claude in a new directory ${branch_dir}, made in ${clone}, for ${url}" ;;
+    esac
     "${SCRIPT_DIR}/rerun-failed-ci" --dry-run "${url}" < /dev/null
     continue
   fi
@@ -538,7 +563,12 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     0) ;;
     3)
       echo "${SCRIPT_NAME}: skipping ${url}, whose transient CI failures were rerun"
-      reran="${reran}${url}
+      case "${dir_state}" in
+        usable) note="" ;;
+        blocked) note=" (exists, but does not push to the pull request's branch)" ;;
+        absent) note=" (not made yet)" ;;
+      esac
+      reran="${reran}${url}  ${branch_path}${note}
 "
       continue
       ;;
@@ -549,7 +579,7 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   if ! checks="$(gh_query "cannot read the checks of ${url}" \
     gh pr view "${url}" --json statusCheckRollup \
     --jq "${check_state_def} (${ci_state_jq}), (${failed_checks_jq})")"; then
-    problem "${url}" "cannot read its checks"
+    problem "${url}" "cannot read its checks" "${holder:+${branch_path}}"
     continue
   fi
   ci="$(printf '%s\n' "${checks}" | sed -n -e 1p)"
@@ -571,25 +601,24 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   esac
 
   # Find or make the directory, and bring it to the pull request's head.
-  if [ -z "${holder}" ]; then
-    if [ -e "${base}/${branch_dir}" ] || [ -L "${base}/${branch_dir}" ]; then
-      problem "${url}" "${base}/${branch_dir} exists but does not push to the pull request's branch"
-      continue
-    fi
+  if [ "${dir_state}" = blocked ]; then
+    problem "${url}" "${branch_path} exists but does not push to the pull request's branch"
+    continue
+  fi
+  if [ "${dir_state}" = absent ]; then
     if ! (cd -- "${base}/${clone}" && "${SCRIPT_DIR}/git-checkout-branch" --no-pull "${head_branch}") < /dev/null; then
-      problem "${url}" "git-checkout-branch --no-pull ${head_branch} failed in ${clone}"
+      problem "${url}" "git-checkout-branch --no-pull ${head_branch} failed in ${base}/${clone}"
       continue
     fi
   fi
-  branch_path="${base}/${branch_dir}"
   local_branch="$(current_branch "${branch_path}")"
-  if [ -z "${local_branch}" ] || ! pr_repositories "${branch_path}" "${local_branch}" \
-    || [ "$(printf '%s\n' "${pr_head_repo}" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s\n' "${slug}" | tr '[:upper:]' '[:lower:]')" ] \
-    || [ "${pr_head_branch}" != "${head_branch}" ]; then
+  if [ -z "${local_branch}" ] || ! push_destination "${branch_path}" "${local_branch}" \
+    || [ "$(printf '%s\n' "${push_destination_repo}" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s\n' "${slug}" | tr '[:upper:]' '[:lower:]')" ] \
+    || [ "${push_destination_branch}" != "${head_branch}" ]; then
     problem "${url}" "git push in ${branch_path} does not push to the pull request's branch"
     continue
   fi
-  push_to="${pr_head_remote}"
+  push_to="${push_destination_remote}"
   if ! sync_directory "${url}" "${branch_path}" "${head_oid}" "${push_to}" "${head_branch}" "${local_branch}"; then
     continue
   fi
@@ -711,7 +740,7 @@ ${new_files}"
       } > "${work}/comment.md"
       if ! gh_query "cannot comment on ${url}" \
         gh pr comment "${url}" --body-file "${work}/comment.md" > /dev/null; then
-        problem "${url}" "cannot post claude's explanation, which is:
+        problem "${url}" "cannot post the explanation that claude wrote in ${branch_path}:
 ${explanation}"
         continue
       fi
