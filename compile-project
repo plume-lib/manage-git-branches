@@ -238,6 +238,7 @@ status_file="$tmpdir/status"
 # Ctrl-C would no longer stop the build.
 
 # Prints the output so far, removes the temporary directory, and dies of signal $1.
+# shellcheck disable=SC2329 # Invoked by `trap`.
 on_signal() {
   cat "$output" >&2
   rm -rf "$tmpdir"
