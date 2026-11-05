@@ -3205,7 +3205,10 @@ def main() -> None:
     if not check_only:
         failed_updates = apply_description_updates(updates, cfg)
     now = dt.datetime.now().astimezone()
-    as_of = now.strftime("%Y-%m-%d %H:%M %Z")
+    # A 24-hour clock, with "am" after a morning time, as in "2026-11-05 09:07am PST"
+    # and "2026-11-05 15:07 PST".
+    am = "am" if now.hour < 12 else ""
+    as_of = f"{now:%Y-%m-%d %H:%M}{am} {now:%Z}"
     if HIGHLIGHTED:
         command = " ".join(shell_word(w) for w in ["pr-status", "--highlight", *args.highlight])
         as_of += f", by `{command}`"
