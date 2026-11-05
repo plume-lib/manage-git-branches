@@ -31,6 +31,10 @@ Each run:
     of the dependency document between <!-- BEGIN GENERATED: name --> and
     <!-- END GENERATED: name --> (or creates the dependency document, if it does not
     exist),
+  * removes from the dependency document each "## Unblocked PRs" or "## Blocked PRs"
+    heading that directly precedes an "unblocked-REPO" or "blocked-REPO" generated
+    section, because each such section contains its own heading (and is empty if it has
+    no PR to show),
   * sets the dependency document's title, in its YAML front matter and its "# " heading,
     to the current directory's basename followed by "PR status", as in "src PR status".
 """
@@ -67,6 +71,12 @@ SNAPSHOT = ".pr-status-snapshot.json"
 FRONT_MATTER = re.compile(r"---\n((?:(?!---\n).*\n)*)---\n+")
 # The start of a top-level "title" entry of YAML front matter, whose key may be quoted.
 TITLE_KEY = re.compile(r"""(?:title|"title"|'title')[ \t]*:(?:[ \t]|$)""")
+# Matches a "## Unblocked PRs" or "## Blocked PRs" heading, such as "## Blocked PRs (daikon)",
+# and the blank lines that follow it, if they directly precede an "unblocked-REPO" or
+# "blocked-REPO" generated section.  Such a section contains its own heading.
+PR_HEADING_BEFORE_SECTION = re.compile(
+    r"^## (?:Unblocked|Blocked) PRs.*\n\n+(?=<!-- BEGIN GENERATED: (?:un)?blocked-)", re.MULTILINE
+)
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -2381,13 +2391,35 @@ def pr_table(
     return lines
 
 
-def gen_unblocked(model: Model, cfg: dict[str, Any], base: str) -> list[str]:
-    """Generate the "unblocked-REPO" section.
+def headed(heading: str, lines: list[str]) -> list[str]:
+    """Return the lines of a generated section that starts with a "## " heading.
+
+    Args:
+        heading: a heading, such as "Blocked PRs".
+        lines: the lines that follow the heading.
 
     Returns:
-        The section's lines:  a table of the PRs that depend on no other open PR.
+        The heading and lines, set off by blank lines.
     """
-    return pr_table(
+    return ["", f"## {heading}", "", *lines, ""]
+
+
+def gen_unblocked(model: Model, cfg: dict[str, Any], base: str, suffix: str) -> list[str]:
+    """Generate the "unblocked-REPO" section.
+
+    Args:
+        model: a repository's model.
+        cfg: the configuration.
+        base: the directory that holds the working copy directories.
+        suffix: the end of the section's heading, such as " (daikon)", or "".
+
+    Returns:
+        The section's lines:  an "Unblocked PRs" heading and a table of the PRs that depend
+        on no other open PR, or no lines if the repository has no open PR.
+    """
+    if not model.open:
+        return []
+    table = pr_table(
         model,
         cfg,
         base,
@@ -2404,15 +2436,25 @@ def gen_unblocked(model: Model, cfg: dict[str, Any], base: str) -> list[str]:
             for n in model.unblocked()
         ],
     )
+    return headed(f"Unblocked PRs{suffix}", table)
 
 
-def gen_blocked(model: Model, cfg: dict[str, Any], base: str) -> list[str]:
+def gen_blocked(model: Model, cfg: dict[str, Any], base: str, suffix: str) -> list[str]:
     """Generate the "blocked-REPO" section.
 
+    Args:
+        model: a repository's model.
+        cfg: the configuration.
+        base: the directory that holds the working copy directories.
+        suffix: the end of the section's heading, such as " (daikon)", or "".
+
     Returns:
-        The section's lines:  a table of the PRs that depend on another open PR.
+        The section's lines:  a "Blocked PRs" heading and a table of the PRs that depend on
+        another open PR, or no lines if no PR is blocked.
     """
-    return pr_table(
+    if not model.blocked():
+        return []
+    table = pr_table(
         model,
         cfg,
         base,
@@ -2428,6 +2470,7 @@ def gen_blocked(model: Model, cfg: dict[str, Any], base: str) -> list[str]:
             for n in model.blocked()
         ],
     )
+    return headed(f"Blocked PRs{suffix}", table)
 
 
 def gen_directories(models: list[Model], cfg: dict[str, Any], base: str) -> list[str]:
@@ -2609,8 +2652,9 @@ def section_generators(
         generators[f"details-{name}"] = lambda m=m: gen_details(m, cfg)
         generators[f"prerequisites-{name}"] = lambda m=m: gen_prerequisites(m)
         generators[f"independent-{name}"] = lambda m=m: gen_independent(m, cfg)
-        generators[f"unblocked-{name}"] = lambda m=m: gen_unblocked(m, cfg, base)
-        generators[f"blocked-{name}"] = lambda m=m: gen_blocked(m, cfg, base)
+        suffix = f" ({m.repo.label})" if len(models) > 1 else ""
+        generators[f"unblocked-{name}"] = lambda m=m, s=suffix: gen_unblocked(m, cfg, base, s)
+        generators[f"blocked-{name}"] = lambda m=m, s=suffix: gen_blocked(m, cfg, base, s)
     return generators
 
 
@@ -3110,17 +3154,7 @@ def default_dependency_document(models: list[Model]) -> str:
     ]
     for m in models:
         name = m.repo.name
-        heading = f" ({m.repo.label})" if len(models) > 1 else ""
-        lines += [
-            "",
-            f"## Unblocked PRs{heading}",
-            "",
-            *generated(f"unblocked-{name}"),
-            "",
-            f"## Blocked PRs{heading}",
-            "",
-            *generated(f"blocked-{name}"),
-        ]
+        lines += ["", *generated(f"unblocked-{name}"), "", *generated(f"blocked-{name}")]
     lines += [
         "",
         "## Other directories",
@@ -3268,6 +3302,7 @@ def main() -> None:
     else:
         text = default_dependency_document(models)
     text = set_header(text, f"{pathlib.Path(base).name} PR status")
+    text = PR_HEADING_BEFORE_SECTION.sub("", text)
     text = replace_sections(text, section_generators(models, cfg, base, as_of))
     dependencies.write_text(text)
     with pathlib.Path(SNAPSHOT).open("w") as f:
