@@ -226,18 +226,28 @@ errors="$tmpdir/errors"
 status_file="$tmpdir/status"
 
 # When interrupted, print the output so far, which might show why the build
-# was slow or stuck.  Each signal handler removes itself and the EXIT trap,
-# and then re-raises the signal, so that this command dies of the signal.
+# was slow or stuck.  That includes a hang-up:  standard error might be a file
+# rather than the terminal that hung up, and if it is that terminal, the write
+# merely fails.  Each signal handler removes itself and the EXIT trap, and then
+# re-raises the signal, so that this command dies of the signal.
 # The shell runs a handler only after the build pipeline below finishes.  A
 # Ctrl-C reaches the build too, so the build ends promptly.  But a SIGTERM sent
 # to this command alone takes effect only once the build finishes.  Running the
 # pipeline in the background and waiting for it would let the handler run at
 # once, but the shell starts a background command with SIGINT ignored, so a
 # Ctrl-C would no longer stop the build.
+
+# Prints the output so far, removes the temporary directory, and dies of signal $1.
+on_signal() {
+  cat "$output" >&2
+  rm -rf "$tmpdir"
+  trap - "$1" EXIT
+  kill -s "$1" "$$"
+}
 trap 'rm -rf "$tmpdir"' EXIT
-trap 'rm -rf "$tmpdir"; trap - HUP EXIT; kill -s HUP "$$"' HUP
-trap 'cat "$output" >&2; rm -rf "$tmpdir"; trap - INT EXIT; kill -s INT "$$"' INT
-trap 'cat "$output" >&2; rm -rf "$tmpdir"; trap - TERM EXIT; kill -s TERM "$$"' TERM
+trap 'on_signal HUP' HUP
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
 
 printf '%s\n' "$running_message" > "$output"
 # The builds' standard output is appended to $output, and their standard error
