@@ -675,6 +675,152 @@ class SectionGeneratorsTest(unittest.TestCase):
         self.assertIn("conflicting-push-commands", generators)
 
 
+class PrSectionsTest(unittest.TestCase):
+    """Tests for gen_unblocked and gen_blocked."""
+
+    @staticmethod
+    def sections(unblocked, blocked, label="repo"):
+        """Return the "unblocked-REPO" and "blocked-REPO" sections of the given repository.
+
+        Args:
+            unblocked: the numbers of a repository's unblocked PRs, such as [1, 2]
+            blocked: the numbers of the repository's blocked PRs
+            label: the repository's label, or None to omit it from the sections' headings
+
+        Returns:
+            The lines of the two sections, each with "TABLE" in place of its table.  The
+            table's cells are mocks.
+        """
+        model = types.SimpleNamespace(
+            open=set(unblocked) | set(blocked),
+            unblocked=lambda: sorted(unblocked),
+            blocked=lambda: sorted(blocked),
+        )
+        cells = dict.fromkeys(
+            [
+                "needed_by",
+                "textual_conflicts",
+                "unblocked_notes",
+                "dependency_cells",
+                "detail_notes",
+            ],
+            mock.DEFAULT,
+        )
+        with mock.patch.multiple(pr_status, pr_table=mock.Mock(return_value=["TABLE"]), **cells):
+            return (
+                pr_status.gen_unblocked(model, {}, "/base", label),
+                pr_status.gen_blocked(model, {}, "/base", label),
+            )
+
+    def test_no_prs(self):
+        """With no open PR, neither section has a heading or a table."""
+        self.assertEqual(self.sections([], []), ([], []))
+
+    def test_no_blocked_prs(self):
+        """With no blocked PR, only the "Unblocked PRs" section has a heading and a table."""
+        self.assertEqual(
+            self.sections([1], []), (["", "## Unblocked PRs (repo)", "", "TABLE", ""], [])
+        )
+
+    def test_no_unblocked_prs(self):
+        """With a blocked PR, the "Unblocked PRs" section has a heading, even if it has no PR."""
+        self.assertEqual(
+            self.sections([], [1]),
+            (
+                ["", "## Unblocked PRs (repo)", "", "None.", ""],
+                ["", "## Blocked PRs (repo)", "", "TABLE", ""],
+            ),
+        )
+
+    def test_no_label(self):
+        """Without a label, the sections' headings name no repository."""
+        self.assertEqual(
+            self.sections([1], [2], label=None),
+            (
+                ["", "## Unblocked PRs", "", "TABLE", ""],
+                ["", "## Blocked PRs", "", "TABLE", ""],
+            ),
+        )
+
+
+class PrHeadingBeforeSectionTest(unittest.TestCase):
+    """Tests for PR_HEADING_BEFORE_SECTION."""
+
+    SECTIONS = (
+        "<!-- BEGIN GENERATED: unblocked-repo -->\n<!-- END GENERATED: unblocked-repo -->\n\n"
+        "<!-- BEGIN GENERATED: blocked-repo -->\n<!-- END GENERATED: blocked-repo -->\n\n"
+        "## Other directories\n"
+    )
+
+    def test_removes_headings(self):
+        """A heading that precedes an "unblocked-REPO" or "blocked-REPO" section is removed."""
+        text = (
+            "## Unblocked PRs (repo)\n\n"
+            "<!-- BEGIN GENERATED: unblocked-repo -->\n<!-- END GENERATED: unblocked-repo -->\n\n"
+            "## Blocked PRs (repo)\n\n"
+            "<!-- BEGIN GENERATED: blocked-repo -->\n<!-- END GENERATED: blocked-repo -->\n\n"
+            "## Other directories\n"
+        )
+        self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION.sub("", text), self.SECTIONS)
+
+    def test_removes_headings_without_blank_line(self):
+        """A heading on the line directly before its section is removed."""
+        text = (
+            "## Unblocked PRs (repo)\n"
+            "<!-- BEGIN GENERATED: unblocked-repo -->\n<!-- END GENERATED: unblocked-repo -->\n\n"
+            "## Blocked PRs (repo)\n"
+            "<!-- BEGIN GENERATED: blocked-repo -->\n<!-- END GENERATED: blocked-repo -->\n\n"
+            "## Other directories\n"
+        )
+        self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION.sub("", text), self.SECTIONS)
+
+    def test_retains_other_headings(self):
+        """A heading that precedes no "unblocked-REPO" or "blocked-REPO" section is retained."""
+        text = "## Blocked PRs\n\nProse.\n\n" + self.SECTIONS
+        self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION.sub("", text), text)
+
+    def test_retains_heading_before_other_kind_of_section(self):
+        """A heading is retained if it precedes the other kind of section."""
+        for text in [
+            "## Unblocked PRs\n\n<!-- BEGIN GENERATED: blocked-repo -->\n",
+            "## Blocked PRs\n\n<!-- BEGIN GENERATED: unblocked-repo -->\n",
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION.sub("", text), text)
+
+
+class RegenerateDependencyDocumentTest(unittest.TestCase):
+    """Tests for regenerate_dependency_document."""
+
+    def test_removes_old_headings_idempotently(self):
+        """Old standalone headings are removed, and regenerating again changes nothing."""
+        generators = {
+            "as-of": lambda: ["As of now."],
+            "unblocked-repo": lambda: ["", "## Unblocked PRs (repo)", "", "None.", ""],
+            "blocked-repo": lambda: ["", "## Blocked PRs (repo)", "", "TABLE", ""],
+        }
+        text = (
+            "# Old\n\n" + AS_OF + "\n## Unblocked PRs (repo)\n\n"
+            "<!-- BEGIN GENERATED: unblocked-repo -->\n<!-- END GENERATED: unblocked-repo -->\n\n"
+            "## Blocked PRs (repo)\n"
+            "<!-- BEGIN GENERATED: blocked-repo -->\n<!-- END GENERATED: blocked-repo -->\n\n"
+            "## Other directories\n"
+        )
+        first = pr_status.regenerate_dependency_document(text, "src PR status", generators)
+        self.assertEqual(
+            first,
+            "---\ntitle: src PR status\n---\n\n# src PR status\n\n"
+            "<!-- BEGIN GENERATED: as-of -->\nAs of now.\n<!-- END GENERATED: as-of -->\n\n"
+            "<!-- BEGIN GENERATED: unblocked-repo -->\n\n## Unblocked PRs (repo)\n\nNone.\n\n"
+            "<!-- END GENERATED: unblocked-repo -->\n\n"
+            "<!-- BEGIN GENERATED: blocked-repo -->\n\n## Blocked PRs (repo)\n\nTABLE\n\n"
+            "<!-- END GENERATED: blocked-repo -->\n\n"
+            "## Other directories\n",
+        )
+        second = pr_status.regenerate_dependency_document(first, "src PR status", generators)
+        self.assertEqual(second, first)
+
+
 AS_OF = "<!-- BEGIN GENERATED: as-of -->\n<!-- END GENERATED: as-of -->\n"
 HEADER = "---\ntitle: src PR status\n---\n\n# src PR status\n\n" + AS_OF
 
