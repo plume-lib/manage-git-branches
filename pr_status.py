@@ -73,9 +73,11 @@ FRONT_MATTER = re.compile(r"---\n((?:(?!---\n).*\n)*)---\n+")
 TITLE_KEY = re.compile(r"""(?:title|"title"|'title')[ \t]*:(?:[ \t]|$)""")
 # Matches a "## Unblocked PRs" or "## Blocked PRs" heading, such as "## Blocked PRs (daikon)",
 # and the blank lines that follow it, if they directly precede an "unblocked-REPO" or
-# "blocked-REPO" generated section.  Such a section contains its own heading.
+# "blocked-REPO" generated section, respectively.  Such a section contains its own heading.
 PR_HEADING_BEFORE_SECTION = re.compile(
-    r"^## (?:Unblocked|Blocked) PRs.*\n\n+(?=<!-- BEGIN GENERATED: (?:un)?blocked-)", re.MULTILINE
+    r"^(?:## Unblocked PRs.*\n+(?=<!-- BEGIN GENERATED: unblocked-)"
+    r"|## Blocked PRs.*\n+(?=<!-- BEGIN GENERATED: blocked-))",
+    re.MULTILINE,
 )
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
@@ -2580,6 +2582,22 @@ def replace_sections(text: str, generators: Mapping[str, Callable[[], list[str]]
     )
 
 
+def regenerate_dependency_document(
+    text: str, title: str, generators: Mapping[str, Callable[[], list[str]]]
+) -> str:
+    """Set the header of the dependency document and regenerate its generated sections.
+
+    A "## Unblocked PRs" or "## Blocked PRs" heading that directly precedes its generated
+    section is removed, because the section contains its own heading.
+
+    Returns:
+        text, with its title set and its generated sections regenerated.
+    """
+    text = set_header(text, title)
+    text = PR_HEADING_BEFORE_SECTION.sub("", text)
+    return replace_sections(text, generators)
+
+
 def yaml_string(s: str) -> str:
     """Return a YAML scalar that YAML reads as the given string.
 
@@ -3315,9 +3333,9 @@ def main() -> None:
         text = dependencies.read_text()
     else:
         text = default_dependency_document(models)
-    text = set_header(text, f"{pathlib.Path(base).name} PR status")
-    text = PR_HEADING_BEFORE_SECTION.sub("", text)
-    text = replace_sections(text, section_generators(models, cfg, base, as_of))
+    title = f"{pathlib.Path(base).name} PR status"
+    generators = section_generators(models, cfg, base, as_of)
+    text = regenerate_dependency_document(text, title, generators)
     dependencies.write_text(text)
     with pathlib.Path(SNAPSHOT).open("w") as f:
         json.dump({"time": now.isoformat(timespec="seconds"), "facts": new}, f, indent=1)
