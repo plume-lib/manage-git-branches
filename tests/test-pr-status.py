@@ -679,12 +679,13 @@ class PrSectionsTest(unittest.TestCase):
     """Tests for gen_unblocked and gen_blocked."""
 
     @staticmethod
-    def sections(unblocked, blocked):
-        """Generate the "unblocked-REPO" and "blocked-REPO" sections of a repository.
+    def sections(unblocked, blocked, label="repo"):
+        """Return the "unblocked-REPO" and "blocked-REPO" sections of the given repository.
 
         Args:
-            unblocked: the numbers of the repository's unblocked PRs
+            unblocked: the numbers of a repository's unblocked PRs, such as [1, 2]
             blocked: the numbers of the repository's blocked PRs
+            label: the repository's label, or None to omit it from the sections' headings
 
         Returns:
             The lines of the two sections, each with "TABLE" in place of its table.  The
@@ -707,8 +708,8 @@ class PrSectionsTest(unittest.TestCase):
         )
         with mock.patch.multiple(pr_status, pr_table=mock.Mock(return_value=["TABLE"]), **cells):
             return (
-                pr_status.gen_unblocked(model, {}, "/base", " (repo)"),
-                pr_status.gen_blocked(model, {}, "/base", " (repo)"),
+                pr_status.gen_unblocked(model, {}, "/base", label),
+                pr_status.gen_blocked(model, {}, "/base", label),
             )
 
     def test_no_prs(self):
@@ -726,8 +727,18 @@ class PrSectionsTest(unittest.TestCase):
         self.assertEqual(
             self.sections([], [1]),
             (
-                ["", "## Unblocked PRs (repo)", "", "TABLE", ""],
+                ["", "## Unblocked PRs (repo)", "", "None.", ""],
                 ["", "## Blocked PRs (repo)", "", "TABLE", ""],
+            ),
+        )
+
+    def test_no_label(self):
+        """Without a label, the sections' headings name no repository."""
+        self.assertEqual(
+            self.sections([1], [2], label=None),
+            (
+                ["", "## Unblocked PRs", "", "TABLE", ""],
+                ["", "## Blocked PRs", "", "TABLE", ""],
             ),
         )
 

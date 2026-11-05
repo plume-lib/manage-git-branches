@@ -2391,34 +2391,43 @@ def pr_table(
     return lines
 
 
-def headed(heading: str, lines: list[str]) -> list[str]:
-    """Return the lines of a generated section that starts with a "## " heading.
+def headed(heading: str, label: str | None, lines: list[str]) -> list[str]:
+    """Return the given lines, preceded by the given "## " heading.
 
     Args:
         heading: a heading, such as "Blocked PRs".
+        label: a repository's label, such as "daikon", to follow the heading in parentheses,
+            or None to omit it.
         lines: the lines that follow the heading.
 
     Returns:
         The heading and lines, set off by blank lines.
     """
+    if label is not None:
+        heading += f" ({label})"
     return ["", f"## {heading}", "", *lines, ""]
 
 
-def gen_unblocked(model: Model, cfg: dict[str, Any], base: str, suffix: str) -> list[str]:
+def gen_unblocked(model: Model, cfg: dict[str, Any], base: str, label: str | None) -> list[str]:
     """Generate the "unblocked-REPO" section.
 
     Args:
         model: a repository's model.
         cfg: the configuration.
         base: the directory that holds the working copy directories.
-        suffix: the end of the section's heading, such as " (daikon)", or "".
+        label: the repository's label, such as "daikon", to follow the section's heading, or
+            None to omit it.
 
     Returns:
         The section's lines:  an "Unblocked PRs" heading and a table of the PRs that depend
-        on no other open PR, or no lines if the repository has no open PR.
+        on no other open PR (or "None." if there are none), or no lines if the repository has
+        no open PR.
     """
     if not model.open:
         return []
+    unblocked = model.unblocked()
+    if not unblocked:
+        return headed("Unblocked PRs", label, ["None."])
     table = pr_table(
         model,
         cfg,
@@ -2433,26 +2442,28 @@ def gen_unblocked(model: Model, cfg: dict[str, Any], base: str, suffix: str) -> 
                     unblocked_notes(model, cfg, n, master=False),
                 ],
             )
-            for n in model.unblocked()
+            for n in unblocked
         ],
     )
-    return headed(f"Unblocked PRs{suffix}", table)
+    return headed("Unblocked PRs", label, table)
 
 
-def gen_blocked(model: Model, cfg: dict[str, Any], base: str, suffix: str) -> list[str]:
+def gen_blocked(model: Model, cfg: dict[str, Any], base: str, label: str | None) -> list[str]:
     """Generate the "blocked-REPO" section.
 
     Args:
         model: a repository's model.
         cfg: the configuration.
         base: the directory that holds the working copy directories.
-        suffix: the end of the section's heading, such as " (daikon)", or "".
+        label: the repository's label, such as "daikon", to follow the section's heading, or
+            None to omit it.
 
     Returns:
         The section's lines:  a "Blocked PRs" heading and a table of the PRs that depend on
         another open PR, or no lines if no PR is blocked.
     """
-    if not model.blocked():
+    blocked = model.blocked()
+    if not blocked:
         return []
     table = pr_table(
         model,
@@ -2467,10 +2478,10 @@ def gen_blocked(model: Model, cfg: dict[str, Any], base: str, suffix: str) -> li
                     detail_notes(model, cfg, n, master=False),
                 ],
             )
-            for n in model.blocked()
+            for n in blocked
         ],
     )
-    return headed(f"Blocked PRs{suffix}", table)
+    return headed("Blocked PRs", label, table)
 
 
 def gen_directories(models: list[Model], cfg: dict[str, Any], base: str) -> list[str]:
@@ -2647,14 +2658,17 @@ def section_generators(
         "push-commands": lambda: gen_push_commands(models, base),
         "conflicting-push-commands": lambda: gen_push_commands(models, base, conflicts_only=True),
     }
+    # Each repository's label distinguishes its sections' headings in a multi-repository
+    # document.
+    labeled = len(models) > 1
     for m in models:
         name = m.repo.name
+        label = m.repo.label if labeled else None
         generators[f"details-{name}"] = lambda m=m: gen_details(m, cfg)
         generators[f"prerequisites-{name}"] = lambda m=m: gen_prerequisites(m)
         generators[f"independent-{name}"] = lambda m=m: gen_independent(m, cfg)
-        suffix = f" ({m.repo.label})" if len(models) > 1 else ""
-        generators[f"unblocked-{name}"] = lambda m=m, s=suffix: gen_unblocked(m, cfg, base, s)
-        generators[f"blocked-{name}"] = lambda m=m, s=suffix: gen_blocked(m, cfg, base, s)
+        generators[f"unblocked-{name}"] = functools.partial(gen_unblocked, m, cfg, base, label)
+        generators[f"blocked-{name}"] = functools.partial(gen_blocked, m, cfg, base, label)
     return generators
 
 
