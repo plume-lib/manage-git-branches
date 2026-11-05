@@ -258,13 +258,16 @@ printf '%s\n' "$running_message" > "$output"
 # descriptor for both would preserve the order exactly, but then this command
 # could not tell whether the builds wrote to standard error.  A pipeline does
 # not pass on the status of its first command in POSIX sh, so the status goes
-# through $status_file.  `tee` ignores SIGINT, so that after a Ctrl-C, it still
-# copies what the builds write to standard error as they end.
+# through $status_file.  `tee` ignores SIGHUP, SIGINT, and SIGTERM, so that
+# after a hang-up, a Ctrl-C, or a SIGTERM sent to the whole process group, it
+# still copies what the builds write to standard error as they end, rather than
+# dying with that output unread in its pipe.  `tee` exits once the builds close
+# their standard error, so ignoring these signals cannot leave it running.
 {
   compile_project < /dev/null
   echo "$?" > "$status_file"
 } 2>&1 >> "$output" | (
-  trap '' INT
+  trap '' HUP INT TERM
   exec tee "$errors"
 ) >> "$output"
 build_status="$(cat "$status_file" 2> /dev/null)"
