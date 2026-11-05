@@ -29,6 +29,12 @@ unset MAKE_FLAGS
 unset GRADLE_ASSEMBLE_FLAGS
 unset MVN_COMPILE_FLAGS
 unset ERR_IF_NO_BUILDFILE
+# A `make` that inherits these from a `make` that runs this test prints
+# "Entering directory" lines, which the checks of the output below do not
+# expect.
+unset MAKELEVEL
+unset MAKEFLAGS
+unset MFLAGS
 
 if ! tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")" || [ -z "${tmpdir}" ]; then
   echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
@@ -275,6 +281,75 @@ fi
 if [ "$(cat "${sentinel}/log")" != "cleaned" ]; then
   fail "with a clean that exited 222, expected only \"cleaned\" but got: $(cat "${sentinel}/log")"
 fi
+
+# `compile-project` gets a temporary directory of its own, so that the checks
+# below can tell whether it removes its temporary files.
+quiet_tmp="${tmpdir}/quiet-tmp"
+mkdir -p "${quiet_tmp}"
+
+# Runs `compile-project` on directory $1, with its standard output in
+# ${quiet_stdout}, its standard error in ${quiet_stderr}, and its exit status
+# in ${quiet_status}.  Reports a failure if it leaves temporary files behind.
+run_quiet() {
+  quiet_stdout="$(TMPDIR="${quiet_tmp}" "${COMPILE_PROJECT}" "$1" 2> "${tmpdir}/quiet-stderr")"
+  quiet_status=$?
+  quiet_stderr="$(cat "${tmpdir}/quiet-stderr")"
+  if [ -n "$(ls -A "${quiet_tmp}")" ]; then
+    fail "temporary files left behind for $1: $(ls -A "${quiet_tmp}")"
+  fi
+}
+
+# A successful build that writes only to standard output prints nothing.
+quietok="${tmpdir}/quiet-ok"
+mkdir -p "${quietok}"
+printf 'all:\n\techo building\n' > "${quietok}/Makefile"
+run_quiet "${quietok}"
+if [ "${quiet_status}" != 0 ]; then
+  fail "nonzero exit status ${quiet_status} in ${quietok}: ${quiet_stderr}"
+fi
+if [ -n "${quiet_stdout}${quiet_stderr}" ]; then
+  fail "a successful build printed output in ${quietok}: ${quiet_stdout}${quiet_stderr}"
+fi
+
+# A successful build that writes to standard error prints, to standard error,
+# where it ran and the build's standard output and standard error together, in
+# order.  The build pauses between writes, because the order is exact only for
+# writes that are separated in time.
+quietstderr="${tmpdir}/quiet-stderr-project"
+mkdir -p "${quietstderr}"
+printf 'all:\n\t@echo out 1\n\t@sleep 0.3\n\t@echo err 1 >&2\n\t@sleep 0.3\n\t@echo out 2\n' \
+  > "${quietstderr}/Makefile"
+run_quiet "${quietstderr}"
+if [ "${quiet_status}" != 0 ]; then
+  fail "nonzero exit status ${quiet_status} in ${quietstderr}: ${quiet_stderr}"
+fi
+if [ -n "${quiet_stdout}" ]; then
+  fail "expected no standard output in ${quietstderr}, got: ${quiet_stdout}"
+fi
+if [ "${quiet_stderr}" != "Running compile-project in ${quietstderr}
+out 1
+err 1
+out 2" ]; then
+  fail "expected the output in order on standard error in ${quietstderr}, got: ${quiet_stderr}"
+fi
+
+# A failing build that writes only to standard output prints its output, to
+# standard error, and exits with the build's status.
+quietfails="${tmpdir}/quiet-fails"
+mkdir -p "${quietfails}"
+printf 'all:\n\t@echo the reason\n\t@exit 3\n' > "${quietfails}/Makefile"
+run_quiet "${quietfails}"
+if [ "${quiet_status}" != 2 ]; then
+  fail "expected exit status 2, the status of make, in ${quietfails}, got ${quiet_status}"
+fi
+if [ -n "${quiet_stdout}" ]; then
+  fail "expected no standard output in ${quietfails}, got: ${quiet_stdout}"
+fi
+case "${quiet_stderr}" in
+  "Running compile-project in ${quietfails}
+the reason"*) ;;
+  *) fail "expected the build's output on standard error in ${quietfails}, got: ${quiet_stderr}" ;;
+esac
 
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
