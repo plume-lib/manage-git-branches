@@ -5,12 +5,14 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status            # snapshot, report changes, regenerate the documents
   pr-status --check    # snapshot and report changes, but write no document
   pr-status --print-document  # print the dependency document's file name, and exit
+  pr-status --print-config    # print the config, with its defaults filled in, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
 
 Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
-                           (optional; see default_config for the default)
+                           (optional; see default_config for the default, and
+                           pr-status-config.md for the format)
   .pr-status-snapshot.json written by the previous run; compared with this run
 Each run:
   * reads the open PRs with gh,
@@ -59,20 +61,19 @@ import sys
 from collections import Counter, defaultdict
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+import pr_status_config
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
-CONFIG = "pr-status-config.json"
-# The dependency document's file name when there is no config file.
-DEFAULT_DEPENDENCY_DOCUMENT = "pr-status.md"
-SNAPSHOT = ".pr-status-snapshot.json"
 # Matches the YAML front matter that starts a Markdown document, such as
 # "---\ntitle: src PR status\n---\n", and the blank lines that follow it.  The front matter
 # ends at its first "---" line.  Group 1 is the front matter's contents, such as
 # "title: src PR status\n", or "" if it is empty.
-FRONT_MATTER = re.compile(r"---\n((?:(?!---\n).*\n)*)---\n+")
-# The start of a top-level "title" entry of YAML front matter, whose key may be quoted.
-TITLE_KEY = re.compile(r"""(?:title|"title"|'title')[ \t]*:(?:[ \t]|$)""")
+FRONT_MATTER_RE = re.compile(r"---\n((?:(?!---\n).*\n)*)---\n+")
+# Matches the start of a top-level "title" entry of YAML front matter, such as "title: " or
+# '"title":', whose key may be quoted.
+TITLE_KEY_RE = re.compile(r"""(?:title|"title"|'title')[ \t]*:(?:[ \t]|$)""")
 # Matches a heading, such as "## Blocked PRs (daikon)", and the blank lines that follow it, if
 # they directly precede a generated section that contains its own heading, such as a
 # "blocked-REPO" section.  Such a section is empty if it has nothing to show, so a heading
@@ -152,9 +153,15 @@ def basename(path: str) -> str:
 class Repo:
     """A GitHub repository, its open PRs, and the merge analysis of those PRs."""
 
-    def __init__(self, cfg: dict[str, Any]) -> None:
-        """Create a Repo from its entry in the config, with no PRs."""
-        self.name = cfg["name"]
+    def __init__(self, name: str, cfg: dict[str, Any]) -> None:
+        """Create a Repo, with no PRs, from an entry in the config.
+
+        Args:
+            name: the entry's key in the config's "repos", such as "daikon".
+            cfg: the entry, as a dict parsed from the config file's JSON, with keys such as
+                "gh" and "prefix".
+        """
+        self.name = name
         self.gh = cfg["gh"]
         self.clone = cfg["clone"]
         self.prefix = cfg["prefix"]
@@ -162,7 +169,7 @@ class Repo:
         self.node_prefix = cfg["node_prefix"]
         self.owner = self.gh.split("/")[0]
         self.dir_name = cfg.get("dir_name", self.name)
-        self.default_branch = cfg.get("default_branch", "master")
+        self.default_branch = repo_default_branch(cfg)
         self.keywords = cfg.get("dependency_keywords", [])
         self.show_author = cfg.get("show_author", False)
         self.prs: dict[int, dict[str, Any]] = {}  # number -> gh JSON
@@ -640,11 +647,14 @@ def query_pr_states(refs: Iterable[str]) -> dict[str, str | None]:
 
 BASE_KEYWORDS = ["depends on", "depend on", "builds on", "land", "merge"]
 
-# A negation, possibly followed by one word, that ends the text before a keyword, as in
-# "does not depend on", "doesn't actually depend on", or "no longer builds on".
-NEGATION = re.compile(r"(\b(not|never|no longer)|n['\u2019]t)\s+(\w+\s+)?$", re.IGNORECASE)
+# Matches a negation, possibly followed by one word, at the end of the text before a keyword,
+# as in "does not depend on", "doesn't actually depend on", or "no longer builds on".
+NEGATION_RE = re.compile(r"(\b(not|never|no longer)|n['\u2019]t)\s+(\w+\s+)?$", re.IGNORECASE)
 
-LANDING_START = re.compile(
+# Matches the start of a landing-order line, such as "Land after #12" or
+# "Land with owner/repo#34", which names its PR as "#N", "owner/repo#N", or the PR's URL.
+# Group 1 is the word "after", "with", or "before".
+LANDING_START_RE = re.compile(
     r"Land (after|with|before)"
     r" (#\d+|[\w.-]+/[\w.-]+#\d+|https://github\.com/[\w.-]+/[\w.-]+/pull/\d+)\b"
 )
@@ -732,7 +742,7 @@ def stated_relations(body: str, repo: Repo) -> StatedRelations:
     # A colon does not end a sentence, so "Merge with:" and the list that follows stay together.
     for sentence in re.split(r"(?<=[.;])\s+|\n\s*\n(?!\s*https?://)", body):
         for m in pattern.finditer(sentence):
-            if NEGATION.search(sentence[: m.start()]):
+            if NEGATION_RE.search(sentence[: m.start()]):
                 continue  # "This PR does not depend on #N" names no relationship
             rest = sentence[m.end() :]
             keyword = m[1].lower()
@@ -786,7 +796,7 @@ def landing_line(line: str, repo: Repo) -> tuple[str, str] | None:
         it is in repo and as "owner/repo#N" otherwise; or None if line is not a
         landing-order line.
     """
-    m = LANDING_START.match(line)
+    m = LANDING_START_RE.match(line)
     if not m:
         return None
     refs = pr_refs(line, repo)
@@ -1251,7 +1261,7 @@ def load_models(cfg: dict[str, Any], pairwise: bool = True) -> list[Model]:
     """
     models = []
     for name in cfg["order"]:
-        repo = Repo(cfg["repos"][name])
+        repo = Repo(name, cfg["repos"][name])
         load_repo(repo, pairwise=pairwise)
         models.append(Model(repo, cfg))
     unite_partners(models)
@@ -1942,43 +1952,6 @@ def keep(model: Model, n: int, flt: str | dict[str, list[str]]) -> bool:
     return True
 
 
-def is_valid_filter(flt: Any) -> bool:
-    """Return True if the given value is a valid filter of an unblocked document.
-
-    Args:
-        flt: a value parsed from the config file's JSON, such as "unassigned".
-
-    Returns:
-        True if flt is "all", "unassigned", or a dict whose only key "unassigned_or" maps
-        to a list of GitHub logins, such as {"unassigned_or": ["mernst"]}.
-    """
-    if flt in ("all", "unassigned"):
-        return True
-    if not isinstance(flt, dict) or flt.keys() != {"unassigned_or"}:
-        return False
-    logins = flt["unassigned_or"]
-    return isinstance(logins, list) and all(isinstance(w, str) for w in logins)
-
-
-def check_unblocked_filters(cfg: dict[str, Any], program: str) -> None:
-    """Exit with an error message if an unblocked document of cfg has an invalid filter.
-
-    An unblocked document with no filter uses the filter "all".
-
-    Args:
-        cfg: a config, as a dict parsed from the config file's JSON, with keys such as
-            "repos" and "documents".
-        program: the name of the running program; used for diagnostics.
-    """
-    for doc in cfg["documents"].get("unblocked", []):
-        flt = doc.get("filter", "all")
-        if not is_valid_filter(flt):
-            sys.exit(
-                f"{program}: {CONFIG}: the filter of {doc.get('file')} is {json.dumps(flt)},"
-                ' not "all", "unassigned", or {"unassigned_or": [LOGIN...]}'
-            )
-
-
 def unblocked_doc(
     models: list[Model], cfg: dict[str, Any], base: str, doc: dict[str, Any], as_of: str
 ) -> str:
@@ -2042,12 +2015,20 @@ def unblocked_doc(
                 unblocked_notes(m, cfg, n),
             ]
             lines.append(table_row(cells))
-    excluded = [(m, cfg["repos"][m.repo.name].get("excluded", {})) for m in models]
-    if any(ex.get("prs") for _, ex in excluded):
+    # Each model, its excluded PRs that are open, and the reason for excluding them.
+    excluded = [
+        (
+            m,
+            m.excluded & set(m.repo.prs),
+            cfg["repos"][m.repo.name].get("excluded", {}).get("reason"),
+        )
+        for m in models
+    ]
+    if any(prs for _, prs, _ in excluded):
         lines += ["", "## Excluded by decision", ""]
-        for m, ex in excluded:
-            if ex.get("prs"):
-                lines.append(f"* {m.repo.label}: {ex['reason']}")
+        for m, prs, reason in excluded:
+            if prs:
+                lines.append(f"* {m.repo.label}: {reason or m.repo.links(prs) + '.'}")
     lines += ["", "## Excluded because they depend on another PR", ""]
     for m in models:
         items = []
@@ -2658,11 +2639,11 @@ def set_header(text: str, title: str) -> str:
         text, starting with a header that has title.
     """
     title_entry = f"title: {yaml_string(title)}"
-    m = FRONT_MATTER.match(text)
+    m = FRONT_MATTER_RE.match(text)
     entries = m[1].splitlines() if m else []
     body = text[m.end() :] if m else text.lstrip("\n")
     for i, entry in enumerate(entries):
-        if TITLE_KEY.match(entry):
+        if TITLE_KEY_RE.match(entry):
             # The value continues through indented lines, and through blank lines that precede
             # an indented line.
             end = i + 1
@@ -3029,7 +3010,97 @@ def report_changes(models: list[Model], old: dict[str, Any], new: dict[str, Any]
     return out
 
 
-# ---------- the default config ----------
+# The default branch that GitHub reports for each repository that github_default_branch or
+# default_config has read it for, as a map from the repository's GitHub slug, such as
+# "ORG/REPO", to the branch, such as "main".
+GITHUB_DEFAULT_BRANCHES: dict[str, str] = {}
+
+
+def github_default_branch(gh: str) -> str:
+    """Return the default branch that GitHub reports for the given repository.
+
+    It is read from GitHub at most once per run.
+
+    Args:
+        gh: a repository's GitHub slug, such as "ORG/REPO".
+
+    Returns:
+        The default branch, such as "main", even if a config names a different one.
+    """
+    if gh not in GITHUB_DEFAULT_BRANCHES:
+        fields = ["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]
+        GITHUB_DEFAULT_BRANCHES[gh] = run(["gh", "repo", "view", gh, *fields]).strip()
+    return GITHUB_DEFAULT_BRANCHES[gh]
+
+
+def repo_default_branch(rc: dict[str, Any]) -> str:
+    """Return the default branch of the repository that the given config entry describes.
+
+    Args:
+        rc: a repository's entry in a config, as a dict parsed from the config file's JSON,
+            with keys such as "gh" and "default_branch".
+
+    Returns:
+        The branch that rc names, or else the one that GitHub reports, such as "main".
+    """
+    configured = rc.get("default_branch")
+    return configured if configured is not None else github_default_branch(rc["gh"])
+
+
+def fork_source(owner: str, name: str) -> str | None:
+    """Return the repository that the given GitHub repository is a fork of, at its root.
+
+    Args:
+        owner: the owner of a GitHub repository, such as "mernst".
+        name: the repository's name, such as "daikon".
+
+    Returns:
+        The lowercase GitHub slug of the repository that owner/name was ultimately forked
+        from, such as "codespecs/daikon"; or None if owner/name is not a fork or gh cannot
+        view it.
+    """
+    try:
+        source = run(["gh", "api", f"repos/{owner}/{name}", "--jq", '.source.full_name // ""'])
+    except subprocess.CalledProcessError:
+        return None
+    return source.strip().lower() or None
+
+
+def find_clone(base: str, owner: str, name: str, default_branch: Callable[[], str]) -> str | None:
+    """Return the clone in base of the GitHub repository owner/name, or of a fork of it.
+
+    A fork counts only if it has the same name.  The clone is a clone of owner/name itself
+    if there is one, and among several, a clone whose current branch is the default branch,
+    which has no branch of its own to disturb.  If there is no clone of owner/name itself,
+    GitHub is asked which of the clones' origins are forks of owner/name.
+
+    Args:
+        base: the directory that holds the working copy directories.
+        owner: the owner of a GitHub repository, such as "codespecs".
+        name: the repository's name, such as "daikon".
+        default_branch: a function that returns the repository's default branch, such as
+            "main"; it is called only if base holds more than one candidate clone.
+
+    Returns:
+        The clone's path, or None if base holds no clone of the repository or of a fork.
+    """
+    entries = git_entries(base)
+    owner, name = owner.lower(), name.lower()
+    named = sorted(d for d, info in entries.items() if info.owner and info.repo_name == name)
+    clones = [d for d in named if entries[d].owner == owner]
+    if not clones:
+        forks = {
+            o
+            for o in {entries[d].owner for d in named}
+            if fork_source(o, name) == f"{owner}/{name}"
+        }
+        clones = [d for d in named if entries[d].owner in forks]
+    if not clones:
+        return None
+    if len(clones) > 1:
+        branch = default_branch()
+        clones.sort(key=lambda d: (entries[d].owner != owner, entries[d].branch != branch, d))
+    return str(pathlib.Path(base) / clones[0])
 
 
 def default_config(base: str) -> dict[str, Any]:
@@ -3043,7 +3114,7 @@ def default_config(base: str) -> dict[str, Any]:
     (Its "Unblocked PRs" sections serve in place of an unblocked document.)
 
     Returns:
-        The default config.
+        The default config, with each default that pr_status_config.with_defaults sets.
 
     Raises:
         ConfigError: if base contains no clone of a GitHub repository that gh can view.
@@ -3051,15 +3122,14 @@ def default_config(base: str) -> dict[str, Any]:
     # The clones of repositories on GitHub.
     clones = {d: info for d, info in git_entries(base).items() if info.owner}
     if not clones:
-        msg = f"no {CONFIG} and no clone of a GitHub repository in {base}"
+        msg = f"no {pr_status_config.CONFIG} and no clone of a GitHub repository in {base}"
         raise ConfigError(msg)
     counts = Counter(info.repo_name for info in clones.values()).most_common()
     names = [name for name, count in counts if count >= 2] or [counts[0][0]]
     fields = ["--json", "nameWithOwner,parent,defaultBranchRef"]
-    repos = {}
+    repos: dict[str, dict[str, Any]] = {}
     for name in names:
-        name_clones = {d: info for d, info in clones.items() if info.repo_name == name}
-        first_owner = next(iter(name_clones.values())).owner
+        first_owner = next(info.owner for info in clones.values() if info.repo_name == name)
         try:
             j = json.loads(run(["gh", "repo", "view", f"{first_owner}/{name}", *fields]))
             parent = j["parent"]
@@ -3086,94 +3156,37 @@ def default_config(base: str) -> dict[str, Any]:
         if any(r["gh"] == gh for r in repos.values()):
             continue
         default_branch = j["defaultBranchRef"]["name"]
-        owner = gh.split("/")[0].lower()
-        # Prefer a clone of the upstream default branch, which has no branch of its own to disturb.
-        clone = min(
-            name_clones,
-            key=lambda d: (
-                name_clones[d].owner != owner,
-                name_clones[d].branch != default_branch,
-                d,
-            ),
-        )
-        repo_name = gh.split("/")[1]
-        repos[repo_name] = {
-            "name": repo_name,
-            "gh": gh,
-            "clone": str(pathlib.Path(base) / clone),
-            "label": repo_name,
-            "default_branch": default_branch,
-        }
+        # Repo reads the default branch from here, so that the config, which --print-config
+        # prints, need not name it.
+        GITHUB_DEFAULT_BRANCHES[gh] = default_branch
+        clone = find_clone(base, gh.split("/")[0], name, lambda b=default_branch: b)
+        if clone is None:
+            continue
+        repos[gh.split("/")[1]] = {"gh": gh, "clone": clone}
     if not repos:
-        msg = f"no {CONFIG} and no GitHub repository that gh can view"
+        msg = f"no {pr_status_config.CONFIG} and no GitHub repository that gh can view"
         raise ConfigError(msg)
-    for repo_name, repo in repos.items():
-        # With several repositories, a bare "#N" would be ambiguous.
-        repo["prefix"] = "#" if len(repos) == 1 else f"{repo_name}#"
-        repo["node_prefix"] = "pr" if len(repos) == 1 else re.sub(r"\W", "_", repo_name) + "_"
     print(
         "pr-status: reporting on " + and_list(r["gh"] for r in repos.values()),
         file=sys.stderr,
     )
-    return {
-        "order": list(repos),
-        "repos": repos,
-        "documents": {"dependencies": DEFAULT_DEPENDENCY_DOCUMENT},
-        "directories": [],
-    }
-
-
-def read_config_file() -> dict[str, Any] | None:
-    """Return the contents of the config file in the current directory.
-
-    Returns:
-        The config, as a dict parsed from the config file's JSON, with keys such as "repos"
-        and "documents"; or None if there is no config file.
-    """
-    if not pathlib.Path(CONFIG).exists():
-        return None
-    with pathlib.Path(CONFIG).open() as f:
-        return json.load(f)
-
-
-def dependency_document_name(cfg: dict[str, Any] | None, program: str) -> str:
-    """Return the file name of the dependency document that the given config names.
-
-    Exit with an error message if the config names no dependency document.
-
-    Args:
-        cfg: a config, as a dict parsed from the config file's JSON, with keys such as
-            "repos" and "documents"; or None if there is no config file
-        program: the name of a running program; used for diagnostics.
-
-    Returns:
-        The file name, such as "pr-status.md", that cfg names, or
-        DEFAULT_DEPENDENCY_DOCUMENT if cfg is None.
-    """
-    if cfg is None:
-        return DEFAULT_DEPENDENCY_DOCUMENT
-    docs = cfg.get("documents")
-    name = docs.get("dependencies") if isinstance(docs, dict) else None
-    if not isinstance(name, str) or not name:
-        sys.exit(
-            f"{program}: {CONFIG} names no dependency document"
-            ' ("documents": {"dependencies": ...})'
-        )
-    return name
+    return pr_status_config.with_defaults({"repos": repos})
 
 
 def load_config(program: str) -> dict[str, Any]:
     """Return the config for the current directory, which holds the working copy directories.
 
-    Exit with an error message if the current directory is in a git working copy, or if
-    there is no config file and default_config cannot construct a config.
+    Exit with an error message if the current directory is in a git working copy, if the
+    config file is not a valid config, if the config names no clone of a repository and the
+    current directory holds none, or if there is no config file and default_config cannot
+    construct a config.
 
     Args:
         program: the name of the running program; used for diagnostics.
 
     Returns:
-        The config, as the config file holds it or, if there is no config file, as
-        default_config constructs it.
+        The config, as pr_status_config.read_config_file returns it, with a clone for each
+        repository; or, if there is no config file, as default_config constructs it.
     """
     base = str(pathlib.Path.cwd())
     # The current directory holds the working copy directories; it is not one of them.
@@ -3185,13 +3198,32 @@ def load_config(program: str) -> dict[str, Any]:
             f"{program}: {base} is in the git working copy {toplevel.stdout.strip()}; "
             f"run {program} in the directory that holds the working copy directories"
         )
-    cfg = read_config_file()
-    if cfg is not None:
-        return cfg
-    try:
-        return default_config(base)
-    except ConfigError as error:
-        sys.exit(f"{program}: {error}")
+    cfg = pr_status_config.read_config_file(program)
+    if cfg is None:
+        try:
+            return default_config(base)
+        except ConfigError as error:
+            sys.exit(f"{program}: {error}")
+    problems = []
+    for key, rc in cfg["repos"].items():
+        if "clone" in rc:
+            continue
+        owner, name = rc["gh"].split("/")
+        clone = find_clone(
+            base,
+            owner,
+            name,
+            lambda rc=rc: repo_default_branch(rc),
+        )
+        if clone is None:
+            problems.append(
+                f'{pr_status_config.key_path("repos", key)} has no "clone", and {base} holds'
+                f" no clone of {rc['gh']} or of a fork of it"
+            )
+        rc["clone"] = clone
+    if problems:
+        sys.exit("\n".join(f"{program}: {pr_status_config.CONFIG}: {p}" for p in problems))
+    return cfg
 
 
 def generated(name: str) -> list[str]:
@@ -3222,7 +3254,7 @@ def default_dependency_document(models: list[Model]) -> str:
             'A PR depends on another PR if its description says so (for example, "Land after #N"),'
             " if its base branch is the other PR's branch,"
             " if its branch contains all of the other PR's non-merge commits,"
-            f" or if `{CONFIG}` says so."
+            f" or if `{pr_status_config.CONFIG}` says so."
             ' PRs that land together, as "Land with #N" says, are one unit,'
             " which may span repositories:  each member depends on every prerequisite of every"
             " member, and on no member, even if its branch contains another member's commits."
@@ -3279,6 +3311,11 @@ def main() -> None:
         help="print the file name of the dependency document, and do nothing else",
     )
     parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="print the config as JSON, with its defaults filled in, and do nothing else",
+    )
+    parser.add_argument(
         "-C",
         "--directory",
         metavar="DIR",
@@ -3304,12 +3341,18 @@ def main() -> None:
         except OSError as error:
             sys.exit(f"pr-status: cannot change to directory {args.directory}: {error.strerror}")
     if args.print_document:
-        print(dependency_document_name(read_config_file(), "pr-status"))
+        print(
+            pr_status_config.dependency_document_name(
+                pr_status_config.read_config_file("pr-status")
+            )
+        )
+        return
+    if args.print_config:
+        print(json.dumps(load_config("pr-status"), indent=2))
         return
     base = str(pathlib.Path.cwd())
     cfg = load_config("pr-status")
-    dependencies = pathlib.Path(dependency_document_name(cfg, "pr-status"))
-    check_unblocked_filters(cfg, "pr-status")
+    dependencies = pathlib.Path(pr_status_config.dependency_document_name(cfg))
     models = load_models(cfg)
     try:
         HIGHLIGHTED.update(needed_to_land(models, resolve_pr_names(models, args.highlight)))
@@ -3329,8 +3372,8 @@ def main() -> None:
         as_of += f", by `{command}`"
     new = facts(models)
     old = {}
-    if pathlib.Path(SNAPSHOT).exists():
-        with pathlib.Path(SNAPSHOT).open() as f:
+    if pathlib.Path(pr_status_config.SNAPSHOT).exists():
+        with pathlib.Path(pr_status_config.SNAPSHOT).open() as f:
             old = json.load(f)
     changes = report_changes(models, old.get("facts", {}), new)
     if changes:
@@ -3389,10 +3432,10 @@ def main() -> None:
     generators = section_generators(models, cfg, base, as_of)
     text = regenerate_dependency_document(text, title, generators)
     dependencies.write_text(text)
-    with pathlib.Path(SNAPSHOT).open("w") as f:
+    with pathlib.Path(pr_status_config.SNAPSHOT).open("w") as f:
         json.dump({"time": now.isoformat(timespec="seconds"), "facts": new}, f, indent=1)
     written = [d["file"] for d in unblocked_docs]
-    written += [f"the title and generated sections of {dependencies}", SNAPSHOT]
+    written += [f"the title and generated sections of {dependencies}", pr_status_config.SNAPSHOT]
     print(f"## Wrote {and_list(written)}")
     if failed_updates:
         sys.exit(1)

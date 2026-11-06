@@ -1,6 +1,9 @@
 """Tests for the pr-status script that do not access GitHub or local repositories."""
 
+import json
+import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -10,6 +13,7 @@ TOPLEVEL = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(TOPLEVEL))
 
 import pr_status  # ruff: ignore[module-import-not-at-top-of-file]
+import pr_status_config  # ruff: ignore[module-import-not-at-top-of-file]
 
 REPO = types.SimpleNamespace(gh="owner/repo", keywords=[])
 
@@ -463,14 +467,15 @@ class HighlightTest(unittest.TestCase):
     def test_highlights_links(self):
         """A link to a highlighted PR, in this or another repository, is highlighted."""
         repo = pr_status.Repo(
+            "repo",
             {
-                "name": "repo",
                 "gh": "Owner/Repo",
                 "clone": "/base/repo",
                 "prefix": "#",
                 "label": "repo",
                 "node_prefix": "pr",
-            }
+                "default_branch": "master",
+            },
         )
         with mock.patch.object(pr_status, "HIGHLIGHTED", {("owner/repo", 1), ("other/repo", 5)}):
             self.assertEqual(
@@ -497,14 +502,15 @@ class DependsOnTest(unittest.TestCase):
             A Repo with GitHub slug gh, whose PRs in failed failed CI.
         """
         repo = pr_status.Repo(
+            gh,
             {
-                "name": gh,
                 "gh": gh,
                 "clone": "/base/repo",
                 "prefix": "#",
                 "label": gh,
                 "node_prefix": "pr",
-            }
+                "default_branch": "master",
+            },
         )
         repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(failed), set())
         return repo
@@ -1206,40 +1212,197 @@ class KeepTest(unittest.TestCase):
         self.assertTrue(pr_status.keep(self.model(["a", "b"]), 1, flt))
         self.assertFalse(pr_status.keep(self.model(["b"]), 1, flt))
 
-    def test_valid_filters(self):
-        """is_valid_filter accepts each form of filter."""
-        for flt in ["all", "unassigned", {"unassigned_or": []}, {"unassigned_or": ["a", "b"]}]:
-            with self.subTest(flt=flt):
-                self.assertTrue(pr_status.is_valid_filter(flt))
 
-    def test_invalid_filters(self):
-        """is_valid_filter rejects a misspelled or malformed filter."""
-        for flt in [
-            "unasigned",
-            None,
-            ["a"],
-            {},
-            {"unassigned-or": ["a"]},
-            {"unassigned_or": "a"},
-            {"unassigned_or": [1]},
-            {"unassigned_or": ["a"], "extra": 1},
-        ]:
-            with self.subTest(flt=flt):
-                self.assertFalse(pr_status.is_valid_filter(flt))
+class LoadConfigTest(unittest.TestCase):
+    """Tests for load_config."""
 
-    def test_unknown_filter(self):
-        """An unblocked document with an unknown filter is an error."""
-        doc = {"file": "unblocked.md", "title": "Unblocked", "filter": "unasigned"}
-        cfg = {"documents": {"dependencies": "pr-status.md", "unblocked": [doc]}}
-        with self.assertRaises(SystemExit) as cm:
-            pr_status.check_unblocked_filters(cfg, "pr-status")
-        self.assertIn('the filter of unblocked.md is "unasigned"', str(cm.exception))
+    def write(self, text):
+        """Write a config file in a fresh directory, which becomes the current one.
 
-    def test_no_filter(self):
-        """An unblocked document with no filter is not an error."""
+        Args:
+            text: the config file's contents.
+        """
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(directory.name)
+        Path(pr_status_config.CONFIG).write_text(text)
+
+    def test_clone_found(self):
+        """load_config finds a clone for a repository that names none."""
+        self.write(json.dumps({"repos": {"a": {"gh": "o/a"}, "b": {"gh": "o/b", "clone": "x"}}}))
+        entries = {"a-fork": pr_status.GitEntry("me", "a", "fix")}
+        with (
+            mock.patch.object(pr_status, "git_entries", return_value=entries),
+            mock.patch.object(pr_status, "fork_source", return_value="o/a"),
+        ):
+            cfg = pr_status.load_config("pr-status")
+        self.assertEqual(cfg["repos"]["a"]["clone"], str(Path.cwd() / "a-fork"))
+        self.assertEqual(cfg["repos"]["b"]["clone"], "x")
+
+    def test_no_clone(self):
+        """A repository that names no clone, and has none, is an error."""
+        self.write(json.dumps({"repos": {"a": {"gh": "o/a"}}}))
+        with (
+            mock.patch.object(pr_status, "git_entries", return_value={}),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            pr_status.load_config("pr-status")
+        self.assertIn('repos.a has no "clone"', str(cm.exception.code))
+
+
+# Clones of the repositories o/a and o/b, of a fork of o/a, of an unrelated repository
+# named "a", and of a repository that is not on GitHub.
+CLONES = {
+    "a-fork": pr_status.GitEntry("me", "a", "main"),
+    "a-feature": pr_status.GitEntry("o", "a", "feature"),
+    "a": pr_status.GitEntry("o", "a", "main"),
+    "b": pr_status.GitEntry("o", "b", "main"),
+    "a-other": pr_status.GitEntry("other", "a", "main"),
+    "a-local": pr_status.GitEntry("", "a", "main"),
+}
+# The repository that each owner's GitHub repository "a" is a fork of, as fork_source reports.
+SOURCES = {"me": "o/a", "other": None}
+
+
+class FindCloneTest(unittest.TestCase):
+    """Tests for find_clone."""
+
+    def find(self, names, default_branch):
+        """Return the clone that find_clone finds among the given CLONES, for o/a.
+
+        Args:
+            names: the names of some entries of CLONES.
+            default_branch: what find_clone calls to read the default branch.
+
+        Returns:
+            The clone's name, or None if find_clone finds none.
+        """
+        entries = {d: CLONES[d] for d in names}
+        with (
+            mock.patch.object(pr_status, "git_entries", return_value=entries),
+            mock.patch.object(pr_status, "fork_source", side_effect=lambda o, _: SOURCES[o]),
+        ):
+            clone = pr_status.find_clone("/base", "O", "A", default_branch)
+        return clone and Path(clone).name
+
+    def test_prefers_upstream_default_branch(self):
+        """A clone of the upstream repository, on its default branch, is preferred."""
+        self.assertEqual(self.find(CLONES, lambda: "main"), "a")
+
+    def test_lone_clone_of_a_fork(self):
+        """A lone clone of a fork is found without reading the default branch."""
+        names = ["a-fork", "a-other", "a-local", "b"]
+        self.assertEqual(self.find(names, mock.Mock(side_effect=AssertionError)), "a-fork")
+
+    def test_none(self):
+        """A clone of an unrelated repository, or of one not on GitHub, is not found."""
+        self.assertIsNone(self.find(["a-other", "a-local", "b"], lambda: "main"))
+
+
+def config_repo(**extra):
+    """Return a Repo made from a config entry that has the required keys and extra.
+
+    Args:
+        extra: config keys, such as default_branch, in addition to the required ones.
+
+    Returns:
+        A Repo whose GitHub slug is "Owner/Repo", and that has no PRs.
+    """
+    return pr_status.Repo(
+        "repo",
+        {
+            "gh": "Owner/Repo",
+            "clone": "/base/repo",
+            "prefix": "#",
+            "label": "repo",
+            "node_prefix": "pr",
+            "default_branch": "master",
+            **extra,
+        },
+    )
+
+
+class DefaultBranchTest(unittest.TestCase):
+    """Tests for repo_default_branch and github_default_branch."""
+
+    def setUp(self):
+        """Forget every default branch that GitHub has reported."""
+        patcher = mock.patch.dict(pr_status.GITHUB_DEFAULT_BRANCHES, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_configured(self):
+        """A default branch that the config names is used without asking GitHub."""
+        with mock.patch.object(pr_status, "run") as run:
+            self.assertEqual(config_repo(default_branch="trunk").default_branch, "trunk")
+        run.assert_not_called()
+
+    def test_from_github(self):
+        """If the config names no default branch, GitHub is asked, once."""
+        rc = {"gh": "Owner/Repo"}
+        with mock.patch.object(pr_status, "run", return_value="main\n") as run:
+            self.assertEqual(pr_status.repo_default_branch(rc), "main")
+            self.assertEqual(pr_status.repo_default_branch(rc), "main")
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][:4], ["gh", "repo", "view", "Owner/Repo"])
+
+    def test_recorded(self):
+        """A default branch that is already recorded is used without asking GitHub."""
+        pr_status.GITHUB_DEFAULT_BRANCHES["Owner/Repo"] = "trunk"
+        with mock.patch.object(pr_status, "run") as run:
+            self.assertEqual(pr_status.repo_default_branch({"gh": "Owner/Repo"}), "trunk")
+        run.assert_not_called()
+
+
+class ExcludedByDecisionTest(unittest.TestCase):
+    """Tests for the "Excluded by decision" section of an unblocked document."""
+
+    @staticmethod
+    def section(excluded, open_prs):
+        """Return the "Excluded by decision" section of an unblocked document.
+
+        The document reports on one repository, none of whose open PRs is unblocked.
+
+        Args:
+            excluded: the repository's "excluded" config entry.
+            open_prs: the numbers of the repository's open PRs.
+
+        Returns:
+            The section, without its heading; or None if the document has no such section.
+        """
+        repo = config_repo()
+        repo.prs = {n: {} for n in open_prs}
+        model = types.SimpleNamespace(
+            repo=repo, excluded=set(excluded["prs"]), unblocked=list, blocked=list
+        )
+        cfg = {
+            "documents": {"dependencies": "pr-status.md"},
+            "repos": {"repo": {"excluded": excluded}},
+        }
         doc = {"file": "unblocked.md", "title": "Unblocked"}
-        cfg = {"documents": {"dependencies": "pr-status.md", "unblocked": [doc]}}
-        pr_status.check_unblocked_filters(cfg, "pr-status")
+        text = pr_status.unblocked_doc([model], cfg, "/base", doc, "now")
+        parts = text.split("## Excluded by decision\n\n")
+        return parts[1].split("\n\n")[0] if len(parts) > 1 else None
+
+    def test_reason(self):
+        """The reason, if the config gives one, describes the excluded PRs."""
+        self.assertEqual(
+            self.section({"prs": [7], "reason": "#7 will not land."}, {7}),
+            "* repo: #7 will not land.",
+        )
+
+    def test_no_reason(self):
+        """Without a reason, the excluded PRs that are open are listed."""
+        self.assertEqual(
+            self.section({"prs": [9, 7, 5]}, {7, 9}),
+            "* repo: [#7](https://github.com/Owner/Repo/pull/7) and"
+            " [#9](https://github.com/Owner/Repo/pull/9).",
+        )
+
+    def test_none_open(self):
+        """If no excluded PR is open, the section is omitted, even if it has a reason."""
+        self.assertIsNone(self.section({"prs": [5], "reason": "#5 will not land."}, {7}))
 
 
 if __name__ == "__main__":

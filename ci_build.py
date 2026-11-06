@@ -34,23 +34,23 @@ if TYPE_CHECKING:
 # "https://dev.azure.com/checkerframework/4dcb7892-.../_build/results?buildId=24267&view=logs".
 # The groups are the organization (for dev.azure.com), the organization (for
 # visualstudio.com), the project, and the build.
-AZURE_BUILD = re.compile(
+AZURE_BUILD_RE = re.compile(
     r"https://(?:dev\.azure\.com/([^/?#]+)|([^/.]+)\.visualstudio\.com)/([^/?#]+)"
     r"/_build/results\?(?:[^#]*&)?buildId=(\d+)"
 )
 # Matches the URL of a CircleCI workflow, such as "https://app.circleci.com/workflow/ecc46ce8-..."
 # or "https://app.circleci.com/pipelines/gh/ORG/REPO/7/details?workflowId=ecc46ce8-...".
-CIRCLECI_WORKFLOW = re.compile(
+CIRCLECI_WORKFLOW_RE = re.compile(
     r"circleci\.com/.*(?:\bworkflows?(?:-run)?/|[?&]workflowId=)([0-9a-f-]{36})"
 )
 # Matches the number of a CircleCI job, in the URL of a job of a workflow, such as
 # ".../workflows/ecc46ce8-.../jobs/230602" or ".../details?...&buildNumber=230602".
-CIRCLECI_JOB_OF_WORKFLOW = re.compile(r"circleci\.com/.*(?:/jobs/|[?&]buildNumber=)(\d+)")
+CIRCLECI_JOB_OF_WORKFLOW_RE = re.compile(r"circleci\.com/.*(?:/jobs/|[?&]buildNumber=)(\d+)")
 # Matches the URL of a CircleCI job that names its project but not its workflow, such as
 # "https://circleci.com/gh/circleci/circleci-docs/230602?utm_campaign=..." (in a GitHub
 # commit status) or "https://app.circleci.com/jobs/github/circleci/circleci-docs/230602".
 # The groups are the VCS, the organization, the repository, and the job number.
-CIRCLECI_JOB = re.compile(
+CIRCLECI_JOB_RE = re.compile(
     r"https?://(?:app\.)?circleci\.com/(?:jobs/)?(gh|bb|github|bitbucket)/([^/?#]+)/([^/?#]+)"
     r"/(\d+)/?(?:[?#]|$)"
 )
@@ -59,7 +59,7 @@ CIRCLECI_JOB = re.compile(
 # project that the CircleCI GitHub App connects,
 # "https://app.circleci.com/pipelines/circleci/ORG-ID/PROJECT-ID/7/workflows/ecc46ce8-...".
 # The groups are the VCS, the organization, and the project.
-CIRCLECI_PIPELINE = re.compile(r"app\.circleci\.com/pipelines/([^/?#]+)/([^/?#]+)/([^/?#]+)")
+CIRCLECI_PIPELINE_RE = re.compile(r"app\.circleci\.com/pipelines/([^/?#]+)/([^/?#]+)/([^/?#]+)")
 # The VCS slugs that the API uses in place of the ones in the URLs of the CircleCI web app.
 CIRCLECI_VCS_SLUGS = {"github": "gh", "bitbucket": "bb"}
 # The VCS names, such as "github", that the CircleCI v1.1 API uses in place of the VCS
@@ -68,7 +68,7 @@ CIRCLECI_VCS_NAMES = {slug: name for name, slug in CIRCLECI_VCS_SLUGS.items()}
 # Matches the URL of a GitHub Actions workflow run or of one of its jobs, such as
 # "https://github.com/ORG/REPO/actions/runs/123/job/456".  The capturing groups are the
 # repository, the run, and the job.
-GITHUB_ACTIONS_RUN = re.compile(
+GITHUB_ACTIONS_RUN_RE = re.compile(
     r"https://github\.com/([^/]+/[^/]+)/actions/runs/(\d+)(?:/attempts/\d+)?(?:/job/(\d+))?"
 )
 
@@ -261,12 +261,12 @@ class AzureBuildUrlParts(NamedTuple):
         Args:
             url: any URL.  This method recognizes the URL of an Azure Pipelines build or
                 of one of its jobs, on dev.azure.com or on visualstudio.com, as
-                AZURE_BUILD documents.
+                AZURE_BUILD_RE documents.
 
         Returns:
             The parts, or None if url is not the URL of an Azure Pipelines build.
         """
-        if match := AZURE_BUILD.match(url):
+        if match := AZURE_BUILD_RE.match(url):
             return cls(match[1] or match[2], match[3], int(match[4]))
         return None
 
@@ -361,8 +361,8 @@ class CircleciUrlParts(NamedTuple):
             url: any URL.  This method recognizes a URL that contains "circleci.com/",
                 such as the URL of a CircleCI pipeline, of a workflow, of a job of a
                 workflow, or of a job that names its project but not its workflow, as
-                CIRCLECI_PIPELINE, CIRCLECI_WORKFLOW, CIRCLECI_JOB_OF_WORKFLOW, and
-                CIRCLECI_JOB document.
+                CIRCLECI_PIPELINE_RE, CIRCLECI_WORKFLOW_RE, CIRCLECI_JOB_OF_WORKFLOW_RE, and
+                CIRCLECI_JOB_RE document.
 
         Returns:
             The workflow, project, and job, or None if url is not a CircleCI URL.  Each
@@ -370,14 +370,14 @@ class CircleciUrlParts(NamedTuple):
         """
         if "circleci.com/" not in url:
             return None
-        if match := CIRCLECI_JOB.match(url):
+        if match := CIRCLECI_JOB_RE.match(url):
             vcs = CIRCLECI_VCS_SLUGS.get(match[1], match[1])
             return cls(None, f"{vcs}/{match[2]}/{match[3]}", int(match[4]))
         project = None
-        if match := CIRCLECI_PIPELINE.search(url):
+        if match := CIRCLECI_PIPELINE_RE.search(url):
             project = f"{CIRCLECI_VCS_SLUGS.get(match[1], match[1])}/{match[2]}/{match[3]}"
-        workflow = match[1] if (match := CIRCLECI_WORKFLOW.search(url)) else None
-        job = int(match[1]) if (match := CIRCLECI_JOB_OF_WORKFLOW.search(url)) else None
+        workflow = match[1] if (match := CIRCLECI_WORKFLOW_RE.search(url)) else None
+        job = int(match[1]) if (match := CIRCLECI_JOB_OF_WORKFLOW_RE.search(url)) else None
         return cls(workflow, project, job)
 
     def lookup_workflow(self) -> str | None:
@@ -443,11 +443,11 @@ class GithubActionsRunUrlParts(NamedTuple):
 
         Args:
             url: any URL.  This method recognizes the URL of a GitHub Actions workflow
-                run or of one of its jobs, as GITHUB_ACTIONS_RUN documents.
+                run or of one of its jobs, as GITHUB_ACTIONS_RUN_RE documents.
 
         Returns:
             The parts, or None if url is not the URL of a GitHub Actions run.
         """
-        if match := GITHUB_ACTIONS_RUN.match(url):
+        if match := GITHUB_ACTIONS_RUN_RE.match(url):
             return cls(match[1], int(match[2]), int(match[3]) if match[3] else None)
         return None
