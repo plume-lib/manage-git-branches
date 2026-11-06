@@ -176,6 +176,7 @@ class RepoBlockedPrs(NamedTuple):
     Attributes:
         label: the name of the repository in output, such as "daikon".
         gh: a repository's GitHub slug, such as "ORG/REPO".
+        default_branch: the repository's default branch, such as "main".
         prs: the BlockedPr of each of the repository's blocked PRs.
         pr_shared_branches: the branches of the repository that its open PRs make
             shared:  the base branch of each open PR, such as "main", and the head branch
@@ -186,6 +187,7 @@ class RepoBlockedPrs(NamedTuple):
 
     label: str
     gh: str
+    default_branch: str
     prs: list[BlockedPr]
     pr_shared_branches: set[str]
     pr_shas: list[str]
@@ -209,6 +211,7 @@ def blocked_prs(cfg: dict[str, Any]) -> list[RepoBlockedPrs]:
             RepoBlockedPrs(
                 repo.label,
                 repo.gh,
+                repo.default_branch,
                 [BlockedPr(pr_name(repo.label, repo.ref(n)), repo.prs[n]) for n in blocked],
                 {pr["baseRefName"] for pr in repo.prs.values()}
                 | {
@@ -554,21 +557,6 @@ def check_urls(gh: str, shas: list[str]) -> dict[str, list[str]]:
     ):
         result[sha] = [c.url for c in sha_checks]
     return result
-
-
-def github_default_branch(gh: str) -> str:
-    """Return the default branch of the GitHub repository gh.
-
-    A pr-status config need not name a repository's default branch, so this function asks
-    GitHub.
-
-    Args:
-        gh: a repository's GitHub slug, such as "ORG/REPO".
-
-    Returns:
-        The default branch, such as "main".
-    """
-    return request_util.gh_api(f"repos/{gh}")["default_branch"]
 
 
 def github_protected_branches(gh: str) -> set[str]:
@@ -1372,7 +1360,7 @@ def main() -> None:
         try:
             shared_branches = (
                 {
-                    github_default_branch(gh),
+                    repo.default_branch,
                     *github_protected_branches(gh),
                     *repo.pr_shared_branches,
                 }
@@ -1381,8 +1369,7 @@ def main() -> None:
             )
         except request_util.REQUEST_ERRORS as e:
             report_failure(
-                f"{repo.label}: failed to find the default and protected branches:"
-                f" {request_util.failure(e)}"
+                f"{repo.label}: failed to find the protected branches: {request_util.failure(e)}"
             )
             shared_branches, prs = set(), []
         try:

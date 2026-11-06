@@ -1,6 +1,9 @@
 """Tests for the pr-status script that do not access GitHub or local repositories."""
 
+import json
+import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -504,6 +507,7 @@ class DependsOnTest(unittest.TestCase):
                 "prefix": "#",
                 "label": gh,
                 "node_prefix": "pr",
+                "default_branch": "master",
             }
         )
         repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(failed), set())
@@ -1058,6 +1062,134 @@ class KeepTest(unittest.TestCase):
         doc = {"file": "unblocked.md", "title": "Unblocked"}
         cfg = {"documents": {"dependencies": "pr-status.md", "unblocked": [doc]}}
         pr_status.check_unblocked_filters(cfg, "pr-status")
+
+
+class ReadConfigFileTest(unittest.TestCase):
+    """Tests for read_config_file and dependency_document_name."""
+
+    def read(self, cfg):
+        """Write cfg to a config file in a fresh directory, and read it back.
+
+        Returns:
+            The config, as read_config_file returns it.
+        """
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(directory.name)
+        Path(pr_status.CONFIG).write_text(json.dumps(cfg))
+        return pr_status.read_config_file()
+
+    def test_defaults(self):
+        """Each omitted optional top-level key gets its default."""
+        cfg = self.read({"repos": {"b": {}, "a": {}}})
+        self.assertEqual(cfg["order"], ["b", "a"])
+        self.assertEqual(cfg["documents"], {"dependencies": "pr-status.md"})
+        self.assertEqual(cfg["directories"], [])
+        self.assertEqual(pr_status.dependency_document_name(cfg, "pr-status"), "pr-status.md")
+
+    def test_given_values(self):
+        """Each given top-level key is retained."""
+        given = {
+            "order": ["a"],
+            "repos": {"b": {}, "a": {}},
+            "documents": {"dependencies": "status.md", "unblocked": []},
+            "directories": [{"dirs": ["x"], "status": "old", "relationship": "none"}],
+        }
+        cfg = self.read(given)
+        self.assertEqual(cfg, given)
+        self.assertEqual(pr_status.dependency_document_name(cfg, "pr-status"), "status.md")
+
+    def test_unblocked_only(self):
+        """A documents object that names only unblocked documents gets the default name."""
+        cfg = self.read({"repos": {}, "documents": {"unblocked": []}})
+        self.assertEqual(cfg["documents"], {"unblocked": [], "dependencies": "pr-status.md"})
+
+    def test_invalid_dependency_document(self):
+        """A dependency document that is not a file name is an error."""
+        cfg = self.read({"repos": {}, "documents": {"dependencies": ""}})
+        with self.assertRaises(SystemExit) as cm:
+            pr_status.dependency_document_name(cfg, "pr-status")
+        self.assertIn('is "", not a file name', str(cm.exception))
+
+
+def config_repo(**extra):
+    """Build a Repo from a config entry.
+
+    Args:
+        extra: config keys, such as default_branch, in addition to the required ones.
+
+    Returns:
+        A Repo whose GitHub slug is "Owner/Repo", and that has no PRs.
+    """
+    return pr_status.Repo(
+        {
+            "name": "repo",
+            "gh": "Owner/Repo",
+            "clone": "/base/repo",
+            "prefix": "#",
+            "label": "repo",
+            "node_prefix": "pr",
+            **extra,
+        }
+    )
+
+
+class DefaultBranchTest(unittest.TestCase):
+    """Tests for Repo.default_branch."""
+
+    def test_configured(self):
+        """A default branch that the config names is used without asking GitHub."""
+        repo = config_repo(default_branch="trunk")
+        with mock.patch.object(pr_status, "run") as run:
+            self.assertEqual(repo.default_branch, "trunk")
+        run.assert_not_called()
+
+    def test_from_github(self):
+        """If the config names no default branch, GitHub is asked, once."""
+        repo = config_repo()
+        with mock.patch.object(pr_status, "run", return_value="main\n") as run:
+            self.assertEqual(repo.default_branch, "main")
+            self.assertEqual(repo.default_branch, "main")
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][:4], ["gh", "repo", "view", "Owner/Repo"])
+
+
+class ExcludedByDecisionTest(unittest.TestCase):
+    """Tests for the "Excluded by decision" section of an unblocked document."""
+
+    @staticmethod
+    def section(excluded):
+        """Generate an unblocked document for a repository with no open PRs.
+
+        Args:
+            excluded: the repository's "excluded" config entry.
+
+        Returns:
+            The document's "Excluded by decision" section, without its heading.
+        """
+        model = types.SimpleNamespace(repo=config_repo(), unblocked=list, blocked=list)
+        cfg = {
+            "documents": {"dependencies": "pr-status.md"},
+            "repos": {"repo": {"excluded": excluded}},
+        }
+        doc = {"file": "unblocked.md", "title": "Unblocked"}
+        text = pr_status.unblocked_doc([model], cfg, "/base", doc, "now")
+        return text.split("## Excluded by decision\n\n")[1].split("\n\n")[0]
+
+    def test_reason(self):
+        """The reason, if the config gives one, describes the excluded PRs."""
+        self.assertEqual(
+            self.section({"prs": [7], "reason": "#7 will not land."}), "* repo: #7 will not land."
+        )
+
+    def test_no_reason(self):
+        """Without a reason, the excluded PRs are listed."""
+        self.assertEqual(
+            self.section({"prs": [9, 7]}),
+            "* repo: [#7](https://github.com/Owner/Repo/pull/7) and"
+            " [#9](https://github.com/Owner/Repo/pull/9).",
+        )
 
 
 if __name__ == "__main__":
