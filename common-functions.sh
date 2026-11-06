@@ -2902,6 +2902,37 @@ git_batch_ssh() {
   fi
 }
 
+## Usage: git_batch_ssh_capture DIRECTORY GIT-ARGUMENT...
+## Runs `git_batch_ssh DIRECTORY GIT-ARGUMENT...` and returns its exit status.
+## Sets ${git_batch_ssh_capture_output} to the command's standard output and
+## ${git_batch_ssh_capture_error} to its standard error, such as "Host key
+## verification failed.", each without trailing newlines.
+##
+## Standard error passes through a temporary file, because a command
+## substitution captures only standard output.  If no temporary file can be
+## created, the command still runs, its standard error is discarded, and
+## ${git_batch_ssh_capture_error} says so instead.
+##
+## The results are returned in variables rather than printed, because one
+## printed stream could not hold both of them distinguishably.
+git_batch_ssh_capture() {
+  git_batch_ssh_capture_file="$(mktemp "${TMPDIR:-/tmp}/${SCRIPT_NAME}-git.XXXXXX" \
+    2> /dev/null)" || git_batch_ssh_capture_file=''
+  if git_batch_ssh_capture_output="$(git_batch_ssh "$@" \
+    2> "${git_batch_ssh_capture_file:-/dev/null}")"; then
+    git_batch_ssh_capture_status=0
+  else
+    git_batch_ssh_capture_status="$?"
+  fi
+  if [ -n "${git_batch_ssh_capture_file}" ]; then
+    git_batch_ssh_capture_error="$(cat -- "${git_batch_ssh_capture_file}")"
+    rm -f -- "${git_batch_ssh_capture_file}"
+  else
+    git_batch_ssh_capture_error="(git's error output is unavailable, because no temporary file could be created in ${TMPDIR:-/tmp} to hold it)"
+  fi
+  return "${git_batch_ssh_capture_status}"
+}
+
 ## Usage: physical_path DIRECTORY
 ## Prints the absolute pathname of DIRECTORY, with symbolic links resolved.
 ## Prints nothing and returns nonzero if DIRECTORY cannot be entered.
@@ -3954,7 +3985,9 @@ remote_heads_key() {
 ## Asks REMOTE, in DIRECTORY, for its branches, and returns the status of
 ## `git ls-remote --heads`:  0 if the remote answered, nonzero if it could not
 ## be asked.  Sets ${remote_heads_output} to what the remote said, which is
-## one "SHA<TAB>refname" line per branch.
+## one "SHA<TAB>refname" line per branch, and ${remote_heads_error} to what
+## git printed on standard error, which says why the remote could not be
+## asked when it could not.
 ##
 ## With a nonempty KEY, from `remote_heads_key`, an answer is remembered under
 ## that key and a later call with the same key returns it without asking
@@ -3982,6 +4015,7 @@ remote_heads_key() {
 ## `--heads`, rather than a pattern per branch:  one answer serves any number
 ## of questions, with no chunking and no command-line length limit.
 remote_heads() {
+  remote_heads_error=''
   if [ -n "$3" ]; then
     remote_heads_index="$(printf '%s\n' "${remote_heads_keys}" \
       | grep -n -x -F -- "$3" | head -n 1)"
@@ -3991,8 +4025,13 @@ remote_heads() {
       return 0
     fi
   fi
-  remote_heads_output="$(git_batch_ssh "$1" ls-remote --heads "$2" 2> /dev/null)"
-  remote_heads_status="$?"
+  if git_batch_ssh_capture "$1" ls-remote --heads "$2"; then
+    remote_heads_status=0
+  else
+    remote_heads_status="$?"
+  fi
+  remote_heads_output="${git_batch_ssh_capture_output}"
+  remote_heads_error="${git_batch_ssh_capture_error}"
   if [ -n "$3" ] && [ "${remote_heads_status}" -eq 0 ]; then
     remote_heads_answers=$((remote_heads_answers + 1))
     remote_heads_keys="${remote_heads_keys}$3
@@ -4138,6 +4177,47 @@ only_leftovers() {
 is_leftover_tree() {
   only_leftovers_found=
   only_leftovers "$1" && [ -n "${only_leftovers_found}" ]
+}
+
+## Usage: warn_cannot_list_branches REMOTE DIRECTORY ERROR
+## Prints, on standard error, that the branches of a remote REMOTE of the
+## working tree DIRECTORY cannot be listed, followed by ERROR, indented, if it
+## is nonempty.  ERROR is what the git command that tried to list them printed
+## on standard error, such as "Host key verification failed.".
+##
+## ERROR is printed only the first time that it is seen.  When a later call
+## has the same ERROR, the warning instead names the directory whose warning
+## printed it.  A scan of many directories, such as `git-orphaned-branches`
+## performs, fails the same way in each of them when the network is down, and
+## git's error is several lines long.
+##
+## ${warn_cannot_list_branches_count} is the number of distinct errors
+## printed; the variables `warn_cannot_list_branches_error_N` and
+## `warn_cannot_list_branches_dir_N` hold the Nth of them and the directory
+## whose warning printed it.  A shell has no associative array.
+warn_cannot_list_branches_count=0
+warn_cannot_list_branches() {
+  if [ -z "$3" ]; then
+    echo "${SCRIPT_NAME}: cannot list branches of remote $1 for $2" >&2
+    return 0
+  fi
+  warn_cannot_list_branches_seen=''
+  warn_cannot_list_branches_index=1
+  while [ "${warn_cannot_list_branches_index}" -le "${warn_cannot_list_branches_count}" ]; do
+    eval "warn_cannot_list_branches_seen=\${warn_cannot_list_branches_error_${warn_cannot_list_branches_index}}"
+    if [ "${warn_cannot_list_branches_seen}" = "$3" ]; then
+      eval "warn_cannot_list_branches_seen=\${warn_cannot_list_branches_dir_${warn_cannot_list_branches_index}}"
+      echo "${SCRIPT_NAME}: cannot list branches of remote $1 for $2, for the same reason as for ${warn_cannot_list_branches_seen}" >&2
+      return 0
+    fi
+    warn_cannot_list_branches_index=$((warn_cannot_list_branches_index + 1))
+  done
+  warn_cannot_list_branches_count=$((warn_cannot_list_branches_count + 1))
+  eval "warn_cannot_list_branches_error_${warn_cannot_list_branches_count}=\$3"
+  eval "warn_cannot_list_branches_dir_${warn_cannot_list_branches_count}=\$2"
+  echo "${SCRIPT_NAME}: cannot list branches of remote $1 for $2:" >&2
+  # Indent only nonempty lines, so that a blank line gets no trailing spaces.
+  printf '%s\n' "$3" | sed -e 's/^./  &/' >&2
 }
 
 ## Usage: is_deleted_branch DIRECTORY
@@ -4377,7 +4457,8 @@ is_deleted_branch() {
       "${is_deleted_branch_key}"; then
       # The remote could not be contacted (say, the network is down), so it is
       # unknown whether the branch still exists there.
-      echo "${SCRIPT_NAME}: cannot list branches of remote ${is_deleted_branch_remote} for ${is_deleted_branch_dir}" >&2
+      warn_cannot_list_branches "${is_deleted_branch_remote}" \
+        "${is_deleted_branch_dir}" "${remote_heads_error}"
       return 3
     fi
     # Each line of the listing is "SHA<TAB>refname".
@@ -4403,8 +4484,8 @@ is_deleted_branch() {
   # which would abort a caller that runs under `set -e` -- and would do so in
   # the very case that this function exists to report, since a deleted branch
   # is what makes the command exit nonzero.
-  if is_deleted_branch_listing="$(git_batch_ssh "${is_deleted_branch_dir}" \
-    ls-remote --exit-code "${is_deleted_branch_remote}" "$@" 2> /dev/null)"; then
+  if git_batch_ssh_capture "${is_deleted_branch_dir}" \
+    ls-remote --exit-code "${is_deleted_branch_remote}" "$@"; then
     is_deleted_branch_status=0
   else
     is_deleted_branch_status="$?"
@@ -4413,7 +4494,7 @@ is_deleted_branch() {
     0)
       # The branch still exists in the remote.
       # shellcheck disable=SC2034 # Callers read it; see the documentation above.
-      is_deleted_branch_heads="${is_deleted_branch_listing}"
+      is_deleted_branch_heads="${git_batch_ssh_capture_output}"
       return 1
       ;;
     2)
@@ -4423,7 +4504,8 @@ is_deleted_branch() {
     *)
       # The remote could not be contacted (say, the network is down), so it is
       # unknown whether the branch still exists there.
-      echo "${SCRIPT_NAME}: cannot list branches of remote ${is_deleted_branch_remote} for ${is_deleted_branch_dir}" >&2
+      warn_cannot_list_branches "${is_deleted_branch_remote}" \
+        "${is_deleted_branch_dir}" "${git_batch_ssh_capture_error}"
       return 3
       ;;
   esac

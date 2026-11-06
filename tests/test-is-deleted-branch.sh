@@ -318,6 +318,7 @@ fake_ssh="${testdir}/fake-ssh"
 cat > "${fake_ssh}" << 'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "${SSH_ARGUMENTS_FILE}"
+echo 'fake-ssh: connection refused' >&2
 exit 1
 EOF
 chmod +x "${fake_ssh}"
@@ -326,6 +327,17 @@ export SSH_ARGUMENTS_FILE
 git -C "${testdir}/myrepo-branch-unreachable" config core.sshCommand "${fake_ssh}"
 git -C "${testdir}/myrepo-branch-unreachable" config ssh.variant ssh
 git -C "${testdir}/myrepo-branch-unreachable" remote set-url origin \
+  'ssh://example.invalid/no-such-repo.git'
+
+## A working tree whose remote repository cannot be reached and whose upstream
+## ref is outside refs/heads/, so that `is_deleted_branch` asks the remote
+## about that ref rather than listing the remote's branches.
+unreachabletag="${testdir}/myrepo-branch-unreachable-tag"
+git clone -q -b live "${remote}" "${unreachabletag}"
+git -C "${unreachabletag}" config branch.live.merge refs/tags/upstream-tag
+git -C "${unreachabletag}" config core.sshCommand "${fake_ssh}"
+git -C "${unreachabletag}" config ssh.variant ssh
+git -C "${unreachabletag}" remote set-url origin \
   'ssh://example.invalid/no-such-repo.git'
 
 ## A working tree whose branch was never pushed and whose remote cannot be
@@ -575,6 +587,15 @@ expect_status 1 "${testdir}/myrepo-worktree-host" \
 
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
   'is-deleted-branch on a working tree whose remote cannot be reached'
+# The warning includes the reason that SSH gave.
+if ! grep -q '^  fake-ssh: connection refused$' "${testdir}/stderr"; then
+  fail "is-deleted-branch on a working tree whose remote cannot be reached: expected SSH's error on standard error, got [$(cat "${testdir}/stderr")]"
+fi
+expect_failure_message "${IS_DELETED_BRANCH}" "${unreachabletag}" \
+  'is-deleted-branch on a working tree whose remote cannot be reached and whose upstream ref is a tag'
+if ! grep -q '^  fake-ssh: connection refused$' "${testdir}/stderr"; then
+  fail "is-deleted-branch on a working tree whose remote cannot be reached and whose upstream ref is a tag: expected SSH's error on standard error, got [$(cat "${testdir}/stderr")]"
+fi
 if ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
   fail 'SSH invocation did not include "-o BatchMode=yes"'
 fi
@@ -611,6 +632,11 @@ export GIT_SSH GIT_SSH_VARIANT TMPDIR
 expect_failure_message "${IS_DELETED_BRANCH}" "${testdir}/myrepo-branch-unreachable" \
   'is-deleted-branch with a spaced executable path selected by GIT_SSH'
 unset GIT_SSH GIT_SSH_VARIANT TMPDIR
+# Without a temporary file, git's error output cannot be kept, and the warning
+# says so.
+if ! grep -q "^  (git's error output is unavailable, because no temporary file could be created" "${testdir}/stderr"; then
+  fail "is-deleted-branch with a nonexistent TMPDIR: expected an explanation of the missing error output, got [$(cat "${testdir}/stderr")]"
+fi
 if [ ! -s "${ssh_arguments}" ]; then
   fail 'SSH wrapper selected by GIT_SSH was not invoked'
 elif ! grep -q -- '-o BatchMode=yes' "${ssh_arguments}"; then
@@ -752,7 +778,7 @@ git -C "${testdir}/myrepo-branch-unreachable" config ssh.variant plink
 # modify any of the directories that it inspects.
 scanned_clones='live dead brandnew detached unreachable notracking-live
 notracking-dead otherremote staleref pruned customrefspec mergeonly pushremote
-mirrorrefspec pushdefaultabsent neverpushed unborn'
+mirrorrefspec pushdefaultabsent neverpushed unborn unreachable-tag'
 for branch in ${scanned_clones}; do
   repo_state "${testdir}/myrepo-branch-${branch}" > "${testdir}/before-${branch}"
 done
@@ -770,6 +796,15 @@ for branch in ${scanned_clones}; do
 done
 if ! grep -q 'cannot list branches of remote' "${orphans_stderr}"; then
   fail "git-orphaned-branches: expected \"cannot list branches of remote\" on standard error, got [$(cat "${orphans_stderr}")]"
+fi
+# Two directories fail for the same reason, which is printed only once.
+ssh_error_count="$(grep -c '^  fake-ssh: connection refused$' "${orphans_stderr}")"
+if [ "${ssh_error_count}" -ne 1 ]; then
+  fail "git-orphaned-branches: expected SSH's error once on standard error, got it ${ssh_error_count} times in [$(cat "${orphans_stderr}")]"
+fi
+same_reason_count="$(grep -c 'for the same reason as for .*myrepo-branch-unreachable' "${orphans_stderr}")"
+if [ "${same_reason_count}" -ne 1 ]; then
+  fail "git-orphaned-branches: expected one warning that refers to an earlier one, got ${same_reason_count} in [$(cat "${orphans_stderr}")]"
 fi
 # `find` does not specify the order in which it visits directories, so compare
 # the sorted lists.  `git-orphaned-branches` prints each directory as `cd` and
