@@ -72,6 +72,7 @@ each repository:
   },
   "documents": {
     "dependencies": "pr-status.md",
+    "optional_sections": ["graph", "independent"],
     "unblocked": [
       {
         "file": "unblocked-prs.md",
@@ -115,9 +116,7 @@ A repository object describes one GitHub repository.
 ### Required keys
 
 * `"name"`:  the repository's name, such as `"daikon"`.  It must equal the
-  repository object's key in `"repos"`.  The names of the dependency
-  document's per-repository generated sections contain it, as in
-  `<!-- BEGIN GENERATED: unblocked-daikon -->`.
+  repository object's key in `"repos"`.
 * `"gh"`:  the repository's GitHub slug, such as `"codespecs/daikon"` (in
   general, `"ORG/REPO"`).  This is the upstream repository, whose open pull
   requests `pr-status` reports on, not a fork.
@@ -139,7 +138,8 @@ A repository object describes one GitHub repository.
   documents report on several repositories, as in "## Unblocked PRs
   (Daikon)" and "* Daikon has these dependency clusters:".
 * `"node_prefix"`:  the text that precedes a PR number in the id of the PR's
-  node in the Mermaid dependency graph, such as `"daikon_"` (which yields the
+  node in the Mermaid dependency graph (the optional section `"graph"`),
+  such as `"daikon_"` (which yields the
   node id `daikon_95`) or `"pr"`.  It must consist of letters, digits, and
   underscores, and each repository must have a different one.
 
@@ -181,9 +181,9 @@ of the repository; an entry for a PR that is not open is ignored.
     table of PRs, in no dependency, in no generated command, and in no other
     PR's textual conflicts, and its description is not updated.  Its
     working copy directories are still working copies of an open PR:
-    `pr-status` omits them from the section "directories" and renames them
-    as it renames other PRs' working copy directories.  `cancel-blocked-ci`
-    does not cancel the builds of an excluded PR.
+    `pr-status` omits them from the "Other directories" section and renames
+    them as it renames other PRs' working copy directories.
+    `cancel-blocked-ci` does not cancel the builds of an excluded PR.
   * `"reason"` (optional):  a sentence that explains why, such as `"#512 is
     an experiment that will not land."`.  If at least one of the excluded
     PRs is open, each unblocked document has a section "Excluded by
@@ -210,13 +210,13 @@ so it must not contain a newline or an unescaped "|".
 
 * `"titles"`:  the PR's title in the documents' tables, in place of its
   title on GitHub.
-* `"labels"`:  the text of the PR's node in the Mermaid dependency graph,
-  after the PR's reference, in place of the first 50 characters of its
-  title.
+* `"labels"`:  the text of the PR's node in the Mermaid dependency graph
+  (the optional section `"graph"`), after the PR's reference, in place of
+  the first 50 characters of its title.
 * `"cluster_names"`:  a name for the dependency cluster (a connected
-  component of the dependency graph) that contains the PR.  The section
-  "clusters" and the comments in the Mermaid graph show it.  Any member of
-  the cluster can name it; if several members do, the one with the
+  component of the dependency graph) that contains the PR.  The "Dependency
+  clusters" section and the comments in the Mermaid graph show it.  Any
+  member of the cluster can name it; if several members do, the one with the
   smallest PR number wins.
 * `"unblocked_notes"`:  a note that precedes the generated notes in the
   "Notes" cell of the PR's row in a table of unblocked PRs (one that has no
@@ -225,22 +225,33 @@ so it must not contain a newline or an unescaped "|".
   instrumenter's author"`.
 * `"detail_notes"`:  a note that precedes the generated notes in the
   "Notes" cell of the PR's row in a table of blocked PRs (one that has a
-  prerequisite) and in the section `details-NAME`.  The generated notes are
-  sentences, so write the note as one or more sentences, such as `"Rebase
-  after #527 lands."`.
+  prerequisite) and in the optional section `"details"`.  The generated
+  notes are sentences, so write the note as one or more sentences, such as
+  `"Rebase after #527 lands."`.
 * `"independent_notes"`:  a note that precedes the generated notes in the
-  "Notes" cell of the PR's row in the section `independent-NAME`, which
-  lists the PRs that have no prerequisite and no dependent.  Write the note
-  as a phrase, as for `"unblocked_notes"`.
+  "Notes" cell of the PR's row in the optional section `"independent"`,
+  which lists the PRs that have no prerequisite and no dependent.  Write the
+  note as a phrase, as for `"unblocked_notes"`.
 
 ## The documents object
 
 * `"dependencies"` (optional):  the file name of the dependency document,
   such as `"status.md"`.  The default is `"pr-status.md"`.  `pr-status`
-  rewrites the document's title and its generated sections, between
-  `<!-- BEGIN GENERATED: NAME -->` and `<!-- END GENERATED: NAME -->`, and
-  retains the rest.  If the document does not exist, `pr-status` creates
-  it.
+  rewrites the dependency document entirely, so do not edit it by hand.
+* `"optional_sections"` (optional):  a list of the optional sections that
+  the dependency document includes, such as `["graph", "details"]`.  The
+  default is `[]`.  Whatever order the list gives, the sections appear in a
+  fixed order.  An optional section is omitted if it has nothing to show.
+  The optional sections are:
+  * `"graph"`:  a "Dependency graph" section, with a Mermaid graph of the
+    dependencies.
+  * `"details"`:  for each repository, a "Dependency details" section, with
+    a table of the PRs that depend on another PR or that another PR depends
+    on, giving each PR's prerequisites and why it depends on them.
+  * `"prerequisites"`:  for each repository, a "Prerequisites" section,
+    which lists the prerequisites that have no prerequisite of their own.
+  * `"independent"`:  for each repository, an "Independent PRs" section, with
+    a table of the PRs that have no prerequisite and no dependent.
 * `"unblocked"` (optional):  a list of unblocked-document objects.  The
   default is `[]`.  `pr-status` rewrites each unblocked document entirely,
   so do not edit one by hand.
@@ -265,7 +276,7 @@ unblocked-document object has these keys:
 
 ## A directory object
 
-The section "directories" of the dependency document describes each entry
+The "Other directories" section of the dependency document describes each entry
 of the directory that holds the working copy directories, other than the
 working copies of open PRs' branches.  `pr-status` describes most entries
 automatically, such as a clone of the default branch or the working copy of
