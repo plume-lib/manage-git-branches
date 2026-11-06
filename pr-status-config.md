@@ -130,8 +130,10 @@ A repository object describes one GitHub repository.
 * `"prefix"`:  the text that precedes a PR number when the documents refer
   to a PR, such as `"daikon#"` (which yields "daikon#95") or `"#"` (which
   yields "#95").  With several repositories, use a different prefix for each
-  one, so that a reference is unambiguous.  `--highlight` also accepts the
-  prefix without its "#", as in `--highlight daikon#95`.
+  one, so that a reference is unambiguous.  `--highlight` names a PR as
+  `REPO#N`, where `REPO` is the prefix without its final "#", the
+  repository's name, or its GitHub slug, as in `--highlight daikon#95` or
+  `--highlight codespecs/daikon#95`.
 * `"label"`:  the repository's name as the documents show it to a reader,
   such as `"Daikon"`.  It appears in headings and list items when the
   documents report on several repositories, as in "## Unblocked PRs
@@ -174,13 +176,19 @@ In each of these keys, a PR is given by its number, which must be an open PR
 of the repository; an entry for a PR that is not open is ignored.
 
 * `"excluded"`:  an object with these keys:
-  * `"prs"`:  a list of PR numbers, such as `[512]`.  `pr-status` treats
-    each of these PRs as if it were not open:  the PR appears in no table,
-    in no dependency, and in no generated command.
+  * `"prs"`:  a list of PR numbers, such as `[512]`.  `pr-status` leaves
+    each of these PRs out of the dependency analysis:  the PR appears in no
+    table of PRs, in no dependency, in no generated command, and in no other
+    PR's textual conflicts, and its description is not updated.  Its
+    working copy directories are still working copies of an open PR:
+    `pr-status` omits them from the section "directories" and renames them
+    as it renames other PRs' working copy directories.  `cancel-blocked-ci`
+    does not cancel the builds of an excluded PR.
   * `"reason"` (optional):  a sentence that explains why, such as `"#512 is
-    an experiment that will not land."`.  Each unblocked document lists it
-    in its section "Excluded by decision".  If it is absent, that section
-    lists the excluded PRs instead.
+    an experiment that will not land."`.  If at least one of the excluded
+    PRs is open, each unblocked document has a section "Excluded by
+    decision", which gives the reason or, if there is none, lists the
+    excluded PRs that are open.
 * `"not_prerequisites"`:  a list of PR numbers.  A PR whose branch contains
   all of the non-merge commits of one of these PRs does not depend on it
   for that reason.  (A PR can still depend on it for another reason, such as

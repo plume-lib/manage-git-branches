@@ -1065,20 +1065,37 @@ class KeepTest(unittest.TestCase):
 
 
 class ReadConfigFileTest(unittest.TestCase):
-    """Tests for read_config_file and dependency_document_name."""
+    """Tests for read_config_file, dependency_document_name, and load_config."""
 
-    def read(self, cfg):
-        """Write cfg to a config file in a fresh directory, and read it back.
+    def write(self, cfg):
+        """Write cfg to a config file in a fresh directory, which becomes the current one.
 
-        Returns:
-            The config, as read_config_file returns it.
+        Args:
+            cfg: the config file's contents, as a value that json.dumps accepts.
         """
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.addCleanup(os.chdir, Path.cwd())
         os.chdir(directory.name)
         Path(pr_status.CONFIG).write_text(json.dumps(cfg))
-        return pr_status.read_config_file()
+
+    def read(self, cfg):
+        """Return the config that read_config_file reads from a file that holds cfg.
+
+        Args:
+            cfg: the config file's contents, as a value that json.dumps accepts.
+
+        Returns:
+            The config, as read_config_file returns it.
+        """
+        self.write(cfg)
+        return pr_status.read_config_file("pr-status")
+
+    def assert_exits(self, call, message):
+        """Assert that call exits with an error message that contains message."""
+        with self.assertRaises(SystemExit) as cm:
+            call()
+        self.assertIn(message, str(cm.exception))
 
     def test_defaults(self):
         """Each omitted optional top-level key gets its default."""
@@ -1108,13 +1125,36 @@ class ReadConfigFileTest(unittest.TestCase):
     def test_invalid_dependency_document(self):
         """A dependency document that is not a file name is an error."""
         cfg = self.read({"repos": {}, "documents": {"dependencies": ""}})
-        with self.assertRaises(SystemExit) as cm:
-            pr_status.dependency_document_name(cfg, "pr-status")
-        self.assertIn('is "", not a file name', str(cm.exception))
+        self.assert_exits(
+            lambda: pr_status.dependency_document_name(cfg, "pr-status"),
+            'is "", not a file name',
+        )
+
+    def test_not_an_object(self):
+        """A config file that does not hold a JSON object is an error."""
+        self.write([])
+        self.assert_exits(
+            lambda: pr_status.read_config_file("pr-status"), "holds [], not a JSON object"
+        )
+
+    def test_invalid_documents(self):
+        """A documents value that is not an object is an error."""
+        self.write({"repos": {}, "documents": None})
+        self.assert_exits(
+            lambda: pr_status.read_config_file("pr-status"),
+            '"documents" is null, not an object',
+        )
+
+    def test_no_repos(self):
+        """A config with no repos names its dependency document, but load_config rejects it."""
+        cfg = self.read({"documents": {"dependencies": "status.md"}})
+        self.assertNotIn("order", cfg)
+        self.assertEqual(pr_status.dependency_document_name(cfg, "pr-status"), "status.md")
+        self.assert_exits(lambda: pr_status.load_config("pr-status"), 'has no "repos" object')
 
 
 def config_repo(**extra):
-    """Build a Repo from a config entry.
+    """Return a Repo made from a config entry that has the required keys and extra.
 
     Args:
         extra: config keys, such as default_branch, in addition to the required ones.
@@ -1159,37 +1199,50 @@ class ExcludedByDecisionTest(unittest.TestCase):
     """Tests for the "Excluded by decision" section of an unblocked document."""
 
     @staticmethod
-    def section(excluded):
-        """Generate an unblocked document for a repository with no open PRs.
+    def section(excluded, open_prs):
+        """Return the "Excluded by decision" section of an unblocked document.
+
+        The document reports on one repository, none of whose open PRs is unblocked.
 
         Args:
             excluded: the repository's "excluded" config entry.
+            open_prs: the numbers of the repository's open PRs.
 
         Returns:
-            The document's "Excluded by decision" section, without its heading.
+            The section, without its heading; or None if the document has no such section.
         """
-        model = types.SimpleNamespace(repo=config_repo(), unblocked=list, blocked=list)
+        repo = config_repo()
+        repo.prs = {n: {} for n in open_prs}
+        model = types.SimpleNamespace(
+            repo=repo, excluded=set(excluded["prs"]), unblocked=list, blocked=list
+        )
         cfg = {
             "documents": {"dependencies": "pr-status.md"},
             "repos": {"repo": {"excluded": excluded}},
         }
         doc = {"file": "unblocked.md", "title": "Unblocked"}
         text = pr_status.unblocked_doc([model], cfg, "/base", doc, "now")
-        return text.split("## Excluded by decision\n\n")[1].split("\n\n")[0]
+        parts = text.split("## Excluded by decision\n\n")
+        return parts[1].split("\n\n")[0] if len(parts) > 1 else None
 
     def test_reason(self):
         """The reason, if the config gives one, describes the excluded PRs."""
         self.assertEqual(
-            self.section({"prs": [7], "reason": "#7 will not land."}), "* repo: #7 will not land."
+            self.section({"prs": [7], "reason": "#7 will not land."}, {7}),
+            "* repo: #7 will not land.",
         )
 
     def test_no_reason(self):
-        """Without a reason, the excluded PRs are listed."""
+        """Without a reason, the excluded PRs that are open are listed."""
         self.assertEqual(
-            self.section({"prs": [9, 7]}),
+            self.section({"prs": [9, 7, 5]}, {7, 9}),
             "* repo: [#7](https://github.com/Owner/Repo/pull/7) and"
             " [#9](https://github.com/Owner/Repo/pull/9).",
         )
+
+    def test_none_open(self):
+        """If no excluded PR is open, the section is omitted, even if it has a reason."""
+        self.assertIsNone(self.section({"prs": [5], "reason": "#5 will not land."}, {7}))
 
 
 if __name__ == "__main__":
