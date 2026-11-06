@@ -21,12 +21,14 @@ exits.  For example, a misspelled key is reported as
 `repos.daikon.exclude is not a known key; did you mean "excluded"?`, and a
 PR number written as a string is reported as
 `repos.daikon.excluded.prs[0] is "512", not a PR number such as 527`.
+Every string in the config must be on one line, because `pr-status` copies
+each one into a single line of a document.
 
 `pr-status --print-config` prints the config that `pr-status` uses, as JSON,
 with the defaults filled in, and does nothing else.  If there is no config
 file, it prints the default config, which can be the starting point for a
-config file.  It does not print a default branch that `pr-status` reads from
-GitHub.
+config file.  It never prints a default branch that `pr-status` reads from
+GitHub, because a config that names a default branch overrides GitHub's.
 
 ## Examples
 
@@ -136,10 +138,12 @@ repository object has no `"name"` key.
   that holds the config file.  `pr-merge-analysis` fetches the pull requests
   into the clone, and `pr-status` never renames or re-creates the clone.
   The default is a clone, in the directory that holds the config file, of
-  the repository or of a fork of it with the same name.  Among several, it
-  is a clone of the repository itself if there is one, and among those, one
-  whose current branch is the default branch, because it has no branch of
-  its own to disturb.  If there is none, `pr-status` reports an error.
+  the repository or of a fork of it with the same name, whose origin is on
+  GitHub.  It is a clone of the repository itself if there is one; only if
+  there is none does `pr-status` ask GitHub which of the clones' origins are
+  forks of the repository.  Among several, it is one whose current branch
+  is the default branch, because it has no branch of its own to disturb.
+  If there is none, `pr-status` reports an error.
 * `"prefix"`:  the text that precedes a PR number when the documents refer
   to a PR, such as `"daikon#"` (which yields "daikon#95") or `"#"` (which
   yields "#95").  The default is `"#"` if `"repos"` has one repository, and
@@ -260,7 +264,9 @@ cell, and it replaces each double quote in a label by a single quote.
   rewrites the document's title and its generated sections, between
   `<!-- BEGIN GENERATED: NAME -->` and `<!-- END GENERATED: NAME -->`, and
   retains the rest.  If the document does not exist, `pr-status` creates
-  it.
+  it.  No two documents can have the same file, and neither can a document
+  and `pr-status-config.json` or `.pr-status-snapshot.json`, the file in
+  which `pr-status` records what it found.
 * `"unblocked"` (optional):  a list of unblocked-document objects.  The
   default is `[]`.  `pr-status` rewrites each unblocked document entirely,
   so do not edit one by hand.

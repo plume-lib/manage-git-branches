@@ -159,8 +159,7 @@ class Repo:
         self.node_prefix = cfg["node_prefix"]
         self.owner = self.gh.split("/")[0]
         self.dir_name = cfg.get("dir_name", self.name)
-        # The default branch that the config names, or None if it names none.
-        self.configured_default_branch: str | None = cfg.get("default_branch")
+        self.default_branch = repo_default_branch(cfg)
         self.keywords = cfg.get("dependency_keywords", [])
         self.show_author = cfg.get("show_author", False)
         self.prs: dict[int, dict[str, Any]] = {}  # number -> gh JSON
@@ -170,17 +169,6 @@ class Repo:
         self.pair_conflicts: dict[tuple[int, int], list[str]] = {}  # (a, b) with a < b -> files
         # number -> "landed" | "closed" | None (not a PR)
         self.closed_state: dict[int, str | None] = {}
-
-    @functools.cached_property
-    def default_branch(self) -> str:
-        """The repository's default branch, such as "main".
-
-        It is the one that the config names or, if the config names none, the one that
-        GitHub reports.  It is read from GitHub when first used.
-        """
-        if self.configured_default_branch is not None:
-            return self.configured_default_branch
-        return github_default_branch(self.gh)
 
     @functools.cached_property
     def reviews_and_ci(self) -> ReviewsAndCi:
@@ -254,14 +242,10 @@ class Repo:
 
 
 def load_repo(repo: Repo, pairwise: bool = True) -> None:
-    """Read the default branch, the open PRs, and the merge analysis.
+    """Read the open PRs and the merge analysis.
 
     Without pairwise, repo.pair_conflicts stays empty.
     """
-    # Reading the default branch from GitHub now, rather than when a document first uses
-    # it, makes a failure to read it occur along with any failure to read the PRs:  before
-    # any PR description or document changes.
-    _ = repo.default_branch
     fields = (
         "number,title,headRefName,headRefOid,headRepositoryOwner,baseRefName,"
         "author,assignees,body,updatedAt"
@@ -3158,7 +3142,7 @@ def map_checker(
 
     Args:
         item_checker: a checker of each of the object's values.
-        pr_keys: true if each of the object's keys must be a PR number, such as "527".
+        pr_keys: True if each of the object's keys must be a PR number, such as "527".
 
     Returns:
         The checker.
@@ -3177,9 +3161,13 @@ def map_checker(
     return check
 
 
-STRING_CHECKER = type_checker(str, "a string")
-NAME_CHECKER = pattern_checker(re.compile(r".+"), "a non-empty string")
-NOTES_CHECKER = map_checker(STRING_CHECKER, pr_keys=True)
+# Matches text on one line, such as "needs a review", or "".
+ONE_LINE_RE = re.compile(r"[^\n\r]*")
+# Matches non-empty text on one line, such as "pr-status.md".
+NONEMPTY_LINE_RE = re.compile(r"[^\n\r]+")
+LINE_CHECKER = pattern_checker(ONE_LINE_RE, "a string on one line")
+NAME_CHECKER = pattern_checker(NONEMPTY_LINE_RE, "a non-empty string on one line")
+NOTES_CHECKER = map_checker(LINE_CHECKER, pr_keys=True)
 REPO_CHECKER = object_checker(
     {
         "gh": pattern_checker(GH_SLUG_RE, 'a GitHub slug such as "ORG/REPO"'),
@@ -3193,7 +3181,7 @@ REPO_CHECKER = object_checker(
         "show_author": type_checker(bool, "true or false"),
         "routine_files": list_checker(NAME_CHECKER),
         "excluded": object_checker(
-            {"prs": list_checker(pr_number_checker), "reason": STRING_CHECKER}, required=["prs"]
+            {"prs": list_checker(pr_number_checker), "reason": LINE_CHECKER}, required=["prs"]
         ),
         "not_prerequisites": list_checker(pr_number_checker),
         "extra_dependencies": list_checker(list_checker(pr_number_checker, length=2)),
@@ -3220,7 +3208,7 @@ CONFIG_CHECKER = object_checker(
                 "dependencies": NAME_CHECKER,
                 "unblocked": list_checker(
                     object_checker(
-                        {"file": NAME_CHECKER, "title": STRING_CHECKER, "filter": filter_checker},
+                        {"file": NAME_CHECKER, "title": LINE_CHECKER, "filter": filter_checker},
                         required=["file", "title"],
                     )
                 ),
@@ -3230,8 +3218,8 @@ CONFIG_CHECKER = object_checker(
             object_checker(
                 {
                     "dirs": list_checker(NAME_CHECKER),
-                    "status": STRING_CHECKER,
-                    "relationship": STRING_CHECKER,
+                    "status": LINE_CHECKER,
+                    "relationship": LINE_CHECKER,
                 },
                 required=["dirs", "status", "relationship"],
             )
@@ -3302,13 +3290,29 @@ def duplicate_problems(cfg: dict[str, Any]) -> list[str]:
     """Return the problems with a config that with_defaults has filled in:  shared values.
 
     Two repositories must not have the same GitHub slug, prefix (ignoring case), or node
-    prefix.
+    prefix.  Two documents must not have the same file, and no document's file can be the
+    config file or the snapshot file, because pr-status overwrites each document.
 
     Returns:
-        A description of each value that two repositories share, such as
+        A description of each value that two repositories or two files share, such as
         'repos.daikon and repos.fjalar have the same "prefix", "#"'.
     """
     problems = []
+    docs = cfg["documents"]
+    owners = {
+        os.path.normpath(CONFIG): f"the config file, {CONFIG}",
+        os.path.normpath(SNAPSHOT): f"the snapshot file, {SNAPSHOT}",
+    }
+    files = [("documents.dependencies", docs["dependencies"])] + [
+        (f"documents.unblocked[{i}].file", doc["file"])
+        for i, doc in enumerate(docs.get("unblocked", []))
+    ]
+    for path, file in files:
+        normalized = os.path.normpath(file)
+        if normalized in owners:
+            problems.append(f"{path} is {json.dumps(file)}, which is also {owners[normalized]}")
+        else:
+            owners[normalized] = path
     for field, normalize in (("gh", str.lower), ("prefix", str.lower), ("node_prefix", str)):
         first: dict[str, str] = {}
         for key, rc in cfg["repos"].items():
@@ -3352,39 +3356,91 @@ def read_config_file(program: str) -> dict[str, Any] | None:
     return cfg
 
 
-@functools.cache
+# The default branch that GitHub reports for each repository that github_default_branch or
+# default_config has read it for, as a map from the repository's GitHub slug, such as
+# "ORG/REPO", to the branch, such as "main".
+GITHUB_DEFAULT_BRANCHES: dict[str, str] = {}
+
+
 def github_default_branch(gh: str) -> str:
-    """Return the default branch that GitHub reports for a GitHub repository, once.
+    """Return the default branch that GitHub reports for the given repository.
+
+    It is read from GitHub at most once per run.
 
     Args:
         gh: a repository's GitHub slug, such as "ORG/REPO".
 
     Returns:
-        The default branch, such as "main".
+        The default branch, such as "main", even if a config names a different one.
     """
-    fields = ["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]
-    return run(["gh", "repo", "view", gh, *fields]).strip()
+    if gh not in GITHUB_DEFAULT_BRANCHES:
+        fields = ["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]
+        GITHUB_DEFAULT_BRANCHES[gh] = run(["gh", "repo", "view", gh, *fields]).strip()
+    return GITHUB_DEFAULT_BRANCHES[gh]
+
+
+def repo_default_branch(rc: dict[str, Any]) -> str:
+    """Return the default branch of the repository that the given config entry describes.
+
+    Args:
+        rc: a repository's entry in a config, as a dict parsed from the config file's JSON,
+            with keys such as "gh" and "default_branch".
+
+    Returns:
+        The branch that rc names, or else the one that GitHub reports, such as "main".
+    """
+    configured = rc.get("default_branch")
+    return configured if configured is not None else github_default_branch(rc["gh"])
+
+
+def fork_source(owner: str, name: str) -> str | None:
+    """Return the repository that the given GitHub repository is a fork of, at its root.
+
+    Args:
+        owner: the owner of a GitHub repository, such as "mernst".
+        name: the repository's name, such as "daikon".
+
+    Returns:
+        The lowercase GitHub slug of the repository that owner/name was ultimately forked
+        from, such as "codespecs/daikon"; or None if owner/name is not a fork or gh cannot
+        view it.
+    """
+    try:
+        source = run(["gh", "api", f"repos/{owner}/{name}", "--jq", '.source.full_name // ""'])
+    except subprocess.CalledProcessError:
+        return None
+    return source.strip().lower() or None
 
 
 def find_clone(base: str, owner: str, name: str, default_branch: Callable[[], str]) -> str | None:
     """Return the clone in base of the GitHub repository owner/name, or of a fork of it.
 
-    The clone is a clone of owner/name itself if there is one, and among those, a clone
-    whose current branch is the default branch, which has no branch of its own to disturb.
+    A fork counts only if it has the same name.  The clone is a clone of owner/name itself
+    if there is one, and among several, a clone whose current branch is the default branch,
+    which has no branch of its own to disturb.  If there is no clone of owner/name itself,
+    GitHub is asked which of the clones' origins are forks of owner/name.
 
     Args:
         base: the directory that holds the working copy directories.
         owner: the owner of a GitHub repository, such as "codespecs".
         name: the repository's name, such as "daikon".
         default_branch: a function that returns the repository's default branch, such as
-            "main"; it is called only if base holds more than one clone.
+            "main"; it is called only if base holds more than one candidate clone.
 
     Returns:
         The clone's path, or None if base holds no clone of the repository or of a fork.
     """
     entries = git_entries(base)
     owner, name = owner.lower(), name.lower()
-    clones = [d for d, info in entries.items() if info.repo_name == name]
+    named = sorted(d for d, info in entries.items() if info.owner and info.repo_name == name)
+    clones = [d for d in named if entries[d].owner == owner]
+    if not clones:
+        forks = {
+            o
+            for o in {entries[d].owner for d in named}
+            if fork_source(o, name) == f"{owner}/{name}"
+        }
+        clones = [d for d in named if entries[d].owner in forks]
     if not clones:
         return None
     if len(clones) > 1:
@@ -3446,8 +3502,13 @@ def default_config(base: str) -> dict[str, Any]:
         if any(r["gh"] == gh for r in repos.values()):
             continue
         default_branch = j["defaultBranchRef"]["name"]
+        # Repo reads the default branch from here, so that the config, which --print-config
+        # prints, need not name it.
+        GITHUB_DEFAULT_BRANCHES[gh] = default_branch
         clone = find_clone(base, gh.split("/")[0], name, lambda b=default_branch: b)
-        repos[gh.split("/")[1]] = {"gh": gh, "clone": clone, "default_branch": default_branch}
+        if clone is None:
+            continue
+        repos[gh.split("/")[1]] = {"gh": gh, "clone": clone}
     if not repos:
         msg = f"no {CONFIG} and no GitHub repository that gh can view"
         raise ConfigError(msg)
@@ -3512,7 +3573,7 @@ def load_config(program: str) -> dict[str, Any]:
             base,
             owner,
             name,
-            lambda rc=rc: rc.get("default_branch") or github_default_branch(rc["gh"]),
+            lambda rc=rc: repo_default_branch(rc),
         )
         if clone is None:
             problems.append(

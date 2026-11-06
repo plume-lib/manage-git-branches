@@ -195,8 +195,7 @@ def blocked_prs(cfg: dict[str, Any]) -> list[RepoBlockedPrs]:
     """Return the blocked PRs, as pr-status computes them from its config cfg.
 
     Args:
-        cfg: a pr-status config, as pr-status-config.json holds it or as pr-status
-            constructs it by default.
+        cfg: a pr-status config, as pr_status.load_config returns it.
 
     Returns:
         A list of the RepoBlockedPrs of each repository.
@@ -554,21 +553,6 @@ def check_urls(gh: str, shas: list[str]) -> dict[str, list[str]]:
     ):
         result[sha] = [c.url for c in sha_checks]
     return result
-
-
-def github_default_branch(gh: str) -> str:
-    """Return the default branch of the GitHub repository gh.
-
-    The result is the default branch that GitHub reports, even if a pr-status config names
-    a different one.
-
-    Args:
-        gh: a repository's GitHub slug, such as "ORG/REPO".
-
-    Returns:
-        The default branch, such as "main".
-    """
-    return request_util.gh_api(f"repos/{gh}")["default_branch"]
 
 
 def github_protected_branches(gh: str) -> set[str]:
@@ -1372,7 +1356,8 @@ def main() -> None:
         try:
             shared_branches = (
                 {
-                    github_default_branch(gh),
+                    # GitHub's default branch, even if the config overrides it.
+                    pr_status.github_default_branch(gh),
                     *github_protected_branches(gh),
                     *repo.pr_shared_branches,
                 }

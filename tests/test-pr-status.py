@@ -473,6 +473,7 @@ class HighlightTest(unittest.TestCase):
                 "prefix": "#",
                 "label": "repo",
                 "node_prefix": "pr",
+                "default_branch": "master",
             },
         )
         with mock.patch.object(pr_status, "HIGHLIGHTED", {("owner/repo", 1), ("other/repo", 5)}):
@@ -1178,6 +1179,7 @@ class ReadConfigFileTest(unittest.TestCase):
             "extra_dependencies": [[1, 2, 3], [1, "2"]],
             "extra_external_dependencies": {"x": ["o/r#5", "o/r"]},
             "titles": {"527": 5},
+            "detail_notes": {"530": "a\nb"},
             "show_author": "yes",
         }
         self.assertEqual(
@@ -1199,7 +1201,8 @@ class ReadConfigFileTest(unittest.TestCase):
                     'repos.daikon.extra_external_dependencies.x[1] is "o/r",'
                     ' not a PR such as "ORG/REPO#95"'
                 ),
-                'repos.daikon.titles."527" is 5, not a string',
+                'repos.daikon.titles."527" is 5, not a string on one line',
+                'repos.daikon.detail_notes."530" is "a\\nb", not a string on one line',
                 'repos.daikon.show_author is "yes", not true or false',
             ],
         )
@@ -1256,11 +1259,42 @@ class ReadConfigFileTest(unittest.TestCase):
             ],
         )
 
+    def test_document_files(self):
+        """No two documents, and no document and pr-status's own files, share a file."""
+        unblocked = [
+            {"file": "pr-status.md", "title": "U"},
+            {"file": "./pr-status-config.json", "title": "U"},
+            {"file": ".pr-status-snapshot.json", "title": "U"},
+            {"file": "u.md", "title": "U"},
+            {"file": "u.md", "title": "U"},
+        ]
+        self.assertEqual(
+            self.problems({"repos": {}, "documents": {"unblocked": unblocked}}),
+            [
+                (
+                    'documents.unblocked[0].file is "pr-status.md", which is also'
+                    " documents.dependencies"
+                ),
+                (
+                    'documents.unblocked[1].file is "./pr-status-config.json", which is also'
+                    " the config file, pr-status-config.json"
+                ),
+                (
+                    'documents.unblocked[2].file is ".pr-status-snapshot.json", which is also'
+                    " the snapshot file, .pr-status-snapshot.json"
+                ),
+                'documents.unblocked[4].file is "u.md", which is also documents.unblocked[3].file',
+            ],
+        )
+
     def test_clone_found(self):
         """load_config finds a clone for a repository that names none."""
         self.write(json.dumps({"repos": {"a": {"gh": "o/a"}, "b": {"gh": "o/b", "clone": "x"}}}))
         entries = {"a-fork": pr_status.GitEntry("me", "a", "fix")}
-        with mock.patch.object(pr_status, "git_entries", return_value=entries):
+        with (
+            mock.patch.object(pr_status, "git_entries", return_value=entries),
+            mock.patch.object(pr_status, "fork_source", return_value="o/a"),
+        ):
             cfg = pr_status.load_config("pr-status")
         self.assertEqual(cfg["repos"]["a"]["clone"], str(Path.cwd() / "a-fork"))
         self.assertEqual(cfg["repos"]["b"]["clone"], "x")
@@ -1276,25 +1310,38 @@ class ReadConfigFileTest(unittest.TestCase):
         self.assertIn('repos.a has no "clone"', str(cm.exception.code))
 
 
-# Clones of the repositories o/a and o/b, and of a fork of o/a.
+# Clones of the repositories o/a and o/b, of a fork of o/a, of an unrelated repository
+# named "a", and of a repository that is not on GitHub.
 CLONES = {
     "a-fork": pr_status.GitEntry("me", "a", "main"),
     "a-feature": pr_status.GitEntry("o", "a", "feature"),
     "a": pr_status.GitEntry("o", "a", "main"),
     "b": pr_status.GitEntry("o", "b", "main"),
+    "a-other": pr_status.GitEntry("other", "a", "main"),
+    "a-local": pr_status.GitEntry("", "a", "main"),
 }
+# The repository that each owner's GitHub repository "a" is a fork of, as fork_source reports.
+SOURCES = {"me": "o/a", "other": None}
 
 
 class FindCloneTest(unittest.TestCase):
     """Tests for find_clone."""
 
-    def find(self, entries, default_branch):
-        """Return the clone that find_clone finds among entries, for the repository o/a.
+    def find(self, names, default_branch):
+        """Return the clone that find_clone finds among the given CLONES, for o/a.
+
+        Args:
+            names: the names of some entries of CLONES.
+            default_branch: what find_clone calls to read the default branch.
 
         Returns:
             The clone's name, or None if find_clone finds none.
         """
-        with mock.patch.object(pr_status, "git_entries", return_value=entries):
+        entries = {d: CLONES[d] for d in names}
+        with (
+            mock.patch.object(pr_status, "git_entries", return_value=entries),
+            mock.patch.object(pr_status, "fork_source", side_effect=lambda o, _: SOURCES[o]),
+        ):
             clone = pr_status.find_clone("/base", "O", "A", default_branch)
         return clone and Path(clone).name
 
@@ -1304,12 +1351,12 @@ class FindCloneTest(unittest.TestCase):
 
     def test_lone_clone_of_a_fork(self):
         """A lone clone of a fork is found without reading the default branch."""
-        entries = {"a-fork": CLONES["a-fork"], "b": CLONES["b"]}
-        self.assertEqual(self.find(entries, mock.Mock(side_effect=AssertionError)), "a-fork")
+        names = ["a-fork", "a-other", "a-local", "b"]
+        self.assertEqual(self.find(names, mock.Mock(side_effect=AssertionError)), "a-fork")
 
     def test_none(self):
-        """If no clone is of the repository or a fork of it, there is none."""
-        self.assertIsNone(self.find({"b": CLONES["b"]}, lambda: "main"))
+        """A clone of an unrelated repository, or of one not on GitHub, is not found."""
+        self.assertIsNone(self.find(["a-other", "a-local", "b"], lambda: "main"))
 
 
 def config_repo(**extra):
@@ -1329,29 +1376,42 @@ def config_repo(**extra):
             "prefix": "#",
             "label": "repo",
             "node_prefix": "pr",
+            "default_branch": "master",
             **extra,
         },
     )
 
 
 class DefaultBranchTest(unittest.TestCase):
-    """Tests for Repo.default_branch."""
+    """Tests for repo_default_branch and github_default_branch."""
+
+    def setUp(self):
+        """Forget every default branch that GitHub has reported."""
+        patcher = mock.patch.dict(pr_status.GITHUB_DEFAULT_BRANCHES, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_configured(self):
         """A default branch that the config names is used without asking GitHub."""
-        repo = config_repo(default_branch="trunk")
         with mock.patch.object(pr_status, "run") as run:
-            self.assertEqual(repo.default_branch, "trunk")
+            self.assertEqual(config_repo(default_branch="trunk").default_branch, "trunk")
         run.assert_not_called()
 
     def test_from_github(self):
         """If the config names no default branch, GitHub is asked, once."""
-        repo = config_repo()
+        rc = {"gh": "Owner/Repo"}
         with mock.patch.object(pr_status, "run", return_value="main\n") as run:
-            self.assertEqual(repo.default_branch, "main")
-            self.assertEqual(repo.default_branch, "main")
+            self.assertEqual(pr_status.repo_default_branch(rc), "main")
+            self.assertEqual(pr_status.repo_default_branch(rc), "main")
         run.assert_called_once()
         self.assertEqual(run.call_args.args[0][:4], ["gh", "repo", "view", "Owner/Repo"])
+
+    def test_recorded(self):
+        """A default branch that is already recorded is used without asking GitHub."""
+        pr_status.GITHUB_DEFAULT_BRANCHES["Owner/Repo"] = "trunk"
+        with mock.patch.object(pr_status, "run") as run:
+            self.assertEqual(pr_status.repo_default_branch({"gh": "Owner/Repo"}), "trunk")
+        run.assert_not_called()
 
 
 class ExcludedByDecisionTest(unittest.TestCase):
