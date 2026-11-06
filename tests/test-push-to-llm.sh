@@ -852,10 +852,14 @@ push_to good --llm
 check_resolved claude "rerun with core.commentChar"
 
 ## A rerun leaves the merge in progress if an AI agent is working in the
-## directory.  The stand-in agent is a script named `claude`, which runs its
-## arguments, or with none, runs until it is killed.  On Linux, a script's
-## command name is the script's name.  On a system where `ps` names the
-## script after its interpreter instead, these tests are skipped.
+## directory.  The stand-in agent is a copy of `sleep` named `claude`, whose
+## command name is "claude" on every system.  Where such a copy cannot run,
+## as where `sleep` is a link to a multi-call binary such as BusyBox, the
+## stand-in is instead the script `claude` below, run with no arguments.  The
+## script runs its arguments, or with none, runs until it is killed.  On
+## Linux, a script's command name is the script's name.  On a system where
+## `ps` names the script after its interpreter instead, and the copy of
+## `sleep` cannot run, these tests are skipped.
 mkdir "${WORK_DIR}/agent-bin"
 cat > "${WORK_DIR}/agent-bin/claude" << 'AGENT_EOF'
 #!/bin/sh
@@ -867,18 +871,46 @@ fi
 exit "$?"
 AGENT_EOF
 chmod +x "${WORK_DIR}/agent-bin/claude"
+mkdir "${WORK_DIR}/agent-sleep-bin"
+agent_sleep="${WORK_DIR}/agent-sleep-bin/claude"
+if ! cp -- "$(command -v sleep)" "${agent_sleep}" 2> /dev/null \
+  || ! "${agent_sleep}" 0 > /dev/null 2>&1; then
+  agent_sleep=''
+fi
 
 ## Usage: start_agent DIR
 ## Starts the stand-in agent in DIR, and sets ${agent_pid} to its process id.
-## Returns 1, after stopping the agent, if `ps` does not name it "claude".
+## Returns 1, after stopping the agent, if the stand-in is the script and
+## `ps` does not name it "claude" within 10 seconds.  Fails the test if the
+## stand-in exits, if `ps` fails while it runs, or if `ps` does not name the
+## copy of `sleep` "claude".
 start_agent() {
-  (cd -- "$1" && exec "${WORK_DIR}/agent-bin/claude") &
+  if [ -n "${agent_sleep}" ]; then
+    (cd -- "$1" && exec "${agent_sleep}" 100000) &
+  else
+    (cd -- "$1" && exec "${WORK_DIR}/agent-bin/claude") &
+  fi
   agent_pid=$!
   agent_tries=0
-  until [ "$(basename -- "$(ps -o comm= -p "${agent_pid}")")" = claude ]; do
+  while :; do
+    # Until the subshell runs `exec`, `ps` names it after the shell.
+    if ! agent_command="$(ps -o comm= -p "${agent_pid}")"; then
+      if kill -0 "${agent_pid}" 2> /dev/null; then
+        stop_agent
+        fail "ps failed for the stand-in agent, process ${agent_pid}"
+      fi
+      wait "${agent_pid}" 2> /dev/null || true
+      fail "the stand-in agent in $1 exited"
+    fi
+    if [ "$(basename -- "${agent_command}")" = claude ]; then
+      return 0
+    fi
     agent_tries=$((agent_tries + 1))
     if [ "${agent_tries}" -gt 10 ]; then
       stop_agent
+      if [ -n "${agent_sleep}" ]; then
+        fail "ps names the stand-in agent ${agent_command}, not claude"
+      fi
       return 1
     fi
     sleep 1
@@ -888,7 +920,7 @@ start_agent() {
 ## Usage: stop_agent
 ## Stops the stand-in agent that `start_agent` started.
 stop_agent() {
-  kill "${agent_pid}"
+  kill "${agent_pid}" 2> /dev/null || true
   wait "${agent_pid}" 2> /dev/null || true
 }
 
@@ -896,6 +928,41 @@ if ! start_agent "${WORK_DIR}"; then
   echo "${SCRIPT_NAME}: skipping the tests of an AI agent working in a directory, because ps does not name a script after itself"
 else
   stop_agent
+
+  ## A rerun leaves the merge in progress if the current directory of a
+  ## running agent cannot be read, here because a stand-in `readlink` fails
+  ## for it.  The stand-in matters only where /proc is read.
+  if [ -d /proc/self ]; then
+    mkdir "${WORK_DIR}/readlink-bin"
+    cat > "${WORK_DIR}/readlink-bin/readlink" << READLINK_EOF
+#!/bin/sh
+if [ "\$#" -eq 1 ] && [ "\$1" = "/proc/\${UNREADABLE_CWD_PID}/cwd" ]; then
+  exit 1
+fi
+exec '$(command -v readlink)' "\$@"
+READLINK_EOF
+    chmod +x "${WORK_DIR}/readlink-bin/readlink"
+    setup_case rerun-agent-unreadable
+    push_to none --llm
+    : > "${STUB_LOG}"
+    start_agent "${feature_dir}" || fail "the stand-in agent did not start"
+    saved_path="${PATH}"
+    PATH="${WORK_DIR}/readlink-bin:${PATH}"
+    UNREADABLE_CWD_PID="${agent_pid}"
+    export UNREADABLE_CWD_PID
+    push_to good --llm
+    PATH="${saved_path}"
+    unset UNREADABLE_CWD_PID
+    stop_agent
+    check_not_resolved "rerun with an agent whose current directory cannot be read"
+    case "${push_output}" in
+      *"cannot read the current directory of claude (process ${agent_pid})"*"might be working there"*) ;;
+      *) fail "rerun with an agent whose current directory cannot be read: wrong diagnostic: ${push_output}" ;;
+    esac
+    if [ -s "${STUB_LOG}" ]; then
+      fail "rerun with an agent whose current directory cannot be read: an agent ran: $(cat "${STUB_LOG}")"
+    fi
+  fi
 
   for agent_subdir in '' /sub; do
     setup_case "rerun-agent${agent_subdir#/}"
@@ -914,6 +981,25 @@ else
       fail "rerun with an agent: an agent ran: $(cat "${STUB_LOG}")"
     fi
   done
+
+  ## An inherited $GIT_DIR, as in a git hook, does not hide the agent.  With
+  ## $GIT_DIR set, git would take the agent's subdirectory for the top level
+  ## of its working tree.
+  setup_case rerun-agent-git-dir
+  push_to none --llm
+  : > "${STUB_LOG}"
+  mkdir -p "${feature_dir}/sub"
+  start_agent "${feature_dir}/sub" || fail "the stand-in agent did not start"
+  GIT_DIR="${main_dir}/.git"
+  export GIT_DIR
+  push_to good --llm
+  unset GIT_DIR
+  stop_agent
+  check_not_resolved "rerun with an agent and an inherited GIT_DIR"
+  case "${push_output}" in
+    *"claude (process ${agent_pid}) is working in"*) ;;
+    *) fail "rerun with an agent and an inherited GIT_DIR: wrong diagnostic: ${push_output}" ;;
+  esac
 
   ## An agent in another directory, or in a worktree nested in the
   ## directory, does not keep a rerun from finishing the merge.

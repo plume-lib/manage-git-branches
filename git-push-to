@@ -115,7 +115,9 @@
 #  * A process of Claude Code or of Codex (a process whose command name is
 #    "claude" or "codex") is working in the directory, as when you are
 #    resolving the conflicts in a session that this script printed a command
-#    to resume.  On a system that has neither /proc nor `lsof`, this script
+#    to resume.  This script also stops if it cannot read the current
+#    directory of such a process.  On a system that has neither /proc nor
+#    `lsof`, this script
 #    cannot tell whether such a process is working in the directory; it says
 #    so, and finishes the merge.
 #  * No conflicted file remains, as when you have resolved and staged the
@@ -292,6 +294,9 @@ if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
 fi
 # shellcheck source=common-functions.sh
 . "${SCRIPT_DIR}/common-functions.sh"
+# This script runs git in directories other than the current one, such as in
+# `agent_processes_in`, where an inherited $GIT_DIR would override `git -C`.
+unset_git_location_variables
 
 ## Returns 0 if the given directory is the top level of a working tree whose
 ## branch still exists in its remote.  Otherwise, prints a diagnostic and
@@ -416,7 +421,10 @@ fetch_branch() {
 ## that is this script or an ancestor of it, such as a Claude Code session
 ## that ran this script.  Returns 1, after printing a diagnostic, if the
 ## system has neither /proc nor `lsof`, so that the current directories of
-## processes cannot be read.
+## processes cannot be read.  Returns 2, after printing a diagnostic for each,
+## if the current directory of some such process that is still running cannot
+## be read, so that whether it works in DIRECTORY is unknown; it still prints
+## the processes that it found in DIRECTORY.
 agent_processes_in() {
   if [ -d /proc/self ]; then
     agent_processes_via=proc
@@ -435,31 +443,47 @@ agent_processes_in() {
   done
   # On macOS, `ps` prints a command name as the executable's full pathname,
   # which can contain blanks.
-  ps -U "$(id -u)" -o pid= -o comm= | while read -r agent_processes_pid agent_processes_command; do
-    case "${agent_processes_command##*/}" in
-      claude | codex) ;;
-      *) continue ;;
-    esac
-    case "${agent_processes_ancestors}" in
-      *" ${agent_processes_pid} "*) continue ;;
-    esac
-    # The current directory of a process that has exited, or that belongs to
-    # another user, cannot be read, and is empty.
-    if [ "${agent_processes_via}" = proc ]; then
-      agent_processes_cwd="$(readlink "/proc/${agent_processes_pid}/cwd" 2> /dev/null)"
-    else
-      agent_processes_cwd="$(lsof -a -p "${agent_processes_pid}" -d cwd -Fn 2> /dev/null | sed -n -e 's/^n//p')"
-    fi
-    case "${agent_processes_cwd}" in
-      "$1" | "$1"/*) ;;
-      *) continue ;;
-    esac
-    # The test above is cheap; this one excludes a nested working tree.
-    if agent_processes_top="$(git -C "${agent_processes_cwd}" rev-parse --show-toplevel 2> /dev/null)" \
-      && [ "$(physical_path "${agent_processes_top}" 2> /dev/null)" = "$1" ]; then
-      printf '%s %s\n' "${agent_processes_pid}" "${agent_processes_command##*/}"
-    fi
-  done
+  # The loop runs in an explicit subshell, so that its exit status is the
+  # pipeline's even in a shell that runs a pipeline's last command in the
+  # current shell.
+  ps -U "$(id -u)" -o pid= -o comm= | (
+    agent_processes_status=0
+    while read -r agent_processes_pid agent_processes_command; do
+      case "${agent_processes_command##*/}" in
+        claude | codex) ;;
+        *) continue ;;
+      esac
+      case "${agent_processes_ancestors}" in
+        *" ${agent_processes_pid} "*) continue ;;
+      esac
+      if [ "${agent_processes_via}" = proc ]; then
+        agent_processes_cwd="$(readlink "/proc/${agent_processes_pid}/cwd" 2> /dev/null)"
+      else
+        agent_processes_cwd="$(lsof -a -p "${agent_processes_pid}" -d cwd -Fn 2> /dev/null | sed -n -e 's/^n//p')"
+      fi
+      if [ -z "${agent_processes_cwd}" ]; then
+        # A process that has exited since `ps` listed it, or a zombie, has no
+        # current directory and works nowhere.  For any other process, the
+        # lookup failed, and the process might be working in the directory.
+        case "$(ps -o stat= -p "${agent_processes_pid}" 2> /dev/null | tr -d ' ')" in
+          '' | Z*) continue ;;
+        esac
+        echo "${SCRIPT_NAME}: cannot read the current directory of ${agent_processes_command##*/} (process ${agent_processes_pid})" >&2
+        agent_processes_status=2
+        continue
+      fi
+      case "${agent_processes_cwd}" in
+        "$1" | "$1"/*) ;;
+        *) continue ;;
+      esac
+      # The test above is cheap; this one excludes a nested working tree.
+      if agent_processes_top="$(git -C "${agent_processes_cwd}" rev-parse --show-toplevel 2> /dev/null)" \
+        && [ "$(physical_path "${agent_processes_top}" 2> /dev/null)" = "$1" ]; then
+        printf '%s %s\n' "${agent_processes_pid}" "${agent_processes_command##*/}"
+      fi
+    done
+    exit "${agent_processes_status}"
+  )
 }
 
 ## Usage: finish_merge_in_progress DIRECTORY
@@ -480,17 +504,30 @@ agent_processes_in() {
 ## after git, `git rerere`, and this script left it (see
 ## `changed_conflicted_files`), as when this script rejected an AI agent's
 ## work, whose edits remain; or if the conflicts are not resolved or the
-## merge cannot be committed.  If `agent_processes_in` cannot tell whether an
-## AI agent is working in DIRECTORY, this function proceeds as if none is.
+## merge cannot be committed.  The same holds if the current directory of a
+## running AI agent cannot be read, so that it might be working in DIRECTORY.
+## If `agent_processes_in` cannot tell at all whether an AI agent is working
+## in DIRECTORY, because the system has neither /proc nor `lsof`, this
+## function proceeds as if none is.
 finish_merge_in_progress() {
   if ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
     return 0
   fi
   finish_in_progress="${SCRIPT_NAME}: a merge is in progress in $1"
   # `agent_processes_in` has said why it cannot tell.
-  if ! finish_agents="$(agent_processes_in "$1")"; then
-    echo "${SCRIPT_NAME}: finishing the merge in $1 anyway" >&2
-    finish_agents=''
+  finish_agents="$(agent_processes_in "$1")"
+  finish_agents_status=$?
+  case "${finish_agents_status}" in
+    0 | 2) ;;
+    *)
+      echo "${SCRIPT_NAME}: finishing the merge in $1 anyway" >&2
+      finish_agents=''
+      ;;
+  esac
+  if [ -z "${finish_agents}" ] && [ "${finish_agents_status}" -eq 2 ]; then
+    echo "${finish_in_progress}, and an AI agent whose current directory cannot be read might be working there; finish the merge, or abort it with \`git merge --abort\`" >&2
+    report_merge_in_progress "The current directory of an AI agent's process could not be read, so the agent might have been working in the directory."
+    return 1
   fi
   if [ -n "${finish_agents}" ]; then
     printf '%s\n' "${finish_agents}" | while read -r finish_pid finish_command; do
