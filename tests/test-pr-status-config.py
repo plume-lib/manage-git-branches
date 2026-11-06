@@ -126,12 +126,13 @@ class ReadConfigFileTest(unittest.TestCase):
 
     def test_syntax_error(self):
         """A file that is not JSON is reported with the position of the error."""
-        self.write('{"repos": {},\n}')
+        # A missing value, unlike a trailing comma, gets the same message from every version
+        # of Python's json module.
+        self.write('{"repos": }')
         with self.assertRaises(SystemExit) as cm:
             pr_status_config.read_config_file("pr-status")
         self.assertEqual(
-            str(cm.exception.code),
-            "pr-status: pr-status-config.json:1:13: Illegal trailing comma before end of object",
+            str(cm.exception.code), "pr-status: pr-status-config.json:1:11: Expecting value"
         )
 
     def test_not_an_object(self):
