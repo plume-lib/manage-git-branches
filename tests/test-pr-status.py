@@ -748,7 +748,7 @@ class PrSectionsTest(unittest.TestCase):
 
 
 class PrHeadingBeforeSectionTest(unittest.TestCase):
-    """Tests for PR_HEADING_BEFORE_SECTION."""
+    """Tests for PR_HEADING_BEFORE_SECTION_RE."""
 
     SECTIONS = (
         "<!-- BEGIN GENERATED: unblocked-repo -->\n<!-- END GENERATED: unblocked-repo -->\n\n"
@@ -765,7 +765,7 @@ class PrHeadingBeforeSectionTest(unittest.TestCase):
             "<!-- BEGIN GENERATED: blocked-repo -->\n<!-- END GENERATED: blocked-repo -->\n\n"
             "## Other directories\n"
         )
-        self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION.sub("", text), self.SECTIONS)
+        self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION_RE.sub("", text), self.SECTIONS)
 
     def test_removes_headings_without_blank_line(self):
         """A heading on the line directly before its section is removed."""
@@ -776,12 +776,12 @@ class PrHeadingBeforeSectionTest(unittest.TestCase):
             "<!-- BEGIN GENERATED: blocked-repo -->\n<!-- END GENERATED: blocked-repo -->\n\n"
             "## Other directories\n"
         )
-        self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION.sub("", text), self.SECTIONS)
+        self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION_RE.sub("", text), self.SECTIONS)
 
     def test_retains_other_headings(self):
         """A heading that precedes no "unblocked-REPO" or "blocked-REPO" section is retained."""
         text = "## Blocked PRs\n\nProse.\n\n" + self.SECTIONS
-        self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION.sub("", text), text)
+        self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION_RE.sub("", text), text)
 
     def test_retains_heading_before_other_kind_of_section(self):
         """A heading is retained if it precedes the other kind of section."""
@@ -790,7 +790,7 @@ class PrHeadingBeforeSectionTest(unittest.TestCase):
             "## Blocked PRs\n\n<!-- BEGIN GENERATED: unblocked-repo -->\n",
         ]:
             with self.subTest(text=text):
-                self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION.sub("", text), text)
+                self.assertEqual(pr_status.PR_HEADING_BEFORE_SECTION_RE.sub("", text), text)
 
 
 class RegenerateDependencyDocumentTest(unittest.TestCase):

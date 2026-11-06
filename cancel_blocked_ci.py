@@ -118,7 +118,7 @@ GITHUB_SUPERSEDING = {"requested", "queued", "in_progress"}
 CIRCLECI_WINDOW = dt.timedelta(days=1)
 
 # Matches a branch that holds a PR, such as "refs/pull/123/merge" or "pull/123".
-PULL_BRANCH = re.compile(r"(?:refs/)?pull/(\d+)(?:/merge|/head)?")
+PULL_BRANCH_RE = re.compile(r"(?:refs/)?pull/(\d+)(?:/merge|/head)?")
 
 
 class RunBranch(NamedTuple):
@@ -291,7 +291,7 @@ def branch_name(branch: str) -> str:
     Returns:
         "pull/N" if branch holds PR N, and otherwise branch without "refs/heads/".
     """
-    if match := PULL_BRANCH.fullmatch(branch):
+    if match := PULL_BRANCH_RE.fullmatch(branch):
         return f"pull/{match[1]}"
     return branch.removeprefix("refs/heads/")
 
@@ -307,7 +307,7 @@ def branch_subject(label: str, branch: str) -> str:
     Returns:
         A reference to the PR if branch holds a PR, and otherwise label and branch.
     """
-    if match := PULL_BRANCH.fullmatch(branch):
+    if match := PULL_BRANCH_RE.fullmatch(branch):
         return pr_name(label, f"#{match[1]}")
     return f"{label} {branch.removeprefix('refs/heads/')}"
 

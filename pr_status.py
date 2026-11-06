@@ -71,13 +71,14 @@ SNAPSHOT = ".pr-status-snapshot.json"
 # "---\ntitle: src PR status\n---\n", and the blank lines that follow it.  The front matter
 # ends at its first "---" line.  Group 1 is the front matter's contents, such as
 # "title: src PR status\n", or "" if it is empty.
-FRONT_MATTER = re.compile(r"---\n((?:(?!---\n).*\n)*)---\n+")
-# The start of a top-level "title" entry of YAML front matter, whose key may be quoted.
-TITLE_KEY = re.compile(r"""(?:title|"title"|'title')[ \t]*:(?:[ \t]|$)""")
+FRONT_MATTER_RE = re.compile(r"---\n((?:(?!---\n).*\n)*)---\n+")
+# Matches the start of a top-level "title" entry of YAML front matter, such as "title: " or
+# '"title":', whose key may be quoted.
+TITLE_KEY_RE = re.compile(r"""(?:title|"title"|'title')[ \t]*:(?:[ \t]|$)""")
 # Matches a "## Unblocked PRs" or "## Blocked PRs" heading, such as "## Blocked PRs (daikon)",
 # and the blank lines that follow it, if they directly precede an "unblocked-REPO" or
 # "blocked-REPO" generated section, respectively.  Such a section contains its own heading.
-PR_HEADING_BEFORE_SECTION = re.compile(
+PR_HEADING_BEFORE_SECTION_RE = re.compile(
     r"^(?:## Unblocked PRs.*\n+(?=<!-- BEGIN GENERATED: unblocked-)"
     r"|## Blocked PRs.*\n+(?=<!-- BEGIN GENERATED: blocked-))",
     re.MULTILINE,
@@ -652,11 +653,14 @@ def query_pr_states(refs: Iterable[str]) -> dict[str, str | None]:
 
 BASE_KEYWORDS = ["depends on", "depend on", "builds on", "land", "merge"]
 
-# A negation, possibly followed by one word, that ends the text before a keyword, as in
-# "does not depend on", "doesn't actually depend on", or "no longer builds on".
-NEGATION = re.compile(r"(\b(not|never|no longer)|n['\u2019]t)\s+(\w+\s+)?$", re.IGNORECASE)
+# Matches a negation, possibly followed by one word, at the end of the text before a keyword,
+# as in "does not depend on", "doesn't actually depend on", or "no longer builds on".
+NEGATION_RE = re.compile(r"(\b(not|never|no longer)|n['\u2019]t)\s+(\w+\s+)?$", re.IGNORECASE)
 
-LANDING_START = re.compile(
+# Matches the start of a landing-order line, such as "Land after #12" or
+# "Land with owner/repo#34", which names its PR as "#N", "owner/repo#N", or the PR's URL.
+# Group 1 is the word "after", "with", or "before".
+LANDING_START_RE = re.compile(
     r"Land (after|with|before)"
     r" (#\d+|[\w.-]+/[\w.-]+#\d+|https://github\.com/[\w.-]+/[\w.-]+/pull/\d+)\b"
 )
@@ -744,7 +748,7 @@ def stated_relations(body: str, repo: Repo) -> StatedRelations:
     # A colon does not end a sentence, so "Merge with:" and the list that follows stay together.
     for sentence in re.split(r"(?<=[.;])\s+|\n\s*\n(?!\s*https?://)", body):
         for m in pattern.finditer(sentence):
-            if NEGATION.search(sentence[: m.start()]):
+            if NEGATION_RE.search(sentence[: m.start()]):
                 continue  # "This PR does not depend on #N" names no relationship
             rest = sentence[m.end() :]
             keyword = m[1].lower()
@@ -798,7 +802,7 @@ def landing_line(line: str, repo: Repo) -> tuple[str, str] | None:
         it is in repo and as "owner/repo#N" otherwise; or None if line is not a
         landing-order line.
     """
-    m = LANDING_START.match(line)
+    m = LANDING_START_RE.match(line)
     if not m:
         return None
     refs = pr_refs(line, repo)
@@ -2608,7 +2612,7 @@ def regenerate_dependency_document(
         text, with its title set and its generated sections regenerated.
     """
     text = set_header(text, title)
-    text = PR_HEADING_BEFORE_SECTION.sub("", text)
+    text = PR_HEADING_BEFORE_SECTION_RE.sub("", text)
     return replace_sections(text, generators)
 
 
@@ -2648,11 +2652,11 @@ def set_header(text: str, title: str) -> str:
         text, starting with a header that has title.
     """
     title_entry = f"title: {yaml_string(title)}"
-    m = FRONT_MATTER.match(text)
+    m = FRONT_MATTER_RE.match(text)
     entries = m[1].splitlines() if m else []
     body = text[m.end() :] if m else text.lstrip("\n")
     for i, entry in enumerate(entries):
-        if TITLE_KEY.match(entry):
+        if TITLE_KEY_RE.match(entry):
             # The value continues through indented lines, and through blank lines that precede
             # an indented line.
             end = i + 1
@@ -2967,15 +2971,15 @@ def report_changes(models: list[Model], old: dict[str, Any], new: dict[str, Any]
 # ---------- the config ----------
 
 # Matches a PR number that is a key of a config object, such as "527".
-PR_NUMBER_KEY = re.compile(r"[1-9][0-9]*")
+PR_NUMBER_KEY_RE = re.compile(r"[1-9][0-9]*")
 # Matches a GitHub slug, such as "codespecs/daikon".
-GH_SLUG = re.compile(r"[\w.-]+/[\w.-]+")
+GH_SLUG_RE = re.compile(r"[\w.-]+/[\w.-]+")
 # Matches a reference to a PR in a GitHub repository, such as "codespecs/fjalar#95".
-EXTERNAL_PR = re.compile(r"[\w.-]+/[\w.-]+#[1-9][0-9]*")
+EXTERNAL_PR_RE = re.compile(r"[\w.-]+/[\w.-]+#[1-9][0-9]*")
 # Matches a Mermaid node id prefix, such as "daikon_".
-NODE_PREFIX = re.compile(r"[A-Za-z0-9_]+")
+NODE_PREFIX_RE = re.compile(r"[A-Za-z0-9_]+")
 # Matches a key that a config path shows without quotes, such as "detail_notes".
-PLAIN_KEY = re.compile(r"[A-Za-z_][\w-]*")
+PLAIN_KEY_RE = re.compile(r"[A-Za-z_][\w-]*")
 # The most characters of a value that an error message shows.
 SHOWN_LENGTH = 40
 
@@ -2993,7 +2997,7 @@ def key_path(path: str, key: str) -> str:
     Returns:
         The config path of the key's value, such as "repos.daikon.titles".
     """
-    shown = key if PLAIN_KEY.fullmatch(key) else json.dumps(key)
+    shown = key if PLAIN_KEY_RE.fullmatch(key) else json.dumps(key)
     return f"{path}.{shown}" if path else shown
 
 
@@ -3021,20 +3025,21 @@ def subject(path: str) -> str:
     return path or "the config"
 
 
-# Each function whose name ends in "_check" returns a check:  a function that, given a value
-# parsed from the config's JSON, its config path, and a list of problems, appends to the list
-# a description of each problem with the value, such as 'order[0] is 5, not a string'.
+# A checker is a function that, given a value parsed from the config's JSON, its config path,
+# and a list of problems, appends to the list a description of each problem with the value,
+# such as 'order[0] is 5, not a string'.  The functions named "..._checker" that take other
+# arguments, such as type_checker(str, "a string"), return a checker.
 
 
-def type_check(kind: type, description: str) -> Callable[[Any, str, list[str]], None]:
-    """Return a check that a value has the given JSON type.
+def type_checker(kind: type, description: str) -> Callable[[Any, str, list[str]], None]:
+    """Return a checker that reports a value that does not have the given JSON type.
 
     Args:
         kind: a Python type that JSON values parse to, such as str or bool.
         description: what a value of the type is, such as "a string"; used for diagnostics.
 
     Returns:
-        The check.
+        The checker.
     """
 
     def check(value: Any, path: str, problems: list[str]) -> None:
@@ -3045,10 +3050,10 @@ def type_check(kind: type, description: str) -> Callable[[Any, str, list[str]], 
     return check
 
 
-def pattern_check(
+def pattern_checker(
     pattern: re.Pattern[str], description: str
 ) -> Callable[[Any, str, list[str]], None]:
-    """Return a check that a value is a string that pattern matches.
+    """Return a checker that reports a value that is not a string that pattern matches.
 
     Args:
         pattern: a regular expression that a valid string matches in full.
@@ -3056,7 +3061,7 @@ def pattern_check(
             used for diagnostics.
 
     Returns:
-        The check.
+        The checker.
     """
 
     def check(value: Any, path: str, problems: list[str]) -> None:
@@ -3066,14 +3071,14 @@ def pattern_check(
     return check
 
 
-def pr_number_check(value: Any, path: str, problems: list[str]) -> None:
-    """Check that a value is a PR number, such as 527."""
+def pr_number_checker(value: Any, path: str, problems: list[str]) -> None:
+    """Append to problems a description of value if it is not a PR number, such as 527."""
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         problems.append(f"{subject(path)} is {shown(value)}, not a PR number such as 527")
 
 
-def filter_check(value: Any, path: str, problems: list[str]) -> None:
-    """Check that a value is a filter of an unblocked document."""
+def filter_checker(value: Any, path: str, problems: list[str]) -> None:
+    """Append to problems a description of value if it is not a filter of an unblocked document."""
     if not is_valid_filter(value):
         problems.append(
             f'{subject(path)} is {shown(value)}, not "all", "unassigned", or'
@@ -3081,17 +3086,17 @@ def filter_check(value: Any, path: str, problems: list[str]) -> None:
         )
 
 
-def list_check(
-    item_check: Callable[[Any, str, list[str]], None], length: int | None = None
+def list_checker(
+    item_checker: Callable[[Any, str, list[str]], None], length: int | None = None
 ) -> Callable[[Any, str, list[str]], None]:
-    """Return a check that a value is a list, each of whose elements item_check accepts.
+    """Return a checker that reports a value that is not a list, and its elements' problems.
 
     Args:
-        item_check: a check of each element.
+        item_checker: a checker of each element.
         length: the number of elements that the list must have, or None for any number.
 
     Returns:
-        The check.
+        The checker.
     """
 
     def check(value: Any, path: str, problems: list[str]) -> None:
@@ -3101,26 +3106,26 @@ def list_check(
         if length is not None and len(value) != length:
             problems.append(f"{subject(path)} has {len(value)} elements, not {length}")
         for i, item in enumerate(value):
-            item_check(item, f"{path}[{i}]", problems)
+            item_checker(item, f"{path}[{i}]", problems)
 
     return check
 
 
-def object_check(
+def object_checker(
     fields: dict[str, Callable[[Any, str, list[str]], None]],
     required: Iterable[str] = (),
     forbidden: Mapping[str, str] | None = None,
 ) -> Callable[[Any, str, list[str]], None]:
-    """Return a check that a value is an object with the given keys.
+    """Return a checker that reports a value that is not an object with the given keys.
 
     Args:
-        fields: a map from each key that the object can have to a check of its value.
+        fields: a map from each key that the object can have to a checker of its value.
         required: the keys that the object must have.
         forbidden: a map from each key that the object must not have, although a user might
             expect it to, to why not, such as 'a repository's name is its key in "repos"'.
 
     Returns:
-        The check, which reports a missing required key, a forbidden key, and an unknown
+        The checker, which reports a missing required key, a forbidden key, and an unknown
         key, which it compares to the known keys to suggest a correction.
     """
 
@@ -3146,17 +3151,17 @@ def object_check(
     return check
 
 
-def map_check(
-    item_check: Callable[[Any, str, list[str]], None], pr_keys: bool
+def map_checker(
+    item_checker: Callable[[Any, str, list[str]], None], pr_keys: bool
 ) -> Callable[[Any, str, list[str]], None]:
-    """Return a check that a value is an object, each of whose values item_check accepts.
+    """Return a checker that reports a value that is not an object, and its values' problems.
 
     Args:
-        item_check: a check of each of the object's values.
+        item_checker: a checker of each of the object's values.
         pr_keys: true if each of the object's keys must be a PR number, such as "527".
 
     Returns:
-        The check.
+        The checker.
     """
 
     def check(value: Any, path: str, problems: list[str]) -> None:
@@ -3165,67 +3170,68 @@ def map_check(
             return
         for key, item in value.items():
             child = key_path(path, key)
-            if pr_keys and not PR_NUMBER_KEY.fullmatch(key):
+            if pr_keys and not PR_NUMBER_KEY_RE.fullmatch(key):
                 problems.append(f'{child}:  the key is not a PR number such as "527"')
-            item_check(item, child, problems)
+            item_checker(item, child, problems)
 
     return check
 
 
-STRING_CHECK = type_check(str, "a string")
-NAME_CHECK = pattern_check(re.compile(r".+"), "a non-empty string")
-NOTES_CHECK = map_check(STRING_CHECK, pr_keys=True)
-REPO_CHECK = object_check(
+STRING_CHECKER = type_checker(str, "a string")
+NAME_CHECKER = pattern_checker(re.compile(r".+"), "a non-empty string")
+NOTES_CHECKER = map_checker(STRING_CHECKER, pr_keys=True)
+REPO_CHECKER = object_checker(
     {
-        "gh": pattern_check(GH_SLUG, 'a GitHub slug such as "ORG/REPO"'),
-        "clone": NAME_CHECK,
-        "prefix": NAME_CHECK,
-        "label": NAME_CHECK,
-        "node_prefix": pattern_check(NODE_PREFIX, "letters, digits, and underscores"),
-        "dir_name": NAME_CHECK,
-        "default_branch": NAME_CHECK,
-        "dependency_keywords": list_check(NAME_CHECK),
-        "show_author": type_check(bool, "true or false"),
-        "routine_files": list_check(NAME_CHECK),
-        "excluded": object_check(
-            {"prs": list_check(pr_number_check), "reason": STRING_CHECK}, required=["prs"]
+        "gh": pattern_checker(GH_SLUG_RE, 'a GitHub slug such as "ORG/REPO"'),
+        "clone": NAME_CHECKER,
+        "prefix": NAME_CHECKER,
+        "label": NAME_CHECKER,
+        "node_prefix": pattern_checker(NODE_PREFIX_RE, "letters, digits, and underscores"),
+        "dir_name": NAME_CHECKER,
+        "default_branch": NAME_CHECKER,
+        "dependency_keywords": list_checker(NAME_CHECKER),
+        "show_author": type_checker(bool, "true or false"),
+        "routine_files": list_checker(NAME_CHECKER),
+        "excluded": object_checker(
+            {"prs": list_checker(pr_number_checker), "reason": STRING_CHECKER}, required=["prs"]
         ),
-        "not_prerequisites": list_check(pr_number_check),
-        "extra_dependencies": list_check(list_check(pr_number_check, length=2)),
-        "extra_external_dependencies": map_check(
-            list_check(pattern_check(EXTERNAL_PR, 'a PR such as "ORG/REPO#95"')), pr_keys=True
+        "not_prerequisites": list_checker(pr_number_checker),
+        "extra_dependencies": list_checker(list_checker(pr_number_checker, length=2)),
+        "extra_external_dependencies": map_checker(
+            list_checker(pattern_checker(EXTERNAL_PR_RE, 'a PR such as "ORG/REPO#95"')),
+            pr_keys=True,
         ),
-        "titles": NOTES_CHECK,
-        "labels": NOTES_CHECK,
-        "cluster_names": NOTES_CHECK,
-        "unblocked_notes": NOTES_CHECK,
-        "detail_notes": NOTES_CHECK,
-        "independent_notes": NOTES_CHECK,
+        "titles": NOTES_CHECKER,
+        "labels": NOTES_CHECKER,
+        "cluster_names": NOTES_CHECKER,
+        "unblocked_notes": NOTES_CHECKER,
+        "detail_notes": NOTES_CHECKER,
+        "independent_notes": NOTES_CHECKER,
     },
     required=["gh"],
     forbidden={"name": 'a repository\'s name is its key in "repos"'},
 )
-CONFIG_CHECK = object_check(
+CONFIG_CHECKER = object_checker(
     {
-        "repos": map_check(REPO_CHECK, pr_keys=False),
-        "order": list_check(NAME_CHECK),
-        "documents": object_check(
+        "repos": map_checker(REPO_CHECKER, pr_keys=False),
+        "order": list_checker(NAME_CHECKER),
+        "documents": object_checker(
             {
-                "dependencies": NAME_CHECK,
-                "unblocked": list_check(
-                    object_check(
-                        {"file": NAME_CHECK, "title": STRING_CHECK, "filter": filter_check},
+                "dependencies": NAME_CHECKER,
+                "unblocked": list_checker(
+                    object_checker(
+                        {"file": NAME_CHECKER, "title": STRING_CHECKER, "filter": filter_checker},
                         required=["file", "title"],
                     )
                 ),
             }
         ),
-        "directories": list_check(
-            object_check(
+        "directories": list_checker(
+            object_checker(
                 {
-                    "dirs": list_check(NAME_CHECK),
-                    "status": STRING_CHECK,
-                    "relationship": STRING_CHECK,
+                    "dirs": list_checker(NAME_CHECKER),
+                    "status": STRING_CHECKER,
+                    "relationship": STRING_CHECKER,
                 },
                 required=["dirs", "status", "relationship"],
             )
@@ -3246,7 +3252,7 @@ def config_problems(cfg: Any) -> list[str]:
         'repos.daikon.excluded.prs[0] is "512", not a PR number such as 527'.
     """
     problems: list[str] = []
-    CONFIG_CHECK(cfg, "", problems)
+    CONFIG_CHECKER(cfg, "", problems)
     repos = cfg.get("repos") if isinstance(cfg, dict) else None
     if not isinstance(repos, dict):
         return problems
