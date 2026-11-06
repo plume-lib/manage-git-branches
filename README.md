@@ -128,8 +128,13 @@ The commands are:
   agent:  that nothing outside the conflict regions changed and that no
   conflict marker remains.  Then it commits the merge and continues.
   It does the same for a merge that is already in progress in any directory
-  except the first, as after an earlier run stopped at conflicts, unless a
-  Claude Code or Codex process is working in that directory.
+  except the first, as after an earlier run stopped at conflicts, after
+  running `git rerere` to apply any resolution recorded since then.  It
+  leaves such a merge alone if a Claude Code or Codex process is working in
+  that directory, if no conflicted file remains, or if a conflicted file
+  changed after the merge stopped.  Whenever it stops with a merge in
+  progress, it notes the merge in the file `AGENT-TODO.md` at the top level
+  of the working tree.
   If the build fails, and TO_DIR's branch has a merge that neither its
   remote branches nor those of FROM_DIR's branch contain, such as the one
   that it just made, it asks the agent to fix the build, up to 3 times, and

@@ -556,7 +556,8 @@ if ! grep -q -x 'cd .* && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093' "${
 fi
 
 ## If Codex prints no session id, the user is told that its session cannot be
-## continued, and AGENT-TODO.md is not written.
+## continued, and AGENT-TODO.md notes the merge in progress but gives no
+## command.
 setup_case codex-no-session
 STUB_NO_SESSION=1 push_to fail --codex
 check_not_resolved "codex without a session id"
@@ -567,8 +568,9 @@ esac
 case "${push_output}" in
   *"codex resume"*) fail "codex without a session id: a command to continue the session: ${push_output}" ;;
 esac
-if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
-  fail "codex without a session id: AGENT-TODO.md was written: $(cat "${feature_dir}/AGENT-TODO.md")"
+if grep -q 'codex resume' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
+  || ! grep -q -x 'The merge of commit .* is in progress in .*' "${feature_dir}/AGENT-TODO.md" 2> /dev/null; then
+  fail "codex without a session id: wrong AGENT-TODO.md: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
 fi
 
 ## The work of an agent that fails is checked too.
@@ -771,6 +773,83 @@ esac
 if [ -s "${STUB_LOG}" ]; then
   fail "rerun after staging: an agent ran: $(cat "${STUB_LOG}")"
 fi
+
+## Usage: check_todo_merge DESCRIPTION
+## Checks that ${feature_dir}/AGENT-TODO.md says exactly once that the merge
+## in progress in ${feature_dir} is in progress.
+check_todo_merge() {
+  todo_merge_head="$(git -C "${feature_dir}" rev-parse MERGE_HEAD)"
+  todo_count="$(grep -c -x "The merge of commit ${todo_merge_head} is in progress in .*/myrepo-branch-feature\." \
+    "${feature_dir}/AGENT-TODO.md" 2> /dev/null)" || true
+  if [ "${todo_count}" != 1 ]; then
+    fail "$1: AGENT-TODO.md does not note the merge exactly once: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+  fi
+}
+
+## A run that leaves a merge in progress without running an agent notes the
+## merge in AGENT-TODO.md, and a rerun that stops at the same merge does not
+## note it again.  So does a run whose agent was rejected, in the entry that
+## gives the command to continue the agent's session.
+setup_case todo-no-llm
+push_to good --no-llm
+check_not_resolved "AGENT-TODO.md without an agent"
+if ! grep -q -x '## Finish the merge in progress (git-push-to, .*)' "${feature_dir}/AGENT-TODO.md"; then
+  fail "AGENT-TODO.md without an agent: no entry: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
+check_todo_merge "AGENT-TODO.md without an agent"
+push_to good --no-llm
+check_not_resolved "AGENT-TODO.md without an agent, rerun"
+check_todo_merge "AGENT-TODO.md without an agent, rerun"
+setup_case todo-agent
+push_to none --llm
+check_not_resolved "AGENT-TODO.md with an agent"
+check_todo_merge "AGENT-TODO.md with an agent"
+if ! grep -q '^cd .* && claude --resume ' "${feature_dir}/AGENT-TODO.md"; then
+  fail "AGENT-TODO.md with an agent: no command: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+push_to good --no-llm
+check_todo_merge "AGENT-TODO.md with an agent, rerun"
+
+## A rerun leaves alone a merge whose conflicted files changed after it
+## stopped, as when the agent's work was rejected, even if the files have no
+## conflict markers.
+setup_case rerun-rejected
+push_to clean --llm
+check_not_resolved "rejected agent"
+: > "${STUB_LOG}"
+push_to good --llm
+check_not_resolved "rerun after a rejected agent"
+case "${push_output}" in
+  *"changed after the merge stopped: file.txt"*) ;;
+  *) fail "rerun after a rejected agent: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "rerun after a rejected agent: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## A rerun applies a resolution that `git rerere` recorded after the merge
+## stopped, here in another working tree of the same repository, and needs no
+## agent.
+setup_case rerun-rerere
+git -C "${feature_dir}" config rerere.enabled true
+push_to none --llm
+: > "${STUB_LOG}"
+git -C "${feature_dir}" worktree add -q --detach "${case_dir}/other" "${feature_head}"
+git -C "${case_dir}/other" merge -q "$(git -C "${feature_dir}" rev-parse MERGE_HEAD)" > /dev/null 2>&1 || true
+write_file "${case_dir}/other/file.txt" ONE two three four five six SEVEN-feature SEVEN-main eight nine
+git -C "${case_dir}/other" add file.txt
+git -C "${case_dir}/other" commit -q --no-edit > /dev/null 2>&1
+push_to good --no-llm
+check_resolved "" "rerun with a resolution that rerere recorded later"
+
+## The merge's message loses git's list of conflicts whatever the comment
+## character.
+setup_case rerun-comment-char
+git -C "${feature_dir}" config core.commentChar ';'
+push_to none --llm
+: > "${STUB_LOG}"
+push_to good --llm
+check_resolved claude "rerun with core.commentChar"
 
 ## A rerun leaves the merge in progress if an AI agent is working in the
 ## directory.  The stand-in agent is a script named `claude`, which runs its
