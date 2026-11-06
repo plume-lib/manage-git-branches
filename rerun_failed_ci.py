@@ -129,10 +129,10 @@ TRANSIENT_PATTERNS = [
     r"lost communication with the server",
 ]
 # Matches a line of a log that shows a transient failure.
-TRANSIENT = re.compile("|".join(f"(?:{p})" for p in TRANSIENT_PATTERNS), re.IGNORECASE)
+TRANSIENT_RE = re.compile("|".join(f"(?:{p})" for p in TRANSIENT_PATTERNS), re.IGNORECASE)
 
 # Matches a shell trace line, as `set -x` prints it.
-TRACE_LINE = re.compile(r"\++ ")
+TRACE_LINE_RE = re.compile(r"\++ ")
 # For Azure Pipelines and for GitHub Actions, regular expressions that match the start
 # and the end of the script that the CI service echoes before running a step.
 ECHOED_SCRIPTS = [
@@ -201,9 +201,9 @@ def transient_reason(log: str) -> str | None:
                 end_of_echo = None
             continue
         end_of_echo = next((end for start, end in ECHOED_SCRIPTS if start.match(line)), None)
-        if end_of_echo or TRACE_LINE.match(line):
+        if end_of_echo or TRACE_LINE_RE.match(line):
             continue
-        if TRANSIENT.search(line):
+        if TRANSIENT_RE.search(line):
             return line.lstrip()[:200]
     return None
 

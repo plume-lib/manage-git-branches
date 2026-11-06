@@ -178,7 +178,7 @@ The commands are:
   `--claude`,
   and `--codex` options.
 * [`pr-status`](pr-status)
-  `[--check] [--print-document] [-C DIR] [--highlight PR...]`:
+  `[--check] [--print-document] [--print-config] [-C DIR] [--highlight PR...]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
   `pr-status.md` (or the documents that `pr-status-config.json` names;
@@ -189,7 +189,9 @@ The commands are:
   by "PR status", as in "src PR status".
   It prints what changed since its previous run.
   With `--check`, it writes no document.  With `--print-document`, it prints
-  the file name of the dependency document and does nothing else.
+  the file name of the dependency document and does nothing else.  With
+  `--print-config`, it prints its config, with the defaults filled in, and
+  does nothing else.
   `--highlight PR...` highlights, wherever the documents name it, each
   given PR (such as `REPO#100` or `ORG/REPO#100`) and every PR that must
   land for it to land:  the PRs that it depends on or lands with,
