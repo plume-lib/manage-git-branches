@@ -14,22 +14,29 @@ most clones are clones of), and its only document is `pr-status.md`.  Writing
 a config file is a way to choose the repositories, to name other documents,
 and to record notes and decisions.
 
+`pr-status` checks the whole file before it does anything else.  If the file
+is not valid JSON or is not a valid config, `pr-status` reports every problem
+that it finds, each with the config path of the value that it concerns, and
+exits.  For example, a misspelled key is reported as
+`repos.daikon.exclude is not a known key; did you mean "excluded"?`, and a
+PR number written as a string is reported as
+`repos.daikon.excluded.prs[0] is "512", not a PR number such as 527`.
+
+`pr-status --print-config` prints the config that `pr-status` uses, as JSON,
+with the defaults filled in, and does nothing else.  If there is no config
+file, it prints the default config, which can be the starting point for a
+config file.  It does not print a default branch that `pr-status` reads from
+GitHub.
+
 ## Examples
 
-The smallest config that reports on a repository names the repository and
-gives each of its required keys:
+The smallest config that reports on a repository gives the repository's
+name and its GitHub slug:
 
 ```json
 {
   "repos": {
-    "daikon": {
-      "name": "daikon",
-      "gh": "codespecs/daikon",
-      "clone": "daikon",
-      "prefix": "#",
-      "label": "Daikon",
-      "node_prefix": "pr"
-    }
+    "daikon": {"gh": "codespecs/daikon"}
   }
 }
 ```
@@ -42,7 +49,6 @@ each repository:
   "order": ["daikon", "fjalar"],
   "repos": {
     "daikon": {
-      "name": "daikon",
       "gh": "codespecs/daikon",
       "clone": "daikon",
       "prefix": "daikon#",
@@ -62,7 +68,6 @@ each repository:
       "detail_notes": {"530": "Rebase after #527 lands."}
     },
     "fjalar": {
-      "name": "fjalar",
       "gh": "codespecs/fjalar",
       "clone": "fjalar",
       "prefix": "fjalar#",
@@ -97,10 +102,10 @@ see the smallest config in [Examples](#examples).
 
 * `"repos"` (required):  an object that maps each repository name, such as
   `"daikon"`, to a repository object (see below).
-* `"order"` (optional):  a list of repository names, each of which is a key
-  of `"repos"`, such as `["daikon", "fjalar"]`.  `pr-status` reports on
-  exactly these repositories, in this order.  The default is every
-  repository in `"repos"`, in the order that the file lists them.
+* `"order"` (optional):  a list of the repository names, such as
+  `["daikon", "fjalar"]`.  It lists each key of `"repos"` exactly once, and
+  `pr-status` reports on the repositories in this order.  The default is the
+  order in which `"repos"` lists them.
 * `"documents"` (optional):  an object that names the documents that
   `pr-status` generates (see below).  The default is
   `{"dependencies": "pr-status.md"}`.
@@ -112,36 +117,50 @@ see the smallest config in [Examples](#examples).
 
 A repository object describes one GitHub repository.
 
-### Required keys
+The repository object's key in `"repos"` is the repository's name, such as
+`"daikon"`.  The names of the dependency document's per-repository generated
+sections contain it, as in `<!-- BEGIN GENERATED: unblocked-daikon -->`.  A
+repository object has no `"name"` key.
 
-* `"name"`:  the repository's name, such as `"daikon"`.  It must equal the
-  repository object's key in `"repos"`.  The names of the dependency
-  document's per-repository generated sections contain it, as in
-  `<!-- BEGIN GENERATED: unblocked-daikon -->`.
+### The required key
+
 * `"gh"`:  the repository's GitHub slug, such as `"codespecs/daikon"` (in
   general, `"ORG/REPO"`).  This is the upstream repository, whose open pull
-  requests `pr-status` reports on, not a fork.
+  requests `pr-status` reports on, not a fork.  Two repositories must not
+  have the same GitHub slug.
+
+### Optional keys that identify the repository
+
 * `"clone"`:  the path of a git clone of the repository, such as `"daikon"`
   or `"/home/me/src/daikon"`.  A relative path is relative to the directory
   that holds the config file.  `pr-merge-analysis` fetches the pull requests
-  into the clone, and `pr-status` never renames or re-creates the clone.  A
-  clone of the upstream default branch is a good choice, because it has no
-  branch of its own to disturb.
+  into the clone, and `pr-status` never renames or re-creates the clone.
+  The default is a clone, in the directory that holds the config file, of
+  the repository or of a fork of it with the same name.  Among several, it
+  is a clone of the repository itself if there is one, and among those, one
+  whose current branch is the default branch, because it has no branch of
+  its own to disturb.  If there is none, `pr-status` reports an error.
 * `"prefix"`:  the text that precedes a PR number when the documents refer
   to a PR, such as `"daikon#"` (which yields "daikon#95") or `"#"` (which
-  yields "#95").  With several repositories, use a different prefix for each
-  one, so that a reference is unambiguous.  `--highlight` names a PR as
-  `REPO#N`, where `REPO` is the prefix without its final "#", the
-  repository's name, or its GitHub slug, as in `--highlight daikon#95` or
+  yields "#95").  The default is `"#"` if `"repos"` has one repository, and
+  otherwise the repository's name followed by "#", as in `"daikon#"`.  Two
+  repositories must not have the same prefix, ignoring case, so that a
+  reference is unambiguous.  `--highlight` names a PR as `REPO#N`, where
+  `REPO` is the prefix without its final "#", the repository's name, or its
+  GitHub slug, as in `--highlight daikon#95` or
   `--highlight codespecs/daikon#95`.
 * `"label"`:  the repository's name as the documents show it to a reader,
   such as `"Daikon"`.  It appears in headings and list items when the
   documents report on several repositories, as in "## Unblocked PRs
-  (Daikon)" and "* Daikon has these dependency clusters:".
+  (Daikon)" and "* Daikon has these dependency clusters:".  The default is
+  the repository's name.
 * `"node_prefix"`:  the text that precedes a PR number in the id of the PR's
   node in the Mermaid dependency graph, such as `"daikon_"` (which yields the
   node id `daikon_95`) or `"pr"`.  It must consist of letters, digits, and
-  underscores, and each repository must have a different one.
+  underscores, and two repositories must not have the same one.  The
+  default is `"pr"` if `"repos"` has one repository, and otherwise the
+  repository's name, with each character other than a letter, digit, or
+  underscore replaced by "_", followed by "_", as in `"daikon_"`.
 
 ### Optional keys that describe the repository
 
@@ -151,7 +170,7 @@ A repository object describes one GitHub repository.
   only to override GitHub.
 * `"dir_name"`:  the name that the repository's working copy directories
   start with, such as `"daikon"` in `daikon-fork-mernst-branch-fix-typo`.
-  The default is the value of `"name"`.  `pr-status` uses it to decide
+  The default is the repository's name.  `pr-status` uses it to decide
   whether a directory's name matches its branch's PR, and to rename a
   directory whose name does not.
 * `"dependency_keywords"`:  a list of phrases that, in a PR description,
@@ -205,8 +224,9 @@ of the repository; an entry for a PR that is not open is ignored.
 ### Optional keys that change how the documents describe a PR
 
 Each of these keys holds an object that maps a PR number, as a string such
-as `"527"`, to text.  The text is Markdown, and it appears in a table cell,
-so it must not contain a newline or an unescaped "|".
+as `"527"`, to text on one line.  The text is Markdown, except in
+`"labels"`.  `pr-status` escapes each "|" in text that it puts in a table
+cell, and it replaces each double quote in a label by a single quote.
 
 * `"titles"`:  the PR's title in the documents' tables, in place of its
   title on GitHub.

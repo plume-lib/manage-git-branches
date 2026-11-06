@@ -466,14 +466,14 @@ class HighlightTest(unittest.TestCase):
     def test_highlights_links(self):
         """A link to a highlighted PR, in this or another repository, is highlighted."""
         repo = pr_status.Repo(
+            "repo",
             {
-                "name": "repo",
                 "gh": "Owner/Repo",
                 "clone": "/base/repo",
                 "prefix": "#",
                 "label": "repo",
                 "node_prefix": "pr",
-            }
+            },
         )
         with mock.patch.object(pr_status, "HIGHLIGHTED", {("owner/repo", 1), ("other/repo", 5)}):
             self.assertEqual(
@@ -500,15 +500,15 @@ class DependsOnTest(unittest.TestCase):
             A Repo with GitHub slug gh, whose PRs in failed failed CI.
         """
         repo = pr_status.Repo(
+            gh,
             {
-                "name": gh,
                 "gh": gh,
                 "clone": "/base/repo",
                 "prefix": "#",
                 "label": gh,
                 "node_prefix": "pr",
                 "default_branch": "master",
-            }
+            },
         )
         repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(failed), set())
         return repo
@@ -1049,35 +1049,21 @@ class KeepTest(unittest.TestCase):
             with self.subTest(flt=flt):
                 self.assertFalse(pr_status.is_valid_filter(flt))
 
-    def test_unknown_filter(self):
-        """An unblocked document with an unknown filter is an error."""
-        doc = {"file": "unblocked.md", "title": "Unblocked", "filter": "unasigned"}
-        cfg = {"documents": {"dependencies": "pr-status.md", "unblocked": [doc]}}
-        with self.assertRaises(SystemExit) as cm:
-            pr_status.check_unblocked_filters(cfg, "pr-status")
-        self.assertIn('the filter of unblocked.md is "unasigned"', str(cm.exception))
-
-    def test_no_filter(self):
-        """An unblocked document with no filter is not an error."""
-        doc = {"file": "unblocked.md", "title": "Unblocked"}
-        cfg = {"documents": {"dependencies": "pr-status.md", "unblocked": [doc]}}
-        pr_status.check_unblocked_filters(cfg, "pr-status")
-
 
 class ReadConfigFileTest(unittest.TestCase):
     """Tests for read_config_file, dependency_document_name, and load_config."""
 
-    def write(self, cfg):
-        """Write cfg to a config file in a fresh directory, which becomes the current one.
+    def write(self, text):
+        """Write a config file in a fresh directory, which becomes the current one.
 
         Args:
-            cfg: the config file's contents, as a value that json.dumps accepts.
+            text: the config file's contents.
         """
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.addCleanup(os.chdir, Path.cwd())
         os.chdir(directory.name)
-        Path(pr_status.CONFIG).write_text(json.dumps(cfg))
+        Path(pr_status.CONFIG).write_text(text)
 
     def read(self, cfg):
         """Return the config that read_config_file reads from a file that holds cfg.
@@ -1088,69 +1074,242 @@ class ReadConfigFileTest(unittest.TestCase):
         Returns:
             The config, as read_config_file returns it.
         """
-        self.write(cfg)
+        self.write(json.dumps(cfg))
         return pr_status.read_config_file("pr-status")
 
-    def assert_exits(self, call, message):
-        """Assert that call exits with an error message that contains message."""
+    def problems(self, cfg):
+        """Return the error message that read_config_file exits with for a file holding cfg.
+
+        Args:
+            cfg: the config file's contents, as a value that json.dumps accepts.
+
+        Returns:
+            The error message's lines, without their "pr-status: pr-status-config.json: ".
+        """
         with self.assertRaises(SystemExit) as cm:
-            call()
-        self.assertIn(message, str(cm.exception))
+            self.read(cfg)
+        prefix = "pr-status: pr-status-config.json: "
+        lines = str(cm.exception.code).splitlines()
+        for line in lines:
+            self.assertTrue(line.startswith(prefix), line)
+        return [line.removeprefix(prefix) for line in lines]
 
     def test_defaults(self):
-        """Each omitted optional top-level key gets its default."""
-        cfg = self.read({"repos": {"b": {}, "a": {}}})
-        self.assertEqual(cfg["order"], ["b", "a"])
+        """Each omitted optional key that has a default gets it."""
+        cfg = self.read({"repos": {"b-c": {"gh": "o/b-c"}, "a": {"gh": "o/a"}}})
+        self.assertEqual(cfg["order"], ["b-c", "a"])
         self.assertEqual(cfg["documents"], {"dependencies": "pr-status.md"})
         self.assertEqual(cfg["directories"], [])
-        self.assertEqual(pr_status.dependency_document_name(cfg, "pr-status"), "pr-status.md")
+        self.assertEqual(
+            cfg["repos"]["b-c"],
+            {"gh": "o/b-c", "label": "b-c", "prefix": "b-c#", "node_prefix": "b_c_"},
+        )
+        self.assertEqual(pr_status.dependency_document_name(cfg), "pr-status.md")
+
+    def test_defaults_one_repository(self):
+        """A lone repository's PRs are referred to as "#N"."""
+        cfg = self.read({"repos": {"a": {"gh": "o/a"}}})
+        self.assertEqual(cfg["repos"]["a"]["prefix"], "#")
+        self.assertEqual(cfg["repos"]["a"]["node_prefix"], "pr")
 
     def test_given_values(self):
-        """Each given top-level key is retained."""
+        """Each given key is retained."""
+        repo = {
+            "gh": "o/a",
+            "clone": "a",
+            "prefix": "A#",
+            "label": "Alpha",
+            "node_prefix": "alpha_",
+        }
         given = {
             "order": ["a"],
-            "repos": {"b": {}, "a": {}},
+            "repos": {"a": repo},
             "documents": {"dependencies": "status.md", "unblocked": []},
             "directories": [{"dirs": ["x"], "status": "old", "relationship": "none"}],
         }
         cfg = self.read(given)
         self.assertEqual(cfg, given)
-        self.assertEqual(pr_status.dependency_document_name(cfg, "pr-status"), "status.md")
+        self.assertEqual(pr_status.dependency_document_name(cfg), "status.md")
 
     def test_unblocked_only(self):
         """A documents object that names only unblocked documents gets the default name."""
         cfg = self.read({"repos": {}, "documents": {"unblocked": []}})
         self.assertEqual(cfg["documents"], {"unblocked": [], "dependencies": "pr-status.md"})
 
-    def test_invalid_dependency_document(self):
-        """A dependency document that is not a file name is an error."""
-        cfg = self.read({"repos": {}, "documents": {"dependencies": ""}})
-        self.assert_exits(
-            lambda: pr_status.dependency_document_name(cfg, "pr-status"),
-            'is "", not a file name',
+    def test_syntax_error(self):
+        """A file that is not JSON is reported with the position of the error."""
+        self.write('{"repos": {},\n}')
+        with self.assertRaises(SystemExit) as cm:
+            pr_status.read_config_file("pr-status")
+        self.assertEqual(
+            str(cm.exception.code),
+            "pr-status: pr-status-config.json:1:13: Illegal trailing comma before end of object",
         )
 
     def test_not_an_object(self):
         """A config file that does not hold a JSON object is an error."""
-        self.write([])
-        self.assert_exits(
-            lambda: pr_status.read_config_file("pr-status"), "holds [], not a JSON object"
+        self.assertEqual(self.problems([]), ["the config is a list, not an object"])
+
+    def test_every_problem_is_reported(self):
+        """Every problem is reported, with its config path."""
+        cfg = {
+            "repo": {},
+            "documents": None,
+            "directories": [{"dirs": "x", "status": "old"}],
+        }
+        self.assertEqual(
+            self.problems(cfg),
+            [
+                'the config has no "repos"',
+                'repo is not a known key; did you mean "repos"?',
+                "documents is null, not an object",
+                'directories[0] has no "relationship"',
+                'directories[0].dirs is "x", not a list',
+            ],
         )
 
-    def test_invalid_documents(self):
-        """A documents value that is not an object is an error."""
-        self.write({"repos": {}, "documents": None})
-        self.assert_exits(
-            lambda: pr_status.read_config_file("pr-status"),
-            '"documents" is null, not an object',
+    def test_repository_problems(self):
+        """Wrong types, misspelled keys, and PR numbers as strings are reported."""
+        repo = {
+            "gh": "daikon",
+            "node_prefix": "d-",
+            "exclude": {"prs": [1]},
+            "excluded": {"prs": ["512", True, 0]},
+            "extra_dependencies": [[1, 2, 3], [1, "2"]],
+            "extra_external_dependencies": {"x": ["o/r#5", "o/r"]},
+            "titles": {"527": 5},
+            "show_author": "yes",
+        }
+        self.assertEqual(
+            self.problems({"repos": {"daikon": repo}}),
+            [
+                'repos.daikon.gh is "daikon", not a GitHub slug such as "ORG/REPO"',
+                'repos.daikon.node_prefix is "d-", not letters, digits, and underscores',
+                'repos.daikon.exclude is not a known key; did you mean "excluded"?',
+                'repos.daikon.excluded.prs[0] is "512", not a PR number such as 527',
+                "repos.daikon.excluded.prs[1] is true, not a PR number such as 527",
+                "repos.daikon.excluded.prs[2] is 0, not a PR number such as 527",
+                "repos.daikon.extra_dependencies[0] has 3 elements, not 2",
+                'repos.daikon.extra_dependencies[1][1] is "2", not a PR number such as 527',
+                (
+                    "repos.daikon.extra_external_dependencies.x:"
+                    '  the key is not a PR number such as "527"'
+                ),
+                (
+                    'repos.daikon.extra_external_dependencies.x[1] is "o/r",'
+                    ' not a PR such as "ORG/REPO#95"'
+                ),
+                'repos.daikon.titles."527" is 5, not a string',
+                'repos.daikon.show_author is "yes", not true or false',
+            ],
         )
 
-    def test_no_repos(self):
-        """A config with no repos names its dependency document, but load_config rejects it."""
-        cfg = self.read({"documents": {"dependencies": "status.md"}})
-        self.assertNotIn("order", cfg)
-        self.assertEqual(pr_status.dependency_document_name(cfg, "pr-status"), "status.md")
-        self.assert_exits(lambda: pr_status.load_config("pr-status"), 'has no "repos" object')
+    def test_invalid_filter(self):
+        """An unblocked document with an unknown filter is an error."""
+        doc = {"file": "unblocked.md", "title": "Unblocked", "filter": "unasigned"}
+        self.assertEqual(
+            self.problems({"repos": {}, "documents": {"unblocked": [doc]}}),
+            [
+                (
+                    'documents.unblocked[0].filter is "unasigned", not "all", "unassigned", or'
+                    ' {"unassigned_or": [LOGIN, ...]}'
+                )
+            ],
+        )
+
+    def test_name(self):
+        """A repository's name is its key, so the repository cannot give a name."""
+        self.assertEqual(
+            self.problems({"repos": {"a": {"gh": "o/a", "name": "a"}}}),
+            ['repos.a.name is not permitted:  a repository\'s name is its key in "repos"'],
+        )
+
+    def test_order(self):
+        """The "order" must list each repository once."""
+        cfg = {
+            "order": ["a", "c", "a"],
+            "repos": {"a": {"gh": "o/a"}, "b": {"gh": "o/b"}},
+        }
+        self.assertEqual(
+            self.problems(cfg),
+            [
+                'order[1] is "c", which is not a key of "repos"',
+                'order[2] repeats "a"',
+                'repos.b is not in "order"; add it to "order" or remove it',
+            ],
+        )
+
+    def test_duplicates(self):
+        """Two repositories must not share a GitHub slug, prefix, or node prefix."""
+        cfg = {
+            "repos": {
+                "a": {"gh": "o/a", "prefix": "x#", "node_prefix": "n"},
+                "b": {"gh": "O/A", "prefix": "X#", "node_prefix": "n"},
+            }
+        }
+        self.assertEqual(
+            self.problems(cfg),
+            [
+                'repos.a and repos.b have the same "gh", "O/A"',
+                'repos.a and repos.b have the same "prefix", "X#"',
+                'repos.a and repos.b have the same "node_prefix", "n"',
+            ],
+        )
+
+    def test_clone_found(self):
+        """load_config finds a clone for a repository that names none."""
+        self.write(json.dumps({"repos": {"a": {"gh": "o/a"}, "b": {"gh": "o/b", "clone": "x"}}}))
+        entries = {"a-fork": pr_status.GitEntry("me", "a", "fix")}
+        with mock.patch.object(pr_status, "git_entries", return_value=entries):
+            cfg = pr_status.load_config("pr-status")
+        self.assertEqual(cfg["repos"]["a"]["clone"], str(Path.cwd() / "a-fork"))
+        self.assertEqual(cfg["repos"]["b"]["clone"], "x")
+
+    def test_no_clone(self):
+        """A repository that names no clone, and has none, is an error."""
+        self.write(json.dumps({"repos": {"a": {"gh": "o/a"}}}))
+        with (
+            mock.patch.object(pr_status, "git_entries", return_value={}),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            pr_status.load_config("pr-status")
+        self.assertIn('repos.a has no "clone"', str(cm.exception.code))
+
+
+# Clones of the repositories o/a and o/b, and of a fork of o/a.
+CLONES = {
+    "a-fork": pr_status.GitEntry("me", "a", "main"),
+    "a-feature": pr_status.GitEntry("o", "a", "feature"),
+    "a": pr_status.GitEntry("o", "a", "main"),
+    "b": pr_status.GitEntry("o", "b", "main"),
+}
+
+
+class FindCloneTest(unittest.TestCase):
+    """Tests for find_clone."""
+
+    def find(self, entries, default_branch):
+        """Return the clone that find_clone finds among entries, for the repository o/a.
+
+        Returns:
+            The clone's name, or None if find_clone finds none.
+        """
+        with mock.patch.object(pr_status, "git_entries", return_value=entries):
+            clone = pr_status.find_clone("/base", "O", "A", default_branch)
+        return clone and Path(clone).name
+
+    def test_prefers_upstream_default_branch(self):
+        """A clone of the upstream repository, on its default branch, is preferred."""
+        self.assertEqual(self.find(CLONES, lambda: "main"), "a")
+
+    def test_lone_clone_of_a_fork(self):
+        """A lone clone of a fork is found without reading the default branch."""
+        entries = {"a-fork": CLONES["a-fork"], "b": CLONES["b"]}
+        self.assertEqual(self.find(entries, mock.Mock(side_effect=AssertionError)), "a-fork")
+
+    def test_none(self):
+        """If no clone is of the repository or a fork of it, there is none."""
+        self.assertIsNone(self.find({"b": CLONES["b"]}, lambda: "main"))
 
 
 def config_repo(**extra):
@@ -1163,15 +1322,15 @@ def config_repo(**extra):
         A Repo whose GitHub slug is "Owner/Repo", and that has no PRs.
     """
     return pr_status.Repo(
+        "repo",
         {
-            "name": "repo",
             "gh": "Owner/Repo",
             "clone": "/base/repo",
             "prefix": "#",
             "label": "repo",
             "node_prefix": "pr",
             **extra,
-        }
+        },
     )
 
 

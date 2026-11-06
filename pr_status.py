@@ -5,6 +5,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status            # snapshot, report changes, regenerate the documents
   pr-status --check    # snapshot and report changes, but write no document
   pr-status --print-document  # print the dependency document's file name, and exit
+  pr-status --print-config    # print the config, with its defaults filled in, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
 
@@ -44,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import difflib
 import functools
 import hashlib
 import itertools
@@ -140,9 +142,15 @@ def basename(path: str) -> str:
 class Repo:
     """A GitHub repository, its open PRs, and the merge analysis of those PRs."""
 
-    def __init__(self, cfg: dict[str, Any]) -> None:
-        """Create a Repo from its entry in the config, with no PRs."""
-        self.name = cfg["name"]
+    def __init__(self, name: str, cfg: dict[str, Any]) -> None:
+        """Create a Repo, with no PRs, from an entry in the config.
+
+        Args:
+            name: the entry's key in the config's "repos", such as "daikon".
+            cfg: the entry, as a dict parsed from the config file's JSON, with keys such as
+                "gh" and "prefix".
+        """
+        self.name = name
         self.gh = cfg["gh"]
         self.clone = cfg["clone"]
         self.prefix = cfg["prefix"]
@@ -171,8 +179,7 @@ class Repo:
         """
         if self.configured_default_branch is not None:
             return self.configured_default_branch
-        fields = ["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]
-        return run(["gh", "repo", "view", self.gh, *fields]).strip()
+        return github_default_branch(self.gh)
 
     @functools.cached_property
     def reviews_and_ci(self) -> ReviewsAndCi:
@@ -1256,7 +1263,7 @@ def load_models(cfg: dict[str, Any], pairwise: bool = True) -> list[Model]:
     """
     models = []
     for name in cfg["order"]:
-        repo = Repo(cfg["repos"][name])
+        repo = Repo(name, cfg["repos"][name])
         load_repo(repo, pairwise=pairwise)
         models.append(Model(repo, cfg))
     unite_partners(models)
@@ -1963,25 +1970,6 @@ def is_valid_filter(flt: Any) -> bool:
         return False
     logins = flt["unassigned_or"]
     return isinstance(logins, list) and all(isinstance(w, str) for w in logins)
-
-
-def check_unblocked_filters(cfg: dict[str, Any], program: str) -> None:
-    """Exit with an error message if an unblocked document of cfg has an invalid filter.
-
-    An unblocked document with no filter uses the filter "all".
-
-    Args:
-        cfg: a config, as a dict parsed from the config file's JSON, with keys such as
-            "repos" and "documents".
-        program: the name of the running program; used for diagnostics.
-    """
-    for doc in cfg["documents"].get("unblocked", []):
-        flt = doc.get("filter", "all")
-        if not is_valid_filter(flt):
-            sys.exit(
-                f"{program}: {CONFIG}: the filter of {doc.get('file')} is {json.dumps(flt)},"
-                ' not "all", "unassigned", or {"unassigned_or": [LOGIN...]}'
-            )
 
 
 def unblocked_doc(
@@ -2976,7 +2964,427 @@ def report_changes(models: list[Model], old: dict[str, Any], new: dict[str, Any]
     return out
 
 
-# ---------- the default config ----------
+# ---------- the config ----------
+
+# Matches a PR number that is a key of a config object, such as "527".
+PR_NUMBER_KEY = re.compile(r"[1-9][0-9]*")
+# Matches a GitHub slug, such as "codespecs/daikon".
+GH_SLUG = re.compile(r"[\w.-]+/[\w.-]+")
+# Matches a reference to a PR in a GitHub repository, such as "codespecs/fjalar#95".
+EXTERNAL_PR = re.compile(r"[\w.-]+/[\w.-]+#[1-9][0-9]*")
+# Matches a Mermaid node id prefix, such as "daikon_".
+NODE_PREFIX = re.compile(r"[A-Za-z0-9_]+")
+# Matches a key that a config path shows without quotes, such as "detail_notes".
+PLAIN_KEY = re.compile(r"[A-Za-z_][\w-]*")
+# The most characters of a value that an error message shows.
+SHOWN_LENGTH = 40
+
+
+def key_path(path: str, key: str) -> str:
+    """Return the config path of the given key of the object at path.
+
+    A config path names a value in the config, as in "repos.daikon.titles" or
+    'repos.daikon.titles."527"' or "order[0]".
+
+    Args:
+        path: the config path of an object, such as "repos.daikon", or "" for the config.
+        key: a key of the object, such as "titles" or "527".
+
+    Returns:
+        The config path of the key's value, such as "repos.daikon.titles".
+    """
+    shown = key if PLAIN_KEY.fullmatch(key) else json.dumps(key)
+    return f"{path}.{shown}" if path else shown
+
+
+def shown(value: Any) -> str:
+    """Return how an error message shows a value parsed from the config's JSON.
+
+    Returns:
+        "an object" or "a list" for a JSON object or list; otherwise the value as JSON, such
+        as '"512"' or "null", shortened if it is long.
+    """
+    if isinstance(value, dict):
+        return "an object"
+    if isinstance(value, list):
+        return "a list"
+    text = json.dumps(value)
+    return text if len(text) <= SHOWN_LENGTH else text[: SHOWN_LENGTH - 3] + "..."
+
+
+def subject(path: str) -> str:
+    """Return how an error message names the value at a config path.
+
+    Returns:
+        The path, or "the config" if path is "".
+    """
+    return path or "the config"
+
+
+# Each function whose name ends in "_check" returns a check:  a function that, given a value
+# parsed from the config's JSON, its config path, and a list of problems, appends to the list
+# a description of each problem with the value, such as 'order[0] is 5, not a string'.
+
+
+def type_check(kind: type, description: str) -> Callable[[Any, str, list[str]], None]:
+    """Return a check that a value has the given JSON type.
+
+    Args:
+        kind: a Python type that JSON values parse to, such as str or bool.
+        description: what a value of the type is, such as "a string"; used for diagnostics.
+
+    Returns:
+        The check.
+    """
+
+    def check(value: Any, path: str, problems: list[str]) -> None:
+        # In Python, a bool is an int.
+        if not isinstance(value, kind) or (isinstance(value, bool) and kind is not bool):
+            problems.append(f"{subject(path)} is {shown(value)}, not {description}")
+
+    return check
+
+
+def pattern_check(
+    pattern: re.Pattern[str], description: str
+) -> Callable[[Any, str, list[str]], None]:
+    """Return a check that a value is a string that pattern matches.
+
+    Args:
+        pattern: a regular expression that a valid string matches in full.
+        description: what a valid string is, such as 'a GitHub slug such as "ORG/REPO"';
+            used for diagnostics.
+
+    Returns:
+        The check.
+    """
+
+    def check(value: Any, path: str, problems: list[str]) -> None:
+        if not isinstance(value, str) or not pattern.fullmatch(value):
+            problems.append(f"{subject(path)} is {shown(value)}, not {description}")
+
+    return check
+
+
+def pr_number_check(value: Any, path: str, problems: list[str]) -> None:
+    """Check that a value is a PR number, such as 527."""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        problems.append(f"{subject(path)} is {shown(value)}, not a PR number such as 527")
+
+
+def filter_check(value: Any, path: str, problems: list[str]) -> None:
+    """Check that a value is a filter of an unblocked document."""
+    if not is_valid_filter(value):
+        problems.append(
+            f'{subject(path)} is {shown(value)}, not "all", "unassigned", or'
+            ' {"unassigned_or": [LOGIN, ...]}'
+        )
+
+
+def list_check(
+    item_check: Callable[[Any, str, list[str]], None], length: int | None = None
+) -> Callable[[Any, str, list[str]], None]:
+    """Return a check that a value is a list, each of whose elements item_check accepts.
+
+    Args:
+        item_check: a check of each element.
+        length: the number of elements that the list must have, or None for any number.
+
+    Returns:
+        The check.
+    """
+
+    def check(value: Any, path: str, problems: list[str]) -> None:
+        if not isinstance(value, list):
+            problems.append(f"{subject(path)} is {shown(value)}, not a list")
+            return
+        if length is not None and len(value) != length:
+            problems.append(f"{subject(path)} has {len(value)} elements, not {length}")
+        for i, item in enumerate(value):
+            item_check(item, f"{path}[{i}]", problems)
+
+    return check
+
+
+def object_check(
+    fields: dict[str, Callable[[Any, str, list[str]], None]],
+    required: Iterable[str] = (),
+    forbidden: Mapping[str, str] | None = None,
+) -> Callable[[Any, str, list[str]], None]:
+    """Return a check that a value is an object with the given keys.
+
+    Args:
+        fields: a map from each key that the object can have to a check of its value.
+        required: the keys that the object must have.
+        forbidden: a map from each key that the object must not have, although a user might
+            expect it to, to why not, such as 'a repository's name is its key in "repos"'.
+
+    Returns:
+        The check, which reports a missing required key, a forbidden key, and an unknown
+        key, which it compares to the known keys to suggest a correction.
+    """
+
+    def check(value: Any, path: str, problems: list[str]) -> None:
+        if not isinstance(value, dict):
+            problems.append(f"{subject(path)} is {shown(value)}, not an object")
+            return
+        problems.extend(
+            f"{subject(path)} has no {json.dumps(key)}" for key in required if key not in value
+        )
+        for key, item in value.items():
+            child = key_path(path, key)
+            if key in fields:
+                fields[key](item, child, problems)
+                continue
+            if forbidden and key in forbidden:
+                problems.append(f"{child} is not permitted:  {forbidden[key]}")
+                continue
+            close = difflib.get_close_matches(key, fields, n=1)
+            suggestion = f"; did you mean {json.dumps(close[0])}?" if close else ""
+            problems.append(f"{child} is not a known key{suggestion}")
+
+    return check
+
+
+def map_check(
+    item_check: Callable[[Any, str, list[str]], None], pr_keys: bool
+) -> Callable[[Any, str, list[str]], None]:
+    """Return a check that a value is an object, each of whose values item_check accepts.
+
+    Args:
+        item_check: a check of each of the object's values.
+        pr_keys: true if each of the object's keys must be a PR number, such as "527".
+
+    Returns:
+        The check.
+    """
+
+    def check(value: Any, path: str, problems: list[str]) -> None:
+        if not isinstance(value, dict):
+            problems.append(f"{subject(path)} is {shown(value)}, not an object")
+            return
+        for key, item in value.items():
+            child = key_path(path, key)
+            if pr_keys and not PR_NUMBER_KEY.fullmatch(key):
+                problems.append(f'{child}:  the key is not a PR number such as "527"')
+            item_check(item, child, problems)
+
+    return check
+
+
+STRING_CHECK = type_check(str, "a string")
+NAME_CHECK = pattern_check(re.compile(r".+"), "a non-empty string")
+NOTES_CHECK = map_check(STRING_CHECK, pr_keys=True)
+REPO_CHECK = object_check(
+    {
+        "gh": pattern_check(GH_SLUG, 'a GitHub slug such as "ORG/REPO"'),
+        "clone": NAME_CHECK,
+        "prefix": NAME_CHECK,
+        "label": NAME_CHECK,
+        "node_prefix": pattern_check(NODE_PREFIX, "letters, digits, and underscores"),
+        "dir_name": NAME_CHECK,
+        "default_branch": NAME_CHECK,
+        "dependency_keywords": list_check(NAME_CHECK),
+        "show_author": type_check(bool, "true or false"),
+        "routine_files": list_check(NAME_CHECK),
+        "excluded": object_check(
+            {"prs": list_check(pr_number_check), "reason": STRING_CHECK}, required=["prs"]
+        ),
+        "not_prerequisites": list_check(pr_number_check),
+        "extra_dependencies": list_check(list_check(pr_number_check, length=2)),
+        "extra_external_dependencies": map_check(
+            list_check(pattern_check(EXTERNAL_PR, 'a PR such as "ORG/REPO#95"')), pr_keys=True
+        ),
+        "titles": NOTES_CHECK,
+        "labels": NOTES_CHECK,
+        "cluster_names": NOTES_CHECK,
+        "unblocked_notes": NOTES_CHECK,
+        "detail_notes": NOTES_CHECK,
+        "independent_notes": NOTES_CHECK,
+    },
+    required=["gh"],
+    forbidden={"name": 'a repository\'s name is its key in "repos"'},
+)
+CONFIG_CHECK = object_check(
+    {
+        "repos": map_check(REPO_CHECK, pr_keys=False),
+        "order": list_check(NAME_CHECK),
+        "documents": object_check(
+            {
+                "dependencies": NAME_CHECK,
+                "unblocked": list_check(
+                    object_check(
+                        {"file": NAME_CHECK, "title": STRING_CHECK, "filter": filter_check},
+                        required=["file", "title"],
+                    )
+                ),
+            }
+        ),
+        "directories": list_check(
+            object_check(
+                {
+                    "dirs": list_check(NAME_CHECK),
+                    "status": STRING_CHECK,
+                    "relationship": STRING_CHECK,
+                },
+                required=["dirs", "status", "relationship"],
+            )
+        ),
+    },
+    required=["repos"],
+)
+
+
+def config_problems(cfg: Any) -> list[str]:
+    """Return the problems with a config, before with_defaults fills in its defaults.
+
+    Args:
+        cfg: a value parsed from the config file's JSON.
+
+    Returns:
+        A description of each problem, such as
+        'repos.daikon.excluded.prs[0] is "512", not a PR number such as 527'.
+    """
+    problems: list[str] = []
+    CONFIG_CHECK(cfg, "", problems)
+    repos = cfg.get("repos") if isinstance(cfg, dict) else None
+    if not isinstance(repos, dict):
+        return problems
+    order = cfg.get("order")
+    if isinstance(order, list):
+        seen = set()
+        for i, name in enumerate(order):
+            if not isinstance(name, str):
+                continue
+            if name not in repos:
+                problems.append(f'order[{i}] is {json.dumps(name)}, which is not a key of "repos"')
+            elif name in seen:
+                problems.append(f"order[{i}] repeats {json.dumps(name)}")
+            seen.add(name)
+        problems.extend(
+            f'{key_path("repos", key)} is not in "order"; add it to "order" or remove it'
+            for key in repos
+            if key not in seen
+        )
+    return problems
+
+
+def with_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Set each optional key of cfg that has a computed or constant default, except "clone".
+
+    Args:
+        cfg: a config, as a dict parsed from the config file's JSON, with keys such as
+            "repos" and "documents", which config_problems accepts.
+
+    Returns:
+        cfg, which this function changes.
+    """
+    repos = cfg["repos"]
+    cfg.setdefault("order", list(repos))
+    cfg.setdefault("documents", {}).setdefault("dependencies", DEFAULT_DEPENDENCY_DOCUMENT)
+    cfg.setdefault("directories", [])
+    # With several repositories, a bare "#N" would be ambiguous.
+    several = len(repos) > 1
+    for key, rc in repos.items():
+        rc.setdefault("label", key)
+        rc.setdefault("prefix", f"{key}#" if several else "#")
+        rc.setdefault("node_prefix", re.sub(r"\W", "_", key) + "_" if several else "pr")
+    return cfg
+
+
+def duplicate_problems(cfg: dict[str, Any]) -> list[str]:
+    """Return the problems with a config that with_defaults has filled in:  shared values.
+
+    Two repositories must not have the same GitHub slug, prefix (ignoring case), or node
+    prefix.
+
+    Returns:
+        A description of each value that two repositories share, such as
+        'repos.daikon and repos.fjalar have the same "prefix", "#"'.
+    """
+    problems = []
+    for field, normalize in (("gh", str.lower), ("prefix", str.lower), ("node_prefix", str)):
+        first: dict[str, str] = {}
+        for key, rc in cfg["repos"].items():
+            value = normalize(rc[field])
+            if value in first:
+                problems.append(
+                    f"{key_path('repos', first[value])} and {key_path('repos', key)} have the"
+                    f" same {json.dumps(field)}, {json.dumps(rc[field])}"
+                )
+            else:
+                first[value] = key
+    return problems
+
+
+def read_config_file(program: str) -> dict[str, Any] | None:
+    """Return the config that the config file in the current directory holds.
+
+    Exit with an error message that describes each problem if the file is not valid JSON or
+    is not a valid config.
+
+    Args:
+        program: the name of a running program; used for diagnostics.
+
+    Returns:
+        The config, as a dict parsed from the config file's JSON, with keys such as "repos"
+        and "documents", with each default that with_defaults sets; or None if there is no
+        config file.
+    """
+    if not pathlib.Path(CONFIG).exists():
+        return None
+    with pathlib.Path(CONFIG).open() as f:
+        try:
+            cfg = json.load(f)
+        except json.JSONDecodeError as error:
+            sys.exit(f"{program}: {CONFIG}:{error.lineno}:{error.colno}: {error.msg}")
+    problems = config_problems(cfg)
+    if not problems:
+        problems = duplicate_problems(with_defaults(cfg))
+    if problems:
+        sys.exit("\n".join(f"{program}: {CONFIG}: {p}" for p in problems))
+    return cfg
+
+
+@functools.cache
+def github_default_branch(gh: str) -> str:
+    """Return the default branch that GitHub reports for a GitHub repository, once.
+
+    Args:
+        gh: a repository's GitHub slug, such as "ORG/REPO".
+
+    Returns:
+        The default branch, such as "main".
+    """
+    fields = ["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]
+    return run(["gh", "repo", "view", gh, *fields]).strip()
+
+
+def find_clone(base: str, owner: str, name: str, default_branch: Callable[[], str]) -> str | None:
+    """Return the clone in base of the GitHub repository owner/name, or of a fork of it.
+
+    The clone is a clone of owner/name itself if there is one, and among those, a clone
+    whose current branch is the default branch, which has no branch of its own to disturb.
+
+    Args:
+        base: the directory that holds the working copy directories.
+        owner: the owner of a GitHub repository, such as "codespecs".
+        name: the repository's name, such as "daikon".
+        default_branch: a function that returns the repository's default branch, such as
+            "main"; it is called only if base holds more than one clone.
+
+    Returns:
+        The clone's path, or None if base holds no clone of the repository or of a fork.
+    """
+    entries = git_entries(base)
+    owner, name = owner.lower(), name.lower()
+    clones = [d for d, info in entries.items() if info.repo_name == name]
+    if not clones:
+        return None
+    if len(clones) > 1:
+        branch = default_branch()
+        clones.sort(key=lambda d: (entries[d].owner != owner, entries[d].branch != branch, d))
+    return str(pathlib.Path(base) / clones[0])
 
 
 def default_config(base: str) -> dict[str, Any]:
@@ -2990,7 +3398,7 @@ def default_config(base: str) -> dict[str, Any]:
     (Its "Unblocked PRs" sections serve in place of an unblocked document.)
 
     Returns:
-        The default config.
+        The default config, with each default that with_defaults sets.
 
     Raises:
         ConfigError: if base contains no clone of a GitHub repository that gh can view.
@@ -3003,10 +3411,9 @@ def default_config(base: str) -> dict[str, Any]:
     counts = Counter(info.repo_name for info in clones.values()).most_common()
     names = [name for name, count in counts if count >= 2] or [counts[0][0]]
     fields = ["--json", "nameWithOwner,parent,defaultBranchRef"]
-    repos = {}
+    repos: dict[str, dict[str, Any]] = {}
     for name in names:
-        name_clones = {d: info for d, info in clones.items() if info.repo_name == name}
-        first_owner = next(iter(name_clones.values())).owner
+        first_owner = next(info.owner for info in clones.values() if info.repo_name == name)
         try:
             j = json.loads(run(["gh", "repo", "view", f"{first_owner}/{name}", *fields]))
             parent = j["parent"]
@@ -3033,113 +3440,46 @@ def default_config(base: str) -> dict[str, Any]:
         if any(r["gh"] == gh for r in repos.values()):
             continue
         default_branch = j["defaultBranchRef"]["name"]
-        owner = gh.split("/")[0].lower()
-        # Prefer a clone of the upstream default branch, which has no branch of its own to disturb.
-        clone = min(
-            name_clones,
-            key=lambda d: (
-                name_clones[d].owner != owner,
-                name_clones[d].branch != default_branch,
-                d,
-            ),
-        )
-        repo_name = gh.split("/")[1]
-        repos[repo_name] = {
-            "name": repo_name,
-            "gh": gh,
-            "clone": str(pathlib.Path(base) / clone),
-            "label": repo_name,
-            "default_branch": default_branch,
-        }
+        clone = find_clone(base, gh.split("/")[0], name, lambda b=default_branch: b)
+        repos[gh.split("/")[1]] = {"gh": gh, "clone": clone, "default_branch": default_branch}
     if not repos:
         msg = f"no {CONFIG} and no GitHub repository that gh can view"
         raise ConfigError(msg)
-    for repo_name, repo in repos.items():
-        # With several repositories, a bare "#N" would be ambiguous.
-        repo["prefix"] = "#" if len(repos) == 1 else f"{repo_name}#"
-        repo["node_prefix"] = "pr" if len(repos) == 1 else re.sub(r"\W", "_", repo_name) + "_"
     print(
         "pr-status: reporting on " + and_list(r["gh"] for r in repos.values()),
         file=sys.stderr,
     )
-    return {
-        "order": list(repos),
-        "repos": repos,
-        "documents": {"dependencies": DEFAULT_DEPENDENCY_DOCUMENT},
-        "directories": [],
-    }
+    return with_defaults({"repos": repos})
 
 
-def read_config_file(program: str) -> dict[str, Any] | None:
-    """Return the contents of the config file in the current directory.
-
-    Exit with an error message if the file does not hold a JSON object, or if its
-    "documents" is not an object.
-
-    Args:
-        program: the name of a running program; used for diagnostics.
-
-    Returns:
-        The config, as a dict parsed from the config file's JSON, with keys such as "repos"
-        and "documents", and with each optional top-level key that the file omits set to
-        its default (except "order" if the file has no "repos" object); or None if there is
-        no config file.
-    """
-    if not pathlib.Path(CONFIG).exists():
-        return None
-    with pathlib.Path(CONFIG).open() as f:
-        cfg = json.load(f)
-    if not isinstance(cfg, dict):
-        sys.exit(f"{program}: {CONFIG} holds {json.dumps(cfg)}, not a JSON object")
-    docs = cfg.setdefault("documents", {})
-    if not isinstance(docs, dict):
-        sys.exit(f'{program}: {CONFIG}: "documents" is {json.dumps(docs)}, not an object')
-    docs.setdefault("dependencies", DEFAULT_DEPENDENCY_DOCUMENT)
-    cfg.setdefault("directories", [])
-    if "order" not in cfg and isinstance(cfg.get("repos"), dict):
-        # Every repository, in the order that the file lists them.
-        cfg["order"] = list(cfg["repos"])
-    return cfg
-
-
-def dependency_document_name(cfg: dict[str, Any] | None, program: str) -> str:
+def dependency_document_name(cfg: dict[str, Any] | None) -> str:
     """Return the file name of the dependency document that the given config names.
-
-    Exit with an error message if the config's dependency document is not a file name.
 
     Args:
         cfg: a config, as read_config_file returns it, with keys such as "repos" and
-            "documents"; or None if there is no config file
-        program: the name of a running program; used for diagnostics.
+            "documents"; or None if there is no config file.
 
     Returns:
         The file name, such as "pr-status.md", that cfg names, or
         DEFAULT_DEPENDENCY_DOCUMENT if cfg is None.
     """
-    if cfg is None:
-        return DEFAULT_DEPENDENCY_DOCUMENT
-    name = cfg["documents"]["dependencies"]
-    if not isinstance(name, str) or not name:
-        sys.exit(
-            f"{program}: {CONFIG}: the dependency document"
-            f' ("documents": {{"dependencies": ...}}) is {json.dumps(name)}, not a file name'
-        )
-    return name
+    return DEFAULT_DEPENDENCY_DOCUMENT if cfg is None else cfg["documents"]["dependencies"]
 
 
 def load_config(program: str) -> dict[str, Any]:
     """Return the config for the current directory, which holds the working copy directories.
 
     Exit with an error message if the current directory is in a git working copy, if the
-    config file is malformed or has no "repos" object, or if there is no config file and
-    default_config cannot construct a config.
+    config file is not a valid config, if the config names no clone of a repository and the
+    current directory holds none, or if there is no config file and default_config cannot
+    construct a config.
 
     Args:
         program: the name of the running program; used for diagnostics.
 
     Returns:
-        The config, as the config file holds it or, if there is no config file, as
-        default_config constructs it.
+        The config, as read_config_file returns it, with a clone for each repository; or, if
+        there is no config file, as default_config constructs it.
     """
     base = str(pathlib.Path.cwd())
     # The current directory holds the working copy directories; it is not one of them.
@@ -3152,14 +3492,31 @@ def load_config(program: str) -> dict[str, Any]:
             f"run {program} in the directory that holds the working copy directories"
         )
     cfg = read_config_file(program)
-    if cfg is not None:
-        if not isinstance(cfg.get("repos"), dict):
-            sys.exit(f'{program}: {CONFIG} has no "repos" object')
-        return cfg
-    try:
-        return default_config(base)
-    except ConfigError as error:
-        sys.exit(f"{program}: {error}")
+    if cfg is None:
+        try:
+            return default_config(base)
+        except ConfigError as error:
+            sys.exit(f"{program}: {error}")
+    problems = []
+    for key, rc in cfg["repos"].items():
+        if "clone" in rc:
+            continue
+        owner, name = rc["gh"].split("/")
+        clone = find_clone(
+            base,
+            owner,
+            name,
+            lambda rc=rc: rc.get("default_branch") or github_default_branch(rc["gh"]),
+        )
+        if clone is None:
+            problems.append(
+                f'{key_path("repos", key)} has no "clone", and {base} holds no clone of'
+                f" {rc['gh']} or of a fork of it"
+            )
+        rc["clone"] = clone
+    if problems:
+        sys.exit("\n".join(f"{program}: {CONFIG}: {p}" for p in problems))
+    return cfg
 
 
 def generated(name: str) -> list[str]:
@@ -3277,6 +3634,11 @@ def main() -> None:
         help="print the file name of the dependency document, and do nothing else",
     )
     parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="print the config as JSON, with its defaults filled in, and do nothing else",
+    )
+    parser.add_argument(
         "-C",
         "--directory",
         metavar="DIR",
@@ -3302,12 +3664,14 @@ def main() -> None:
         except OSError as error:
             sys.exit(f"pr-status: cannot change to directory {args.directory}: {error.strerror}")
     if args.print_document:
-        print(dependency_document_name(read_config_file("pr-status"), "pr-status"))
+        print(dependency_document_name(read_config_file("pr-status")))
+        return
+    if args.print_config:
+        print(json.dumps(load_config("pr-status"), indent=2))
         return
     base = str(pathlib.Path.cwd())
     cfg = load_config("pr-status")
-    dependencies = pathlib.Path(dependency_document_name(cfg, "pr-status"))
-    check_unblocked_filters(cfg, "pr-status")
+    dependencies = pathlib.Path(dependency_document_name(cfg))
     models = load_models(cfg)
     try:
         HIGHLIGHTED.update(needed_to_land(models, resolve_pr_names(models, args.highlight)))
