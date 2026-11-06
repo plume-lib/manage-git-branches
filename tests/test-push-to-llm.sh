@@ -728,19 +728,146 @@ case "${push_output}" in
   *) fail "agent that changes git's configuration: wrong diagnostic: ${push_output}" ;;
 esac
 
-## A rerun does not mistake the merge that an earlier run left in progress
-## for a conflicted pull.
+## A rerun finishes the merge that an earlier run left in progress:  it asks
+## the agent to resolve the conflicts, commits the merge with the merge's own
+## message, and pushes.
 setup_case rerun
 push_to none --llm
 : > "${STUB_LOG}"
 push_to good --llm
-check_not_resolved "rerun"
+check_resolved claude "rerun"
 case "${push_output}" in
-  *"a merge is in progress"*) ;;
+  *"finishing the merge of branch 'main' that is in progress"*) ;;
   *) fail "rerun: wrong diagnostic: ${push_output}" ;;
 esac
+setup_case rerun-codex
+push_to none --codex
+: > "${STUB_LOG}"
+push_to good --codex
+check_resolved codex "rerun with --codex"
+
+## With --no-llm, a rerun leaves the merge in progress.
+setup_case rerun-no-llm
+push_to none --llm
+: > "${STUB_LOG}"
+push_to good --no-llm
+check_not_resolved "rerun with --no-llm"
 if [ -s "${STUB_LOG}" ]; then
-  fail "rerun: an agent ran: $(cat "${STUB_LOG}")"
+  fail "rerun with --no-llm: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## A rerun leaves alone a merge whose conflicts were resolved and staged.
+setup_case rerun-staged
+push_to none --llm
+write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-feature SEVEN-main eight nine
+git -C "${feature_dir}" add file.txt
+: > "${STUB_LOG}"
+push_to good --llm
+check_not_resolved "rerun after staging"
+case "${push_output}" in
+  *"has no conflicted file"*) ;;
+  *) fail "rerun after staging: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "rerun after staging: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## A rerun leaves the merge in progress if an AI agent is working in the
+## directory.  The stand-in agent is a script named `claude`, which runs its
+## arguments, or with none, runs until it is killed.  On Linux, a script's
+## command name is the script's name.  On a system where `ps` names the
+## script after its interpreter instead, these tests are skipped.
+mkdir "${WORK_DIR}/agent-bin"
+cat > "${WORK_DIR}/agent-bin/claude" << 'AGENT_EOF'
+#!/bin/sh
+if [ "$#" -eq 0 ]; then
+  while :; do sleep 1; done
+fi
+# Not the last command, so that the shell does not replace itself with "$@".
+"$@"
+exit "$?"
+AGENT_EOF
+chmod +x "${WORK_DIR}/agent-bin/claude"
+
+## Usage: start_agent DIR
+## Starts the stand-in agent in DIR, and sets ${agent_pid} to its process id.
+## Returns 1, after stopping the agent, if `ps` does not name it "claude".
+start_agent() {
+  (cd -- "$1" && exec "${WORK_DIR}/agent-bin/claude") &
+  agent_pid=$!
+  agent_tries=0
+  until [ "$(basename -- "$(ps -o comm= -p "${agent_pid}")")" = claude ]; do
+    agent_tries=$((agent_tries + 1))
+    if [ "${agent_tries}" -gt 10 ]; then
+      stop_agent
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+## Usage: stop_agent
+## Stops the stand-in agent that `start_agent` started.
+stop_agent() {
+  kill "${agent_pid}"
+  wait "${agent_pid}" 2> /dev/null || true
+}
+
+if ! start_agent "${WORK_DIR}"; then
+  echo "${SCRIPT_NAME}: skipping the tests of an AI agent working in a directory, because ps does not name a script after itself"
+else
+  stop_agent
+
+  for agent_subdir in '' /sub; do
+    setup_case "rerun-agent${agent_subdir#/}"
+    push_to none --llm
+    : > "${STUB_LOG}"
+    mkdir -p "${feature_dir}${agent_subdir}"
+    start_agent "${feature_dir}${agent_subdir}" || fail "the stand-in agent did not start"
+    push_to good --llm
+    stop_agent
+    check_not_resolved "rerun with an agent in ${feature_dir}${agent_subdir}"
+    case "${push_output}" in
+      *"claude (process ${agent_pid}) is working in"*"an AI agent is working there"*) ;;
+      *) fail "rerun with an agent in ${feature_dir}${agent_subdir}: wrong diagnostic: ${push_output}" ;;
+    esac
+    if [ -s "${STUB_LOG}" ]; then
+      fail "rerun with an agent: an agent ran: $(cat "${STUB_LOG}")"
+    fi
+  done
+
+  ## An agent in another directory, or in a worktree nested in the
+  ## directory, does not keep a rerun from finishing the merge.
+  for agent_location in main nested; do
+    setup_case "rerun-agent-${agent_location}"
+    push_to none --llm
+    : > "${STUB_LOG}"
+    if [ "${agent_location}" = main ]; then
+      start_agent "${main_dir}" || fail "the stand-in agent did not start"
+    else
+      echo 'nested/' >> "${feature_dir}/.git/info/exclude"
+      git -C "${feature_dir}" worktree add -q --detach nested HEAD
+      start_agent "${feature_dir}/nested" || fail "the stand-in agent did not start"
+    fi
+    push_to good --llm
+    stop_agent
+    check_resolved claude "rerun with an agent in ${agent_location}"
+  done
+
+  ## An agent that ran `git-push-to` in the directory does not keep it from
+  ## finishing the merge.
+  setup_case rerun-agent-ancestor
+  push_to none --llm
+  : > "${STUB_LOG}"
+  if push_output="$(cd -- "${feature_dir}" \
+    && STUB_MODE=good PATH="${WORK_DIR}/test-bin:${PATH}" \
+      "${WORK_DIR}/agent-bin/claude" \
+      "${COMMANDS_DIR}/git-push-to" --llm "${main_dir}" "${feature_dir}" 2>&1)"; then
+    push_status=0
+  else
+    push_status=$?
+  fi
+  check_resolved claude "rerun from an agent in the directory"
 fi
 
 ## An agent that stages a file is rejected, even if the working tree holds an

@@ -127,6 +127,9 @@ The commands are:
   resolve.  It checks every resolution, whether from rerere or from the
   agent:  that nothing outside the conflict regions changed and that no
   conflict marker remains.  Then it commits the merge and continues.
+  It does the same for a merge that is already in progress in any directory
+  except the first, as after an earlier run stopped at conflicts, unless a
+  Claude Code or Codex process is working in that directory.
   If the build fails, and TO_DIR's branch has a merge that neither its
   remote branches nor those of FROM_DIR's branch contain, such as the one
   that it just made, it asks the agent to fix the build, up to 3 times, and
