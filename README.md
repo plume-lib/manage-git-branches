@@ -181,7 +181,8 @@ The commands are:
   `[--check] [--print-document] [-C DIR] [--highlight PR...]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
-  `pr-status.md` (or the documents that `pr-status-config.json` names),
+  `pr-status.md` (or the documents that `pr-status-config.json` names;
+  see [its format](pr-status-config.md)),
   which lists the dependencies and the `git-push-to` commands that update
   each dependency chain.  It sets the dependency document's title, in its
   front matter and its heading, to the current directory's basename followed

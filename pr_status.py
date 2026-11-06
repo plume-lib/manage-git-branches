@@ -10,7 +10,8 @@ must not itself be in a git working copy, or pass that directory with -C):
 
 Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
-                           (optional; see default_config for the default)
+                           (optional; see default_config for the default, and
+                           pr-status-config.md for the format)
   .pr-status-snapshot.json written by the previous run; compared with this run
 Each run:
   * reads the open PRs with gh,
@@ -162,7 +163,8 @@ class Repo:
         self.node_prefix = cfg["node_prefix"]
         self.owner = self.gh.split("/")[0]
         self.dir_name = cfg.get("dir_name", self.name)
-        self.default_branch = cfg.get("default_branch", "master")
+        # The default branch that the config names, or None if it names none.
+        self.configured_default_branch: str | None = cfg.get("default_branch")
         self.keywords = cfg.get("dependency_keywords", [])
         self.show_author = cfg.get("show_author", False)
         self.prs: dict[int, dict[str, Any]] = {}  # number -> gh JSON
@@ -172,6 +174,18 @@ class Repo:
         self.pair_conflicts: dict[tuple[int, int], list[str]] = {}  # (a, b) with a < b -> files
         # number -> "landed" | "closed" | None (not a PR)
         self.closed_state: dict[int, str | None] = {}
+
+    @functools.cached_property
+    def default_branch(self) -> str:
+        """The repository's default branch, such as "main".
+
+        It is the one that the config names or, if the config names none, the one that
+        GitHub reports.  It is read from GitHub when first used.
+        """
+        if self.configured_default_branch is not None:
+            return self.configured_default_branch
+        fields = ["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]
+        return run(["gh", "repo", "view", self.gh, *fields]).strip()
 
     @functools.cached_property
     def reviews_and_ci(self) -> ReviewsAndCi:
@@ -245,10 +259,14 @@ class Repo:
 
 
 def load_repo(repo: Repo, pairwise: bool = True) -> None:
-    """Read the open PRs and the merge analysis.
+    """Read the default branch, the open PRs, and the merge analysis.
 
     Without pairwise, repo.pair_conflicts stays empty.
     """
+    # Reading the default branch from GitHub now, rather than when a document first uses
+    # it, makes a failure to read it occur along with any failure to read the PRs:  before
+    # any PR description or document changes.
+    _ = repo.default_branch
     fields = (
         "number,title,headRefName,headRefOid,headRepositoryOwner,baseRefName,"
         "author,assignees,body,updatedAt"
@@ -2042,12 +2060,20 @@ def unblocked_doc(
                 unblocked_notes(m, cfg, n),
             ]
             lines.append(table_row(cells))
-    excluded = [(m, cfg["repos"][m.repo.name].get("excluded", {})) for m in models]
-    if any(ex.get("prs") for _, ex in excluded):
+    # Each model, its excluded PRs that are open, and the reason for excluding them.
+    excluded = [
+        (
+            m,
+            m.excluded & set(m.repo.prs),
+            cfg["repos"][m.repo.name].get("excluded", {}).get("reason"),
+        )
+        for m in models
+    ]
+    if any(prs for _, prs, _ in excluded):
         lines += ["", "## Excluded by decision", ""]
-        for m, ex in excluded:
-            if ex.get("prs"):
-                lines.append(f"* {m.repo.label}: {ex['reason']}")
+        for m, prs, reason in excluded:
+            if prs:
+                lines.append(f"* {m.repo.label}: {reason or m.repo.links(prs) + '.'}")
     lines += ["", "## Excluded because they depend on another PR", ""]
     for m in models:
         items = []
@@ -3123,27 +3149,46 @@ def default_config(base: str) -> dict[str, Any]:
     }
 
 
-def read_config_file() -> dict[str, Any] | None:
+def read_config_file(program: str) -> dict[str, Any] | None:
     """Return the contents of the config file in the current directory.
+
+    Exit with an error message if the file does not hold a JSON object, or if its
+    "documents" is not an object.
+
+    Args:
+        program: the name of a running program; used for diagnostics.
 
     Returns:
         The config, as a dict parsed from the config file's JSON, with keys such as "repos"
-        and "documents"; or None if there is no config file.
+        and "documents", and with each optional top-level key that the file omits set to
+        its default (except "order" if the file has no "repos" object); or None if there is
+        no config file.
     """
     if not pathlib.Path(CONFIG).exists():
         return None
     with pathlib.Path(CONFIG).open() as f:
-        return json.load(f)
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        sys.exit(f"{program}: {CONFIG} holds {json.dumps(cfg)}, not a JSON object")
+    docs = cfg.setdefault("documents", {})
+    if not isinstance(docs, dict):
+        sys.exit(f'{program}: {CONFIG}: "documents" is {json.dumps(docs)}, not an object')
+    docs.setdefault("dependencies", DEFAULT_DEPENDENCY_DOCUMENT)
+    cfg.setdefault("directories", [])
+    if "order" not in cfg and isinstance(cfg.get("repos"), dict):
+        # Every repository, in the order that the file lists them.
+        cfg["order"] = list(cfg["repos"])
+    return cfg
 
 
 def dependency_document_name(cfg: dict[str, Any] | None, program: str) -> str:
     """Return the file name of the dependency document that the given config names.
 
-    Exit with an error message if the config names no dependency document.
+    Exit with an error message if the config's dependency document is not a file name.
 
     Args:
-        cfg: a config, as a dict parsed from the config file's JSON, with keys such as
-            "repos" and "documents"; or None if there is no config file
+        cfg: a config, as read_config_file returns it, with keys such as "repos" and
+            "documents"; or None if there is no config file
         program: the name of a running program; used for diagnostics.
 
     Returns:
@@ -3152,12 +3197,11 @@ def dependency_document_name(cfg: dict[str, Any] | None, program: str) -> str:
     """
     if cfg is None:
         return DEFAULT_DEPENDENCY_DOCUMENT
-    docs = cfg.get("documents")
-    name = docs.get("dependencies") if isinstance(docs, dict) else None
+    name = cfg["documents"]["dependencies"]
     if not isinstance(name, str) or not name:
         sys.exit(
-            f"{program}: {CONFIG} names no dependency document"
-            ' ("documents": {"dependencies": ...})'
+            f"{program}: {CONFIG}: the dependency document"
+            f' ("documents": {{"dependencies": ...}}) is {json.dumps(name)}, not a file name'
         )
     return name
 
@@ -3165,8 +3209,9 @@ def dependency_document_name(cfg: dict[str, Any] | None, program: str) -> str:
 def load_config(program: str) -> dict[str, Any]:
     """Return the config for the current directory, which holds the working copy directories.
 
-    Exit with an error message if the current directory is in a git working copy, or if
-    there is no config file and default_config cannot construct a config.
+    Exit with an error message if the current directory is in a git working copy, if the
+    config file is malformed or has no "repos" object, or if there is no config file and
+    default_config cannot construct a config.
 
     Args:
         program: the name of the running program; used for diagnostics.
@@ -3185,8 +3230,10 @@ def load_config(program: str) -> dict[str, Any]:
             f"{program}: {base} is in the git working copy {toplevel.stdout.strip()}; "
             f"run {program} in the directory that holds the working copy directories"
         )
-    cfg = read_config_file()
+    cfg = read_config_file(program)
     if cfg is not None:
+        if not isinstance(cfg.get("repos"), dict):
+            sys.exit(f'{program}: {CONFIG} has no "repos" object')
         return cfg
     try:
         return default_config(base)
@@ -3304,7 +3351,7 @@ def main() -> None:
         except OSError as error:
             sys.exit(f"pr-status: cannot change to directory {args.directory}: {error.strerror}")
     if args.print_document:
-        print(dependency_document_name(read_config_file(), "pr-status"))
+        print(dependency_document_name(read_config_file("pr-status"), "pr-status"))
         return
     base = str(pathlib.Path.cwd())
     cfg = load_config("pr-status")

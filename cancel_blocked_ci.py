@@ -559,8 +559,8 @@ def check_urls(gh: str, shas: list[str]) -> dict[str, list[str]]:
 def github_default_branch(gh: str) -> str:
     """Return the default branch of the GitHub repository gh.
 
-    A pr-status config need not name a repository's default branch, so this function asks
-    GitHub.
+    The result is the default branch that GitHub reports, even if a pr-status config names
+    a different one.
 
     Args:
         gh: a repository's GitHub slug, such as "ORG/REPO".
