@@ -31,10 +31,12 @@ Each run:
     of the dependency document between <!-- BEGIN GENERATED: name --> and
     <!-- END GENERATED: name --> (or creates the dependency document, if it does not
     exist),
-  * removes from the dependency document each "## Unblocked PRs" or "## Blocked PRs"
-    heading that directly precedes an "unblocked-REPO" or "blocked-REPO" generated
-    section, because each such section contains its own heading (and is empty if it has
-    no PR to show),
+  * removes from the dependency document each heading, such as "## Blocked PRs", that
+    directly precedes a generated section that contains its own heading, and replaces the
+    "## Updating branches" heading and the text that follows it, up to the
+    "conflicting-push-commands" generated section, with an "updating-branches" generated
+    section; each such generated section contains its own heading and text (and is empty
+    if it has nothing to show),
   * sets the dependency document's title, in its YAML front matter and its "# " heading,
     to the current directory's basename followed by "PR status", as in "src PR status".
 """
@@ -71,12 +73,23 @@ SNAPSHOT = ".pr-status-snapshot.json"
 FRONT_MATTER = re.compile(r"---\n((?:(?!---\n).*\n)*)---\n+")
 # The start of a top-level "title" entry of YAML front matter, whose key may be quoted.
 TITLE_KEY = re.compile(r"""(?:title|"title"|'title')[ \t]*:(?:[ \t]|$)""")
-# Matches a "## Unblocked PRs" or "## Blocked PRs" heading, such as "## Blocked PRs (daikon)",
-# and the blank lines that follow it, if they directly precede an "unblocked-REPO" or
-# "blocked-REPO" generated section, respectively.  Such a section contains its own heading.
-PR_HEADING_BEFORE_SECTION = re.compile(
-    r"^(?:## Unblocked PRs.*\n+(?=<!-- BEGIN GENERATED: unblocked-)"
-    r"|## Blocked PRs.*\n+(?=<!-- BEGIN GENERATED: blocked-))",
+# Matches a heading, such as "## Blocked PRs (daikon)", and the blank lines that follow it, if
+# they directly precede a generated section that contains its own heading, such as a
+# "blocked-REPO" section.  Such a section is empty if it has nothing to show, so a heading
+# outside it would be a second heading or would head nothing.
+HEADING_BEFORE_SECTION = re.compile(
+    r"^#+[ \t].*\n+(?=<!-- BEGIN GENERATED: (?:unblocked-[\w-]+|blocked-[\w-]+|status|clusters"
+    r"|updating-branches|conflicting-push-commands|push-commands|directories) -->)",
+    re.MULTILINE,
+)
+# Matches the "## Updating branches" heading and the text that follows it, if the text
+# contains no generated section and directly precedes the "conflicting-push-commands"
+# generated section.  The text consists of the "updating-branches" section's introduction
+# and the "### Dependency chains with conflicts" heading and its introduction, all of which
+# the "updating-branches" and "conflicting-push-commands" sections contain.
+UPDATING_TEXT_BEFORE_SECTION = re.compile(
+    r"^## Updating branches\n(?:(?!<!-- (?:BEGIN|END) GENERATED: ).*\n)*?"
+    r"(?=<!-- BEGIN GENERATED: conflicting-push-commands -->)",
     re.MULTILINE,
 )
 # The most open PRs of a repository that load_repo reads.
@@ -2067,13 +2080,31 @@ def unblocked_doc(
 # ---------- generated sections of the dependency document ----------
 
 
+def headed(heading: str, label: str | None, lines: list[str], level: int = 2) -> list[str]:
+    """Return the given lines, preceded by the given heading.
+
+    Args:
+        heading: a heading, such as "Blocked PRs".
+        label: a repository's label, such as "daikon", to follow the heading in parentheses,
+            or None to omit it.
+        lines: the lines that follow the heading.
+        level: the heading's level, such as 2 for a "## " heading.
+
+    Returns:
+        The heading and lines, set off by blank lines.
+    """
+    if label is not None:
+        heading += f" ({label})"
+    return ["", f"{'#' * level} {heading}", "", *lines, ""]
+
+
 def gen_status(models: list[Model]) -> list[str]:
     """Generate the "status" section.
 
     Returns:
-        The section's lines:  which PRs are in a cycle of dependencies, which PRs conflict with
-        the default branch, and which dependent branches lack their prerequisites' current
-        commits.
+        The section's lines:  a "Status" heading and which PRs are in a cycle of dependencies,
+        which PRs conflict with the default branch, and which dependent branches lack their
+        prerequisites' current commits; or no lines if there is no such PR or branch.
     """
     lines = []
     for m in models:
@@ -2108,14 +2139,15 @@ def gen_status(models: list[Model]) -> list[str]:
     if behind:
         lines.append("* Dependent branches that lack their prerequisites' current commits:")
         lines += behind
-    return lines
+    return headed("Status", None, lines) if lines else []
 
 
 def gen_clusters(models: list[Model], cfg: dict[str, Any]) -> list[str]:
     """Generate the "clusters" section.
 
     Returns:
-        The section's lines:  each repository's connected components of the dependency graph.
+        The section's lines:  a "Dependency clusters" heading and each repository's connected
+        components of the dependency graph, or no lines if no repository has a component.
     """
     lines = []
     for m in models:
@@ -2128,7 +2160,7 @@ def gen_clusters(models: list[Model], cfg: dict[str, Any]) -> list[str]:
             name = next((names[str(n)] for n in comp if str(n) in names), None)
             members = m.repo.links(comp)
             lines.append(f"  * {name} ({members})" if name else f"  * {members}")
-    return lines
+    return headed("Dependency clusters", None, lines) if lines else []
 
 
 def gen_graph(models: list[Model], cfg: dict[str, Any]) -> list[str]:
@@ -2393,23 +2425,6 @@ def pr_table(
     return lines
 
 
-def headed(heading: str, label: str | None, lines: list[str]) -> list[str]:
-    """Return the given lines, preceded by the given "## " heading.
-
-    Args:
-        heading: a heading, such as "Blocked PRs".
-        label: a repository's label, such as "daikon", to follow the heading in parentheses,
-            or None to omit it.
-        lines: the lines that follow the heading.
-
-    Returns:
-        The heading and lines, set off by blank lines.
-    """
-    if label is not None:
-        heading += f" ({label})"
-    return ["", f"## {heading}", "", *lines, ""]
-
-
 def gen_unblocked(model: Model, cfg: dict[str, Any], base: str, label: str | None) -> list[str]:
     """Generate the "unblocked-REPO" section.
 
@@ -2490,8 +2505,9 @@ def gen_directories(models: list[Model], cfg: dict[str, Any], base: str) -> list
     """Generate the "directories" section.
 
     Returns:
-        The section's lines:  a table of the entries of base that are not a working copy of
-        an open PR's branch.
+        The section's lines:  an "Other directories" heading and a table of the entries of
+        base that are not a working copy of an open PR's branch, or no lines if every entry
+        is such a working copy.
     """
     dirs_info = scan_directories(base)
     working = set()
@@ -2553,10 +2569,12 @@ def gen_directories(models: list[Model], cfg: dict[str, Any], base: str) -> list
             status = f"the {state} {and_list(refs)}"
         status += ", respectively" if len(refs) > 1 else ""
         rows.append(([d for d, _ in pairs], status, "none"))
+    if not rows:
+        return []
     lines = ["| Directory | Status | Relationship to other branches |", "| --- | --- | --- |"]
     for dirs, status, rel in rows:
         lines.append(table_row([", ".join(f"`{d}`" for d in dirs), status, rel]))
-    return lines
+    return headed("Other directories", None, lines)
 
 
 def replace_sections(text: str, generators: Mapping[str, Callable[[], list[str]]]) -> str:
@@ -2587,14 +2605,20 @@ def regenerate_dependency_document(
 ) -> str:
     """Set the header of the dependency document and regenerate its generated sections.
 
-    A "## Unblocked PRs" or "## Blocked PRs" heading that directly precedes its generated
-    section is removed, because the section contains its own heading.
+    A heading, such as "## Blocked PRs", that directly precedes a generated section that
+    contains its own heading is removed.  The "## Updating branches"
+    heading and the text that follows it, up to the "conflicting-push-commands" section, are
+    replaced by an "updating-branches" section, which contains that heading and an
+    introduction.
 
     Returns:
         text, with its title set and its generated sections regenerated.
     """
     text = set_header(text, title)
-    text = PR_HEADING_BEFORE_SECTION.sub("", text)
+    text = HEADING_BEFORE_SECTION.sub("", text)
+    text = UPDATING_TEXT_BEFORE_SECTION.sub(
+        "\n".join(generated("updating-branches")) + "\n\n", text
+    )
     return replace_sections(text, generators)
 
 
@@ -2667,14 +2691,18 @@ def section_generators(
     Returns:
         A map from each generated section name to a function that returns the section's lines.
     """
+    all_commands = functools.cache(functools.partial(push_commands, models, base))
     generators: dict[str, Callable[[], list[str]]] = {
         "as-of": lambda: [f"As of {as_of}."],
         "status": lambda: gen_status(models),
         "clusters": lambda: gen_clusters(models, cfg),
         "graph": lambda: gen_graph(models, cfg),
         "directories": lambda: gen_directories(models, cfg, base),
-        "push-commands": lambda: gen_push_commands(models, base),
-        "conflicting-push-commands": lambda: gen_push_commands(models, base, conflicts_only=True),
+        "updating-branches": lambda: gen_updating_branches(models, all_commands()),
+        "push-commands": lambda: gen_push_commands(all_commands(), base),
+        "conflicting-push-commands": lambda: gen_push_commands(
+            push_commands(models, base, conflicts_only=True), base, conflicts_only=True
+        ),
     }
     # Each repository's label distinguishes its sections' headings in a multi-repository
     # document.
@@ -2789,6 +2817,14 @@ class PushCommands(NamedTuple):
     chain_count: int
     """The number of `git-push-to` chains that the commands run."""
 
+    def is_empty(self) -> bool:
+        """Return True if the commands run no chain and have no note.
+
+        Returns:
+            True if the commands run no chain and have no note.
+        """
+        return self.chain_count == 0 and not self.notes
+
 
 def push_commands(models: list[Model], base: str, conflicts_only: bool = False) -> PushCommands:
     """Return the shell commands that update each PR's branch from upstream and its prerequisites.
@@ -2824,24 +2860,32 @@ def push_commands(models: list[Model], base: str, conflicts_only: bool = False) 
     return PushCommands(lines, notes, chain_count)
 
 
-def gen_push_commands(models: list[Model], base: str, conflicts_only: bool = False) -> list[str]:
+def gen_push_commands(commands: PushCommands, base: str, conflicts_only: bool = False) -> list[str]:
     """Return the lines of the "push-commands" or "conflicting-push-commands" section.
 
     Args:
-        models: a list of the models of the repositories, one per repository
+        commands: shell commands that update the PRs' branches
         base: the directory that holds the working copy directories of the repositories
         conflicts_only: True if the lines are those of the "conflicting-push-commands" section,
             whose chains are the ones with conflicts; False if they are those of the
             "push-commands" section
 
     Returns:
-        The section's lines:  with conflicts_only, if there is a chain, a suggestion to run
-        resolve-conflicts; then notes; then the commands in a fenced code block.
+        The section's lines:  a heading; with conflicts_only, an introduction and a suggestion
+        to run resolve-conflicts; then the notes of commands; then commands in a fenced code
+        block, if they run a chain.  Or no lines if commands run no chain and either
+        conflicts_only is true or commands have no note.
     """
-    commands = push_commands(models, base, conflicts_only)
+    if commands.is_empty() or (conflicts_only and commands.chain_count == 0):
+        return []
     lines = []
-    if conflicts_only and commands.chain_count > 0:
+    if conflicts_only:
         lines += [
+            (
+                "This subset repeats a whole dependency chain if at least one merge in the chain"
+                " would result in a textual conflict."
+            ),
+            "",
             (
                 f"Run `cd {base} && resolve-conflicts`, which runs these commands with an AI"
                 " agent's help, repeating until no chain has conflicts."
@@ -2849,8 +2893,43 @@ def gen_push_commands(models: list[Model], base: str, conflicts_only: bool = Fal
             "Alternatively, run the commands yourself.",
             "",
         ]
-    lines += [f"{note}." for note in commands.notes] + ([""] if commands.notes else [])
-    return [*lines, "```sh", *commands.lines, "```"]
+    lines += [f"{note}." for note in commands.notes]
+    if commands.chain_count > 0:
+        lines += [""] if commands.notes else []
+        lines += ["```sh", *commands.lines, "```"]
+    if conflicts_only:
+        return headed("Dependency chains with conflicts", None, lines, level=3)
+    return headed("All dependency chains", None, lines, level=3)
+
+
+def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[str]:
+    """Generate the "updating-branches" section.
+
+    Args:
+        models: a list of the models of the repositories, one per repository
+        commands: the shell commands that update the branches of the PRs of the models
+
+    Returns:
+        The section's lines:  an "Updating branches" heading and an introduction to the
+        "conflicting-push-commands" and "push-commands" sections that follow it, or no lines
+        if commands run no chain and have no note.
+    """
+    if commands.is_empty():
+        return []
+    if len(models) == 1:
+        upstream = f"upstream `{models[0].repo.default_branch}`"
+    else:
+        upstream = "the upstream default branch"
+    lines = [
+        "Each command updates one dependency chain.",
+        (
+            f"It starts with {upstream}, then pushes each PR's branch into the branches of the PRs"
+            " that directly depend on it, prerequisites first."
+        ),
+        f"A chain may consist of {upstream} and a single PR that has no prerequisite or dependent.",
+        "`git-push-to` merges, compiles, and pushes; see its documentation.",
+    ]
+    return headed("Updating branches", None, lines)
 
 
 # ---------- snapshot and changes ----------
@@ -3131,10 +3210,6 @@ def default_dependency_document(models: list[Model]) -> str:
         The text of a dependency document that has no header (set_header adds it) and whose
         generated sections are empty.
     """
-    if len(models) == 1:
-        upstream = f"upstream `{models[0].repo.default_branch}`"
-    else:
-        upstream = "the upstream default branch"
     lines = [
         (
             "The title and the generated sections are regenerated by `pr-status`;"
@@ -3153,46 +3228,20 @@ def default_dependency_document(models: list[Model]) -> str:
             " member, and on no member, even if its branch contains another member's commits."
         ),
         "",
-        "## Status",
-        "",
         *generated("status"),
-        "",
-        "## Dependency clusters",
         "",
         *generated("clusters"),
         "",
-        "## Updating branches",
-        "",
-        "Each command updates one dependency chain.",
-        (
-            f"It starts with {upstream}, then pushes each PR's branch into the branches of the PRs"
-            " that directly depend on it, prerequisites first."
-        ),
-        f"A chain may consist of {upstream} and a single PR that has no prerequisite or dependent.",
-        "`git-push-to` merges, compiles, and pushes; see its documentation.",
-        "",
-        "### Dependency chains with conflicts",
-        "",
-        (
-            "This subset repeats a whole dependency chain if at least one merge in the chain"
-            " would result in a textual conflict."
-        ),
+        *generated("updating-branches"),
         "",
         *generated("conflicting-push-commands"),
-        "",
-        "### All dependency chains",
         "",
         *generated("push-commands"),
     ]
     for m in models:
         name = m.repo.name
         lines += ["", *generated(f"unblocked-{name}"), "", *generated(f"blocked-{name}")]
-    lines += [
-        "",
-        "## Other directories",
-        "",
-        *generated("directories"),
-    ]
+    lines += ["", *generated("directories")]
     return "\n".join(lines) + "\n"
 
 
