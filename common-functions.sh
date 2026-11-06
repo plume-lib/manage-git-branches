@@ -941,7 +941,11 @@ ends_with_newline() {
 ## cannot be run.  Either way, it checks every resolution with
 ## `check_conflict_resolution`.  SOURCE names COMMIT in diagnostics and in the
 ## agent's instructions.  Returns 1, after printing a diagnostic, on failure,
-## and leaves the merge in progress.  The merge must have been made with
+## and leaves the merge in progress, which it notes in AGENT-TODO.md, with
+## the command that continues the agent's session if one ran (see
+## `report_merge_in_progress` and `report_agent_session`).  Before any agent
+## runs, it records the conflicted files (see `record_conflicted_files`).
+## The merge must have been made with
 ## `rerere.autoUpdate` false, so that the index lists every conflicted file as
 ## unmerged, including each one that rerere resolved.
 ##
@@ -961,7 +965,7 @@ resolve_merge_conflicts() {
   # changed it would defeat them; `resolve_with_agent` checks that it did not.
   if ! resolve_auto_merge="$(git rev-parse --verify --quiet AUTO_MERGE)"; then
     echo "${SCRIPT_NAME}: no AUTO_MERGE, which git 2.42 and later write, in $(pwd)" >&2
-    echo "${resolve_failed}" >&2
+    resolve_stopped
     return 1
   fi
   if ! resolve_head="$(git rev-parse --verify HEAD)" \
@@ -978,13 +982,13 @@ resolve_merge_conflicts() {
   resolve_files="$(git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n')"
   if [ -z "${resolve_files}" ]; then
     echo "${SCRIPT_NAME}: cannot list the conflicted files in $(pwd)" >&2
-    echo "${resolve_failed}" >&2
+    resolve_stopped
     return 1
   fi
   case "${resolve_files}" in
     *"$(printf '\001')"*)
       echo "${SCRIPT_NAME}: a conflicted file has a newline in its name; resolve the conflicts by hand" >&2
-      echo "${resolve_failed}" >&2
+      resolve_stopped
       return 1
       ;;
   esac
@@ -993,7 +997,7 @@ resolve_merge_conflicts() {
   if [ -n "${resolve_other}" ]; then
     printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: changed, but not conflicted: /" >&2
     echo "${SCRIPT_NAME}: the working tree has changes that are not part of the merge; resolve the conflicts by hand" >&2
-    echo "${resolve_failed}" >&2
+    resolve_stopped
     return 1
   fi
 
@@ -1058,7 +1062,7 @@ resolve_merge_conflicts() {
     done
     exit "${resolve_status}"
   })"; then
-    echo "${resolve_failed}" >&2
+    resolve_stopped
     return 1
   fi
   # The files in which a line of 7 or more "=" is permitted, one per line;
@@ -1066,17 +1070,33 @@ resolve_merge_conflicts() {
   resolve_separators="$(printf '%s\n' "${resolve_checks}" | sed -n -e 's/^separator //p')"
   # The files that `git rerere` did not resolve, one per line.
   resolve_unresolved="$(printf '%s\n' "${resolve_checks}" | sed -n -e 's/^unresolved //p')"
+  # Before an agent edits them, so that a later run can tell whether anyone
+  # changed them after this one stopped.
+  record_conflicted_files
 
   if [ -z "${resolve_unresolved}" ]; then
     echo "${SCRIPT_NAME}: \`git rerere\` resolved the conflicts in $(pwd)" >&2
   elif [ -z "${resolve_with}" ] || ! agent_available "${resolve_with}"; then
     report_unresolved "${resolve_unresolved}"
-    echo "${resolve_failed}" >&2
+    resolve_stopped
     return 1
-  elif ! resolve_with_agent; then
-    report_agent_session "Resolve the conflicts in the merge of ${resolve_source}"
-    echo "${resolve_failed}" >&2
-    return 1
+  else
+    # The note is composed before the agent runs, because no git command
+    # should run after an agent has changed git's configuration, which
+    # `resolve_with_agent` reports as ${resolve_agent_status} 2.
+    resolve_note="$(merge_in_progress_note)"
+    resolve_agent_status=0
+    if ! resolve_with_agent; then
+      if [ -n "${agent_session_ids:-}" ]; then
+        report_agent_session "Resolve the conflicts in the merge of ${resolve_source}" "${resolve_note}"
+        echo "${resolve_failed}" >&2
+      elif [ "${resolve_agent_status}" -ne 2 ]; then
+        resolve_stopped
+      else
+        echo "${resolve_failed}" >&2
+      fi
+      return 1
+    fi
   fi
 
   # `xargs -0` passes every pathname intact, even one that contains a blank
@@ -1086,10 +1106,19 @@ resolve_merge_conflicts() {
     | GIT_LITERAL_PATHSPECS=1 xargs -0 git add -- \
     || [ -n "$(git ls-files -u)" ]; then
     echo "${SCRIPT_NAME}: cannot stage the resolved files in $(pwd)" >&2
-    echo "${resolve_failed}" >&2
+    resolve_stopped
     return 1
   fi
   return 0
+}
+
+## Usage: resolve_stopped
+## For `resolve_merge_conflicts`, which is leaving the merge in progress:
+## says so, and notes the merge in AGENT-TODO.md (see
+## `report_merge_in_progress`).
+resolve_stopped() {
+  echo "${resolve_failed}" >&2
+  report_merge_in_progress
 }
 
 ## Usage: resolve_with_agent
@@ -1427,11 +1456,7 @@ run_agent() {
   agent_session_agent="$1"
   agent_session_dir="$(pwd)"
   run_agent_session=''
-  agent_session_todo=''
-  if run_agent_top="$(git rev-parse --show-toplevel)" \
-    && ! git -C "${run_agent_top}" ls-files --error-unmatch -- "${agent_todo_file}" > /dev/null 2>&1; then
-    agent_session_todo="${run_agent_top}/${agent_todo_file}"
-  fi
+  agent_session_todo="$(agent_todo_path)" || agent_session_todo=''
   # Each agent reads its instructions from standard input.
   #
   # Claude's restricted mode confines the file tools to the current
@@ -1548,29 +1573,29 @@ run_agent() {
   return 0
 }
 
-## Usage: report_agent_session TASK
+## Usage: report_agent_session TASK [NOTE]
 ## Prints a command that continues, interactively, each session of the AI
 ## agent that `run_agent` recorded in ${agent_session_ids}, such as
 ## "cd /home/me/myrepo && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b".
 ## The user can then ask the agent about its work, or tell it to finish the
 ## work in a way that its instructions forbade, such as by changing text
 ## outside a conflict region.  Also appends the commands, under a heading that
-## gives TASK and the time, to the file ${agent_session_todo}, where the user
-## is less likely to overlook them than in the script's output.  TASK is what
+## gives TASK and the time, and after NOTE, a paragraph such as
+## `merge_in_progress_note` prints, if NOTE is given and not empty, to the
+## file ${agent_session_todo} (see `append_agent_todo`), where the user is
+## less likely to overlook them than in the script's output.  TASK is what
 ## the agent was asked to do, such as "Fix the build after merging branch
 ## 'main'"; only its first line is used.  Neither prints nor writes anything
 ## if no session is recorded.
 ##
 ## Runs no git command, because the agent might have changed git's
-## configuration.  The file is not written if ${agent_session_todo} is empty,
-## or if the file is a symbolic link or has another hard link, either of which
-## could make the file another one outside the working tree, or if it is
-## anything else but a regular file.
+## configuration.
 agent_todo_file=AGENT-TODO.md
 report_agent_session() {
   if [ -z "${agent_session_ids:-}" ]; then
     return 0
   fi
+  report_note="${2:-}"
   # The UUIDs contain no character that field splitting or globbing would
   # change, so each unquoted expansion below is the list of UUIDs.
   # shellcheck disable=SC2086
@@ -1582,6 +1607,11 @@ report_agent_session() {
   report_entry="
 ## ${report_task} (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
 "
+  if [ -n "${report_note}" ]; then
+    report_entry="${report_entry}
+${report_note}
+"
+  fi
   report_index=0
   for report_id in "$@"; do
     report_index=$((report_index + 1))
@@ -1603,44 +1633,192 @@ ${report_command}
 \`\`\`
 "
   done
-  if [ -z "${agent_session_todo:-}" ]; then
+  if ! append_agent_todo "${agent_session_todo:-}" "${report_entry}"; then
+    return 0
+  fi
+  if [ "${report_count}" -eq 1 ]; then
+    echo "${SCRIPT_NAME}: appended that command to ${agent_session_todo}" >&2
+  else
+    echo "${SCRIPT_NAME}: appended those commands to ${agent_session_todo}" >&2
+  fi
+}
+
+## Usage: append_agent_todo FILE ENTRY
+## Appends ENTRY, Markdown text that begins with a blank line and a heading,
+## to FILE, the pathname of a file AGENT-TODO.md, which this function creates,
+## with a title and an explanation, if it does not exist.  Returns 1, after
+## printing a diagnostic, if it did not write FILE:  because FILE is empty, as
+## `agent_todo_path` leaves it if the file must not be written; or because
+## FILE is a symbolic link or has another hard link, either of which could
+## make the file another one outside the working tree, or is anything else
+## but a regular file; or because writing failed.  Runs no git command.
+append_agent_todo() {
+  if [ -z "$1" ]; then
     echo "${SCRIPT_NAME}: did not write ${agent_todo_file}, which git tracks or whose working tree is unknown" >&2
-    return 0
+    return 1
   fi
-  report_todo="${agent_session_todo}"
   # `find -links +1` prints the file if it has more than one hard link.
-  if [ -L "${report_todo}" ] \
-    || { [ -e "${report_todo}" ] && [ ! -f "${report_todo}" ]; } \
-    || [ -n "$(find "${report_todo}" -prune -links +1 2> /dev/null)" ]; then
-    echo "${SCRIPT_NAME}: did not write ${report_todo}, which is not a regular file with one link" >&2
-    return 0
+  if [ -L "$1" ] \
+    || { [ -e "$1" ] && [ ! -f "$1" ]; } \
+    || [ -n "$(find "$1" -prune -links +1 2> /dev/null)" ]; then
+    echo "${SCRIPT_NAME}: did not write $1, which is not a regular file with one link" >&2
+    return 1
   fi
-  report_new=no
-  if [ ! -e "${report_todo}" ]; then
-    report_new=yes
+  append_todo_new=no
+  if [ ! -e "$1" ]; then
+    append_todo_new=yes
   fi
   if ! {
-    if [ "${report_new}" = yes ]; then
+    if [ "${append_todo_new}" = yes ]; then
       # The backquotes are Markdown, not command substitutions.
       # shellcheck disable=SC2016
       printf '%s\n' \
         '# AI agent sessions to continue' \
         '' \
         'A script of manage-git-branches, such as `git-push-to`, appends an entry' \
-        'here when an AI agent fails or when the script rejects its work.  The' \
-        "entry's command continues the agent's session interactively.  Delete the" \
-        'entry once you have dealt with it.'
+        'here when an AI agent fails, when the script rejects its work, or when' \
+        "the script leaves a merge in progress.  An entry's command continues the" \
+        "agent's session interactively.  Delete the entry once you have dealt with" \
+        'it.'
     fi
-    printf '%s' "${report_entry}"
-  } >> "${report_todo}"; then
-    echo "${SCRIPT_NAME}: cannot write ${report_todo}" >&2
+    printf '%s' "$2"
+  } >> "$1"; then
+    echo "${SCRIPT_NAME}: cannot write $1" >&2
+    return 1
+  fi
+  return 0
+}
+
+## Usage: agent_todo_path
+## Prints the pathname of the file AGENT-TODO.md at the top level of the
+## working tree that contains the current directory, such as
+## "/home/me/myrepo/AGENT-TODO.md".  Prints nothing, and returns 1, if that
+## file must not be written, because git tracks it or because the current
+## directory is not in a working tree.
+agent_todo_path() {
+  agent_todo_top="$(git rev-parse --show-toplevel 2> /dev/null)" || return 1
+  if [ -z "${agent_todo_top}" ] \
+    || git -C "${agent_todo_top}" ls-files --error-unmatch -- "${agent_todo_file}" > /dev/null 2>&1; then
+    return 1
+  fi
+  printf '%s\n' "${agent_todo_top}/${agent_todo_file}"
+}
+
+## Usage: merge_in_progress_note [REASON]
+## Prints a paragraph for an entry of AGENT-TODO.md that says that a merge is
+## in progress in the current directory, the top level of a working tree.
+## Its first line identifies the merge, as in "The merge of commit
+## 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b is in progress in
+## /home/me/myrepo-branch-feature."; then come REASON, such as "No conflicted
+## file remains.", if it is given and not empty, and what to do.  Prints
+## nothing if no merge is in progress.
+merge_in_progress_note() {
+  if ! note_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)"; then
     return 0
   fi
-  if [ "${report_count}" -eq 1 ]; then
-    echo "${SCRIPT_NAME}: appended that command to ${report_todo}" >&2
-  else
-    echo "${SCRIPT_NAME}: appended those commands to ${report_todo}" >&2
+  printf 'The merge of commit %s is in progress in %s.\n' "${note_merge_head}" "$(pwd)"
+  if [ -n "${1:-}" ]; then
+    printf '%s\n' "$1"
   fi
+  # The backquotes are Markdown, not command substitutions.
+  # shellcheck disable=SC2016
+  printf '%s\n' 'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.'
+}
+
+## Usage: report_merge_in_progress [REASON]
+## Appends to AGENT-TODO.md (see `agent_todo_path` and `append_agent_todo`)
+## an entry that says that a merge is in progress in the current directory,
+## the top level of a working tree, as `merge_in_progress_note` writes it,
+## given REASON.  Does nothing if no merge is in progress, or if the file
+## already says that this merge is in progress in this directory, as after
+## an earlier run stopped at the same merge.  Runs git commands, so it must
+## not be called after an AI agent ran without its work being checked; see
+## `report_agent_session`.
+report_merge_in_progress() {
+  report_merge_note="$(merge_in_progress_note "${1:-}")"
+  if [ -z "${report_merge_note}" ]; then
+    return 0
+  fi
+  report_merge_first="$(printf '%s\n' "${report_merge_note}" | head -n 1)"
+  report_merge_todo="$(agent_todo_path)" || report_merge_todo=''
+  if [ -n "${report_merge_todo}" ] && [ -f "${report_merge_todo}" ] \
+    && grep -F -x -q -- "${report_merge_first}" "${report_merge_todo}"; then
+    return 0
+  fi
+  if append_agent_todo "${report_merge_todo}" "
+## Finish the merge in progress (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
+
+${report_merge_note}
+"; then
+    echo "${SCRIPT_NAME}: noted the merge in progress in ${report_merge_todo}" >&2
+  fi
+}
+
+## Usage: record_conflicted_files
+## Records, in the file manage-git-branches-conflicts in the git directory of
+## the current directory, the top level of a working tree, MERGE_HEAD and the
+## content of each of ${resolve_files}, the files that the merge in progress
+## left conflicted, as they are in the working tree:  as git and `git rerere`
+## left them, before any AI agent edits them.  `changed_conflicted_files`
+## reads the record.  Neither agent can write the git directory.  Only
+## `resolve_merge_conflicts` calls this function, which reads that function's
+## variables.  A failure to write the record goes unreported, because
+## without it `changed_conflicted_files` reports more files, not fewer.
+record_conflicted_files() {
+  if ! record_conflicts="$(git rev-parse --path-format=absolute --git-path manage-git-branches-conflicts)"; then
+    return 0
+  fi
+  {
+    printf 'merge %s\n' "${resolve_merge_head}"
+    printf '%s\n' "${resolve_files}" | while IFS= read -r record_file; do
+      if record_hash="$(git hash-object --no-filters -- "${record_file}" 2> /dev/null)"; then
+        printf '%s\t%s\n' "${record_hash}" "${record_file}"
+      fi
+    done
+  } > "${record_conflicts}" 2> /dev/null || true
+}
+
+## Usage: forget_conflicted_files
+## Removes the record that `record_conflicted_files` writes in the current
+## directory's git directory, once the merge is committed.
+forget_conflicted_files() {
+  if forget_conflicts="$(git rev-parse --path-format=absolute --git-path manage-git-branches-conflicts)"; then
+    rm -f -- "${forget_conflicts}"
+  fi
+}
+
+## Usage: changed_conflicted_files
+## Prints, one per line, each conflicted file of the merge in progress in the
+## current directory, the top level of a working tree, whose content in the
+## working tree differs both from its version in AUTO_MERGE, git's automatic
+## merge, which contains the conflict markers, and from the content that
+## `record_conflicted_files` recorded for this merge.  Such a file was changed
+## after git, `git rerere`, and this package's scripts last left it:  for
+## example, by an AI agent whose work a script rejected, or by a person.  A
+## file that was deleted is printed too.
+changed_conflicted_files() {
+  changed_record=''
+  if changed_conflicts="$(git rev-parse --git-path manage-git-branches-conflicts)" \
+    && [ -f "${changed_conflicts}" ] \
+    && changed_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)" \
+    && [ "$(head -n 1 "${changed_conflicts}")" = "merge ${changed_merge_head}" ]; then
+    changed_record="$(sed -e 1d "${changed_conflicts}")"
+  fi
+  # As for ${resolve_files} in `resolve_merge_conflicts`, a pathname that
+  # contains a newline is not split.
+  git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n' | while IFS= read -r changed_file; do
+    # `--filters` converts AUTO_MERGE's file as a checkout would.
+    if [ -f "${changed_file}" ] \
+      && git cat-file --filters "AUTO_MERGE:${changed_file}" 2> /dev/null | cmp -s - "${changed_file}"; then
+      continue
+    fi
+    if [ -n "${changed_record}" ] \
+      && changed_hash="$(git hash-object --no-filters -- "${changed_file}" 2> /dev/null)" \
+      && printf '%s\n' "${changed_record}" | grep -F -x -q -- "$(printf '%s\t%s' "${changed_hash}" "${changed_file}")"; then
+      continue
+    fi
+    printf '%s\n' "${changed_file}"
+  done
 }
 
 ## Usage: new_uuid
@@ -2001,6 +2179,7 @@ pull_resolving() {
   # seem to be the pull's.
   if git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
     echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
+    report_merge_in_progress_in "${pull_dir}" "It was in progress when \`${SCRIPT_NAME}\` tried to pull."
     return 1
   fi
   # `git pull` decides, as usual, whether to rebase, to fast-forward, or to
@@ -2025,6 +2204,7 @@ pull_resolving() {
     # A merge without conflicts is in progress only if the editor failed.
     if [ -z "$(git -C "${pull_dir}" ls-files --unmerged)" ]; then
       echo "${SCRIPT_NAME}: cannot compose a message for the merge that the pull made in ${pull_dir}; the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
+      report_merge_in_progress_in "${pull_dir}" "\`${SCRIPT_NAME}\` could not compose its message."
       return 1
     fi
     pull_conflicted=1
@@ -2035,6 +2215,7 @@ pull_resolving() {
     if ! pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)" \
       || ! pull_message="$(cd -- "${pull_top}" && pull_merge_message)"; then
       echo "${SCRIPT_NAME}: cannot compose a message for the merge that the pull made in ${pull_dir}; the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
+      report_merge_in_progress_in "${pull_dir}" "\`${SCRIPT_NAME}\` could not compose its message."
       return 1
     fi
   fi
@@ -2059,17 +2240,43 @@ pull_resolving() {
       echo "${SCRIPT_NAME}: cannot cd to the top level of ${pull_dir}" >&2
       exit 1
     fi
-    pull_source="$(upstream_description)"
-    if ! resolve_merge_conflicts "${pull_resolver}" MERGE_HEAD "${pull_source}"; then
-      exit 1
-    fi
-    # `-F` supplies the message, rather than MERGE_MSG, to which `git merge`
-    # appended a list of the conflicts.
-    if ! printf '%s\n' "${pull_message}" | git commit -q --cleanup=whitespace -F -; then
-      echo "${SCRIPT_NAME}: cannot commit the merge of ${pull_source} in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
-      exit 1
+    commit_resolved_merge "${pull_resolver}" MERGE_HEAD "$(upstream_description)" "${pull_message}"
+  )
+}
+
+## Usage: report_merge_in_progress_in DIRECTORY [REASON]
+## Runs `report_merge_in_progress` with REASON at the top level of the
+## working tree that contains DIRECTORY, in a subshell that leaves the
+## current directory unchanged.
+report_merge_in_progress_in() {
+  (
+    if report_in_top="$(git -C "$1" rev-parse --show-toplevel)" && cd -- "${report_in_top}"; then
+      report_merge_in_progress "${2:-}"
     fi
   )
+}
+
+## Usage: commit_resolved_merge RESOLVER COMMIT SOURCE MESSAGE
+## Resolves the conflicts of the merge of COMMIT that is in progress in the
+## current directory, the top level of a working tree, with
+## `resolve_merge_conflicts`, given RESOLVER, COMMIT, and SOURCE, and commits
+## the merge with the message MESSAGE.  Returns 1, after printing a
+## diagnostic, on failure, and leaves the merge in progress, which it notes
+## in AGENT-TODO.md, as `resolve_merge_conflicts` does.
+commit_resolved_merge() {
+  if ! resolve_merge_conflicts "$1" "$2" "$3"; then
+    return 1
+  fi
+  # `-F` supplies MESSAGE, rather than MERGE_MSG, to which `git merge`
+  # appended a list of the conflicts.  `--cleanup=whitespace` keeps every
+  # line of MESSAGE, whatever comment character the configuration names.
+  if ! printf '%s\n' "$4" | git commit -q --cleanup=whitespace -F -; then
+    echo "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
+    report_merge_in_progress "\`${SCRIPT_NAME}\` could not commit it."
+    return 1
+  fi
+  forget_conflicted_files
+  return 0
 }
 
 ## Usage: pull_merge_message
@@ -2144,6 +2351,68 @@ upstream_description() {
       fi
       ;;
   esac
+}
+
+## Usage: in_progress_merge_message
+## Prints the message for the merge that is in progress in the current
+## directory, the top level of a working tree:  the message in MERGE_MSG,
+## which `git merge` or `git pull` wrote, without the list of conflicts that
+## git appended to it, with its subject's sources named without their URLs
+## where `subject_without_url` can, and with the location in each header of
+## the commit summaries that `merge.log` turns on, such as
+## "* 'feature' of /home/me/repos/proj:", written as `source_without_pathname`
+## writes it, as in "* 'feature' of proj:".  Returns 1 if there is no
+## MERGE_MSG or no merge is in progress.
+##
+## Git writes the list of conflicts as comment lines at the end of the
+## message:  a line "C Conflicts:" and one line "C<TAB>FILE" per file, where
+## C is the comment character, such as "#".  The list is recognized by that
+## form, whatever C is, rather than removed with the other comment lines,
+## because the configured comment character can differ from the one git
+## used, as with `core.commentChar` "auto", or can begin a header of the
+## commit summaries, as "*" does.
+in_progress_merge_message() {
+  if ! in_progress_head="$(git rev-parse --verify --quiet MERGE_HEAD)" \
+    || ! in_progress_file="$(git rev-parse --git-path MERGE_MSG)" \
+    || [ ! -f "${in_progress_file}" ]; then
+    return 1
+  fi
+  awk '
+    { line[NR] = $0 }
+    END {
+      n = NR
+      for (k = n; k >= 1; k--) {
+        if (line[k] ~ / Conflicts:$/) break
+      }
+      if (k >= 1) {
+        prefix = substr(line[k], 1, length(line[k]) - length(" Conflicts:"))
+        listed = (prefix != "")
+        for (i = k + 1; i <= n && listed; i++) {
+          if (substr(line[i], 1, length(prefix) + 1) != prefix "\t") listed = 0
+        }
+        if (listed) n = k - 1
+      }
+      while (n >= 1 && line[n] ~ /^[ \t]*$/) n--
+      for (i = 1; i <= n; i++) print line[i]
+    }' "${in_progress_file}" | {
+    if IFS= read -r in_progress_subject; then
+      subject_without_url "${in_progress_subject}" "${in_progress_head}"
+    fi
+    while IFS= read -r in_progress_line; do
+      case "${in_progress_line}" in
+        "* "*"' of "*": ("*")")
+          in_progress_rest="${in_progress_line#"* "}"
+          printf '* %s: (%s\n' "$(source_without_pathname "${in_progress_rest%": ("*}")" \
+            "${in_progress_rest##*": ("}"
+          ;;
+        "* "*"' of "*":")
+          in_progress_rest="${in_progress_line#"* "}"
+          printf '* %s:\n' "$(source_without_pathname "${in_progress_rest%:}")"
+          ;;
+        *) printf '%s\n' "${in_progress_line}" ;;
+      esac
+    done
+  }
 }
 
 ## Usage: subject_without_url SUBJECT COMMIT
@@ -2743,13 +3012,7 @@ merge_build_push() {
     # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
     # the current directory unchanged.
     if ! merge_top="$(git rev-parse --show-toplevel)" \
-      || ! (cd "${merge_top}" && resolve_merge_conflicts "${5:-}" "$1" "$3"); then
-      return 1
-    fi
-    # `-F` supplies the message, rather than MERGE_MSG, to which `git merge`
-    # appended a list of the conflicts.
-    if ! printf '%s\n' "${merge_message}" | git commit -q --cleanup=whitespace -F -; then
-      echo "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd)" >&2
+      || ! (cd "${merge_top}" && commit_resolved_merge "${5:-}" "$1" "$3" "${merge_message}"); then
       return 1
     fi
   fi

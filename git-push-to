@@ -97,7 +97,35 @@
 # `git rerere` or an AI agent (see below) resolves, this script checks the
 # resolution; `resolve_merge_conflicts` in common-functions.sh describes the
 # check.  Otherwise, this script stops with the merge still in progress, for
-# the user to finish or to abort with `git merge --abort`.
+# the user to finish or to abort with `git merge --abort`.  Whenever this
+# script stops with a merge in progress, it appends an entry that says so to
+# the file AGENT-TODO.md at the top level of the working tree (see "Asking an
+# AI agent" below), unless the file already has one for that merge.
+#
+# A merge can already be in progress when this script starts, as one is
+# after this script stopped as just described.  In each directory except the
+# first, before pulling it, this script finishes such a merge:  it runs
+# `git rerere`, which applies any resolution recorded since the merge stopped,
+# such as one recorded in another working tree of the same repository; it
+# resolves the remaining conflicts in the same way as above, asking the AI
+# agent about those that `git rerere` does not resolve; and it commits the
+# merge with the merge's own message.  The merge commit is pushed along with
+# the rest of the directory's branch, once the build succeeds.  This script
+# does not touch the merge, but stops, in these cases:
+#  * A process of Claude Code or of Codex (a process whose command name is
+#    "claude" or "codex") is working in the directory, as when you are
+#    resolving the conflicts in a session that this script printed a command
+#    to resume.  This script also stops if it cannot read the current
+#    directory of such a process.  On a system that has neither /proc nor
+#    `lsof`, this script
+#    cannot tell whether such a process is working in the directory; it says
+#    so, and finishes the merge.
+#  * No conflicted file remains, as when you have resolved and staged the
+#    conflicts but not committed the merge.
+#  * A conflicted file changed after git, `git rerere`, and this script left
+#    it, as when this script rejected an AI agent's work, whose edits remain,
+#    or when you have begun to resolve the conflicts.
+# A merge in progress in the first directory makes this script stop.
 
 # Asking an AI agent
 #
@@ -266,6 +294,9 @@ if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
 fi
 # shellcheck source=common-functions.sh
 . "${SCRIPT_DIR}/common-functions.sh"
+# This script runs git in directories other than the current one, such as in
+# `agent_processes_in`, where an inherited $GIT_DIR would override `git -C`.
+unset_git_location_variables
 
 ## Returns 0 if the given directory is the top level of a working tree whose
 ## branch still exists in its remote.  Otherwise, prints a diagnostic and
@@ -378,6 +409,183 @@ fetch_branch() {
   return 0
 }
 
+## Usage: agent_processes_in DIRECTORY
+## Prints, one per line, the process id and command name, such as
+## "4242 claude", of each process of the current user that runs an AI agent
+## and whose current directory is in the working tree whose top level is
+## DIRECTORY, an absolute pathname with symbolic links resolved.  A process
+## runs an AI agent if its command name is "claude" or "codex", as for Claude
+## Code and Codex installed as native executables.  A process whose current
+## directory is in another working tree nested in DIRECTORY, such as one in
+## DIRECTORY/.claude/worktrees/NAME, is not printed.  Neither is a process
+## that is this script or an ancestor of it, such as a Claude Code session
+## that ran this script.  Returns 1, after printing a diagnostic, if the
+## system has neither /proc nor `lsof`, so that the current directories of
+## processes cannot be read.  Returns 2, after printing a diagnostic for each,
+## if the current directory of some such process that is still running cannot
+## be read, so that whether it works in DIRECTORY is unknown; it still prints
+## the processes that it found in DIRECTORY.
+agent_processes_in() {
+  if [ -d /proc/self ]; then
+    agent_processes_via=proc
+  elif command -v lsof > /dev/null 2>&1; then
+    agent_processes_via=lsof
+  else
+    echo "${SCRIPT_NAME}: cannot tell whether an AI agent is working in $1, because this system has neither /proc nor lsof" >&2
+    return 1
+  fi
+  # The process ids of this shell and its ancestors, each followed by a blank.
+  agent_processes_ancestors=' '
+  agent_processes_pid=$$
+  while [ -n "${agent_processes_pid}" ] && [ "${agent_processes_pid}" -gt 1 ]; do
+    agent_processes_ancestors="${agent_processes_ancestors}${agent_processes_pid} "
+    agent_processes_pid="$(ps -o ppid= -p "${agent_processes_pid}" 2> /dev/null | tr -d ' ')"
+  done
+  # On macOS, `ps` prints a command name as the executable's full pathname,
+  # which can contain blanks.
+  # The loop runs in an explicit subshell, so that its exit status is the
+  # pipeline's even in a shell that runs a pipeline's last command in the
+  # current shell.
+  ps -U "$(id -u)" -o pid= -o comm= | (
+    agent_processes_status=0
+    while read -r agent_processes_pid agent_processes_command; do
+      case "${agent_processes_command##*/}" in
+        claude | codex) ;;
+        *) continue ;;
+      esac
+      case "${agent_processes_ancestors}" in
+        *" ${agent_processes_pid} "*) continue ;;
+      esac
+      if [ "${agent_processes_via}" = proc ]; then
+        agent_processes_cwd="$(readlink "/proc/${agent_processes_pid}/cwd" 2> /dev/null)"
+      else
+        agent_processes_cwd="$(lsof -a -p "${agent_processes_pid}" -d cwd -Fn 2> /dev/null | sed -n -e 's/^n//p')"
+      fi
+      if [ -z "${agent_processes_cwd}" ]; then
+        # A process that has exited since `ps` listed it, or a zombie, has no
+        # current directory and works nowhere.  For any other process, the
+        # lookup failed, and the process might be working in the directory.
+        case "$(ps -o stat= -p "${agent_processes_pid}" 2> /dev/null | tr -d ' ')" in
+          '' | Z*) continue ;;
+        esac
+        echo "${SCRIPT_NAME}: cannot read the current directory of ${agent_processes_command##*/} (process ${agent_processes_pid})" >&2
+        agent_processes_status=2
+        continue
+      fi
+      case "${agent_processes_cwd}" in
+        "$1" | "$1"/*) ;;
+        *) continue ;;
+      esac
+      # The test above is cheap; this one excludes a nested working tree.
+      if agent_processes_top="$(git -C "${agent_processes_cwd}" rev-parse --show-toplevel 2> /dev/null)" \
+        && [ "$(physical_path "${agent_processes_top}" 2> /dev/null)" = "$1" ]; then
+        printf '%s %s\n' "${agent_processes_pid}" "${agent_processes_command##*/}"
+      fi
+    done
+    exit "${agent_processes_status}"
+  )
+}
+
+## Usage: finish_merge_in_progress DIRECTORY
+## If a merge is in progress in DIRECTORY, the top level of a working tree and
+## the current directory, resolves its conflicts and commits it, as when a
+## merge that this script makes has conflicts (see `commit_resolved_merge`):
+## it first runs `git rerere`, which applies any resolution recorded since
+## the merge stopped, and then asks the AI agent ${llm_agent}, if it is not
+## empty, about the conflicts that remain.  The commit's message is the
+## merge's own (see `in_progress_merge_message`).  Does nothing if no merge
+## is in progress.
+##
+## Returns 1, after printing a diagnostic, and leaves the merge in progress,
+## which it notes in AGENT-TODO.md (see `report_merge_in_progress`), if an AI
+## agent is working in DIRECTORY (see `agent_processes_in`), as when the user
+## is resolving the conflicts in a session that this script printed a command
+## to resume; if no conflicted file remains; if a conflicted file changed
+## after git, `git rerere`, and this script left it (see
+## `changed_conflicted_files`), as when this script rejected an AI agent's
+## work, whose edits remain; or if the conflicts are not resolved or the
+## merge cannot be committed.  The same holds if the current directory of a
+## running AI agent cannot be read, so that it might be working in DIRECTORY.
+## If `agent_processes_in` cannot tell at all whether an AI agent is working
+## in DIRECTORY, because the system has neither /proc nor `lsof`, this
+## function proceeds as if none is.
+finish_merge_in_progress() {
+  if ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    return 0
+  fi
+  finish_in_progress="${SCRIPT_NAME}: a merge is in progress in $1"
+  # `agent_processes_in` has said why it cannot tell.
+  finish_agents="$(agent_processes_in "$1")"
+  finish_agents_status=$?
+  case "${finish_agents_status}" in
+    0 | 2) ;;
+    *)
+      echo "${SCRIPT_NAME}: finishing the merge in $1 anyway" >&2
+      finish_agents=''
+      ;;
+  esac
+  if [ -z "${finish_agents}" ] && [ "${finish_agents_status}" -eq 2 ]; then
+    echo "${finish_in_progress}, and an AI agent whose current directory cannot be read might be working there; finish the merge, or abort it with \`git merge --abort\`" >&2
+    report_merge_in_progress "The current directory of an AI agent's process could not be read, so the agent might have been working in the directory."
+    return 1
+  fi
+  if [ -n "${finish_agents}" ]; then
+    printf '%s\n' "${finish_agents}" | while read -r finish_pid finish_command; do
+      echo "${SCRIPT_NAME}: ${finish_command} (process ${finish_pid}) is working in $1" >&2
+    done
+    echo "${finish_in_progress}, and an AI agent is working there; finish the merge, or abort it with \`git merge --abort\`" >&2
+    report_merge_in_progress "An AI agent was working in the directory:  $(printf '%s\n' "${finish_agents}" \
+      | sed -e 's/^\([0-9]*\) \(.*\)/\2 (process \1)/' | paste -s -d ' ' -)."
+    return 1
+  fi
+  # `resolve_merge_conflicts` would say only that it cannot list the
+  # conflicted files.  A merge in progress without conflicts is one whose
+  # conflicts someone resolved and staged, or one whose message `git pull`
+  # could not compose; either way, a person should look at it.
+  if [ -z "$(git ls-files --unmerged)" ]; then
+    echo "${finish_in_progress}, and has no conflicted file; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
+    report_merge_in_progress "No conflicted file remains."
+    return 1
+  fi
+  # `resolve_merge_conflicts` would take such a file, which has no conflict
+  # markers, for one that `git rerere` resolved.
+  finish_changed="$(changed_conflicted_files)"
+  if [ -n "${finish_changed}" ]; then
+    printf '%s\n' "${finish_changed}" | while IFS= read -r finish_file; do
+      echo "${SCRIPT_NAME}: changed after the merge stopped: ${finish_file}" >&2
+    done
+    echo "${finish_in_progress}, and its conflicted files changed after the merge stopped, as when an AI agent's work was rejected; finish the merge, or abort it with \`git merge --abort\`" >&2
+    report_merge_in_progress "Its conflicted files changed after the merge stopped:  $(printf '%s\n' "${finish_changed}" | paste -s -d ' ' -)."
+    return 1
+  fi
+  # Every conflicted file is as git and `git rerere` left it, so `git rerere`
+  # changes only a file that still has conflict markers.
+  # `rerere.autoUpdate` false leaves each file that it resolves unmerged in
+  # the index, where `resolve_merge_conflicts` finds it.
+  if ! git -c rerere.autoUpdate=false rerere; then
+    echo "${SCRIPT_NAME}: \`git rerere\` failed in $1" >&2
+  fi
+  if ! finish_message="$(in_progress_merge_message)"; then
+    echo "${finish_in_progress}, and has no MERGE_MSG; finish it, or abort it with \`git merge --abort\`" >&2
+    report_merge_in_progress "It has no MERGE_MSG."
+    return 1
+  fi
+  # The source as `resolve_merge_conflicts` names it, such as "branch 'main'"
+  # for the subject "Merge branch 'main' into feature".
+  finish_subject="$(printf '%s\n' "${finish_message}" | head -n 1)"
+  case "${finish_subject}" in
+    "Merge "*)
+      finish_source="${finish_subject#Merge }"
+      case "${finish_source}" in
+        *" into "*) finish_source="${finish_source% into *}" ;;
+      esac
+      ;;
+    *) finish_source="commit $(git rev-parse --verify --quiet MERGE_HEAD)" ;;
+  esac
+  echo "${SCRIPT_NAME}: finishing the merge of ${finish_source} that is in progress in $1" >&2
+  commit_resolved_merge "${llm_agent}" MERGE_HEAD "${finish_source}" "${finish_message}"
+}
+
 ## A helper function that works on exactly two repositories.
 git_push_to() {
 
@@ -452,6 +660,13 @@ git_push_to() {
   fi
 
   if ! check_branch_exists "${to_absolute}"; then
+    return 1
+  fi
+
+  # TO_DIR is never the first directory of the chain.  A merge in progress in
+  # the first directory makes `pull_resolving` above fail.
+  # Note: pwd=to_absolute
+  if ! finish_merge_in_progress "${to_absolute}"; then
     return 1
   fi
 
