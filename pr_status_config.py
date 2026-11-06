@@ -25,6 +25,9 @@ DEFAULT_DEPENDENCY_DOCUMENT = "pr-status.md"
 # The name of the file in which each run of pr-status records what it found, for the next
 # run to compare with.
 SNAPSHOT = ".pr-status-snapshot.json"
+# The optional sections of the dependency document, which the config's
+# "documents": {"optional_sections": [...]} includes.
+OPTIONAL_SECTIONS = ("graph", "details", "prerequisites", "independent")
 
 
 def is_valid_filter(flt: Any) -> bool:
@@ -158,6 +161,15 @@ def filter_checker(value: Any, path: str, problems: list[str]) -> None:
         problems.append(
             f'{subject(path)} is {shown(value)}, not "all", "unassigned", or'
             ' {"unassigned_or": [LOGIN, ...]}'
+        )
+
+
+def optional_section_checker(value: Any, path: str, problems: list[str]) -> None:
+    """Append to problems a description of value if it is not an optional section's name."""
+    if value not in OPTIONAL_SECTIONS:
+        names = [json.dumps(s) for s in OPTIONAL_SECTIONS]
+        problems.append(
+            f"{subject(path)} is {shown(value)}, not {', '.join(names[:-1])}, or {names[-1]}"
         )
 
 
@@ -297,6 +309,7 @@ CONFIG_CHECKER = object_checker(
         "documents": object_checker(
             {
                 "dependencies": NAME_CHECKER,
+                "optional_sections": list_checker(optional_section_checker),
                 "unblocked": list_checker(
                     object_checker(
                         {"file": NAME_CHECKER, "title": LINE_CHECKER, "filter": filter_checker},

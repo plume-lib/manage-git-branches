@@ -208,6 +208,27 @@ class ReadConfigFileTest(unittest.TestCase):
             ],
         )
 
+    def test_valid_optional_sections(self):
+        """A list of optional sections' names is not an error."""
+        cfg = self.read({"repos": {}, "documents": {"optional_sections": ["graph", "details"]}})
+        self.assertEqual(cfg["documents"]["optional_sections"], ["graph", "details"])
+
+    def test_invalid_optional_sections(self):
+        """An unknown optional section, or a value that is not a list, is an error."""
+        self.assertEqual(
+            self.problems({"repos": {}, "documents": {"optional_sections": ["grpah"]}}),
+            [
+                (
+                    'documents.optional_sections[0] is "grpah", not "graph", "details",'
+                    ' "prerequisites", or "independent"'
+                )
+            ],
+        )
+        self.assertEqual(
+            self.problems({"repos": {}, "documents": {"optional_sections": "graph"}}),
+            ['documents.optional_sections is "graph", not a list'],
+        )
+
     def test_name(self):
         """A repository's name is its key, so the repository cannot give a name."""
         self.assertEqual(

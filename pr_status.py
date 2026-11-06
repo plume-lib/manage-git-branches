@@ -29,16 +29,8 @@ Each run:
     re-creates the ones whose origin is not the PR's head repository as working trees
     of a clone of that repository, when doing so loses no information,
   * prints the directories whose name or origin does not match their branch's PR,
-  * rewrites the unblocked documents (if the config names any) entirely, and the parts
-    of the dependency document between <!-- BEGIN GENERATED: name --> and
-    <!-- END GENERATED: name --> (or creates the dependency document, if it does not
-    exist),
-  * removes from the dependency document each heading, such as "## Blocked PRs", that
-    directly precedes a generated section that contains its own heading, and replaces the
-    "## Updating branches" heading and the text that follows it, up to the
-    "conflicting-push-commands" generated section, with an "updating-branches" generated
-    section; each such generated section contains its own heading and text (and is empty
-    if it has nothing to show),
+  * rewrites the unblocked documents (if the config names any) and the dependency
+    document entirely:  pr-status discards any edit to them,
   * sets the dependency document's title, in its YAML front matter and its "# " heading,
     to the current directory's basename followed by "PR status", as in "src PR status".
 """
@@ -64,35 +56,12 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import pr_status_config
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable
 
-# Matches the YAML front matter that starts a Markdown document, such as
-# "---\ntitle: src PR status\n---\n", and the blank lines that follow it.  The front matter
-# ends at its first "---" line.  Group 1 is the front matter's contents, such as
-# "title: src PR status\n", or "" if it is empty.
-FRONT_MATTER_RE = re.compile(r"---\n((?:(?!---\n).*\n)*)---\n+")
-# Matches the start of a top-level "title" entry of YAML front matter, such as "title: " or
-# '"title":', whose key may be quoted.
-TITLE_KEY_RE = re.compile(r"""(?:title|"title"|'title')[ \t]*:(?:[ \t]|$)""")
-# Matches a heading, such as "## Blocked PRs (daikon)", and the blank lines that follow it, if
-# they directly precede a generated section that contains its own heading, such as a
-# "blocked-REPO" section.  Such a section is empty if it has nothing to show, so a heading
-# outside it would be a second heading or would head nothing.
-HEADING_BEFORE_SECTION = re.compile(
-    r"^#+[ \t].*\n+(?=<!-- BEGIN GENERATED: (?:unblocked-[\w-]+|blocked-[\w-]+|status|clusters"
-    r"|updating-branches|conflicting-push-commands|push-commands|directories) -->)",
-    re.MULTILINE,
-)
-# Matches the "## Updating branches" heading and the text that follows it, if the text
-# contains no generated section and directly precedes the "conflicting-push-commands"
-# generated section.  The text consists of the "updating-branches" section's introduction
-# and the "### Dependency chains with conflicts" heading and its introduction, all of which
-# the "updating-branches" and "conflicting-push-commands" sections contain.
-UPDATING_TEXT_BEFORE_SECTION = re.compile(
-    r"^## Updating branches\n(?:(?!<!-- (?:BEGIN|END) GENERATED: ).*\n)*?"
-    r"(?=<!-- BEGIN GENERATED: conflicting-push-commands -->)",
-    re.MULTILINE,
-)
+# The config file's name, which the dependency document mentions.
+CONFIG = pr_status_config.CONFIG
+# The name of the generated section that resolve-conflicts reads from the dependency document.
+CONFLICTING_PUSH_COMMANDS = "conflicting-push-commands"
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -2148,8 +2117,11 @@ def gen_graph(models: list[Model], cfg: dict[str, Any]) -> list[str]:
     """Generate the "graph" section.
 
     Returns:
-        The section's lines:  a Mermaid graph of the dependencies.
+        The section's lines:  a "Dependency graph" heading and a Mermaid graph of the
+        dependencies, or no lines if no PR is in the dependency graph.
     """
+    if not any(m.components() for m in models):
+        return []
     lines = ["```mermaid", "graph BT"]
     for m in models:
         r = m.repo
@@ -2184,7 +2156,7 @@ def gen_graph(models: list[Model], cfg: dict[str, Any]) -> list[str]:
             ]
         )
     lines.append("```")
-    return lines
+    return headed("Dependency graph", None, lines)
 
 
 def dependency_cells(model: Model, n: int, mark_failed: bool = False) -> list[str]:
@@ -2234,13 +2206,23 @@ def dependency_cells(model: Model, n: int, mark_failed: bool = False) -> list[st
     return [depends_on(model, n, mark_failed), stated_text, contains]
 
 
-def gen_details(model: Model, cfg: dict[str, Any]) -> list[str]:
-    """Generate the "details-REPO" section.
+def gen_details(model: Model, cfg: dict[str, Any], label: str | None) -> list[str]:
+    """Generate the "details" section of the given repository.
+
+    Args:
+        model: a repository's model.
+        cfg: the configuration.
+        label: the repository's label, such as "daikon", to follow the section's heading, or
+            None to omit it.
 
     Returns:
-        The section's lines:  a table of the PRs in the dependency graph.
+        The section's lines:  a "Dependency details" heading and a table of the PRs in the
+        dependency graph, or no lines if no PR is in the dependency graph.
     """
     r = model.repo
+    shown = [n for n in sorted(model.open) if model.in_graph(n) or model.external[n]]
+    if not shown:
+        return []
     lines = [
         (
             "| PR | Assigned to | Depends on | Stated in description"
@@ -2248,9 +2230,7 @@ def gen_details(model: Model, cfg: dict[str, Any]) -> list[str]:
         ),
         "| --- | --- | --- | --- | --- | --- |",
     ]
-    for n in sorted(model.open):
-        if not model.in_graph(n) and not model.external[n]:
-            continue
+    for n in shown:
         t = title(model, cfg, n)
         has_prerequisite = bool(model.direct[n] or model.external[n])
         if has_prerequisite:
@@ -2261,14 +2241,20 @@ def gen_details(model: Model, cfg: dict[str, Any]) -> list[str]:
         # the default branch, unless a direct prerequisite conflicts too.
         notes = detail_notes(model, cfg, n, master=not has_prerequisite)
         lines.append(table_row([r.link(n) + " " + t, model.assigned_to(n), *cells, notes]))
-    return lines
+    return headed("Dependency details", label, lines)
 
 
-def gen_prerequisites(model: Model) -> list[str]:
-    """Generate the "prerequisites-REPO" section.
+def gen_prerequisites(model: Model, label: str | None) -> list[str]:
+    """Generate the "prerequisites" section of the given repository.
+
+    Args:
+        model: a repository's model.
+        label: the repository's label, such as "daikon", to follow the section's heading, or
+            None to omit it.
 
     Returns:
-        The section's lines:  the prerequisites that have no prerequisite of their own.
+        The section's lines:  a "Prerequisites" heading and the prerequisites that have no
+        prerequisite of their own, or no lines if there are none.
     """
     r = model.repo
     items = []
@@ -2280,7 +2266,10 @@ def gen_prerequisites(model: Model) -> list[str]:
         if who:
             extra.append("assigned to " + and_list(who))
         items.append(f"{r.link(n)} ({'; '.join(extra)})")
-    return [f"Prerequisites with no prerequisite of their own: {and_list(items)}."] if items else []
+    if not items:
+        return []
+    lines = [f"Prerequisites with no prerequisite of their own: {and_list(items)}."]
+    return headed("Prerequisites", label, lines)
 
 
 def textual_conflicts(model: Model, cfg: dict[str, Any], n: int) -> str:
@@ -2336,19 +2325,29 @@ def textual_conflicts(model: Model, cfg: dict[str, Any], n: int) -> str:
     return "; ".join(groups) or "none"
 
 
-def gen_independent(model: Model, cfg: dict[str, Any]) -> list[str]:
-    """Generate the "independent-REPO" section.
+def gen_independent(model: Model, cfg: dict[str, Any], label: str | None) -> list[str]:
+    """Generate the "independent" section of the given repository.
+
+    Args:
+        model: a repository's model.
+        cfg: the configuration.
+        label: the repository's label, such as "daikon", to follow the section's heading, or
+            None to omit it.
 
     Returns:
-        The section's lines:  a table of the PRs that have no prerequisite and no dependent.
+        The section's lines:  an "Independent PRs" heading and a table of the PRs that have no
+        prerequisite and no dependent, or no lines if there are none.
     """
     r = model.repo
+    independent = model.independent()
+    if not independent:
+        return []
     notes = cfg["repos"][r.name].get("independent_notes", {})
     lines = [
         "| PR | Assigned to | Unresolved threads | Title | Textual conflicts | Notes |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
-    for n in model.independent():
+    for n in independent:
         note = notes.get(str(n), "")
         auto = auto_notes(model, n, master=False)
         note = capitalize("; ".join(([note] if note else []) + auto))
@@ -2361,7 +2360,7 @@ def gen_independent(model: Model, cfg: dict[str, Any]) -> list[str]:
             note,
         ]
         lines.append(table_row(cells))
-    return lines
+    return headed("Independent PRs", label, lines)
 
 
 def pr_table(
@@ -2558,49 +2557,79 @@ def gen_directories(models: list[Model], cfg: dict[str, Any], base: str) -> list
     return headed("Other directories", None, lines)
 
 
-def replace_sections(text: str, generators: Mapping[str, Callable[[], list[str]]]) -> str:
-    """Replace each generated section of text.
-
-    generators maps a section name to a function that returns the section's lines.  A document
-    need not contain every section.
-
-    Returns:
-        text, with the contents of each generated section regenerated.
-    """
-    pattern = re.compile(
-        r"(<!-- BEGIN GENERATED: ([\w-]+) -->).*?(<!-- END GENERATED: \2 -->)", re.DOTALL
-    )
-    unknown = sorted({m[2] for m in pattern.finditer(text)} - set(generators))
-    if unknown:
-        sys.exit(
-            "pr-status: unknown generated sections in the dependency document: "
-            + ", ".join(unknown)
-        )
-    return pattern.sub(
-        lambda m: "\n".join([m[1], *fix_empty_cells(generators[m[2]]()), m[3]]), text
-    )
-
-
-def regenerate_dependency_document(
-    text: str, title: str, generators: Mapping[str, Callable[[], list[str]]]
+def dependency_document(
+    models: list[Model], cfg: dict[str, Any], base: str, as_of: str, title: str
 ) -> str:
-    """Set the header of the dependency document and regenerate its generated sections.
+    """Generate the dependency document.
 
-    A heading, such as "## Blocked PRs", that directly precedes a generated section that
-    contains its own heading is removed.  The "## Updating branches"
-    heading and the text that follows it, up to the "conflicting-push-commands" section, are
-    replaced by an "updating-branches" section, which contains that heading and an
-    introduction.
+    The lines "<!-- BEGIN GENERATED: conflicting-push-commands -->" and
+    "<!-- END GENERATED: conflicting-push-commands -->" delimit the document's
+    "Dependency chains with conflicts" section, which resolve-conflicts reads.  They are
+    present even if the section is empty.
+
+    Args:
+        models: a list of the models of the repositories, one per repository
+        cfg: the configuration
+        base: the directory that holds the working copy directories
+        as_of: the time of the PRs' data, such as "2026-11-05 17:59 PST"
+        title: the document's title, such as "src PR status"
 
     Returns:
-        text, with its title set and its generated sections regenerated.
+        The text of the dependency document:  YAML front matter and a "# " heading that give
+        title, then its sections, including each optional section that cfg names.
     """
-    text = set_header(text, title)
-    text = HEADING_BEFORE_SECTION.sub("", text)
-    text = UPDATING_TEXT_BEFORE_SECTION.sub(
-        "\n".join(generated("updating-branches")) + "\n\n", text
-    )
-    return replace_sections(text, generators)
+    optional = set(cfg["documents"].get("optional_sections", []))
+    all_commands = push_commands(models, base)
+    conflicting_commands = push_commands(models, base, conflicts_only=True)
+    lines = [
+        "---",
+        f"title: {yaml_string(title)}",
+        "---",
+        "",
+        f"# {title}",
+        "",
+        f"As of {as_of}.",
+        "Generated by `pr-status`; do not edit it by hand.",
+        "",
+        "## How dependencies are determined",
+        "",
+        (
+            'A PR depends on another PR if its description says so (for example, "Land after #N"),'
+            " if its base branch is the other PR's branch,"
+            " if its branch contains all of the other PR's non-merge commits,"
+            f" or if `{CONFIG}` says so."
+            ' PRs that land together, as "Land with #N" says, are one unit,'
+            " which may span repositories:  each member depends on every prerequisite of every"
+            " member, and on no member, even if its branch contains another member's commits."
+        ),
+        "",
+        *gen_status(models),
+        *gen_clusters(models, cfg),
+        *(gen_graph(models, cfg) if "graph" in optional else []),
+        *gen_updating_branches(models, all_commands),
+        "",
+        f"<!-- BEGIN GENERATED: {CONFLICTING_PUSH_COMMANDS} -->",
+        *gen_push_commands(conflicting_commands, base, conflicts_only=True),
+        f"<!-- END GENERATED: {CONFLICTING_PUSH_COMMANDS} -->",
+        *gen_push_commands(all_commands, base),
+    ]
+    # Each repository's label distinguishes its sections' headings in a multi-repository
+    # document.
+    labeled = len(models) > 1
+    for m in models:
+        label = m.repo.label if labeled else None
+        lines += gen_unblocked(m, cfg, base, label)
+        lines += gen_blocked(m, cfg, base, label)
+        if "details" in optional:
+            lines += gen_details(m, cfg, label)
+        if "prerequisites" in optional:
+            lines += gen_prerequisites(m, label)
+        if "independent" in optional:
+            lines += gen_independent(m, cfg, label)
+    lines += gen_directories(models, cfg, base)
+    # Each section is set off by blank lines, so adjacent sections yield several.
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(fix_empty_cells(lines)))
+    return text.rstrip("\n") + "\n"
 
 
 def yaml_string(s: str) -> str:
@@ -2619,84 +2648,6 @@ def yaml_string(s: str) -> str:
     # A JSON string is a YAML double-quoted scalar.  Escaping a character outside the Basic
     # Multilingual Plane, as ensure_ascii does, would yield a surrogate pair, which YAML rejects.
     return json.dumps(s, ensure_ascii=False)
-
-
-def set_header(text: str, title: str) -> str:
-    """Return the given Markdown text, with a header that has the given title.
-
-    The header is YAML front matter whose "title" entry is title, followed by a "# " heading
-    of title, followed by an "as-of" generated section.  The title replaces the "title" entry
-    of the front matter, including the indented continuation lines (and blank lines among them)
-    of a multi-line value, and the "# " heading that starts the text after the front matter.
-    Text that lacks any part of the header gains it.  The rest of the front matter, and an
-    existing "as-of" section wherever it is, are retained.
-
-    Args:
-        text: a Markdown document, possibly starting with YAML front matter.
-        title: a title, such as "src PR status".
-
-    Returns:
-        text, starting with a header that has title.
-    """
-    title_entry = f"title: {yaml_string(title)}"
-    m = FRONT_MATTER_RE.match(text)
-    entries = m[1].splitlines() if m else []
-    body = text[m.end() :] if m else text.lstrip("\n")
-    for i, entry in enumerate(entries):
-        if TITLE_KEY_RE.match(entry):
-            # The value continues through indented lines, and through blank lines that precede
-            # an indented line.
-            end = i + 1
-            for j in range(i + 1, len(entries)):
-                if not entries[j].strip():
-                    continue
-                if entries[j][:1] not in (" ", "\t"):
-                    break
-                end = j + 1
-            entries[i:end] = [title_entry]
-            break
-    else:
-        entries.insert(0, title_entry)
-    if body.startswith(("# ", "#\t")):
-        body = body.partition("\n")[2].lstrip("\n")
-    if "<!-- BEGIN GENERATED: as-of -->" not in body:
-        body = "\n".join(generated("as-of")) + "\n" + ("\n" + body if body else "")
-    return "\n".join(["---", *entries, "---", "", f"# {title}", "", body])
-
-
-def section_generators(
-    models: list[Model], cfg: dict[str, Any], base: str, as_of: str
-) -> dict[str, Callable[[], list[str]]]:
-    """Return the generators of the generated sections.
-
-    Returns:
-        A map from each generated section name to a function that returns the section's lines.
-    """
-    all_commands = functools.cache(functools.partial(push_commands, models, base))
-    generators: dict[str, Callable[[], list[str]]] = {
-        "as-of": lambda: [f"As of {as_of}."],
-        "status": lambda: gen_status(models),
-        "clusters": lambda: gen_clusters(models, cfg),
-        "graph": lambda: gen_graph(models, cfg),
-        "directories": lambda: gen_directories(models, cfg, base),
-        "updating-branches": lambda: gen_updating_branches(models, all_commands()),
-        "push-commands": lambda: gen_push_commands(all_commands(), base),
-        "conflicting-push-commands": lambda: gen_push_commands(
-            push_commands(models, base, conflicts_only=True), base, conflicts_only=True
-        ),
-    }
-    # Each repository's label distinguishes its sections' headings in a multi-repository
-    # document.
-    labeled = len(models) > 1
-    for m in models:
-        name = m.repo.name
-        label = m.repo.label if labeled else None
-        generators[f"details-{name}"] = lambda m=m: gen_details(m, cfg)
-        generators[f"prerequisites-{name}"] = lambda m=m: gen_prerequisites(m)
-        generators[f"independent-{name}"] = lambda m=m: gen_independent(m, cfg)
-        generators[f"unblocked-{name}"] = functools.partial(gen_unblocked, m, cfg, base, label)
-        generators[f"blocked-{name}"] = functools.partial(gen_blocked, m, cfg, base, label)
-    return generators
 
 
 # ---------- commands that update dependent branches ----------
@@ -3226,57 +3177,6 @@ def load_config(program: str) -> dict[str, Any]:
     return cfg
 
 
-def generated(name: str) -> list[str]:
-    """Return an empty generated section.
-
-    Returns:
-        The lines that delimit the section.
-    """
-    return [f"<!-- BEGIN GENERATED: {name} -->", f"<!-- END GENERATED: {name} -->"]
-
-
-def default_dependency_document(models: list[Model]) -> str:
-    """Generate the dependency document to use when it does not exist.
-
-    Returns:
-        The text of a dependency document that has no header (set_header adds it) and whose
-        generated sections are empty.
-    """
-    lines = [
-        (
-            "The title and the generated sections are regenerated by `pr-status`;"
-            " other text is retained."
-        ),
-        "",
-        "## How dependencies are determined",
-        "",
-        (
-            'A PR depends on another PR if its description says so (for example, "Land after #N"),'
-            " if its base branch is the other PR's branch,"
-            " if its branch contains all of the other PR's non-merge commits,"
-            f" or if `{pr_status_config.CONFIG}` says so."
-            ' PRs that land together, as "Land with #N" says, are one unit,'
-            " which may span repositories:  each member depends on every prerequisite of every"
-            " member, and on no member, even if its branch contains another member's commits."
-        ),
-        "",
-        *generated("status"),
-        "",
-        *generated("clusters"),
-        "",
-        *generated("updating-branches"),
-        "",
-        *generated("conflicting-push-commands"),
-        "",
-        *generated("push-commands"),
-    ]
-    for m in models:
-        name = m.repo.name
-        lines += ["", *generated(f"unblocked-{name}"), "", *generated(f"blocked-{name}")]
-    lines += ["", *generated("directories")]
-    return "\n".join(lines) + "\n"
-
-
 def shell_word(word: str) -> str:
     """Return the given word, quoted if a shell would not otherwise read it as that one word.
 
@@ -3424,18 +3324,12 @@ def main() -> None:
     unblocked_docs = cfg["documents"].get("unblocked", [])
     for doc in unblocked_docs:
         pathlib.Path(doc["file"]).write_text(unblocked_doc(models, cfg, base, doc, as_of))
-    if dependencies.exists():
-        text = dependencies.read_text()
-    else:
-        text = default_dependency_document(models)
     title = f"{pathlib.Path(base).name} PR status"
-    generators = section_generators(models, cfg, base, as_of)
-    text = regenerate_dependency_document(text, title, generators)
-    dependencies.write_text(text)
+    dependencies.write_text(dependency_document(models, cfg, base, as_of, title))
     with pathlib.Path(pr_status_config.SNAPSHOT).open("w") as f:
         json.dump({"time": now.isoformat(timespec="seconds"), "facts": new}, f, indent=1)
     written = [d["file"] for d in unblocked_docs]
-    written += [f"the title and generated sections of {dependencies}", pr_status_config.SNAPSHOT]
+    written += [str(dependencies), pr_status_config.SNAPSHOT]
     print(f"## Wrote {and_list(written)}")
     if failed_updates:
         sys.exit(1)
