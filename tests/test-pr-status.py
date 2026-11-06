@@ -774,27 +774,27 @@ class HeadingBeforeSectionTest(unittest.TestCase):
         )
         self.assertEqual(pr_status.HEADING_BEFORE_SECTION.sub("", text), self.SECTIONS)
 
-    def test_retains_other_headings(self):
-        """A heading that precedes no "unblocked-REPO" or "blocked-REPO" section is retained."""
+    def test_retains_heading_before_prose(self):
+        """A heading that precedes prose, not a generated section, is retained."""
         text = "## Blocked PRs\n\nProse.\n\n" + self.SECTIONS
         self.assertEqual(pr_status.HEADING_BEFORE_SECTION.sub("", text), text)
 
-    def test_retains_heading_before_other_kind_of_section(self):
-        """A heading is retained if it precedes the other kind of section."""
-        for text in [
-            "## Unblocked PRs\n\n<!-- BEGIN GENERATED: blocked-repo -->\n",
-            "## Blocked PRs\n\n<!-- BEGIN GENERATED: unblocked-repo -->\n",
-            "## Status\n\n<!-- BEGIN GENERATED: clusters -->\n",
-            "### All dependency chains\n\n<!-- BEGIN GENERATED: conflicting-push-commands -->\n",
-        ]:
-            with self.subTest(text=text):
+    def test_retains_heading_before_section_without_heading(self):
+        """A heading is retained if it precedes a section that contains no heading."""
+        for section in ["graph", "details-repo", "as-of"]:
+            with self.subTest(section=section):
+                text = f"## Graph\n\n<!-- BEGIN GENERATED: {section} -->\n"
                 self.assertEqual(pr_status.HEADING_BEFORE_SECTION.sub("", text), text)
 
     def test_removes_other_headings(self):
-        """A heading that precedes the generated section that contains it is removed."""
+        """Any heading that precedes a section that contains a heading is removed."""
         for heading, section in [
             ("## Status", "status"),
+            ("## Status ", "status"),
+            ("## Problems", "status"),
             ("## Dependency clusters", "clusters"),
+            ("## Updating branches", "updating-branches"),
+            ("### Dependency chains with conflicts", "conflicting-push-commands"),
             ("### All dependency chains", "push-commands"),
             ("## Other directories", "directories"),
         ]:
@@ -1049,21 +1049,21 @@ class GenPushCommandsTest(unittest.TestCase):
     CHAIN = ("cd /base && \\", "git-push-to \\", "  pr1 \\", "  pr2 && \\", 'echo "success"')
     NO_CHAIN = ("cd /base && \\", 'echo "success"')
 
-    def generate(self, commands, conflicts_only):
-        """Run gen_push_commands, with push_commands returning the given commands and no notes.
+    def generate(self, commands, conflicts_only, notes=()):
+        """Run gen_push_commands on the given commands.
 
         Args:
             commands: the commands' lines, either CHAIN or NO_CHAIN
             conflicts_only: True to generate the "conflicting-push-commands" section; False
                 to generate the "push-commands" section
+            notes: the commands' notes, such as ["No working copy of upstream"]
 
         Returns:
             The section's lines.
         """
         chain_count = 1 if commands == self.CHAIN else 0
-        result = pr_status.PushCommands(list(commands), [], chain_count)
-        with mock.patch.object(pr_status, "push_commands", return_value=result):
-            return pr_status.gen_push_commands([], "/base", conflicts_only)
+        result = pr_status.PushCommands(list(commands), list(notes), chain_count)
+        return pr_status.gen_push_commands(result, "/base", conflicts_only)
 
     def test_suggests_resolve_conflicts_first(self):
         """The conflict-only section suggests resolve-conflicts before the commands."""
@@ -1073,10 +1073,36 @@ class GenPushCommandsTest(unittest.TestCase):
         self.assertEqual(lines[lines.index("```sh") :], ["```sh", *self.CHAIN, "```", ""])
 
     def test_empty_without_chains(self):
-        """With no chain, either section is empty."""
+        """With no chain and no note, either section is empty."""
         for conflicts_only in [True, False]:
             with self.subTest(conflicts_only=conflicts_only):
                 self.assertEqual(self.generate(self.NO_CHAIN, conflicts_only), [])
+
+    def test_notes_without_chains(self):
+        """With notes but no chain, only the section of all chains shows the notes."""
+        notes = ["No working copy"]
+        self.assertEqual(self.generate(self.NO_CHAIN, conflicts_only=True, notes=notes), [])
+        self.assertEqual(
+            self.generate(self.NO_CHAIN, conflicts_only=False, notes=notes),
+            ["", "### All dependency chains", "", "No working copy.", ""],
+        )
+
+    def test_notes_with_chains(self):
+        """With notes and a chain, the notes precede the commands."""
+        self.assertEqual(
+            self.generate(self.CHAIN, conflicts_only=False, notes=["No working copy"]),
+            [
+                "",
+                "### All dependency chains",
+                "",
+                "No working copy.",
+                "",
+                "```sh",
+                *self.CHAIN,
+                "```",
+                "",
+            ],
+        )
 
     def test_no_suggestion_for_all_chains(self):
         """The section of all chains does not suggest resolve-conflicts."""
@@ -1090,23 +1116,29 @@ class GenUpdatingBranchesTest(unittest.TestCase):
     """Tests for gen_updating_branches."""
 
     @staticmethod
-    def generate(chain_count):
-        """Run gen_updating_branches for one repository, with the given number of chains.
+    def generate(chain_count, notes=()):
+        """Run gen_updating_branches for one repository, with the given chains and notes.
 
         Args:
-            chain_count: the number of chains that push_commands reports, such as 1
+            chain_count: the number of chains that the push commands run, such as 1
+            notes: the push commands' notes, such as ["No working copy of upstream"]
 
         Returns:
             The section's lines.
         """
         model = types.SimpleNamespace(repo=types.SimpleNamespace(default_branch="master"))
-        result = pr_status.PushCommands([], [], chain_count)
-        with mock.patch.object(pr_status, "push_commands", return_value=result):
-            return pr_status.gen_updating_branches([model], "/base")
+        commands = pr_status.PushCommands([], list(notes), chain_count)
+        return pr_status.gen_updating_branches([model], commands)
 
     def test_empty_without_chains(self):
-        """With no chain, the section is empty."""
+        """With no chain and no note, the section is empty."""
         self.assertEqual(self.generate(0), [])
+
+    def test_heading_with_notes(self):
+        """With a note but no chain, the section has a heading."""
+        self.assertEqual(
+            self.generate(0, ["No working copy"])[:3], ["", "## Updating branches", ""]
+        )
 
     def test_heading_with_chains(self):
         """With a chain, the section has a heading and names upstream."""
