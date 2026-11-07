@@ -1777,15 +1777,18 @@ fi
 # A linked worktree whose repository is gone is diagnosed as such, both by
 # `git-new-branch` and by `git-checkout-branch`, rather than merely as a
 # directory whose top level cannot be determined.
-make_repo "${tmpdir}/doomed" || exit 1
-git -C "${tmpdir}/doomed" worktree add -q -b orphan "${tmpdir}/orphan"
-mv "${tmpdir}/doomed" "${tmpdir}/doomed-moved"
+# Git writes the physical pathname of the git directory in the worktree's
+# `.git` file.  On macOS, ${tmpdir} is not physical.
+physical_tmpdir="$(CDPATH='' cd -- "${tmpdir}" && pwd -P)"
+make_repo "${physical_tmpdir}/doomed" || exit 1
+git -C "${physical_tmpdir}/doomed" worktree add -q -b orphan "${physical_tmpdir}/orphan"
+mv "${physical_tmpdir}/doomed" "${physical_tmpdir}/doomed-moved"
 for broken_command in "${GIT_NEW_BRANCH}" "${SCRIPT_DIR}/../git-checkout-branch"; do
-  if out="$(cd "${tmpdir}/orphan" && "${broken_command}" newbranch 2>&1)"; then
+  if out="$(cd "${physical_tmpdir}/orphan" && "${broken_command}" newbranch 2>&1)"; then
     fail "zero exit status for $(basename -- "${broken_command}") in a broken worktree"
   fi
   case "${out}" in
-    *"broken git working tree"*"its repository does not exist; it was moved or deleted: ${tmpdir}/doomed/.git"*) ;;
+    *"broken git working tree"*"its repository does not exist; it was moved or deleted: ${physical_tmpdir}/doomed/.git"*) ;;
     *) fail "unexpected message for $(basename -- "${broken_command}") in a broken worktree: ${out}" ;;
   esac
 done

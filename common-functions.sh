@@ -3389,8 +3389,9 @@ enter_slug_clone() {
   fi
   if ! esc_toplevel="$(git rev-parse --show-toplevel 2> /dev/null)" \
     || [ -z "${esc_toplevel}" ]; then
-    report_broken_working_tree "${PWD}" 'ERROR: ' \
-      || echo "${SCRIPT_NAME}: ERROR: a slug must be given in a working tree of the project, such as PROJECT, PROJECT-fork-ORG, or one of their branch directories" >&2
+    report_unusable_working_tree "${PWD}" 'ERROR: ' \
+      'a slug must be given in a working tree of the project, such as PROJECT, PROJECT-fork-ORG, or one of their branch directories' \
+      || true
     return 1
   fi
   esc_main="$(main_working_tree)" || esc_main="${esc_toplevel}"
@@ -3558,6 +3559,11 @@ gitfile_git_dir() {
     'gitdir: '?*) ggd_path="${ggd_line#gitdir: }" ;;
     *) return 1 ;;
   esac
+  # Remove trailing slashes, which git accepts, so that the last component of
+  # the printed pathname is the git directory's own name.
+  while [ "${ggd_path%/}" != "${ggd_path}" ] && [ -n "${ggd_path%/}" ]; do
+    ggd_path="${ggd_path%/}"
+  done
   case "${ggd_path}" in
     /* | [A-Za-z]:[/\\]*) ;;
     *)
@@ -3596,15 +3602,27 @@ missing_git_dir() {
   printf '%s\n' "${mgd_path}"
 }
 
+## Usage: report_unusable_working_tree DIRECTORY PREFIX MESSAGE
+## Prints to standard error a diagnostic that DIRECTORY, a directory that git
+## cannot use as a working tree, is unusable.  If DIRECTORY is in a broken
+## working tree, prints the diagnostic that `report_broken_working_tree`
+## prints, and returns 0.  Otherwise prints MESSAGE, such as "not the top
+## level of a git working tree: DIRECTORY", and returns 1.  PREFIX, such as
+## "ERROR: " or "", begins the diagnostic's first line, after the name of the
+## command.
+report_unusable_working_tree() {
+  report_broken_working_tree "$1" "$2" && return 0
+  echo "${SCRIPT_NAME}: $2$3" >&2
+  return 1
+}
+
 ## Usage: report_not_working_tree_top DIRECTORY [PREFIX]
 ## Prints to standard error a diagnostic that DIRECTORY is not the top level
-## of a git working tree.  If DIRECTORY is in a broken working tree, the
-## diagnostic is the one that `report_broken_working_tree` prints.  PREFIX,
+## of a git working tree, as `report_unusable_working_tree` does.  PREFIX,
 ## such as "ERROR: ", begins the diagnostic's first line, after the name of
 ## the command.
 report_not_working_tree_top() {
-  report_broken_working_tree "$1" "${2:-}" \
-    || echo "${SCRIPT_NAME}: ${2:-}not the top level of a git working tree: $1" >&2
+  report_unusable_working_tree "$1" "${2:-}" "not the top level of a git working tree: $1" || true
 }
 
 ## Usage: report_broken_working_tree DIRECTORY [PREFIX]
@@ -3615,7 +3633,7 @@ report_not_working_tree_top() {
 ##
 ## A broken working tree is the nearest of DIRECTORY and its ancestors that
 ## holds a `.git`, if that `.git` is a file that names a git directory that
-## does not exist.  An example is a linked worktree whose main working tree
+## does not exist or is not a directory.  An example is a linked worktree whose main working tree
 ## was deleted:  its files remain, but git refuses every command in it, saying
 ## only "not a git repository".  The diagnostic names the missing git
 ## directory and, for a linked worktree, says whether the repository that the
@@ -3637,6 +3655,10 @@ report_broken_working_tree() {
     echo "${SCRIPT_NAME}: ${2:-}in a broken git working tree: $1" >&2
     echo "${SCRIPT_NAME}: the broken working tree is: ${rbwt_top}" >&2
   fi
+  if [ -e "${rbwt_missing}" ] || [ -L "${rbwt_missing}" ]; then
+    echo "${SCRIPT_NAME}: its .git file names, as its git directory, something that is not a directory: ${rbwt_missing}" >&2
+    return 0
+  fi
   echo "${SCRIPT_NAME}: its .git file names a git directory that does not exist: ${rbwt_missing}" >&2
   # The git directory of a linked worktree is REPOSITORY/worktrees/NAME,
   # where REPOSITORY is the git directory of the main working tree, such as
@@ -3650,7 +3672,14 @@ report_broken_working_tree() {
     echo "${SCRIPT_NAME}: its repository exists but no longer registers this worktree: ${rbwt_repository}" >&2
   elif [ ! -e "${rbwt_repository}" ]; then
     echo "${SCRIPT_NAME}: its repository does not exist; it was moved or deleted: ${rbwt_repository}" >&2
-    echo "${SCRIPT_NAME}: if the repository was moved, running \`git worktree repair ${rbwt_top}\` in it reconnects this worktree" >&2
+    # Quote the pathname if the shell would not take it as one word.
+    case "${rbwt_top}" in
+      *[!A-Za-z0-9/._+-]*)
+        rbwt_quoted="'$(printf '%s\n' "${rbwt_top}" | sed "s/'/'\\\\''/g")'"
+        ;;
+      *) rbwt_quoted="${rbwt_top}" ;;
+    esac
+    echo "${SCRIPT_NAME}: if the repository was moved, running \`git worktree repair ${rbwt_quoted}\` in it reconnects this worktree" >&2
   fi
 }
 

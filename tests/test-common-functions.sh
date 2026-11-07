@@ -1151,6 +1151,45 @@ case "${rbwt_out}" in
   *"its repository exists but no longer registers this worktree: ${mgd_root}/exists/.git"*) ;;
   *) fail "unexpected report for an unregistered worktree: ${rbwt_out}" ;;
 esac
+# Trailing slashes in the `.git` file do not hide the repository.
+printf 'gitdir: %s//\n' "${mgd_root}/gone/.git/worktrees/wt" > "${mgd_root}/wt/.git"
+rbwt_out="$(report_broken_working_tree "${mgd_root}/wt" 2>&1)" \
+  || fail "report_broken_working_tree returned 1 for a gitdir with trailing slashes"
+case "${rbwt_out}" in
+  *"does not exist: ${mgd_root}/gone/.git/worktrees/wt
+"*"its repository does not exist; it was moved or deleted: ${mgd_root}/gone/.git"*) ;;
+  *) fail "unexpected report for a gitdir with trailing slashes: ${rbwt_out}" ;;
+esac
+# A git directory that is a regular file is reported as not a directory, and
+# not as missing.
+printf 'gitdir: %s\n' "${mgd_root}/exists/.git/HEAD" > "${mgd_root}/wt/.git"
+rbwt_out="$(report_broken_working_tree "${mgd_root}/wt" 2>&1)" \
+  || fail "report_broken_working_tree returned 1 for a gitdir that is a regular file"
+case "${rbwt_out}" in
+  *"something that is not a directory: ${mgd_root}/exists/.git/HEAD"*) ;;
+  *) fail "unexpected report for a gitdir that is a regular file: ${rbwt_out}" ;;
+esac
+case "${rbwt_out}" in
+  *"does not exist"* | *"its repository"*)
+    fail "misleading report for a gitdir that is a regular file: ${rbwt_out}"
+    ;;
+esac
+# The suggested `git worktree repair` command quotes a pathname that the
+# shell would split or interpret.
+mkdir -p "${mgd_root}/it's wt"
+printf 'gitdir: %s\n' "${mgd_root}/gone/.git/worktrees/wt" > "${mgd_root}/it's wt/.git"
+rbwt_out="$(report_broken_working_tree "${mgd_root}/it's wt" 2>&1)" || true
+case "${rbwt_out}" in
+  *"git worktree repair '${mgd_physical}/it'\''s wt'\`"*) ;;
+  *) fail "unexpected repair command for a pathname with a space and a quote: ${rbwt_out}" ;;
+esac
+# `report_unusable_working_tree` prints MESSAGE and returns 1 for a directory
+# that is not in a broken working tree.
+if rnwtt_out="$(report_unusable_working_tree "${mgd_root}/exists/.git" 'ERROR: ' 'some message' 2>&1)"; then
+  fail "report_unusable_working_tree returned 0 for a directory that is not broken"
+fi
+[ "${rnwtt_out}" = "${SCRIPT_NAME}: ERROR: some message" ] \
+  || fail "unexpected report_unusable_working_tree diagnostic: ${rnwtt_out}"
 # A missing git directory that is not REPOSITORY/worktrees/NAME, even one
 # with a component "worktrees" or whose parent "worktrees" is not in a git
 # directory, gets no report about a repository.
