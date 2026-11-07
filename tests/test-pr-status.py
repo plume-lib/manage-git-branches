@@ -907,6 +907,18 @@ class GenPushCommandsTest(unittest.TestCase):
 
     CHAIN = ("cd /base && \\", "git-push-to \\", "  pr1 \\", "  pr2 && \\", 'echo "success"')
     NO_CHAIN = ("cd /base && \\", 'echo "success"')
+    # The lines that end a section whose commands are CHAIN.
+    BLOCK = (
+        '<div style="position:relative">',
+        pr_status.COPY_BUTTON,
+        "",
+        "```sh",
+        *CHAIN,
+        "```",
+        "",
+        "</div>",
+        "",
+    )
 
     def generate(self, commands, conflicts_only, notes=()):
         """Run gen_push_commands on the given commands.
@@ -929,7 +941,7 @@ class GenPushCommandsTest(unittest.TestCase):
         lines = self.generate(self.CHAIN, conflicts_only=True)
         self.assertEqual(lines[:3], ["", "### Dependency chains with conflicts", ""])
         self.assertIn("`cd /base && resolve-conflicts`", lines[5])
-        self.assertEqual(lines[lines.index("```sh") :], ["```sh", *self.CHAIN, "```", ""])
+        self.assertEqual(lines[lines.index("```sh") - 3 :], list(self.BLOCK))
 
     def test_empty_without_chains(self):
         """With no chain and no note, either section is empty."""
@@ -956,10 +968,7 @@ class GenPushCommandsTest(unittest.TestCase):
                 "",
                 "No working copy.",
                 "",
-                "```sh",
-                *self.CHAIN,
-                "```",
-                "",
+                *self.BLOCK,
             ],
         )
 
@@ -967,7 +976,7 @@ class GenPushCommandsTest(unittest.TestCase):
         """The section of all chains does not suggest resolve-conflicts."""
         self.assertEqual(
             self.generate(self.CHAIN, conflicts_only=False),
-            ["", "### All dependency chains", "", "```sh", *self.CHAIN, "```", ""],
+            ["", "### All dependency chains", "", *self.BLOCK],
         )
 
 
