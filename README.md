@@ -212,8 +212,10 @@ The commands are:
   given PR (such as `REPO#100` or `ORG/REPO#100`) and every PR that must
   land for it to land:  the PRs that it depends on or lands with,
   recursively.  It shows them in bold on a light red background, and as red
-  nodes in the dependency graph.  It is not allowed with a `--print-...`
-  option.
+  nodes in the dependency graph.  The PR `nested` means, in each
+  repository, the PR that starts the longest path of prerequisites (each
+  PR that starts one, if several paths are longest), as in
+  `--highlight nested`.  It is not allowed with a `--print-...` option.
   Run it in a directory that holds the working copy directories, or pass
   that directory with `-C`.
   This command needs Python 3.10 or later, and the programs that

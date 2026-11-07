@@ -9,6 +9,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --print-conflicting-push-chains  # print the chains with conflicts, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
+  pr-status --highlight nested  # highlight the PR that starts each longest path
 
 Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
@@ -508,7 +509,9 @@ def resolve_pr_names(models: list[Model], names: Iterable[str]) -> set[tuple[str
         names: a list of strings, each of which names PRs, separated by commas or whitespace.
             A PR's name is a repository's GitHub slug, its name, or the prefix of its
             references (which is "" when the documents refer to its PRs as "#N"), followed by
-            "#" and a PR number, as in "ORG/REPO#100", "REPO#100", or "#100".
+            "#" and a PR number, as in "ORG/REPO#100", "REPO#100", or "#100".  The name
+            "nested" names, in each repository, the first PR of each longest path of
+            prerequisites (see Model.deepest_roots).
 
     Returns:
         The PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR number.
@@ -518,6 +521,9 @@ def resolve_pr_names(models: list[Model], names: Iterable[str]) -> set[tuple[str
     """
     result = set()
     for name in (s for arg in names for s in re.split(r"[,\s]+", arg) if s):
+        if name.lower() == "nested":
+            result.update((m.repo.gh.lower(), n) for m in models for n in m.deepest_roots())
+            continue
         head, sep, number = name.rpartition("#")
         if not sep or not number.isdigit():
             msg = f"{name} is not of the form REPO#N"
@@ -1145,6 +1151,35 @@ class Model:
             if self.in_graph(n):
                 lev(n)
         return level
+
+    def deepest_roots(self) -> set[int]:
+        """Return the first PR of each longest path of prerequisites in the dependency graph.
+
+        A path of prerequisites is a list of PRs, each a direct prerequisite of the next,
+        whose first PR has no prerequisite, such as [1, 4, 7] if PR 7 depends directly on
+        PR 4 and PR 4 on PR 1.  A longest path ends at a PR whose level (see levels) is the
+        largest.  Several paths can be longest.
+
+        Returns:
+            The numbers, such as 123, of the PRs that start a longest path, or the empty set
+            if no PR is in the dependency graph.
+        """
+        level = self.levels()
+        deepest = max(level.values(), default=0)
+        roots, seen = set(), set()
+        todo = [n for n, lev in level.items() if lev == deepest]
+        while todo:
+            n = todo.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            # A prerequisite on a longest path is one level below n.
+            on_path = [d for d in self.direct[n] if level[d] == level[n] - 1]
+            if on_path:
+                todo.extend(on_path)
+            else:
+                roots.add(n)
+        return roots
 
     def components(self) -> list[list[int]]:
         """Compute the connected components of the dependency graph.
@@ -3362,7 +3397,9 @@ def main() -> None:
         help=(
             "in the documents, highlight each PR (such as REPO#N or ORG/REPO#N) and every PR"
             " that must land for it to land:  the PRs that it depends on or lands with,"
-            " recursively"
+            ' recursively.  The PR "nested" means, in each repository, the PR that starts'
+            " the longest path of prerequisites (each PR that starts one, if several are"
+            " longest)"
         ),
     )
     args = parser.parse_args()

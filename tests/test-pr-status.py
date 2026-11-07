@@ -457,6 +457,39 @@ class HighlightTest(unittest.TestCase):
             {("owner/repo", 1), ("other/repo", 5), ("other/repo", 6)},
         )
 
+    def test_resolves_nested(self):
+        """The name "nested" names the PR that starts each longest path of prerequisites."""
+        models = self.models()
+        self.assertEqual(
+            pr_status.resolve_pr_names(models, ["nested"]),
+            {("owner/repo", 2), ("other/repo", 6)},
+        )
+        self.assertEqual(
+            pr_status.resolve_pr_names(models, ["Nested,other/repo#7"]),
+            {("owner/repo", 2), ("other/repo", 6), ("other/repo", 7)},
+        )
+
+    def test_deepest_roots(self):
+        """Each PR that starts a longest path of prerequisites is a deepest root."""
+        model = ModelTest.raw_model(
+            {
+                1: "",
+                2: "",
+                3: "Land after #1.\nLand after #2.",
+                4: "Land after #3.",
+                5: "Land after #2.",
+                6: "",
+                7: "Land after #6.",
+                8: "",
+            },
+            set(),
+        )
+        pr_status.unite_partners([model])
+        self.assertEqual(model.deepest_roots(), {1, 2})
+        empty = ModelTest.raw_model({1: "", 2: ""}, set())
+        pr_status.unite_partners([empty])
+        self.assertEqual(empty.deepest_roots(), set())
+
     def test_rejects_bad_names(self):
         """A name must name one repository and an open PR of it."""
         models = self.models()
