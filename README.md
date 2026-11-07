@@ -192,9 +192,9 @@ The commands are:
   `pr-status.md` (or the documents that `pr-status-config.json` names;
   see [its format](pr-status-config.md)),
   which lists the dependencies and the `git-push-to` commands that update
-  each dependency chain.  Each block of commands has a button (📋) that
-  copies them, in a Markdown renderer, such as the Markdown Viewer browser
-  extension, that keeps HTML event handlers.
+  each dependency chain.  In a Markdown renderer that keeps HTML event
+  handlers, such as the Markdown Viewer browser extension, each block of
+  commands has a button (📋) that copies the commands.
   It sets the dependency document's title, in its front matter and its
   heading, to the current directory's basename followed by "PR status", as
   in "src PR status".

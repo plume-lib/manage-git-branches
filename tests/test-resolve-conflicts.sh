@@ -68,6 +68,24 @@ for command_file in "${COMMANDS_DIR}"/*; do
   if [ -f "${command_file}" ]; then cp -p "${command_file}" "${WORK_DIR}/commands/"; fi
 done
 
+## The lines that pr-status writes around the fenced code block of a
+## section's commands:  ${BLOCK_HEAD} holds those before the opening fence, and
+## ${BLOCK_TAIL} holds those after the closing fence.
+BLOCK_HEAD="${WORK_DIR}/block-head"
+BLOCK_TAIL="${WORK_DIR}/block-tail"
+export BLOCK_HEAD BLOCK_TAIL
+PYTHONDONTWRITEBYTECODE=1 python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import pr_status
+block = pr_status.copyable_code_block("sh", [])
+fence = block.index("```sh")
+with open(sys.argv[2], "w") as head:
+    head.writelines(line + "\n" for line in block[:fence])
+with open(sys.argv[3], "w") as tail:
+    tail.writelines(line + "\n" for line in block[fence + 2 :])
+' "${COMMANDS_DIR}" "${BLOCK_HEAD}" "${BLOCK_TAIL}"
+
 ## The stub pr-status writes deps.md in the current directory.  On its first
 ## run, the section of chains with conflicts contains the commands in
 ## ${STUB_COMMANDS}; afterward, it contains none.  With "--print-document", it
@@ -89,11 +107,13 @@ fi
   echo '# PR dependencies'
   echo
   echo '<!-- BEGIN GENERATED: conflicting-push-commands -->'
+  cat "${BLOCK_HEAD}"
   echo '```sh'
   echo "cd $(pwd) && \\"
   if [ -n "${commands}" ]; then printf '%s\n' "${commands}"; fi
   echo 'echo "success"'
   echo '```'
+  cat "${BLOCK_TAIL}"
   echo '<!-- END GENERATED: conflicting-push-commands -->'
 } > deps.md
 EOF

@@ -902,23 +902,40 @@ class YamlStringTest(unittest.TestCase):
         self.assertEqual(pr_status.yaml_string("src-\U0001f600"), '"src-\U0001f600"')
 
 
+class CopyableCodeBlockTest(unittest.TestCase):
+    """Tests for copyable_code_block."""
+
+    def test_wraps_fenced_code_block(self):
+        """The code block follows the copy button, inside an element that markdownlint permits."""
+        self.assertEqual(
+            pr_status.copyable_code_block("sh", ["cd /base && \\", 'echo "success"']),
+            [
+                "<!-- markdownlint-disable no-inline-html -->",
+                '<div style="position:relative">',
+                pr_status.COPY_BUTTON,
+                "",
+                "```sh",
+                "cd /base && \\",
+                'echo "success"',
+                "```",
+                "",
+                "</div>",
+                "<!-- markdownlint-enable no-inline-html -->",
+            ],
+        )
+
+    def test_button_copies_without_final_newline(self):
+        """The copy button removes the final newline of the code block's text."""
+        self.assertIn(".textContent.replace(/\\n$/, '')", pr_status.COPY_BUTTON)
+
+
 class GenPushCommandsTest(unittest.TestCase):
     """Tests for gen_push_commands."""
 
     CHAIN = ("cd /base && \\", "git-push-to \\", "  pr1 \\", "  pr2 && \\", 'echo "success"')
     NO_CHAIN = ("cd /base && \\", 'echo "success"')
     # The lines that end a section whose commands are CHAIN.
-    BLOCK = (
-        '<div style="position:relative">',
-        pr_status.COPY_BUTTON,
-        "",
-        "```sh",
-        *CHAIN,
-        "```",
-        "",
-        "</div>",
-        "",
-    )
+    BLOCK = (*pr_status.copyable_code_block("sh", list(CHAIN)), "")
 
     def generate(self, commands, conflicts_only, notes=()):
         """Run gen_push_commands on the given commands.
@@ -941,7 +958,7 @@ class GenPushCommandsTest(unittest.TestCase):
         lines = self.generate(self.CHAIN, conflicts_only=True)
         self.assertEqual(lines[:3], ["", "### Dependency chains with conflicts", ""])
         self.assertIn("`cd /base && resolve-conflicts`", lines[5])
-        self.assertEqual(lines[lines.index("```sh") - 3 :], list(self.BLOCK))
+        self.assertEqual(lines[-len(self.BLOCK) :], list(self.BLOCK))
 
     def test_empty_without_chains(self):
         """With no chain and no note, either section is empty."""

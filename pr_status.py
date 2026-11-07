@@ -2048,14 +2048,16 @@ def headed(heading: str, label: str | None, lines: list[str], level: int = 2) ->
     return ["", f"{'#' * level} {heading}", "", *lines, ""]
 
 
-# The HTML button, in the upper right corner of a code block, that copies the block's text
-# to the clipboard and then briefly shows a check mark.  It works in a renderer, such as
-# the Markdown Viewer browser extension, that passes HTML through, including its event
-# handlers; a renderer that removes them shows a button that does nothing.
+# The HTML button, in the upper right corner of a code block, that copies the block's text,
+# without its final newline, to the clipboard and then briefly shows a check mark.  The
+# copied text lacks the final newline so that pasting it into a shell does not run it.  The
+# button works in a renderer, such as the Markdown Viewer browser extension, that passes
+# HTML through, including its event handlers; a renderer that removes them shows a button
+# that does nothing.
 COPY_BUTTON = (
     '<button type="button" title="Copy" style="position:absolute;top:0.25em;right:0.25em"'
     " onclick=\"navigator.clipboard.writeText(this.parentElement.querySelector('code')"
-    ".textContent).then(() => { this.textContent = '✓';"
+    ".textContent.replace(/\\n$/, '')).then(() => { this.textContent = '✓';"
     " setTimeout(() => { this.textContent = '📋'; }, 1000); })\">📋</button>"
 )
 
@@ -2069,9 +2071,10 @@ def copyable_code_block(language: str, lines: list[str]) -> list[str]:
 
     Returns:
         The Markdown lines of the code block, inside an HTML element that also holds
-        COPY_BUTTON.
+        COPY_BUTTON, between comments that make markdownlint permit the HTML.
     """
     return [
+        "<!-- markdownlint-disable no-inline-html -->",
         '<div style="position:relative">',
         COPY_BUTTON,
         "",
@@ -2080,6 +2083,7 @@ def copyable_code_block(language: str, lines: list[str]) -> list[str]:
         "```",
         "",
         "</div>",
+        "<!-- markdownlint-enable no-inline-html -->",
     ]
 
 
