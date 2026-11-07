@@ -9,7 +9,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --print-conflicting-push-chains  # print the chains with conflicts, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
-  pr-status --highlight nested  # highlight the next PR to work on in each repository
+  pr-status --highlight bottleneck  # highlight the next PR to work on in each repository
 
 Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
@@ -508,17 +508,17 @@ def highlight_selection(models: list[Model], arguments: Iterable[str]) -> set[tu
         models: the model of each repository.
         arguments: a list of strings, each of which holds words separated by commas or
             whitespace.  Each word is a PR's name (see resolve_pr_names), such as
-            "REPO#100", or "nested".  The word "nested" selects, in each repository, the
-            first PR of each longest path of prerequisites within that repository (see
+            "REPO#100", or "bottleneck".  The word "bottleneck" selects, in each repository,
+            the first PR of each longest path of prerequisites within that repository (see
             Model.deepest_roots).
 
     Returns:
         The PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR number.
-        If a word is neither "nested" nor the name of an open PR, resolve_pr_names raises
-        ValueError.
+        If a word is neither "bottleneck" nor the name of an open PR, resolve_pr_names
+        raises ValueError.
     """
     words = [w for arg in arguments for w in re.split(r"[,\s]+", arg) if w]
-    names = [w for w in words if w.lower() != "nested"]
+    names = [w for w in words if w.lower() != "bottleneck"]
     result = resolve_pr_names(models, names)
     if len(names) < len(words):
         result.update((m.repo.gh.lower(), n) for m in models for n in m.deepest_roots())
@@ -3417,8 +3417,8 @@ def main() -> None:
         help=(
             "in the documents, highlight each PR (such as REPO#N or ORG/REPO#N) and every PR"
             " that must land for it to land:  the PRs that it depends on or lands with,"
-            ' recursively.  In place of a PR, it accepts the word "nested", which selects, in'
-            " each repository, the PR that starts the longest path of prerequisites within"
+            ' recursively.  In place of a PR, it accepts the word "bottleneck", which selects,'
+            " in each repository, the PR that starts the longest path of prerequisites within"
             " that repository (each PR that starts one, if several are longest).  That PR is"
             " the next one to work on, because the rest of the path cannot land until it does"
         ),

@@ -213,9 +213,9 @@ The commands are:
   land for it to land:  the PRs that it depends on or lands with,
   recursively.  It shows them in bold on a light red background, and as red
   nodes in the dependency graph.  In place of a PR, it accepts the word
-  `nested`, as in `--highlight nested`, which selects, in each repository,
-  the PR that starts the longest path of prerequisites within that
-  repository (each PR that starts one, if several paths are longest);
+  `bottleneck`, as in `--highlight bottleneck`, which selects, in each
+  repository, the PR that starts the longest path of prerequisites within
+  that repository (each PR that starts one, if several paths are longest);
   prerequisites in other repositories do not count.  That PR is the next
   one to work on, because the rest of the path cannot land until it does.
   `--highlight` is not allowed with a `--print-...` option.
