@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -688,6 +689,118 @@ class PushChainsTest(unittest.TestCase):
         self.assertEqual(chains, [["master", "pr1", "pr5"]])
 
 
+class NewSnapshotTest(unittest.TestCase):
+    """Tests for new_snapshot."""
+
+    def test_round_trip(self):
+        """The chains with conflicts of every repository, in order, survive a JSON round trip."""
+        conflicting = [
+            pr_status.PushChains([["a", "a-branch-x"]], [], True),
+            pr_status.PushChains([], [1], True),
+            pr_status.PushChains([["b", "b-branch y"], ["b", "b-branch-z"]], [], True),
+        ]
+        snapshot = pr_status.new_snapshot("now", {"repo": {}}, conflicting)
+        self.assertEqual((snapshot["time"], snapshot["facts"]), ("now", {"repo": {}}))
+        self.assertEqual(
+            pr_status.format_push_chains(json.loads(json.dumps(snapshot))),
+            ["a\ta-branch-x", "b\tb-branch y", "b\tb-branch-z"],
+        )
+
+
+class FormatPushChainsTest(unittest.TestCase):
+    """Tests for format_push_chains."""
+
+    def test_one_line_per_chain(self):
+        """Each chain is one line, with its directories separated by tabs."""
+        snapshot = {"conflicting_push_chains": [["a", "a-branch-x", "a-branch y"], ["b", "c"]]}
+        self.assertEqual(
+            pr_status.format_push_chains(snapshot), ["a\ta-branch-x\ta-branch y", "b\tc"]
+        )
+
+    def test_no_chains(self):
+        """A snapshot that records no chain with conflicts yields no line."""
+        self.assertEqual(pr_status.format_push_chains({"conflicting_push_chains": []}), [])
+
+    def test_missing_key(self):
+        """A snapshot that does not record the chains is an error."""
+        with self.assertRaisesRegex(ValueError, "does not record the dependency chains"):
+            pr_status.format_push_chains({"time": "now", "facts": {}})
+
+    def test_tab_or_newline(self):
+        """A directory whose name contains a tab or newline is an error."""
+        for d in ("a\tb", "a\nb"):
+            with self.subTest(d=d), self.assertRaisesRegex(ValueError, "tab or newline"):
+                pr_status.format_push_chains({"conflicting_push_chains": [["a", d]]})
+
+
+class PrintConflictingPushChainsTest(unittest.TestCase):
+    """Tests for `pr-status --print-conflicting-push-chains`."""
+
+    PR_STATUS = str(Path(__file__).resolve().parent.parent / "pr-status")
+
+    def run_option(self, snapshot):
+        """Run `pr-status --print-conflicting-push-chains` in a directory with a snapshot.
+
+        Args:
+            snapshot: the text of .pr-status-snapshot.json, or None to write no snapshot
+
+        Returns:
+            The completed process, with its output as text.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            if snapshot is not None:
+                (Path(d) / pr_status_config.SNAPSHOT).write_text(snapshot)
+            return subprocess.run(
+                [sys.executable, self.PR_STATUS, "-C", d, "--print-conflicting-push-chains"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_prints_chains(self):
+        """Only the chains are printed, one per line."""
+        snapshot = pr_status.new_snapshot(
+            "now",
+            {},
+            [pr_status.PushChains([["a", "a-branch-x"], ["a", "a-branch y", "z"]], [], True)],
+        )
+        result = self.run_option(json.dumps(snapshot))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "a\ta-branch-x\na\ta-branch y\tz\n")
+
+    def test_no_snapshot(self):
+        """Without a snapshot, the option fails, printing nothing to standard output."""
+        result = self.run_option(None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("--print-conflicting-push-chains", result.stderr)
+
+
+class ExclusiveOptionsTest(unittest.TestCase):
+    """Tests that pr-status rejects options that choose different things to do."""
+
+    PR_STATUS = PrintConflictingPushChainsTest.PR_STATUS
+
+    def test_rejected(self):
+        """Each combination fails with a usage error, before reading any file."""
+        for options in [
+            ["--check", "--print-conflicting-push-chains"],
+            ["--print-document", "--print-conflicting-push-chains"],
+            ["--print-config", "--print-document"],
+            ["--print-conflicting-push-chains", "--highlight", "repo#1"],
+        ]:
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as d:
+                result = subprocess.run(
+                    [sys.executable, self.PR_STATUS, "-C", d, *options],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("not allowed with", result.stderr)
+
+
 class PrSectionsTest(unittest.TestCase):
     """Tests for gen_unblocked and gen_blocked."""
 
@@ -812,8 +925,8 @@ class DependencyDocumentTest(unittest.TestCase):
         gens = {g: self.section(g, False) for g in self.GENERATORS}
         gens |= {g: self.section(g, True) for g in self.REPO_GENERATORS}
 
-        def push_commands(_models, _base, conflicts_only=False):
-            return "conflicting" if conflicts_only else "all"
+        def push_commands(_models, chains, _base):
+            return "conflicting" if chains == "CONFLICTING" else "all"
 
         def gen_push_commands(commands, _base, conflicts_only=False):
             return ["", f"### {commands} commands" + (" only" if conflicts_only else ""), ""]
@@ -825,7 +938,7 @@ class DependencyDocumentTest(unittest.TestCase):
             **gens,
         ):
             return pr_status.dependency_document(
-                models, {"documents": docs}, "/base", "now", "src PR status"
+                models, {"documents": docs}, "/base", "now", "src PR status", "ALL", "CONFLICTING"
             )
 
     def test_document(self):
@@ -843,9 +956,7 @@ class DependencyDocumentTest(unittest.TestCase):
             text.endswith(
                 " even if its branch contains another member's commits.\n\n"
                 "## status\n\n## clusters\n\n## updating_branches\n\n"
-                "<!-- BEGIN GENERATED: conflicting-push-commands -->\n\n"
                 "### conflicting commands only\n\n"
-                "<!-- END GENERATED: conflicting-push-commands -->\n\n"
                 "### all commands\n\n"
                 "## unblocked\n\n## blocked\n\n## directories\n"
             ),
@@ -896,7 +1007,7 @@ class DependencyDocumentTest(unittest.TestCase):
             **dict.fromkeys(self.GENERATORS, mock.Mock(return_value=[])),
         ):
             cfg = {"documents": {}}
-            text = pr_status.dependency_document([], cfg, "/base", "now", "a: #b PR status")
+            text = pr_status.dependency_document([], cfg, "/base", "now", "a: #b PR status", [], [])
         self.assertTrue(
             text.startswith('---\ntitle: "a: #b PR status"\n---\n\n# a: #b PR status\n\n'),
             text,
@@ -960,8 +1071,8 @@ class GenPushCommandsTest(unittest.TestCase):
 
         Args:
             commands: the commands' lines, either CHAIN or NO_CHAIN
-            conflicts_only: True to generate the "conflicting-push-commands" section; False
-                to generate the "push-commands" section
+            conflicts_only: True to generate the "Dependency chains with conflicts" section;
+                False to generate the "All dependency chains" section
             notes: the commands' notes, such as ["No working copy of upstream"]
 
         Returns:

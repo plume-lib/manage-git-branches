@@ -6,6 +6,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --check    # snapshot and report changes, but write no document
   pr-status --print-document  # print the dependency document's file name, and exit
   pr-status --print-config    # print the config, with its defaults filled in, and exit
+  pr-status --print-conflicting-push-chains  # print the chains with conflicts, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
 
@@ -13,7 +14,9 @@ Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
                            (optional; see default_config for the default, and
                            pr-status-config.md for the format)
-  .pr-status-snapshot.json written by the previous run; compared with this run
+  .pr-status-snapshot.json written by the previous run; compared with this run.  It also
+                           records the dependency chains with conflicts, which
+                           --print-conflicting-push-chains prints
 Each run:
   * reads the open PRs with gh,
   * runs pr-merge-analysis (cached) on them, for each repository,
@@ -60,8 +63,8 @@ if TYPE_CHECKING:
 
 # The config file's name, which the dependency document mentions.
 CONFIG = pr_status_config.CONFIG
-# The name of the generated section that resolve-conflicts reads from the dependency document.
-CONFLICTING_PUSH_COMMANDS = "conflicting-push-commands"
+# The key of the snapshot's list of the `git-push-to` chains with conflicts.
+CONFLICTING_PUSH_CHAINS = "conflicting_push_chains"
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -2591,14 +2594,15 @@ def gen_directories(models: list[Model], cfg: dict[str, Any], base: str) -> list
 
 
 def dependency_document(
-    models: list[Model], cfg: dict[str, Any], base: str, as_of: str, title: str
+    models: list[Model],
+    cfg: dict[str, Any],
+    base: str,
+    as_of: str,
+    title: str,
+    all_chains: list[PushChains],
+    conflicting: list[PushChains],
 ) -> str:
     """Generate the dependency document.
-
-    The lines "<!-- BEGIN GENERATED: conflicting-push-commands -->" and
-    "<!-- END GENERATED: conflicting-push-commands -->" delimit the document's
-    "Dependency chains with conflicts" section, which resolve-conflicts reads.  They are
-    present even if the section is empty.
 
     Args:
         models: a list of the models of the repositories, one per repository
@@ -2606,14 +2610,19 @@ def dependency_document(
         base: the directory that holds the working copy directories
         as_of: the time of the PRs' data, such as "2026-11-05 17:59 PST"
         title: the document's title, such as "src PR status"
+        all_chains: the chains of each of models, as push_chains computes them, which the
+            "All dependency chains" section lists
+        conflicting: the chains with conflicts of each of models, as push_chains computes
+            them with conflicts_only, which the "Dependency chains with conflicts" section
+            lists
 
     Returns:
         The text of the dependency document:  YAML front matter and a "# " heading that give
         title, then its sections, including each optional section that cfg names.
     """
     optional = set(cfg["documents"].get("optional_sections", []))
-    all_commands = push_commands(models, base)
-    conflicting_commands = push_commands(models, base, conflicts_only=True)
+    all_commands = push_commands(models, all_chains, base)
+    conflicting_commands = push_commands(models, conflicting, base)
     lines = [
         "---",
         f"title: {yaml_string(title)}",
@@ -2640,10 +2649,7 @@ def dependency_document(
         *gen_clusters(models, cfg),
         *(gen_graph(models, cfg) if "graph" in optional else []),
         *gen_updating_branches(models, all_commands),
-        "",
-        f"<!-- BEGIN GENERATED: {CONFLICTING_PUSH_COMMANDS} -->",
         *gen_push_commands(conflicting_commands, base, conflicts_only=True),
-        f"<!-- END GENERATED: {CONFLICTING_PUSH_COMMANDS} -->",
         *gen_push_commands(all_commands, base),
     ]
     # Each repository's label distinguishes its sections' headings in a multi-repository
@@ -2791,8 +2797,71 @@ class PushCommands(NamedTuple):
         return self.chain_count == 0 and not self.notes
 
 
-def push_commands(models: list[Model], base: str, conflicts_only: bool = False) -> PushCommands:
-    """Return the shell commands that update each PR's branch from upstream and its prerequisites.
+def new_snapshot(
+    time: str, new_facts: dict[str, Any], conflicting: list[PushChains]
+) -> dict[str, Any]:
+    """Return the snapshot that records the given facts and chains with conflicts.
+
+    Args:
+        time: a time, such as "2026-11-05T17:59:00-08:00", which the snapshot records
+        new_facts: the facts, as facts computes them
+        conflicting: the chains with conflicts of each repository, as push_chains computes
+            them with conflicts_only
+
+    Returns:
+        The snapshot, as a dict that .pr-status-snapshot.json holds as JSON, with the keys
+        "time", "facts", and "conflicting_push_chains".  The value of
+        "conflicting_push_chains" is a list of chains, in the order of the "Dependency
+        chains with conflicts" section of the dependency document; each chain is a list of
+        directories, such as ["daikon", "daikon-branch-a"], each of which `git-push-to`
+        pushes into the next.
+    """
+    return {
+        "time": time,
+        "facts": new_facts,
+        CONFLICTING_PUSH_CHAINS: [chain for pc in conflicting for chain in pc.chains],
+    }
+
+
+def format_push_chains(snapshot: dict[str, Any]) -> list[str]:
+    """Return the `git-push-to` chains with conflicts of the given snapshot, one line per chain.
+
+    Args:
+        snapshot: a snapshot, as a dict parsed from the JSON of .pr-status-snapshot.json, with
+            keys such as "time", "facts", and "conflicting_push_chains"
+
+    Returns:
+        One line per `git-push-to` chain with conflicts that snapshot records:  the chain's
+        directories, such as "daikon" and "daikon-branch-a", separated by tabs.
+
+    Raises:
+        ValueError: if snapshot does not record the chains with conflicts (even an empty list
+            of them), or if a directory's name contains a tab or a newline.
+    """
+    if CONFLICTING_PUSH_CHAINS not in snapshot:
+        msg = (
+            f"{pr_status_config.SNAPSHOT} does not record the dependency chains with"
+            " conflicts, because an older version of pr-status wrote it; run pr-status to"
+            " rewrite it"
+        )
+        raise ValueError(msg)
+    lines = []
+    for chain in snapshot[CONFLICTING_PUSH_CHAINS]:
+        for d in chain:
+            if "\t" in d or "\n" in d:
+                msg = f"a directory name contains a tab or newline: {d!r}"
+                raise ValueError(msg)
+        lines.append("\t".join(chain))
+    return lines
+
+
+def push_commands(models: list[Model], all_chains: list[PushChains], base: str) -> PushCommands:
+    """Return the shell commands that run the given `git-push-to` chains.
+
+    Args:
+        models: a list of the models of the repositories, one per repository
+        all_chains: the chains of each of models, as push_chains computes them
+        base: the directory that holds the working copy directories of the repositories
 
     Returns:
         The commands, as a PushCommands.
@@ -2800,9 +2869,8 @@ def push_commands(models: list[Model], base: str, conflicts_only: bool = False) 
     lines = [f"cd {base} && \\"]
     notes = []
     chain_count = 0
-    for m in models:
+    for m, (chains, missing, has_upstream) in zip(models, all_chains, strict=True):
         r = m.repo
-        chains, missing, has_upstream = push_chains(m, base, conflicts_only)
         chain_count += len(chains)
         for chain in chains:
             lines += ["git-push-to \\", *(f"  {d} \\" for d in chain[:-1]), f"  {chain[-1]}"]
@@ -2826,14 +2894,14 @@ def push_commands(models: list[Model], base: str, conflicts_only: bool = False) 
 
 
 def gen_push_commands(commands: PushCommands, base: str, conflicts_only: bool = False) -> list[str]:
-    """Return the lines of the "push-commands" or "conflicting-push-commands" section.
+    """Return the lines of the dependency-chain section that shows the given commands.
 
     Args:
         commands: shell commands that update the PRs' branches
         base: the directory that holds the working copy directories of the repositories
-        conflicts_only: True if the lines are those of the "conflicting-push-commands" section,
-            whose chains are the ones with conflicts; False if they are those of the
-            "push-commands" section
+        conflicts_only: True if the lines are those of the "Dependency chains with conflicts"
+            section, whose chains are the ones with conflicts; False if they are those of the
+            "All dependency chains" section
 
     Returns:
         The section's lines:  a heading; with conflicts_only, an introduction and a suggestion
@@ -2852,8 +2920,8 @@ def gen_push_commands(commands: PushCommands, base: str, conflicts_only: bool = 
             ),
             "",
             (
-                f"Run `cd {base} && resolve-conflicts`, which runs these commands with an AI"
-                " agent's help, repeating until no chain has conflicts."
+                f"Run `cd {base} && resolve-conflicts`, which runs `git-push-to` on these"
+                " chains with an AI agent's help, repeating until no chain has conflicts."
             ),
             "Alternatively, run the commands yourself.",
             "",
@@ -2868,7 +2936,7 @@ def gen_push_commands(commands: PushCommands, base: str, conflicts_only: bool = 
 
 
 def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[str]:
-    """Generate the "updating-branches" section.
+    """Generate the "Updating branches" section.
 
     Args:
         models: a list of the models of the repositories, one per repository
@@ -2876,8 +2944,8 @@ def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[s
 
     Returns:
         The section's lines:  an "Updating branches" heading and an introduction to the
-        "conflicting-push-commands" and "push-commands" sections that follow it, or no lines
-        if commands run no chain and have no note.
+        "Dependency chains with conflicts" and "All dependency chains" sections that follow
+        it, or no lines if commands run no chain and have no note.
     """
     if commands.is_empty():
         return []
@@ -2898,6 +2966,27 @@ def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[s
 
 
 # ---------- snapshot and changes ----------
+
+
+def write_json_atomically(path: pathlib.Path, value: Any) -> None:
+    """Write the given value as JSON to the given file, which is never left partly written.
+
+    The file holds either its old contents or all of the new ones, even if this process is
+    killed or json.dump raises an exception.
+
+    Args:
+        value: a value that json.dump accepts, such as a dict
+        path: the file to write, such as .pr-status-snapshot.json
+    """
+    # The process id keeps two concurrent runs from writing the same temporary file.
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w") as f:
+            json.dump(value, f, indent=1)
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def facts(models: list[Model]) -> dict[str, Any]:
@@ -3233,20 +3322,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument(
+    # At most one of these options, which choose what pr-status does.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
         help="report changes, but change no document, snapshot, PR description, or directory",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--print-document",
         action="store_true",
         help="print the file name of the dependency document, and do nothing else",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--print-config",
         action="store_true",
         help="print the config as JSON, with its defaults filled in, and do nothing else",
+    )
+    mode.add_argument(
+        "--print-conflicting-push-chains",
+        action="store_true",
+        help=(
+            "print the dependency chains with conflicts that the snapshot records, one per line,"
+            " with their directories separated by tabs, and do nothing else"
+        ),
     )
     parser.add_argument(
         "-C",
@@ -3267,6 +3366,13 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    if args.highlight and (
+        args.print_document or args.print_config or args.print_conflicting_push_chains
+    ):
+        parser.error(
+            "--highlight is not allowed with --print-document, --print-config, or"
+            " --print-conflicting-push-chains"
+        )
     check_only = args.check
     if args.directory is not None:
         try:
@@ -3282,6 +3388,15 @@ def main() -> None:
         return
     if args.print_config:
         print(json.dumps(load_config("pr-status"), indent=2))
+        return
+    if args.print_conflicting_push_chains:
+        try:
+            with pathlib.Path(pr_status_config.SNAPSHOT).open() as f:
+                lines = format_push_chains(json.load(f))
+        except (OSError, ValueError) as error:
+            sys.exit(f"pr-status: --print-conflicting-push-chains: {error}")
+        for line in lines:
+            print(line)
         return
     base = str(pathlib.Path.cwd())
     cfg = load_config("pr-status")
@@ -3358,9 +3473,14 @@ def main() -> None:
     for doc in unblocked_docs:
         pathlib.Path(doc["file"]).write_text(unblocked_doc(models, cfg, base, doc, as_of))
     title = f"{pathlib.Path(base).name} PR status"
-    dependencies.write_text(dependency_document(models, cfg, base, as_of, title))
-    with pathlib.Path(pr_status_config.SNAPSHOT).open("w") as f:
-        json.dump({"time": now.isoformat(timespec="seconds"), "facts": new}, f, indent=1)
+    # Both lists come from this one place, so the document and the snapshot agree.
+    all_chains = [push_chains(m, base) for m in models]
+    conflicting = [push_chains(m, base, conflicts_only=True) for m in models]
+    dependencies.write_text(
+        dependency_document(models, cfg, base, as_of, title, all_chains, conflicting)
+    )
+    snapshot = new_snapshot(now.isoformat(timespec="seconds"), new, conflicting)
+    write_json_atomically(pathlib.Path(pr_status_config.SNAPSHOT), snapshot)
     written = [d["file"] for d in unblocked_docs]
     written += [str(dependencies), pr_status_config.SNAPSHOT]
     print(f"## Wrote {and_list(written)}")

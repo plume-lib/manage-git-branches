@@ -186,7 +186,8 @@ The commands are:
   `--claude`,
   and `--codex` options.
 * [`pr-status`](pr-status)
-  `[--check] [--print-document] [--print-config] [-C DIR] [--highlight PR...]`:
+  `[--check | --print-document | --print-config |`
+  `--print-conflicting-push-chains] [-C DIR] [--highlight PR...]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
   `pr-status.md` (or the documents that `pr-status-config.json` names;
@@ -202,12 +203,17 @@ The commands are:
   With `--check`, it writes no document.  With `--print-document`, it prints
   the file name of the dependency document and does nothing else.  With
   `--print-config`, it prints its config, with the defaults filled in, and
-  does nothing else.
+  does nothing else.  With `--print-conflicting-push-chains`, it prints the
+  dependency chains with conflicts that its previous run recorded in
+  `.pr-status-snapshot.json`, one chain per line, with the chain's
+  directories separated by tabs, and does nothing else.
+  At most one of these 4 options is allowed.
   `--highlight PR...` highlights, wherever the documents name it, each
   given PR (such as `REPO#100` or `ORG/REPO#100`) and every PR that must
   land for it to land:  the PRs that it depends on or lands with,
   recursively.  It shows them in bold on a light red background, and as red
-  nodes in the dependency graph.
+  nodes in the dependency graph.  It is not allowed with a `--print-...`
+  option.
   Run it in a directory that holds the working copy directories, or pass
   that directory with `-C`.
   This command needs Python 3.10 or later, and the programs that
@@ -232,12 +238,12 @@ The commands are:
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--claude | --codex] [-C DIR]`:
   Runs `pr-status`, which regenerates the dependency document (by default,
-  `pr-status.md`), then runs each
-  `git-push-to` command in its section "Dependency chains with conflicts",
+  `pr-status.md`), then runs `git-push-to` on each chain of its section
+  "Dependency chains with conflicts", as `pr-status
+  --print-conflicting-push-chains` prints them,
   with `--claude` (or `--codex`), which asks an AI agent for help.  Repeats
   until no chain has conflicts, for up to 3 rounds; stops after a round in
-  which a chain fails.  It runs only the commands that `pr-status` writes,
-  and refuses any other.
+  which a chain fails.
 * [`crreview-resolve-all`](crreview-resolve-all)
   `[--dry-run] [--agent claude|codex] [-C DIR]`:
   Runs
