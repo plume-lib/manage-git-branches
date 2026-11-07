@@ -432,7 +432,7 @@ class ModelTest(unittest.TestCase):
 
 
 class HighlightTest(unittest.TestCase):
-    """Tests for resolve_pr_names, needed_to_land, and highlight."""
+    """Tests for highlight_selection, resolve_pr_names, needed_to_land, and highlight."""
 
     def models(self):
         """Build models of two repositories, whose PRs depend on each other's.
@@ -453,9 +453,42 @@ class HighlightTest(unittest.TestCase):
         """A PR is named by its repository's GitHub slug, name, or reference prefix."""
         models = self.models()
         self.assertEqual(
-            pr_status.resolve_pr_names(models, ["Owner/Repo#1, other/repo#5", "other/repo#6"]),
+            pr_status.highlight_selection(models, ["Owner/Repo#1, other/repo#5", "other/repo#6"]),
             {("owner/repo", 1), ("other/repo", 5), ("other/repo", 6)},
         )
+
+    def test_selects_nested(self):
+        """The word "nested" selects the PR that starts each longest path of prerequisites."""
+        models = self.models()
+        self.assertEqual(
+            pr_status.highlight_selection(models, ["nested"]),
+            {("owner/repo", 2), ("other/repo", 6)},
+        )
+        self.assertEqual(
+            pr_status.highlight_selection(models, ["Nested,other/repo#7"]),
+            {("owner/repo", 2), ("other/repo", 6), ("other/repo", 7)},
+        )
+
+    def test_deepest_roots(self):
+        """Each PR that starts a longest path of prerequisites is a deepest root."""
+        model = ModelTest.raw_model(
+            {
+                1: "",
+                2: "",
+                3: "Land after #1.\nLand after #2.",
+                4: "Land after #3.",
+                5: "Land after #2.",
+                6: "",
+                7: "Land after #6.",
+                8: "",
+            },
+            set(),
+        )
+        pr_status.unite_partners([model])
+        self.assertEqual(model.deepest_roots(), {1, 2})
+        empty = ModelTest.raw_model({1: "", 2: ""}, set())
+        pr_status.unite_partners([empty])
+        self.assertEqual(empty.deepest_roots(), set())
 
     def test_rejects_bad_names(self):
         """A name must name one repository and an open PR of it."""
@@ -652,7 +685,7 @@ class PushChainsTest(unittest.TestCase):
             repo=repo,
             open=set(direct),
             direct=direct,
-            levels=lambda: levels,
+            levels=levels,
             cycle_affected=set(cycle_affected),
         )
         upstream = {"master": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}

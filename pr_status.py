@@ -9,6 +9,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --print-conflicting-push-chains  # print the chains with conflicts, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
+  pr-status --highlight nested  # highlight the next PR to work on in each repository
 
 Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
@@ -500,15 +501,39 @@ def highlight(gh: str, n: int, text: str) -> str:
     return f'<span style="background-color:#fcc">**{text}**</span>'
 
 
+def highlight_selection(models: list[Model], arguments: Iterable[str]) -> set[tuple[str, int]]:
+    """Return the open PRs that the arguments of --highlight select.
+
+    Args:
+        models: the model of each repository.
+        arguments: a list of strings, each of which holds words separated by commas or
+            whitespace.  Each word is a PR's name (see resolve_pr_names), such as
+            "REPO#100", or "nested".  The word "nested" selects, in each repository, the
+            first PR of each longest path of prerequisites within that repository (see
+            Model.deepest_roots).
+
+    Returns:
+        The PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR number.
+        If a word is neither "nested" nor the name of an open PR, resolve_pr_names raises
+        ValueError.
+    """
+    words = [w for arg in arguments for w in re.split(r"[,\s]+", arg) if w]
+    names = [w for w in words if w.lower() != "nested"]
+    result = resolve_pr_names(models, names)
+    if len(names) < len(words):
+        result.update((m.repo.gh.lower(), n) for m in models for n in m.deepest_roots())
+    return result
+
+
 def resolve_pr_names(models: list[Model], names: Iterable[str]) -> set[tuple[str, int]]:
     """Return the open PRs that names name.
 
     Args:
         models: the model of each repository.
-        names: a list of strings, each of which names PRs, separated by commas or whitespace.
-            A PR's name is a repository's GitHub slug, its name, or the prefix of its
-            references (which is "" when the documents refer to its PRs as "#N"), followed by
-            "#" and a PR number, as in "ORG/REPO#100", "REPO#100", or "#100".
+        names: PRs' names.  A PR's name is a repository's GitHub slug, its name, or the
+            prefix of its references (which is "" when the documents refer to its PRs as
+            "#N"), followed by "#" and a PR number, as in "ORG/REPO#100", "REPO#100", or
+            "#100".
 
     Returns:
         The PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR number.
@@ -517,7 +542,7 @@ def resolve_pr_names(models: list[Model], names: Iterable[str]) -> set[tuple[str
         ValueError: if a name does not name exactly one repository or does not name an open PR.
     """
     result = set()
-    for name in (s for arg in names for s in re.split(r"[,\s]+", arg) if s):
+    for name in names:
         head, sep, number = name.rpartition("#")
         if not sep or not number.isdigit():
             msg = f"{name} is not of the form REPO#N"
@@ -1126,12 +1151,12 @@ class Model:
         own = run([*g, "rev-list", "--no-merges", pb, "^refs/remotes/csm/master"]).split()
         return "none" if len(missing) == len(own) else "newest"
 
+    @functools.cached_property
     def levels(self) -> dict[int, int]:
-        """Compute each PR's level in the dependency graph.
+        """Each PR's level in the dependency graph.
 
-        Returns:
-            A map from each PR in the dependency graph to 1 plus the largest level of its
-            direct prerequisites, or to 1 if it has none.
+        It maps each PR in the dependency graph to 1 plus the largest level of its direct
+        prerequisites, or to 1 if it has none.
         """
         level: dict[int, int] = {}
 
@@ -1145,6 +1170,36 @@ class Model:
             if self.in_graph(n):
                 lev(n)
         return level
+
+    def deepest_roots(self) -> set[int]:
+        """Return the first PR of each longest path of prerequisites in the dependency graph.
+
+        A path of prerequisites is a list of this repository's PRs, each a direct
+        prerequisite of the next, whose first PR has no prerequisite in this repository,
+        such as [1, 4, 7] if PR 7 depends directly on PR 4 and PR 4 on PR 1.  Prerequisites
+        in other repositories are ignored, so the first PR can have some.  A longest path
+        ends at a PR whose level (see levels) is the largest.  Several paths can be longest.
+
+        Returns:
+            The numbers, such as 123, of the PRs that start a longest path, or the empty set
+            if no PR is in the dependency graph.
+        """
+        level = self.levels
+        deepest = max(level.values(), default=0)
+        roots, seen = set(), set()
+        todo = [n for n, v in level.items() if v == deepest]
+        while todo:
+            n = todo.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            # A prerequisite on a longest path is one level below n.
+            on_path = [d for d in self.direct[n] if level[d] == level[n] - 1]
+            if on_path:
+                todo.extend(on_path)
+            else:
+                roots.add(n)
+        return roots
 
     def components(self) -> list[list[int]]:
         """Compute the connected components of the dependency graph.
@@ -2750,7 +2805,7 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     pushable = {n for n in model.open if dirs[n] and n not in model.cycle_affected}
     edges = {(d, n) for n in pushable for d in model.direct[n] if d in pushable}
     in_edge = {n for e in edges for n in e}
-    level = model.levels()
+    level = model.levels
     pr_chains = []
     for d, n in sorted(edges, key=lambda e: (level[e[0]], e)):
         if (d, n) not in edges:
@@ -3362,7 +3417,10 @@ def main() -> None:
         help=(
             "in the documents, highlight each PR (such as REPO#N or ORG/REPO#N) and every PR"
             " that must land for it to land:  the PRs that it depends on or lands with,"
-            " recursively"
+            ' recursively.  In place of a PR, it accepts the word "nested", which selects, in'
+            " each repository, the PR that starts the longest path of prerequisites within"
+            " that repository (each PR that starts one, if several are longest).  That PR is"
+            " the next one to work on, because the rest of the path cannot land until it does"
         ),
     )
     args = parser.parse_args()
@@ -3403,7 +3461,7 @@ def main() -> None:
     dependencies = pathlib.Path(pr_status_config.dependency_document_name(cfg))
     models = load_models(cfg)
     try:
-        HIGHLIGHTED.update(needed_to_land(models, resolve_pr_names(models, args.highlight)))
+        HIGHLIGHTED.update(needed_to_land(models, highlight_selection(models, args.highlight)))
     except ValueError as error:
         sys.exit(f"pr-status: --highlight: {error}")
     updates = description_updates(models)
