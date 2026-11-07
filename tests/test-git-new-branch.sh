@@ -1595,7 +1595,7 @@ if out="$(cd "${slugs}/outer/inproj" && "${GIT_NEW_BRANCH}" mernst:nested 2>&1)"
   fail "zero exit status for a PROJECT-fork-ORG that is not a working tree"
 fi
 case "${out}" in
-  *"not the top level of a working tree: ${slugs}/outer/inproj-fork-mernst"*) ;;
+  *"not the top level of a git working tree: ${slugs}/outer/inproj-fork-mernst"*) ;;
   *) fail "unexpected message for a PROJECT-fork-ORG that is not a working tree: ${out}" ;;
 esac
 if git -C "${slugs}/outer" rev-parse --verify --quiet refs/heads/nested > /dev/null; then
@@ -1773,6 +1773,25 @@ done
 if [ -e "${slugs}/proj-fork-mernst-branch-copied" ]; then
   fail "--copy with a slug created a directory"
 fi
+
+# A linked worktree whose repository is gone is diagnosed as such, both by
+# `git-new-branch` and by `git-checkout-branch`, rather than merely as a
+# directory whose top level cannot be determined.
+# Git writes the physical pathname of the git directory in the worktree's
+# `.git` file.  On macOS, ${tmpdir} is not physical.
+physical_tmpdir="$(CDPATH='' cd -- "${tmpdir}" && pwd -P)"
+make_repo "${physical_tmpdir}/doomed" || exit 1
+git -C "${physical_tmpdir}/doomed" worktree add -q -b orphan "${physical_tmpdir}/orphan"
+mv "${physical_tmpdir}/doomed" "${physical_tmpdir}/doomed-moved"
+for broken_command in "${GIT_NEW_BRANCH}" "${SCRIPT_DIR}/../git-checkout-branch"; do
+  if out="$(cd "${physical_tmpdir}/orphan" && "${broken_command}" newbranch 2>&1)"; then
+    fail "zero exit status for $(basename -- "${broken_command}") in a broken worktree"
+  fi
+  case "${out}" in
+    *"broken git working tree"*"its repository does not exist; it was moved or deleted: ${physical_tmpdir}/doomed/.git"*) ;;
+    *) fail "unexpected message for $(basename -- "${broken_command}") in a broken worktree: ${out}" ;;
+  esac
+done
 
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then

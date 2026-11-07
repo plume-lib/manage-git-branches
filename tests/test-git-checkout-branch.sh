@@ -911,12 +911,23 @@ if out="$(cd "${encl}/proj-fork-me" && "${GIT_CHECKOUT_BRANCH}" up:main 2>&1)"; 
   fail "zero exit status for the slug up:main without a clone PROJECT"
 fi
 case "${out}" in
-  *"names the clone ${encl}/proj"*"not the top level of a working tree: ${encl}/proj"*) ;;
+  *"names the clone ${encl}/proj"*"not the top level of a git working tree: ${encl}/proj"*) ;;
   *) fail "unexpected message for the slug up:main without a clone PROJECT: ${out}" ;;
 esac
 if [ -e "${encl}/proj-fork-up" ]; then
   fail "the slug up:main without a clone PROJECT made ${encl}/proj-fork-up"
 fi
+# A directory PROJECT that is a linked worktree whose repository is gone is
+# reported as such, rather than merely as not the top level of a working tree.
+printf 'gitdir: %s\n' "${encl}/gone/.git/worktrees/proj" > "${encl}/proj/.git"
+if out="$(cd "${encl}/proj-fork-me" && "${GIT_CHECKOUT_BRANCH}" up:main 2>&1)"; then
+  fail "zero exit status for the slug up:main with a broken clone PROJECT"
+fi
+case "${out}" in
+  *"ERROR: broken git working tree: ${encl}/proj"*"its repository does not exist; it was moved or deleted: ${encl}/gone/.git"*) ;;
+  *) fail "unexpected message for the slug up:main with a broken clone PROJECT: ${out}" ;;
+esac
+rm "${encl}/proj/.git"
 
 # A slug whose ORG owns the upstream repository looks for the branch on the
 # upstream remote, even if the clone PROJECT pushes to some other remote.

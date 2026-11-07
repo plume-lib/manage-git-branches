@@ -111,8 +111,9 @@ fi
 # 0 rather than failing.
 if ! toplevel="$(git rev-parse --show-toplevel 2> /dev/null)" || [ -z "${toplevel}" ]; then
   # The current directory is not in a working tree at all:  it is outside any
-  # repository, or it is in a bare repository, which has no working tree.
-  echo "${SCRIPT_NAME}: not the top level of a git working tree: $(pwd)" >&2
+  # repository, it is in a bare repository, which has no working tree, or it
+  # is in a broken working tree.
+  report_not_working_tree_top "$(pwd)"
   exit 1
 fi
 # Compare physical pathnames, because the current directory may be reached
@@ -146,7 +147,7 @@ if [ -z "${other_physical}" ]; then
 fi
 if ! other_toplevel="$(git -C "${other_dir}" rev-parse --show-toplevel 2> /dev/null)" \
   || [ -z "${other_toplevel}" ]; then
-  echo "${SCRIPT_NAME}: not the top level of a git working tree: ${other_dir}" >&2
+  report_not_working_tree_top "${other_dir}"
   exit 1
 fi
 # As above, compare physical pathnames, canonicalizing both.
