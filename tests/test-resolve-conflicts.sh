@@ -148,6 +148,28 @@ case "${resolve_output}" in
   *) fail "no chain: wrong output: ${resolve_output}" ;;
 esac
 
+## Of several chains, each runs, even after one fails; a directory whose name
+## contains a space is one argument; and a chain that fails makes
+## resolve-conflicts fail.
+setup_case several
+STUB_CHAINS="$(printf 'myrepo-branch-main\tno such dir\nmyrepo-branch-main\tmyrepo-branch-feature')"
+resolve_conflicts
+if [ "${resolve_status}" -eq 0 ]; then
+  fail "several: resolve-conflicts succeeded: ${resolve_output}"
+fi
+case "${resolve_output}" in
+  *"no such directory: no such dir"*"the chain failed: myrepo-branch-main no such dir"*) ;;
+  *) fail "several: wrong output for the failed chain: ${resolve_output}" ;;
+esac
+case "${resolve_output}" in
+  *"1 of 2 dependency chains failed"*) ;;
+  *) fail "several: wrong count: ${resolve_output}" ;;
+esac
+expected="$(printf '%s\n' one two-feature two-main three)"
+if [ "$(git -C "${case_dir}/myrepo.git" show refs/heads/feature:file.txt)" != "${expected}" ]; then
+  fail "several: the chain after the failed one was not pushed"
+fi
+
 ## A chain's directory is passed literally, not expanded as a pattern, and a
 ## chain that fails makes resolve-conflicts fail.
 setup_case literal

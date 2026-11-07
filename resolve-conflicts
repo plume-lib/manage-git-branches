@@ -107,10 +107,14 @@ while :; do
     echo "${SCRIPT_NAME}: ${pr_status} --print-conflicting-push-chains failed in $(pwd)" >&2
     exit 1
   fi
+  # Count the chains as the loop below splits them.
   num_chains=0
-  if [ -n "${chains}" ]; then
-    num_chains="$(printf '%s\n' "${chains}" | wc -l | tr -d ' ')"
-  fi
+  saved_ifs="${IFS}"
+  IFS="${newline}"
+  for chain in ${chains}; do
+    num_chains=$((num_chains + 1))
+  done
+  IFS="${saved_ifs}"
 
   if [ "${num_chains}" -eq 0 ]; then
     echo "${SCRIPT_NAME}: no dependency chain has conflicts"
@@ -122,7 +126,6 @@ while :; do
   fi
 
   num_failed=0
-  saved_ifs="${IFS}"
   IFS="${newline}"
   for chain in ${chains}; do
     IFS="${tab}"
