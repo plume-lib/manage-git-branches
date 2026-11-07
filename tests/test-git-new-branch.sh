@@ -1595,7 +1595,7 @@ if out="$(cd "${slugs}/outer/inproj" && "${GIT_NEW_BRANCH}" mernst:nested 2>&1)"
   fail "zero exit status for a PROJECT-fork-ORG that is not a working tree"
 fi
 case "${out}" in
-  *"not the top level of a working tree: ${slugs}/outer/inproj-fork-mernst"*) ;;
+  *"not the top level of a git working tree: ${slugs}/outer/inproj-fork-mernst"*) ;;
   *) fail "unexpected message for a PROJECT-fork-ORG that is not a working tree: ${out}" ;;
 esac
 if git -C "${slugs}/outer" rev-parse --verify --quiet refs/heads/nested > /dev/null; then
@@ -1773,6 +1773,22 @@ done
 if [ -e "${slugs}/proj-fork-mernst-branch-copied" ]; then
   fail "--copy with a slug created a directory"
 fi
+
+# A linked worktree whose repository is gone is diagnosed as such, both by
+# `git-new-branch` and by `git-checkout-branch`, rather than merely as a
+# directory whose top level cannot be determined.
+make_repo "${tmpdir}/doomed" || exit 1
+git -C "${tmpdir}/doomed" worktree add -q -b orphan "${tmpdir}/orphan"
+mv "${tmpdir}/doomed" "${tmpdir}/doomed-moved"
+for broken_command in "${GIT_NEW_BRANCH}" "${SCRIPT_DIR}/../git-checkout-branch"; do
+  if out="$(cd "${tmpdir}/orphan" && "${broken_command}" newbranch 2>&1)"; then
+    fail "zero exit status for $(basename -- "${broken_command}") in a broken worktree"
+  fi
+  case "${out}" in
+    *"broken git working tree"*"its repository does not exist; it was moved or deleted: ${tmpdir}/doomed/.git"*) ;;
+    *) fail "unexpected message for $(basename -- "${broken_command}") in a broken worktree: ${out}" ;;
+  esac
+done
 
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then

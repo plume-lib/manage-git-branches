@@ -1076,6 +1076,9 @@ check_fork_url 'ssh://host/cf.git' cushon ''
 ## case writes.
 mgd_root="${WORK_DIR}/mgd"
 mkdir -p "${mgd_root}/exists/.git/worktrees/wt" "${mgd_root}/wt/subdir"
+# A git directory holds a file HEAD.
+echo 'ref: refs/heads/main' > "${mgd_root}/exists/.git/HEAD"
+mgd_physical="$(physical_path "${mgd_root}")"
 
 ## Usage: check_missing_git_dir GIT_FILE_CONTENTS EXPECTED DESCRIPTION
 ## Writes GIT_FILE_CONTENTS, a printf format, to ${mgd_root}/wt/.git, and
@@ -1093,7 +1096,14 @@ check_missing_git_dir() {
 }
 
 check_missing_git_dir "gitdir: ${mgd_root}/gone\\n" "${mgd_root}/gone" 'an absolute pathname'
-check_missing_git_dir 'gitdir: ../gone\n' "${mgd_root}/wt/../gone" 'a relative pathname'
+check_missing_git_dir 'gitdir: ../gone\n' "${mgd_physical}/gone" 'a relative pathname'
+check_missing_git_dir 'gitdir: ../gone/../x/.git\n' "${mgd_physical}/gone/../x/.git" \
+  'a relative pathname with ".." after a missing directory'
+check_missing_git_dir "gitdir: ${mgd_root}/gone\\r\\n" "${mgd_root}/gone" 'CRLF line ending'
+check_missing_git_dir "gitdir: ${mgd_root}/exists/.git/HEAD\\n" "${mgd_root}/exists/.git/HEAD" \
+  'a regular file'
+check_missing_git_dir "gitdir: ${mgd_root}/exists/.git/worktrees/wt\\r\\n" '' \
+  'an existing git directory, CRLF line ending'
 check_missing_git_dir "gitdir: ${mgd_root}/gone" "${mgd_root}/gone" 'no final newline'
 check_missing_git_dir "gitdir: ${mgd_root}/exists/.git/worktrees/wt\\n" '' 'an existing git directory'
 check_missing_git_dir 'gitdir: ../exists/.git/worktrees/wt\n' '' 'an existing git directory, relative'
@@ -1113,20 +1123,26 @@ fi
 if missing_git_dir "${mgd_root}/exists" > /dev/null; then
   fail "missing_git_dir returned 0 for a .git directory"
 fi
+# `gitfile_git_dir` resolves ".." in a relative pathname that exists.
+printf 'gitdir: ../exists/.git/worktrees/wt\n' > "${mgd_root}/wt/.git"
+ggd_actual="$(gitfile_git_dir "${mgd_root}/wt")" \
+  || fail "gitfile_git_dir returned 1 for a relative pathname"
+[ "${ggd_actual}" = "${mgd_physical}/exists/.git/worktrees/wt" ] \
+  || fail "gitfile_git_dir printed [${ggd_actual}] for a relative pathname"
 
 printf 'gitdir: %s\n' "${mgd_root}/gone/.git/worktrees/wt" > "${mgd_root}/wt/.git"
 if ! rbwt_out="$(report_broken_working_tree "${mgd_root}/wt" 'ERROR: ' 2>&1)"; then
   fail "report_broken_working_tree returned 1 for a broken worktree"
 fi
 case "${rbwt_out}" in
-  *"${SCRIPT_NAME}: ERROR: broken git working tree: ${mgd_root}/wt"*"does not exist: ${mgd_root}/gone/.git/worktrees/wt"*"its repository does not exist; it was moved or deleted: ${mgd_root}/gone/.git"*) ;;
+  *"${SCRIPT_NAME}: ERROR: broken git working tree: ${mgd_root}/wt"*"does not exist: ${mgd_root}/gone/.git/worktrees/wt"*"its repository does not exist; it was moved or deleted: ${mgd_root}/gone/.git"*"git worktree repair ${mgd_physical}/wt"*) ;;
   *) fail "unexpected report for a broken worktree: ${rbwt_out}" ;;
 esac
 if ! rbwt_out="$(report_broken_working_tree "${mgd_root}/wt/subdir" 2>&1)"; then
   fail "report_broken_working_tree returned 1 for a subdirectory of a broken worktree"
 fi
 case "${rbwt_out}" in
-  *"within a broken one: ${mgd_root}/wt/subdir"*"the broken working tree is: ${mgd_root}/wt"*) ;;
+  *"in a broken git working tree: ${mgd_root}/wt/subdir"*"the broken working tree is: ${mgd_root}/wt"*) ;;
   *) fail "unexpected report for a subdirectory of a broken worktree: ${rbwt_out}" ;;
 esac
 printf 'gitdir: %s\n' "${mgd_root}/exists/.git/worktrees/gone" > "${mgd_root}/wt/.git"
@@ -1134,6 +1150,33 @@ rbwt_out="$(report_broken_working_tree "${mgd_root}/wt" 2>&1)" || true
 case "${rbwt_out}" in
   *"its repository exists but no longer registers this worktree: ${mgd_root}/exists/.git"*) ;;
   *) fail "unexpected report for an unregistered worktree: ${rbwt_out}" ;;
+esac
+# A missing git directory that is not REPOSITORY/worktrees/NAME, even one
+# with a component "worktrees" or whose parent "worktrees" is not in a git
+# directory, gets no report about a repository.
+for rbwt_gitdir in "${mgd_root}/gone/worktrees/a/b" "${mgd_root}/wt/worktrees/proj.git" \
+  "${mgd_root}/exists/worktrees/proj.git"; do
+  mkdir -p "${mgd_root}/wt/worktrees"
+  printf 'gitdir: %s\n' "${rbwt_gitdir}" > "${mgd_root}/wt/.git"
+  rbwt_out="$(report_broken_working_tree "${mgd_root}/wt" 2>&1)" \
+    || fail "report_broken_working_tree returned 1 for ${rbwt_gitdir}"
+  case "${rbwt_out}" in
+    *"does not exist: ${rbwt_gitdir}"*) ;;
+    *) fail "unexpected report for ${rbwt_gitdir}: ${rbwt_out}" ;;
+  esac
+  case "${rbwt_out}" in
+    *"its repository"*) fail "report about a repository for ${rbwt_gitdir}: ${rbwt_out}" ;;
+  esac
+done
+# `report_not_working_tree_top` falls back to a plain diagnostic.
+rnwtt_out="$(report_not_working_tree_top "${mgd_root}/exists/.git" 'ERROR: ' 2>&1)"
+[ "${rnwtt_out}" = "${SCRIPT_NAME}: ERROR: not the top level of a git working tree: ${mgd_root}/exists/.git" ] \
+  || fail "unexpected report_not_working_tree_top diagnostic: ${rnwtt_out}"
+printf 'gitdir: %s\n' "${mgd_root}/gone" > "${mgd_root}/wt/.git"
+rnwtt_out="$(report_not_working_tree_top "${mgd_root}/wt" 2>&1)"
+case "${rnwtt_out}" in
+  *"broken git working tree: ${mgd_root}/wt"*) ;;
+  *) fail "report_not_working_tree_top did not report a broken worktree: ${rnwtt_out}" ;;
 esac
 # A working tree that is not broken, and a directory in no working tree, get
 # no report.

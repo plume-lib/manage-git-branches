@@ -911,7 +911,7 @@ if out="$(cd "${encl}/proj-fork-me" && "${GIT_CHECKOUT_BRANCH}" up:main 2>&1)"; 
   fail "zero exit status for the slug up:main without a clone PROJECT"
 fi
 case "${out}" in
-  *"names the clone ${encl}/proj"*"not the top level of a working tree: ${encl}/proj"*) ;;
+  *"names the clone ${encl}/proj"*"not the top level of a git working tree: ${encl}/proj"*) ;;
   *) fail "unexpected message for the slug up:main without a clone PROJECT: ${out}" ;;
 esac
 if [ -e "${encl}/proj-fork-up" ]; then

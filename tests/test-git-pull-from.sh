@@ -215,7 +215,7 @@ fi
 # The diagnostic names the worktree by its physical pathname.
 orphan_physical="$(CDPATH='' cd -- "${workdir}/orphan" && pwd -P)"
 case "${output}" in
-  *"within a broken one: ${workdir}/orphan/subdir"*"the broken working tree is: ${orphan_physical}"*) ;;
+  *"in a broken git working tree: ${workdir}/orphan/subdir"*"the broken working tree is: ${orphan_physical}"*) ;;
   *) fail "git-pull-from did not report the enclosing broken worktree: ${output}" ;;
 esac
 # `git-push-to` gives the same diagnostic for its own arguments.

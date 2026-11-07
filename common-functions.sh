@@ -3389,7 +3389,8 @@ enter_slug_clone() {
   fi
   if ! esc_toplevel="$(git rev-parse --show-toplevel 2> /dev/null)" \
     || [ -z "${esc_toplevel}" ]; then
-    echo "${SCRIPT_NAME}: ERROR: a slug must be given in a working tree of the project, such as PROJECT, PROJECT-fork-ORG, or one of their branch directories" >&2
+    report_broken_working_tree "${PWD}" 'ERROR: ' \
+      || echo "${SCRIPT_NAME}: ERROR: a slug must be given in a working tree of the project, such as PROJECT, PROJECT-fork-ORG, or one of their branch directories" >&2
     return 1
   fi
   esc_main="$(main_working_tree)" || esc_main="${esc_toplevel}"
@@ -3440,8 +3441,7 @@ enter_slug_clone() {
       return 1
       ;;
     *)
-      report_broken_working_tree "${esc_clone}" 'ERROR: ' \
-        || echo "${SCRIPT_NAME}: ERROR: not the top level of a working tree: ${esc_clone}" >&2
+      report_not_working_tree_top "${esc_clone}" 'ERROR: '
       return 1
       ;;
   esac
@@ -3531,34 +3531,80 @@ is_working_tree_top() {
     && [ "$(physical_path "${iwtt_top}" 2> /dev/null)" = "${iwtt_real}" ]
 }
 
-## Usage: missing_git_dir DIRECTORY
-## Prints the git directory that the file DIRECTORY/.git names and returns 0,
-## if that git directory does not exist.  An example is
-## "/home/me/proj/.git/worktrees/proj-branch-x", in a linked worktree whose
-## main working tree "/home/me/proj" was deleted.  Prints nothing and returns
-## 1 if DIRECTORY/.git is not a readable file of the form "gitdir: PATH", as
-## in a linked worktree or a submodule, or if the git directory that it names
-## exists.
-missing_git_dir() {
+## Usage: gitfile_git_dir DIRECTORY
+## Prints the git directory that the file DIRECTORY/.git names, and returns
+## 0.  An example is "/home/me/proj/.git/worktrees/proj-branch-x" in the
+## linked worktree "/home/me/proj-branch-x".  (A linked worktree and a
+## submodule each have a `.git` file, of the form "gitdir: PATH".)  A
+## relative PATH is printed as an absolute pathname, with symbolic links and
+## ".." resolved in the part of it that exists.  Prints nothing and returns 1
+## if DIRECTORY/.git is not a readable file of that form.  Does not check
+## whether the git directory exists.
+gitfile_git_dir() {
   [ -f "$1/.git" ] || return 1
   # Clear the variable, because a `read` that cannot open the file leaves it
   # unchanged.  `read` fails on a last line that lacks a newline, so test the
   # line too.  The diagnostic of a file that cannot be opened is discarded:
-  # this function's answer, that there is no such git directory, is enough.
-  mgd_line=
-  IFS= read -r mgd_line 2> /dev/null < "$1/.git" || [ -n "${mgd_line}" ] || return 1
-  case "${mgd_line}" in
-    'gitdir: '?*) mgd_path="${mgd_line#gitdir: }" ;;
+  # this function's answer, that the file names no git directory, is enough.
+  ggd_line=
+  IFS= read -r ggd_line 2> /dev/null < "$1/.git" || [ -n "${ggd_line}" ] || return 1
+  # Git ignores carriage returns at the end of the file, as in a file with
+  # CRLF line endings.
+  ggd_cr="$(printf '\r')"
+  while [ "${ggd_line%"${ggd_cr}"}" != "${ggd_line}" ]; do
+    ggd_line="${ggd_line%"${ggd_cr}"}"
+  done
+  case "${ggd_line}" in
+    'gitdir: '?*) ggd_path="${ggd_line#gitdir: }" ;;
     *) return 1 ;;
   esac
-  # Git interprets a relative pathname relative to the directory that holds
-  # the `.git` file.
-  case "${mgd_path}" in
+  case "${ggd_path}" in
     /* | [A-Za-z]:[/\\]*) ;;
-    *) mgd_path="$1/${mgd_path}" ;;
+    *)
+      # Git interprets a relative pathname relative to the directory that
+      # holds the `.git` file.  Canonicalize the longest prefix that is an
+      # existing directory, so that "/home/me/wt/../proj/.git" is printed as
+      # "/home/me/proj/.git" even if "/home/me/proj" does not exist.
+      ggd_head="$1/${ggd_path}"
+      ggd_tail=
+      while [ ! -d "${ggd_head}" ]; do
+        ggd_tail="/$(basename -- "${ggd_head}")${ggd_tail}"
+        ggd_head="$(dirname -- "${ggd_head}")"
+      done
+      if ggd_head="$(physical_path "${ggd_head}" 2> /dev/null)" && [ -n "${ggd_head}" ]; then
+        ggd_path="${ggd_head%/}${ggd_tail}"
+      else
+        ggd_path="$1/${ggd_path}"
+      fi
+      ;;
   esac
-  [ -e "${mgd_path}" ] && return 1
+  printf '%s\n' "${ggd_path}"
+}
+
+## Usage: missing_git_dir DIRECTORY
+## Prints the git directory that the file DIRECTORY/.git names, as
+## `gitfile_git_dir` does, and returns 0, if that git directory does not
+## exist or is not a directory.  An example is
+## "/home/me/proj/.git/worktrees/proj-branch-x", in a linked worktree whose
+## main working tree "/home/me/proj" was deleted.  Prints nothing and returns
+## 1 if DIRECTORY/.git is not a readable file of the form "gitdir: PATH", or
+## if the git directory that it names is a directory.
+missing_git_dir() {
+  mgd_path="$(gitfile_git_dir "$1")" || return 1
+  # Git requires a directory; it rejects a regular file.
+  [ -d "${mgd_path}" ] && return 1
   printf '%s\n' "${mgd_path}"
+}
+
+## Usage: report_not_working_tree_top DIRECTORY [PREFIX]
+## Prints to standard error a diagnostic that DIRECTORY is not the top level
+## of a git working tree.  If DIRECTORY is in a broken working tree, the
+## diagnostic is the one that `report_broken_working_tree` prints.  PREFIX,
+## such as "ERROR: ", begins the diagnostic's first line, after the name of
+## the command.
+report_not_working_tree_top() {
+  report_broken_working_tree "$1" "${2:-}" \
+    || echo "${SCRIPT_NAME}: ${2:-}not the top level of a git working tree: $1" >&2
 }
 
 ## Usage: report_broken_working_tree DIRECTORY [PREFIX]
@@ -3588,23 +3634,24 @@ report_broken_working_tree() {
   if [ "${rbwt_top}" = "${rbwt_dir}" ]; then
     echo "${SCRIPT_NAME}: ${2:-}broken git working tree: $1" >&2
   else
-    echo "${SCRIPT_NAME}: ${2:-}not the top level of a git working tree, and within a broken one: $1" >&2
+    echo "${SCRIPT_NAME}: ${2:-}in a broken git working tree: $1" >&2
     echo "${SCRIPT_NAME}: the broken working tree is: ${rbwt_top}" >&2
   fi
   echo "${SCRIPT_NAME}: its .git file names a git directory that does not exist: ${rbwt_missing}" >&2
   # The git directory of a linked worktree is REPOSITORY/worktrees/NAME,
   # where REPOSITORY is the git directory of the main working tree, such as
-  # "/home/me/proj/.git".
-  case "${rbwt_missing}" in
-    */worktrees/?*)
-      rbwt_repository="${rbwt_missing%/worktrees/*}"
-      if [ -d "${rbwt_repository}" ]; then
-        echo "${SCRIPT_NAME}: its repository exists but no longer registers this worktree: ${rbwt_repository}" >&2
-      else
-        echo "${SCRIPT_NAME}: its repository does not exist; it was moved or deleted: ${rbwt_repository}" >&2
-      fi
-      ;;
-  esac
+  # "/home/me/proj/.git".  A git directory made by `git clone
+  # --separate-git-dir` can also have a parent named "worktrees", so an
+  # existing REPOSITORY is reported only if it is a git directory.
+  rbwt_parent="${rbwt_missing%/*}"
+  [ "${rbwt_parent##*/}" = worktrees ] || return 0
+  rbwt_repository="${rbwt_parent%/*}"
+  if [ -f "${rbwt_repository}/HEAD" ]; then
+    echo "${SCRIPT_NAME}: its repository exists but no longer registers this worktree: ${rbwt_repository}" >&2
+  elif [ ! -e "${rbwt_repository}" ]; then
+    echo "${SCRIPT_NAME}: its repository does not exist; it was moved or deleted: ${rbwt_repository}" >&2
+    echo "${SCRIPT_NAME}: if the repository was moved, running \`git worktree repair ${rbwt_top}\` in it reconnects this worktree" >&2
+  fi
 }
 
 ## Usage: upstream_repository DIRECTORY
