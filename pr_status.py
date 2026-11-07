@@ -1087,8 +1087,8 @@ class Model:
             The number of the PR's unresolved review threads and how many of them are
             outdated, followed by a red X if the PR's CI failed or a green checkmark if it
             completed and passed, followed by shuffle arrows (🔀) if merging the default
-            branch or a direct prerequisite into the PR would conflict, in any file; or "" if
-            none of these applies.
+            branch or a direct prerequisite into the PR would conflict, in any file; each
+            separated from the next by a space.  Or "" if none of these applies.
         """
         reviews_and_ci = self.repo.reviews_and_ci
         threads = reviews_and_ci.review_threads.get(n, [])
@@ -1097,12 +1097,12 @@ class Model:
             outdated = sum(threads)
             cell.append(str(len(threads)) + (f" ({outdated} outdated)" if outdated else ""))
         if n in reviews_and_ci.ci_failed:
-            cell.append(FAILED_MARK)
+            cell.append(FAILED_MARK.strip())
         elif n in reviews_and_ci.ci_passed:
-            cell.append(" ✅")
+            cell.append("✅")
         if n in self.repo.master_conflicts or self.conflicting_prerequisites(n):
-            cell.append(" 🔀")
-        return "".join(cell)
+            cell.append("🔀")
+        return " ".join(cell)
 
     def head_status(self, a: int, b: int) -> str:
         """Return whether a's branch has b's current commits.
