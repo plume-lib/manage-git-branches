@@ -1071,4 +1071,77 @@ check_fork_url 'https://github.com/cf.git' cushon ''
 check_fork_url 'ssh://git@host:22/cf.git' cushon ''
 check_fork_url 'ssh://host/cf.git' cushon ''
 
+## Tests of missing_git_dir and report_broken_working_tree.  Each directory
+## under ${mgd_root} holds a `.git` file, or a `.git` directory, that a test
+## case writes.
+mgd_root="${WORK_DIR}/mgd"
+mkdir -p "${mgd_root}/exists/.git/worktrees/wt" "${mgd_root}/wt/subdir"
+
+## Usage: check_missing_git_dir GIT_FILE_CONTENTS EXPECTED DESCRIPTION
+## Writes GIT_FILE_CONTENTS, a printf format, to ${mgd_root}/wt/.git, and
+## checks that `missing_git_dir ${mgd_root}/wt` prints EXPECTED, which is
+## empty if the function is to return 1.
+check_missing_git_dir() {
+  # shellcheck disable=SC2059 # The format is the test case's argument.
+  printf "$1" > "${mgd_root}/wt/.git"
+  if cmgd_actual="$(missing_git_dir "${mgd_root}/wt")"; then
+    [ -n "${cmgd_actual}" ] || fail "missing_git_dir printed nothing but returned 0: $3"
+  else
+    [ -z "${cmgd_actual}" ] || fail "missing_git_dir printed [${cmgd_actual}] but returned 1: $3"
+  fi
+  [ "${cmgd_actual}" = "$2" ] || fail "missing_git_dir printed [${cmgd_actual}], not [$2]: $3"
+}
+
+check_missing_git_dir "gitdir: ${mgd_root}/gone\\n" "${mgd_root}/gone" 'an absolute pathname'
+check_missing_git_dir 'gitdir: ../gone\n' "${mgd_root}/wt/../gone" 'a relative pathname'
+check_missing_git_dir "gitdir: ${mgd_root}/gone" "${mgd_root}/gone" 'no final newline'
+check_missing_git_dir "gitdir: ${mgd_root}/exists/.git/worktrees/wt\\n" '' 'an existing git directory'
+check_missing_git_dir 'gitdir: ../exists/.git/worktrees/wt\n' '' 'an existing git directory, relative'
+check_missing_git_dir 'not a gitdir line\n' '' 'no gitdir line'
+check_missing_git_dir '' '' 'an empty file'
+# A file that cannot be opened has no answer, and no stale answer from the
+# previous call.  Only an unprivileged user is stopped by the permissions.
+if [ "$(id -u)" != 0 ]; then
+  chmod 000 "${mgd_root}/wt/.git"
+  if cmgd_actual="$(missing_git_dir "${mgd_root}/wt" 2>&1)"; then
+    fail "missing_git_dir returned 0 for an unreadable .git file"
+  fi
+  [ -z "${cmgd_actual}" ] || fail "missing_git_dir printed [${cmgd_actual}] for an unreadable .git file"
+  chmod 600 "${mgd_root}/wt/.git"
+fi
+# A `.git` directory is not a `.git` file.
+if missing_git_dir "${mgd_root}/exists" > /dev/null; then
+  fail "missing_git_dir returned 0 for a .git directory"
+fi
+
+printf 'gitdir: %s\n' "${mgd_root}/gone/.git/worktrees/wt" > "${mgd_root}/wt/.git"
+if ! rbwt_out="$(report_broken_working_tree "${mgd_root}/wt" 'ERROR: ' 2>&1)"; then
+  fail "report_broken_working_tree returned 1 for a broken worktree"
+fi
+case "${rbwt_out}" in
+  *"${SCRIPT_NAME}: ERROR: broken git working tree: ${mgd_root}/wt"*"does not exist: ${mgd_root}/gone/.git/worktrees/wt"*"its repository does not exist; it was moved or deleted: ${mgd_root}/gone/.git"*) ;;
+  *) fail "unexpected report for a broken worktree: ${rbwt_out}" ;;
+esac
+if ! rbwt_out="$(report_broken_working_tree "${mgd_root}/wt/subdir" 2>&1)"; then
+  fail "report_broken_working_tree returned 1 for a subdirectory of a broken worktree"
+fi
+case "${rbwt_out}" in
+  *"within a broken one: ${mgd_root}/wt/subdir"*"the broken working tree is: ${mgd_root}/wt"*) ;;
+  *) fail "unexpected report for a subdirectory of a broken worktree: ${rbwt_out}" ;;
+esac
+printf 'gitdir: %s\n' "${mgd_root}/exists/.git/worktrees/gone" > "${mgd_root}/wt/.git"
+rbwt_out="$(report_broken_working_tree "${mgd_root}/wt" 2>&1)" || true
+case "${rbwt_out}" in
+  *"its repository exists but no longer registers this worktree: ${mgd_root}/exists/.git"*) ;;
+  *) fail "unexpected report for an unregistered worktree: ${rbwt_out}" ;;
+esac
+# A working tree that is not broken, and a directory in no working tree, get
+# no report.
+if rbwt_out="$(report_broken_working_tree "${mgd_root}/exists" 2>&1)" || [ -n "${rbwt_out}" ]; then
+  fail "report_broken_working_tree reported a working tree that is not broken: ${rbwt_out}"
+fi
+if rbwt_out="$(report_broken_working_tree / 2>&1)" || [ -n "${rbwt_out}" ]; then
+  fail "report_broken_working_tree reported the root directory: ${rbwt_out}"
+fi
+
 echo "${SCRIPT_NAME}: OK"

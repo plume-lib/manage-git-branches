@@ -3440,7 +3440,8 @@ enter_slug_clone() {
       return 1
       ;;
     *)
-      echo "${SCRIPT_NAME}: ERROR: not the top level of a working tree: ${esc_clone}" >&2
+      report_broken_working_tree "${esc_clone}" 'ERROR: ' \
+        || echo "${SCRIPT_NAME}: ERROR: not the top level of a working tree: ${esc_clone}" >&2
       return 1
       ;;
   esac
@@ -3528,6 +3529,82 @@ is_working_tree_top() {
   iwtt_top="$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" \
     && [ -n "${iwtt_top}" ] \
     && [ "$(physical_path "${iwtt_top}" 2> /dev/null)" = "${iwtt_real}" ]
+}
+
+## Usage: missing_git_dir DIRECTORY
+## Prints the git directory that the file DIRECTORY/.git names and returns 0,
+## if that git directory does not exist.  An example is
+## "/home/me/proj/.git/worktrees/proj-branch-x", in a linked worktree whose
+## main working tree "/home/me/proj" was deleted.  Prints nothing and returns
+## 1 if DIRECTORY/.git is not a readable file of the form "gitdir: PATH", as
+## in a linked worktree or a submodule, or if the git directory that it names
+## exists.
+missing_git_dir() {
+  [ -f "$1/.git" ] || return 1
+  # Clear the variable, because a `read` that cannot open the file leaves it
+  # unchanged.  `read` fails on a last line that lacks a newline, so test the
+  # line too.  The diagnostic of a file that cannot be opened is discarded:
+  # this function's answer, that there is no such git directory, is enough.
+  mgd_line=
+  IFS= read -r mgd_line 2> /dev/null < "$1/.git" || [ -n "${mgd_line}" ] || return 1
+  case "${mgd_line}" in
+    'gitdir: '?*) mgd_path="${mgd_line#gitdir: }" ;;
+    *) return 1 ;;
+  esac
+  # Git interprets a relative pathname relative to the directory that holds
+  # the `.git` file.
+  case "${mgd_path}" in
+    /* | [A-Za-z]:[/\\]*) ;;
+    *) mgd_path="$1/${mgd_path}" ;;
+  esac
+  [ -e "${mgd_path}" ] && return 1
+  printf '%s\n' "${mgd_path}"
+}
+
+## Usage: report_broken_working_tree DIRECTORY [PREFIX]
+## If DIRECTORY is in a broken working tree, prints a diagnostic that says so
+## to standard error, and returns 0.  Otherwise prints nothing and returns 1.
+## PREFIX, such as "ERROR: ", begins the diagnostic's first line, after the
+## name of the command.
+##
+## A broken working tree is the nearest of DIRECTORY and its ancestors that
+## holds a `.git`, if that `.git` is a file that names a git directory that
+## does not exist.  An example is a linked worktree whose main working tree
+## was deleted:  its files remain, but git refuses every command in it, saying
+## only "not a git repository".  The diagnostic names the missing git
+## directory and, for a linked worktree, says whether the repository that the
+## worktree belongs to exists.
+report_broken_working_tree() {
+  rbwt_dir="$(physical_path "$1" 2> /dev/null)" || return 1
+  [ -n "${rbwt_dir}" ] || return 1
+  # Git searches upward for a `.git`, and it stops at the first one that it
+  # finds, even one that names a git directory that does not exist.
+  rbwt_top="${rbwt_dir}"
+  while [ ! -e "${rbwt_top}/.git" ] && [ ! -L "${rbwt_top}/.git" ]; do
+    [ "${rbwt_top}" = / ] && return 1
+    rbwt_top="$(dirname -- "${rbwt_top}")"
+  done
+  rbwt_missing="$(missing_git_dir "${rbwt_top}")" || return 1
+  if [ "${rbwt_top}" = "${rbwt_dir}" ]; then
+    echo "${SCRIPT_NAME}: ${2:-}broken git working tree: $1" >&2
+  else
+    echo "${SCRIPT_NAME}: ${2:-}not the top level of a git working tree, and within a broken one: $1" >&2
+    echo "${SCRIPT_NAME}: the broken working tree is: ${rbwt_top}" >&2
+  fi
+  echo "${SCRIPT_NAME}: its .git file names a git directory that does not exist: ${rbwt_missing}" >&2
+  # The git directory of a linked worktree is REPOSITORY/worktrees/NAME,
+  # where REPOSITORY is the git directory of the main working tree, such as
+  # "/home/me/proj/.git".
+  case "${rbwt_missing}" in
+    */worktrees/?*)
+      rbwt_repository="${rbwt_missing%/worktrees/*}"
+      if [ -d "${rbwt_repository}" ]; then
+        echo "${SCRIPT_NAME}: its repository exists but no longer registers this worktree: ${rbwt_repository}" >&2
+      else
+        echo "${SCRIPT_NAME}: its repository does not exist; it was moved or deleted: ${rbwt_repository}" >&2
+      fi
+      ;;
+  esac
 }
 
 ## Usage: upstream_repository DIRECTORY

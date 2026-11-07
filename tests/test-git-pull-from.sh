@@ -4,7 +4,8 @@
 # `git-push-to` does, that the merge commit it creates names the other
 # repository by a relative pathname, and that it diagnoses the current
 # directory and OTHER-REPO-DIR itself when either is not the top level of a
-# working tree.
+# working tree, including when either is a linked worktree whose repository is
+# gone.
 #
 # Usage:
 #   tests/test-git-pull-from
@@ -178,5 +179,65 @@ if [ "$(id -u)" != 0 ]; then
     *) fail "git-pull-from did not report a directory that cannot be entered: ${output}" ;;
   esac
 fi
+
+# A linked worktree whose main working tree was deleted still holds its files,
+# but git refuses every command in it.  The diagnostic says why, and names the
+# missing repository, both for the current directory and for OTHER-REPO-DIR.
+make_clone "${workdir}/doomed"
+git -C "${workdir}/doomed" worktree add -q -b orphan "${workdir}/orphan"
+mv "${workdir}/doomed" "${workdir}/doomed-moved"
+if output="$(cd "${workdir}/orphan" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from" 2>&1)"; then
+  fail "git-pull-from succeeded in a worktree whose repository is gone"
+fi
+case "${output}" in
+  *"broken git working tree"*"${workdir}/orphan"*) ;;
+  *) fail "git-pull-from did not report the broken worktree: ${output}" ;;
+esac
+case "${output}" in
+  *"its repository does not exist; it was moved or deleted: ${workdir}/doomed/.git"*) ;;
+  *) fail "git-pull-from did not name the missing repository: ${output}" ;;
+esac
+if output="$(cd "${workdir}/to" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/orphan" 2>&1)"; then
+  fail "git-pull-from accepted a worktree whose repository is gone as OTHER-REPO-DIR"
+fi
+case "${output}" in
+  *"git-pull-from: broken git working tree"*"${workdir}/orphan"*) ;;
+  *) fail "git-pull-from did not report the broken OTHER-REPO-DIR: ${output}" ;;
+esac
+# In a subdirectory of a broken worktree, the diagnostic names the worktree.
+mkdir "${workdir}/orphan/subdir"
+if output="$(cd "${workdir}/orphan/subdir" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/from" 2>&1)"; then
+  fail "git-pull-from succeeded in a subdirectory of a worktree whose repository is gone"
+fi
+# The diagnostic names the worktree by its physical pathname.
+orphan_physical="$(CDPATH='' cd -- "${workdir}/orphan" && pwd -P)"
+case "${output}" in
+  *"within a broken one: ${workdir}/orphan/subdir"*"the broken working tree is: ${orphan_physical}"*) ;;
+  *) fail "git-pull-from did not report the enclosing broken worktree: ${output}" ;;
+esac
+# `git-push-to` gives the same diagnostic for its own arguments.
+if output="$("${REPO_DIR}/git-push-to" --no-llm "${workdir}/orphan" "${workdir}/to" 2>&1)"; then
+  fail "git-push-to accepted a worktree whose repository is gone"
+fi
+case "${output}" in
+  *"git-push-to: broken git working tree"*"${workdir}/orphan"*) ;;
+  *) fail "git-push-to did not report the broken worktree: ${output}" ;;
+esac
+
+# A repository that exists but no longer registers the worktree, as after
+# `git worktree prune`, is reported as such.
+mv "${workdir}/doomed-moved" "${workdir}/doomed"
+rm -rf "${workdir}/doomed/.git/worktrees/orphan"
+if output="$(cd "${workdir}/to" \
+  && "${REPO_DIR}/git-pull-from" --nocompile "${workdir}/orphan" 2>&1)"; then
+  fail "git-pull-from accepted a worktree that its repository does not register"
+fi
+case "${output}" in
+  *"its repository exists but no longer registers this worktree: ${workdir}/doomed/.git"*) ;;
+  *) fail "git-pull-from did not report the unregistered worktree: ${output}" ;;
+esac
 
 echo "${SCRIPT_NAME}: OK"
