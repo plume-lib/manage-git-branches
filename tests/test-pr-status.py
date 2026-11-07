@@ -29,6 +29,13 @@ class TableRowTest(unittest.TestCase):
         )
         self.assertEqual(pr_status.table_row([r"already \| escaped"]), r"| already \| escaped |")
 
+    def test_pads_each_cell_with_one_space(self):
+        """Each cell has exactly one space on each side, and an empty cell is "| |"."""
+        self.assertEqual(
+            pr_status.table_row([" leading", "trailing  ", "", " ", " both "]),
+            "| leading | trailing | | | both |",
+        )
+
 
 class UpdatedPrDescriptionTest(unittest.TestCase):
     """Tests for updated_pr_description."""
@@ -381,11 +388,22 @@ class ModelTest(unittest.TestCase):
         """
         model = self.conflicting_model()
         self.assertEqual(
-            [model.unresolved_threads(n) for n in (1, 2, 3, 4)], [" 🔀", " 🔀", " 🔀", ""]
+            [model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["🔀", "🔀", "🔀", ""]
         )
         model.repo.master_conflicts = {}
         model.repo.pair_conflicts = {(1, 3): ["c.txt"], (2, 3): ["a.txt"]}
-        self.assertEqual([model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["", " 🔀", "", ""])
+        self.assertEqual([model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["", "🔀", "", ""])
+
+    def test_unresolved_threads_separates_parts_by_one_space(self):
+        """The cell's parts are separated by one space, with none at either end."""
+        model = self.conflicting_model()
+        model.repo.reviews_and_ci = pr_status.ReviewsAndCi(
+            {1: [True, False], 4: [False]}, {1, 2}, {1, 4}
+        )
+        self.assertEqual(
+            [model.unresolved_threads(n) for n in (1, 2, 3, 4)],
+            ["2 (1 outdated) ❌ 🔀", "❌ 🔀", "🔀", "1 ✅"],
+        )
 
     def test_depends_on_marks_conflicting_direct_prerequisites(self):
         """The cell shows 🔀 after each conflicting direct prerequisite, or else after master."""

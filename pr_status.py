@@ -185,9 +185,9 @@ class Repo:
         """Return the mark that a link to PR n carries if the PR's CI failed.
 
         Returns:
-            FAILED_MARK if the PR's CI failed, or "" otherwise.
+            A space followed by FAILED_MARK if the PR's CI failed, or "" otherwise.
         """
-        return FAILED_MARK if n in self.reviews_and_ci.ci_failed else ""
+        return " " + FAILED_MARK if n in self.reviews_and_ci.ci_failed else ""
 
     def refs(self, ns: Iterable[int]) -> str:
         """Return how documents refer to the PRs ns.
@@ -470,7 +470,7 @@ def external_link(ref: str) -> str:
 
 
 # The mark that follows a PR whose CI failed.
-FAILED_MARK = " ❌"
+FAILED_MARK = "❌"
 
 
 # The PRs that the documents highlight, as pairs of a lowercase GitHub slug, such as
@@ -1084,11 +1084,12 @@ class Model:
         """Return the "Unresolved threads" cell of PR n.
 
         Returns:
-            The number of the PR's unresolved review threads and how many of them are
-            outdated, followed by a red X if the PR's CI failed or a green checkmark if it
-            completed and passed, followed by shuffle arrows (🔀) if merging the default
-            branch or a direct prerequisite into the PR would conflict, in any file; or "" if
-            none of these applies.
+            The parts that apply, separated by single spaces:  the number of the PR's
+            unresolved review threads and how many of them are outdated, if the PR has any;
+            a red X if the PR's CI failed, or else a green checkmark if its CI completed and
+            passed; and shuffle arrows (🔀) if merging the default branch or a direct
+            prerequisite into the PR would conflict, in any file.  The result is "" if no
+            part applies.
         """
         reviews_and_ci = self.repo.reviews_and_ci
         threads = reviews_and_ci.review_threads.get(n, [])
@@ -1099,10 +1100,10 @@ class Model:
         if n in reviews_and_ci.ci_failed:
             cell.append(FAILED_MARK)
         elif n in reviews_and_ci.ci_passed:
-            cell.append(" ✅")
+            cell.append("✅")
         if n in self.repo.master_conflicts or self.conflicting_prerequisites(n):
-            cell.append(" 🔀")
-        return "".join(cell)
+            cell.append("🔀")
+        return " ".join(cell)
 
     def head_status(self, a: int, b: int) -> str:
         """Return whether a's branch has b's current commits.
@@ -1359,8 +1360,8 @@ def external_failed_mark(model: Model, ref: str) -> str:
         ref: a PR in another repository, such as "owner/repo#5".
 
     Returns:
-        FAILED_MARK if the PR's repository is one of the models that unite_partners united
-        with model and the PR's CI failed, or "" otherwise.
+        A space followed by FAILED_MARK if the PR's repository is one of the models that
+        unite_partners united with model and the PR's CI failed, or "" otherwise.
     """
     gh, n = ref.split("#")
     other = model.by_gh.get(gh.lower())
@@ -1432,26 +1433,19 @@ def auto_notes(model: Model, n: int, master: bool = True) -> list[str]:
     return notes
 
 
-def fix_empty_cells(lines: Iterable[str]) -> list[str]:
-    """Write each empty table cell as "| |", not "|  |".
-
-    Returns:
-        The lines, with their empty table cells rewritten.
-    """
-    return [
-        re.sub(r"(?<=\|)  (?=\|)", " ", line) if line.startswith("|") else line for line in lines
-    ]
-
-
 def table_row(cells: Iterable[str]) -> str:
     """Return a Markdown table row containing cells.
 
-    Pipe characters within a cell are escaped so that they do not create extra columns.
+    Each cell is stripped of leading and trailing whitespace and then padded with exactly one
+    space on each side, as in "| a | b |", and an empty cell is written as "| |".  This is the
+    "compact" table style that markdownlint's rule MD060 checks.  Pipe characters within a cell
+    are escaped so that they do not create extra columns.
 
     Returns:
         A Markdown table row.
     """
-    return "| " + " | ".join(re.sub(r"(?<!\\)\|", r"\\|", cell) for cell in cells) + " |"
+    escaped = (re.sub(r"(?<!\\)\|", r"\\|", cell.strip()) for cell in cells)
+    return "|" + "".join(f" {cell} |" if cell else " |" for cell in escaped)
 
 
 def capitalize(s: str) -> str:
@@ -2024,7 +2018,7 @@ def unblocked_doc(
             if by:
                 groups = [f"{m.repo.links(ns)} ({who})" for who, ns in sorted(by.items())]
                 lines.append(f"* {m.repo.label}: {'; '.join(groups)}.")
-    return "\n".join(fix_empty_cells(lines)) + "\n"
+    return "\n".join(lines) + "\n"
 
 
 # ---------- generated sections of the dependency document ----------
@@ -2667,7 +2661,7 @@ def dependency_document(
             lines += gen_independent(m, cfg, label)
     lines += gen_directories(models, cfg, base)
     # Each section is set off by blank lines, so adjacent sections yield several.
-    text = re.sub(r"\n{3,}", "\n\n", "\n".join(fix_empty_cells(lines)))
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
     return text.rstrip("\n") + "\n"
 
 
