@@ -6,6 +6,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --check    # snapshot and report changes, but write no document
   pr-status --print-document  # print the dependency document's file name, and exit
   pr-status --print-config    # print the config, with its defaults filled in, and exit
+  pr-status --print-conflicting-push-chains  # print the chains with conflicts, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
 
@@ -13,7 +14,9 @@ Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
                            (optional; see default_config for the default, and
                            pr-status-config.md for the format)
-  .pr-status-snapshot.json written by the previous run; compared with this run
+  .pr-status-snapshot.json written by the previous run; compared with this run.  It also
+                           records the dependency chains with conflicts, which
+                           --print-conflicting-push-chains prints
 Each run:
   * reads the open PRs with gh,
   * runs pr-merge-analysis (cached) on them, for each repository,
@@ -60,8 +63,8 @@ if TYPE_CHECKING:
 
 # The config file's name, which the dependency document mentions.
 CONFIG = pr_status_config.CONFIG
-# The name of the generated section that resolve-conflicts reads from the dependency document.
-CONFLICTING_PUSH_COMMANDS = "conflicting-push-commands"
+# The key of the snapshot's list of the `git-push-to` chains with conflicts.
+CONFLICTING_PUSH_CHAINS = "conflicting_push_chains"
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -2562,11 +2565,6 @@ def dependency_document(
 ) -> str:
     """Generate the dependency document.
 
-    The lines "<!-- BEGIN GENERATED: conflicting-push-commands -->" and
-    "<!-- END GENERATED: conflicting-push-commands -->" delimit the document's
-    "Dependency chains with conflicts" section, which resolve-conflicts reads.  They are
-    present even if the section is empty.
-
     Args:
         models: a list of the models of the repositories, one per repository
         cfg: the configuration
@@ -2607,10 +2605,7 @@ def dependency_document(
         *gen_clusters(models, cfg),
         *(gen_graph(models, cfg) if "graph" in optional else []),
         *gen_updating_branches(models, all_commands),
-        "",
-        f"<!-- BEGIN GENERATED: {CONFLICTING_PUSH_COMMANDS} -->",
         *gen_push_commands(conflicting_commands, base, conflicts_only=True),
-        f"<!-- END GENERATED: {CONFLICTING_PUSH_COMMANDS} -->",
         *gen_push_commands(all_commands, base),
     ]
     # Each repository's label distinguishes its sections' headings in a multi-repository
@@ -2756,6 +2751,52 @@ class PushCommands(NamedTuple):
             True if the commands run no chain and have no note.
         """
         return self.chain_count == 0 and not self.notes
+
+
+def conflicting_push_chains(models: list[Model], base: str) -> list[list[str]]:
+    """Return the `git-push-to` chains of every repository that would encounter a conflict.
+
+    Args:
+        models: a list of the models of the repositories, one per repository
+        base: the directory that holds the working copy directories of the repositories
+
+    Returns:
+        The chains, in the order of the "Dependency chains with conflicts" section of the
+        dependency document.  Each chain is a list of directories in base, such as
+        ["daikon", "daikon-branch-a"], each of which `git-push-to` pushes into the next.
+    """
+    return [chain for m in models for chain in push_chains(m, base, conflicts_only=True).chains]
+
+
+def format_push_chains(snapshot: dict[str, Any]) -> list[str]:
+    """Return the `git-push-to` chains with conflicts of the given snapshot, one line per chain.
+
+    Args:
+        snapshot: a snapshot, as a dict parsed from the JSON of .pr-status-snapshot.json, with
+            keys such as "time", "facts", and "conflicting_push_chains"
+
+    Returns:
+        One line per `git-push-to` chain with conflicts that snapshot records:  the chain's
+        directories, such as "daikon" and "daikon-branch-a", separated by tabs.
+
+    Raises:
+        ValueError: if snapshot records no chains, or if a directory's name contains a tab or
+            a newline.
+    """
+    if CONFLICTING_PUSH_CHAINS not in snapshot:
+        msg = (
+            f"{pr_status_config.SNAPSHOT} records no dependency chains with conflicts;"
+            " run pr-status without --check"
+        )
+        raise ValueError(msg)
+    lines = []
+    for chain in snapshot[CONFLICTING_PUSH_CHAINS]:
+        for d in chain:
+            if "\t" in d or "\n" in d:
+                msg = f"a directory name contains a tab or newline: {d!r}"
+                raise ValueError(msg)
+        lines.append("\t".join(chain))
+    return lines
 
 
 def push_commands(models: list[Model], base: str, conflicts_only: bool = False) -> PushCommands:
@@ -3216,6 +3257,14 @@ def main() -> None:
         help="print the config as JSON, with its defaults filled in, and do nothing else",
     )
     parser.add_argument(
+        "--print-conflicting-push-chains",
+        action="store_true",
+        help=(
+            "print the dependency chains with conflicts that the snapshot records, one per line,"
+            " with their directories separated by tabs, and do nothing else"
+        ),
+    )
+    parser.add_argument(
         "-C",
         "--directory",
         metavar="DIR",
@@ -3249,6 +3298,15 @@ def main() -> None:
         return
     if args.print_config:
         print(json.dumps(load_config("pr-status"), indent=2))
+        return
+    if args.print_conflicting_push_chains:
+        try:
+            with pathlib.Path(pr_status_config.SNAPSHOT).open() as f:
+                lines = format_push_chains(json.load(f))
+        except (OSError, ValueError) as error:
+            sys.exit(f"pr-status: --print-conflicting-push-chains: {error}")
+        for line in lines:
+            print(line)
         return
     base = str(pathlib.Path.cwd())
     cfg = load_config("pr-status")
@@ -3327,7 +3385,12 @@ def main() -> None:
     title = f"{pathlib.Path(base).name} PR status"
     dependencies.write_text(dependency_document(models, cfg, base, as_of, title))
     with pathlib.Path(pr_status_config.SNAPSHOT).open("w") as f:
-        json.dump({"time": now.isoformat(timespec="seconds"), "facts": new}, f, indent=1)
+        snapshot = {
+            "time": now.isoformat(timespec="seconds"),
+            "facts": new,
+            CONFLICTING_PUSH_CHAINS: conflicting_push_chains(models, base),
+        }
+        json.dump(snapshot, f, indent=1)
     written = [d["file"] for d in unblocked_docs]
     written += [str(dependencies), pr_status_config.SNAPSHOT]
     print(f"## Wrote {and_list(written)}")

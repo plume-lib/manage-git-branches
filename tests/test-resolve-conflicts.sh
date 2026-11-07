@@ -1,24 +1,17 @@
 #!/bin/sh
 
-# Tests that `resolve-conflicts` runs the chains that the dependency document
-# lists
-# under "Dependency chains with conflicts", with an AI agent resolving the
-# conflicts, and that it refuses a command that `pr-status` does not write.
+# Tests that `resolve-conflicts` runs the dependency chains with conflicts
+# that `pr-status --print-conflicting-push-chains` prints, with an AI agent
+# resolving the conflicts.
 #
 # Usage:
 #   tests/test-resolve-conflicts.sh
 #
-# The test runs a copy of the commands in which a stub `pr-status` writes the
-# dependency document, and a stub `claude` stands in for the agent.  The stub
-# names the document deps.md rather than the default, pr-status.md, so that the
-# test checks that `resolve-conflicts` asks `pr-status` for the name.
+# The test runs a copy of the commands in which a stub replaces `pr-status`,
+# and a stub `claude` stands in for the agent.
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
-
-# The shell commands in single quotes end with a literal backslash, as the
-# ones that pr-status writes do.
-# shellcheck disable=SC1003
 
 set -e
 
@@ -68,34 +61,23 @@ for command_file in "${COMMANDS_DIR}"/*; do
   if [ -f "${command_file}" ]; then cp -p "${command_file}" "${WORK_DIR}/commands/"; fi
 done
 
-## The stub pr-status writes deps.md in the current directory.  On its first
-## run, the section of chains with conflicts contains the commands in
-## ${STUB_COMMANDS}; afterward, it contains none.  With "--print-document", it
-## prints the document's file name.
+## The stub pr-status records the chains with conflicts in the file chains.
+## On its first run, they are the chains in ${STUB_CHAINS}, one per line, with
+## their directories separated by tabs; afterward, there are none.  With
+## "--print-conflicting-push-chains", it prints the chains that it recorded.
 cat > "${WORK_DIR}/commands/pr-status" << 'EOF'
 #!/bin/sh
-if [ "$1" = --print-document ]; then
-  echo deps.md
+if [ "$1" = --print-conflicting-push-chains ]; then
+  cat chains
   exit 0
 fi
 echo pr-status >> "${STUB_LOG}"
 if grep -q -x pr-status-ran "${STUB_LOG}"; then
-  commands=''
+  : > chains
 else
   echo pr-status-ran >> "${STUB_LOG}"
-  commands="${STUB_COMMANDS}"
+  if [ -n "${STUB_CHAINS}" ]; then printf '%s\n' "${STUB_CHAINS}"; fi > chains
 fi
-{
-  echo '# PR dependencies'
-  echo
-  echo '<!-- BEGIN GENERATED: conflicting-push-commands -->'
-  echo '```sh'
-  echo "cd $(pwd) && \\"
-  if [ -n "${commands}" ]; then printf '%s\n' "${commands}"; fi
-  echo 'echo "success"'
-  echo '```'
-  echo '<!-- END GENERATED: conflicting-push-commands -->'
-} > deps.md
 EOF
 chmod +x "${WORK_DIR}/test-bin/claude" "${WORK_DIR}/commands/pr-status"
 
@@ -140,8 +122,8 @@ resolve_conflicts() {
 
 ## A chain with conflicts is pushed, and pr-status runs again.
 setup_case chain
-STUB_COMMANDS="$(printf '%s\n' 'git-push-to \' '  myrepo-branch-main \' '  myrepo-branch-feature && \')"
-export STUB_COMMANDS
+STUB_CHAINS="$(printf 'myrepo-branch-main\tmyrepo-branch-feature')"
+export STUB_CHAINS
 resolve_conflicts
 if [ "${resolve_status}" -ne 0 ]; then
   fail "chain: resolve-conflicts failed: ${resolve_output}"
@@ -156,7 +138,7 @@ fi
 
 ## No chain with conflicts:  nothing to do.
 setup_case none
-STUB_COMMANDS=''
+STUB_CHAINS=''
 resolve_conflicts
 if [ "${resolve_status}" -ne 0 ]; then
   fail "no chain: resolve-conflicts failed: ${resolve_output}"
@@ -166,26 +148,17 @@ case "${resolve_output}" in
   *) fail "no chain: wrong output: ${resolve_output}" ;;
 esac
 
-## A command that pr-status does not write is refused, and nothing runs.
-# shellcheck disable=SC2016 # The command substitution must not be expanded.
-for bad_command in 'touch pwned && \' 'git-push-to $(touch pwned) myrepo-branch-feature && \' 'git-push-to * && \'; do
-  setup_case refuse
-  STUB_COMMANDS="$(printf '%s\n' 'git-push-to \' '  myrepo-branch-main \' '  myrepo-branch-feature && \' "${bad_command}")"
-  resolve_conflicts
-  if [ "${resolve_status}" -eq 0 ]; then
-    fail "refuse: resolve-conflicts accepted: ${bad_command}"
-  fi
-  case "${resolve_output}" in
-    *"unexpected command"*) ;;
-    *) fail "refuse: wrong diagnostic for ${bad_command}: ${resolve_output}" ;;
-  esac
-  if [ -s "${STUB_LOG}" ] && grep -q -x claude "${STUB_LOG}"; then
-    fail "refuse: a chain ran despite: ${bad_command}"
-  fi
-  if [ -e "${case_dir}/pwned" ]; then
-    fail "refuse: the command ran: ${bad_command}"
-  fi
-  rm -rf "${case_dir}"
-done
+## A chain's directory is passed literally, not expanded as a pattern, and a
+## chain that fails makes resolve-conflicts fail.
+setup_case literal
+STUB_CHAINS="$(printf 'myrepo-branch-main\t*')"
+resolve_conflicts
+if [ "${resolve_status}" -eq 0 ]; then
+  fail "literal: resolve-conflicts succeeded: ${resolve_output}"
+fi
+case "${resolve_output}" in
+  *"the chain failed: myrepo-branch-main *"*) ;;
+  *) fail "literal: wrong output: ${resolve_output}" ;;
+esac
 
 echo "${SCRIPT_NAME}: all tests passed"

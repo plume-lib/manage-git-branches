@@ -670,6 +670,50 @@ class PushChainsTest(unittest.TestCase):
         self.assertEqual(chains, [["master", "pr1", "pr5"]])
 
 
+class ConflictingPushChainsTest(unittest.TestCase):
+    """Tests for conflicting_push_chains."""
+
+    def test_chains_of_every_repository(self):
+        """The result is the chains with conflicts of each repository, in order."""
+        chains = {"a": [["a", "a-branch-x"]], "b": [["b", "b-branch-y"], ["b", "b-branch-z"]]}
+
+        def push_chains(model, _base, conflicts_only=False):
+            self.assertTrue(conflicts_only)
+            return pr_status.PushChains(chains[model], [], True)
+
+        with mock.patch.object(pr_status, "push_chains", push_chains):
+            self.assertEqual(
+                pr_status.conflicting_push_chains(["a", "b"], "/base"),
+                [["a", "a-branch-x"], ["b", "b-branch-y"], ["b", "b-branch-z"]],
+            )
+
+
+class FormatPushChainsTest(unittest.TestCase):
+    """Tests for format_push_chains."""
+
+    def test_one_line_per_chain(self):
+        """Each chain is one line, with its directories separated by tabs."""
+        snapshot = {"conflicting_push_chains": [["a", "a-branch-x", "a-branch y"], ["b", "c"]]}
+        self.assertEqual(
+            pr_status.format_push_chains(snapshot), ["a\ta-branch-x\ta-branch y", "b\tc"]
+        )
+
+    def test_no_chains(self):
+        """A snapshot that records no chain with conflicts yields no line."""
+        self.assertEqual(pr_status.format_push_chains({"conflicting_push_chains": []}), [])
+
+    def test_missing_key(self):
+        """A snapshot that does not record the chains is an error."""
+        with self.assertRaisesRegex(ValueError, "records no dependency chains with conflicts"):
+            pr_status.format_push_chains({"time": "now", "facts": {}})
+
+    def test_tab_or_newline(self):
+        """A directory whose name contains a tab or newline is an error."""
+        for d in ("a\tb", "a\nb"):
+            with self.subTest(d=d), self.assertRaisesRegex(ValueError, "tab or newline"):
+                pr_status.format_push_chains({"conflicting_push_chains": [["a", d]]})
+
+
 class PrSectionsTest(unittest.TestCase):
     """Tests for gen_unblocked and gen_blocked."""
 
@@ -825,9 +869,7 @@ class DependencyDocumentTest(unittest.TestCase):
             text.endswith(
                 " even if its branch contains another member's commits.\n\n"
                 "## status\n\n## clusters\n\n## updating_branches\n\n"
-                "<!-- BEGIN GENERATED: conflicting-push-commands -->\n\n"
                 "### conflicting commands only\n\n"
-                "<!-- END GENERATED: conflicting-push-commands -->\n\n"
                 "### all commands\n\n"
                 "## unblocked\n\n## blocked\n\n## directories\n"
             ),
