@@ -132,7 +132,7 @@ while :; do
     # shellcheck disable=SC2086 # Split the chain into directories.
     set -- ${chain}
     IFS="${saved_ifs}"
-    echo "${SCRIPT_NAME}: git-push-to ${agent_option} ${nocompile_option} $*"
+    echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} $*"
     # The chain does not read this script's standard input.
     # shellcheck disable=SC2086 # ${nocompile_option} is empty or one word.
     if ! "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} "$@" < /dev/null; then

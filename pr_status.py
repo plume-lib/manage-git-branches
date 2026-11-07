@@ -2566,6 +2566,7 @@ def dependency_document(
     base: str,
     as_of: str,
     title: str,
+    all_chains: list[PushChains],
     conflicting: list[PushChains],
 ) -> str:
     """Generate the dependency document.
@@ -2576,6 +2577,8 @@ def dependency_document(
         base: the directory that holds the working copy directories
         as_of: the time of the PRs' data, such as "2026-11-05 17:59 PST"
         title: the document's title, such as "src PR status"
+        all_chains: the chains of each of models, as push_chains computes them, which the
+            "All dependency chains" section lists
         conflicting: the chains with conflicts of each of models, as push_chains computes
             them with conflicts_only, which the "Dependency chains with conflicts" section
             lists
@@ -2585,7 +2588,7 @@ def dependency_document(
         title, then its sections, including each optional section that cfg names.
     """
     optional = set(cfg["documents"].get("optional_sections", []))
-    all_commands = push_commands(models, [push_chains(m, base) for m in models], base)
+    all_commands = push_commands(models, all_chains, base)
     conflicting_commands = push_commands(models, conflicting, base)
     lines = [
         "---",
@@ -2767,7 +2770,7 @@ def new_snapshot(
     """Return the snapshot that records the given facts and chains with conflicts.
 
     Args:
-        time: the time of the snapshot, such as "2026-11-05T17:59:00-08:00"
+        time: a time, such as "2026-11-05T17:59:00-08:00", which the snapshot records
         new_facts: the facts, as facts computes them
         conflicting: the chains with conflicts of each repository, as push_chains computes
             them with conflicts_only
@@ -2805,7 +2808,8 @@ def format_push_chains(snapshot: dict[str, Any]) -> list[str]:
     if CONFLICTING_PUSH_CHAINS not in snapshot:
         msg = (
             f"{pr_status_config.SNAPSHOT} does not record the dependency chains with"
-            " conflicts; run pr-status without --check"
+            " conflicts, because an older version of pr-status wrote it; run pr-status to"
+            " rewrite it"
         )
         raise ValueError(msg)
     lines = []
@@ -2929,6 +2933,27 @@ def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[s
 
 
 # ---------- snapshot and changes ----------
+
+
+def write_json_atomically(path: pathlib.Path, value: Any) -> None:
+    """Write the given value as JSON to the given file, which is never left partly written.
+
+    The file holds either its old contents or all of the new ones, even if this process is
+    killed or json.dump raises an exception.
+
+    Args:
+        value: a value that json.dump accepts, such as a dict
+        path: the file to write, such as .pr-status-snapshot.json
+    """
+    # The process id keeps two concurrent runs from writing the same temporary file.
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w") as f:
+            json.dump(value, f, indent=1)
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def facts(models: list[Model]) -> dict[str, Any]:
@@ -3264,22 +3289,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument(
+    # At most one of these options, which choose what pr-status does.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
         help="report changes, but change no document, snapshot, PR description, or directory",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--print-document",
         action="store_true",
         help="print the file name of the dependency document, and do nothing else",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--print-config",
         action="store_true",
         help="print the config as JSON, with its defaults filled in, and do nothing else",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--print-conflicting-push-chains",
         action="store_true",
         help=(
@@ -3306,6 +3333,13 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    if args.highlight and (
+        args.print_document or args.print_config or args.print_conflicting_push_chains
+    ):
+        parser.error(
+            "--highlight is not allowed with --print-document, --print-config, or"
+            " --print-conflicting-push-chains"
+        )
     check_only = args.check
     if args.directory is not None:
         try:
@@ -3406,12 +3440,14 @@ def main() -> None:
     for doc in unblocked_docs:
         pathlib.Path(doc["file"]).write_text(unblocked_doc(models, cfg, base, doc, as_of))
     title = f"{pathlib.Path(base).name} PR status"
+    # Both lists come from this one place, so the document and the snapshot agree.
+    all_chains = [push_chains(m, base) for m in models]
     conflicting = [push_chains(m, base, conflicts_only=True) for m in models]
-    dependencies.write_text(dependency_document(models, cfg, base, as_of, title, conflicting))
-    # Computed before the file is opened, which empties it.
+    dependencies.write_text(
+        dependency_document(models, cfg, base, as_of, title, all_chains, conflicting)
+    )
     snapshot = new_snapshot(now.isoformat(timespec="seconds"), new, conflicting)
-    with pathlib.Path(pr_status_config.SNAPSHOT).open("w") as f:
-        json.dump(snapshot, f, indent=1)
+    write_json_atomically(pathlib.Path(pr_status_config.SNAPSHOT), snapshot)
     written = [d["file"] for d in unblocked_docs]
     written += [str(dependencies), pr_status_config.SNAPSHOT]
     print(f"## Wrote {and_list(written)}")

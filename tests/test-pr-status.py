@@ -758,6 +758,31 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
         self.assertIn("--print-conflicting-push-chains", result.stderr)
 
 
+class ExclusiveOptionsTest(unittest.TestCase):
+    """Tests that pr-status rejects options that choose different things to do."""
+
+    PR_STATUS = PrintConflictingPushChainsTest.PR_STATUS
+
+    def test_rejected(self):
+        """Each combination fails with a usage error, before reading any file."""
+        for options in [
+            ["--check", "--print-conflicting-push-chains"],
+            ["--print-document", "--print-conflicting-push-chains"],
+            ["--print-config", "--print-document"],
+            ["--print-conflicting-push-chains", "--highlight", "repo#1"],
+        ]:
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as d:
+                result = subprocess.run(
+                    [sys.executable, self.PR_STATUS, "-C", d, *options],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("not allowed with", result.stderr)
+
+
 class PrSectionsTest(unittest.TestCase):
     """Tests for gen_unblocked and gen_blocked."""
 
@@ -890,13 +915,12 @@ class DependencyDocumentTest(unittest.TestCase):
 
         with mock.patch.multiple(
             pr_status,
-            push_chains=mock.Mock(return_value="ALL"),
             push_commands=push_commands,
             gen_push_commands=gen_push_commands,
             **gens,
         ):
             return pr_status.dependency_document(
-                models, {"documents": docs}, "/base", "now", "src PR status", "CONFLICTING"
+                models, {"documents": docs}, "/base", "now", "src PR status", "ALL", "CONFLICTING"
             )
 
     def test_document(self):
@@ -965,7 +989,7 @@ class DependencyDocumentTest(unittest.TestCase):
             **dict.fromkeys(self.GENERATORS, mock.Mock(return_value=[])),
         ):
             cfg = {"documents": {}}
-            text = pr_status.dependency_document([], cfg, "/base", "now", "a: #b PR status", [])
+            text = pr_status.dependency_document([], cfg, "/base", "now", "a: #b PR status", [], [])
         self.assertTrue(
             text.startswith('---\ntitle: "a: #b PR status"\n---\n\n# a: #b PR status\n\n'),
             text,

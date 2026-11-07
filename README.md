@@ -186,8 +186,8 @@ The commands are:
   `--claude`,
   and `--codex` options.
 * [`pr-status`](pr-status)
-  `[--check] [--print-document] [--print-config]`
-  `[--print-conflicting-push-chains] [-C DIR] [--highlight PR...]`:
+  `[--check | --print-document | --print-config |`
+  `--print-conflicting-push-chains] [-C DIR] [--highlight PR...]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
   `pr-status.md` (or the documents that `pr-status-config.json` names;
@@ -204,11 +204,13 @@ The commands are:
   dependency chains with conflicts that its previous run recorded in
   `.pr-status-snapshot.json`, one chain per line, with the chain's
   directories separated by tabs, and does nothing else.
+  At most one of these 4 options is allowed.
   `--highlight PR...` highlights, wherever the documents name it, each
   given PR (such as `REPO#100` or `ORG/REPO#100`) and every PR that must
   land for it to land:  the PRs that it depends on or lands with,
   recursively.  It shows them in bold on a light red background, and as red
-  nodes in the dependency graph.
+  nodes in the dependency graph.  It is not allowed with a `--print-...`
+  option.
   Run it in a directory that holds the working copy directories, or pass
   that directory with `-C`.
   This command needs Python 3.10 or later, and the programs that
