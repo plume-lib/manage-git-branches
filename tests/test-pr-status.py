@@ -423,6 +423,82 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model.direct, {1: {2}, 2: set(), 4: set()})
         self.assertEqual(model.update_direct, {1: set(), 2: {1}, 4: set()})
 
+    def test_pr_on_fix_waits_for_base_pr_without_containment(self):
+        """A PR whose branch is updated from a fix's branch lands after the fix's base PR.
+
+        That holds even if its branch lacks some of the base PR's commits.
+        """
+        for bodies, bases, contains in (
+            ({1: "", 2: "Land before #1.", 3: ""}, {2: 1, 3: 2}, {(2, 1), (3, 2)}),
+            ({1: "", 2: "Land before #1.", 3: "Land after #2."}, {2: 1}, {(2, 1)}),
+        ):
+            with self.subTest(bodies=bodies):
+                model = self.model(bodies, contains, bases=bases)
+                self.assertEqual(model.cyclic, [])
+                self.assertEqual(model.direct, {1: {2}, 2: set(), 3: {1}})
+                self.assertEqual(model.update_direct, {1: set(), 2: {1}, 3: {2}})
+                self.assertEqual(model.blocked(), [1, 3])
+
+    def test_fix_does_not_wait_for_commits_its_base_pr_lacks(self):
+        """The base PR, not its fix, waits for the commits that only the fix's branch has."""
+        model = self.model(
+            {1: "", 2: "Land before #1.", 5: ""}, {(1, 5), (2, 1), (2, 5)}, bases={1: 5, 2: 1}
+        )
+        model_lagging = self.model(
+            {1: "", 2: "Land before #1.", 5: ""}, {(2, 1), (2, 5)}, bases={2: 1}
+        )
+        for m in (model, model_lagging):
+            self.assertEqual(m.cyclic, [])
+            self.assertEqual(m.direct, {1: {2, 5}, 2: set(), 5: set()})
+            self.assertEqual(m.blocked(), [1])
+
+    def test_configured_dependency_on_fix(self):
+        """A configured dependency of a base PR on its stacked PR makes the stacked PR a fix."""
+        model = self.raw_model({1: "", 2: ""}, {(2, 1)}, bases={2: 1})
+        model = pr_status.Model(
+            model.repo, {"repos": {"owner/repo": {"extra_dependencies": [[1, 2]]}}}
+        )
+        pr_status.unite_partners([model])
+        self.assertEqual(model.lands_into, {2: 1})
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.direct, {1: {2}, 2: set()})
+        # The base PR's branch is not updated from the fix's branch.
+        self.assertEqual(model.update_direct, {1: set(), 2: {1}})
+
+    def test_push_commands_keep_base_pr_of_fix_in_cycle(self):
+        """A base PR whose fix is in a cycle is still updated, unlike the cycle's members."""
+        model = self.model(
+            {1: "", 2: "Land before #1.\nLand after #4.", 4: "Land after #2."},
+            {(2, 1)},
+            bases={2: 1},
+        )
+        # 4's branch is updated from 2's, which has 1's commits, so 4 lands after 1.
+        self.assertEqual(model.cyclic, [1, 2, 4])
+        self.assertEqual(model.cycle_affected, {1, 2, 4})
+        self.assertEqual(model.update_cycle_affected, {2, 4})
+
+    def test_textual_conflicts_include_update_neighbors(self):
+        """The cell keeps a conflict with the branch that a PR's branch is updated from."""
+        model = self.model(
+            {1: "", 2: "Land before #1.", 3: ""}, {(2, 1), (3, 1), (3, 2)}, bases={2: 1, 3: 2}
+        )
+        model.repo.master_conflicts = {}
+        model.repo.pair_conflicts = {(1, 3): ["a.txt"], (2, 3): ["b.txt"]}
+        model.repo.link = lambda n: f"#{n}"
+        model.excluded = set()
+        cfg = {"repos": {model.repo.name: {}}}
+        self.assertEqual(
+            pr_status.textual_conflicts(model, cfg, 3), "`a.txt` with #1; `b.txt` with #2"
+        )
+
+    def test_branch_contains_for_fix(self):
+        """The cell says whether a fix's branch has its base PR's current commits."""
+        model = self.model({1: "", 2: "Land before #1."}, {(2, 1)}, bases={2: 1})
+        model.repo.link = lambda n: f"#{n}"
+        with mock.patch.object(model, "head_status", return_value="newest"):
+            self.assertEqual(pr_status.branch_contains(model, 2), "no (lacks #1's newest commits)")
+        self.assertEqual(pr_status.branch_contains(model, 1), "not applicable")
+
     def test_fix_documents_landing_order(self):
         """The cells and sections that describe prerequisites follow the landing order."""
         model = self.model({1: "", 2: "Land before #1."}, {(2, 1)}, bases={2: 1})
@@ -822,7 +898,7 @@ class PushChainsTest(unittest.TestCase):
             open=set(direct),
             update_direct=direct,
             update_levels=levels,
-            cycle_affected=set(cycle_affected),
+            update_cycle_affected=set(cycle_affected),
         )
         upstream = {"master": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}
         # pr_directories receives the PR's data, so look up the PR's number by identity.
