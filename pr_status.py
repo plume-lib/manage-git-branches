@@ -1466,6 +1466,10 @@ class FailedDescriptionUpdate(NamedTuple):
 def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
     """Return the updates of the PR descriptions whose conventional landing-order lines are stale.
 
+    The descriptions of PRs in a cycle of dependencies, and of PRs that depend on one, are not
+    updated:  their direct dependencies are wrong, and their stated landing order is what
+    must be corrected to break the cycle.
+
     Returns:
         A DescriptionUpdate for each such PR description.
     """
@@ -1479,12 +1483,19 @@ def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
                     f" malformed landing-order line: {line}",
                     file=sys.stderr,
                 )
+            if n in model.cycle_affected:
+                continue
             unit = model.unit[n]
+            # A fix and its base PR keep the lines that make the fix a fix, even when the
+            # base PR depends on the fix only transitively, through another fix.  Without
+            # them, the next run would take the fix to build on its base PR.
+            fixes = {f for f, m in model.lands_into.items() if m == n}
+            base = {model.lands_into[n]} if n in model.lands_into else set()
             updated = updated_pr_description(
                 body,
                 model.repo,
-                model.direct[n] - unit,
-                model.dependents[n] - unit,
+                (model.direct[n] | fixes) - unit,
+                (model.dependents[n] | base) - unit,
                 model.external[n],
             )
             if updated != body:

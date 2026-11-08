@@ -123,6 +123,8 @@ class UpdatedPrDescriptionTest(unittest.TestCase):
             dependents={1: set(), 2: {1}},
             unit={1: {1, 2}, 2: {1, 2}},
             external={1: [], 2: []},
+            lands_into={},
+            cycle_affected=set(),
         )
         self.assertEqual(pr_status.description_updates([model]), [])
 
@@ -392,6 +394,42 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model.direct, {1: {2}, 2: {3}, 3: set()})
         self.assertEqual(model.update_direct, {1: set(), 2: {1}, 3: {2}})
         self.assertEqual(model.blocked(), [1, 2])
+
+    def test_fix_that_lands_after_another_fix_stays_a_fix(self):
+        """Updating the descriptions keeps the statement that makes each fix a fix.
+
+        Fixes 2 and 3 both land into 1's branch, and 3 lands after 2.  Then 1 depends on 2
+        only transitively, through 3, but 2's description must still say to land before 1.
+        """
+        model = self.model(
+            {1: "", 2: "Land before #1.", 3: "Land before #1.\nLand after #2."},
+            {(2, 1), (3, 1), (3, 2)},
+            bases={2: 1, 3: 1},
+        )
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.lands_into, {2: 1, 3: 1})
+        bodies = self.updated_bodies(model)
+        self.assertEqual(
+            bodies,
+            {
+                1: "Land after #2.\nLand after #3.",
+                2: "Land before #1.\nLand before #3.",
+                3: "Land after #2.\nLand before #1.",
+            },
+        )
+        # The updated descriptions describe the same model.
+        model = self.model(bodies, {(2, 1), (3, 1), (3, 2)}, bases={2: 1, 3: 1})
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.lands_into, {2: 1, 3: 1})
+        self.assertEqual(self.updated_bodies(model), bodies)
+
+    def test_cycle_leaves_descriptions_unchanged(self):
+        """The descriptions of PRs in a cycle, or that depend on one, are not updated."""
+        bodies = {1: "Land after #2.", 2: "Land after #1.", 3: "Land after #2.\n\nBody.", 4: ""}
+        model = self.model(bodies, set())
+        self.assertEqual(model.cyclic, [1, 2])
+        self.assertEqual(model.cycle_affected, {1, 2, 3})
+        self.assertEqual(self.updated_bodies(model), bodies)
 
     def test_cycle_through_fix(self):
         """A cycle of dependencies that includes a fix's landing order is a cycle."""
