@@ -48,11 +48,18 @@ fail() {
 ##   good:   removes the conflict marker lines and the merge base's text,
 ##           keeping both sides
 ##   clean:  as "good", but also changes a line that merged cleanly
+##   ours:   replaces file.txt with HEAD's version, discarding main's changes
+##   theirs: replaces file.txt with MERGE_HEAD's version, discarding
+##           feature's changes
+##   delete-conflicted: deletes file.txt
 ##   none:   changes nothing
 ##   fail:   exits with status 3
-##   fail-create: creates a file, then exits with status 3
+##   fail-untracked: changes the untracked file notes.txt, then exits with
+##           status 3
 ##   commit: as "good", but also commits the merge
 ##   create: as "good", but also creates a file
+##   change-tracked: as "good", but also changes other.txt, which git tracks
+##   delete-tracked: as "good", but also deletes other.txt, which git tracks
 ##   config: as "good", but also changes git's configuration
 ##   change-untracked: as "good", but also changes the untracked file notes.txt
 ##   delete-untracked: as "good", but also deletes the untracked file notes.txt
@@ -109,9 +116,19 @@ if ! grep -q '^<<<<<<< ' file.txt; then
   exit 0
 fi
 if [ "${STUB_MODE}" = fail ]; then exit 3; fi
-if [ "${STUB_MODE}" = fail-create ]; then
-  echo "scratch" > scratch.txt
+if [ "${STUB_MODE}" = fail-untracked ]; then
+  echo "changed" >> notes.txt
   exit 3
+fi
+if [ "${STUB_MODE}" = ours ] || [ "${STUB_MODE}" = theirs ]; then
+  if [ "${STUB_MODE}" = ours ]; then stub_stage=2; else stub_stage=3; fi
+  git show ":${stub_stage}:file.txt" > file.txt.new
+  mv file.txt.new file.txt
+  exit 0
+fi
+if [ "${STUB_MODE}" = delete-conflicted ]; then
+  rm file.txt
+  exit 0
 fi
 if [ "${STUB_MODE}" = none ]; then exit 0; fi
 if [ "${STUB_MODE}" = hang ]; then exec sleep 60; fi
@@ -140,7 +157,8 @@ case "${STUB_MODE}" in
   change-ignored) echo "changed" >> build/old.txt ;;
   include) printf '[core]\n\tfsmonitor = echo pwned\n' >> local.gitconfig ;;
   attributes) echo '* diff=pwned' >> .git/info/attributes ;;
-  change-rerere) echo "agent" >> other.txt ;;
+  change-rerere | change-tracked) echo "agent" >> other.txt ;;
+  delete-tracked) rm other.txt ;;
   change-quoted) echo "changed" >> 'a"b\c' ;;
   change-nested) echo "changed" >> nested/file.txt ;;
   auto-merge) git update-ref AUTO_MERGE "$(git rev-parse 'HEAD^{tree}')" ;;
@@ -437,35 +455,77 @@ else
   esac
 fi
 
-## A change outside the conflict region is rejected.
+## The instructions tell the agent to examine both sides' changes, permit it
+## to edit any part of any file, and forbid taking one side.
+setup_case instructions
+push_to good --llm
+check_resolved claude "instructions"
+for instruction in 'git diff HEAD...MERGE_HEAD' 'git diff MERGE_HEAD...HEAD' \
+  'edit any part of any file' 'by taking one side' 'Step 3:  check that no change was lost' \
+  'HEAD is feature, and MERGE_HEAD is main' '# Rules for this session'; do
+  if ! grep -q -F -- "${instruction}" "${STUB_PROMPT}"; then
+    fail "instructions: they lack \"${instruction}\": $(cat "${STUB_PROMPT}")"
+  fi
+done
+
+## A change outside the conflict region is accepted.
 setup_case clean
 push_to clean --llm
-check_not_resolved "change outside a conflict region"
+if [ "${push_status}" -ne 0 ]; then
+  fail "change outside a conflict region: git-push-to failed: ${push_output}"
+fi
+expected="$(printf '%s\n' ONE two THREE four five six SEVEN-feature SEVEN-main eight nine)"
+if [ "$(git -C "${remote}" show refs/heads/feature:file.txt)" != "${expected}" ]; then
+  fail "change outside a conflict region: wrong merge result: $(git -C "${remote}" show refs/heads/feature:file.txt)"
+fi
+
+## A resolution that is identical to either side's version is rejected.
+for side_mode in ours theirs; do
+  setup_case "side-${side_mode}"
+  push_to "${side_mode}" --llm
+  check_not_resolved "${side_mode}"
+  case "${side_mode}:${push_output}" in
+    ours:*"file.txt: the resolution is the version on feature, which discards every change of main"*" to the file"*) ;;
+    theirs:*"file.txt: the resolution is the version in main"*", which discards every change of feature to the file"*) ;;
+    *) fail "${side_mode}: wrong diagnostic: ${push_output}" ;;
+  esac
+done
+
+## Deleting the conflicted file is rejected.
+setup_case delete-conflicted
+push_to delete-conflicted --llm
+check_not_resolved "delete-conflicted"
 case "${push_output}" in
-  *"the text before the first conflict region changed"*) ;;
-  *) fail "change outside a conflict region: wrong diagnostic: ${push_output}" ;;
+  *"file.txt: the conflicted file was deleted"*) ;;
+  *) fail "delete-conflicted: wrong diagnostic: ${push_output}" ;;
 esac
+
+## When the agent's work is rejected, the user is told how to continue its
+## session.
+setup_case session
+push_to ours --llm
+check_not_resolved "rejected resolution"
 ## The command that continues Claude's session names the session that the
 ## stub was given.  The directory is a physical path, as on macOS, where
 ## the temporary directory is under a symbolic link.
 session_id="$(sed -n -e '/^--session-id$/{n;p;}' "${STUB_ARGS}")"
 session_dir="$(cd "${feature_dir}" && pwd -P)"
 case "${session_id}" in
-  "") fail "change outside a conflict region: claude was not given --session-id" ;;
+  "") fail "rejected resolution: claude was not given --session-id" ;;
   *)
     case "${push_output}" in
       *"to continue the session of claude:  cd ${session_dir} && claude --resume ${session_id}"*) ;;
-      *) fail "change outside a conflict region: no command to continue the session: ${push_output}" ;;
+      *) fail "rejected resolution: no command to continue the session: ${push_output}" ;;
     esac
     ## The command is also appended to AGENT-TODO.md, which starts with a
     ## title.
     todo="${feature_dir}/AGENT-TODO.md"
     if [ "$(head -n 1 "${todo}" 2> /dev/null)" != "# AI agent sessions to continue" ]; then
-      fail "change outside a conflict region: AGENT-TODO.md has no title: $(cat "${todo}" 2> /dev/null)"
+      fail "rejected resolution: AGENT-TODO.md has no title: $(cat "${todo}" 2> /dev/null)"
     fi
     if ! grep -q -x "## Resolve the conflicts in the merge of .* (git-push-to, .*)" "${todo}" \
       || ! grep -q -x -F "cd ${session_dir} && claude --resume ${session_id}" "${todo}"; then
-      fail "change outside a conflict region: AGENT-TODO.md lacks the command: $(cat "${todo}")"
+      fail "rejected resolution: AGENT-TODO.md lacks the command: $(cat "${todo}")"
     fi
     ;;
 esac
@@ -574,12 +634,13 @@ if grep -q 'codex resume' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
 fi
 
 ## The work of an agent that fails is checked too.
-setup_case fail-create
-push_to fail-create --llm
-check_not_resolved "failing agent that creates a file"
+setup_case fail-untracked
+echo "notes" > "${feature_dir}/notes.txt"
+push_to fail-untracked --llm
+check_not_resolved "failing agent that changes an untracked file"
 case "${push_output}" in
-  *"claude failed with status 3"*"created a file: scratch.txt"*) ;;
-  *) fail "failing agent that creates a file: wrong diagnostic: ${push_output}" ;;
+  *"claude failed with status 3"*"changed a file: notes.txt"*) ;;
+  *) fail "failing agent that changes an untracked file: wrong diagnostic: ${push_output}" ;;
 esac
 
 ## An agent that commits is rejected.
@@ -591,14 +652,38 @@ case "${push_output}" in
   *) fail "agent that commits: wrong diagnostic: ${push_output}" ;;
 esac
 
-## An agent that creates a file is rejected.
+## A file that the agent creates is committed with the merge, and reported.
 setup_case create
 push_to create --llm
-check_not_resolved "agent that creates a file"
+check_resolved claude "agent that creates a file"
+if [ "$(git -C "${remote}" show refs/heads/feature:scratch.txt 2> /dev/null)" != scratch ]; then
+  fail "agent that creates a file: the file was not committed"
+fi
 case "${push_output}" in
-  *"created a file: scratch.txt"*) ;;
+  *"claude created: scratch.txt"*) ;;
   *) fail "agent that creates a file: wrong diagnostic: ${push_output}" ;;
 esac
+
+## A change to a tracked file that has no conflicts, or its deletion, is
+## committed with the merge, and reported.
+for tracked_mode in change-tracked delete-tracked; do
+  setup_case "${tracked_mode}"
+  echo "other" > "${feature_dir}/other.txt"
+  git -C "${feature_dir}" add other.txt
+  git -C "${feature_dir}" commit -q -m "Add other.txt"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  push_to "${tracked_mode}" --llm
+  check_resolved claude "${tracked_mode}"
+  case "${tracked_mode}:$(git -C "${remote}" show refs/heads/feature:other.txt 2> /dev/null)" in
+    change-tracked:"$(printf '%s\n' other agent)" | delete-tracked:) ;;
+    *) fail "${tracked_mode}: wrong other.txt: $(git -C "${remote}" show refs/heads/feature:other.txt 2>&1)" ;;
+  esac
+  case "${push_output}" in
+    *"claude also changed: other.txt"*) ;;
+    *) fail "${tracked_mode}: wrong diagnostic: ${push_output}" ;;
+  esac
+done
 
 ## An agent that changes or deletes an untracked file is rejected.
 for untracked_mode in change-untracked delete-untracked; do
@@ -814,7 +899,7 @@ check_todo_merge "AGENT-TODO.md with an agent, rerun"
 ## stopped, as when the agent's work was rejected, even if the files have no
 ## conflict markers.
 setup_case rerun-rejected
-push_to clean --llm
+push_to ours --llm
 check_not_resolved "rejected agent"
 : > "${STUB_LOG}"
 push_to good --llm
@@ -1103,8 +1188,8 @@ for control_mode in include attributes; do
   esac
 done
 
-## An agent that changes a file whose conflict `git rerere` resolved is
-## rejected.  Only the other conflicted file is named to the agent.
+## An agent can change a file whose conflict `git rerere` resolved, which is
+## named to the agent as such.
 setup_case change-rerere
 echo "other main" > "${main_dir}/other.txt"
 git -C "${main_dir}" add other.txt
@@ -1124,14 +1209,13 @@ printf '%s\n' "other feature" "other main" > "${feature_dir}/other.txt"
 git -C "${feature_dir}" rerere 2> /dev/null
 git -C "${feature_dir}" merge --abort
 push_to change-rerere --llm
-check_not_resolved "change-rerere"
-if grep -q 'other.txt' "${STUB_PROMPT}"; then
-  fail "change-rerere: the instructions name the file that rerere resolved"
+check_resolved claude "change-rerere"
+if ! grep -q -x '  other.txt' "${STUB_PROMPT}"; then
+  fail "change-rerere: the instructions do not name the file that rerere resolved"
 fi
-case "${push_output}" in
-  *"changed a file: other.txt"*) ;;
-  *) fail "change-rerere: wrong diagnostic: ${push_output}" ;;
-esac
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "$(printf '%s\n' "other feature" "other main" agent)" ]; then
+  fail "change-rerere: wrong other.txt: $(git -C "${remote}" show refs/heads/feature:other.txt)"
+fi
 
 ## A resolution that `git rerere` recorded needs no agent, whether or not
 ## rerere stages the files that it resolves.  test-push-to-rerere.sh tests

@@ -140,8 +140,19 @@
 # the README.
 #
 # When a merge has conflicts that `git rerere` does not resolve, the agent
-# edits the conflicted files, and this script checks its resolution as
-# described above.  That applies to the merge of FROM_DIR's branch into
+# resolves them, and this script checks its resolution as described above.
+# The agent is told to examine every change of both sides of the merge, and
+# to combine them rather than taking either side's version.  It can edit any
+# part of any file that git tracks, not only the conflict regions, because
+# git's automatic merge of the rest can combine changes that do not fit
+# together, such as a call to a method that the other side renamed.  It can
+# also create and delete files.  This script rejects a resolution of a file
+# that is identical to either side's version of the file, and it lists the
+# files outside the conflicted ones that the agent changed or created, so
+# that you can review them.  The agent's instructions consist of the file
+# merge-conflict-instructions.md, which also suits a merge that you resolve
+# yourself or with an agent interactively, followed by rules specific to this
+# script.  That applies to the merge of FROM_DIR's branch into
 # TO_DIR, and to the merges of the pulls that update FROM_DIR and TO_DIR from
 # their remotes.  The pull of TO_DIR merges even if `pull.rebase` is set; a
 # pull of FROM_DIR that rebases, as `pull.rebase` can make it do, is not
@@ -179,8 +190,7 @@
 # that continues the agent's session interactively, or one such command for
 # each of the agent's attempts to fix the build.  In the resumed session,
 # you can ask the agent about its work, or tell it to finish in a way that
-# its instructions forbade, such as by changing text outside a conflict
-# region.  Then commit the merge or the fix yourself, and run this script
+# its instructions forbade, such as by taking one side's version of a file.  Then commit the merge or the fix yourself, and run this script
 # again.  This script also appends the command to the file AGENT-TODO.md at
 # the top level of the working tree, where you are less likely to overlook
 # it; delete the entry once you have dealt with it.  The resumed

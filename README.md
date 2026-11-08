@@ -123,10 +123,18 @@ The commands are:
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
   When a merge or a pull has conflicts, it uses the resolutions that
   `git rerere` recorded, and it asks an AI agent, Claude (or, with
-  `--codex`, Codex), to edit the conflicted hunks that rerere does not
-  resolve.  It checks every resolution, whether from rerere or from the
-  agent:  that nothing outside the conflict regions changed and that no
-  conflict marker remains.  Then it commits the merge and continues.
+  `--codex`, Codex), to resolve the conflicts that rerere does not resolve.
+  The agent examines every change of both sides of the merge and combines
+  them; it can edit any part of any file, because git's automatic merge of
+  the text outside the conflict regions can be wrong too.  The script checks
+  every resolution:  that no conflict marker remains, that a resolution from
+  rerere changed nothing outside the conflict regions, and that the agent
+  did not resolve a file by taking either side's version of it.  It lists
+  the other files that the agent changed, for your review.  The agent's
+  instructions start with the file `merge-conflict-instructions.md`, which
+  also suits a merge that you resolve yourself or with an agent
+  interactively.  Then it commits
+  the merge and continues.
   It does the same for a merge that is already in progress in any directory
   except the first, as after an earlier run stopped at conflicts, after
   running `git rerere` to apply any resolution recorded since then.  It
