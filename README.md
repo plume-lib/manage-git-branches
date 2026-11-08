@@ -187,7 +187,8 @@ The commands are:
   and `--codex` options.
 * [`pr-status`](pr-status)
   `[--check | --print-document | --print-config |`
-  `--print-conflicting-push-chains] [-C DIR] [--highlight PR...]`:
+  `--print-conflicting-push-chains] [-C DIR]`
+  `[--highlight PR|bottleneck...]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
   `pr-status.md` (or the documents that `pr-status-config.json` names;

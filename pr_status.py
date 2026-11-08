@@ -3413,7 +3413,7 @@ def main() -> None:
         action="extend",
         nargs="+",
         default=[],
-        metavar="PR",
+        metavar="PR|bottleneck",
         help=(
             "in the documents, highlight each PR (such as REPO#N or ORG/REPO#N) and every PR"
             " that must land for it to land:  the PRs that it depends on or lands with,"
