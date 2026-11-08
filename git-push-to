@@ -136,8 +136,12 @@
 # "--llm" turns on the agent that the last "--claude" or "--codex" chose.
 # If the agent cannot be run because its command is not on the PATH, this
 # script acts as it does with "--no-llm".
-# The agent runs in a sandbox, which requires a recent version of it; see
-# the README.
+# The agent runs in a sandbox, which requires a recent version of it:
+# Claude Code with the `--restricted` option and the setting
+# `permissions.blockReadsOutsideWorkingDirectories`, or Codex with permission
+# profiles (the setting `default_permissions`).  Claude Code 2.1.316 and
+# Codex 0.165.0 work.  The sandbox lets the agent read every file of the
+# working tree, including ignored files such as `.env`, and the repository.
 #
 # When a merge has conflicts that `git rerere` does not resolve, the agent
 # edits the conflicted files, and this script checks its resolution as

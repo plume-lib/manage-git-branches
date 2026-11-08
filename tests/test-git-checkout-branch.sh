@@ -784,8 +784,11 @@ new_clone="${forks}/proj-fork-me"
 if [ ! -d "${new_clone}" ]; then
   fail "a slug whose fork has no clone did not make ${new_clone}: ${out}"
 else
-  if [ "$(git -C "${new_clone}" remote)" != 'origin' ]; then
-    fail "the new clone ${new_clone} has remotes other than origin: $(git -C "${new_clone}" remote)"
+  if [ "$(git -C "${new_clone}" remote | tr '\n' ' ')" != 'origin upstream ' ]; then
+    fail "the new clone ${new_clone} has remotes other than origin and upstream: $(git -C "${new_clone}" remote)"
+  fi
+  if [ "$(git -C "${new_clone}" config --get remote.upstream.url)" != 'git@github.com:up/proj.git' ]; then
+    fail "the new clone's upstream is not the upstream repository: $(git -C "${new_clone}" config --get remote.upstream.url)"
   fi
   if [ "$(git -C "${new_clone}" config --get remote.origin.url)" != 'git@github.com:me/proj.git' ]; then
     fail "the new clone's origin is not the fork: $(git -C "${new_clone}" config --get remote.origin.url)"
@@ -870,7 +873,7 @@ done
 # "upstream", whichever remote its branch is fetched from.  Without that
 # remote, the upstream repository is the one that `remote.origin.gh-resolved`
 # names, and it is unknown if that is unset, because "origin" is the current
-# clone's own fork.
+# clone's own fork; then the new clone has no remote "upstream".
 git init -q "${tmpdir}/encl"
 encl="$(cd "${tmpdir}/encl" && pwd -P)"
 mkdir "${encl}/proj"
@@ -882,14 +885,19 @@ for org in third fourth; do
 done
 for org in other third fourth; do
   case "${org}" in
-    other) expected_resolved='up/proj' ;;
+    other)
+      expected_resolved='up/proj'
+      expected_upstream='git@github.com:up/proj.git'
+      ;;
     third)
       git -C "${encl}/proj-fork-me" remote remove upstream
       expected_resolved=''
+      expected_upstream=''
       ;;
     fourth)
       git -C "${encl}/proj-fork-me" config remote.origin.gh-resolved up/proj
       expected_resolved='up/proj'
+      expected_upstream='git@github.com:up/proj.git'
       ;;
   esac
   if ! out="$(cd "${encl}/proj-fork-me" && "${GIT_CHECKOUT_BRANCH}" "${org}:main" 2>&1)"; then
@@ -901,6 +909,10 @@ for org in other third fourth; do
   actual_resolved="$(git -C "${encl}/proj-fork-${org}" config --get remote.origin.gh-resolved)"
   if [ "${actual_resolved}" != "${expected_resolved}" ]; then
     fail "the slug ${org}:main without a clone PROJECT set remote.origin.gh-resolved to [${actual_resolved}], not [${expected_resolved}]"
+  fi
+  actual_upstream="$(git -C "${encl}/proj-fork-${org}" config --get remote.upstream.url)"
+  if [ "${actual_upstream}" != "${expected_upstream}" ]; then
+    fail "the slug ${org}:main without a clone PROJECT set the remote upstream to [${actual_upstream}], not [${expected_upstream}]"
   fi
 done
 

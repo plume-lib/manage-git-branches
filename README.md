@@ -13,7 +13,7 @@ The key principles of this work style are:
 1. Do not run git commands in the main branch, except `git pull`.  (Or,
    use [`mvc pull`](https://github.com/plume-lib/multi-version-control).)
 2. Do not change branches in any working tree.
-   That is, never run `git checkout`, and never run `git stash`.
+   That is, never run `git switch`, `git checkout`, or `git stash`.
 3. To create a new branch, run the command `gnb` or `git-new-branch`.  It
    creates a new directory holding a new branch that starts as a copy of
    the branch from which you ran `gnb`.
@@ -27,132 +27,91 @@ The commands are:
 * [`git-checkout-branch`](git-checkout-branch) `[--no-pull] BRANCHNAME`:
   Checks out the given branch of the repository in a new working tree
   directory.  Run this command from within a working tree; the new directory
-  is a sibling of the working tree.  First, it runs `git pull` in the working
-  tree, unless `--no-pull` is given.  The new directory is a worktree (see
-  [below](#worktrees)) that holds a fresh checkout of the branch:  it does
-  not inherit the current directory's uncommitted changes, untracked files,
-  or build output, so the first build there is a full one.  A branch can be
-  checked out in only one worktree of a repository at a time, though
-  separate clones can each check it out.  A branch that has
-  submodules gets a copy of the whole directory instead, which is an
-  independent clone.
+  is a sibling of the working tree.
+
   Instead of BRANCHNAME, the argument can be a slug of the form
   `ORG:BRANCHNAME`, such as `git-checkout-branch mernst:feature`, which is
-  how GitHub shows a pull request's branch.  It can be given in any working
-  tree of the project, such as `PROJECT`, `PROJECT-fork-OTHERORG`, or one of
-  their branch directories.  It does what `git-checkout-branch BRANCHNAME`
-  does in the sibling clone `PROJECT-fork-ORG`:  it pulls there (only if the
-  pull can fast-forward; otherwise it warns and uses the clone's current
-  commit), then makes the directory `PROJECT-fork-ORG-branch-BRANCHNAME`.
-  It looks for the branch only on ORG's fork, the remote that
-  `PROJECT-fork-ORG` pushes to, and not on another remote such as
-  `upstream`.  As for `git-new-branch` and `git-push-to`, ORG `-` stands for
-  the clone `PROJECT` itself.
-  If there is no clone `PROJECT-fork-ORG` and ORG owns the project's
-  upstream repository, as `typetools` owns `typetools/checker-framework`,
-  then `ORG:BRANCH` acts as `-:BRANCH` does; `git-new-branch` and
-  `git-push-to` follow the same rule.  If the clone that the slug names has
-  the branch checked out, the command does nothing else.
-  Otherwise, if there is no clone `PROJECT-fork-ORG`, the command first makes
-  one, if ORG's fork has the branch.  The fork's URL is that of the clone
-  `PROJECT`'s upstream remote with the owner replaced by ORG, so
-  `git@github.com:typetools/checker-framework.git` becomes
-  `git@github.com:cushon/checker-framework.git`.  The new clone borrows
-  `PROJECT`'s objects while it is made, so that only the others are
-  downloaded, but it does not depend on `PROJECT` afterward.
+  how GitHub shows a pull request's branch.  It does what
+  `git-checkout-branch BRANCHNAME` does in the sibling clone
+  `PROJECT-fork-ORG`.  ORG `-` stands for the clone `PROJECT` itself, and so
+  does an ORG that owns the project's upstream repository, as `typetools`
+  owns `typetools/checker-framework`, if there is no clone
+  `PROJECT-fork-ORG`.  Otherwise, if there is no clone `PROJECT-fork-ORG`,
+  the command first makes one, if ORG's fork has the branch.  The new
+  clone's remote `origin` is ORG's fork, and its remote `upstream` is the
+  upstream repository.
+
   Below is a definition for an alias `gcb`.
 * [`git-new-branch`](git-new-branch)
   `[--clean | --copy] [--verbose] [--allow-upstream] BRANCHNAME`:
-  Creates and checks out the given branch of the repository in a new working
-  tree directory.  Run this command from within a working tree; the new
-  directory is a sibling of the working tree.  This command does not push the
-  new branch, and it does not build.
-  The new branch starts at the current commit, after a `git pull`.  On a
-  fork's `master` that lags behind `upstream/master`, this command first
-  fast-forwards `master` to `upstream/master`.
+  Creates the given branch of the repository in a new directory that is a
+  sibling of the current working tree.  This command does not push the
+  new branch.
+
+  The new branch starts at the current commit, after a `git pull`.
+
   By default, the new directory is a worktree (see [below](#worktrees)) whose
   contents are the same as the current directory's, including uncommitted
-  changes, untracked files, and build output, except for nested worktrees
-  and some build output that refers to the current directory; `--clean` and
+  changes and untracked files; `--clean` and
   `--copy` make other kinds of directory.
+
   Instead of BRANCHNAME, the argument can be a slug of the form
-  `ORG:BRANCHNAME`, such as `git-new-branch mernst:feature`, in any working
-  tree of the project, such as `PROJECT`, `PROJECT-fork-OTHERORG`, or one of
-  their branch directories.  It does what `git-new-branch --clean BRANCHNAME`
-  does in the sibling clone `PROJECT-fork-ORG`:  it pulls there (only if the
-  pull can fast-forward), then makes the directory
-  `PROJECT-fork-ORG-branch-BRANCHNAME` at the commit of `PROJECT-fork-ORG`,
-  with none of the current directory's changes.  As for `git-push-to`, ORG
-  `-` stands for the clone `PROJECT` itself, and so does an ORG that owns the
-  project's upstream repository if there is no clone `PROJECT-fork-ORG`.
+  `ORG:BRANCHNAME`, such as `git-new-branch mernst:feature`.  It does what
+  `git-new-branch --clean BRANCHNAME` does in the sibling clone
+  `PROJECT-fork-ORG`.  ORG `-` stands for the clone `PROJECT` itself, and so
+  does an ORG that owns the project's upstream repository, if there is no
+  clone `PROJECT-fork-ORG`.  Otherwise, if there is no clone
+  `PROJECT-fork-ORG`, the command first makes one, as `git-checkout-branch`
+  does, if ORG's fork exists.
+
   In a clone of an upstream repository whose fork is in a sibling directory
   `PROJECT-fork-ORG`, the command refuses, because a branch for a pull
   request belongs in the fork; `--allow-upstream` overrides the refusal.
   If git's configuration sets `github.user`, only a fork whose ORG is that
   user counts.
+
   `git-new-branch --help` (or `-h`) prints a synopsis, which describes the
-  modes.  The comments in [`git-new-branch`](git-new-branch) give the
-  details, such as when the fast-forward is not made and which copied build
-  output this command deletes, and which it warns about.
-  It says which of the directories that it deleted files from CMake or
-  autotools configured, because such a directory needs to be reconfigured.
-  With `--verbose`, it also says how many files it deleted and from which
-  directories.
+  modes.  The comments in [`git-new-branch`](git-new-branch) give more details.
+
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] [--llm | --no-llm] [--claude | --codex]
   FROM_DIR TO_DIR ...`:
+
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
-  its remote if compilation succeeds.
-  Each directory must be the top level of a working tree and must have an
-  upstream branch.
-  You may also pass a list of directories: each is pushed into the subsequent one.
-  Instead of directories, you may pass slugs of the form `ORG:BRANCH`, such as
-  `git-push-to upstream:main myname:feature`.  Each slug names the
-  directory `PROJECT-fork-ORG-branch-BRANCH` (or `PROJECT-fork-ORG`, if it has
-  BRANCH checked out) in the current directory.  If there is no clone
-  `PROJECT-fork-ORG` and ORG owns the upstream repository of the clone
-  `PROJECT`, the slug names what `-:BRANCH` names.  Each PROJECT that has
-  directories for two or more of the slugs gets its own chain.
-  A slug may also be just `BRANCH`, as in `git-push-to main feature`.
-  It matches every ORG; each PROJECT and ORG gets its own chain.
-  It also matches `PROJECT-branch-BRANCH`, as created by `git-new-branch`
-  from a clone `PROJECT`, and it matches the clone `PROJECT` itself if that
-  has BRANCH checked out and no `PROJECT-branch-BRANCH` exists; those
-  directories form one more chain per PROJECT.
+  its remote if compilation succeeds.  Each directory must be the top level
+  of a working tree and must have an upstream branch.  You can also pass a
+  list of directories: each is pushed into the subsequent one.
+
+  Instead of directories, you can pass slugs of the form `ORG:BRANCH`, such
+  as `git-push-to upstream:main myname:feature`.  Each slug names the
+  directory `PROJECT-fork-ORG-branch-BRANCH` in the current directory.  As
+  for `git-checkout-branch`, ORG `-` stands for the clone `PROJECT` itself,
+  and so does an ORG that owns the project's upstream repository, if there
+  is no clone `PROJECT-fork-ORG`.  Unlike `git-checkout-branch`, this
+  command never makes a clone.  A slug can
+  also be just `BRANCH`, as in `git-push-to main feature`.  It matches
+  every ORG.  It also matches `PROJECT-branch-BRANCH`, as created by
+  `git-new-branch` from a clone `PROJECT`, and it matches the clone
+  `PROJECT` itself if that has BRANCH checked out and no
+  `PROJECT-branch-BRANCH` exists; those directories form one more chain per
+  PROJECT.
+
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
+
   When a merge or a pull has conflicts, it uses the resolutions that
   `git rerere` recorded, and it asks an AI agent, Claude (or, with
-  `--codex`, Codex), to edit the conflicted hunks that rerere does not
-  resolve.  It checks every resolution, whether from rerere or from the
-  agent:  that nothing outside the conflict regions changed and that no
-  conflict marker remains.  Then it commits the merge and continues.
-  It does the same for a merge that is already in progress in any directory
-  except the first, as after an earlier run stopped at conflicts, after
-  running `git rerere` to apply any resolution recorded since then.  It
-  leaves such a merge alone if a Claude Code or Codex process is working in
-  that directory, if no conflicted file remains, or if a conflicted file
-  changed after the merge stopped.  Whenever it stops with a merge in
-  progress, it notes the merge in the file `AGENT-TODO.md` at the top level
-  of the working tree.
-  If the build fails, and TO_DIR's branch has a merge that neither its
-  remote branches nor those of FROM_DIR's branch contain, such as the one
-  that it just made, it asks the agent to fix the build, up to 3 times, and
-  commits the fix.
+  `--codex`, Codex), to resolve the conflicts that remain.  If the build
+  fails, and TO_DIR's branch has a merge that neither its remote branches
+  nor those of FROM_DIR's branch contain, such as the one that it just
+  made, it asks the agent to fix the build, up to 3 times, and commits the
+  fix.  `--no-llm` turns off the agent; `--llm`, `--claude` (the default),
+  and `--codex` turn it on.
+
   If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
-  prints a command, such as `cd DIR && claude --resume ID`, that continues
-  the agent's session interactively (one per attempt to fix the build), and
-  appends it to the file `AGENT-TODO.md` at the top level of the working
-  tree.
-  `--no-llm` turns off the agent; `--llm`, `--claude`, and `--codex` turn it
-  on.
-  The agent runs in a sandbox, which requires a recent version:  Claude
-  Code with the `--restricted` option and the setting
-  `permissions.blockReadsOutsideWorkingDirectories`, or Codex with
-  permission profiles (the setting `default_permissions`).  Claude Code
-  2.1.316 and Codex 0.165.0 work.  The sandbox lets the agent read every
-  file of the working tree, including ignored files such as `.env`, and the
-  repository.
+  prints a command that continues
+  the agent's session interactively.
+
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]
   FROM_DIR TO_DIR ...`:
@@ -164,93 +123,61 @@ The commands are:
   The arguments may be slugs, as for `git-push-to`.
 * [`git-pull-from`](git-pull-from)
   `[--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR`:
-  Pulls from OTHER-REPO-DIR into the current directory, compiles the current
-  directory, then pushes the current directory to its remote if compilation
-  succeeds.  It handles conflicts and a failed build as `git-push-to` does,
-  using `git rerere` and an AI agent, and it accepts the same `--llm`,
-  `--no-llm`,
-  `--claude`, and `--codex` options.
-  OTHER-REPO-DIR and the current directory must both be the top level of a
-  working tree and must each have an upstream branch.
+  Pulls from OTHER-REPO-DIR into the current directory, just as
+  `git-push-to` does.
 * [`git-pull-upstream`](git-pull-upstream)
   `[--nocompile] [--llm | --no-llm] [--claude | --codex]`:
   Merges the default branch of the remote `upstream` (or `origin`, if there
   is no `upstream`, or the only remote, if there is neither) into the current
   branch, compiles, then pushes the current branch if compilation succeeds.
-  It first pulls the current branch, which must have an upstream branch.
+
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of `upstream`.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
-  It handles conflicts and a failed build as `git-push-to` does, using
-  `git rerere` and an AI agent, and it accepts the same `--llm`, `--no-llm`,
-  `--claude`,
-  and `--codex` options.
+  It handles conflicts and a failed build as `git-push-to` does.
 * [`pr-status`](pr-status)
   `[--check | --print-document | --print-config |`
   `--print-conflicting-push-chains] [-C DIR]`
   `[--highlight PR|bottleneck...]`:
   Computes the dependencies among the open pull requests, updates the "Land
-  after" and "Land before" lines of their descriptions (but keeps the lines
-  about a pull request in or after a cycle of dependencies), and regenerates
-  `pr-status.md` (or the documents that `pr-status-config.json` names;
-  see [its format](pr-status-config.md)),
+  after" and "Land before" lines of their descriptions, and regenerates
+  `pr-status.md`,
   which lists the dependencies and the `git-push-to` commands that update
   each dependency chain.  In a Markdown renderer that keeps HTML event
-  handlers, such as the Markdown Viewer browser extension, each block of
-  commands has a button (📋) that copies the commands.
-  It sets the dependency document's title, in its front matter and its
-  heading, to the current directory's basename followed by "PR status", as
-  in "src PR status".
-  It prints what changed since its previous run.
-  With `--check`, it writes no document.  With `--print-document`, it prints
-  the file name of the dependency document and does nothing else.  With
-  `--print-config`, it prints its config, with the defaults filled in, and
-  does nothing else.  With `--print-conflicting-push-chains`, it prints the
-  dependency chains with conflicts that its previous run recorded in
-  `.pr-status-snapshot.json`, one chain per line, with the chain's
-  directories separated by tabs, and does nothing else.
-  At most one of these 4 options is allowed.
-  `--highlight PR...` highlights, wherever the documents name it, each
-  given PR (such as `REPO#100` or `ORG/REPO#100`) and every PR that must
-  land for it to land:  the PRs that it depends on or lands with,
-  recursively.  It shows them in bold on a light red background, and as red
-  nodes in the dependency graph.  In place of a PR, it accepts the word
-  `bottleneck`, as in `--highlight bottleneck`, which selects, in each
-  repository, the PR that starts the longest path of prerequisites within
-  that repository (each PR that starts one, if several paths are longest);
-  prerequisites in other repositories do not count.  That PR is the next
-  one to work on, because the rest of the path cannot land until it does.
-  `--highlight` is not allowed with a `--print-...` option.
+  handlers, each block of commands has a button (📋) that copies the
+  commands.
+
   Run it in a directory that holds the working copy directories, or pass
   that directory with `-C`.
-  This command needs Python 3.10 or later, and the programs that
-  `pr-merge-analysis` needs.
+
+  It prints what changed since its previous run.
+  With `--check`, it writes no document.  With `--print-document`, it
+  prints the file name of the document that it regenerates and does nothing
+  else.  With `--print-config`, it prints its config, with the defaults
+  filled in, and does nothing else.
+  `--highlight PR...` highlights, wherever the documents that it regenerates
+  name it, each given PR (such as `REPO#100` or `ORG/REPO#100`) and every
+  PR that must land for it to land.
 * [`pr-merge-analysis`](pr-merge-analysis)
   `[--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]`:
   For the given open pull requests of the GitHub repository OWNER/REPO (by
   default, all of them), reports which ones conflict with the default
   branch, which ones contain every non-merge commit of another, and (unless
   `--no-pairwise`) which pairs conflict with each other.  It fetches the
-  pull requests into REPO_DIR, a clone of the repository, and caches its
+  pull requests into `REPO_DIR`, a clone of the repository, and caches its
   results in the current directory.  When the run covers every open pull
   request (no PR number is given, or `--prune` says that the given ones are
   all of them), it removes the cached results for commits that are no longer
-  the head of an open pull request, and it deletes from REPO_DIR the refs of
+  the head of an open pull request, and it deletes from `REPO_DIR` the refs of
   the pull requests that are not open.  `--default-branch BRANCH` compares
   against BRANCH rather than the repository's default branch.
   `pr-status` runs it.
-  This command needs Git 2.38 or later, `gh`, and Bash 4 or later as the
-  first `bash` on the PATH.  On macOS, `/bin/bash` is Bash 3.2, so put a
-  newer Bash, such as Homebrew's, earlier on the PATH.
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--claude | --codex] [-C DIR]`:
-  Runs `pr-status`, which regenerates the dependency document (by default,
-  `pr-status.md`), then runs `git-push-to` on each chain of its section
-  "Dependency chains with conflicts", as `pr-status
-  --print-conflicting-push-chains` prints them,
-  with `--claude` (or `--codex`), which asks an AI agent for help.  Repeats
-  until no chain has conflicts, for up to 3 rounds; stops after a round in
-  which a chain fails.
+  Runs `pr-status`, which regenerates the dependency document
+  `pr-status.md`, then runs `git-push-to` on each chain of its section
+  "Dependency chains with conflicts",
+  with `--claude` (or `--codex`), which asks an AI agent for help.
 * [`crreview-resolve-all`](crreview-resolve-all)
   `[--dry-run] [--agent claude|codex] [-C DIR]`:
   Runs
@@ -258,14 +185,12 @@ The commands are:
   which addresses the unresolved CodeRabbit review comments on the current
   branch's pull request, in each working copy directory that holds an open
   pull request that you opened:  one whose head is the branch that
-  `git push` in the directory pushes to.  It runs once per pull request,
-  even if several directories hold that pull request; it prefers one that
-  is at the pull request's head commit.  It prints nothing for a pull
-  request that has no comments to address.  With `--dry-run`, it prints
+  `git push` in the directory pushes to.
+
+  With `--dry-run`, it prints
   the directories and pull requests but runs nothing.  `--agent` is passed
   to `crreview-resolve`.  Run it in a directory that holds the working copy
-  directories, or pass that directory with `-C`.  This command needs `gh`
-  and `crreview-resolve`.
+  directories, or pass that directory with `-C`.
 * [`fix-renovate-prs`](fix-renovate-prs) `[--dry-run] [-C DIR]`:
   For each open pull request that Renovate opened and whose CI fails, in a
   repository that a working copy directory is a clone of, runs
@@ -301,20 +226,10 @@ The commands are:
   working trees for branches that were deleted in the remote repository, or
   that hold nothing but leftovers, as for `is-deleted-branch`.
   With `--remove`, removes each of them instead of printing them.
-  A directory whose branch still exists in the remote, but whose GitHub pull
-  requests are all closed or merged, is neither listed nor removed; a warning
-  about it is printed instead.  (This needs the `gh` command.)
-  If one of the pull requests was merged, the directory has no uncommitted
-  changes to tracked files, and its HEAD is the commit that the remote branch
-  names, the warning also gives the commands that delete the remote branch
-  and then remove the directory.
-  Likewise, a warning is printed about a directory named `*-branch-*` that
-  is in no git working tree and either holds more than leftovers, such as
-  one whose removal failed on files that another user owns, or holds no
-  leftover at all, such as an empty directory; about one that is in a git
-  working tree that tracks none of its files; and about one that is in a
-  working tree that git cannot use, such as a linked worktree whose main
-  working tree was moved.
+
+  Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
+  alias below).
+
   A directory named `.cache` or `.claude`, such as `~/.cache` or a
   repository's `.claude`, is not examined, nor is anything below it.
   Neither is the `projects` directory of a Claude Code configuration
@@ -329,47 +244,36 @@ The commands are:
   `[-home-me-repo-branch-other-tests-all]` in a build directory copied from
   the sibling working tree `/home/me/repo-branch-other`; the directories
   below it are still examined.
-  Typical usage is `git-orphaned-branches --remove` or `rmgob` (see
-  alias below).
+
+  A directory whose branch still exists in the remote, but whose GitHub pull
+  requests are all closed or merged, is neither listed nor removed; a warning
+  about it is printed instead.
+  If one of the pull requests was merged, the directory has no uncommitted
+  changes to tracked files, and its HEAD is the commit that the remote branch
+  names, the warning also gives the commands that delete the remote branch
+  and then remove the directory.
+
+  Likewise, a warning is printed about a directory named `*-branch-*` that
+  is in no git working tree and either holds more than leftovers, such as
+  one whose removal failed on files that another user owns, or holds no
+  leftover at all, such as an empty directory; about one that is in a git
+  working tree that tracks none of its files; and about one that is in a
+  working tree that git cannot use, such as a linked worktree whose main
+  working tree was moved.
+
 * [`git-remove-branch-directory`](git-remove-branch-directory)
   `[--force] [--force-uncommitted] [--force-unpushed] [--repository DIR]
   DIRECTORY...`:
-  Removes a branch directory, unless the removal would lose work.
-  Commits on a branch whose changes have landed in a remote's default branch,
-  as after a squash-merge, do not count as work that would be lost.  Neither
-  do the commits of a branch whose remote branch is gone, if they are in a
-  landed GitHub pull request from the branch, even one with later commits
-  that the branch lacks.  (This needs the `gh` command.)
-  An uncommitted change to a tracked file does not count as work that would
-  be lost if it is saved:  if each new version of the file, in the index and
-  in the working tree, has the same pathname, mode, and contents as the file
-  in the commit that some ref that the removal leaves names, such as a
-  remote-tracking ref.  The ref can differ from version to version and from
-  file to file, and only the commit that the ref names counts, not its
-  history.  A clone's local branches do not save a change, because the
-  removal deletes them.  A deleted file, a submodule, and a symbolic link are
-  never saved.
-  A commit does not count either if each of its resulting files is saved in
-  the same way; the ref can differ from file to file.  A commit's resulting
-  files are as the last unpushed commit of its branch has them, so a branch
-  whose final result has landed loses no work, even if the branch changes a
-  file more than once.
-  Such landed and saved commits never prevent a removal.  When other commits
-  would be lost, the message that refuses the removal, or that reports its
-  waiver by `--force-unpushed`, counts the landed and saved commits among
-  those that the removal would delete.
-  It removes a worktree with `git worktree remove` and deletes its branch, if
-  `git-new-branch` or `git-checkout-branch` created that branch and no other
-  worktree has it checked out, and it removes anything else with `rm -rf`.
-  If `rm -rf` cannot remove everything, as when a container running as root
+  Removes a branch directory (a directory that holds a branch's working
+  tree, or one that holds nothing of value, such as a directory that
+  `git-orphaned-branches` reports), unless the removal would lose work.
+
+  If it cannot remove all files, as when a container running as root
   created files in the directory, it moves what remains to a new directory in
   `/tmp`, whose cleanup runs as root, provided that `/tmp` is on the same
   file system, or else to a new directory beneath `~/tmp/DELETEME`, under the
   same condition.
-  Given a worktree whose directory was already removed with `rm -rf`, it
-  removes what that left behind:  the worktree's registration and, under the
-  same conditions, its branch, in the repository that `--repository` names
-  (by default, the current directory's).
+
 * [`git-outgoing`](git-outgoing)
   `[--only-branch BRANCH]... [--omitted | GIT-LOG-ARGS]`:
   Shows the commits on local branches that have not been pushed.

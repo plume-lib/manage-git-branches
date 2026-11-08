@@ -14,7 +14,8 @@
 #
 # Run this command from the top level of a working tree.  OTHER-REPO-DIR is
 # the top level of another working tree; it may be an absolute or relative
-# pathname.
+# pathname.  The current branch and the branch of OTHER-REPO-DIR must each
+# have an upstream branch.
 
 # This script does the following:
 #  * pull another directory from its remote,

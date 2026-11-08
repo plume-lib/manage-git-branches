@@ -43,6 +43,13 @@ Each run:
     document entirely:  pr-status discards any edit to them,
   * sets the dependency document's title, in its YAML front matter and its "# " heading,
     to the current directory's basename followed by "PR status", as in "src PR status".
+
+--highlight PR... highlights, wherever the documents name it, each given PR (such as
+REPO#100 or ORG/REPO#100) and, recursively, every PR that it depends on or lands with.
+It shows them in bold on a light red background, and as red nodes in the dependency
+graph.
+
+pr-status needs Python 3.10 or later, and the programs that pr-merge-analysis needs.
 """
 
 from __future__ import annotations
