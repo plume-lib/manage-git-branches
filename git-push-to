@@ -141,23 +141,31 @@
 #
 # When a merge has conflicts that `git rerere` does not resolve, the agent
 # resolves them, and this script checks its resolution as described above.
-# The agent is told to examine every change of both sides of the merge, and
-# to combine them rather than taking either side's version.  It can edit any
-# part of any file that git tracks, not only the conflict regions, because
-# git's automatic merge of the rest can combine changes that do not fit
-# together, such as a call to a method that the other side renamed.  It can
-# also create and delete files.  This script rejects a resolution of a file
-# that is identical to either side's version of the file, and it lists the
-# files outside the conflicted ones that the agent changed or created, so
-# that you can review them.  The agent's instructions consist of the file
-# merge-conflict-instructions.md, which also suits a merge that you resolve
-# yourself or with an agent interactively, followed by rules specific to this
-# script.  That applies to the merge of FROM_DIR's branch into
-# TO_DIR, and to the merges of the pulls that update FROM_DIR and TO_DIR from
-# their remotes.  The pull of TO_DIR merges even if `pull.rebase` is set; a
-# pull of FROM_DIR that rebases, as `pull.rebase` can make it do, is not
-# resolved.  If the agent fails, this script stops with the merge still in
-# progress.
+# That applies to the merge of FROM_DIR's branch into TO_DIR, and to the
+# merges of the pulls that update FROM_DIR and TO_DIR from their remotes.
+# The pull of TO_DIR merges even if `pull.rebase` is set; a pull of FROM_DIR
+# that rebases, as `pull.rebase` can make it do, is not resolved.  If the
+# agent fails, this script stops with the merge still in progress.
+#
+# The agent's instructions consist of the file merge-conflict-instructions.md,
+# which also suits a merge that you resolve yourself or with an agent
+# interactively, followed by rules specific to this script.  The agent is
+# told to examine every change of both sides of the merge, and to combine
+# them rather than taking either side's version.  It can edit any part of any
+# file that git tracks, not only the conflict regions, because git's
+# automatic merge of the rest can combine changes that do not fit together,
+# such as a call to a method that the other side renamed.  It can also create
+# and delete files.  It cannot change a hook in the working tree, as with
+# `core.hooksPath` ".githooks", unless the hook has conflicts, because this
+# script's commit would run it outside the agent's sandbox.  This script
+# rejects a resolution of a file that is identical to either side's version
+# of the file, apart from whitespace and blank lines, and any file that the
+# agent changed or created that contains a conflict marker line that git's
+# merge did not put there.  Whether or not it accepts the agent's work, it
+# lists the files outside the conflicted ones that the agent changed or
+# created, each conflicted file in which the agent changed text outside the
+# conflict regions, and each resolution by `git rerere` that the agent
+# changed, so that you can review them.
 #
 # When the build of TO_DIR fails, and a merge on TO_DIR's branch might have
 # broken it, the agent edits files to fix it, without building; then this
@@ -190,8 +198,9 @@
 # that continues the agent's session interactively, or one such command for
 # each of the agent's attempts to fix the build.  In the resumed session,
 # you can ask the agent about its work, or tell it to finish in a way that
-# its instructions forbade, such as by taking one side's version of a file.  Then commit the merge or the fix yourself, and run this script
-# again.  This script also appends the command to the file AGENT-TODO.md at
+# its instructions forbade, such as by taking one side's version of a file.
+# Then commit the merge or the fix yourself, and run this script again.
+# This script also appends the command to the file AGENT-TODO.md at
 # the top level of the working tree, where you are less likely to overlook
 # it; delete the entry once you have dealt with it.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
