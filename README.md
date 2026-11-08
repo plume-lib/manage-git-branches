@@ -13,7 +13,7 @@ The key principles of this work style are:
 1. Do not run git commands in the main branch, except `git pull`.  (Or,
    use [`mvc pull`](https://github.com/plume-lib/multi-version-control).)
 2. Do not change branches in any working tree.
-   That is, never run `git switch` or `git checkout`.
+   That is, never run `git switch`, `git checkout`, or `git stash`.
 3. To create a new branch, run the command `gnb` or `git-new-branch`.  It
    creates a new directory holding a new branch that starts as a copy of
    the branch from which you ran `gnb`.
@@ -30,11 +30,16 @@ The commands are:
   is a sibling of the working tree.
 
   Instead of BRANCHNAME, the argument can be a slug of the form
-  `ORG:BRANCHNAME`, such as `git-checkout-branch mernst:feature`.
-  It does what `git-checkout-branch BRANCHNAME`
-  does in the sibling clone `PROJECT-fork-ORG`, which it creates if necessary.
-  ORG `-` stands for
-  the clone `PROJECT` itself.
+  `ORG:BRANCHNAME`, such as `git-checkout-branch mernst:feature`, which is
+  how GitHub shows a pull request's branch.  It does what
+  `git-checkout-branch BRANCHNAME` does in the sibling clone
+  `PROJECT-fork-ORG`.  ORG `-` stands for the clone `PROJECT` itself, and so
+  does an ORG that owns the project's upstream repository, as `typetools`
+  owns `typetools/checker-framework`, if there is no clone
+  `PROJECT-fork-ORG`.  Otherwise, if there is no clone `PROJECT-fork-ORG`,
+  the command first makes one, if ORG's fork has the branch.  The new
+  clone's remote `origin` is ORG's fork, and its remote `upstream` is the
+  upstream repository.
 
   Below is a definition for an alias `gcb`.
 * [`git-new-branch`](git-new-branch)
@@ -51,10 +56,13 @@ The commands are:
   `--copy` make other kinds of directory.
 
   Instead of BRANCHNAME, the argument can be a slug of the form
-  `ORG:BRANCHNAME`.  It does what `git-new-branch --clean BRANCHNAME`
-  does in the sibling clone `PROJECT-fork-ORG`, which it creates if necessary.
-  ORG
-  `-` stands for the clone `PROJECT` itself.
+  `ORG:BRANCHNAME`, such as `git-new-branch mernst:feature`.  It does what
+  `git-new-branch --clean BRANCHNAME` does in the sibling clone
+  `PROJECT-fork-ORG`.  ORG `-` stands for the clone `PROJECT` itself, and so
+  does an ORG that owns the project's upstream repository, if there is no
+  clone `PROJECT-fork-ORG`.  Otherwise, if there is no clone
+  `PROJECT-fork-ORG`, the command first makes one, as `git-checkout-branch`
+  does, if ORG's fork exists.
 
   In a clone of an upstream repository whose fork is in a sibling directory
   `PROJECT-fork-ORG`, the command refuses, because a branch for a pull
@@ -72,14 +80,16 @@ The commands are:
 
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.  Each directory must be the top level
-  of a working tree and must have an upstream branch.  You may also pass a
+  of a working tree and must have an upstream branch.  You can also pass a
   list of directories: each is pushed into the subsequent one.
 
-  Instead of directories, you may pass slugs of the form `ORG:BRANCH`, such
+  Instead of directories, you can pass slugs of the form `ORG:BRANCH`, such
   as `git-push-to upstream:main myname:feature`.  Each slug names the
-  directory `PROJECT-fork-ORG-branch-BRANCH` in the current directory.  If
-  there is no clone `PROJECT-fork-ORG` and ORG owns the upstream repository
-  of the clone `PROJECT`, the slug names what `-:BRANCH` names.  A slug may
+  directory `PROJECT-fork-ORG-branch-BRANCH` in the current directory.  As
+  for `git-checkout-branch`, ORG `-` stands for the clone `PROJECT` itself,
+  and so does an ORG that owns the project's upstream repository, if there
+  is no clone `PROJECT-fork-ORG`.  Unlike `git-checkout-branch`, this
+  command never makes a clone.  A slug can
   also be just `BRANCH`, as in `git-push-to main feature`.  It matches
   every ORG.  It also matches `PROJECT-branch-BRANCH`, as created by
   `git-new-branch` from a clone `PROJECT`, and it matches the clone
@@ -90,15 +100,13 @@ The commands are:
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
 
   When a merge or a pull has conflicts, it uses the resolutions that
-  `git rerere` recorded.
-
-  If conflicts or build failures remain, it asks an AI agent, Claude (or,
-  with `--codex`, Codex), to fix it.  `--no-llm` turns off the agent;
-  `--llm`, `--claude` (the default), and `--codex` turn it on.  If the
-  build fails, and TO_DIR's branch has a merge that neither its remote
-  branches nor those of FROM_DIR's branch contain, such as the one that it
-  just made, it asks the agent to fix the build, up to 3 times, and commits
-  the fix.
+  `git rerere` recorded, and it asks an AI agent, Claude (or, with
+  `--codex`, Codex), to resolve the conflicts that remain.  If the build
+  fails, and TO_DIR's branch has a merge that neither its remote branches
+  nor those of FROM_DIR's branch contain, such as the one that it just
+  made, it asks the agent to fix the build, up to 3 times, and commits the
+  fix.  `--no-llm` turns off the agent; `--llm`, `--claude` (the default),
+  and `--codex` turn it on.
 
   If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
   prints a command that continues
@@ -139,13 +147,13 @@ The commands are:
   that directory with `-C`.
 
   It prints what changed since its previous run.
-  With `--check`, it writes no document.  With `--print-document`, it prints
-  the file name of the dependency document and does nothing else.  With
-  `--print-config`, it prints its config, with the defaults filled in, and
-  does nothing else.
-  `--highlight PR...` highlights, wherever the documents name it, each
-  given PR (such as `REPO#100` or `ORG/REPO#100`) and every PR that must
-  land for it to land.
+  With `--check`, it writes no document.  With `--print-document`, it
+  prints the file name of the document that it regenerates and does nothing
+  else.  With `--print-config`, it prints its config, with the defaults
+  filled in, and does nothing else.
+  `--highlight PR...` highlights, wherever the documents that it regenerates
+  name it, each given PR (such as `REPO#100` or `ORG/REPO#100`) and every
+  PR that must land for it to land.
 * [`pr-merge-analysis`](pr-merge-analysis)
   `[--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]`:
   For the given open pull requests of the GitHub repository OWNER/REPO (by
@@ -252,8 +260,9 @@ The commands are:
 * [`git-remove-branch-directory`](git-remove-branch-directory)
   `[--force] [--force-uncommitted] [--force-unpushed] [--repository DIR]
   DIRECTORY...`:
-  Removes a branch directory (one of the form
-  `REPO[-fork-USER]-branch-BRANCH`), unless the removal would lose work.
+  Removes a branch directory (a directory that holds a branch's working
+  tree, or one that holds nothing of value, such as a directory that
+  `git-orphaned-branches` reports), unless the removal would lose work.
 
   If it cannot remove all files, as when a container running as root
   created files in the directory, it moves what remains to a new directory in

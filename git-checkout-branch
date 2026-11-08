@@ -41,8 +41,10 @@
 # git@github.com:typetools/checker-framework.git becomes
 # git@github.com:cushon/checker-framework.git.  The new clone borrows the
 # objects of PROJECT while it is made, so that only the others are
-# downloaded, but it does not depend on PROJECT afterward.  Its only remote is
-# "origin", ORG's fork; `clone_fork` in common-functions.sh gives the details.
+# downloaded, but it does not depend on PROJECT afterward.  Its remote
+# "origin" is ORG's fork, and its remote "upstream" is the upstream
+# repository; `clone_fork` in common-functions.sh gives the details.
+# `git-new-branch` makes such a clone too.
 #
 # The new directory is a linked worktree of the current repository, made by
 # `git worktree add`, so that it shares the repository's object store.  (If

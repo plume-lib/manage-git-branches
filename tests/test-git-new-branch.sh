@@ -1618,14 +1618,18 @@ if [ -e "${slugs}/sub/super-fork-mernst-branch-subslug" ]; then
   fail "a slug whose fork's clone has submodules created a directory"
 fi
 
-# A slug whose fork has no clone is an error that names the missing directory.
+# A slug whose fork has no clone, and that names no fork that can be cloned,
+# is an error that names the directory that was not made.
 if out="$(cd "${slugs}/proj" && "${GIT_NEW_BRANCH}" nosuchorg:feature 2>&1)"; then
-  fail "zero exit status for a slug whose fork has no clone"
+  fail "zero exit status for a slug whose fork has no clone and does not exist"
 fi
 case "${out}" in
-  *"directory does not exist: ${slugs}/proj-fork-nosuchorg"*) ;;
-  *) fail "unexpected message for a slug whose fork has no clone: ${out}" ;;
+  *"so ${slugs}/proj-fork-nosuchorg was not made"*) ;;
+  *) fail "unexpected message for a slug whose fork has no clone and does not exist: ${out}" ;;
 esac
+if [ -e "${slugs}/proj-fork-nosuchorg" ]; then
+  fail "a slug whose fork does not exist made ${slugs}/proj-fork-nosuchorg"
+fi
 
 # An ORG that contains "-branch-" is refused even when its fork has a clone,
 # because the clone's name would be read as that of a branch directory.
@@ -1773,6 +1777,64 @@ done
 if [ -e "${slugs}/proj-fork-mernst-branch-copied" ]; then
   fail "--copy with a slug created a directory"
 fi
+
+# A slug whose fork has no clone clones the fork into PROJECT-fork-ORG, if the
+# fork exists, and makes the branch there.  The new clone's remote "upstream"
+# is the upstream repository, so the new branch starts at that repository's
+# default branch, even though the fork's default branch lags behind it.  The
+# remotes' URLs are GitHub's, which `url.<base>.insteadOf` rewrites to local
+# repositories.
+nbhub="${tmpdir}/nbhub"
+mkdir -p "${nbhub}/up" "${nbhub}/me" "${tmpdir}/nbforks"
+nbhub="$(cd "${nbhub}" && pwd -P)"
+nbforks="$(cd "${tmpdir}/nbforks" && pwd -P)"
+git config --global "url.file://${nbhub}/.insteadOf" 'git@github.com:'
+git init -q --bare -b main "${nbhub}/up/proj.git"
+git clone -q git@github.com:up/proj.git "${nbforks}/proj" 2> /dev/null
+(
+  cd "${nbforks}/proj" || exit 1
+  echo "hello" > file.txt
+  git add file.txt
+  git commit -q -m "Initial commit"
+  git push -q origin main
+) || exit 1
+git clone -q --bare "${nbhub}/up/proj.git" "${nbhub}/me/proj.git"
+(
+  cd "${nbforks}/proj" || exit 1
+  echo "later" > file.txt
+  git commit -q -a -m "A commit that the fork lacks"
+  git push -q origin main
+) || exit 1
+nb_upstream_commit="$(git -C "${nbforks}/proj" rev-parse HEAD)"
+if ! out="$(cd "${nbforks}/proj" && "${GIT_NEW_BRANCH}" me:feature 2>&1)"; then
+  fail "nonzero exit status for a slug whose fork has no clone: ${out}"
+fi
+case "${out}" in
+  *"cloning git@github.com:me/proj.git into ${nbforks}/proj-fork-me"*) ;;
+  *) fail "a slug whose fork has no clone did not say that it cloned the fork: ${out}" ;;
+esac
+if [ "$(git -C "${nbforks}/proj-fork-me" config --get remote.upstream.url 2> /dev/null)" != 'git@github.com:up/proj.git' ]; then
+  fail "the new clone's upstream is not the upstream repository: ${out}"
+fi
+nb_newdir="${nbforks}/proj-fork-me-branch-feature"
+if [ "$(git -C "${nb_newdir}" symbolic-ref HEAD 2> /dev/null)" != 'refs/heads/feature' ]; then
+  fail "a slug whose fork has no clone did not make the branch feature in ${nb_newdir}: ${out}"
+elif [ "$(git -C "${nb_newdir}" rev-parse HEAD)" != "${nb_upstream_commit}" ]; then
+  fail "the new branch does not start at the upstream repository's default branch: ${out}"
+fi
+
+# A slug whose fork does not exist clones nothing.
+if out="$(cd "${nbforks}/proj" && "${GIT_NEW_BRANCH}" nosuchorg:feature 2>&1)"; then
+  fail "zero exit status for a slug whose fork has no clone and does not exist"
+fi
+case "${out}" in
+  *"cannot ask git@github.com:nosuchorg/proj.git, so ${nbforks}/proj-fork-nosuchorg was not made"*) ;;
+  *) fail "unexpected message for a slug whose fork has no clone and does not exist: ${out}" ;;
+esac
+if [ -e "${nbforks}/proj-fork-nosuchorg" ]; then
+  fail "a slug whose fork does not exist made ${nbforks}/proj-fork-nosuchorg"
+fi
+git config --global --unset "url.file://${nbhub}/.insteadOf"
 
 # The wrong number of arguments is an error.
 if (cd "${repo}" && "${GIT_NEW_BRANCH}" > /dev/null 2>&1); then

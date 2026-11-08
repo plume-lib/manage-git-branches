@@ -48,7 +48,11 @@
 # stands for the clone PROJECT itself, so `-:NEWBRANCHNAME` makes
 # PROJECT-branch-NEWBRANCHNAME.  So does an ORG that owns the project's
 # upstream repository, as typetools owns typetools/checker-framework, if there
-# is no clone PROJECT-fork-ORG.
+# is no clone PROJECT-fork-ORG.  Otherwise, if there is no clone
+# PROJECT-fork-ORG, the command first makes one, if ORG's fork exists, as
+# `git-checkout-branch` does; then the clone's remote "upstream" is the
+# upstream repository, so the new branch starts at that repository's default
+# branch.
 #
 # In a clone of an upstream repository whose fork is in a sibling directory,
 # this command refuses, unless `--allow-upstream` is given, because a branch
@@ -315,7 +319,7 @@ case "$1" in
       exit 1
     fi
     MODE='clean'
-    enter_slug_clone "$1" || {
+    enter_slug_clone "$1" --clone-for-new-branch || {
       [ "$?" -eq 2 ] && usage
       exit 1
     }
