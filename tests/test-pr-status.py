@@ -116,13 +116,11 @@ class UpdatedPrDescriptionTest(unittest.TestCase):
         repo = types.SimpleNamespace(
             gh="owner/repo", prs={1: {"body": "Land with #2."}, 2: {"body": ""}}
         )
-        direct = {1: {2}, 2: set()}
-        dependents = {1: set(), 2: {1}}
         model = types.SimpleNamespace(
             repo=repo,
             open={1, 2},
-            landing_prerequisites=direct.__getitem__,
-            landing_dependents=dependents.__getitem__,
+            direct={1: {2}, 2: set()},
+            dependents={1: set(), 2: {1}},
             unit={1: {1, 2}, 2: {1, 2}},
             external={1: [], 2: []},
         )
@@ -337,24 +335,112 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model.blocked(), [2])
         self.assertEqual(self.updated_bodies(model), {1: "Land before #2.", 2: "Land after #1."})
 
-    def test_fix_within_base_branch_lands_before_base_pr(self):
-        """A stacked PR that says to land before its base PR is a fix within that branch."""
+    def test_fix_lands_before_base_pr(self):
+        """A stacked PR that says to land before its base PR is a fix to that PR."""
         for bodies in (
             {1: "", 2: "Land before #1.\n\nFix it."},
             {1: "Land after #2.", 2: "Fix it."},
-            {1: "Land before #2.", 2: "Land before #1.\n\nFix it."},
         ):
             with self.subTest(bodies=bodies):
                 model = self.model(bodies, {(2, 1)}, bases={2: 1})
                 self.assertEqual(model.cyclic, [])
                 self.assertEqual(model.lands_into, {2: 1})
+                self.assertEqual(model.direct, {1: {2}, 2: set()})
+                self.assertEqual((model.dependents[1], model.dependents[2]), (set(), {1}))
                 # The fix's branch is still updated from its base PR's branch.
-                self.assertEqual(model.direct[2], {1})
+                self.assertEqual(model.update_direct, {1: set(), 2: {1}})
                 self.assertEqual(model.blocked(), [1])
+                self.assertEqual(model.deepest_roots(), {2})
                 self.assertEqual(
                     self.updated_bodies(model),
                     {1: "Land after #2.", 2: "Land before #1.\n\nFix it."},
                 )
+
+    def test_contradictory_stacked_pr_is_cycle(self):
+        """Descriptions that disagree about a stacked PR's landing order form a cycle."""
+        for bodies in (
+            {1: "Land before #2.", 2: "Land before #1."},
+            {1: "Land after #2.", 2: "Land after #1."},
+        ):
+            with self.subTest(bodies=bodies):
+                model = self.model(bodies, {(2, 1)}, bases={2: 1})
+                self.assertEqual(model.lands_into, {})
+                self.assertEqual(model.cyclic, [1, 2])
+
+    def test_pr_on_fix_lands_after_base_pr(self):
+        """A PR that builds on a fix lands after the fix's base PR, too."""
+        model = self.model(
+            {1: "", 2: "Land before #1.", 3: ""}, {(2, 1), (3, 1), (3, 2)}, bases={2: 1, 3: 2}
+        )
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.direct, {1: {2}, 2: set(), 3: {1}})
+        self.assertEqual(model.update_direct, {1: set(), 2: {1}, 3: {2}})
+        self.assertEqual(model.blocked(), [1, 3])
+        self.assertEqual(
+            self.updated_bodies(model),
+            {1: "Land after #2.\nLand before #3.", 2: "Land before #1.", 3: "Land after #1."},
+        )
+
+    def test_fix_to_fix_lands_first(self):
+        """A fix to a fix lands into the fix's branch, before the fix lands."""
+        model = self.model(
+            {1: "", 2: "Land before #1.", 3: "Land before #2."},
+            {(2, 1), (3, 1), (3, 2)},
+            bases={2: 1, 3: 2},
+        )
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.direct, {1: {2}, 2: {3}, 3: set()})
+        self.assertEqual(model.update_direct, {1: set(), 2: {1}, 3: {2}})
+        self.assertEqual(model.blocked(), [1, 2])
+
+    def test_cycle_through_fix(self):
+        """A cycle of dependencies that includes a fix's landing order is a cycle."""
+        model = self.model(
+            {1: "Land after #2.", 2: "Land after #3.", 3: "Land after #1."}, set(), bases={2: 1}
+        )
+        self.assertEqual(model.lands_into, {2: 1})
+        self.assertEqual(model.cyclic, [1, 2, 3])
+        self.assertEqual(model.cycle_affected, {1, 2, 3})
+
+    def test_partner_of_base_pr_waits_for_fix(self):
+        """A land-with partner of a base PR also lands after the base PR's fix."""
+        model = self.model(
+            {1: "Land with #3.", 2: "Land before #1.", 3: ""}, {(2, 1)}, bases={2: 1}
+        )
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.blocked(), [1, 3])
+        self.assertEqual(model.direct, {1: {2}, 2: set(), 3: {2}})
+        # The partner's branch is not updated from the fix's branch.
+        self.assertEqual(model.update_direct, {1: set(), 2: {1}, 3: set()})
+
+    def test_partner_of_fix_does_not_wait_for_base_pr(self):
+        """A land-with partner of a fix does not wait for the fix's base PR."""
+        model = self.model(
+            {1: "", 2: "Land before #1.\nLand with #4.", 4: ""}, {(2, 1)}, bases={2: 1}
+        )
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.blocked(), [1])
+        self.assertEqual(model.direct, {1: {2}, 2: set(), 4: set()})
+        self.assertEqual(model.update_direct, {1: set(), 2: {1}, 4: set()})
+
+    def test_fix_documents_landing_order(self):
+        """The cells and sections that describe prerequisites follow the landing order."""
+        model = self.model({1: "", 2: "Land before #1."}, {(2, 1)}, bases={2: 1})
+        model.repo.master_conflicts = {}
+        model.repo.pair_conflicts = {}
+        model.repo.link = lambda n: f"#{n}"
+        model.repo.links = lambda ns: pr_status.and_list(f"#{n}" for n in sorted(ns))
+        model.repo.prs[2]["assignees"] = []
+        self.assertEqual(pr_status.depends_on(model, 1), "#2")
+        self.assertEqual(pr_status.needed_by(model, 2), "#1")
+        self.assertEqual(pr_status.needed_by(model, 1), "")
+        self.assertEqual(
+            pr_status.gen_prerequisites(model, None)[-2],
+            "Prerequisites with no prerequisite of their own: #2 (needed by #1).",
+        )
+        # The base PR's branch does not contain its fix's commits, and need not.
+        with mock.patch.object(model, "head_status", side_effect=AssertionError):
+            self.assertEqual(pr_status.dependency_cells(model, 1), ["#2", "yes", "not applicable"])
 
     def test_containment_is_dependency(self):
         """A PR whose branch contains another's commits depends on it."""
@@ -714,7 +800,7 @@ class PushChainsTest(unittest.TestCase):
     def chains(
         direct, master_conflicts, has_upstream=True, conflicts_only=False, cycle_affected=()
     ):
-        """Run push_chains on PRs whose direct prerequisites are direct.
+        """Run push_chains on PRs whose direct prerequisites in the update graph are direct.
 
         Each PR n has the working copy "pr<n>".
 
@@ -734,8 +820,8 @@ class PushChainsTest(unittest.TestCase):
         model = types.SimpleNamespace(
             repo=repo,
             open=set(direct),
-            direct=direct,
-            levels=levels,
+            update_direct=direct,
+            update_levels=levels,
             cycle_affected=set(cycle_affected),
         )
         upstream = {"master": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}

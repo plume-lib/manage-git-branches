@@ -24,9 +24,11 @@ Each run:
   * computes the dependencies:  a PR depends on another if its description says
     so, if its base branch is the other PR's branch, if its branch contains all of the
     other PR's non-merge commits, or if the config says so; a PR whose base branch is
-    another PR's branch, but that says to land before it, is a fix within that branch,
-    which lands first; PRs that land together (possibly in different repositories) are one
-    unit, whose members depend on each other's prerequisites but not on each other,
+    another PR's branch, but whose description says to land before it (or whose base
+    PR's description says to land after it), is a fix to that PR, which lands into that
+    PR's branch first, although its branch is updated from that PR's branch; PRs that land
+    together (possibly in different repositories) are one unit, whose members depend on
+    each other's prerequisites but not on each other,
   * warns about each cycle of dependencies, and omits from the generated push commands
     the PRs in a cycle and the PRs that depend on them,
   * updates each modeled PR description's "Land after" and "Land before" lines,
@@ -967,26 +969,42 @@ class Model:
                 m = by_head.get((repo.owner.lower(), base))
                 if m in open_prs:
                     self.base_pr[n] = m
-        # A stacked PR is one of two kinds.  A fix after the base PR's branch, which the base
-        # PR enables, lands after the base PR.  A fix within the base PR's branch, which fixes
-        # a problem in it, lands into that branch before the base PR lands; its description
-        # says "Land before #M", or the base PR's description says "Land after #N".
-        # `lands_into` maps each fix within a branch to its base PR.  Its branch is still
-        # updated from the base PR's branch, so `deps` retains that edge; only the landing
-        # order (see `landing_prerequisites`) is reversed.
+        # A stacked PR is one of two kinds.  A change that builds on the base PR lands after
+        # the base PR.  A fix to the base PR, which fixes a problem in the base PR's branch,
+        # lands into that branch before the base PR lands:  its description says
+        # "Land before #M", or the base PR's description says "Land after #N", and neither
+        # description says the reverse.  If one does, the descriptions contradict each other,
+        # and the PRs form a cycle of dependencies.
+        # `lands_into` maps each fix to its base PR.
         self.lands_into: dict[int, int] = {
             n: m
             for n, m in self.base_pr.items()
-            if m in self.stated_dependents[n] or n in self.stated[m]
+            if (m in self.stated_dependents[n] or n in self.stated[m])
+            and not (m in self.stated[n] or n in self.stated_dependents[m])
         }
+        # The fixes to each PR, as a map from a base PR's number to the numbers of its fixes.
+        fixes: defaultdict[int, set[int]] = defaultdict(set)
+        for n, m in self.lands_into.items():
+            fixes[m].add(n)
+        # Two graphs relate the open PRs.  `deps`, the landing graph, maps each PR to the PRs
+        # that must land before it.  `update_deps`, the update graph, maps each PR to the PRs
+        # whose branches its branch is updated from.  They differ only for a fix:  the fix
+        # lands before its base PR, but its branch is updated from the base PR's branch.
         deps: defaultdict[int, set[int]] = defaultdict(set)
+        update_deps: defaultdict[int, set[int]] = defaultdict(set)
         for n in open_prs:
-            deps[n] |= {m for m in self.stated[n] if self.lands_into.get(m) != n}
+            deps[n] |= self.stated[n]
             for m in self.stated_dependents[n]:
-                if self.lands_into.get(n) != m:
-                    deps[m].add(n)
+                deps[m].add(n)
+        # A base PR's branch is not updated from its fixes' branches.
+        for n in open_prs:
+            update_deps[n] |= deps[n] - fixes[n]
         for n, m in self.base_pr.items():
-            deps[n].add(m)
+            if n in self.lands_into:
+                deps[m].add(n)
+            else:
+                deps[n].add(m)
+            update_deps[n].add(m)
         for a, b in repo.contains:
             if (
                 a in open_prs
@@ -994,13 +1012,20 @@ class Model:
                 and b not in not_prereq
                 and (b, a) not in repo.contains
             ):
-                deps[a].add(b)
+                update_deps[a].add(b)
+                # A fix's branch contains the commits of its base PR's branch, which the fix
+                # does not wait for, because the fix lands into that branch.
+                base = self.lands_into.get(a)
+                if base is None or (b != base and (base, b) not in repo.contains):
+                    deps[a].add(b)
         self.extra: defaultdict[int, set[int]] = defaultdict(set)
         for a, b in rc.get("extra_dependencies", []):
             if a in open_prs and b in open_prs:
                 deps[a].add(b)
+                update_deps[a].add(b)
                 self.extra[a].add(b)
         self.deps = deps
+        self.update_deps = update_deps
         # The members, in this repository, of each PR's land-with unit.
         self.unit = {n: {n} for n in open_prs}
         # The members, in every repository, of each PR's land-with unit, as pairs of a
@@ -1010,30 +1035,14 @@ class Model:
         self.inherited_external: dict[int, set[str]] = {}
 
     def compute_graph(self) -> None:
-        """Compute the dependency graph from the dependencies that unite_partners set."""
+        """Compute the landing and update graphs from the dependencies that unite_partners set."""
         open_prs, deps = self.open, self.deps
-        self.all_deps = {n: self.closure(deps, n) for n in open_prs}
+        self.all_deps, self.direct = self.reduce(deps)
         # Each PR that depends on its own unit, such as two PRs whose descriptions say to land
         # each after the other.
         self.cyclic = sorted(
             n for n in open_prs if any(self.unit[n] & self.all_deps[d] for d in deps[n])
         )
-        # The unit members whose commits each PR's branch contains, but not vice versa.
-        contains = self.repo.contains
-        covered = {
-            n: {m for m in self.unit[n] - {n} if (n, m) in contains and (m, n) not in contains}
-            for n in open_prs
-        }
-        # Direct dependencies:  the transitive reduction, in which a dependency on a PR also
-        # covers the unit members whose commits its branch contains.
-        self.direct: dict[int, set[int]] = {}
-        for n in open_prs:
-            indirect = (
-                set().union(*(self.all_deps[d] | covered[d] for d in self.all_deps[n]))
-                if self.all_deps[n]
-                else set()
-            )
-            self.direct[n] = self.all_deps[n] - indirect
         self.dependents: defaultdict[int, set[int]] = defaultdict(set)
         for n in open_prs:
             for d in self.direct[n]:
@@ -1043,6 +1052,37 @@ class Model:
         # dependencies wrong:  each member of a cycle covers the others, so a dependent of
         # the cycle can have no direct prerequisite at all.
         self.cycle_affected = set(self.cyclic).union(*(self.all_dependents[n] for n in self.cyclic))
+        self.update_all_deps, self.update_direct = self.reduce(self.update_deps)
+
+    def reduce(self, deps: dict[int, set[int]]) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
+        """Return the transitive closure and the transitive reduction of the given graph.
+
+        Args:
+            deps: a graph, such as the landing graph, as a map from each open PR's number to
+                the numbers of the open PRs that it depends on.
+
+        Returns:
+            A pair of maps from each open PR's number:  to the PRs that it depends on directly
+            or transitively, and to the PRs that it depends on directly.  In the transitive
+            reduction, a dependency on a PR also covers the land-with unit members whose
+            commits that PR's branch contains.
+        """
+        open_prs, contains = self.open, self.repo.contains
+        all_deps = {n: self.closure(deps, n) for n in open_prs}
+        # The unit members whose commits each PR's branch contains, but not vice versa.
+        covered = {
+            n: {m for m in self.unit[n] - {n} if (n, m) in contains and (m, n) not in contains}
+            for n in open_prs
+        }
+        direct: dict[int, set[int]] = {}
+        for n in open_prs:
+            indirect = (
+                set().union(*(all_deps[d] | covered[d] for d in all_deps[n]))
+                if all_deps[n]
+                else set()
+            )
+            direct[n] = all_deps[n] - indirect
+        return all_deps, direct
 
     @staticmethod
     def closure(deps: dict[int, set[int]], n: int) -> set[int]:
@@ -1067,38 +1107,14 @@ class Model:
         """
         return bool(self.direct[n] or self.dependents[n])
 
-    def landing_prerequisites(self, n: int) -> set[int]:
-        """Return the open PRs in this repository that must land before PR n.
-
-        They are n's direct prerequisites, except that a fix within its base PR's branch (see
-        `lands_into`) lands before its base PR rather than after it.
-
-        Returns:
-            The numbers of the PRs that must land before PR n.
-        """
-        result = self.direct[n] - {self.lands_into.get(n)}
-        return result | {k for k, m in self.lands_into.items() if m == n}
-
-    def landing_dependents(self, n: int) -> set[int]:
-        """Return the open PRs in this repository that must land after PR n.
-
-        They are n's direct dependents, except that a fix within its base PR's branch (see
-        `lands_into`) lands before its base PR rather than after it.
-
-        Returns:
-            The numbers of the PRs that must land after PR n.
-        """
-        result = self.dependents[n] - {k for k, m in self.lands_into.items() if m == n}
-        return result | ({self.lands_into[n]} if n in self.lands_into else set())
-
     def is_blocked(self, n: int) -> bool:
-        """Return whether PR n must wait for another open PR to land.
+        """Return True if PR n must wait for another open PR to land.
 
         Returns:
-            True if PR n has a landing prerequisite, in this or another repository, or is in
-            or after a cycle of dependencies.
+            True if PR n has a prerequisite, in this or another repository, or is in or after
+            a cycle of dependencies.
         """
-        return bool(self.landing_prerequisites(n) or self.external[n] or n in self.cycle_affected)
+        return bool(self.direct[n] or self.external[n] or n in self.cycle_affected)
 
     def unblocked(self) -> list[int]:
         """Return the PRs that depend on no other open PR.
@@ -1141,13 +1157,13 @@ class Model:
         return and_list(self.assignees(n))
 
     def conflicting_prerequisites(self, n: int) -> set[int]:
-        """Return the direct prerequisites of PR n whose branches conflict with PR n's.
+        """Return the PRs that PR n's branch is updated from and whose branches conflict with it.
 
         Returns:
-            The numbers of the direct prerequisites of PR n whose branches cannot be merged
-            cleanly into PR n's branch.
+            The numbers of the direct prerequisites of PR n in the update graph whose branches
+            cannot be merged cleanly into PR n's branch.
         """
-        return {d for d in self.direct[n] if branches_conflict(self.repo, n, d)}
+        return {d for d in self.update_direct[n] if branches_conflict(self.repo, n, d)}
 
     def unresolved_threads(self, n: int) -> str:
         """Return the "Unresolved threads" cell of PR n.
@@ -1156,9 +1172,9 @@ class Model:
             The parts that apply, separated by single spaces:  the number of the PR's
             unresolved review threads and how many of them are outdated, if the PR has any;
             a red X if the PR's CI failed, or else a green checkmark if its CI completed and
-            passed; and shuffle arrows (🔀) if merging the default branch or a direct
-            prerequisite into the PR would conflict, in any file.  The result is "" if no
-            part applies.
+            passed; and shuffle arrows (🔀) if merging the default branch, or a branch that
+            the PR's branch is updated from, into the PR would conflict, in any file.  The
+            result is "" if no part applies.
         """
         reviews_and_ci = self.repo.reviews_and_ci
         threads = reviews_and_ci.review_threads.get(n, [])
@@ -1192,25 +1208,40 @@ class Model:
         own = run([*g, "rev-list", "--no-merges", pb, "^refs/remotes/csm/master"]).split()
         return "none" if len(missing) == len(own) else "newest"
 
-    @functools.cached_property
-    def levels(self) -> dict[int, int]:
-        """Each PR's level in the dependency graph.
+    @staticmethod
+    def graph_levels(direct: dict[int, set[int]]) -> dict[int, int]:
+        """Return each PR's level in the given graph.
 
-        It maps each PR in the dependency graph to 1 plus the largest level of its direct
-        prerequisites, or to 1 if it has none.
+        Args:
+            direct: a transitive reduction, such as `direct` or `update_direct`, as a map from
+                each open PR's number to the numbers of its direct prerequisites.
+
+        Returns:
+            A map from each PR that has a direct prerequisite or a direct dependent in direct
+            to 1 plus the largest level of its direct prerequisites, or to 1 if it has none.
         """
         level: dict[int, int] = {}
 
         def lev(n: int) -> int:
             if n not in level:
                 level[n] = 1  # provisional, so that a cycle of dependencies terminates
-                level[n] = 1 + max((lev(d) for d in self.direct[n]), default=0)
+                level[n] = 1 + max((lev(d) for d in direct[n]), default=0)
             return level[n]
 
-        for n in self.open:
-            if self.in_graph(n):
+        for n, ds in direct.items():
+            if ds:
                 lev(n)
         return level
+
+    @functools.cached_property
+    def levels(self) -> dict[int, int]:
+        """Each PR's level in the landing graph (see graph_levels)."""
+        return self.graph_levels(self.direct)
+
+    @functools.cached_property
+    def update_levels(self) -> dict[int, int]:
+        """Each PR's level in the update graph (see graph_levels)."""
+        return self.graph_levels(self.update_direct)
 
     def deepest_roots(self) -> set[int]:
         """Return the first PR of each longest path of prerequisites in the dependency graph.
@@ -1271,7 +1302,11 @@ def unite_partners(models: list[Model]) -> None:
     The partners of a PR are the PRs that its description says to land with it, and the
     PRs whose descriptions say to land with it, in any of the models' repositories.  A unit
     is a set of PRs that are connected by the partner relation.  Each member of a unit
-    depends on every prerequisite of every member, and on no member.
+    depends on every prerequisite of every member, and on no member.  In the update graph
+    (see Model.update_deps), each member's branch is updated from the branches that its
+    description and commits say, and from each branch that another member's branch is
+    updated from and that is a prerequisite of the member.  So a fix's branch is updated
+    from its base PR's branch, but the branches of the fix's partners are not.
     """
     by_gh = {m.repo.gh.lower(): m for m in models}
     for model in models:
@@ -1310,11 +1345,18 @@ def unite_partners(models: list[Model]) -> None:
                 prereqs[g.lower(), int(d)] = ref
         members = {(model.repo.gh.lower(), n) for model, n in unit}
         prereqs = {key: ref for key, ref in prereqs.items() if key not in members}
+        # The branches that the unit's members' branches are updated from, in each model.
+        updated_from: defaultdict[Model, set[int]] = defaultdict(set)
+        for model, n in unit:
+            updated_from[model] |= model.update_deps[n]
         for model, n in unit:
             gh = model.repo.gh.lower()
             model.unit[n] = {m for other, m in unit if other is model}
             model.cross_repo_unit[n] = {(other.repo.gh.lower(), m) for other, m in unit}
             model.deps[n] = {d for (g, d) in prereqs if g == gh and d in model.open}
+            model.update_deps[n] = (
+                model.update_deps[n] | (updated_from[model] & model.deps[n])
+            ) - model.unit[n]
             inherited = {ref for (g, _), ref in prereqs.items() if g != gh} - set(model.external[n])
             model.inherited_external[n] = inherited
             model.external[n] = sorted(set(model.external[n]) | inherited)
@@ -1385,8 +1427,8 @@ def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
             updated = updated_pr_description(
                 body,
                 model.repo,
-                model.landing_prerequisites(n) - unit,
-                model.landing_dependents(n) - unit,
+                model.direct[n] - unit,
+                model.dependents[n] - unit,
                 model.external[n],
             )
             if updated != body:
@@ -1486,7 +1528,7 @@ def depends_on(model: Model, n: int, mark_failed: bool = False) -> str:
     def ext_link(e: str) -> str:
         return external_link(e) + (external_failed_mark(model, e) if mark_failed else "")
 
-    conflicting = model.conflicting_prerequisites(n)
+    conflicting = model.conflicting_prerequisites(n) & model.direct[n]
     items = [link(d) + (" 🔀" if d in conflicting else "") for d in sorted(model.direct[n])] + [
         ext_link(e) for e in model.external[n]
     ]
@@ -2097,7 +2139,7 @@ def unblocked_doc(
     for m in models:
         items = []
         for n in m.blocked():
-            on = [m.repo.link(d) for d in sorted(m.landing_prerequisites(n))] + [
+            on = [m.repo.link(d) for d in sorted(m.direct[n])] + [
                 external_link(e) for e in m.external[n]
             ]
             # In a cycle of dependencies, a PR can have no direct prerequisite.
@@ -2207,8 +2249,8 @@ def gen_status(models: list[Model]) -> list[str]:
     for m in models:
         r = m.repo
         for n in sorted(m.open):
-            newest = [d for d in sorted(m.direct[n]) if m.head_status(n, d) == "newest"]
-            none = [d for d in sorted(m.direct[n]) if m.head_status(n, d) == "none"]
+            newest = [d for d in sorted(m.update_direct[n]) if m.head_status(n, d) == "newest"]
+            none = [d for d in sorted(m.update_direct[n]) if m.head_status(n, d) == "none"]
             parts = []
             if newest:
                 parts.append(
@@ -2319,10 +2361,12 @@ def dependency_cells(model: Model, n: int, mark_failed: bool = False) -> list[st
         stated_text = "no"
     else:
         stated_text = f"{and_list(stated)}:  yes; {and_list(unstated)}:  no"
-    status = {d: model.head_status(n, d) for d in direct}
-    newest = [d for d in direct if status[d] == "newest"]
-    none = [d for d in direct if status[d] == "none"]
-    if not direct:
+    # A base PR's branch does not contain its fixes' commits until they land into it.
+    updated_from = [d for d in direct if d in model.update_all_deps[n]]
+    status = {d: model.head_status(n, d) for d in updated_from}
+    newest = [d for d in updated_from if status[d] == "newest"]
+    none = [d for d in updated_from if status[d] == "none"]
+    if not updated_from:
         contains = "not applicable"
     elif not newest and not none:
         contains = "yes"
@@ -2742,7 +2786,7 @@ def dependency_document(
             " which may span repositories:  each member depends on every prerequisite of every"
             " member, and on no member, even if its branch contains another member's commits."
             " A PR whose base branch is another PR's branch, and whose description says to land"
-            ' before that PR (as in "Land before #N"), is a fix within that branch:'
+            ' before that PR (as in "Land before #N"), is a fix to that PR:'
             " its branch is still updated from the other PR's branch, but it lands first."
         ),
         "",
@@ -2824,12 +2868,16 @@ class PushChains(NamedTuple):
 
 
 def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushChains:
-    """Compute the `git-push-to` chains that update every PR from upstream and its prerequisites.
+    """Compute the `git-push-to` chains that update every PR's branch.
 
+    The chains update each PR's branch from upstream and from the branches that it is
+    updated from (see Model.update_deps).  A fix's branch is updated from its base PR's
+    branch, but the base PR's branch is not updated from the fix's branch.
     Each chain is a list of directories, each of which `git-push-to` pushes into the next.
     Each chain starts with a working copy of the upstream default branch, if there is one.
-    A chain may contain a single PR, which has no direct prerequisite or dependent that has
-    a working copy; such a chain exists only if there is a working copy of upstream.
+    A chain may contain a single PR, which has no direct prerequisite or dependent in the
+    update graph that has a working copy; such a chain exists only if there is a working
+    copy of upstream.
     Before a chain pushes into a directory, the chains that precede it have updated that
     directory's prerequisites.
     If conflicts_only is true, retain a whole chain only if merging it would encounter a
@@ -2849,9 +2897,9 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     dirs = {n: pr_directories(r, r.prs[n], base) for n in model.open}
     missing = sorted(n for n in model.open if not dirs[n])
     pushable = {n for n in model.open if dirs[n] and n not in model.cycle_affected}
-    edges = {(d, n) for n in pushable for d in model.direct[n] if d in pushable}
+    edges = {(d, n) for n in pushable for d in model.update_direct[n] if d in pushable}
     in_edge = {n for e in edges for n in e}
-    level = model.levels
+    level = model.update_levels
     pr_chains = []
     for d, n in sorted(edges, key=lambda e: (level[e[0]], e)):
         if (d, n) not in edges:
@@ -2859,7 +2907,7 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
         edges.discard((d, n))
         chain = [d, n]
         # Extend the chain from n only if this chain has made n up to date.
-        while len(model.direct[chain[-1]]) == 1:
+        while len(model.update_direct[chain[-1]]) == 1:
             nxt = min((m for p, m in edges if p == chain[-1]), default=None)
             if nxt is None:
                 break
