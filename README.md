@@ -101,7 +101,13 @@ The commands are:
 
   When a merge or a pull has conflicts, it uses the resolutions that
   `git rerere` recorded, and it asks an AI agent, Claude (or, with
-  `--codex`, Codex), to resolve the conflicts that remain.  If the build
+  `--codex`, Codex), to resolve the conflicts that remain.  The agent
+  examines every change of both sides of the merge and combines them; it
+  can edit any part of any file, and it can delete files but not create
+  them.  The script checks every resolution and lists, for your review, the
+  changes that the agent made outside the conflict regions.  The agent's
+  instructions start with the file `merge-conflict-instructions.md`, which
+  also suits a merge that you resolve yourself.  If the build
   fails, and TO_DIR's branch has a merge that neither its remote branches
   nor those of FROM_DIR's branch contain, such as the one that it just
   made, it asks the agent to fix the build, up to 3 times, and commits the

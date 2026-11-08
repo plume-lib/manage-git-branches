@@ -23,6 +23,13 @@
 # git writes more than 7 for a file whose attribute `conflict-marker-size`
 # is larger.
 #
+# If CCR_MARKERS_ONLY is "yes", the program instead checks only that RESOLVED
+# contains no conflict marker line that MERGED lacks:  each conflict marker
+# line of RESOLVED must be matched by an identical line of MERGED, a
+# different line for each.  MERGED is then any earlier version of the file,
+# or /dev/null, so that every conflict marker line of RESOLVED is reported.
+# That checks the work of an AI agent, which can change any text.
+#
 # The program reads these environment variables:
 #   CCR_FILE                        the file's name; used for diagnostics.
 #   CCR_SCRIPT_NAME                 the name of the command; used for
@@ -33,14 +40,36 @@
 #                                   separator line, which can then be
 #                                   content, such as a Markdown heading's
 #                                   underline; else "no"
+#   CCR_MARKERS_ONLY                "yes" to check only for conflict
+#                                   markers, as described above; else unset
+#                                   or "no"
 #
 # `check_conflict_resolution`, in common-functions.sh, runs this program.  It
 # passes the file in AUTO_MERGE, git's automatic merge, as MERGED; and it passes
-# the file in the working tree as RESOLVED.
+# the file in the working tree as RESOLVED.  `check_conflict_markers` and
+# `check_added_markers` run it with CCR_MARKERS_ONLY "yes".
 
 function problem(message) {
   printf "%s: %s: %s\n", ENVIRON["CCR_SCRIPT_NAME"], ENVIRON["CCR_FILE"], message > "/dev/stderr"
   status = 1
+}
+
+# Returns 1 if LINE is a conflict marker:  a line that starts with 7 or more
+# "<", "|", or ">" followed by a blank or by the end of the line, or a
+# separator line unless CCR_CONTAINS_SEPARATOR is "yes".  A line in a file
+# with CRLF line endings ends with "\r".
+function is_marker(line) {
+  return line ~ /^<<<<<<<+( |\r?$)/ || line ~ /^[|][|][|][|][|][|][|]+( |\r?$)/ \
+    || line ~ /^>>>>>>>+( |\r?$)/ \
+    || (ENVIRON["CCR_CONTAINS_SEPARATOR"] != "yes" && line ~ /^=======+\r?$/)
+}
+
+# Reports each line of the resolution in place of a conflict region that is
+# a conflict marker.
+function report_markers(   k) {
+  for (k = 1; k <= num_w; k++) {
+    if (!clean[k] && is_marker(w[k])) problem("line " k " is a conflict marker")
+  }
 }
 
 # Returns 1 if the lines of block B, a clean block of the merged file, are
@@ -63,6 +92,18 @@ FILENAME == ARGV[2] { w[++num_w] = $0; next }
 { a[++num_a] = $0 }
 
 END {
+  if (ENVIRON["CCR_MARKERS_ONLY"] == "yes") {
+    for (k = 1; k <= num_a; k++) {
+      if (is_marker(a[k])) earlier[a[k]]++
+    }
+    for (k = 1; k <= num_w; k++) {
+      if (!is_marker(w[k])) continue
+      if (earlier[w[k]] > 0) earlier[w[k]]--
+      else problem("line " k " is a conflict marker")
+    }
+    exit status
+  }
+
   # The newline that follows the merged file makes the last line empty if
   # and only if the merged file ends with a newline.  An empty file counts as
   # ending with one.
@@ -127,14 +168,7 @@ END {
   for (k = 1; k <= block_len[0]; k++) clean[k] = 1
   for (k = last_pos; k <= num_w; k++) clean[k] = 1
 
-  # The text in place of the regions has no conflict markers.  A line
-  # in a file with CRLF line endings ends with "\r".
-  for (k = 1; k <= num_w; k++) {
-    if (!clean[k] && (w[k] ~ /^<<<<<<<+( |\r?$)/ || w[k] ~ /^[|][|][|][|][|][|][|]+( |\r?$)/ \
-                      || w[k] ~ /^>>>>>>>+( |\r?$)/ \
-                      || (ENVIRON["CCR_CONTAINS_SEPARATOR"] != "yes" && w[k] ~ /^=======+\r?$/))) {
-      problem("line " k " is a conflict marker")
-    }
-  }
+  # The text in place of the regions has no conflict markers.
+  report_markers()
   exit status
 }

@@ -880,12 +880,14 @@ upstream_default_branch_git() {
 ## Checks the resolution of the conflicts in FILE against AUTO_MERGE, the git
 ## ref that names git's automatic merge, which contains the conflict markers:
 ## returns 0 if the text outside the conflict regions is unchanged and no
-## conflict marker remains, and returns 1 otherwise.  Prints a diagnostic for
-## each problem.  check-conflict-resolution.awk states exactly
-## what is acceptable.  FILE is a pathname relative to the top level of the
-## working tree, which must be the current directory.  CONTAINS_SEPARATOR is
-## "yes" if HEAD's or MERGE_HEAD's version of FILE contains a line of 7 or
-## more "=", such as "=======",
+## conflict marker remains, and returns 1 otherwise.  This check suits a
+## resolution that `git rerere` made, which changes only the conflict
+## regions; an AI agent can change any text (see `check_agent_resolution`).
+## Prints a diagnostic for each problem.  check-conflict-resolution.awk
+## states exactly what is acceptable.  FILE is a pathname relative to the top
+## level of the working tree, which must be the current directory.
+## CONTAINS_SEPARATOR is "yes" if HEAD's or MERGE_HEAD's version of FILE
+## contains a line of 7 or more "=", such as "=======",
 ## which can then be content in the resolution, such as a Markdown heading's
 ## underline, rather than a conflict marker; and "no" otherwise.
 ##
@@ -937,9 +939,11 @@ ends_with_newline() {
 ## current directory, the top level of a working tree, and stages the result.
 ## Conflicts that `git rerere` has already resolved need no more work.  For
 ## any others, this function asks an AI agent, RESOLVER ("claude" or
-## "codex"), to edit the conflicted files, or fails if RESOLVER is empty or
-## cannot be run.  Either way, it checks every resolution with
-## `check_conflict_resolution`.  SOURCE names COMMIT in diagnostics and in the
+## "codex"), to resolve them, or fails if RESOLVER is empty or cannot be run.
+## The agent can edit any part of any file, not just the conflict regions
+## (see `resolve_with_agent`).  This function checks each resolution that
+## `git rerere` made with `check_conflict_resolution`, and the agent's work
+## with `check_agent_resolution`.  SOURCE names COMMIT in diagnostics and in the
 ## agent's instructions.  Returns 1, after printing a diagnostic, on failure,
 ## and leaves the merge in progress, which it notes in AGENT-TODO.md, with
 ## the command that continues the agent's session if one ran (see
@@ -1004,22 +1008,26 @@ resolve_merge_conflicts() {
   # Checks each conflicted file, and lists each one that `git rerere` did not
   # resolve acceptably.
   #
-  # `check_conflict_resolution` cannot tell a conflict marker from a line of
-  # the file that looks like one, as in a test of merging, so such a file is
-  # refused.  The sides are the versions of the file that the merge combined,
-  # which the index holds as stages 1 (the merge base), 2 (HEAD), and 3
-  # (MERGE_HEAD).  Each stage is under the conflicted pathname even if a side
-  # has the file under another name, before or after a rename.  The merge
-  # base matters too, because a merge with `merge.conflictStyle` "diff3" puts
-  # its text in the conflict regions.  With several merge bases, stage 1 is
-  # their merge, which can itself contain conflict markers; then the file is
-  # refused.  A line of 7 or more "=", such as "=======", in HEAD's or
-  # MERGE_HEAD's version is content, so `check_conflict_resolution` permits
-  # such a line in the resolution.  (Git writes a separator of more than 7
-  # "=" for a file whose attribute `conflict-marker-size` is larger.)
+  # Neither `check_conflict_resolution` nor `check_conflict_markers` can tell
+  # a conflict marker from a line of the file that looks like one, as in a
+  # test of merging, so such a file is refused.  The sides are the versions
+  # of the file that the merge combined, which the index holds as stages 1
+  # (the merge base), 2 (HEAD), and 3 (MERGE_HEAD).  Each stage is under the
+  # conflicted pathname even if a side has the file under another name,
+  # before or after a rename.  The merge base matters too, because a merge
+  # with `merge.conflictStyle` "diff3" puts its text in the conflict regions.
+  # With several merge bases, stage 1 is their merge, which can itself
+  # contain conflict markers; then the file is refused.  A line of 7 or more
+  # "=", such as "=======", in HEAD's or MERGE_HEAD's version is content, so
+  # `check_conflict_resolution` and `check_conflict_markers` permit such a
+  # line in the resolution.  (Git writes a separator of more than 7 "=" for a
+  # file whose attribute `conflict-marker-size` is larger.)
   #
   # For one stage, the awk program prints "marker" if a line looks like a
   # conflict marker, or else "separator" if a line consists of 7 or more "=".
+  # Its pattern is looser than that of check-conflict-resolution.awk, which
+  # requires a blank or the end of the line after a marker, so that it
+  # refuses every file that contains a line that might be taken for one.
   resolve_scan='/^(<<<<<<<|[|][|][|][|][|][|][|]|>>>>>>>)/ { marker = 1; exit }
     /^=======+\r?$/ { separator = 1 }
     END { if (marker) print "marker"; else if (separator) print "separator" }'
@@ -1056,9 +1064,20 @@ resolve_merge_conflicts() {
       if [ "${resolve_contains_separator}" = yes ]; then
         printf 'separator %s\n' "${resolve_file}"
       fi
-      if ! check_conflict_resolution "${resolve_file}" "${resolve_contains_separator}" 2> /dev/null; then
-        printf 'unresolved %s\n' "${resolve_file}"
+      if check_conflict_resolution "${resolve_file}" "${resolve_contains_separator}" 2> /dev/null; then
+        continue
       fi
+      # A file without a conflict region was resolved by `git rerere`, but
+      # not acceptably, as when the recorded resolution changed text outside
+      # the conflict regions.  An agent would see no conflict to resolve, and
+      # the check of its work would not find what is wrong.
+      if [ -f "${resolve_file}" ] && ! grep -q '^<<<<<<<' "${resolve_file}"; then
+        check_conflict_resolution "${resolve_file}" "${resolve_contains_separator}" || true
+        echo "${SCRIPT_NAME}: \`git rerere\` did not resolve ${resolve_file} acceptably; resolve its conflicts by hand" >&2
+        resolve_status=1
+        continue
+      fi
+      printf 'unresolved %s\n' "${resolve_file}"
     done
     exit "${resolve_status}"
   })"; then
@@ -1099,11 +1118,11 @@ resolve_merge_conflicts() {
     fi
   fi
 
-  # `xargs -0` passes every pathname intact, even one that contains a blank
-  # or a quotation mark.
-  # GIT_LITERAL_PATHSPECS keeps git from interpreting glob characters in them.
-  if ! git diff --name-only --diff-filter=U -z \
-    | GIT_LITERAL_PATHSPECS=1 xargs -0 git add -- \
+  # `git add -u` stages every change to a tracked file:  the resolution of
+  # each conflicted file, and each other change that the agent made.  Before
+  # the agent ran, no tracked file other than the conflicted ones differed
+  # from AUTO_MERGE.
+  if ! git add -u \
     || [ -n "$(git ls-files -u)" ]; then
     echo "${SCRIPT_NAME}: cannot stage the resolved files in $(pwd)" >&2
     resolve_stopped
@@ -1128,12 +1147,28 @@ resolve_stopped() {
 ## `resolve_merge_conflicts` calls this function, which reads that function's
 ## variables.
 ##
-## The agent may change only the files ${resolve_unresolved}.  Any other
-## change is rejected:  to the index, to HEAD or MERGE_HEAD, to git's
-## configuration or hooks, or to any other file of the working tree, whether
-## tracked, untracked, or ignored.  A file that git does not track would not
-## be committed, but a later build could use it.  A file that `git rerere`
-## resolved must keep the resolution that rerere recorded.
+## The agent can change any part of any file that git tracks, not just the
+## conflict regions:  git's automatic merge of the text outside them, and of
+## the files without conflicts, can combine changes that do not fit together,
+## such as a call to a method that the other side renamed.  It can also
+## change a conflicted file that `git rerere` resolved, and delete a file that
+## git tracks.  Any other change is rejected:  to the index, to HEAD or
+## MERGE_HEAD, to git's configuration or hooks, or to any file that git does
+## not track, whether untracked or ignored, including the creation of a file.
+## A file that git does not track would not be committed, but a later build
+## could use it.  A created file is rejected rather than committed, because
+## a command that the agent runs can create files as a side effect, such as
+## a cache of compiled code, which would then be committed and pushed.  A hook in the working tree, as with
+## `core.hooksPath` ".githooks", can be changed only if it is a conflicted
+## file, because the commit of the merge runs it outside the agent's
+## sandbox.  But the agent can change a tracked file that a hook or the build
+## reads or runs, such as prek.toml, .pre-commit-config.yaml, a script that
+## a hook calls, or a Makefile; the commit and the build then run that code
+## outside the sandbox.  The build-fix agent can do the same (see
+## `fix_failed_build`).  Each conflicted file must be acceptably resolved (see
+## `check_agent_resolution`), and no other file that the agent changed or
+## created can contain a conflict marker line that AUTO_MERGE's version of
+## it lacks (see `check_added_markers`).
 resolve_with_agent() {
   # No session is reported if this function fails before the agent runs.
   agent_session_ids=''
@@ -1161,29 +1196,78 @@ resolve_with_agent() {
     return 1
   fi
   resolve_paths="$(working_tree_paths)"
+  # The files that git tracks, which the agent can change or delete.  `-z`
+  # keeps git from quoting a pathname, as it quotes one that contains a
+  # quotation mark.  `tr` turns each NUL that ends a pathname into a newline,
+  # and each newline within a pathname into the byte 001, so that such a
+  # pathname matches no file, and a change to that file is rejected.  The
+  # index holds a conflicted file at several stages, so `uniq` removes the
+  # repetitions from the sorted list.
+  resolve_tracked="$(git ls-files -z | tr '\n\000' '\001\n' | uniq)"
+  # Git runs a hook when the script commits, outside the agent's sandbox.
+  resolve_hooks="$(working_tree_hooks)"
   resolve_branch="$(current_branch)" || resolve_branch="HEAD"
+  # The conflicted files that `git rerere` resolved, one per line.
+  resolve_rerere="$(printf '%s\n' "${resolve_files}" | grep -F -x -v -- "${resolve_unresolved}")"
+  # A line "HASH FILE" for each of them, where HASH is the hash of the
+  # resolution, as `git hash-object` computes it, such as
+  # "3b18e512dba79e4c8300dd08aeb37f8e728b8dad".  `check_agent_resolution`
+  # reads it to tell whether the agent changed the resolution.
+  resolve_rerere_hashes="$(printf '%s\n' "${resolve_rerere}" | while IFS= read -r resolve_file; do
+    if [ -n "${resolve_file}" ]; then
+      printf '%s %s\n' "$(git hash-object -- "${resolve_file}")" "${resolve_file}"
+    fi
+  done)"
+  resolve_rerere_text=''
+  if [ -n "${resolve_rerere}" ]; then
+    resolve_rerere_text="
+\`git rerere\` resolved the conflicts in these files, by replaying resolutions that were recorded earlier.  Review them as part of the merge too:
+
+$(printf '%s\n' "${resolve_rerere}" | sed -e 's/^/  /')
+"
+  fi
+  # The general procedure is in a file that a person can use too, such as by
+  # naming it in an agent's instructions.  The rules that follow it are
+  # specific to this script.
+  if ! resolve_instructions="$(cat -- "${SCRIPT_DIR}/merge-conflict-instructions.md")"; then
+    echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/merge-conflict-instructions.md" >&2
+    rm -f -- "${resolve_marker}"
+    return 1
+  fi
   resolve_prompt="You are resolving merge conflicts in the git working tree $(pwd).
-\`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts in these files:
+\`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts.  HEAD is ${resolve_branch}, and MERGE_HEAD is ${resolve_source}.  These files contain conflict markers:
 
 $(printf '%s\n' "${resolve_unresolved}" | sed -e 's/^/  /')
+${resolve_rerere_text}
+Follow the instructions below, which are the contents of the file merge-conflict-instructions.md; you need not read that file, or use a skill, to resolve these conflicts.  They override any other instructions that you have about resolving merge conflicts, such as a rule to change only the conflict regions.  After them come rules for this session, which nobody is watching.
 
-Resolve every conflict by editing those files.  Rules:
+${resolve_instructions}
 
-* Edit only the conflict regions, each of which starts with a line \"<<<<<<<\" and ends with a line \">>>>>>>\".  A region holds the text of ${resolve_branch}; then, in the \"diff3\" conflict style, after a line \"|||||||\", the text of the merge base; then, after a line \"=======\", the text being merged in.  Remove every conflict marker line.  Do not change any other part of any file, even of a file that has conflicts:  git merged the rest cleanly.
-* Do not resolve a file by taking one side wholesale.  Combine the intent of both sides.  To learn each side's intent, read the history, for example with \`git log --merge -p -- FILE\`, \`git diff HEAD...MERGE_HEAD -- FILE\` (the changes being merged in), and \`git diff MERGE_HEAD...HEAD -- FILE\` (the changes on ${resolve_branch}).
-* Do not run any git command that changes the index, HEAD, or any other ref, such as \`git add\`, \`git commit\`, \`git checkout\`, \`git restore\`, \`git reset\`, \`git merge\`, \`git stash\`, or \`git rebase\`.  A script stages the files and commits the merge after you finish.
+# Rules for this session
+
+* Do not run any git command that changes the index, HEAD, or any other ref, such as \`git add\`, \`git rm\`, \`git mv\`, \`git commit\`, \`git checkout\`, \`git restore\`, \`git reset\`, \`git merge\`, \`git stash\`, or \`git rebase\`.  A script stages your changes and commits the merge after you finish.
 * Run commands in the current directory, which is the working tree, without \`cd\` or \`git -C\`.  A command in another form needs approval, which nobody is present to give.
 * Do not build the project or run its tests; the script does that.
-* Do not create another working copy, do not create any file, and do not change any file other than those listed above.
-* The script rejects the resolution if any text outside the conflict regions changed, or if a conflict marker line remains.  \`git diff AUTO_MERGE\` shows your changes; AUTO_MERGE is git's automatic merge, which contains the conflict markers.
+* Do not create another working copy, do not create any file, and do not change any file that git does not track.  The script rejects the resolution if any new file appears, even as a side effect of a command that you run.  If combining the two sides requires a new file, leave the related conflict markers in place, and say so.
+* The script rejects the resolution if a conflict marker line remains, or if any file that you change contains a conflict marker line that git's merge did not put there.
+* The script also rejects the resolution if the resolution of a file that has conflict markers, or of a file that \`git rerere\` resolved and that you change, is identical to either side's version of the file, apart from whitespace and blank lines, even if that resolution is correct.  If you conclude that the correct resolution of such a file is identical to one side's version, because every change of the other side to the file is already present in it or is obsolete, leave the file's conflict markers, or the resolution of \`git rerere\`, in place, and say why.
 * If you cannot resolve a conflict with confidence, leave its conflict markers in place, and say why.
 
-Finish with a brief summary of how you resolved each conflict."
+Finish with a summary that says, for each conflict, what each side changed and how your resolution combines the changes; and that lists each change that you made outside the conflict regions, and why."
 
   echo "${SCRIPT_NAME}: asking ${resolve_with} to resolve the conflicts in $(pwd)" >&2
   run_agent "${resolve_with}" "${resolve_prompt}"
   resolve_agent_status=$?
-  resolve_changes="$(working_tree_changes "${resolve_paths}" "${resolve_marker}" "${resolve_unresolved}")"
+  # The files that the agent can change or delete:  the tracked files, except
+  # a hook in the working tree, unless it is conflicted.  A file that existed before, but
+  # that git ignored until the agent changed .gitignore, is neither a change
+  # nor committed.
+  resolve_changes="$( {
+    printf '%s\n' "${resolve_tracked}" | RESOLVE_HOOKS="${resolve_hooks}" awk '
+      ENVIRON["RESOLVE_HOOKS"] == "" { print; next }
+      ENVIRON["RESOLVE_HOOKS"] != "." && index($0, ENVIRON["RESOLVE_HOOKS"] "/") != 1'
+    printf '%s\n' "${resolve_files}"
+  } | working_tree_changes "${resolve_paths}" "${resolve_marker}")"
   rm -f -- "${resolve_marker}"
 
   # Check the agent's work even if the agent failed, so that the user learns
@@ -1210,18 +1294,56 @@ Finish with a brief summary of how you resolved each conflict."
     echo "${SCRIPT_NAME}: ${resolve_with} changed the index" >&2
     resolve_ok=0
   fi
-  # Every conflicted file is checked against AUTO_MERGE, unless that changed,
-  # including one that the agent did not change, whose conflict markers
-  # remain.  After the agent failed, each file that is not acceptably
-  # resolved is reported briefly, as when no agent runs.
+  # The agent's changes outside the conflict regions deserve the user's
+  # review, as the resolutions do.  They are reported whether or not the
+  # agent's work is accepted:  a rejected agent's changes remain in the
+  # working tree.  The changes to the conflicted files outside their
+  # conflict regions are found by the check that a resolution from
+  # `git rerere` must pass; a file that still has conflict markers fails it
+  # anyway, so it is not reported.  A change to a resolution that
+  # `git rerere` made is reported wherever it is.  Each other file that the
+  # agent changed is also checked for conflict markers, as when the agent
+  # copied a conflict region into it.
+  if [ "${resolve_refs_ok}" -eq 1 ]; then
+    resolve_agent_other="$(resolve_other_changes)"
+    printf '%s\n' "${resolve_agent_other}" | sed -e '/^$/d' -e "s/^/${SCRIPT_NAME}: ${resolve_with} also changed: /" >&2
+    printf '%s\n' "${resolve_unresolved}" | while IFS= read -r resolve_file; do
+      resolve_file_separator="$(separator_permitted "${resolve_file}")"
+      if [ -f "${resolve_file}" ] \
+        && check_conflict_markers "${resolve_file}" "${resolve_file_separator}" 2> /dev/null \
+        && ! check_conflict_resolution "${resolve_file}" "${resolve_file_separator}" 2> /dev/null; then
+        echo "${SCRIPT_NAME}: ${resolve_with} changed text outside the conflict regions of ${resolve_file}" >&2
+      fi
+    done
+    printf '%s\n' "${resolve_rerere}" | while IFS= read -r resolve_file; do
+      if [ -n "${resolve_file}" ] && ! rerere_resolution_unchanged "${resolve_file}"; then
+        echo "${SCRIPT_NAME}: ${resolve_with} changed the resolution that \`git rerere\` made of ${resolve_file}" >&2
+      fi
+    done
+    if ! printf '%s\n' "${resolve_agent_other}" | {
+      resolve_loop_ok=1
+      while IFS= read -r resolve_file; do
+        if [ -n "${resolve_file}" ] && ! check_added_markers "${resolve_file}"; then
+          resolve_loop_ok=0
+        fi
+      done
+      [ "${resolve_loop_ok}" -eq 1 ]
+    }; then
+      resolve_ok=0
+    fi
+  fi
+  # Every conflicted file is checked, unless HEAD, MERGE_HEAD, or AUTO_MERGE
+  # changed, including one that the agent did not change, whose conflict
+  # markers remain.  After the agent failed, each file that is not
+  # acceptably resolved is reported briefly, as when no agent runs.
   if [ "${resolve_refs_ok}" -eq 0 ]; then
     :
   elif [ "${resolve_agent_status}" -ne 0 ]; then
-    report_unresolved "${resolve_files}"
+    report_unresolved "${resolve_files}" check_agent_resolution
   elif ! printf '%s\n' "${resolve_files}" | {
     resolve_loop_ok=1
     while IFS= read -r resolve_file; do
-      if ! check_conflict_resolution "${resolve_file}" "$(separator_permitted "${resolve_file}")"; then
+      if ! check_agent_resolution "${resolve_file}"; then
         resolve_loop_ok=0
       fi
     done
@@ -1239,6 +1361,137 @@ Finish with a brief summary of how you resolved each conflict."
   return 0
 }
 
+## Usage: check_agent_resolution FILE
+## Checks the resolution of FILE, a file that the merge in progress in the
+## current directory left conflicted, after an AI agent resolved the
+## conflicts.  Returns 0 if the resolution is acceptable.  Returns 1, after
+## printing a diagnostic, if FILE no longer exists, if it contains a conflict
+## marker line, or if its content is the same as its version on either side
+## of the merge, apart from whitespace and blank lines (see
+## `side_difference`):  such a resolution keeps none of the changes that the
+## other side made to the file, including the changes that git merged
+## cleanly.  Such a resolution is correct only if every change of the other
+## side is already present in it or is obsolete, which a person must
+## confirm.  The comparison with the sides is skipped for a file that
+## `git rerere` resolved, if the agent did not change the resolution (see
+## `rerere_resolution_unchanged`).  A line of 7 or more "=" is not a conflict
+## marker if `separator_permitted` permits one in FILE.  Only
+## `resolve_with_agent` calls this function, which reads the variables of
+## `resolve_merge_conflicts` and of `resolve_with_agent`.
+check_agent_resolution() {
+  if [ ! -f "$1" ]; then
+    echo "${SCRIPT_NAME}: $1: the conflicted file was deleted" >&2
+    return 1
+  fi
+  if ! check_conflict_markers "$1" "$(separator_permitted "$1")"; then
+    return 1
+  fi
+  if ! printf '%s\n' "${resolve_unresolved}" | grep -F -x -q -- "$1" \
+    && rerere_resolution_unchanged "$1"; then
+    return 0
+  fi
+  case "$(side_difference "$1" 2 3)" in
+    identical)
+      echo "${SCRIPT_NAME}: $1: the resolution is identical to the version on ${resolve_branch}, so it keeps none of the changes of ${resolve_source} to the file" >&2
+      return 1
+      ;;
+    whitespace)
+      echo "${SCRIPT_NAME}: $1: the resolution differs from the version on ${resolve_branch} only in whitespace and blank lines, so it keeps none of the changes of ${resolve_source} to the file" >&2
+      return 1
+      ;;
+  esac
+  case "$(side_difference "$1" 3 2)" in
+    identical)
+      echo "${SCRIPT_NAME}: $1: the resolution is identical to the version in ${resolve_source}, so it keeps none of the changes of ${resolve_branch} to the file" >&2
+      return 1
+      ;;
+    whitespace)
+      echo "${SCRIPT_NAME}: $1: the resolution differs from the version in ${resolve_source} only in whitespace and blank lines, so it keeps none of the changes of ${resolve_branch} to the file" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+## Usage: rerere_resolution_unchanged FILE
+## Succeeds if FILE is one of the conflicted files that `git rerere`
+## resolved, and its content is the same as when `resolve_with_agent` asked
+## the agent to resolve the conflicts, as recorded in
+## ${resolve_rerere_hashes}.
+rerere_resolution_unchanged() {
+  # `git hash-object` converts the file as `git add` would, such as from
+  # CRLF line endings, as it did when the hash was recorded.
+  rru_hash="$(git hash-object -- "$1" 2> /dev/null)" \
+    && printf '%s\n' "${resolve_rerere_hashes}" | grep -F -x -q -- "${rru_hash} $1"
+}
+
+## Usage: side_difference FILE STAGE OTHER_STAGE
+## Prints how FILE, a conflicted file of the working tree, differs from its
+## version at STAGE of the index, where stage 2 is HEAD's version and stage 3
+## is MERGE_HEAD's; OTHER_STAGE is the other of 2 and 3.  Prints
+## "identical" if FILE is identical to that version; "whitespace" if they
+## differ only in whitespace and blank lines and the version at OTHER_STAGE
+## differs from the merge base's version (stage 1) in more than whitespace
+## and blank lines; and "other" otherwise.  When the other side's changes are
+## only to whitespace, a resolution that differs from STAGE's version only in
+## whitespace can keep those changes, so it does not count as "whitespace".
+side_difference() {
+  # `git hash-object` converts the file as `git add` would, such as from
+  # CRLF line endings, so that the hash is comparable to those in the index.
+  if [ "$(git hash-object -- "$1" 2> /dev/null)" = "$(git rev-parse --verify --quiet ":$2:$1")" ]; then
+    echo identical
+  elif [ "$(git cat-file blob ":1:$1" 2> /dev/null | squeezed_cksum)" \
+    != "$(git cat-file blob ":$3:$1" 2> /dev/null | squeezed_cksum)" ] \
+    && [ "$(squeezed_cksum < "$1")" = "$(git cat-file blob ":$2:$1" 2> /dev/null | squeezed_cksum)" ]; then
+    echo whitespace
+  else
+    echo other
+  fi
+}
+
+## Usage: squeezed_cksum
+## Prints the checksum, as `cksum` prints it, of standard input with all
+## whitespace removed from each line and the lines that become empty
+## removed.  Two files have the same such checksum if they differ only in
+## whitespace and blank lines (or, with negligible probability, otherwise).
+squeezed_cksum() {
+  awk '{ gsub(/[ \t\r\f\v]+/, ""); if ($0 != "") print }' | cksum
+}
+
+## Usage: check_conflict_markers FILE CONTAINS_SEPARATOR
+## Returns 0 if no line of FILE, a file of the working tree, is a conflict
+## marker.  Otherwise, prints a diagnostic for each such line and returns 1.
+## check-conflict-resolution.awk defines a conflict marker.  A line of 7 or
+## more "=", such as "=======", is a conflict marker unless
+## CONTAINS_SEPARATOR is "yes".
+check_conflict_markers() {
+  # The "./" keeps awk from taking a FILE such as "x=y" for a variable
+  # assignment.
+  CCR_FILE="$1" CCR_SCRIPT_NAME="${SCRIPT_NAME}" CCR_CONTAINS_SEPARATOR="$2" \
+    CCR_MARKERS_ONLY=yes awk -f "${SCRIPT_DIR}/check-conflict-resolution.awk" /dev/null "./$1"
+}
+
+## Usage: check_added_markers FILE
+## Returns 0 if FILE, a file of the working tree that is not conflicted,
+## contains no conflict marker line that its version in AUTO_MERGE lacks, or
+## if FILE does not exist.  A file that is not in AUTO_MERGE, such as a new
+## file, lacks every line.  Otherwise, prints a diagnostic for each such line
+## and returns 1.  check-conflict-resolution.awk defines a conflict marker;
+## here, a line of 7 or more "=", such as "=======", is not one, because it
+## is common content, as a Markdown heading's underline, and a conflict
+## region copied into FILE has the other markers too.
+check_added_markers() {
+  if [ ! -f "$1" ]; then
+    return 0
+  fi
+  # `--filters` converts AUTO_MERGE's file as a checkout would, such as to
+  # CRLF line endings, to match the working tree.  The "./" keeps awk from
+  # taking a FILE such as "x=y" for a variable assignment.
+  git cat-file --filters "AUTO_MERGE:$1" 2> /dev/null \
+    | CCR_FILE="$1" CCR_SCRIPT_NAME="${SCRIPT_NAME}" CCR_CONTAINS_SEPARATOR=yes \
+      CCR_MARKERS_ONLY=yes awk -f "${SCRIPT_DIR}/check-conflict-resolution.awk" - "./$1"
+}
+
 ## Usage: working_tree_paths
 ## Prints the pathname of each file and directory of the working tree whose
 ## top level is the current directory, other than the contents of `.git`,
@@ -1248,25 +1501,35 @@ working_tree_paths() {
   find . -path './.git/*' -prune -o -print
 }
 
-## Usage: working_tree_changes PATHS MARKER ALLOWED
+## Usage: working_tree_changes PATHS MARKER
 ## Compares the working tree whose top level is the current directory with
 ## PATHS, an earlier output of `working_tree_paths`.  Prints, one per line,
 ## "created a file: FILE" or "deleted a file: FILE" for each pathname that
 ## was added to or removed from PATHS, and "changed a file: FILE" for each
 ## other file, not a directory, whose status changed after MARKER, a file,
-## was last modified.  A change to a file in ALLOWED, a list of pathnames
-## relative to the top level such as "src/main.c", one per line, is not
-## printed.  FILE is relative to the top level.
+## was last modified.  FILE is relative to the top level.  Standard input is
+## a list of the pathnames whose creation, deletion, or change is permitted,
+## one per line, relative to the top level, such as "src/main.c"; nothing is
+## printed for one of them or for a directory that contains one of them.
+## The list is read from standard input, rather than from an argument or an
+## environment variable, because it can be long, such as every file that git
+## tracks.
 working_tree_changes() {
   {
+    sed -e 's/^/allowed /'
     printf '%s\n' "$1" | sed -e 's/^/before /'
     working_tree_paths | sed -e 's/^/after /'
     find . -path './.git/*' -prune -o ! -type d -cnewer "$2" -print \
       | sed -e 's/^/changed /'
-  } | WTC_ALLOWED="$3" awk '
-    BEGIN {
-      n = split(ENVIRON["WTC_ALLOWED"], allowed_list, "\n")
-      for (i = 1; i <= n; i++) allowed["./" allowed_list[i]] = 1
+  } | awk '
+    # A permitted pathname, and each directory that contains it, such as
+    # "./src" for "src/main.c".
+    /^allowed / {
+      path = "./" substr($0, 9)
+      allowed[path] = 1
+      # A directory that is already permitted has permitted ancestors.
+      while (sub(/\/[^\/]*$/, "", path) && path != "." && !(path in allowed)) allowed[path] = 1
+      next
     }
     # Each list can hold a pathname more than once, if a pathname that
     # contains a newline spans lines that are also pathnames, so the lists
@@ -1280,6 +1543,7 @@ working_tree_changes() {
     function relative(file) { sub(/^\.\//, "", file); return file }
     END {
       for (file in count) {
+        if (file in allowed) continue
         if (count[file] > 0) print "created a file: " relative(file)
         else if (count[file] < 0) print "deleted a file: " relative(file)
       }
@@ -1361,14 +1625,18 @@ wait_end_by_signal() {
   kill -s "$1" "$(exec sh -c 'echo "$PPID"')"
 }
 
-## Usage: report_unresolved FILES
+## Usage: report_unresolved FILES [CHECK]
 ## Says why each of FILES, a list of conflicted files one per line, is not
 ## acceptably resolved:  that it still has conflict markers, or else what
-## `check_conflict_resolution` finds wrong with its resolution.
+## CHECK finds wrong with its resolution.  CHECK is `check_agent_resolution`,
+## for the work of an AI agent, or `check_conflict_resolution` (the default),
+## for the work of `git rerere`.
 report_unresolved() {
   printf '%s\n' "$1" | while IFS= read -r report_unresolved_file; do
     if grep -q '^<<<<<<<' "${report_unresolved_file}" 2> /dev/null; then
       echo "${SCRIPT_NAME}: conflicted: ${report_unresolved_file}" >&2
+    elif [ "${2:-}" = check_agent_resolution ]; then
+      check_agent_resolution "${report_unresolved_file}" || true
     else
       check_conflict_resolution "${report_unresolved_file}" \
         "$(separator_permitted "${report_unresolved_file}")" || true
@@ -1437,7 +1705,8 @@ agent_available() {
 ## The agent can read every file of the working tree, including files that
 ## git ignores, such as a ".env" file, and the repository, including its
 ## configuration.  Instructions in the conflicting text can make it copy a
-## secret from such a file into a conflict region, where no check finds it.
+## secret from such a file into any file that git tracks, where no check
+## finds it, and the script then commits and pushes that file.
 run_agent() {
   # Each agent's sandbox keeps it from changing git's configuration or hooks,
   # which name commands that git runs.  Check that anyway.
@@ -1578,8 +1847,8 @@ run_agent() {
 ## agent that `run_agent` recorded in ${agent_session_ids}, such as
 ## "cd /home/me/myrepo && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b".
 ## The user can then ask the agent about its work, or tell it to finish the
-## work in a way that its instructions forbade, such as by changing text
-## outside a conflict region.  Also appends the commands, under a heading that
+## work in a way that its instructions forbade, such as by taking one side's
+## version of a file.  Also appends the commands, under a heading that
 ## gives TASK and the time, and after NOTE, a paragraph such as
 ## `merge_in_progress_note` prints, if NOTE is given and not empty, to the
 ## file ${agent_session_todo} (see `append_agent_todo`), where the user is
@@ -1951,8 +2220,9 @@ git_control_state() {
     return 0
   fi
   # A hook in the working tree, as with `core.hooksPath` ".githooks", is a
-  # file of the working tree, which `resolve_with_agent` checks; the agent
-  # may resolve the conflicts in it.  So the summary omits the contents of a
+  # file of the working tree, which `resolve_with_agent` checks:  it rejects
+  # an agent's change to such a hook unless the hook is a conflicted file,
+  # whose conflicts the agent resolves.  So the summary omits the contents of a
   # directory of hooks in the working tree, and the contents of the file that
   # a hook links to.  A link is summarized by its target.
   git_control_hooks_physical="$(physical_path "${git_control_hooks}")" || return 1
@@ -1970,11 +2240,46 @@ git_control_state() {
     -o -print | sort
 }
 
+## Usage: working_tree_hooks
+## Prints the pathname, relative to the top level of the working tree, of
+## the directory of git's hooks, if that directory is in the working tree but
+## not in `.git`, as with `core.hooksPath` ".githooks"; prints "." if it is
+## the top level itself; and prints nothing otherwise.  The directory need
+## not exist.  The current directory must be the top level of the working
+## tree.  Git resolves a symbolic link in `core.hooksPath`, so the pathname
+## is that of the directory that the link leads to; `git_control_state`
+## detects a change to such a link.
+working_tree_hooks() {
+  wth_hooks="$(git rev-parse --path-format=absolute --git-path hooks)" || return 0
+  wth_physical="$(physical_path "${wth_hooks}" 2> /dev/null)" || wth_physical="${wth_hooks}"
+  wth_physical="${wth_physical%/}"
+  for wth_top in "$(pwd -P)" "$(pwd)"; do
+    case "${wth_physical}/" in
+      "${wth_top}/") echo "." ;;
+      "${wth_top}/.git/"*) ;;
+      "${wth_top}/"*) printf '%s\n' "${wth_physical#"${wth_top}"/}" ;;
+      *) continue ;;
+    esac
+    return 0
+  done
+}
+
 ## Usage: untracked_files
 ## Prints, one per line, the files of the working tree that git does not track
-## and does not ignore.
+## and does not ignore.  Returns the exit status of `git ls-files`.
 untracked_files() {
-  git -c core.quotePath=false ls-files --others --exclude-standard
+  # As for `resolve_tracked` in `resolve_with_agent`, `-z` keeps git from
+  # quoting a pathname, and a newline within a pathname becomes the byte 001.
+  # A pipeline's status is that of its last command, so fd 3 carries the
+  # status of git out of the command substitution, and fd 4 is the function's
+  # standard output.
+  {
+    untracked_files_status="$({ {
+      git ls-files -z --others --exclude-standard 3>&- 4>&-
+      echo "$?" >&3
+    } | tr '\n\000' '\001\n' >&4 3>&-; } 3>&1)"
+  } 4>&1
+  [ "${untracked_files_status}" = 0 ]
 }
 
 ## Usage: ignored_files
@@ -2031,7 +2336,10 @@ fix_failed_build() {
   fix_attempt=1
   fix_earlier=''
   while :; do
-    fix_untracked="$(untracked_files)"
+    if ! fix_untracked="$(untracked_files)"; then
+      echo "${SCRIPT_NAME}: cannot list the untracked files of $(pwd)" >&2
+      return 1
+    fi
     fix_ignored="$(ignored_files)"
     if [ "${fix_attempt}" -gt 1 ]; then
       fix_earlier="
@@ -2066,7 +2374,11 @@ $(tail -n 100 "${fix_log}")"
     fi
     # Stage the agent's changes:  to tracked files, and the files that it
     # created.  The changes of earlier attempts are already staged.
-    fix_new="$(untracked_files | grep -F -x -v -- "${fix_untracked}")"
+    if ! fix_now_untracked="$(untracked_files)"; then
+      echo "${SCRIPT_NAME}: cannot list the untracked files of $(pwd)" >&2
+      return 1
+    fi
+    fix_new="$(printf '%s\n' "${fix_now_untracked}" | grep -F -x -v -- "${fix_untracked}")"
     # A file that git ignores would not be committed, but the build could use
     # it.
     fix_new_ignored="$(ignored_files | grep -F -x -v -- "${fix_ignored}")"
