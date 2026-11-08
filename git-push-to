@@ -154,18 +154,22 @@
 # them rather than taking either side's version.  It can edit any part of any
 # file that git tracks, not only the conflict regions, because git's
 # automatic merge of the rest can combine changes that do not fit together,
-# such as a call to a method that the other side renamed.  It can also create
-# and delete files.  It cannot change a hook in the working tree, as with
-# `core.hooksPath` ".githooks", unless the hook has conflicts, because this
-# script's commit would run it outside the agent's sandbox.  This script
-# rejects a resolution of a file that is identical to either side's version
-# of the file, apart from whitespace and blank lines, and any file that the
-# agent changed or created that contains a conflict marker line that git's
-# merge did not put there.  Whether or not it accepts the agent's work, it
-# lists the files outside the conflicted ones that the agent changed or
-# created, each conflicted file in which the agent changed text outside the
-# conflict regions, and each resolution by `git rerere` that the agent
-# changed, so that you can review them.
+# such as a call to a method that the other side renamed.  It can also
+# delete files, but it cannot create one:  a command that it runs can create
+# files as a side effect, which would then be committed.  It cannot change a
+# hook in the working tree, as with `core.hooksPath` ".githooks", unless the
+# hook has conflicts, because this script's commit would run it outside the
+# agent's sandbox.  It can, however, change a tracked file that a hook or the
+# build reads or runs, such as prek.toml or a Makefile, and this script's
+# commit and build then run that code outside the sandbox; the agent that
+# fixes a failed build can do the same.  This script rejects a resolution of
+# a file that is identical to either side's version of the file, apart from
+# whitespace and blank lines, and any file that the agent changed that
+# contains a conflict marker line that git's merge did not put there.
+# Whether or not it accepts the agent's work, it lists the files outside the
+# conflicted ones that the agent changed, each conflicted file in which the
+# agent changed text outside the conflict regions, and each resolution by
+# `git rerere` that the agent changed, so that you can review them.
 #
 # When the build of TO_DIR fails, and a merge on TO_DIR's branch might have
 # broken it, the agent edits files to fix it, without building; then this

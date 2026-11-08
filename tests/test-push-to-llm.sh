@@ -68,6 +68,8 @@ fail() {
 ##           tracks
 ##   unignore: as "good", but also empties .gitignore, which git tracks
 ##   change-hook: as "good", but also changes .githooks/pre-commit
+##   relink-hooks: as "good", but also makes the symbolic link .githooks
+##           point to the directory other-hooks
 ##   config: as "good", but also changes git's configuration
 ##   change-untracked: as "good", but also changes the untracked file notes.txt
 ##   delete-untracked: as "good", but also deletes the untracked file notes.txt
@@ -191,6 +193,10 @@ case "${STUB_MODE}" in
   change-quoted-tracked) echo "agent" >> 'q"x.txt' ;;
   unignore) : > .gitignore ;;
   change-hook) echo "echo pwned" >> .githooks/pre-commit ;;
+  relink-hooks)
+    rm .githooks
+    ln -s other-hooks .githooks
+    ;;
   change-quoted) echo "changed" >> 'a"b\c' ;;
   change-nested) echo "changed" >> nested/file.txt ;;
   auto-merge) git update-ref AUTO_MERGE "$(git rev-parse 'HEAD^{tree}')" ;;
@@ -549,7 +555,7 @@ feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
 push_to ours-other --llm
 check_not_resolved "ours-other"
 case "${push_output}" in
-  *"claude also changed: other.txt"*"claude created: scratch.txt"*"keeps none of the changes"*) ;;
+  *"claude created a file: scratch.txt"*"claude also changed: other.txt"*"keeps none of the changes"*) ;;
   *) fail "ours-other: wrong diagnostic: ${push_output}" ;;
 esac
 
@@ -714,15 +720,12 @@ case "${push_output}" in
   *) fail "agent that commits: wrong diagnostic: ${push_output}" ;;
 esac
 
-## A file that the agent creates is committed with the merge, and reported.
+## An agent that creates a file is rejected.
 setup_case create
 push_to create --llm
-check_resolved claude "agent that creates a file"
-if [ "$(git -C "${remote}" show refs/heads/feature:scratch.txt 2> /dev/null)" != scratch ]; then
-  fail "agent that creates a file: the file was not committed"
-fi
+check_not_resolved "agent that creates a file"
 case "${push_output}" in
-  *"claude created: scratch.txt"*) ;;
+  *"claude created a file: scratch.txt"*) ;;
   *) fail "agent that creates a file: wrong diagnostic: ${push_output}" ;;
 esac
 
@@ -747,8 +750,9 @@ for tracked_mode in change-tracked delete-tracked; do
   esac
 done
 
-## A conflict marker in another file that the agent changed or created is
-## rejected, but not a line like one that the file already contained.
+## A conflict marker in another file that the agent changed is rejected, but
+## not a line like one that the file already contained.  A new file that
+## contains one is rejected anyway.
 for markers_mode in copy-markers create-markers; do
   setup_case "${markers_mode}"
   echo "other" > "${feature_dir}/other.txt"
@@ -760,12 +764,12 @@ for markers_mode in copy-markers create-markers; do
   check_not_resolved "${markers_mode}"
   case "${markers_mode}:${push_output}" in
     copy-markers:*"other.txt: line "*" is a conflict marker"*"did not resolve the conflicts acceptably"*) ;;
-    create-markers:*"copy.txt: line "*" is a conflict marker"*"did not resolve the conflicts acceptably"*) ;;
+    create-markers:*"created a file: copy.txt"*"did not resolve the conflicts acceptably"*) ;;
     *) fail "${markers_mode}: wrong diagnostic: ${push_output}" ;;
   esac
 done
 setup_case existing-markers
-printf '%s\n' "<<<<<<< example" "=======" ">>>>>>> example" > "${feature_dir}/other.txt"
+printf '%s\n' '<<<<<<< example' '=======' '>>>>>>> example' > "${feature_dir}/other.txt"
 git -C "${feature_dir}" add other.txt
 git -C "${feature_dir}" commit -q -m "Add other.txt"
 git -C "${feature_dir}" push -q
@@ -786,17 +790,21 @@ for untracked_mode in change-untracked delete-untracked; do
   esac
 done
 
-## A change to a tracked file whose name git quotes is committed.
+## A change to a tracked file whose name git quotes is committed.  The name
+## is in a variable because checkbashisms misparses a quotation mark inside
+## single quotes in a command substitution.
+quoted_name='q"x.txt'
 setup_case change-quoted-tracked
-echo "quoted" > "${feature_dir}/q\"x.txt"
-git -C "${feature_dir}" add 'q"x.txt'
-git -C "${feature_dir}" commit -q -m 'Add q"x.txt'
+echo "quoted" > "${feature_dir}/${quoted_name}"
+git -C "${feature_dir}" add -- "${quoted_name}"
+git -C "${feature_dir}" commit -q -m "Add ${quoted_name}"
 git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
 push_to change-quoted-tracked --llm
 check_resolved claude "change-quoted-tracked"
-if [ "$(git -C "${remote}" show 'refs/heads/feature:q"x.txt')" != "$(printf '%s\n' quoted agent)" ]; then
-  fail "change-quoted-tracked: wrong q\"x.txt: $(git -C "${remote}" show 'refs/heads/feature:q"x.txt')"
+quoted_content="$(git -C "${remote}" show "refs/heads/feature:${quoted_name}")"
+if [ "${quoted_content}" != "$(printf '%s\n' quoted agent)" ]; then
+  fail "change-quoted-tracked: wrong ${quoted_name}: ${quoted_content}"
 fi
 
 ## A file that git ignored until the agent changed .gitignore is not
@@ -833,6 +841,27 @@ check_not_resolved "change-hook"
 case "${push_output}" in
   *"changed a file: .githooks/pre-commit"*) ;;
   *) fail "change-hook: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that repoints a hooks directory that is a tracked symbolic link
+## is rejected:  git resolves the link, so the hooks that git runs changed.
+setup_case relink-hooks
+for hooks_dir in tools-hooks other-hooks; do
+  mkdir "${feature_dir}/${hooks_dir}"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "${feature_dir}/${hooks_dir}/pre-commit"
+  chmod +x "${feature_dir}/${hooks_dir}/pre-commit"
+done
+ln -s tools-hooks "${feature_dir}/.githooks"
+git -C "${feature_dir}" add .githooks tools-hooks other-hooks
+git -C "${feature_dir}" commit -q -m "Add hooks"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+git -C "${feature_dir}" config core.hooksPath .githooks
+push_to relink-hooks --llm
+check_not_pushed "relink-hooks"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "relink-hooks: wrong diagnostic: ${push_output}" ;;
 esac
 
 ## A file that contains a line that looks like a conflict marker is refused.

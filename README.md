@@ -126,20 +126,23 @@ The commands are:
   `--codex`, Codex), to resolve the conflicts that rerere does not resolve.
   The agent examines every change of both sides of the merge and combines
   them; it can edit any part of any file, because git's automatic merge of
-  the text outside the conflict regions can be wrong too.  It cannot change
-  a hook in the working tree unless the hook has conflicts.  The script
-  checks every resolution:  that no conflict marker remains, that a
-  resolution from rerere changed nothing outside the conflict regions, and
-  that the agent did not resolve a file by taking either side's version of
-  it, even with changes to whitespace and blank lines.  It also checks that
-  no other file that the agent changed or created contains a conflict marker
-  that git's merge did not put there.  For your review, it lists the other
-  files that the agent changed or created, the conflicted files in which the
-  agent changed text outside the conflict regions, and the resolutions by
-  rerere that the agent changed.  The agent's instructions start with the file
-  `merge-conflict-instructions.md`, which also suits a merge that you
-  resolve yourself or with an agent interactively.  Then the script commits
-  the merge and continues.
+  the text outside the conflict regions can be wrong too.  It can delete
+  files, but it cannot create one, and it cannot change a hook in the
+  working tree unless the hook has conflicts.  It can change a tracked file
+  that a hook or the build reads or runs, such as `prek.toml` or a
+  `Makefile`, which the script's commit and build then run outside the
+  agent's sandbox.  The script checks every resolution:  that no conflict
+  marker remains, that a resolution from rerere changed nothing outside the
+  conflict regions, and that the agent did not resolve a file by taking
+  either side's version of it, even with changes to whitespace and blank
+  lines.  It also checks that no other file that the agent changed contains
+  a conflict marker that git's merge did not put there.  For your review,
+  it lists the other files that the agent changed, the conflicted files in
+  which the agent changed text outside the conflict regions, and the
+  resolutions by rerere that the agent changed.  The agent's instructions
+  start with the file `merge-conflict-instructions.md`, which also suits a
+  merge that you resolve yourself or with an agent interactively.  Then the
+  script commits the merge and continues.
   It does the same for a merge that is already in progress in any directory
   except the first, as after an earlier run stopped at conflicts, after
   running `git rerere` to apply any resolution recorded since then.  It
