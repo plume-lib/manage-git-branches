@@ -32,7 +32,10 @@ Each run:
   * warns about each cycle of dependencies, and omits from the generated push commands
     the PRs whose branches are updated in a cycle and the PRs whose branches are updated
     from theirs,
-  * updates each modeled PR description's "Land after" and "Land before" lines,
+  * updates each modeled PR description's "Land after" and "Land before" lines, except
+    that it does not add or remove the lines of a PR in or after a cycle of dependencies,
+    nor the lines that name one, other than to remove lines that name a PR that is no
+    longer open,
   * prints what changed since the previous snapshot (input for the summary),
   * renames the working copies whose name does not match their branch's PR, and
     re-creates the ones whose origin is not the PR's head repository as working trees
@@ -1079,6 +1082,14 @@ class Model:
             for n in open_prs
         }
         self.all_deps, self.direct = self.reduce(self.deps, covered)
+        # A fix lands into its base PR's branch, so it is a direct prerequisite of its base
+        # PR, even when the base PR also depends on it through another fix.  Otherwise, the
+        # base PR's description would not say to land after the fix, nor the fix's
+        # description to land before the base PR, and the next run would take the fix to
+        # build on its base PR.
+        for f, m in self.lands_into.items():
+            if f in self.all_deps[m]:
+                self.direct[m].add(f)
         self.cyclic = self.cycle_members(self.deps, self.all_deps)
         self.dependents: defaultdict[int, set[int]] = defaultdict(set)
         for n in open_prs:
@@ -1466,9 +1477,13 @@ class FailedDescriptionUpdate(NamedTuple):
 def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
     """Return the updates of the PR descriptions whose conventional landing-order lines are stale.
 
-    The descriptions of PRs in a cycle of dependencies, and of PRs that depend on one, are not
-    updated:  their direct dependencies are wrong, and their stated landing order is what
-    must be corrected to break the cycle.
+    A cycle of dependencies makes the direct dependencies of the PRs in it, and of the PRs
+    that depend on it, wrong; and their stated landing order is what must be corrected to
+    break the cycle.  So the description of such a PR gains or loses no landing-order line,
+    and no other description gains or loses a line that names such a PR, except that a line
+    that names a PR that is no longer open is removed.  For example, if PRs 1 and 2 are in a
+    cycle, and PR 3's description says "Land before #1.", it keeps that line, even though PR
+    1's direct prerequisites do not include PR 3.
 
     Returns:
         A DescriptionUpdate for each such PR description.
@@ -1483,19 +1498,22 @@ def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
                     f" malformed landing-order line: {line}",
                     file=sys.stderr,
                 )
-            if n in model.cycle_affected:
-                continue
-            unit = model.unit[n]
-            # A fix and its base PR keep the lines that make the fix a fix, even when the
-            # base PR depends on the fix only transitively, through another fix.  Without
-            # them, the next run would take the fix to build on its base PR.
-            fixes = {f for f, m in model.lands_into.items() if m == n}
-            base = {model.lands_into[n]} if n in model.lands_into else set()
+            unit, cyclic = model.unit[n], model.cycle_affected
+            parsed = [p for line in body.splitlines() if (p := landing_line(line, model.repo))]
+            # The open PRs that the description's "Land after" lines and its "Land before"
+            # lines name.
+            said = {
+                kind: {int(ref[1:]) for k, ref in parsed if k == kind and ref.startswith("#")}
+                & model.open
+                for kind in ("after", "before")
+            }
+            prerequisites = said["after"] if n in cyclic else model.direct[n]
+            dependents = (model.dependents[n] - cyclic) | (said["before"] & cyclic)
             updated = updated_pr_description(
                 body,
                 model.repo,
-                (model.direct[n] | fixes) - unit,
-                (model.dependents[n] | base) - unit,
+                prerequisites - unit,
+                dependents - unit,
                 model.external[n],
             )
             if updated != body:
@@ -3669,7 +3687,10 @@ def main() -> None:
     for m in models:
         if m.cyclic:
             print(
-                f"pr-status: warning: a cycle of dependencies contains {m.repo.refs(m.cyclic)}",
+                f"pr-status: warning: a cycle of dependencies contains {m.repo.refs(m.cyclic)};"
+                " pr-status does not add or remove the landing-order lines of a PR in or after"
+                " the cycle, nor the lines that name one, except to remove lines that name a"
+                " PR that is not open",
                 file=sys.stderr,
             )
     problems, renames = directory_problems(models, base, fix=not check_only)

@@ -123,7 +123,6 @@ class UpdatedPrDescriptionTest(unittest.TestCase):
             dependents={1: set(), 2: {1}},
             unit={1: {1, 2}, 2: {1, 2}},
             external={1: [], 2: []},
-            lands_into={},
             cycle_affected=set(),
         )
         self.assertEqual(pr_status.description_updates([model]), [])
@@ -408,6 +407,7 @@ class ModelTest(unittest.TestCase):
         )
         self.assertEqual(model.cyclic, [])
         self.assertEqual(model.lands_into, {2: 1, 3: 1})
+        self.assertEqual(model.direct, {1: {2, 3}, 2: set(), 3: {2}})
         bodies = self.updated_bodies(model)
         self.assertEqual(
             bodies,
@@ -423,13 +423,28 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model.lands_into, {2: 1, 3: 1})
         self.assertEqual(self.updated_bodies(model), bodies)
 
-    def test_cycle_leaves_descriptions_unchanged(self):
-        """The descriptions of PRs in a cycle, or that depend on one, are not updated."""
-        bodies = {1: "Land after #2.", 2: "Land after #1.", 3: "Land after #2.\n\nBody.", 4: ""}
+    def test_cycle_keeps_landing_lines(self):
+        """No description gains or loses a line about a PR in or after a cycle.
+
+        PRs 1 and 2 are in a cycle, PR 3 depends on it, and PR 4 is a prerequisite of PR 1.
+        Each keeps its lines, except for a line that names PR 9, which is not open.  PRs 5
+        and 6 are unaffected by the cycle, and their descriptions are updated.
+        """
+        bodies = {
+            1: "Land after #2.\nLand after #9.",
+            2: "Land after #1.",
+            3: "Land after #2.\n\nBody.",
+            4: "Land before #1.",
+            5: "Land after #9.",
+            6: "Land after #5.",
+        }
         model = self.model(bodies, set())
         self.assertEqual(model.cyclic, [1, 2])
         self.assertEqual(model.cycle_affected, {1, 2, 3})
-        self.assertEqual(self.updated_bodies(model), bodies)
+        self.assertEqual(
+            self.updated_bodies(model),
+            bodies | {1: "Land after #2.", 5: "Land before #6."},
+        )
 
     def test_cycle_through_fix(self):
         """A cycle of dependencies that includes a fix's landing order is a cycle."""
