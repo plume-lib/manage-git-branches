@@ -271,12 +271,13 @@ class ModelTest(unittest.TestCase):
     """Tests for Model."""
 
     @staticmethod
-    def raw_model(bodies, contains, gh="owner/repo", bases=None):
+    def raw_model(bodies, contains, gh="owner/repo", bases=None, config=None):
         """Build a model, without its graph, of open PRs.
 
         The PRs have the given descriptions and branch containment.  bases maps a PR's
         number to the number of the PR whose branch is its base branch; every other PR's
-        base branch is the default branch.
+        base branch is the default branch.  config is the repository's entry in the config,
+        such as {"excluded": {"prs": [7]}}.
 
         Returns:
             The model.
@@ -303,17 +304,17 @@ class ModelTest(unittest.TestCase):
             closed_state={},
             state_of=lambda _: None,
         )
-        return pr_status.Model(repo, {"repos": {gh: {}}})
+        return pr_status.Model(repo, {"repos": {gh: config or {}}})
 
-    def model(self, bodies, contains, bases=None):
+    def model(self, bodies, contains, bases=None, config=None):
         """Build a model of open PRs with the given descriptions and branch containment.
 
-        bases is as for raw_model.
+        bases and config are as for raw_model.
 
         Returns:
             The model.
         """
-        model = self.raw_model(bodies, contains, bases=bases)
+        model = self.raw_model(bodies, contains, bases=bases, config=config)
         pr_status.unite_partners([model])
         return model
 
@@ -427,24 +428,55 @@ class ModelTest(unittest.TestCase):
         """No description gains or loses a line about a PR in or after a cycle.
 
         PRs 1 and 2 are in a cycle, PR 3 depends on it, and PR 4 is a prerequisite of PR 1.
-        Each keeps its lines, except for a line that names PR 9, which is not open.  PRs 5
-        and 6 are unaffected by the cycle, and their descriptions are updated.
+        Each keeps its lines, except for the lines that name PR 9 and other/repo#6, which
+        are not open.  PR 1 keeps its line that names PR 7, which the config excludes, and
+        does not gain a line that names other/repo#8, which the config adds.  PRs 5 and 6
+        are unaffected by the cycle, and their descriptions are updated.
         """
         bodies = {
-            1: "Land after #2.\nLand after #9.",
+            1: "Land after #2.\nLand after #7.\nLand after #9.\n"
+            "Land after other/repo#5.\nLand after other/repo#6.",
             2: "Land after #1.",
             3: "Land after #2.\n\nBody.",
             4: "Land before #1.",
             5: "Land after #9.",
             6: "Land after #5.",
+            7: "",
         }
-        model = self.model(bodies, set())
+        config = {
+            "excluded": {"prs": [7]},
+            "extra_external_dependencies": {"1": ["other/repo#8"]},
+        }
+        states = {"other/repo#5": "open", "other/repo#6": "closed", "other/repo#8": "open"}
+        with (
+            mock.patch.dict(pr_status.EXTERNAL_STATE, states),
+            mock.patch.object(pr_status, "query_pr_states", return_value={}),
+        ):
+            model = self.model(bodies, set(), config=config)
+            self.assertEqual(model.cyclic, [1, 2])
+            self.assertEqual(model.cycle_affected, {1, 2, 3})
+            self.assertEqual(model.external[1], ["other/repo#5", "other/repo#8"])
+            self.assertEqual(
+                self.updated_bodies(model),
+                {n: body for n, body in bodies.items() if n != 7}
+                | {
+                    1: "Land after #2.\nLand after #7.\nLand after other/repo#5.",
+                    5: "Land before #6.",
+                },
+            )
+
+    def test_fix_to_cycle_member_keeps_its_line(self):
+        """A fix keeps its line that names its base PR, which is in a cycle.
+
+        Fix 3 lands into 1's branch, and 1 is in a cycle with 2.  Neither the fix's
+        "Land before #1." nor PR 1's lines change, and PR 1 gains no "Land after #3.".
+        """
+        bodies = {1: "Land after #2.", 2: "Land after #1.", 3: "Land before #1."}
+        model = self.model(bodies, set(), bases={3: 1})
+        self.assertEqual(model.lands_into, {3: 1})
         self.assertEqual(model.cyclic, [1, 2])
-        self.assertEqual(model.cycle_affected, {1, 2, 3})
-        self.assertEqual(
-            self.updated_bodies(model),
-            bodies | {1: "Land after #2.", 5: "Land before #6."},
-        )
+        self.assertEqual(model.cycle_affected, {1, 2})
+        self.assertEqual(self.updated_bodies(model), bodies)
 
     def test_cycle_through_fix(self):
         """A cycle of dependencies that includes a fix's landing order is a cycle."""
