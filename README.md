@@ -190,7 +190,8 @@ The commands are:
   `--print-conflicting-push-chains] [-C DIR]`
   `[--highlight PR|bottleneck...]`:
   Computes the dependencies among the open pull requests, updates the "Land
-  after" and "Land before" lines of their descriptions, and regenerates
+  after" and "Land before" lines of their descriptions (but keeps the lines
+  about a pull request in or after a cycle of dependencies), and regenerates
   `pr-status.md` (or the documents that `pr-status-config.json` names;
   see [its format](pr-status-config.md)),
   which lists the dependencies and the `git-push-to` commands that update

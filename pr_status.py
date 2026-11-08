@@ -32,7 +32,8 @@ Each run:
   * warns about each cycle of dependencies, and omits from the generated push commands
     the PRs whose branches are updated in a cycle and the PRs whose branches are updated
     from theirs,
-  * updates each modeled PR description's "Land after" and "Land before" lines,
+  * updates each modeled PR description's "Land after" and "Land before" lines, but keeps
+    the lines about a PR in or after a cycle of dependencies,
   * prints what changed since the previous snapshot (input for the summary),
   * renames the working copies whose name does not match their branch's PR, and
     re-creates the ones whose origin is not the PR's head repository as working trees
@@ -1078,7 +1079,17 @@ class Model:
             n: {m for m in self.unit[n] - {n} if (n, m) in contains and (m, n) not in contains}
             for n in open_prs
         }
+        # `direct` maps each open PR to its direct prerequisites:  the transitive reduction
+        # of the landing graph, plus the PR's fixes.
         self.all_deps, self.direct = self.reduce(self.deps, covered)
+        # A fix lands into its base PR's branch, so it is a direct prerequisite of its base
+        # PR, even when the base PR also depends on it through another fix.  Otherwise, the
+        # base PR's description would not say to land after the fix, nor the fix's
+        # description to land before the base PR, and the next run would take the fix to
+        # build on its base PR.  A land-with partner is never a direct prerequisite.
+        for f, m in self.lands_into.items():
+            if f in self.all_deps[m] and f not in self.unit[m]:
+                self.direct[m].add(f)
         self.cyclic = self.cycle_members(self.deps, self.all_deps)
         self.dependents: defaultdict[int, set[int]] = defaultdict(set)
         for n in open_prs:
@@ -1269,8 +1280,8 @@ class Model:
         """Return each PR's level in the given graph.
 
         Args:
-            direct: a transitive reduction, such as `direct` or `update_direct`, as a map from
-                each open PR's number to the numbers of its direct prerequisites.
+            direct: a graph of direct prerequisites, such as `direct` or `update_direct`, as
+                a map from each open PR's number to the numbers of its direct prerequisites.
 
         Returns:
             A map from each PR that has a direct prerequisite or a direct dependent in direct
@@ -1466,6 +1477,15 @@ class FailedDescriptionUpdate(NamedTuple):
 def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
     """Return the updates of the PR descriptions whose conventional landing-order lines are stale.
 
+    A cycle of dependencies makes the direct dependencies of the PRs in it, and of the PRs
+    that depend on it, wrong; and their stated landing order is what must be corrected to
+    break the cycle.  So the description of such a PR gains or loses no landing-order line,
+    and no other description gains or loses a line that names such a PR, except that a line
+    that names a PR that is no longer open is removed.  A PR that the config excludes is
+    still open.  For example, if PRs 1 and 2 are in a cycle, and PR 3's description says
+    "Land before #1.", it keeps that line, even though PR 1's direct prerequisites do not
+    include PR 3.
+
     Returns:
         A DescriptionUpdate for each such PR description.
     """
@@ -1479,14 +1499,25 @@ def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
                     f" malformed landing-order line: {line}",
                     file=sys.stderr,
                 )
-            unit = model.unit[n]
-            updated = updated_pr_description(
-                body,
-                model.repo,
-                model.direct[n] - unit,
-                model.dependents[n] - unit,
-                model.external[n],
-            )
+            affected = model.cycle_affected
+            parsed = [p for line in body.splitlines() if (p := landing_line(line, model.repo))]
+            # The PRs in this repository that are open, including excluded ones, and that the
+            # description's "Land after" lines and its "Land before" lines name.
+            said = {
+                kind: {int(ref[1:]) for k, ref in parsed if k == kind and ref.startswith("#")}
+                & set(model.repo.prs)
+                for kind in ("after", "before")
+            }
+            if n in affected:
+                prerequisites, dependents = said["after"], said["before"]
+                said_after = {ref for kind, ref in parsed if kind == "after"}
+                external = [e for e in model.external[n] if e in said_after]
+            else:
+                unit = model.unit[n]
+                prerequisites = model.direct[n] - unit
+                dependents = (model.dependents[n] - affected - unit) | (said["before"] & affected)
+                external = model.external[n]
+            updated = updated_pr_description(body, model.repo, prerequisites, dependents, external)
             if updated != body:
                 updates.append(DescriptionUpdate(model, n, updated))
     return updates
@@ -3658,7 +3689,8 @@ def main() -> None:
     for m in models:
         if m.cyclic:
             print(
-                f"pr-status: warning: a cycle of dependencies contains {m.repo.refs(m.cyclic)}",
+                f"pr-status: warning: a cycle of dependencies contains {m.repo.refs(m.cyclic)};"
+                " pr-status keeps the landing-order lines about the PRs in or after it",
                 file=sys.stderr,
             )
     problems, renames = directory_problems(models, base, fix=not check_only)
