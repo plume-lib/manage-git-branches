@@ -63,8 +63,7 @@ The commands are:
   user counts.
 
   `git-new-branch --help` (or `-h`) prints a synopsis, which describes the
-  modes.  The comments in [`git-new-branch`](git-new-branch) give more details
-  details.
+  modes.  The comments in [`git-new-branch`](git-new-branch) give more details.
 
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
@@ -254,7 +253,7 @@ The commands are:
   `[--force] [--force-uncommitted] [--force-unpushed] [--repository DIR]
   DIRECTORY...`:
   Removes a branch directory (one of the form
-  `REPO[-fork-USER]-branch-BRANCH`) , unless the removal would lose work.
+  `REPO[-fork-USER]-branch-BRANCH`), unless the removal would lose work.
 
   If it cannot remove all files, as when a container running as root
   created files in the directory, it moves what remains to a new directory in
