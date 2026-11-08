@@ -6,23 +6,32 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --check    # snapshot and report changes, but write no document
   pr-status --print-document  # print the dependency document's file name, and exit
   pr-status --print-config    # print the config, with its defaults filled in, and exit
+  pr-status --print-conflicting-push-chains  # print the chains with conflicts, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
+  pr-status --highlight bottleneck  # highlight the next PR to work on in each repository
 
 Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
                            (optional; see default_config for the default, and
                            pr-status-config.md for the format)
-  .pr-status-snapshot.json written by the previous run; compared with this run
+  .pr-status-snapshot.json written by the previous run; compared with this run.  It also
+                           records the dependency chains with conflicts, which
+                           --print-conflicting-push-chains prints
 Each run:
   * reads the open PRs with gh,
   * runs pr-merge-analysis (cached) on them, for each repository,
   * computes the dependencies:  a PR depends on another if its description says
-    so, if its branch contains all of the other PR's non-merge commits, or if the
-    config says so; PRs that land together (possibly in different repositories) are one
-    unit, whose members depend on each other's prerequisites but not on each other,
+    so, if its base branch is the other PR's branch, if its branch contains all of the
+    other PR's non-merge commits, or if the config says so; a PR whose base branch is
+    another PR's branch, but whose description says to land before it (or whose base
+    PR's description says to land after it), is a fix to that PR, which lands into that
+    PR's branch first, although its branch is updated from that PR's branch; PRs that land
+    together (possibly in different repositories) are one unit, whose members depend on
+    each other's prerequisites but not on each other,
   * warns about each cycle of dependencies, and omits from the generated push commands
-    the PRs in a cycle and the PRs that depend on them,
+    the PRs whose branches are updated in a cycle and the PRs whose branches are updated
+    from theirs,
   * updates each modeled PR description's "Land after" and "Land before" lines,
   * prints what changed since the previous snapshot (input for the summary),
   * renames the working copies whose name does not match their branch's PR, and
@@ -67,8 +76,8 @@ if TYPE_CHECKING:
 
 # The config file's name, which the dependency document mentions.
 CONFIG = pr_status_config.CONFIG
-# The name of the generated section that resolve-conflicts reads from the dependency document.
-CONFLICTING_PUSH_COMMANDS = "conflicting-push-commands"
+# The key of the snapshot's list of the `git-push-to` chains with conflicts.
+CONFLICTING_PUSH_CHAINS = "conflicting_push_chains"
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -192,9 +201,9 @@ class Repo:
         """Return the mark that a link to PR n carries if the PR's CI failed.
 
         Returns:
-            FAILED_MARK if the PR's CI failed, or "" otherwise.
+            A space followed by FAILED_MARK if the PR's CI failed, or "" otherwise.
         """
-        return FAILED_MARK if n in self.reviews_and_ci.ci_failed else ""
+        return " " + FAILED_MARK if n in self.reviews_and_ci.ci_failed else ""
 
     def refs(self, ns: Iterable[int]) -> str:
         """Return how documents refer to the PRs ns.
@@ -477,7 +486,7 @@ def external_link(ref: str) -> str:
 
 
 # The mark that follows a PR whose CI failed.
-FAILED_MARK = " ❌"
+FAILED_MARK = "❌"
 
 
 # The PRs that the documents highlight, as pairs of a lowercase GitHub slug, such as
@@ -504,15 +513,39 @@ def highlight(gh: str, n: int, text: str) -> str:
     return f'<span style="background-color:#fcc">**{text}**</span>'
 
 
+def highlight_selection(models: list[Model], arguments: Iterable[str]) -> set[tuple[str, int]]:
+    """Return the open PRs that the arguments of --highlight select.
+
+    Args:
+        models: the model of each repository.
+        arguments: a list of strings, each of which holds words separated by commas or
+            whitespace.  Each word is a PR's name (see resolve_pr_names), such as
+            "REPO#100", or "bottleneck".  The word "bottleneck" selects, in each repository,
+            the first PR of each longest path of prerequisites within that repository (see
+            Model.deepest_roots).
+
+    Returns:
+        The PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR number.
+        If a word is neither "bottleneck" nor the name of an open PR, resolve_pr_names
+        raises ValueError.
+    """
+    words = [w for arg in arguments for w in re.split(r"[,\s]+", arg) if w]
+    names = [w for w in words if w.lower() != "bottleneck"]
+    result = resolve_pr_names(models, names)
+    if len(names) < len(words):
+        result.update((m.repo.gh.lower(), n) for m in models for n in m.deepest_roots())
+    return result
+
+
 def resolve_pr_names(models: list[Model], names: Iterable[str]) -> set[tuple[str, int]]:
     """Return the open PRs that names name.
 
     Args:
         models: the model of each repository.
-        names: a list of strings, each of which names PRs, separated by commas or whitespace.
-            A PR's name is a repository's GitHub slug, its name, or the prefix of its
-            references (which is "" when the documents refer to its PRs as "#N"), followed by
-            "#" and a PR number, as in "ORG/REPO#100", "REPO#100", or "#100".
+        names: PRs' names.  A PR's name is a repository's GitHub slug, its name, or the
+            prefix of its references (which is "" when the documents refer to its PRs as
+            "#N"), followed by "#" and a PR number, as in "ORG/REPO#100", "REPO#100", or
+            "#100".
 
     Returns:
         The PRs, as pairs of a lowercase GitHub slug, such as "org/repo", and a PR number.
@@ -521,7 +554,7 @@ def resolve_pr_names(models: list[Model], names: Iterable[str]) -> set[tuple[str
         ValueError: if a name does not name exactly one repository or does not name an open PR.
     """
     result = set()
-    for name in (s for arg in names for s in re.split(r"[,\s]+", arg) if s):
+    for name in names:
         head, sep, number = name.rpartition("#")
         if not sep or not number.isdigit():
             msg = f"{name} is not of the form REPO#N"
@@ -934,12 +967,8 @@ class Model:
                 self.external[int(n)] = sorted(
                     set(self.external[int(n)]) | {e for e in refs if external_state(e) == "open"}
                 )
-        deps: defaultdict[int, set[int]] = defaultdict(set)
-        for n in open_prs:
-            deps[n] |= self.stated[n]
-            for m in self.stated_dependents[n]:
-                deps[m].add(n)
-        # A stacked PR depends on the PR whose branch is its base branch.
+        # A stacked PR depends on the PR whose branch is its base branch:  its branch is
+        # updated from that PR's branch.
         self.base_pr: dict[int, int] = {}
         by_head = {(pr["owner"].lower(), pr["headRefName"]): m for m, pr in repo.prs.items()}
         for n in open_prs:
@@ -947,8 +976,72 @@ class Model:
             if base != repo.default_branch:
                 m = by_head.get((repo.owner.lower(), base))
                 if m in open_prs:
-                    deps[n].add(m)
                     self.base_pr[n] = m
+        # The dependencies that the config adds, as a map from a PR's number to the numbers of
+        # the PRs that it depends on.
+        self.extra: defaultdict[int, set[int]] = defaultdict(set)
+        for a, b in rc.get("extra_dependencies", []):
+            if a in open_prs and b in open_prs:
+                self.extra[a].add(b)
+
+        def said_after(a: int, b: int) -> bool:
+            """Return True if a description or the config says that PR a lands after PR b.
+
+            Returns:
+                True if PR a's description says to land after PR b, PR b's description says
+                to land before PR a, or the config says that PR a depends on PR b.
+            """
+            return b in self.stated[a] or a in self.stated_dependents[b] or b in self.extra[a]
+
+        # A stacked PR is one of two kinds.  A change that builds on the base PR lands after
+        # the base PR.  A fix to the base PR, which fixes a problem in the base PR's branch,
+        # lands into that branch before the base PR lands:  its description says
+        # "Land before #M", the base PR's description says "Land after #N", or the config
+        # says that the base PR depends on it; and nothing says the reverse.  If something
+        # does, the statements contradict each other, and the PRs form a cycle of
+        # dependencies.
+        # `lands_into` maps each fix to its base PR.
+        self.lands_into: dict[int, int] = {
+            n: m for n, m in self.base_pr.items() if said_after(m, n) and not said_after(n, m)
+        }
+
+        def landing_chain(n: int) -> list[int]:
+            """Return PR n and the PRs that it lands into, transitively, such as [3, 2, 1].
+
+            In the example, 3 is a fix to 2, which is a fix to 1, which is not a fix.  When 3
+            lands into 2's branch and 2 lands into 1's branch, 1's branch receives 3's commits.
+
+            Returns:
+                PR n, followed by the base PR of each PR in the list that is a fix.
+            """
+            chain = [n]
+            while (m := self.lands_into.get(chain[-1])) is not None and m not in chain:
+                chain.append(m)
+            return chain
+
+        # The fixes to each PR, as a map from a base PR's number to the numbers of its fixes.
+        fixes: defaultdict[int, set[int]] = defaultdict(set)
+        for n, m in self.lands_into.items():
+            fixes[m].add(n)
+        # Two graphs relate the open PRs.  `deps`, the landing graph, maps each PR to the PRs
+        # that must land before it.  `update_deps`, the update graph, maps each PR to the PRs
+        # whose branches its branch is updated from.  They differ because of fixes:  a fix
+        # lands before its base PR, but its branch is updated from the base PR's branch.
+        deps: defaultdict[int, set[int]] = defaultdict(set)
+        update_deps: defaultdict[int, set[int]] = defaultdict(set)
+        for n in open_prs:
+            deps[n] |= self.stated[n] | self.extra[n]
+            for m in self.stated_dependents[n]:
+                deps[m].add(n)
+        # A base PR's branch is not updated from its fixes' branches.
+        for n in open_prs:
+            update_deps[n] |= deps[n] - fixes[n]
+        for n, m in self.base_pr.items():
+            if n in self.lands_into:
+                deps[m].add(n)
+            else:
+                deps[n].add(m)
+            update_deps[n].add(m)
         for a, b in repo.contains:
             if (
                 a in open_prs
@@ -956,13 +1049,26 @@ class Model:
                 and b not in not_prereq
                 and (b, a) not in repo.contains
             ):
-                deps[a].add(b)
-        self.extra: defaultdict[int, set[int]] = defaultdict(set)
-        for a, b in rc.get("extra_dependencies", []):
-            if a in open_prs and b in open_prs:
-                deps[a].add(b)
-                self.extra[a].add(b)
+                update_deps[a].add(b)
+                # A fix does not wait for the commits that its branch contains, because it
+                # lands into its base PR's branch.  The PR at the end of its landing chain,
+                # which receives those commits, waits for them instead, unless they are the
+                # commits of a PR in the chain.
+                chain = landing_chain(a)
+                if b not in chain:
+                    deps[chain[-1]].add(b)
+        # A branch that is updated from a fix's branch receives the commits of every PR in
+        # the fix's landing chain.  So the PR at the end of the branch's own landing chain
+        # waits for the PR at the end of the fix's landing chain, as if the branch contained
+        # that PR's commits.
+        for a in open_prs:
+            chain = landing_chain(a)
+            for f in update_deps[a] & self.lands_into.keys():
+                last = landing_chain(f)[-1]
+                if last not in chain:
+                    deps[chain[-1]].add(last)
         self.deps = deps
+        self.update_deps = update_deps
         # The members, in this repository, of each PR's land-with unit.
         self.unit = {n: {n} for n in open_prs}
         # The members, in every repository, of each PR's land-with unit, as pairs of a
@@ -972,30 +1078,15 @@ class Model:
         self.inherited_external: dict[int, set[str]] = {}
 
     def compute_graph(self) -> None:
-        """Compute the dependency graph from the dependencies that unite_partners set."""
-        open_prs, deps = self.open, self.deps
-        self.all_deps = {n: self.closure(deps, n) for n in open_prs}
-        # Each PR that depends on its own unit, such as two PRs whose descriptions say to land
-        # each after the other.
-        self.cyclic = sorted(
-            n for n in open_prs if any(self.unit[n] & self.all_deps[d] for d in deps[n])
-        )
+        """Set the landing and update graphs from the dependencies that unite_partners set."""
+        open_prs, contains = self.open, self.repo.contains
         # The unit members whose commits each PR's branch contains, but not vice versa.
-        contains = self.repo.contains
         covered = {
             n: {m for m in self.unit[n] - {n} if (n, m) in contains and (m, n) not in contains}
             for n in open_prs
         }
-        # Direct dependencies:  the transitive reduction, in which a dependency on a PR also
-        # covers the unit members whose commits its branch contains.
-        self.direct: dict[int, set[int]] = {}
-        for n in open_prs:
-            indirect = (
-                set().union(*(self.all_deps[d] | covered[d] for d in self.all_deps[n]))
-                if self.all_deps[n]
-                else set()
-            )
-            self.direct[n] = self.all_deps[n] - indirect
+        self.all_deps, self.direct = self.reduce(self.deps, covered)
+        self.cyclic = self.cycle_members(self.deps, self.all_deps)
         self.dependents: defaultdict[int, set[int]] = defaultdict(set)
         for n in open_prs:
             for d in self.direct[n]:
@@ -1005,6 +1096,56 @@ class Model:
         # dependencies wrong:  each member of a cycle covers the others, so a dependent of
         # the cycle can have no direct prerequisite at all.
         self.cycle_affected = set(self.cyclic).union(*(self.all_dependents[n] for n in self.cyclic))
+        self.update_all_deps, self.update_direct = self.reduce(self.update_deps, covered)
+        # The PRs in a cycle of the update graph, and the PRs whose branches are updated,
+        # directly or transitively, from the branch of a PR in one.  A cycle of the landing
+        # graph need not be one of the update graph, as when a fix and its base PR are in a
+        # cycle with a third PR.
+        update_cyclic = set(self.cycle_members(self.update_deps, self.update_all_deps))
+        self.update_cycle_affected = update_cyclic | {
+            n for n in open_prs if self.update_all_deps[n] & update_cyclic
+        }
+
+    def cycle_members(self, deps: dict[int, set[int]], all_deps: dict[int, set[int]]) -> list[int]:
+        """Return the PRs that depend on their own land-with unit in the given graph.
+
+        Args:
+            all_deps: the transitive closure of deps, as reduce returns it.
+            deps: a graph, such as the landing graph, as a map from each open PR's number to
+                the numbers of the open PRs that it depends on.
+
+        Returns:
+            The sorted numbers of the PRs in a cycle of dependencies, such as two PRs whose
+            descriptions say to land each after the other.
+        """
+        return sorted(n for n in self.open if any(self.unit[n] & all_deps[d] for d in deps[n]))
+
+    def reduce(
+        self, deps: dict[int, set[int]], covered: dict[int, set[int]]
+    ) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
+        """Return the transitive closure and the transitive reduction of the given graph.
+
+        Args:
+            deps: a graph, such as the landing graph, as a map from each open PR's number to
+                the numbers of the open PRs that it depends on.
+            covered: a map from each open PR's number to the members of its land-with unit
+                whose commits its branch contains.
+
+        Returns:
+            A pair of maps from each open PR's number:  to the PRs that it depends on directly
+            or transitively, and to the PRs that it depends on directly.  In the transitive
+            reduction, a dependency on a PR also covers the PRs that covered gives for it.
+        """
+        all_deps = {n: self.closure(deps, n) for n in self.open}
+        direct: dict[int, set[int]] = {}
+        for n in self.open:
+            indirect = (
+                set().union(*(all_deps[d] | covered[d] for d in all_deps[n]))
+                if all_deps[n]
+                else set()
+            )
+            direct[n] = all_deps[n] - indirect
+        return all_deps, direct
 
     @staticmethod
     def closure(deps: dict[int, set[int]], n: int) -> set[int]:
@@ -1030,7 +1171,7 @@ class Model:
         return bool(self.direct[n] or self.dependents[n])
 
     def is_blocked(self, n: int) -> bool:
-        """Return whether PR n depends on another open PR.
+        """Return True if PR n must wait for another open PR to land.
 
         Returns:
             True if PR n has a prerequisite, in this or another repository, or is in or after
@@ -1079,23 +1220,24 @@ class Model:
         return and_list(self.assignees(n))
 
     def conflicting_prerequisites(self, n: int) -> set[int]:
-        """Return the direct prerequisites of PR n whose branches conflict with PR n's.
+        """Return the PRs that PR n's branch is updated from and whose branches conflict with it.
 
         Returns:
-            The numbers of the direct prerequisites of PR n whose branches cannot be merged
-            cleanly into PR n's branch.
+            The numbers of the direct prerequisites of PR n in the update graph whose branches
+            cannot be merged cleanly into PR n's branch.
         """
-        return {d for d in self.direct[n] if branches_conflict(self.repo, n, d)}
+        return {d for d in self.update_direct[n] if branches_conflict(self.repo, n, d)}
 
     def unresolved_threads(self, n: int) -> str:
         """Return the "Unresolved threads" cell of PR n.
 
         Returns:
-            The number of the PR's unresolved review threads and how many of them are
-            outdated, followed by a red X if the PR's CI failed or a green checkmark if it
-            completed and passed, followed by shuffle arrows (🔀) if merging the default
-            branch or a direct prerequisite into the PR would conflict, in any file; or "" if
-            none of these applies.
+            The parts that apply, separated by single spaces:  the number of the PR's
+            unresolved review threads and how many of them are outdated, if the PR has any;
+            a red X if the PR's CI failed, or else a green checkmark if its CI completed and
+            passed; and shuffle arrows (🔀) if merging the default branch, or a branch that
+            the PR's branch is updated from, into the PR would conflict, in any file.  The
+            result is "" if no part applies.
         """
         reviews_and_ci = self.repo.reviews_and_ci
         threads = reviews_and_ci.review_threads.get(n, [])
@@ -1106,10 +1248,10 @@ class Model:
         if n in reviews_and_ci.ci_failed:
             cell.append(FAILED_MARK)
         elif n in reviews_and_ci.ci_passed:
-            cell.append(" ✅")
+            cell.append("✅")
         if n in self.repo.master_conflicts or self.conflicting_prerequisites(n):
-            cell.append(" 🔀")
-        return "".join(cell)
+            cell.append("🔀")
+        return " ".join(cell)
 
     def head_status(self, a: int, b: int) -> str:
         """Return whether a's branch has b's current commits.
@@ -1129,25 +1271,70 @@ class Model:
         own = run([*g, "rev-list", "--no-merges", pb, "^refs/remotes/csm/master"]).split()
         return "none" if len(missing) == len(own) else "newest"
 
-    def levels(self) -> dict[int, int]:
-        """Compute each PR's level in the dependency graph.
+    @staticmethod
+    def graph_levels(direct: dict[int, set[int]]) -> dict[int, int]:
+        """Return each PR's level in the given graph.
+
+        Args:
+            direct: a transitive reduction, such as `direct` or `update_direct`, as a map from
+                each open PR's number to the numbers of its direct prerequisites.
 
         Returns:
-            A map from each PR in the dependency graph to 1 plus the largest level of its
-            direct prerequisites, or to 1 if it has none.
+            A map from each PR that has a direct prerequisite or a direct dependent in direct
+            to 1 plus the largest level of its direct prerequisites, or to 1 if it has none.
         """
         level: dict[int, int] = {}
 
         def lev(n: int) -> int:
             if n not in level:
                 level[n] = 1  # provisional, so that a cycle of dependencies terminates
-                level[n] = 1 + max((lev(d) for d in self.direct[n]), default=0)
+                level[n] = 1 + max((lev(d) for d in direct[n]), default=0)
             return level[n]
 
-        for n in self.open:
-            if self.in_graph(n):
+        for n, ds in direct.items():
+            if ds:
                 lev(n)
         return level
+
+    @functools.cached_property
+    def levels(self) -> dict[int, int]:
+        """Each PR's level in the landing graph (see graph_levels)."""
+        return self.graph_levels(self.direct)
+
+    @functools.cached_property
+    def update_levels(self) -> dict[int, int]:
+        """Each PR's level in the update graph (see graph_levels)."""
+        return self.graph_levels(self.update_direct)
+
+    def deepest_roots(self) -> set[int]:
+        """Return the first PR of each longest path of prerequisites in the dependency graph.
+
+        A path of prerequisites is a list of this repository's PRs, each a direct
+        prerequisite of the next, whose first PR has no prerequisite in this repository,
+        such as [1, 4, 7] if PR 7 depends directly on PR 4 and PR 4 on PR 1.  Prerequisites
+        in other repositories are ignored, so the first PR can have some.  A longest path
+        ends at a PR whose level (see levels) is the largest.  Several paths can be longest.
+
+        Returns:
+            The numbers, such as 123, of the PRs that start a longest path, or the empty set
+            if no PR is in the dependency graph.
+        """
+        level = self.levels
+        deepest = max(level.values(), default=0)
+        roots, seen = set(), set()
+        todo = [n for n, v in level.items() if v == deepest]
+        while todo:
+            n = todo.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            # A prerequisite on a longest path is one level below n.
+            on_path = [d for d in self.direct[n] if level[d] == level[n] - 1]
+            if on_path:
+                todo.extend(on_path)
+            else:
+                roots.add(n)
+        return roots
 
     def components(self) -> list[list[int]]:
         """Compute the connected components of the dependency graph.
@@ -1178,7 +1365,11 @@ def unite_partners(models: list[Model]) -> None:
     The partners of a PR are the PRs that its description says to land with it, and the
     PRs whose descriptions say to land with it, in any of the models' repositories.  A unit
     is a set of PRs that are connected by the partner relation.  Each member of a unit
-    depends on every prerequisite of every member, and on no member.
+    depends on every prerequisite of every member, and on no member.  In the update graph
+    (see Model.update_deps), each member's branch is updated from the branches that its
+    description and commits say, and from each branch that another member's branch is
+    updated from and that is a prerequisite of the member.  So a fix's branch is updated
+    from its base PR's branch, but the branches of the fix's partners are not.
     """
     by_gh = {m.repo.gh.lower(): m for m in models}
     for model in models:
@@ -1217,11 +1408,18 @@ def unite_partners(models: list[Model]) -> None:
                 prereqs[g.lower(), int(d)] = ref
         members = {(model.repo.gh.lower(), n) for model, n in unit}
         prereqs = {key: ref for key, ref in prereqs.items() if key not in members}
+        # The branches that the unit's members' branches are updated from, in each model.
+        updated_from: defaultdict[Model, set[int]] = defaultdict(set)
+        for model, n in unit:
+            updated_from[model] |= model.update_deps[n]
         for model, n in unit:
             gh = model.repo.gh.lower()
             model.unit[n] = {m for other, m in unit if other is model}
             model.cross_repo_unit[n] = {(other.repo.gh.lower(), m) for other, m in unit}
             model.deps[n] = {d for (g, d) in prereqs if g == gh and d in model.open}
+            model.update_deps[n] = (
+                model.update_deps[n] | (updated_from[model] & model.deps[n])
+            ) - model.unit[n]
             inherited = {ref for (g, _), ref in prereqs.items() if g != gh} - set(model.external[n])
             model.inherited_external[n] = inherited
             model.external[n] = sorted(set(model.external[n]) | inherited)
@@ -1366,8 +1564,8 @@ def external_failed_mark(model: Model, ref: str) -> str:
         ref: a PR in another repository, such as "owner/repo#5".
 
     Returns:
-        FAILED_MARK if the PR's repository is one of the models that unite_partners united
-        with model and the PR's CI failed, or "" otherwise.
+        A space followed by FAILED_MARK if the PR's repository is one of the models that
+        unite_partners united with model and the PR's CI failed, or "" otherwise.
     """
     gh, n = ref.split("#")
     other = model.by_gh.get(gh.lower())
@@ -1393,7 +1591,7 @@ def depends_on(model: Model, n: int, mark_failed: bool = False) -> str:
     def ext_link(e: str) -> str:
         return external_link(e) + (external_failed_mark(model, e) if mark_failed else "")
 
-    conflicting = model.conflicting_prerequisites(n)
+    conflicting = model.conflicting_prerequisites(n) & model.direct[n]
     items = [link(d) + (" 🔀" if d in conflicting else "") for d in sorted(model.direct[n])] + [
         ext_link(e) for e in model.external[n]
     ]
@@ -1423,7 +1621,9 @@ def auto_notes(model: Model, n: int, master: bool = True) -> list[str]:
         notes.append("it is in a cycle of dependencies")
     elif n in model.cycle_affected:
         notes.append("it depends on a cycle of dependencies")
-    if n in model.base_pr:
+    if n in model.lands_into:
+        notes.append(f"it fixes, and lands into, {r.link(model.lands_into[n])}'s branch")
+    elif n in model.base_pr:
         notes.append(f"its base branch is {r.link(model.base_pr[n])}'s branch")
     landed = [c.number for c in model.stated_closed[n] if c.state == "landed"]
     if landed:
@@ -1439,26 +1639,19 @@ def auto_notes(model: Model, n: int, master: bool = True) -> list[str]:
     return notes
 
 
-def fix_empty_cells(lines: Iterable[str]) -> list[str]:
-    """Write each empty table cell as "| |", not "|  |".
-
-    Returns:
-        The lines, with their empty table cells rewritten.
-    """
-    return [
-        re.sub(r"(?<=\|)  (?=\|)", " ", line) if line.startswith("|") else line for line in lines
-    ]
-
-
 def table_row(cells: Iterable[str]) -> str:
     """Return a Markdown table row containing cells.
 
-    Pipe characters within a cell are escaped so that they do not create extra columns.
+    Each cell is stripped of leading and trailing whitespace and then padded with exactly one
+    space on each side, as in "| a | b |", and an empty cell is written as "| |".  This is the
+    "compact" table style that markdownlint's rule MD060 checks.  Pipe characters within a cell
+    are escaped so that they do not create extra columns.
 
     Returns:
         A Markdown table row.
     """
-    return "| " + " | ".join(re.sub(r"(?<!\\)\|", r"\\|", cell) for cell in cells) + " |"
+    escaped = (re.sub(r"(?<!\\)\|", r"\\|", cell.strip()) for cell in cells)
+    return "|" + "".join(f" {cell} |" if cell else " |" for cell in escaped)
 
 
 def capitalize(s: str) -> str:
@@ -2031,7 +2224,7 @@ def unblocked_doc(
             if by:
                 groups = [f"{m.repo.links(ns)} ({who})" for who, ns in sorted(by.items())]
                 lines.append(f"* {m.repo.label}: {'; '.join(groups)}.")
-    return "\n".join(fix_empty_cells(lines)) + "\n"
+    return "\n".join(lines) + "\n"
 
 
 # ---------- generated sections of the dependency document ----------
@@ -2055,6 +2248,45 @@ def headed(heading: str, label: str | None, lines: list[str], level: int = 2) ->
     return ["", f"{'#' * level} {heading}", "", *lines, ""]
 
 
+# The HTML button, in the upper right corner of a code block, that copies the block's text,
+# without its final newline, to the clipboard and then briefly shows a check mark.  The
+# copied text lacks the final newline so that pasting it into a shell does not run it.  The
+# button works in a renderer, such as the Markdown Viewer browser extension, that passes
+# HTML through, including its event handlers; a renderer that removes them shows a button
+# that does nothing.
+COPY_BUTTON = (
+    '<button type="button" title="Copy" style="position:absolute;top:0.25em;right:0.25em"'
+    " onclick=\"navigator.clipboard.writeText(this.parentElement.querySelector('code')"
+    ".textContent.replace(/\\n$/, '')).then(() => { this.textContent = '✓';"
+    " setTimeout(() => { this.textContent = '📋'; }, 1000); })\">📋</button>"
+)
+
+
+def copyable_code_block(language: str, lines: list[str]) -> list[str]:
+    """Return a fenced code block of the given lines, with a button that copies them.
+
+    Args:
+        language: a fenced code block's language, such as "sh".
+        lines: the lines of the code block.
+
+    Returns:
+        The Markdown lines of the code block, inside an HTML element that also holds
+        COPY_BUTTON, between comments that make markdownlint permit the HTML.
+    """
+    return [
+        "<!-- markdownlint-disable no-inline-html -->",
+        '<div style="position:relative">',
+        COPY_BUTTON,
+        "",
+        f"```{language}",
+        *lines,
+        "```",
+        "",
+        "</div>",
+        "<!-- markdownlint-enable no-inline-html -->",
+    ]
+
+
 def gen_status(models: list[Model]) -> list[str]:
     """Generate the "status" section.
 
@@ -2067,10 +2299,7 @@ def gen_status(models: list[Model]) -> list[str]:
     for m in models:
         r = m.repo
         if m.cyclic:
-            lines.append(
-                f"* {r.label} PRs in a cycle of dependencies, which the push commands omit"
-                f" along with the PRs that depend on them: {r.links(m.cyclic)}."
-            )
+            lines.append(f"* {r.label} PRs in a cycle of dependencies: {r.links(m.cyclic)}.")
         conflicting = sorted(r.master_conflicts)
         if conflicting:
             lines.append(
@@ -2080,8 +2309,8 @@ def gen_status(models: list[Model]) -> list[str]:
     for m in models:
         r = m.repo
         for n in sorted(m.open):
-            newest = [d for d in sorted(m.direct[n]) if m.head_status(n, d) == "newest"]
-            none = [d for d in sorted(m.direct[n]) if m.head_status(n, d) == "none"]
+            newest = [d for d in sorted(m.update_direct[n]) if m.head_status(n, d) == "newest"]
+            none = [d for d in sorted(m.update_direct[n]) if m.head_status(n, d) == "none"]
             parts = []
             if newest:
                 parts.append(
@@ -2192,25 +2421,40 @@ def dependency_cells(model: Model, n: int, mark_failed: bool = False) -> list[st
         stated_text = "no"
     else:
         stated_text = f"{and_list(stated)}:  yes; {and_list(unstated)}:  no"
-    status = {d: model.head_status(n, d) for d in direct}
-    newest = [d for d in direct if status[d] == "newest"]
-    none = [d for d in direct if status[d] == "none"]
-    if not direct:
-        contains = "not applicable"
-    elif not newest and not none:
-        contains = "yes"
-    else:
-        parts = []
-        if newest:
-            parts.append(
-                f"lacks the newest commits of {r.links(newest)}"
-                if len(newest) > 1
-                else f"lacks {r.link(newest[0])}'s newest commits"
-            )
-        if none:
-            parts.append(f"lacks every commit of {r.links(none)}")
-        contains = f"no ({'; '.join(parts)})"
-    return [depends_on(model, n, mark_failed), stated_text, contains]
+    return [depends_on(model, n, mark_failed), stated_text, branch_contains(model, n)]
+
+
+def branch_contains(model: Model, n: int) -> str:
+    """Return the "Branch contains prerequisites' commits" cell of PR n.
+
+    The cell is about the branches that PR n's branch is updated from (see
+    Model.update_direct), such as a fix's base PR's branch.  It is not about a fix to PR n,
+    whose commits PR n's branch receives only when the fix lands.
+
+    Returns:
+        "not applicable" if PR n's branch is updated from no other PR's branch; "yes" if it
+        contains the current commits of every such branch; or "no" followed by the branches
+        whose newest commits, or all of whose commits, it lacks.
+    """
+    r = model.repo
+    updated_from = sorted(model.update_direct[n])
+    status = {d: model.head_status(n, d) for d in updated_from}
+    newest = [d for d in updated_from if status[d] == "newest"]
+    none = [d for d in updated_from if status[d] == "none"]
+    if not updated_from:
+        return "not applicable"
+    if not newest and not none:
+        return "yes"
+    parts = []
+    if newest:
+        parts.append(
+            f"lacks the newest commits of {r.links(newest)}"
+            if len(newest) > 1
+            else f"lacks {r.link(newest[0])}'s newest commits"
+        )
+    if none:
+        parts.append(f"lacks every commit of {r.links(none)}")
+    return f"no ({'; '.join(parts)})"
 
 
 def gen_details(model: Model, cfg: dict[str, Any], label: str | None) -> list[str]:
@@ -2243,7 +2487,7 @@ def gen_details(model: Model, cfg: dict[str, Any], label: str | None) -> list[st
         if has_prerequisite:
             cells = dependency_cells(model, n)
         else:
-            cells = ["none", "not applicable", "not applicable"]
+            cells = ["none", "not applicable", branch_contains(model, n)]
         # The "Depends on" cell of a PR that has a prerequisite marks the PR's conflict with
         # the default branch, unless a direct prerequisite conflicts too.
         notes = detail_notes(model, cfg, n, master=not has_prerequisite)
@@ -2283,7 +2527,8 @@ def textual_conflicts(model: Model, cfg: dict[str, Any], n: int) -> str:
     """Return the "Textual conflicts" cell of PR n.
 
     If PR n conflicts with the default branch or with a neighbor in a chain of dependencies
-    (a direct prerequisite or a direct dependent), the cell gives only those conflicts.
+    (a direct prerequisite or a direct dependent, in the landing graph or the update graph),
+    the cell gives only those conflicts.
 
     Returns:
         The non-routine files in which PR n conflicts with the default branch and with other
@@ -2308,7 +2553,13 @@ def textual_conflicts(model: Model, cfg: dict[str, Any], n: int) -> str:
         for f in files:
             if basename(f) not in routine:
                 by_file[basename(f)].add(other)
-    neighbors = {None} | model.direct[n] | model.dependents[n]
+    neighbors = (
+        {None}
+        | model.direct[n]
+        | model.dependents[n]
+        | model.update_direct[n]
+        | {m for m in model.open if n in model.update_direct[m]}
+    )
     if any(partners & neighbors for partners in by_file.values()):
         by_file = {f: partners & neighbors for f, partners in by_file.items()}
         by_file = {f: partners for f, partners in by_file.items() if partners}
@@ -2565,14 +2816,15 @@ def gen_directories(models: list[Model], cfg: dict[str, Any], base: str) -> list
 
 
 def dependency_document(
-    models: list[Model], cfg: dict[str, Any], base: str, as_of: str, title: str
+    models: list[Model],
+    cfg: dict[str, Any],
+    base: str,
+    as_of: str,
+    title: str,
+    all_chains: list[PushChains],
+    conflicting: list[PushChains],
 ) -> str:
     """Generate the dependency document.
-
-    The lines "<!-- BEGIN GENERATED: conflicting-push-commands -->" and
-    "<!-- END GENERATED: conflicting-push-commands -->" delimit the document's
-    "Dependency chains with conflicts" section, which resolve-conflicts reads.  They are
-    present even if the section is empty.
 
     Args:
         models: a list of the models of the repositories, one per repository
@@ -2580,14 +2832,19 @@ def dependency_document(
         base: the directory that holds the working copy directories
         as_of: the time of the PRs' data, such as "2026-11-05 17:59 PST"
         title: the document's title, such as "src PR status"
+        all_chains: the chains of each of models, as push_chains computes them, which the
+            "All dependency chains" section lists
+        conflicting: the chains with conflicts of each of models, as push_chains computes
+            them with conflicts_only, which the "Dependency chains with conflicts" section
+            lists
 
     Returns:
         The text of the dependency document:  YAML front matter and a "# " heading that give
         title, then its sections, including each optional section that cfg names.
     """
     optional = set(cfg["documents"].get("optional_sections", []))
-    all_commands = push_commands(models, base)
-    conflicting_commands = push_commands(models, base, conflicts_only=True)
+    all_commands = push_commands(models, all_chains, base)
+    conflicting_commands = push_commands(models, conflicting, base)
     lines = [
         "---",
         f"title: {yaml_string(title)}",
@@ -2608,16 +2865,17 @@ def dependency_document(
             ' PRs that land together, as "Land with #N" says, are one unit,'
             " which may span repositories:  each member depends on every prerequisite of every"
             " member, and on no member, even if its branch contains another member's commits."
+            " A PR whose base branch is another PR's branch is a fix to that PR if its"
+            ' description says to land before that PR (as in "Land before #N") or that PR\'s'
+            ' description says to land after it (as in "Land after #N"):'
+            " its branch is still updated from the other PR's branch, but it lands first."
         ),
         "",
         *gen_status(models),
         *gen_clusters(models, cfg),
         *(gen_graph(models, cfg) if "graph" in optional else []),
         *gen_updating_branches(models, all_commands),
-        "",
-        f"<!-- BEGIN GENERATED: {CONFLICTING_PUSH_COMMANDS} -->",
         *gen_push_commands(conflicting_commands, base, conflicts_only=True),
-        f"<!-- END GENERATED: {CONFLICTING_PUSH_COMMANDS} -->",
         *gen_push_commands(all_commands, base),
     ]
     # Each repository's label distinguishes its sections' headings in a multi-repository
@@ -2635,7 +2893,7 @@ def dependency_document(
             lines += gen_independent(m, cfg, label)
     lines += gen_directories(models, cfg, base)
     # Each section is set off by blank lines, so adjacent sections yield several.
-    text = re.sub(r"\n{3,}", "\n\n", "\n".join(fix_empty_cells(lines)))
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
     return text.rstrip("\n") + "\n"
 
 
@@ -2691,17 +2949,22 @@ class PushChains(NamedTuple):
 
 
 def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushChains:
-    """Compute the `git-push-to` chains that update every PR from upstream and its prerequisites.
+    """Compute the `git-push-to` chains that update every PR's branch.
 
+    The chains update each PR's branch from upstream and from the branches that it is
+    updated from (see Model.update_deps).  A fix's branch is updated from its base PR's
+    branch, but the base PR's branch is not updated from the fix's branch.
     Each chain is a list of directories, each of which `git-push-to` pushes into the next.
     Each chain starts with a working copy of the upstream default branch, if there is one.
-    A chain may contain a single PR, which has no direct prerequisite or dependent that has
-    a working copy; such a chain exists only if there is a working copy of upstream.
+    A chain may contain a single PR, which has no direct prerequisite or dependent in the
+    update graph that has a working copy; such a chain exists only if there is a working
+    copy of upstream.
     Before a chain pushes into a directory, the chains that precede it have updated that
     directory's prerequisites.
     If conflicts_only is true, retain a whole chain only if merging it would encounter a
     conflict between 2 of its PRs, or between upstream and one of its PRs.
-    No chain contains a PR that is in, or depends on, a cycle of dependencies.
+    No chain contains a PR that is in a cycle of the update graph or whose branch is updated
+    from the branch of a PR in one (see Model.update_cycle_affected).
 
     Returns:
         The chains, as a PushChains.
@@ -2715,10 +2978,10 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     ][:1]
     dirs = {n: pr_directories(r, r.prs[n], base) for n in model.open}
     missing = sorted(n for n in model.open if not dirs[n])
-    pushable = {n for n in model.open if dirs[n] and n not in model.cycle_affected}
-    edges = {(d, n) for n in pushable for d in model.direct[n] if d in pushable}
+    pushable = {n for n in model.open if dirs[n] and n not in model.update_cycle_affected}
+    edges = {(d, n) for n in pushable for d in model.update_direct[n] if d in pushable}
     in_edge = {n for e in edges for n in e}
-    level = model.levels()
+    level = model.update_levels
     pr_chains = []
     for d, n in sorted(edges, key=lambda e: (level[e[0]], e)):
         if (d, n) not in edges:
@@ -2726,7 +2989,7 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
         edges.discard((d, n))
         chain = [d, n]
         # Extend the chain from n only if this chain has made n up to date.
-        while len(model.direct[chain[-1]]) == 1:
+        while len(model.update_direct[chain[-1]]) == 1:
             nxt = min((m for p, m in edges if p == chain[-1]), default=None)
             if nxt is None:
                 break
@@ -2765,8 +3028,71 @@ class PushCommands(NamedTuple):
         return self.chain_count == 0 and not self.notes
 
 
-def push_commands(models: list[Model], base: str, conflicts_only: bool = False) -> PushCommands:
-    """Return the shell commands that update each PR's branch from upstream and its prerequisites.
+def new_snapshot(
+    time: str, new_facts: dict[str, Any], conflicting: list[PushChains]
+) -> dict[str, Any]:
+    """Return the snapshot that records the given facts and chains with conflicts.
+
+    Args:
+        time: a time, such as "2026-11-05T17:59:00-08:00", which the snapshot records
+        new_facts: the facts, as facts computes them
+        conflicting: the chains with conflicts of each repository, as push_chains computes
+            them with conflicts_only
+
+    Returns:
+        The snapshot, as a dict that .pr-status-snapshot.json holds as JSON, with the keys
+        "time", "facts", and "conflicting_push_chains".  The value of
+        "conflicting_push_chains" is a list of chains, in the order of the "Dependency
+        chains with conflicts" section of the dependency document; each chain is a list of
+        directories, such as ["daikon", "daikon-branch-a"], each of which `git-push-to`
+        pushes into the next.
+    """
+    return {
+        "time": time,
+        "facts": new_facts,
+        CONFLICTING_PUSH_CHAINS: [chain for pc in conflicting for chain in pc.chains],
+    }
+
+
+def format_push_chains(snapshot: dict[str, Any]) -> list[str]:
+    """Return the `git-push-to` chains with conflicts of the given snapshot, one line per chain.
+
+    Args:
+        snapshot: a snapshot, as a dict parsed from the JSON of .pr-status-snapshot.json, with
+            keys such as "time", "facts", and "conflicting_push_chains"
+
+    Returns:
+        One line per `git-push-to` chain with conflicts that snapshot records:  the chain's
+        directories, such as "daikon" and "daikon-branch-a", separated by tabs.
+
+    Raises:
+        ValueError: if snapshot does not record the chains with conflicts (even an empty list
+            of them), or if a directory's name contains a tab or a newline.
+    """
+    if CONFLICTING_PUSH_CHAINS not in snapshot:
+        msg = (
+            f"{pr_status_config.SNAPSHOT} does not record the dependency chains with"
+            " conflicts, because an older version of pr-status wrote it; run pr-status to"
+            " rewrite it"
+        )
+        raise ValueError(msg)
+    lines = []
+    for chain in snapshot[CONFLICTING_PUSH_CHAINS]:
+        for d in chain:
+            if "\t" in d or "\n" in d:
+                msg = f"a directory name contains a tab or newline: {d!r}"
+                raise ValueError(msg)
+        lines.append("\t".join(chain))
+    return lines
+
+
+def push_commands(models: list[Model], all_chains: list[PushChains], base: str) -> PushCommands:
+    """Return the shell commands that run the given `git-push-to` chains.
+
+    Args:
+        models: a list of the models of the repositories, one per repository
+        all_chains: the chains of each of models, as push_chains computes them
+        base: the directory that holds the working copy directories of the repositories
 
     Returns:
         The commands, as a PushCommands.
@@ -2774,9 +3100,8 @@ def push_commands(models: list[Model], base: str, conflicts_only: bool = False) 
     lines = [f"cd {base} && \\"]
     notes = []
     chain_count = 0
-    for m in models:
+    for m, (chains, missing, has_upstream) in zip(models, all_chains, strict=True):
         r = m.repo
-        chains, missing, has_upstream = push_chains(m, base, conflicts_only)
         chain_count += len(chains)
         for chain in chains:
             lines += ["git-push-to \\", *(f"  {d} \\" for d in chain[:-1]), f"  {chain[-1]}"]
@@ -2785,10 +3110,10 @@ def push_commands(models: list[Model], base: str, conflicts_only: bool = False) 
             notes.append(
                 f"{r.label} PRs with no working copy, which these commands omit: {r.links(missing)}"
             )
-        if m.cycle_affected:
+        if m.update_cycle_affected:
             notes.append(
                 f"{r.label} PRs in or after a cycle of dependencies, which these commands omit:"
-                f" {r.links(sorted(m.cycle_affected))}"
+                f" {r.links(sorted(m.update_cycle_affected))}"
             )
         if not has_upstream and len(missing) < len(m.open):
             notes.append(
@@ -2800,20 +3125,20 @@ def push_commands(models: list[Model], base: str, conflicts_only: bool = False) 
 
 
 def gen_push_commands(commands: PushCommands, base: str, conflicts_only: bool = False) -> list[str]:
-    """Return the lines of the "push-commands" or "conflicting-push-commands" section.
+    """Return the lines of the dependency-chain section that shows the given commands.
 
     Args:
         commands: shell commands that update the PRs' branches
         base: the directory that holds the working copy directories of the repositories
-        conflicts_only: True if the lines are those of the "conflicting-push-commands" section,
-            whose chains are the ones with conflicts; False if they are those of the
-            "push-commands" section
+        conflicts_only: True if the lines are those of the "Dependency chains with conflicts"
+            section, whose chains are the ones with conflicts; False if they are those of the
+            "All dependency chains" section
 
     Returns:
         The section's lines:  a heading; with conflicts_only, an introduction and a suggestion
         to run resolve-conflicts; then the notes of commands; then commands in a fenced code
-        block, if they run a chain.  Or no lines if commands run no chain and either
-        conflicts_only is true or commands have no note.
+        block, with a button that copies them, if they run a chain.  Or no lines if commands
+        run no chain and either conflicts_only is true or commands have no note.
     """
     if commands.is_empty() or (conflicts_only and commands.chain_count == 0):
         return []
@@ -2826,8 +3151,8 @@ def gen_push_commands(commands: PushCommands, base: str, conflicts_only: bool = 
             ),
             "",
             (
-                f"Run `cd {base} && resolve-conflicts`, which runs these commands with an AI"
-                " agent's help, repeating until no chain has conflicts."
+                f"Run `cd {base} && resolve-conflicts`, which runs `git-push-to` on these"
+                " chains with an AI agent's help, repeating until no chain has conflicts."
             ),
             "Alternatively, run the commands yourself.",
             "",
@@ -2835,14 +3160,14 @@ def gen_push_commands(commands: PushCommands, base: str, conflicts_only: bool = 
     lines += [f"{note}." for note in commands.notes]
     if commands.chain_count > 0:
         lines += [""] if commands.notes else []
-        lines += ["```sh", *commands.lines, "```"]
+        lines += copyable_code_block("sh", commands.lines)
     if conflicts_only:
         return headed("Dependency chains with conflicts", None, lines, level=3)
     return headed("All dependency chains", None, lines, level=3)
 
 
 def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[str]:
-    """Generate the "updating-branches" section.
+    """Generate the "Updating branches" section.
 
     Args:
         models: a list of the models of the repositories, one per repository
@@ -2850,8 +3175,8 @@ def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[s
 
     Returns:
         The section's lines:  an "Updating branches" heading and an introduction to the
-        "conflicting-push-commands" and "push-commands" sections that follow it, or no lines
-        if commands run no chain and have no note.
+        "Dependency chains with conflicts" and "All dependency chains" sections that follow
+        it, or no lines if commands run no chain and have no note.
     """
     if commands.is_empty():
         return []
@@ -2872,6 +3197,27 @@ def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[s
 
 
 # ---------- snapshot and changes ----------
+
+
+def write_json_atomically(path: pathlib.Path, value: Any) -> None:
+    """Write the given value as JSON to the given file, which is never left partly written.
+
+    The file holds either its old contents or all of the new ones, even if this process is
+    killed or json.dump raises an exception.
+
+    Args:
+        value: a value that json.dump accepts, such as a dict
+        path: the file to write, such as .pr-status-snapshot.json
+    """
+    # The process id keeps two concurrent runs from writing the same temporary file.
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w") as f:
+            json.dump(value, f, indent=1)
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def facts(models: list[Model]) -> dict[str, Any]:
@@ -3207,20 +3553,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument(
+    # At most one of these options, which choose what pr-status does.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
         help="report changes, but change no document, snapshot, PR description, or directory",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--print-document",
         action="store_true",
         help="print the file name of the dependency document, and do nothing else",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--print-config",
         action="store_true",
         help="print the config as JSON, with its defaults filled in, and do nothing else",
+    )
+    mode.add_argument(
+        "--print-conflicting-push-chains",
+        action="store_true",
+        help=(
+            "print the dependency chains with conflicts that the snapshot records, one per line,"
+            " with their directories separated by tabs, and do nothing else"
+        ),
     )
     parser.add_argument(
         "-C",
@@ -3233,14 +3589,24 @@ def main() -> None:
         action="extend",
         nargs="+",
         default=[],
-        metavar="PR",
+        metavar="PR|bottleneck",
         help=(
             "in the documents, highlight each PR (such as REPO#N or ORG/REPO#N) and every PR"
             " that must land for it to land:  the PRs that it depends on or lands with,"
-            " recursively"
+            ' recursively.  In place of a PR, it accepts the word "bottleneck", which selects,'
+            " in each repository, the PR that starts the longest path of prerequisites within"
+            " that repository (each PR that starts one, if several are longest).  That PR is"
+            " the next one to work on, because the rest of the path cannot land until it does"
         ),
     )
     args = parser.parse_args()
+    if args.highlight and (
+        args.print_document or args.print_config or args.print_conflicting_push_chains
+    ):
+        parser.error(
+            "--highlight is not allowed with --print-document, --print-config, or"
+            " --print-conflicting-push-chains"
+        )
     check_only = args.check
     if args.directory is not None:
         try:
@@ -3257,12 +3623,21 @@ def main() -> None:
     if args.print_config:
         print(json.dumps(load_config("pr-status"), indent=2))
         return
+    if args.print_conflicting_push_chains:
+        try:
+            with pathlib.Path(pr_status_config.SNAPSHOT).open() as f:
+                lines = format_push_chains(json.load(f))
+        except (OSError, ValueError) as error:
+            sys.exit(f"pr-status: --print-conflicting-push-chains: {error}")
+        for line in lines:
+            print(line)
+        return
     base = str(pathlib.Path.cwd())
     cfg = load_config("pr-status")
     dependencies = pathlib.Path(pr_status_config.dependency_document_name(cfg))
     models = load_models(cfg)
     try:
-        HIGHLIGHTED.update(needed_to_land(models, resolve_pr_names(models, args.highlight)))
+        HIGHLIGHTED.update(needed_to_land(models, highlight_selection(models, args.highlight)))
     except ValueError as error:
         sys.exit(f"pr-status: --highlight: {error}")
     updates = description_updates(models)
@@ -3290,8 +3665,7 @@ def main() -> None:
     for m in models:
         if m.cyclic:
             print(
-                f"pr-status: warning: a cycle of dependencies contains {m.repo.refs(m.cyclic)};"
-                " the push commands omit the cycle and the PRs that depend on it",
+                f"pr-status: warning: a cycle of dependencies contains {m.repo.refs(m.cyclic)}",
                 file=sys.stderr,
             )
     problems, renames = directory_problems(models, base, fix=not check_only)
@@ -3332,9 +3706,14 @@ def main() -> None:
     for doc in unblocked_docs:
         pathlib.Path(doc["file"]).write_text(unblocked_doc(models, cfg, base, doc, as_of))
     title = f"{pathlib.Path(base).name} PR status"
-    dependencies.write_text(dependency_document(models, cfg, base, as_of, title))
-    with pathlib.Path(pr_status_config.SNAPSHOT).open("w") as f:
-        json.dump({"time": now.isoformat(timespec="seconds"), "facts": new}, f, indent=1)
+    # Both lists come from this one place, so the document and the snapshot agree.
+    all_chains = [push_chains(m, base) for m in models]
+    conflicting = [push_chains(m, base, conflicts_only=True) for m in models]
+    dependencies.write_text(
+        dependency_document(models, cfg, base, as_of, title, all_chains, conflicting)
+    )
+    snapshot = new_snapshot(now.isoformat(timespec="seconds"), new, conflicting)
+    write_json_atomically(pathlib.Path(pr_status_config.SNAPSHOT), snapshot)
     written = [d["file"] for d in unblocked_docs]
     written += [str(dependencies), pr_status_config.SNAPSHOT]
     print(f"## Wrote {and_list(written)}")

@@ -1235,7 +1235,9 @@ run_command 'a worktree without its administrative directory' 1 --force \
 check_present 'a worktree without its administrative directory' \
   "${work}/myrepo-branch-wtnoadmin"
 check_message 'a worktree without its administrative directory' \
-  "is not a git directory that git can use"
+  "its repository exists but no longer registers this worktree"
+check_message 'a worktree without its administrative directory' \
+  "refusing to remove"
 
 # A worktree on a branch that has no commit yet is refused, with a message
 # that names the branch.

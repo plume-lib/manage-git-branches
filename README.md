@@ -136,12 +136,16 @@ The commands are:
   Unlike `git-pull-from`, it needs no working tree for the default branch.
   It handles conflicts and a failed build as `git-push-to` does.
 * [`pr-status`](pr-status)
-  `[--check] [--print-document] [--print-config] [-C DIR] [--highlight PR...]`:
+  `[--check | --print-document | --print-config |`
+  `--print-conflicting-push-chains] [-C DIR]`
+  `[--highlight PR|bottleneck...]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
   `pr-status.md`,
   which lists the dependencies and the `git-push-to` commands that update
-  each dependency chain.
+  each dependency chain.  In a Markdown renderer that keeps HTML event
+  handlers, each block of commands has a button (📋) that copies the
+  commands.
 
   Run it in a directory that holds the working copy directories, or pass
   that directory with `-C`.
@@ -171,8 +175,8 @@ The commands are:
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--claude | --codex] [-C DIR]`:
   Runs `pr-status`, which regenerates the dependency document
-  `pr-status.md`, then runs each
-  `git-push-to` command in its section "Dependency chains with conflicts",
+  `pr-status.md`, then runs `git-push-to` on each chain of its section
+  "Dependency chains with conflicts",
   with `--claude` (or `--codex`), which asks an AI agent for help.
 * [`crreview-resolve-all`](crreview-resolve-all)
   `[--dry-run] [--agent claude|codex] [-C DIR]`:

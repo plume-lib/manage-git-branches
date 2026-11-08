@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -28,6 +29,13 @@ class TableRowTest(unittest.TestCase):
             r"| Unbox && and \|\| | second |",
         )
         self.assertEqual(pr_status.table_row([r"already \| escaped"]), r"| already \| escaped |")
+
+    def test_pads_each_cell_with_one_space(self):
+        """Each cell has exactly one space on each side, and an empty cell is "| |"."""
+        self.assertEqual(
+            pr_status.table_row([" leading", "trailing  ", "", " ", " both "]),
+            "| leading | trailing | | | both |",
+        )
 
 
 class UpdatedPrDescriptionTest(unittest.TestCase):
@@ -262,16 +270,24 @@ class ModelTest(unittest.TestCase):
     """Tests for Model."""
 
     @staticmethod
-    def raw_model(bodies, contains, gh="owner/repo"):
+    def raw_model(bodies, contains, gh="owner/repo", bases=None):
         """Build a model, without its graph, of open PRs.
 
-        The PRs have the given descriptions and branch containment.
+        The PRs have the given descriptions and branch containment.  bases maps a PR's
+        number to the number of the PR whose branch is its base branch; every other PR's
+        base branch is the default branch.
 
         Returns:
             The model.
         """
+        bases = bases or {}
         prs = {
-            n: {"body": body, "baseRefName": "master", "owner": "owner", "headRefName": f"b{n}"}
+            n: {
+                "body": body,
+                "baseRefName": f"b{bases[n]}" if n in bases else "master",
+                "owner": "owner",
+                "headRefName": f"b{n}",
+            }
             for n, body in bodies.items()
         }
         repo = types.SimpleNamespace(
@@ -288,15 +304,219 @@ class ModelTest(unittest.TestCase):
         )
         return pr_status.Model(repo, {"repos": {gh: {}}})
 
-    def model(self, bodies, contains):
+    def model(self, bodies, contains, bases=None):
         """Build a model of open PRs with the given descriptions and branch containment.
+
+        bases is as for raw_model.
 
         Returns:
             The model.
         """
-        model = self.raw_model(bodies, contains)
+        model = self.raw_model(bodies, contains, bases=bases)
         pr_status.unite_partners([model])
         return model
+
+    @staticmethod
+    def updated_bodies(model):
+        """Return the descriptions that description_updates would write.
+
+        Returns:
+            A map from each PR's number to its description after the update.
+        """
+        bodies = {n: model.repo.prs[n]["body"] for n in model.open}
+        for update in pr_status.description_updates([model]):
+            bodies[update.number] = update.body
+        return bodies
+
+    def test_stacked_pr_lands_after_base_pr(self):
+        """A PR whose base branch is another PR's branch lands after it, by default."""
+        model = self.model({1: "", 2: ""}, {(2, 1)}, bases={2: 1})
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.blocked(), [2])
+        self.assertEqual(self.updated_bodies(model), {1: "Land before #2.", 2: "Land after #1."})
+
+    def test_fix_lands_before_base_pr(self):
+        """A stacked PR that says to land before its base PR is a fix to that PR."""
+        for bodies in (
+            {1: "", 2: "Land before #1.\n\nFix it."},
+            {1: "Land after #2.", 2: "Fix it."},
+        ):
+            with self.subTest(bodies=bodies):
+                model = self.model(bodies, {(2, 1)}, bases={2: 1})
+                self.assertEqual(model.cyclic, [])
+                self.assertEqual(model.lands_into, {2: 1})
+                self.assertEqual(model.direct, {1: {2}, 2: set()})
+                self.assertEqual((model.dependents[1], model.dependents[2]), (set(), {1}))
+                # The fix's branch is still updated from its base PR's branch.
+                self.assertEqual(model.update_direct, {1: set(), 2: {1}})
+                self.assertEqual(model.blocked(), [1])
+                self.assertEqual(model.deepest_roots(), {2})
+                self.assertEqual(
+                    self.updated_bodies(model),
+                    {1: "Land after #2.", 2: "Land before #1.\n\nFix it."},
+                )
+
+    def test_contradictory_stacked_pr_is_cycle(self):
+        """Descriptions that disagree about a stacked PR's landing order form a cycle."""
+        for bodies in (
+            {1: "Land before #2.", 2: "Land before #1."},
+            {1: "Land after #2.", 2: "Land after #1."},
+        ):
+            with self.subTest(bodies=bodies):
+                model = self.model(bodies, {(2, 1)}, bases={2: 1})
+                self.assertEqual(model.lands_into, {})
+                self.assertEqual(model.cyclic, [1, 2])
+
+    def test_pr_on_fix_lands_after_base_pr(self):
+        """A PR that builds on a fix lands after the fix's base PR, too."""
+        model = self.model(
+            {1: "", 2: "Land before #1.", 3: ""}, {(2, 1), (3, 1), (3, 2)}, bases={2: 1, 3: 2}
+        )
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.direct, {1: {2}, 2: set(), 3: {1}})
+        self.assertEqual(model.update_direct, {1: set(), 2: {1}, 3: {2}})
+        self.assertEqual(model.blocked(), [1, 3])
+        self.assertEqual(
+            self.updated_bodies(model),
+            {1: "Land after #2.\nLand before #3.", 2: "Land before #1.", 3: "Land after #1."},
+        )
+
+    def test_fix_to_fix_lands_first(self):
+        """A fix to a fix lands into the fix's branch, before the fix lands."""
+        model = self.model(
+            {1: "", 2: "Land before #1.", 3: "Land before #2."},
+            {(2, 1), (3, 1), (3, 2)},
+            bases={2: 1, 3: 2},
+        )
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.direct, {1: {2}, 2: {3}, 3: set()})
+        self.assertEqual(model.update_direct, {1: set(), 2: {1}, 3: {2}})
+        self.assertEqual(model.blocked(), [1, 2])
+
+    def test_cycle_through_fix(self):
+        """A cycle of dependencies that includes a fix's landing order is a cycle."""
+        model = self.model(
+            {1: "Land after #2.", 2: "Land after #3.", 3: "Land after #1."}, set(), bases={2: 1}
+        )
+        self.assertEqual(model.lands_into, {2: 1})
+        self.assertEqual(model.cyclic, [1, 2, 3])
+        self.assertEqual(model.cycle_affected, {1, 2, 3})
+
+    def test_partner_of_base_pr_waits_for_fix(self):
+        """A land-with partner of a base PR also lands after the base PR's fix."""
+        model = self.model(
+            {1: "Land with #3.", 2: "Land before #1.", 3: ""}, {(2, 1)}, bases={2: 1}
+        )
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.blocked(), [1, 3])
+        self.assertEqual(model.direct, {1: {2}, 2: set(), 3: {2}})
+        # The partner's branch is not updated from the fix's branch.
+        self.assertEqual(model.update_direct, {1: set(), 2: {1}, 3: set()})
+
+    def test_partner_of_fix_does_not_wait_for_base_pr(self):
+        """A land-with partner of a fix does not wait for the fix's base PR."""
+        model = self.model(
+            {1: "", 2: "Land before #1.\nLand with #4.", 4: ""}, {(2, 1)}, bases={2: 1}
+        )
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.blocked(), [1])
+        self.assertEqual(model.direct, {1: {2}, 2: set(), 4: set()})
+        self.assertEqual(model.update_direct, {1: set(), 2: {1}, 4: set()})
+
+    def test_pr_on_fix_waits_for_base_pr_without_containment(self):
+        """A PR whose branch is updated from a fix's branch lands after the fix's base PR.
+
+        That holds even if its branch lacks some of the base PR's commits.
+        """
+        for bodies, bases, contains in (
+            ({1: "", 2: "Land before #1.", 3: ""}, {2: 1, 3: 2}, {(2, 1), (3, 2)}),
+            ({1: "", 2: "Land before #1.", 3: "Land after #2."}, {2: 1}, {(2, 1)}),
+        ):
+            with self.subTest(bodies=bodies):
+                model = self.model(bodies, contains, bases=bases)
+                self.assertEqual(model.cyclic, [])
+                self.assertEqual(model.direct, {1: {2}, 2: set(), 3: {1}})
+                self.assertEqual(model.update_direct, {1: set(), 2: {1}, 3: {2}})
+                self.assertEqual(model.blocked(), [1, 3])
+
+    def test_fix_does_not_wait_for_commits_its_base_pr_lacks(self):
+        """The base PR, not its fix, waits for the commits that only the fix's branch has."""
+        model = self.model(
+            {1: "", 2: "Land before #1.", 5: ""}, {(1, 5), (2, 1), (2, 5)}, bases={1: 5, 2: 1}
+        )
+        model_lagging = self.model(
+            {1: "", 2: "Land before #1.", 5: ""}, {(2, 1), (2, 5)}, bases={2: 1}
+        )
+        for m in (model, model_lagging):
+            self.assertEqual(m.cyclic, [])
+            self.assertEqual(m.direct, {1: {2, 5}, 2: set(), 5: set()})
+            self.assertEqual(m.blocked(), [1])
+
+    def test_configured_dependency_on_fix(self):
+        """A configured dependency of a base PR on its stacked PR makes the stacked PR a fix."""
+        model = self.raw_model({1: "", 2: ""}, {(2, 1)}, bases={2: 1})
+        model = pr_status.Model(
+            model.repo, {"repos": {"owner/repo": {"extra_dependencies": [[1, 2]]}}}
+        )
+        pr_status.unite_partners([model])
+        self.assertEqual(model.lands_into, {2: 1})
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.direct, {1: {2}, 2: set()})
+        # The base PR's branch is not updated from the fix's branch.
+        self.assertEqual(model.update_direct, {1: set(), 2: {1}})
+
+    def test_push_commands_keep_base_pr_of_fix_in_cycle(self):
+        """A base PR whose fix is in a cycle is still updated, unlike the cycle's members."""
+        model = self.model(
+            {1: "", 2: "Land before #1.\nLand after #4.", 4: "Land after #2."},
+            {(2, 1)},
+            bases={2: 1},
+        )
+        # 4's branch is updated from 2's, which has 1's commits, so 4 lands after 1.
+        self.assertEqual(model.cyclic, [1, 2, 4])
+        self.assertEqual(model.cycle_affected, {1, 2, 4})
+        self.assertEqual(model.update_cycle_affected, {2, 4})
+
+    def test_textual_conflicts_include_update_neighbors(self):
+        """The cell keeps a conflict with the branch that a PR's branch is updated from."""
+        model = self.model(
+            {1: "", 2: "Land before #1.", 3: ""}, {(2, 1), (3, 1), (3, 2)}, bases={2: 1, 3: 2}
+        )
+        model.repo.master_conflicts = {}
+        model.repo.pair_conflicts = {(1, 3): ["a.txt"], (2, 3): ["b.txt"]}
+        model.repo.link = lambda n: f"#{n}"
+        model.excluded = set()
+        cfg = {"repos": {model.repo.name: {}}}
+        self.assertEqual(
+            pr_status.textual_conflicts(model, cfg, 3), "`a.txt` with #1; `b.txt` with #2"
+        )
+
+    def test_branch_contains_for_fix(self):
+        """The cell says whether a fix's branch has its base PR's current commits."""
+        model = self.model({1: "", 2: "Land before #1."}, {(2, 1)}, bases={2: 1})
+        model.repo.link = lambda n: f"#{n}"
+        with mock.patch.object(model, "head_status", return_value="newest"):
+            self.assertEqual(pr_status.branch_contains(model, 2), "no (lacks #1's newest commits)")
+        self.assertEqual(pr_status.branch_contains(model, 1), "not applicable")
+
+    def test_fix_documents_landing_order(self):
+        """The cells and sections that describe prerequisites follow the landing order."""
+        model = self.model({1: "", 2: "Land before #1."}, {(2, 1)}, bases={2: 1})
+        model.repo.master_conflicts = {}
+        model.repo.pair_conflicts = {}
+        model.repo.link = lambda n: f"#{n}"
+        model.repo.links = lambda ns: pr_status.and_list(f"#{n}" for n in sorted(ns))
+        model.repo.prs[2]["assignees"] = []
+        self.assertEqual(pr_status.depends_on(model, 1), "#2")
+        self.assertEqual(pr_status.needed_by(model, 2), "#1")
+        self.assertEqual(pr_status.needed_by(model, 1), "")
+        self.assertEqual(
+            pr_status.gen_prerequisites(model, None)[-2],
+            "Prerequisites with no prerequisite of their own: #2 (needed by #1).",
+        )
+        # The base PR's branch does not contain its fix's commits, and need not.
+        with mock.patch.object(model, "head_status", side_effect=AssertionError):
+            self.assertEqual(pr_status.dependency_cells(model, 1), ["#2", "yes", "not applicable"])
 
     def test_containment_is_dependency(self):
         """A PR whose branch contains another's commits depends on it."""
@@ -381,11 +601,22 @@ class ModelTest(unittest.TestCase):
         """
         model = self.conflicting_model()
         self.assertEqual(
-            [model.unresolved_threads(n) for n in (1, 2, 3, 4)], [" 🔀", " 🔀", " 🔀", ""]
+            [model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["🔀", "🔀", "🔀", ""]
         )
         model.repo.master_conflicts = {}
         model.repo.pair_conflicts = {(1, 3): ["c.txt"], (2, 3): ["a.txt"]}
-        self.assertEqual([model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["", " 🔀", "", ""])
+        self.assertEqual([model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["", "🔀", "", ""])
+
+    def test_unresolved_threads_separates_parts_by_one_space(self):
+        """The cell's parts are separated by one space, with none at either end."""
+        model = self.conflicting_model()
+        model.repo.reviews_and_ci = pr_status.ReviewsAndCi(
+            {1: [True, False], 4: [False]}, {1, 2}, {1, 4}
+        )
+        self.assertEqual(
+            [model.unresolved_threads(n) for n in (1, 2, 3, 4)],
+            ["2 (1 outdated) ❌ 🔀", "❌ 🔀", "🔀", "1 ✅"],
+        )
 
     def test_depends_on_marks_conflicting_direct_prerequisites(self):
         """The cell shows 🔀 after each conflicting direct prerequisite, or else after master."""
@@ -413,7 +644,7 @@ class ModelTest(unittest.TestCase):
 
 
 class HighlightTest(unittest.TestCase):
-    """Tests for resolve_pr_names, needed_to_land, and highlight."""
+    """Tests for highlight_selection, resolve_pr_names, needed_to_land, and highlight."""
 
     def models(self):
         """Build models of two repositories, whose PRs depend on each other's.
@@ -434,9 +665,42 @@ class HighlightTest(unittest.TestCase):
         """A PR is named by its repository's GitHub slug, name, or reference prefix."""
         models = self.models()
         self.assertEqual(
-            pr_status.resolve_pr_names(models, ["Owner/Repo#1, other/repo#5", "other/repo#6"]),
+            pr_status.highlight_selection(models, ["Owner/Repo#1, other/repo#5", "other/repo#6"]),
             {("owner/repo", 1), ("other/repo", 5), ("other/repo", 6)},
         )
+
+    def test_selects_bottleneck(self):
+        """The word "bottleneck" selects the PR that starts each longest path of prerequisites."""
+        models = self.models()
+        self.assertEqual(
+            pr_status.highlight_selection(models, ["bottleneck"]),
+            {("owner/repo", 2), ("other/repo", 6)},
+        )
+        self.assertEqual(
+            pr_status.highlight_selection(models, ["Bottleneck,other/repo#7"]),
+            {("owner/repo", 2), ("other/repo", 6), ("other/repo", 7)},
+        )
+
+    def test_deepest_roots(self):
+        """Each PR that starts a longest path of prerequisites is a deepest root."""
+        model = ModelTest.raw_model(
+            {
+                1: "",
+                2: "",
+                3: "Land after #1.\nLand after #2.",
+                4: "Land after #3.",
+                5: "Land after #2.",
+                6: "",
+                7: "Land after #6.",
+                8: "",
+            },
+            set(),
+        )
+        pr_status.unite_partners([model])
+        self.assertEqual(model.deepest_roots(), {1, 2})
+        empty = ModelTest.raw_model({1: "", 2: ""}, set())
+        pr_status.unite_partners([empty])
+        self.assertEqual(empty.deepest_roots(), set())
 
     def test_rejects_bad_names(self):
         """A name must name one repository and an open PR of it."""
@@ -612,7 +876,7 @@ class PushChainsTest(unittest.TestCase):
     def chains(
         direct, master_conflicts, has_upstream=True, conflicts_only=False, cycle_affected=()
     ):
-        """Run push_chains on PRs whose direct prerequisites are direct.
+        """Run push_chains on PRs whose direct prerequisites in the update graph are direct.
 
         Each PR n has the working copy "pr<n>".
 
@@ -632,9 +896,9 @@ class PushChainsTest(unittest.TestCase):
         model = types.SimpleNamespace(
             repo=repo,
             open=set(direct),
-            direct=direct,
-            levels=lambda: levels,
-            cycle_affected=set(cycle_affected),
+            update_direct=direct,
+            update_levels=levels,
+            update_cycle_affected=set(cycle_affected),
         )
         upstream = {"master": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}
         # pr_directories receives the PR's data, so look up the PR's number by identity.
@@ -668,6 +932,118 @@ class PushChainsTest(unittest.TestCase):
             {1: set(), 2: {1, 3}, 3: {2}, 4: {3}, 5: {1}}, {}, cycle_affected={2, 3, 4}
         )
         self.assertEqual(chains, [["master", "pr1", "pr5"]])
+
+
+class NewSnapshotTest(unittest.TestCase):
+    """Tests for new_snapshot."""
+
+    def test_round_trip(self):
+        """The chains with conflicts of every repository, in order, survive a JSON round trip."""
+        conflicting = [
+            pr_status.PushChains([["a", "a-branch-x"]], [], True),
+            pr_status.PushChains([], [1], True),
+            pr_status.PushChains([["b", "b-branch y"], ["b", "b-branch-z"]], [], True),
+        ]
+        snapshot = pr_status.new_snapshot("now", {"repo": {}}, conflicting)
+        self.assertEqual((snapshot["time"], snapshot["facts"]), ("now", {"repo": {}}))
+        self.assertEqual(
+            pr_status.format_push_chains(json.loads(json.dumps(snapshot))),
+            ["a\ta-branch-x", "b\tb-branch y", "b\tb-branch-z"],
+        )
+
+
+class FormatPushChainsTest(unittest.TestCase):
+    """Tests for format_push_chains."""
+
+    def test_one_line_per_chain(self):
+        """Each chain is one line, with its directories separated by tabs."""
+        snapshot = {"conflicting_push_chains": [["a", "a-branch-x", "a-branch y"], ["b", "c"]]}
+        self.assertEqual(
+            pr_status.format_push_chains(snapshot), ["a\ta-branch-x\ta-branch y", "b\tc"]
+        )
+
+    def test_no_chains(self):
+        """A snapshot that records no chain with conflicts yields no line."""
+        self.assertEqual(pr_status.format_push_chains({"conflicting_push_chains": []}), [])
+
+    def test_missing_key(self):
+        """A snapshot that does not record the chains is an error."""
+        with self.assertRaisesRegex(ValueError, "does not record the dependency chains"):
+            pr_status.format_push_chains({"time": "now", "facts": {}})
+
+    def test_tab_or_newline(self):
+        """A directory whose name contains a tab or newline is an error."""
+        for d in ("a\tb", "a\nb"):
+            with self.subTest(d=d), self.assertRaisesRegex(ValueError, "tab or newline"):
+                pr_status.format_push_chains({"conflicting_push_chains": [["a", d]]})
+
+
+class PrintConflictingPushChainsTest(unittest.TestCase):
+    """Tests for `pr-status --print-conflicting-push-chains`."""
+
+    PR_STATUS = str(Path(__file__).resolve().parent.parent / "pr-status")
+
+    def run_option(self, snapshot):
+        """Run `pr-status --print-conflicting-push-chains` in a directory with a snapshot.
+
+        Args:
+            snapshot: the text of .pr-status-snapshot.json, or None to write no snapshot
+
+        Returns:
+            The completed process, with its output as text.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            if snapshot is not None:
+                (Path(d) / pr_status_config.SNAPSHOT).write_text(snapshot)
+            return subprocess.run(
+                [sys.executable, self.PR_STATUS, "-C", d, "--print-conflicting-push-chains"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_prints_chains(self):
+        """Only the chains are printed, one per line."""
+        snapshot = pr_status.new_snapshot(
+            "now",
+            {},
+            [pr_status.PushChains([["a", "a-branch-x"], ["a", "a-branch y", "z"]], [], True)],
+        )
+        result = self.run_option(json.dumps(snapshot))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "a\ta-branch-x\na\ta-branch y\tz\n")
+
+    def test_no_snapshot(self):
+        """Without a snapshot, the option fails, printing nothing to standard output."""
+        result = self.run_option(None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("--print-conflicting-push-chains", result.stderr)
+
+
+class ExclusiveOptionsTest(unittest.TestCase):
+    """Tests that pr-status rejects options that choose different things to do."""
+
+    PR_STATUS = PrintConflictingPushChainsTest.PR_STATUS
+
+    def test_rejected(self):
+        """Each combination fails with a usage error, before reading any file."""
+        for options in [
+            ["--check", "--print-conflicting-push-chains"],
+            ["--print-document", "--print-conflicting-push-chains"],
+            ["--print-config", "--print-document"],
+            ["--print-conflicting-push-chains", "--highlight", "repo#1"],
+        ]:
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as d:
+                result = subprocess.run(
+                    [sys.executable, self.PR_STATUS, "-C", d, *options],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("not allowed with", result.stderr)
 
 
 class PrSectionsTest(unittest.TestCase):
@@ -794,8 +1170,8 @@ class DependencyDocumentTest(unittest.TestCase):
         gens = {g: self.section(g, False) for g in self.GENERATORS}
         gens |= {g: self.section(g, True) for g in self.REPO_GENERATORS}
 
-        def push_commands(_models, _base, conflicts_only=False):
-            return "conflicting" if conflicts_only else "all"
+        def push_commands(_models, chains, _base):
+            return "conflicting" if chains == "CONFLICTING" else "all"
 
         def gen_push_commands(commands, _base, conflicts_only=False):
             return ["", f"### {commands} commands" + (" only" if conflicts_only else ""), ""]
@@ -807,7 +1183,7 @@ class DependencyDocumentTest(unittest.TestCase):
             **gens,
         ):
             return pr_status.dependency_document(
-                models, {"documents": docs}, "/base", "now", "src PR status"
+                models, {"documents": docs}, "/base", "now", "src PR status", "ALL", "CONFLICTING"
             )
 
     def test_document(self):
@@ -823,11 +1199,9 @@ class DependencyDocumentTest(unittest.TestCase):
         )
         self.assertTrue(
             text.endswith(
-                " even if its branch contains another member's commits.\n\n"
+                " its branch is still updated from the other PR's branch, but it lands first.\n\n"
                 "## status\n\n## clusters\n\n## updating_branches\n\n"
-                "<!-- BEGIN GENERATED: conflicting-push-commands -->\n\n"
                 "### conflicting commands only\n\n"
-                "<!-- END GENERATED: conflicting-push-commands -->\n\n"
                 "### all commands\n\n"
                 "## unblocked\n\n## blocked\n\n## directories\n"
             ),
@@ -878,7 +1252,7 @@ class DependencyDocumentTest(unittest.TestCase):
             **dict.fromkeys(self.GENERATORS, mock.Mock(return_value=[])),
         ):
             cfg = {"documents": {}}
-            text = pr_status.dependency_document([], cfg, "/base", "now", "a: #b PR status")
+            text = pr_status.dependency_document([], cfg, "/base", "now", "a: #b PR status", [], [])
         self.assertTrue(
             text.startswith('---\ntitle: "a: #b PR status"\n---\n\n# a: #b PR status\n\n'),
             text,
@@ -902,19 +1276,48 @@ class YamlStringTest(unittest.TestCase):
         self.assertEqual(pr_status.yaml_string("src-\U0001f600"), '"src-\U0001f600"')
 
 
+class CopyableCodeBlockTest(unittest.TestCase):
+    """Tests for copyable_code_block."""
+
+    def test_wraps_fenced_code_block(self):
+        """The code block follows the copy button, inside an element that markdownlint permits."""
+        self.assertEqual(
+            pr_status.copyable_code_block("sh", ["cd /base && \\", 'echo "success"']),
+            [
+                "<!-- markdownlint-disable no-inline-html -->",
+                '<div style="position:relative">',
+                pr_status.COPY_BUTTON,
+                "",
+                "```sh",
+                "cd /base && \\",
+                'echo "success"',
+                "```",
+                "",
+                "</div>",
+                "<!-- markdownlint-enable no-inline-html -->",
+            ],
+        )
+
+    def test_button_copies_without_final_newline(self):
+        """The copy button removes the final newline of the code block's text."""
+        self.assertIn(".textContent.replace(/\\n$/, '')", pr_status.COPY_BUTTON)
+
+
 class GenPushCommandsTest(unittest.TestCase):
     """Tests for gen_push_commands."""
 
     CHAIN = ("cd /base && \\", "git-push-to \\", "  pr1 \\", "  pr2 && \\", 'echo "success"')
     NO_CHAIN = ("cd /base && \\", 'echo "success"')
+    # The lines that end a section whose commands are CHAIN.
+    BLOCK = (*pr_status.copyable_code_block("sh", list(CHAIN)), "")
 
     def generate(self, commands, conflicts_only, notes=()):
         """Run gen_push_commands on the given commands.
 
         Args:
             commands: the commands' lines, either CHAIN or NO_CHAIN
-            conflicts_only: True to generate the "conflicting-push-commands" section; False
-                to generate the "push-commands" section
+            conflicts_only: True to generate the "Dependency chains with conflicts" section;
+                False to generate the "All dependency chains" section
             notes: the commands' notes, such as ["No working copy of upstream"]
 
         Returns:
@@ -929,7 +1332,7 @@ class GenPushCommandsTest(unittest.TestCase):
         lines = self.generate(self.CHAIN, conflicts_only=True)
         self.assertEqual(lines[:3], ["", "### Dependency chains with conflicts", ""])
         self.assertIn("`cd /base && resolve-conflicts`", lines[5])
-        self.assertEqual(lines[lines.index("```sh") :], ["```sh", *self.CHAIN, "```", ""])
+        self.assertEqual(lines[-len(self.BLOCK) :], list(self.BLOCK))
 
     def test_empty_without_chains(self):
         """With no chain and no note, either section is empty."""
@@ -956,10 +1359,7 @@ class GenPushCommandsTest(unittest.TestCase):
                 "",
                 "No working copy.",
                 "",
-                "```sh",
-                *self.CHAIN,
-                "```",
-                "",
+                *self.BLOCK,
             ],
         )
 
@@ -967,7 +1367,7 @@ class GenPushCommandsTest(unittest.TestCase):
         """The section of all chains does not suggest resolve-conflicts."""
         self.assertEqual(
             self.generate(self.CHAIN, conflicts_only=False),
-            ["", "### All dependency chains", "", "```sh", *self.CHAIN, "```", ""],
+            ["", "### All dependency chains", "", *self.BLOCK],
         )
 
 

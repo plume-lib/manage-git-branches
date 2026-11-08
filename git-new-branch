@@ -333,8 +333,8 @@ trap_branch_cleanup
 # Capture the top level first: under a POSIX `sh` (e.g., dash), `cd ""` succeeds
 # as a no-op, so testing `cd "$(...)"` directly would not catch an empty result.
 if ! TOPLEVEL="$(git rev-parse --show-toplevel 2> /dev/null)" || [ -z "${TOPLEVEL}" ]; then
-  echo "${SCRIPT_NAME}: Cannot determine top-level directory of git repository" >&2
-  git rev-parse --show-toplevel >&2
+  report_unusable_working_tree "${PWD}" '' 'Cannot determine top-level directory of git repository' \
+    || git rev-parse --show-toplevel >&2
   exit 1
 fi
 # ${TOPLEVEL} has every symbolic link resolved.  ${LOGICAL_TOPLEVEL} is the
