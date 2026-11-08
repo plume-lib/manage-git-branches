@@ -116,11 +116,13 @@ class UpdatedPrDescriptionTest(unittest.TestCase):
         repo = types.SimpleNamespace(
             gh="owner/repo", prs={1: {"body": "Land with #2."}, 2: {"body": ""}}
         )
+        direct = {1: {2}, 2: set()}
+        dependents = {1: set(), 2: {1}}
         model = types.SimpleNamespace(
             repo=repo,
             open={1, 2},
-            direct={1: {2}, 2: set()},
-            dependents={1: set(), 2: {1}},
+            landing_prerequisites=direct.__getitem__,
+            landing_dependents=dependents.__getitem__,
             unit={1: {1, 2}, 2: {1, 2}},
             external={1: [], 2: []},
         )
@@ -270,16 +272,24 @@ class ModelTest(unittest.TestCase):
     """Tests for Model."""
 
     @staticmethod
-    def raw_model(bodies, contains, gh="owner/repo"):
+    def raw_model(bodies, contains, gh="owner/repo", bases=None):
         """Build a model, without its graph, of open PRs.
 
-        The PRs have the given descriptions and branch containment.
+        The PRs have the given descriptions and branch containment.  bases maps a PR's
+        number to the number of the PR whose branch is its base branch; every other PR's
+        base branch is the default branch.
 
         Returns:
             The model.
         """
+        bases = bases or {}
         prs = {
-            n: {"body": body, "baseRefName": "master", "owner": "owner", "headRefName": f"b{n}"}
+            n: {
+                "body": body,
+                "baseRefName": f"b{bases[n]}" if n in bases else "master",
+                "owner": "owner",
+                "headRefName": f"b{n}",
+            }
             for n, body in bodies.items()
         }
         repo = types.SimpleNamespace(
@@ -296,15 +306,55 @@ class ModelTest(unittest.TestCase):
         )
         return pr_status.Model(repo, {"repos": {gh: {}}})
 
-    def model(self, bodies, contains):
+    def model(self, bodies, contains, bases=None):
         """Build a model of open PRs with the given descriptions and branch containment.
+
+        bases is as for raw_model.
 
         Returns:
             The model.
         """
-        model = self.raw_model(bodies, contains)
+        model = self.raw_model(bodies, contains, bases=bases)
         pr_status.unite_partners([model])
         return model
+
+    @staticmethod
+    def updated_bodies(model):
+        """Return the descriptions that description_updates would write.
+
+        Returns:
+            A map from each PR's number to its description after the update.
+        """
+        bodies = {n: model.repo.prs[n]["body"] for n in model.open}
+        for update in pr_status.description_updates([model]):
+            bodies[update.number] = update.body
+        return bodies
+
+    def test_stacked_pr_lands_after_base_pr(self):
+        """A PR whose base branch is another PR's branch lands after it, by default."""
+        model = self.model({1: "", 2: ""}, {(2, 1)}, bases={2: 1})
+        self.assertEqual(model.cyclic, [])
+        self.assertEqual(model.blocked(), [2])
+        self.assertEqual(self.updated_bodies(model), {1: "Land before #2.", 2: "Land after #1."})
+
+    def test_fix_within_base_branch_lands_before_base_pr(self):
+        """A stacked PR that says to land before its base PR is a fix within that branch."""
+        for bodies in (
+            {1: "", 2: "Land before #1.\n\nFix it."},
+            {1: "Land after #2.", 2: "Fix it."},
+            {1: "Land before #2.", 2: "Land before #1.\n\nFix it."},
+        ):
+            with self.subTest(bodies=bodies):
+                model = self.model(bodies, {(2, 1)}, bases={2: 1})
+                self.assertEqual(model.cyclic, [])
+                self.assertEqual(model.lands_into, {2: 1})
+                # The fix's branch is still updated from its base PR's branch.
+                self.assertEqual(model.direct[2], {1})
+                self.assertEqual(model.blocked(), [1])
+                self.assertEqual(
+                    self.updated_bodies(model),
+                    {1: "Land after #2.", 2: "Land before #1.\n\nFix it."},
+                )
 
     def test_containment_is_dependency(self):
         """A PR whose branch contains another's commits depends on it."""
@@ -987,7 +1037,7 @@ class DependencyDocumentTest(unittest.TestCase):
         )
         self.assertTrue(
             text.endswith(
-                " even if its branch contains another member's commits.\n\n"
+                " its branch is still updated from the other PR's branch, but it lands first.\n\n"
                 "## status\n\n## clusters\n\n## updating_branches\n\n"
                 "### conflicting commands only\n\n"
                 "### all commands\n\n"

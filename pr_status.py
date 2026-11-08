@@ -22,8 +22,10 @@ Each run:
   * reads the open PRs with gh,
   * runs pr-merge-analysis (cached) on them, for each repository,
   * computes the dependencies:  a PR depends on another if its description says
-    so, if its branch contains all of the other PR's non-merge commits, or if the
-    config says so; PRs that land together (possibly in different repositories) are one
+    so, if its base branch is the other PR's branch, if its branch contains all of the
+    other PR's non-merge commits, or if the config says so; a PR whose base branch is
+    another PR's branch, but that says to land before it, is a fix within that branch,
+    which lands first; PRs that land together (possibly in different repositories) are one
     unit, whose members depend on each other's prerequisites but not on each other,
   * warns about each cycle of dependencies, and omits from the generated push commands
     the PRs in a cycle and the PRs that depend on them,
@@ -955,12 +957,8 @@ class Model:
                 self.external[int(n)] = sorted(
                     set(self.external[int(n)]) | {e for e in refs if external_state(e) == "open"}
                 )
-        deps: defaultdict[int, set[int]] = defaultdict(set)
-        for n in open_prs:
-            deps[n] |= self.stated[n]
-            for m in self.stated_dependents[n]:
-                deps[m].add(n)
-        # A stacked PR depends on the PR whose branch is its base branch.
+        # A stacked PR depends on the PR whose branch is its base branch:  its branch is
+        # updated from that PR's branch.
         self.base_pr: dict[int, int] = {}
         by_head = {(pr["owner"].lower(), pr["headRefName"]): m for m, pr in repo.prs.items()}
         for n in open_prs:
@@ -968,8 +966,27 @@ class Model:
             if base != repo.default_branch:
                 m = by_head.get((repo.owner.lower(), base))
                 if m in open_prs:
-                    deps[n].add(m)
                     self.base_pr[n] = m
+        # A stacked PR is one of two kinds.  A fix after the base PR's branch, which the base
+        # PR enables, lands after the base PR.  A fix within the base PR's branch, which fixes
+        # a problem in it, lands into that branch before the base PR lands; its description
+        # says "Land before #M", or the base PR's description says "Land after #N".
+        # `lands_into` maps each fix within a branch to its base PR.  Its branch is still
+        # updated from the base PR's branch, so `deps` retains that edge; only the landing
+        # order (see `landing_prerequisites`) is reversed.
+        self.lands_into: dict[int, int] = {
+            n: m
+            for n, m in self.base_pr.items()
+            if m in self.stated_dependents[n] or n in self.stated[m]
+        }
+        deps: defaultdict[int, set[int]] = defaultdict(set)
+        for n in open_prs:
+            deps[n] |= {m for m in self.stated[n] if self.lands_into.get(m) != n}
+            for m in self.stated_dependents[n]:
+                if self.lands_into.get(n) != m:
+                    deps[m].add(n)
+        for n, m in self.base_pr.items():
+            deps[n].add(m)
         for a, b in repo.contains:
             if (
                 a in open_prs
@@ -1050,14 +1067,38 @@ class Model:
         """
         return bool(self.direct[n] or self.dependents[n])
 
-    def is_blocked(self, n: int) -> bool:
-        """Return whether PR n depends on another open PR.
+    def landing_prerequisites(self, n: int) -> set[int]:
+        """Return the open PRs in this repository that must land before PR n.
+
+        They are n's direct prerequisites, except that a fix within its base PR's branch (see
+        `lands_into`) lands before its base PR rather than after it.
 
         Returns:
-            True if PR n has a prerequisite, in this or another repository, or is in or after
-            a cycle of dependencies.
+            The numbers of the PRs that must land before PR n.
         """
-        return bool(self.direct[n] or self.external[n] or n in self.cycle_affected)
+        result = self.direct[n] - {self.lands_into.get(n)}
+        return result | {k for k, m in self.lands_into.items() if m == n}
+
+    def landing_dependents(self, n: int) -> set[int]:
+        """Return the open PRs in this repository that must land after PR n.
+
+        They are n's direct dependents, except that a fix within its base PR's branch (see
+        `lands_into`) lands before its base PR rather than after it.
+
+        Returns:
+            The numbers of the PRs that must land after PR n.
+        """
+        result = self.dependents[n] - {k for k, m in self.lands_into.items() if m == n}
+        return result | ({self.lands_into[n]} if n in self.lands_into else set())
+
+    def is_blocked(self, n: int) -> bool:
+        """Return whether PR n must wait for another open PR to land.
+
+        Returns:
+            True if PR n has a landing prerequisite, in this or another repository, or is in
+            or after a cycle of dependencies.
+        """
+        return bool(self.landing_prerequisites(n) or self.external[n] or n in self.cycle_affected)
 
     def unblocked(self) -> list[int]:
         """Return the PRs that depend on no other open PR.
@@ -1344,8 +1385,8 @@ def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
             updated = updated_pr_description(
                 body,
                 model.repo,
-                model.direct[n] - unit,
-                model.dependents[n] - unit,
+                model.landing_prerequisites(n) - unit,
+                model.landing_dependents(n) - unit,
                 model.external[n],
             )
             if updated != body:
@@ -1475,7 +1516,9 @@ def auto_notes(model: Model, n: int, master: bool = True) -> list[str]:
         notes.append("it is in a cycle of dependencies")
     elif n in model.cycle_affected:
         notes.append("it depends on a cycle of dependencies")
-    if n in model.base_pr:
+    if n in model.lands_into:
+        notes.append(f"it fixes, and lands into, {r.link(model.lands_into[n])}'s branch")
+    elif n in model.base_pr:
         notes.append(f"its base branch is {r.link(model.base_pr[n])}'s branch")
     landed = [c.number for c in model.stated_closed[n] if c.state == "landed"]
     if landed:
@@ -2054,7 +2097,7 @@ def unblocked_doc(
     for m in models:
         items = []
         for n in m.blocked():
-            on = [m.repo.link(d) for d in sorted(m.direct[n])] + [
+            on = [m.repo.link(d) for d in sorted(m.landing_prerequisites(n))] + [
                 external_link(e) for e in m.external[n]
             ]
             # In a cycle of dependencies, a PR can have no direct prerequisite.
@@ -2698,6 +2741,9 @@ def dependency_document(
             ' PRs that land together, as "Land with #N" says, are one unit,'
             " which may span repositories:  each member depends on every prerequisite of every"
             " member, and on no member, even if its branch contains another member's commits."
+            " A PR whose base branch is another PR's branch, and whose description says to land"
+            ' before that PR (as in "Land before #N"), is a fix within that branch:'
+            " its branch is still updated from the other PR's branch, but it lands first."
         ),
         "",
         *gen_status(models),
