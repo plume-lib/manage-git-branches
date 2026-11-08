@@ -2266,11 +2266,20 @@ working_tree_hooks() {
 
 ## Usage: untracked_files
 ## Prints, one per line, the files of the working tree that git does not track
-## and does not ignore.
+## and does not ignore.  Returns the exit status of `git ls-files`.
 untracked_files() {
   # As for `resolve_tracked` in `resolve_with_agent`, `-z` keeps git from
   # quoting a pathname, and a newline within a pathname becomes the byte 001.
-  git ls-files -z --others --exclude-standard | tr '\n\000' '\001\n'
+  # A pipeline's status is that of its last command, so fd 3 carries the
+  # status of git out of the command substitution, and fd 4 is the function's
+  # standard output.
+  {
+    untracked_files_status="$({ {
+      git ls-files -z --others --exclude-standard 3>&- 4>&-
+      echo "$?" >&3
+    } | tr '\n\000' '\001\n' >&4 3>&-; } 3>&1)"
+  } 4>&1
+  [ "${untracked_files_status}" = 0 ]
 }
 
 ## Usage: ignored_files
@@ -2327,7 +2336,10 @@ fix_failed_build() {
   fix_attempt=1
   fix_earlier=''
   while :; do
-    fix_untracked="$(untracked_files)"
+    if ! fix_untracked="$(untracked_files)"; then
+      echo "${SCRIPT_NAME}: cannot list the untracked files of $(pwd)" >&2
+      return 1
+    fi
     fix_ignored="$(ignored_files)"
     if [ "${fix_attempt}" -gt 1 ]; then
       fix_earlier="
@@ -2362,7 +2374,11 @@ $(tail -n 100 "${fix_log}")"
     fi
     # Stage the agent's changes:  to tracked files, and the files that it
     # created.  The changes of earlier attempts are already staged.
-    fix_new="$(untracked_files | grep -F -x -v -- "${fix_untracked}")"
+    if ! fix_now_untracked="$(untracked_files)"; then
+      echo "${SCRIPT_NAME}: cannot list the untracked files of $(pwd)" >&2
+      return 1
+    fi
+    fix_new="$(printf '%s\n' "${fix_now_untracked}" | grep -F -x -v -- "${fix_untracked}")"
     # A file that git ignores would not be committed, but the build could use
     # it.
     fix_new_ignored="$(ignored_files | grep -F -x -v -- "${fix_ignored}")"
