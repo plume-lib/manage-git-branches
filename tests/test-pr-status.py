@@ -457,15 +457,15 @@ class HighlightTest(unittest.TestCase):
             {("owner/repo", 1), ("other/repo", 5), ("other/repo", 6)},
         )
 
-    def test_selects_nested(self):
-        """The word "nested" selects the PR that starts each longest path of prerequisites."""
+    def test_selects_bottleneck(self):
+        """The word "bottleneck" selects the PR that starts each longest path of prerequisites."""
         models = self.models()
         self.assertEqual(
-            pr_status.highlight_selection(models, ["nested"]),
+            pr_status.highlight_selection(models, ["bottleneck"]),
             {("owner/repo", 2), ("other/repo", 6)},
         )
         self.assertEqual(
-            pr_status.highlight_selection(models, ["Nested,other/repo#7"]),
+            pr_status.highlight_selection(models, ["Bottleneck,other/repo#7"]),
             {("owner/repo", 2), ("other/repo", 6), ("other/repo", 7)},
         )
 
