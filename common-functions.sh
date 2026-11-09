@@ -905,7 +905,7 @@ upstream_default_branch() {
   upstream_default_branch_head="refs/remotes/${upstream_default_branch_remote}/HEAD"
   upstream_default_branch_ask=0
   if [ "$2" -eq 1 ]; then
-    if ! upstream_default_branch_git "${upstream_default_branch_batch}" \
+    if ! git_maybe_batch "${upstream_default_branch_batch}" \
       -c "remote.${upstream_default_branch_remote}.followRemoteHEAD=always" \
       fetch --quiet "${upstream_default_branch_remote}"; then
       echo "${SCRIPT_NAME}: problem fetching ${upstream_default_branch_remote}" >&2
@@ -918,7 +918,7 @@ upstream_default_branch() {
   if [ "${upstream_default_branch_ask}" -eq 1 ] \
     || ! upstream_default_branch_branch="$(git symbolic-ref --quiet "${upstream_default_branch_head}")" \
     || ! git rev-parse --verify --quiet "${upstream_default_branch_branch}" > /dev/null; then
-    if ! upstream_default_branch_git "${upstream_default_branch_batch}" remote set-head "${upstream_default_branch_remote}" --auto > /dev/null \
+    if ! git_maybe_batch "${upstream_default_branch_batch}" remote set-head "${upstream_default_branch_remote}" --auto > /dev/null \
       || ! upstream_default_branch_branch="$(git symbolic-ref --quiet "${upstream_default_branch_head}")"; then
       echo "${SCRIPT_NAME}: cannot determine the default branch of ${upstream_default_branch_remote}" >&2
       return 1
@@ -927,14 +927,14 @@ upstream_default_branch() {
   printf '%s\n' "${upstream_default_branch_branch}"
 }
 
-## Usage: upstream_default_branch_git BATCH GIT-ARGUMENT...
-## A helper for `upstream_default_branch` and `find_parent_ref`:  runs
-## `git GIT-ARGUMENT...` in the
-## current directory, under `git_batch_ssh` if BATCH is 1.
-upstream_default_branch_git() {
-  upstream_default_branch_git_batch="$1"
+## Usage: git_maybe_batch BATCH GIT-ARGUMENT...
+## Runs `git GIT-ARGUMENT...` in the current directory, under `git_batch_ssh`
+## if BATCH is 1, so that a command that contacts a remote fails rather than
+## prompts.
+git_maybe_batch() {
+  git_maybe_batch_flag="$1"
   shift
-  if [ "${upstream_default_branch_git_batch}" -eq 1 ]; then
+  if [ "${git_maybe_batch_flag}" -eq 1 ]; then
     git_batch_ssh . "$@"
   else
     git "$@"
@@ -979,7 +979,7 @@ find_upstream_ref() {
   find_parent_ref "$1" "${2:-0}"
   case "$?" in
     0) return 0 ;;
-    2) upstream_ref="$(upstream_default_branch "${upstream_source}" "$1" "${2:-0}")" ;;
+    2 | 3) upstream_ref="$(upstream_default_branch "${upstream_source}" "$1" "${2:-0}")" ;;
     *) return 1 ;;
   esac
 }
@@ -989,9 +989,14 @@ find_upstream_ref() {
 ## upstream repository is another repository than the remote that
 ## `upstream_remote` chooses, as `find_upstream_ref` describes.  Otherwise,
 ## sets ${upstream_source} to the remote that `upstream_remote` chooses and
-## ${upstream_is_parent} to 0, and returns 2, without fetching that remote.
+## ${upstream_is_parent} to 0, without fetching that remote, and returns:
+##  * 2 if the upstream repository is that remote.
+##  * 3, after printing a diagnostic, if the upstream repository might be
+##    another one but its default branch is not available:  GitHub cannot be
+##    asked which repository it is, or its URL cannot be fetched, or FETCH is
+##    0 and no earlier call fetched it.
 ## FETCH and BATCH are as for `find_upstream_ref`.  Returns 1, after printing
-## a diagnostic, on failure.
+## a diagnostic, on any other failure.
 # shellcheck disable=SC2034 # set for the caller
 find_parent_ref() {
   upstream_is_parent=0
@@ -1024,7 +1029,9 @@ find_parent_ref() {
         fur_parent="${gh_resolved_value}"
       fi
     elif [ -n "${fur_fork}" ]; then
-      fork_upstream "${fur_fork}" "$1"
+      if ! fork_upstream "${fur_fork}" "$1"; then
+        return 3
+      fi
       fur_parent="${fork_upstream_repo}"
     fi
     if [ -n "${fur_parent}" ] \
@@ -1052,7 +1059,7 @@ find_parent_ref() {
         if [ "$1" -eq 1 ]; then
           # Without `--no-tags`, the fetch would also create a local tag for
           # each of the URL's tags that points into the fetched history.
-          if upstream_default_branch_git "${2:-0}" \
+          if git_maybe_batch "${2:-0}" \
             fetch --quiet --no-tags "${fur_parent_url}" "+HEAD:${fur_ref}"; then
             upstream_ref="${fur_ref}"
             upstream_source="${fur_parent_url}"
@@ -1060,6 +1067,7 @@ find_parent_ref() {
             return 0
           fi
           echo "${SCRIPT_NAME}: cannot fetch ${fur_parent_url}, the upstream repository of ${fur_fork}; using ${upstream_source} instead" >&2
+          return 3
         elif git rev-parse --verify --quiet "${fur_ref}" > /dev/null; then
           upstream_ref="${fur_ref}"
           upstream_source="${fur_parent_url}"
@@ -1067,6 +1075,7 @@ find_parent_ref() {
           return 0
         else
           echo "${SCRIPT_NAME}: ${fur_parent_url}, the upstream repository of ${fur_fork}, has not been fetched; using ${upstream_source} instead" >&2
+          return 3
         fi
       fi
     fi
@@ -1087,8 +1096,8 @@ find_parent_ref() {
 ## to override this function's choice, uses its value.  Otherwise, if FETCH
 ## is 1, asks GitHub and records the answer.  GitHub is not asked if `gh` is
 ## not installed or has no token for github.com, as when no user has logged
-## in with `gh auth login`.  If asking GitHub fails, prints a diagnostic and
-## records nothing.
+## in with `gh auth login`.  Returns 1, after printing a diagnostic and
+## recording nothing, if asking GitHub fails.
 fork_upstream() {
   fork_upstream_repo=''
   fork_upstream_key="github-fork.$(lowercase "$1").upstream"
@@ -1103,8 +1112,8 @@ fork_upstream() {
     return 0
   fi
   if ! github_upstream "$1"; then
-    echo "${SCRIPT_NAME}: to compare with $1 without asking GitHub again, run:  git config ${fork_upstream_key} none" >&2
-    return 0
+    echo "${SCRIPT_NAME}: to treat $1 as its own upstream repository without asking GitHub again, run:  git config ${fork_upstream_key} none" >&2
+    return 1
   fi
   if [ "$(lowercase "${github_upstream_repo}")" = "$(lowercase "$1")" ]; then
     git config "${fork_upstream_key}" none

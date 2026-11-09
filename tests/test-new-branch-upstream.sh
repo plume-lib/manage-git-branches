@@ -323,15 +323,17 @@ if [ "$(git -C "${work}/proj14-branch-tagged" rev-parse HEAD)" != "$(git -C "${u
 fi
 
 # A clone whose upstream repository is the remote that `git pull` fetched
-# does not fetch it again.  A missing `origin/HEAD`, which its fetch would
-# create, shows whether it did.  `followRemoteHEAD` keeps the pull from
-# creating it; the fetch of the upstream repository overrides that setting.
+# does not fetch it again.  An `origin/HEAD` set by hand to another branch,
+# which its fetch would reset to `origin/main`, shows whether it did.
+# `followRemoteHEAD` keeps the pull from resetting it; the fetch of the
+# upstream repository overrides that setting.
 clone15="${work}/proj15"
 git clone -q "${upstream}" "${clone15}"
-git -C "${clone15}" remote set-head origin -d
+git -C "${clone15}" update-ref refs/remotes/origin/other HEAD
+git -C "${clone15}" remote set-head origin other > /dev/null
 git -C "${clone15}" config remote.origin.followRemoteHEAD never
 run_new_branch "${clone15}" --clean onefetch
-if git -C "${clone15}" symbolic-ref --quiet refs/remotes/origin/HEAD > /dev/null; then
+if [ "$(git -C "${clone15}" symbolic-ref --quiet refs/remotes/origin/HEAD)" != refs/remotes/origin/other ]; then
   fail "git-new-branch fetched origin again after the pull"
 fi
 
@@ -555,6 +557,21 @@ case "${out}" in
   *"fast-forwarded ${gh_clone} to https://github.com/someone/proj.git, the upstream repository's default branch"*) ;;
   *) fail "fork: no message about the fast-forward: ${out}" ;;
 esac
+
+# A missing `origin/HEAD`, as in a clone made by `git remote add` and
+# `git fetch`, does not keep the new branch from the parent's default branch.
+# `followRemoteHEAD` keeps the pull from creating it.
+commit_file "${gh_seed}" file.txt 'parent 2a' || exit 1
+git -C "${gh_seed}" push -q origin main || exit 1
+parent_head="$(git -C "${gh_seed}" rev-parse HEAD)"
+git -C "${gh_clone}" remote set-head origin -d
+git -C "${gh_clone}" config remote.origin.followRemoteHEAD never
+run_new_branch "${gh_clone}" --clean gh-no-origin-head
+newdir="${work}/ghproj-branch-gh-no-origin-head"
+if [ "$(git -C "${newdir}" rev-parse HEAD)" != "${parent_head}" ]; then
+  fail "fork with no origin/HEAD: the new branch is not at the parent's default branch: ${out}"
+fi
+git -C "${gh_clone}" config --unset remote.origin.followRemoteHEAD
 
 # A remote of another name for the parent is used.
 commit_file "${gh_seed}" file.txt 'parent 3' || exit 1

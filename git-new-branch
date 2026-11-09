@@ -669,10 +669,26 @@ fi
 # the condition above that the current branch has the default branch's name
 # does not apply.  If the clone has no remote for the parent, the parent's
 # default branch is fetched from its URL into `refs/fork-upstream/org/proj`,
-# and ${UPSTREAM_NAME} is that URL.  The fetch runs whether or not the pull
-# succeeded, because the pull did not contact the parent.  The parent is not
-# consulted for any other branch, so that a pull request's branch costs no
-# query of GitHub.
+# and ${UPSTREAM_NAME} is that URL.  The pull did not contact the parent, so
+# the parent is fetched even if the pull succeeded.  If the pull failed, the
+# parent is not fetched and GitHub is not asked, because the pull might have
+# failed for lack of network access, which would make each of them fail too,
+# after the same wait; then only a parent that an earlier run found and
+# fetched is used.  The parent is not consulted for any other branch, so that
+# a pull request's branch costs no query of GitHub.  A fork that an
+# organization owns, such as a downstream fork, is its own upstream
+# repository (see `github_upstream`), so its parent is never fetched.  So is
+# a fork ME/PROJ for which the configuration variable
+# `github-fork.me/proj.upstream` is "none" (see `fork_upstream`), as a
+# downstream fork that a user owns can be configured.
+#
+# Whether the current branch is the remote's default branch is determined by
+# `REMOTE/HEAD`.  If that does not exist or names a branch that does not
+# exist, as in a clone made by `git remote add` and `git fetch`, and the pull
+# succeeded, it is set by asking the remote.  A `REMOTE/HEAD` that names
+# another existing branch, as one does after the remote renames its default
+# branch, is used as is, because asking the remote to confirm it would cost
+# a pull request's branch a connection; `git-pull-upstream` corrects it.
 #
 # Otherwise, the upstream repository is the remote that `upstream_remote`
 # chooses.  This fetches it and updates `REMOTE/HEAD`, which names its
@@ -708,22 +724,27 @@ find_upstream_commit() {
   fi
   fuc_cannot_fetch="${SCRIPT_NAME}: warning: cannot fetch the upstream repository's default branch, so the new branch cannot start at its latest commit; continuing."
   fuc_same_name="refs/remotes/${UPSTREAM_REMOTE}/${fuc_branch}"
-  fuc_known="$(git symbolic-ref --quiet "refs/remotes/${UPSTREAM_REMOTE}/HEAD")"
+  # True (1) if the current branch pulls from the remote that `upstream_remote`
+  # chose.
+  fuc_pulls_upstream=0
+  if [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ]; then
+    fuc_pulls_upstream=1
+  fi
+  if [ "${fuc_pulls_upstream}" -eq 1 ] && [ "${PULL_SUCCEEDED}" -eq 1 ]; then
+    fuc_known="$(upstream_default_branch "${UPSTREAM_REMOTE}" 0 1)" || fuc_known=''
+  else
+    fuc_known="$(git symbolic-ref --quiet "refs/remotes/${UPSTREAM_REMOTE}/HEAD")"
+  fi
   # The current branch is the default branch of the remote that
   # `upstream_remote` chose.  If that remote is a fork, the new branch starts
   # at the fork's parent's default branch.
   fuc_parent=0
-  if [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ] \
-    && [ "${fuc_known}" = "${fuc_same_name}" ]; then
-    find_parent_ref 1 1
+  if [ "${fuc_pulls_upstream}" -eq 1 ] && [ "${fuc_known}" = "${fuc_same_name}" ]; then
+    find_parent_ref "${PULL_SUCCEEDED}" 1
     case "$?" in
       0)
         fuc_parent=1
         UPSTREAM_REF="${upstream_ref}"
-        case "${UPSTREAM_REF}" in
-          refs/remotes/*) UPSTREAM_NAME="${UPSTREAM_REF#refs/remotes/}" ;;
-          *) UPSTREAM_NAME="${upstream_source}" ;;
-        esac
         ;;
       2) ;;
       *)
@@ -734,7 +755,7 @@ find_upstream_commit() {
   fi
   if [ "${fuc_parent}" -eq 0 ]; then
     fuc_fetch=1
-    if [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ]; then
+    if [ "${fuc_pulls_upstream}" -eq 1 ]; then
       if [ "${PULL_SUCCEEDED}" -eq 1 ]; then
         return
       fi
@@ -753,8 +774,13 @@ find_upstream_commit() {
     if [ "${UPSTREAM_REF}" != "${fuc_same_name}" ]; then
       return
     fi
-    UPSTREAM_NAME="${UPSTREAM_REF#refs/remotes/}"
   fi
+  # Only a fork's parent fetched from its URL has a ref outside
+  # `refs/remotes/`.
+  case "${UPSTREAM_REF}" in
+    refs/remotes/*) UPSTREAM_NAME="${UPSTREAM_REF#refs/remotes/}" ;;
+    *) UPSTREAM_NAME="${upstream_source}" ;;
+  esac
   if ! fuc_commit="$(git rev-parse --verify --quiet "${UPSTREAM_REF}^{commit}")"; then
     echo "${fuc_cannot_fetch}" >&2
     return
