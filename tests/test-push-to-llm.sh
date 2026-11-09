@@ -366,34 +366,43 @@ push_to() {
   fi
 }
 
-## Usage: check_resolved AGENT DESCRIPTION
+## Usage: check_resolved AGENT DESCRIPTION [LINE...]
 ## Checks that AGENT, and only it, resolved the conflicts, and that the merge
 ## was committed and pushed.  If AGENT is empty, checks that no agent ran.
+## Checks that the merge's file.txt consists of the LINEs, which are by
+## default those of keeping both sides' changes in the case that
+## `setup_case` created.
 check_resolved() {
+  check_resolved_agent="$1"
+  check_resolved_description="$2"
+  shift 2
+  if [ "$#" -eq 0 ]; then
+    set -- ONE two three four five six SEVEN-feature SEVEN-main eight nine
+  fi
   if [ "${push_status}" -ne 0 ]; then
-    fail "$2: git-push-to failed: ${push_output}"
+    fail "${check_resolved_description}: git-push-to failed: ${push_output}"
   fi
-  if [ "$(cat "${STUB_LOG}")" != "$1" ]; then
-    fail "$2: expected only $1 to run, but ran: $(cat "${STUB_LOG}")"
+  if [ "$(cat "${STUB_LOG}")" != "${check_resolved_agent}" ]; then
+    fail "${check_resolved_description}: expected only ${check_resolved_agent} to run, but ran: $(cat "${STUB_LOG}")"
   fi
-  if [ -n "$1" ] && ! grep -q 'file.txt' "${STUB_PROMPT}"; then
-    fail "$2: the instructions do not name the conflicted file"
+  if [ -n "${check_resolved_agent}" ] && ! grep -q 'file.txt' "${STUB_PROMPT}"; then
+    fail "${check_resolved_description}: the instructions do not name the conflicted file"
   fi
   remote_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
   if [ "${remote_head}" != "$(git -C "${feature_dir}" rev-parse HEAD)" ]; then
-    fail "$2: the merge was not pushed"
+    fail "${check_resolved_description}: the merge was not pushed"
   fi
   if [ "$(git -C "${remote}" rev-parse "${remote_head}^1")" != "${feature_head}" ] \
     || [ "$(git -C "${remote}" rev-parse "${remote_head}^2")" != "$(git -C "${main_dir}" rev-parse HEAD)" ]; then
-    fail "$2: the pushed commit is not the merge of main into feature"
+    fail "${check_resolved_description}: the pushed commit is not the merge of main into feature"
   fi
-  expected="$(printf '%s\n' ONE two three four five six SEVEN-feature SEVEN-main eight nine)"
+  expected="$(printf '%s\n' "$@")"
   if [ "$(git -C "${remote}" show "${remote_head}:file.txt")" != "${expected}" ]; then
-    fail "$2: wrong merge result: $(git -C "${remote}" show "${remote_head}:file.txt")"
+    fail "${check_resolved_description}: wrong merge result: $(git -C "${remote}" show "${remote_head}:file.txt")"
   fi
   message="$(git -C "${remote}" log -1 --format=%B "${remote_head}")"
   if [ "${message}" != "Merge branch 'main' into feature" ]; then
-    fail "$2: wrong merge message: ${message}"
+    fail "${check_resolved_description}: wrong merge message: ${message}"
   fi
 }
 
@@ -1245,31 +1254,34 @@ if [ -s "${STUB_LOG}" ]; then
   fail "marker-like line: an agent ran: $(cat "${STUB_LOG}")"
 fi
 
-## Usage: setup_criss_cross [MARKER]
+## Usage: setup_criss_cross [SHARED [MARKER]]
 ## Makes the merge of main into feature, in the case that `setup_case` just
 ## created, a criss-cross merge whose merge bases are the heads of main and
-## feature before this function ran:  main merges feature, and feature
+## feature before the criss-cross merges:  main merges feature, and feature
 ## merges main's earlier head, each resolving the conflict in file.txt in
 ## its own way.  Git's merge of the two merge bases conflicts in file.txt,
 ## so the merge base that git makes of them contains conflict markers.  If
-## MARKER is given, feature first appends the line MARKER to file.txt, and
-## both merges remove it, so that only a merge base's version of file.txt
-## contains it.  Sets ${feature_head}.
+## SHARED is not empty, each merge resolves the conflict as the line SHARED
+## followed by a line of its own, so that both sides delete the first marker
+## of git's conflict in the same way.  If MARKER is given, feature first
+## appends the line MARKER to file.txt, and both merges remove it, so that
+## only a merge base's version of file.txt contains it.  Sets
+## ${feature_head}.
 setup_criss_cross() {
-  if [ -n "${1-}" ]; then
-    printf '%s\n' "$1" >> "${feature_dir}/file.txt"
+  if [ -n "${2-}" ]; then
+    printf '%s\n' "$2" >> "${feature_dir}/file.txt"
     git -C "${feature_dir}" commit -q -a -m "Add a line"
     git -C "${feature_dir}" push -q
   fi
   scc_main_head="$(git -C "${main_dir}" rev-parse HEAD)"
   git -C "${main_dir}" fetch -q origin
   git -C "${main_dir}" merge -q origin/feature > /dev/null 2>&1 || true
-  write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-both-main eight nine
+  write_file "${main_dir}/file.txt" ONE two three four five six ${1:+"$1"} SEVEN-both-main eight nine
   git -C "${main_dir}" commit -q -a --no-edit
   git -C "${main_dir}" push -q
   git -C "${feature_dir}" fetch -q origin
   git -C "${feature_dir}" merge -q "${scc_main_head}" > /dev/null 2>&1 || true
-  write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-both-feature eight nine
+  write_file "${feature_dir}/file.txt" ONE two three four five six ${1:+"$1"} SEVEN-both-feature eight nine
   git -C "${feature_dir}" commit -q -a --no-edit
   git -C "${feature_dir}" push -q
   feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
@@ -1278,33 +1290,64 @@ setup_criss_cross() {
   fi
 }
 
+## Usage: check_no_outside_notice DESCRIPTION
+## Checks that git-push-to did not report that the agent changed text
+## outside the conflict regions.
+check_no_outside_notice() {
+  case "${push_output}" in
+    *"changed text outside the conflict regions"*)
+      fail "$1: a false notice of a change outside the conflict regions: ${push_output}"
+      ;;
+  esac
+}
+
 ## A criss-cross merge is resolved by the agent, although the merge base that
 ## git makes contains conflict markers, which git wrote.
 setup_case criss-cross
 git -C "${feature_dir}" config merge.conflictStyle diff3
 setup_criss_cross
 push_to good --llm
-if [ "${push_status}" -ne 0 ]; then
-  fail "criss-cross: git-push-to failed: ${push_output}"
-fi
-if [ "$(cat "${STUB_LOG}")" != claude ]; then
-  fail "criss-cross: expected only claude to run, but ran: $(cat "${STUB_LOG}")"
-fi
-remote_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
-if [ "$(git -C "${remote}" rev-parse "${remote_head}^1")" != "${feature_head}" ] \
-  || [ "$(git -C "${remote}" rev-parse "${remote_head}^2")" != "$(git -C "${main_dir}" rev-parse HEAD)" ]; then
-  fail "criss-cross: the pushed commit is not the merge of main into feature"
-fi
-expected="$(printf '%s\n' ONE two three four five six SEVEN-both-feature SEVEN-both-main eight nine)"
-if [ "$(git -C "${remote}" show "${remote_head}:file.txt")" != "${expected}" ]; then
-  fail "criss-cross: wrong merge result: $(git -C "${remote}" show "${remote_head}:file.txt")"
-fi
+check_resolved claude "criss-cross" \
+  ONE two three four five six SEVEN-both-feature SEVEN-both-main eight nine
+check_no_outside_notice "criss-cross"
+
+## A criss-cross merge in which both sides delete the first of git's conflict
+## markers in the merge base in the same way, so that the merge base's text in
+## the conflict region contains the rest of git's markers, unbalanced, is
+## resolved by the agent in each conflict style.
+for criss_cross_style in diff3 zdiff3 merge; do
+  setup_case "criss-cross-shared-${criss_cross_style}"
+  git -C "${feature_dir}" config merge.conflictStyle "${criss_cross_style}"
+  setup_criss_cross SEVEN-main
+  push_to good --llm
+  check_resolved claude "criss-cross-shared-${criss_cross_style}" \
+    ONE two three four five six SEVEN-main SEVEN-both-feature SEVEN-both-main eight nine
+  check_no_outside_notice "criss-cross-shared-${criss_cross_style}"
+done
+
+## `git rerere` resolves such a criss-cross merge, and the check of its
+## resolution accepts it.
+setup_case criss-cross-rerere
+git -C "${feature_dir}" config merge.conflictStyle diff3
+git -C "${feature_dir}" config rerere.enabled true
+setup_criss_cross SEVEN-main
+push_to none --llm
+: > "${STUB_LOG}"
+git -C "${feature_dir}" worktree add -q --detach "${case_dir}/other" "${feature_head}"
+git -C "${case_dir}/other" merge -q "$(git -C "${feature_dir}" rev-parse MERGE_HEAD)" > /dev/null 2>&1 || true
+write_file "${case_dir}/other/file.txt" \
+  ONE two three four five six SEVEN-main SEVEN-both-feature SEVEN-both-main eight nine
+git -C "${case_dir}/other" add file.txt
+git -C "${case_dir}/other" commit -q --no-edit > /dev/null 2>&1
+push_to good --no-llm
+check_resolved "" "criss-cross-rerere" \
+  ONE two three four five six SEVEN-main SEVEN-both-feature SEVEN-both-main eight nine
 
 ## A criss-cross merge is refused if a merge base's own version of a
 ## conflicted file contains a line that looks like a conflict marker.
 setup_case criss-cross-marker
 git -C "${feature_dir}" config merge.conflictStyle diff3
-setup_criss_cross '>>>>>>> fixture'
+setup_criss_cross '' '>>>>>>> fixture'
 push_to good --llm
 check_not_resolved "criss-cross-marker"
 case "${push_output}" in
@@ -1313,6 +1356,54 @@ case "${push_output}" in
 esac
 if [ -s "${STUB_LOG}" ]; then
   fail "criss-cross-marker: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## A criss-cross merge is refused if the merge bases' own merge base contains
+## a line that looks like a conflict marker, which the merge base that git
+## makes contains although neither merge base does.  The merge bases' merge
+## base ends with that line, and each merge base replaces it with a line of
+## its own.
+setup_case criss-cross-deep-marker
+git -C "${feature_dir}" config merge.conflictStyle diff3
+printf '%s\n' '>>>>>>> fixture' >> "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Add a line"
+git -C "${feature_dir}" push -q
+git -C "${main_dir}" fetch -q origin
+git -C "${main_dir}" merge -q origin/feature > /dev/null 2>&1 || true
+write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine '>>>>>>> fixture'
+git -C "${main_dir}" commit -q -a --no-edit
+git -C "${main_dir}" push -q
+git -C "${feature_dir}" fetch -q origin
+git -C "${feature_dir}" merge -q --ff-only origin/main
+write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine end-main
+git -C "${main_dir}" commit -q -a -m "End main"
+git -C "${main_dir}" push -q
+write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine end-feature
+git -C "${feature_dir}" commit -q -a -m "End feature"
+git -C "${feature_dir}" push -q
+criss_cross_main_head="$(git -C "${main_dir}" rev-parse HEAD)"
+git -C "${main_dir}" fetch -q origin
+git -C "${main_dir}" merge -q origin/feature > /dev/null 2>&1 || true
+write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine end-both-main
+git -C "${main_dir}" commit -q -a --no-edit
+git -C "${main_dir}" push -q
+git -C "${feature_dir}" fetch -q origin
+git -C "${feature_dir}" merge -q "${criss_cross_main_head}" > /dev/null 2>&1 || true
+write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine end-both-feature
+git -C "${feature_dir}" commit -q -a --no-edit
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+if [ "$(git -C "${feature_dir}" merge-base --all HEAD origin/main | grep -c .)" -ne 2 ]; then
+  fail "criss-cross-deep-marker: the merge does not have two merge bases"
+fi
+push_to good --llm
+check_not_resolved "criss-cross-deep-marker"
+case "${push_output}" in
+  *"file.txt contains lines that look like conflict markers"*) ;;
+  *) fail "criss-cross-deep-marker: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "criss-cross-deep-marker: an agent ran: $(cat "${STUB_LOG}")"
 fi
 
 ## A remaining separator is rejected.

@@ -1,5 +1,5 @@
 # Usage: CCR_FILE=FILE CCR_SCRIPT_NAME=NAME CCR_RESOLVED_ENDS_WITH_NEWLINE=yes|no \
-#          CCR_CONTAINS_SEPARATOR=yes|no \
+#          CCR_CONTAINS_SEPARATOR=yes|no CCR_MARKER_SIZE=N \
 #          awk -f check-conflict-resolution.awk MERGED RESOLVED
 #
 # Checks the resolution of the conflicts in a file.  Exits with status
@@ -23,6 +23,17 @@
 # git writes more than 7 for a file whose attribute `conflict-marker-size`
 # is larger.
 #
+# A conflict region of MERGED starts with a line of exactly
+# CCR_MARKER_SIZE "<", such as "<<<<<<< HEAD", and ends with the next line
+# of exactly CCR_MARKER_SIZE ">", such as ">>>>>>> main".  A longer marker
+# line within a region is part of the region's text.  Git writes such lines
+# in the merge base's text when the merge has several merge bases, as after
+# criss-cross merges:  it merges the merge bases into one, and marks that
+# merge's conflicts with longer markers, such as
+# "<<<<<<<<< Temporary merge branch 1".  Those longer markers need not be
+# balanced, because a side can delete one of them as the other side does,
+# which git merges cleanly.
+#
 # If CCR_MARKERS_ONLY is "yes", the program instead checks only that RESOLVED
 # contains no conflict marker line that MERGED lacks:  each conflict marker
 # line of RESOLVED must be matched by an identical line of MERGED, a
@@ -43,6 +54,11 @@
 #   CCR_MARKERS_ONLY                "yes" to check only for conflict
 #                                   markers, as described above; else unset
 #                                   or "no"
+#   CCR_MARKER_SIZE                 the length of the conflict markers that
+#                                   git wrote in MERGED, such as 7 for
+#                                   "<<<<<<<":  the value of the file's
+#                                   attribute `conflict-marker-size`, if it
+#                                   has one; 7 if unset
 #
 # `check_conflict_resolution`, in common-functions.sh, runs this program.  It
 # passes the file in AUTO_MERGE, git's automatic merge, as MERGED; and it passes
@@ -54,13 +70,34 @@ function problem(message) {
   status = 1
 }
 
+BEGIN {
+  marker_size = ENVIRON["CCR_MARKER_SIZE"]
+  if (marker_size !~ /^[1-9][0-9]*$/) marker_size = 7
+  # A conflict marker has at least min_size characters, which is fewer than 7
+  # only if the file's markers are shorter.
+  min_size = marker_size < 7 ? marker_size : 7
+  # Matches a line that starts or ends a conflict region of MERGED.
+  region_start_regex = "^" repeat("<", marker_size) "( |\r?$)"
+  region_end_regex = "^" repeat(">", marker_size) "( |\r?$)"
+  # Matches a conflict marker other than a separator line.
+  marker_regex = "^(" repeat("<", min_size) "<*|" repeat("[|]", min_size) "[|]*|" \
+    repeat(">", min_size) ">*)( |\r?$)"
+}
+
+# Returns the string S repeated N times.
+function repeat(s, n,   result) {
+  result = ""
+  while (n-- > 0) result = result s
+  return result
+}
+
 # Returns 1 if LINE is a conflict marker:  a line that starts with 7 or more
-# "<", "|", or ">" followed by a blank or by the end of the line, or a
-# separator line unless CCR_CONTAINS_SEPARATOR is "yes".  A line in a file
-# with CRLF line endings ends with "\r".
+# "<", "|", or ">" (or CCR_MARKER_SIZE or more, if that is smaller) followed
+# by a blank or by the end of the line, or a separator line unless
+# CCR_CONTAINS_SEPARATOR is "yes".  A line in a file with CRLF line endings
+# ends with "\r".
 function is_marker(line) {
-  return line ~ /^<<<<<<<+( |\r?$)/ || line ~ /^[|][|][|][|][|][|][|]+( |\r?$)/ \
-    || line ~ /^>>>>>>>+( |\r?$)/ \
+  return line ~ marker_regex \
     || (ENVIRON["CCR_CONTAINS_SEPARATOR"] != "yes" && line ~ /^=======+\r?$/)
 }
 
@@ -118,21 +155,19 @@ END {
   # the regions.
   num_regions = 0
   block_start[0] = 1
-  depth = 0
+  in_region = 0
   for (i = 1; i <= num_a; i++) {
-    if (a[i] ~ /^<<<<<<<+( |\r?$)/) {
-      if (depth == 0) {
-        block_len[num_regions] = i - block_start[num_regions]
-        num_regions++
-      }
-      depth++
-    } else if (depth > 0 && a[i] ~ /^>>>>>>>+( |\r?$)/) {
-      depth--
-      if (depth == 0) block_start[num_regions] = i + 1
+    if (!in_region && a[i] ~ region_start_regex) {
+      block_len[num_regions] = i - block_start[num_regions]
+      num_regions++
+      in_region = 1
+    } else if (in_region && a[i] ~ region_end_regex) {
+      in_region = 0
+      block_start[num_regions] = i + 1
     }
   }
 
-  if (depth != 0) { problem("the merged file has an unterminated conflict region"); exit 1 }
+  if (in_region) { problem("the merged file has an unterminated conflict region"); exit 1 }
   if (num_regions == 0) { problem("the merged file has no conflict markers"); exit 1 }
   block_len[num_regions] = num_a + 1 - block_start[num_regions]
 

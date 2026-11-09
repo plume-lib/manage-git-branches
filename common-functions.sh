@@ -1201,13 +1201,28 @@ check_conflict_resolution() {
     check_conflict_ends_with_newline=no
   fi
 
+  check_conflict_marker_size="$(conflict_marker_size "$1")"
   {
     git cat-file --filters "AUTO_MERGE:$1"
     echo
   } | CCR_FILE="$1" CCR_SCRIPT_NAME="${SCRIPT_NAME}" \
     CCR_RESOLVED_ENDS_WITH_NEWLINE="${check_conflict_ends_with_newline}" \
-    CCR_CONTAINS_SEPARATOR="$2" \
+    CCR_CONTAINS_SEPARATOR="$2" CCR_MARKER_SIZE="${check_conflict_marker_size}" \
     awk -f "${SCRIPT_DIR}/check-conflict-resolution.awk" - "./$1"
+}
+
+## Usage: conflict_marker_size FILE
+## Prints the length of the conflict markers that git writes in FILE, a
+## pathname relative to the current directory, such as 7 for "<<<<<<<":  the
+## value of FILE's attribute `conflict-marker-size`, or 7 if FILE has no
+## such attribute or its value is not a positive integer.
+conflict_marker_size() {
+  # `-z` keeps git from quoting the pathname; the value is the last field.
+  cms_value="$(git check-attr -z conflict-marker-size -- "$1" | tr '\000' '\n' | tail -n 1)"
+  case "${cms_value}" in
+    '' | *[!0-9]* | 0*) echo 7 ;;
+    *) printf '%s\n' "${cms_value}" ;;
+  esac
 }
 
 ## Usage: ends_with_newline
@@ -1241,10 +1256,9 @@ ends_with_newline() {
 ## contains conflict markers.  For any other conflict, such as a file that one
 ## side modified and the other deleted, no check could tell whether the agent
 ## chose well.  Also refused are a file whose versions contain lines that look
-## like conflict markers, other than the markers that git puts in the merge
-## of several merge bases (see `base_markers_from_git`), and a working tree
-## with changes other than the conflicted files, which would be committed
-## with them.
+## like conflict markers, other than the longer markers that git puts in the
+## merge of several merge bases, and a working tree with changes other than
+## the conflicted files, which would be committed with them.
 resolve_merge_conflicts() {
   resolve_with="$1"
   resolve_commit="$2"
@@ -1282,10 +1296,6 @@ resolve_merge_conflicts() {
       return 1
       ;;
   esac
-  # The merge bases of HEAD and MERGE_HEAD, one per line, such as
-  # "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"; `base_markers_from_git`
-  # reads them.
-  resolve_merge_bases="$(git merge-base --all HEAD MERGE_HEAD)" || resolve_merge_bases=''
   # Any other change would be blamed on the agent below, or committed.
   resolve_other="$(resolve_other_changes)"
   if [ -n "${resolve_other}" ]; then
@@ -1307,20 +1317,38 @@ resolve_merge_conflicts() {
   # before or after a rename.  The merge base matters too, because a merge
   # with `merge.conflictStyle` "diff3" puts its text in the conflict regions.
   # With several merge bases, as after criss-cross merges, stage 1 is their
-  # merge, which can itself contain conflict markers; the file is refused
-  # only if a merge base's own version has such lines (see
-  # `base_markers_from_git`).  A line of 7 or more
-  # "=", such as "=======", in HEAD's or MERGE_HEAD's version is content, so
-  # `check_conflict_resolution` and `check_conflict_markers` permit such a
-  # line in the resolution.  (Git writes a separator of more than 7 "=" for a
-  # file whose attribute `conflict-marker-size` is larger.)
+  # merge, which can itself contain conflict markers.  Git makes those
+  # markers longer than the file's own, such as
+  # "<<<<<<<<< Temporary merge branch 1", and check-conflict-resolution.awk
+  # takes such a line in a conflict region for part of the region's text.
+  # A resolution keeps none of them, because neither side contains one.  So
+  # in stage 1, only a line that starts with a marker of the file's own
+  # length (see `conflict_marker_size`) makes the file refused.  The
+  # merge of the merge bases also copies in text from their own merge base,
+  # a deeper ancestor, so that check covers that text too.  A line of 7 or
+  # more "=", such as "=======", in HEAD's or MERGE_HEAD's version is
+  # content, so `check_conflict_resolution` and `check_conflict_markers`
+  # permit such a line in the resolution.  (Git writes a separator of more
+  # than 7 "=" for a file whose attribute `conflict-marker-size` is larger.)
   #
   # For one stage, the awk program prints "marker" if a line looks like a
   # conflict marker, or else "separator" if a line consists of 7 or more "=".
-  # Its pattern is looser than that of check-conflict-resolution.awk, which
+  # A line looks like a conflict marker if it starts with 7 or more "<",
+  # "|", or ">"; or, if the awk variable size is positive, as for stage 1,
+  # with exactly size of them.
+  # The pattern is looser than that of check-conflict-resolution.awk, which
   # requires a blank or the end of the line after a marker, so that it
   # refuses every file that contains a line that might be taken for one.
-  resolve_scan='/^(<<<<<<<|[|][|][|][|][|][|][|]|>>>>>>>)/ { marker = 1; exit }
+  # shellcheck disable=SC2016 # awk, not the shell, expands $0.
+  resolve_scan='BEGIN {
+      pattern = "^(<<<<<<<|[|][|][|][|][|][|][|]|>>>>>>>)"
+      if (size > 0) {
+        lt = bar = gt = ""
+        for (i = 0; i < size; i++) { lt = lt "<"; bar = bar "[|]"; gt = gt ">" }
+        pattern = "^(" lt "|" bar "|" gt ")([^<|>]|$)"
+      }
+    }
+    $0 ~ pattern { marker = 1; exit }
     /^=======+\r?$/ { separator = 1 }
     END { if (marker) print "marker"; else if (separator) print "separator" }'
   # ${resolve_checks} has a line "separator FILE" for each conflicted file
@@ -1337,14 +1365,15 @@ resolve_merge_conflicts() {
       fi
       resolve_contains_separator=no
       for resolve_stage in 1 2 3; do
+        resolve_scan_size=0
+        if [ "${resolve_stage}" -eq 1 ]; then
+          resolve_scan_size="$(conflict_marker_size "${resolve_file}")"
+        fi
         # The "(" before each pattern lets bash 3.2, which is /bin/sh on
         # macOS, parse a case statement inside a command substitution.
         case "$(git cat-file blob ":${resolve_stage}:${resolve_file}" 2> /dev/null \
-          | awk "${resolve_scan}")" in
+          | awk -v size="${resolve_scan_size}" "${resolve_scan}")" in
           (marker)
-            if [ "${resolve_stage}" -eq 1 ] && base_markers_from_git "${resolve_file}"; then
-              continue
-            fi
             echo "${SCRIPT_NAME}: ${resolve_file} contains lines that look like conflict markers; resolve its conflicts by hand" >&2
             resolve_status=1
             continue 2
@@ -1431,35 +1460,6 @@ resolve_merge_conflicts() {
     resolve_stopped
     return 1
   fi
-  return 0
-}
-
-## Usage: base_markers_from_git FILE
-## Succeeds if git wrote every line that looks like a conflict marker in the
-## merge base's version of FILE, which the index holds as stage 1:  if the
-## merge in progress has several merge bases, as after criss-cross merges,
-## and no merge base's version of FILE contains such a line.  Git then
-## merged the merge bases into one, and marked that merge's conflicts with
-## markers longer than the usual 7 characters, such as
-## "<<<<<<<<< Temporary merge branch 1".  In AUTO_MERGE, such markers occur
-## only within a conflict region, nested properly inside its markers, so
-## that `check_conflict_resolution` still finds the regions; neither side's
-## version of FILE contains them, so a resolution keeps none of them.  Fails
-## if a merge base lacks FILE, as after a rename, because its version under
-## another name is not checked.  Reads the variables ${resolve_merge_bases}
-## and ${resolve_scan} of `resolve_merge_conflicts`.
-base_markers_from_git() {
-  if [ "$(printf '%s\n' "${resolve_merge_bases}" | grep -c .)" -lt 2 ]; then
-    return 1
-  fi
-  for bmfg_base in ${resolve_merge_bases}; do
-    if ! bmfg_text="$(git cat-file blob "${bmfg_base}:$1" 2> /dev/null)"; then
-      return 1
-    fi
-    if [ "$(printf '%s\n' "${bmfg_text}" | awk "${resolve_scan}")" = marker ]; then
-      return 1
-    fi
-  done
   return 0
 }
 
