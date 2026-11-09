@@ -1029,11 +1029,20 @@ class NewSnapshotTest(unittest.TestCase):
             pr_status.PushChains([], [1], True),
             pr_status.PushChains([["b", "b-branch y"], ["b", "b-branch-z"]], [], True),
         ]
-        snapshot = pr_status.new_snapshot("now", {"repo": {}}, conflicting)
+        missing = [
+            pr_status.MissingBranch("a", "owner:master"),
+            pr_status.MissingBranch("b dir", "mernst:fix"),
+        ]
+        snapshot = json.loads(
+            json.dumps(pr_status.new_snapshot("now", {"repo": {}}, conflicting, missing))
+        )
         self.assertEqual((snapshot["time"], snapshot["facts"]), ("now", {"repo": {}}))
         self.assertEqual(
-            pr_status.format_push_chains(json.loads(json.dumps(snapshot))),
+            pr_status.format_push_chains(snapshot),
             ["a\ta-branch-x", "b\tb-branch y", "b\tb-branch-z"],
+        )
+        self.assertEqual(
+            pr_status.format_missing_branches(snapshot), ["a\towner:master", "b dir\tmernst:fix"]
         )
 
 
@@ -1061,6 +1070,108 @@ class FormatPushChainsTest(unittest.TestCase):
         for d in ("a\tb", "a\nb"):
             with self.subTest(d=d), self.assertRaisesRegex(ValueError, "tab or newline"):
                 pr_status.format_push_chains({"conflicting_push_chains": [["a", d]]})
+
+
+class MissingBranchesTest(unittest.TestCase):
+    """Tests for missing_branches."""
+
+    @staticmethod
+    def missing(
+        master_conflicts, conflicting=None, has_dir=(), has_upstream=False, deleted_heads=()
+    ):
+        """Run missing_branches on open PRs 1 through 5.
+
+        PR n's branch is "branch<n>" of the fork of "mernst".
+
+        Args:
+            master_conflicts: a map from the number of each PR that conflicts with upstream
+                to its conflicting files
+            conflicting: a map from a PR's number to the numbers of the PRs that its branch is
+                updated from and conflicts with
+            has_dir: the numbers of the PRs that have a working copy
+            has_upstream: True if there is a working copy of upstream
+            deleted_heads: the numbers of the PRs whose head repository has been deleted
+
+        Returns:
+            The branches, as "CLONE OWNER:BRANCH" strings.
+        """
+        conflicting = conflicting or {}
+        prs = {
+            n: {"owner": "" if n in deleted_heads else "mernst", "headRefName": f"branch{n}"}
+            for n in range(1, 6)
+        }
+        repo = types.SimpleNamespace(
+            gh="Owner/repo",
+            owner="Owner",
+            clone="repo",
+            default_branch="master",
+            prs=prs,
+            master_conflicts=master_conflicts,
+        )
+        model = types.SimpleNamespace(
+            repo=repo,
+            open=set(prs),
+            conflicting_prerequisites=lambda n: set(conflicting.get(n, ())),
+        )
+        upstream = {"repo": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}
+        with (
+            mock.patch.object(pr_status, "git_entries", return_value=upstream),
+            mock.patch.object(
+                pr_status,
+                "pr_directories",
+                lambda _r, pr, _base: ["d"] if int(pr["headRefName"][6:]) in has_dir else [],
+            ),
+        ):
+            return [f"{b.clone} {b.branch}" for b in pr_status.missing_branches(model, "/base")]
+
+    def test_master_conflict(self):
+        """A conflict with upstream needs upstream and the PR's branch."""
+        self.assertEqual(self.missing({2: ["file"]}), ["repo Owner:master", "repo mernst:branch2"])
+
+    def test_existing_working_copies(self):
+        """A branch that has a working copy is not missing."""
+        self.assertEqual(self.missing({2: ["file"]}, has_dir={2}), ["repo Owner:master"])
+        self.assertEqual(self.missing({2: ["file"]}, has_upstream=True), ["repo mernst:branch2"])
+
+    def test_prerequisite_conflict(self):
+        """A conflict with a prerequisite needs both PRs' branches, but not upstream."""
+        self.assertEqual(self.missing({}, {4: {1}}, has_dir={4}), ["repo mernst:branch1"])
+
+    def test_both_conflicts(self):
+        """A PR that conflicts with a prerequisite and with upstream needs all 3 branches."""
+        self.assertEqual(
+            self.missing({4: ["file"]}, {4: {1}}),
+            ["repo Owner:master", "repo mernst:branch1", "repo mernst:branch4"],
+        )
+
+    def test_no_duplicates(self):
+        """A branch that several conflicts need appears once."""
+        self.assertEqual(
+            self.missing({}, {3: {1}, 4: {1}}, has_dir={3, 4}), ["repo mernst:branch1"]
+        )
+
+    def test_deleted_head(self):
+        """The branch of a PR whose head repository has been deleted is omitted."""
+        self.assertEqual(self.missing({2: ["file"]}, deleted_heads={2}), ["repo Owner:master"])
+
+    def test_no_conflict(self):
+        """Without a conflict, no branch is missing."""
+        self.assertEqual(self.missing({}), [])
+
+
+class FormatMissingBranchesTest(unittest.TestCase):
+    """Tests for format_missing_branches."""
+
+    def test_missing_key(self):
+        """A snapshot that does not record the branches is an error."""
+        with self.assertRaisesRegex(ValueError, "does not record the branches"):
+            pr_status.format_missing_branches({"time": "now", "facts": {}})
+
+    def test_tab_or_newline(self):
+        """A clone whose path contains a tab or newline is an error."""
+        for d in ("a\tb", "a\nb"):
+            with self.subTest(d=d), self.assertRaisesRegex(ValueError, "tab or newline"):
+                pr_status.format_missing_branches({"missing_branches": [[d, "o:b"]]})
 
 
 class PrintConflictingPushChainsTest(unittest.TestCase):
@@ -1093,6 +1204,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
             "now",
             {},
             [pr_status.PushChains([["a", "a-branch-x"], ["a", "a-branch y", "z"]], [], True)],
+            [],
         )
         result = self.run_option(json.dumps(snapshot))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1104,6 +1216,20 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertIn("--print-conflicting-push-chains", result.stderr)
+
+    def test_prints_missing_branches(self):
+        """`--print-missing-branches` prints only the branches, one per line."""
+        snapshot = pr_status.new_snapshot("now", {}, [], [pr_status.MissingBranch("a", "o:master")])
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / pr_status_config.SNAPSHOT).write_text(json.dumps(snapshot))
+            result = subprocess.run(
+                [sys.executable, self.PR_STATUS, "-C", d, "--print-missing-branches"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "a\to:master\n")
 
 
 class ExclusiveOptionsTest(unittest.TestCase):
@@ -1118,6 +1244,8 @@ class ExclusiveOptionsTest(unittest.TestCase):
             ["--print-document", "--print-conflicting-push-chains"],
             ["--print-config", "--print-document"],
             ["--print-conflicting-push-chains", "--highlight", "repo#1"],
+            ["--print-conflicting-push-chains", "--print-missing-branches"],
+            ["--print-missing-branches", "--highlight", "repo#1"],
         ]:
             with self.subTest(options=options), tempfile.TemporaryDirectory() as d:
                 result = subprocess.run(

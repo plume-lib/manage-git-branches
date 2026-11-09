@@ -7,6 +7,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --print-document  # print the dependency document's file name, and exit
   pr-status --print-config    # print the config, with its defaults filled in, and exit
   pr-status --print-conflicting-push-chains  # print the chains with conflicts, and exit
+  pr-status --print-missing-branches  # print the branches that conflicts need, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
   pr-status --highlight bottleneck  # highlight the next PR to work on in each repository
@@ -17,7 +18,9 @@ Inputs:
                            pr-status-config.md for the format)
   .pr-status-snapshot.json written by the previous run; compared with this run.  It also
                            records the dependency chains with conflicts, which
-                           --print-conflicting-push-chains prints
+                           --print-conflicting-push-chains prints, and the branches
+                           that resolving the conflicts needs but that have no working
+                           copy, which --print-missing-branches prints
 Each run:
   * reads the open PRs with gh,
   * runs pr-merge-analysis (cached) on them, for each repository,
@@ -84,6 +87,9 @@ if TYPE_CHECKING:
 CONFIG = pr_status_config.CONFIG
 # The key of the snapshot's list of the `git-push-to` chains with conflicts.
 CONFLICTING_PUSH_CHAINS = "conflicting_push_chains"
+# The key of the snapshot's list of the branches that resolving the conflicts needs, but that
+# have no working copy.
+MISSING_BRANCHES = "missing_branches"
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -2965,6 +2971,22 @@ def yaml_string(s: str) -> str:
 # ---------- commands that update dependent branches ----------
 
 
+def upstream_directories(repo: Repo, base: str) -> list[str]:
+    """Return the working copies of the given repository's upstream default branch.
+
+    Args:
+        repo: a Repo.
+        base: the directory that holds the working copy directories of the repositories.
+
+    Returns:
+        The entries of base, such as "daikon", whose origin is the repository and whose
+        current branch is its default branch.
+    """
+    owner, name = repo.gh.lower().split("/")
+    wanted = GitEntry(owner, name, repo.default_branch)
+    return [d for d, info in git_entries(base).items() if info == wanted]
+
+
 def chain_has_conflict(repo: Repo, prs: list[int], has_upstream: bool) -> bool:
     """Return whether merging a chain of PRs would encounter a textual conflict.
 
@@ -3017,12 +3039,7 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
         The chains, as a PushChains.
     """
     r = model.repo
-    owner, name = r.gh.lower().split("/")
-    upstream = [
-        d
-        for d, info in git_entries(base).items()
-        if info == GitEntry(owner, name, r.default_branch)
-    ][:1]
+    upstream = upstream_directories(r, base)[:1]
     dirs = {n: pr_directories(r, r.prs[n], base) for n in model.open}
     missing = sorted(n for n in model.open if not dirs[n])
     pushable = {n for n in model.open if dirs[n] and n not in model.update_cycle_affected}
@@ -3056,6 +3073,56 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     return PushChains(chains, missing, bool(upstream))
 
 
+class MissingBranch(NamedTuple):
+    """A branch that has no working copy, but that resolving a conflict needs.
+
+    Attributes:
+        clone: a clone of the branch's repository, in which `git-checkout-branch` can check
+            out the branch:  the repository's "clone" in the config, such as "daikon" or
+            "/home/me/src/daikon".  A relative path is relative to the directory that holds
+            the working copy directories.
+        branch: the branch, in the form OWNER:BRANCH that `git-checkout-branch` takes, such
+            as "mernst:fix-typo" or "codespecs:master".
+    """
+
+    clone: str
+    branch: str
+
+
+def missing_branches(model: Model, base: str) -> list[MissingBranch]:
+    """Return the branches that resolving the conflicts of the given model's PRs needs.
+
+    A PR's conflicts are those that its "Unresolved threads" cell marks with 🔀:  with the
+    upstream default branch, and with the branch of each PR that its branch is updated from
+    (see Model.conflicting_prerequisites).  `git-push-to` can merge one branch into another
+    only if both branches have a working copy.
+
+    Args:
+        model: a Model.
+        base: the directory that holds the working copy directories of the repositories.
+
+    Returns:
+        The branches that some conflict involves and that have no working copy in base,
+        without duplicates:  the upstream default branch first, if it is one, then the PRs'
+        branches in order of PR number.  The result omits the branch of a PR whose head
+        repository has been deleted, because no clone can check out that branch.
+    """
+    r = model.repo
+    involved: set[int] = set()
+    for n in model.open:
+        conflicting = model.conflicting_prerequisites(n)
+        if n in r.master_conflicts or conflicting:
+            involved |= {n} | conflicting
+    result = []
+    if any(n in r.master_conflicts for n in model.open) and not upstream_directories(r, base):
+        result.append(MissingBranch(r.clone, f"{r.owner}:{r.default_branch}"))
+    for n in sorted(involved):
+        pr = r.prs[n]
+        if pr["owner"] and not pr_directories(r, pr, base):
+            result.append(MissingBranch(r.clone, f"{pr['owner']}:{pr['headRefName']}"))
+    return result
+
+
 class PushCommands(NamedTuple):
     """The shell commands that update the PRs' branches, as push_commands generates them."""
 
@@ -3076,28 +3143,36 @@ class PushCommands(NamedTuple):
 
 
 def new_snapshot(
-    time: str, new_facts: dict[str, Any], conflicting: list[PushChains]
+    time: str,
+    new_facts: dict[str, Any],
+    conflicting: list[PushChains],
+    missing: list[MissingBranch],
 ) -> dict[str, Any]:
-    """Return the snapshot that records the given facts and chains with conflicts.
+    """Return the snapshot that records the given facts, chains with conflicts, and branches.
 
     Args:
         time: a time, such as "2026-11-05T17:59:00-08:00", which the snapshot records
         new_facts: the facts, as facts computes them
         conflicting: the chains with conflicts of each repository, as push_chains computes
             them with conflicts_only
+        missing: the branches that resolving the conflicts needs but that have no working
+            copy, as missing_branches computes them for each repository
 
     Returns:
         The snapshot, as a dict that .pr-status-snapshot.json holds as JSON, with the keys
-        "time", "facts", and "conflicting_push_chains".  The value of
+        "time", "facts", "conflicting_push_chains", and "missing_branches".  The value of
         "conflicting_push_chains" is a list of chains, in the order of the "Dependency
         chains with conflicts" section of the dependency document; each chain is a list of
         directories, such as ["daikon", "daikon-branch-a"], each of which `git-push-to`
-        pushes into the next.
+        pushes into the next.  The value of "missing_branches" is a list of the branches,
+        each a list of a clone and a branch, as MissingBranch describes them, such as
+        ["daikon", "mernst:fix-typo"].
     """
     return {
         "time": time,
         "facts": new_facts,
         CONFLICTING_PUSH_CHAINS: [chain for pc in conflicting for chain in pc.chains],
+        MISSING_BRANCHES: [list(b) for b in missing],
     }
 
 
@@ -3130,6 +3205,38 @@ def format_push_chains(snapshot: dict[str, Any]) -> list[str]:
                 msg = f"a directory name contains a tab or newline: {d!r}"
                 raise ValueError(msg)
         lines.append("\t".join(chain))
+    return lines
+
+
+def format_missing_branches(snapshot: dict[str, Any]) -> list[str]:
+    """Return the branches that the given snapshot records as missing, one line per branch.
+
+    Args:
+        snapshot: a snapshot, as a dict parsed from the JSON of .pr-status-snapshot.json, with
+            keys such as "time", "facts", and "missing_branches"
+
+    Returns:
+        One line per branch that resolving the conflicts needs but that has no working copy:
+        a clone of the branch's repository, such as "daikon", and the branch, such as
+        "mernst:fix-typo", separated by a tab.
+
+    Raises:
+        ValueError: if snapshot does not record the branches (even an empty list of them),
+            or if a clone's path contains a tab or a newline.
+    """
+    if MISSING_BRANCHES not in snapshot:
+        msg = (
+            f"{pr_status_config.SNAPSHOT} does not record the branches that resolving the"
+            " conflicts needs, because an older version of pr-status wrote it; run pr-status"
+            " to rewrite it"
+        )
+        raise ValueError(msg)
+    lines = []
+    for clone, branch in snapshot[MISSING_BRANCHES]:
+        if "\t" in clone or "\n" in clone:
+            msg = f"a clone's path contains a tab or newline: {clone!r}"
+            raise ValueError(msg)
+        lines.append(f"{clone}\t{branch}")
     return lines
 
 
@@ -3625,6 +3732,17 @@ def main() -> None:
             " with their directories separated by tabs, and do nothing else"
         ),
     )
+    mode.add_argument(
+        "--print-missing-branches",
+        action="store_true",
+        help=(
+            "print the branches that resolving the conflicts needs, but that have no working"
+            " copy, as the snapshot records them, one per line:  a clone of the branch's"
+            " repository and the branch as OWNER:BRANCH, separated by a tab.  In that clone,"
+            " `git-checkout-branch OWNER:BRANCH` makes a working copy of the branch."
+            "  Do nothing else"
+        ),
+    )
     parser.add_argument(
         "-C",
         "--directory",
@@ -3648,11 +3766,14 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.highlight and (
-        args.print_document or args.print_config or args.print_conflicting_push_chains
+        args.print_document
+        or args.print_config
+        or args.print_conflicting_push_chains
+        or args.print_missing_branches
     ):
         parser.error(
-            "--highlight is not allowed with --print-document, --print-config, or"
-            " --print-conflicting-push-chains"
+            "--highlight is not allowed with --print-document, --print-config,"
+            " --print-conflicting-push-chains, or --print-missing-branches"
         )
     check_only = args.check
     if args.directory is not None:
@@ -3670,12 +3791,16 @@ def main() -> None:
     if args.print_config:
         print(json.dumps(load_config("pr-status"), indent=2))
         return
-    if args.print_conflicting_push_chains:
+    if args.print_conflicting_push_chains or args.print_missing_branches:
+        if args.print_conflicting_push_chains:
+            option, formatter = "--print-conflicting-push-chains", format_push_chains
+        else:
+            option, formatter = "--print-missing-branches", format_missing_branches
         try:
             with pathlib.Path(pr_status_config.SNAPSHOT).open() as f:
-                lines = format_push_chains(json.load(f))
+                lines = formatter(json.load(f))
         except (OSError, ValueError) as error:
-            sys.exit(f"pr-status: --print-conflicting-push-chains: {error}")
+            sys.exit(f"pr-status: {option}: {error}")
         for line in lines:
             print(line)
         return
@@ -3760,7 +3885,8 @@ def main() -> None:
     dependencies.write_text(
         dependency_document(models, cfg, base, as_of, title, all_chains, conflicting)
     )
-    snapshot = new_snapshot(now.isoformat(timespec="seconds"), new, conflicting)
+    missing = [b for m in models for b in missing_branches(m, base)]
+    snapshot = new_snapshot(now.isoformat(timespec="seconds"), new, conflicting, missing)
     write_json_atomically(pathlib.Path(pr_status_config.SNAPSHOT), snapshot)
     written = [d["file"] for d in unblocked_docs]
     written += [str(dependencies), pr_status_config.SNAPSHOT]
