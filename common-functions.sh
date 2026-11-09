@@ -1309,12 +1309,9 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # also checked for conflict markers, as when the agent copied a conflict
   # region into it.
   # The conflicted files that the agent resolved as one side's version of
-  # the file, one per line, and their descriptions, as
-  # `one_sided_description` prints them, one per line in the same order.  No
-  # conflicted pathname contains a newline, which `resolve_merge_conflicts`
-  # refuses.
+  # the file, one per line.  No conflicted pathname contains a newline,
+  # which `resolve_merge_conflicts` refuses.
   resolve_one_sided_files=''
-  resolve_one_sided_descriptions=''
   # The conflicted files that `git rerere` resolved and whose resolution the
   # agent changed or deleted, one per line.
   resolve_rerere_changed=''
@@ -1346,8 +1343,7 @@ Finish with a summary that says, for each conflict, what each side changed and h
         && resolve_description="$(one_sided_description "${resolve_file}" "${resolve_hash}")"; then
         resolve_one_sided_files="${resolve_one_sided_files}${resolve_file}
 "
-        resolve_one_sided_descriptions="${resolve_one_sided_descriptions}${resolve_description}
-"
+        printf '%s\n' "${SCRIPT_NAME}: ${resolve_description}; review it" >&2
       fi
     done
     set +f
@@ -1369,7 +1365,6 @@ Finish with a summary that says, for each conflict, what each side changed and h
       fi
     done
     printf '%s' "${resolve_rerere_changed}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} changed the resolution that \`git rerere\` made of /" >&2
-    printf '%s' "${resolve_one_sided_descriptions}" | sed -e "s/^/${SCRIPT_NAME}: /" -e 's/$/; review it/' >&2
     if ! printf '%s\n' "${resolve_agent_other}" | {
       resolve_loop_ok=1
       while IFS= read -r resolve_file; do

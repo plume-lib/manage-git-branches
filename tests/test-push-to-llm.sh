@@ -1557,8 +1557,12 @@ if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "other main" ]
   fail "theirs-rerere: wrong other.txt: $(git -C "${remote}" show refs/heads/feature:other.txt)"
 fi
 case "${push_output}" in
-  *"claude changed the resolution that \`git rerere\` made of other.txt"*"claude resolved other.txt as the version in main"*", which keeps none of the changes of feature to the file; review it"*) ;;
-  *) fail "theirs-rerere: wrong diagnostic: ${push_output}" ;;
+  *"claude changed the resolution that \`git rerere\` made of other.txt"*) ;;
+  *) fail "theirs-rerere: the changed resolution is not reported: ${push_output}" ;;
+esac
+case "${push_output}" in
+  *"claude resolved other.txt as the version in main"*", which keeps none of the changes of feature to the file; review it"*) ;;
+  *) fail "theirs-rerere: the one-sided resolution is not reported: ${push_output}" ;;
 esac
 
 ## A resolution that `git rerere` recorded needs no agent, whether or not
