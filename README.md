@@ -125,7 +125,7 @@ The commands are:
 
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]
-  FROM_DIR TO_DIR ...`:
+  [--summary FILE] FROM_DIR TO_DIR ...`:
   Runs `git-push-to` on the arguments, then rebases each branch onto the
   previous branch, to eliminate merge commits, and force-pushes each
   branch.  This is useful for maintaining a stack of GitHub pull requests,

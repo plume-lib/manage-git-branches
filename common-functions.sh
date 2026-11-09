@@ -2507,9 +2507,10 @@ build_logged() {
 ## show it, such as "The script just merged commit 1a2b3c4d into branch
 ## feature.  Branch feature has commits that ...".  Once the build succeeds,
 ## commits the agent's changes, if any, with the message MESSAGE, such as
-## "Fix the build after merging branch 'main'".  Returns 1, after printing a
-## diagnostic, if the build still fails; the agent's changes then remain,
-## staged but not committed.
+## "Fix the build after merging branch 'main'", and prints a notice that
+## names the commit, for review (see `review_notice`).  Returns 1, after
+## printing a diagnostic, if the build still fails; the agent's changes then
+## remain, staged but not committed.
 build_fix_attempts=3
 fix_failed_build() {
   fix_with="$1"
@@ -2613,6 +2614,7 @@ $(tail -n 100 "${fix_log}")"
     echo "${SCRIPT_NAME}: cannot commit the changes of ${fix_with} in $(pwd)" >&2
     return 1
   fi
+  review_notice "${fix_with} fixed the build in commit $(git rev-parse --short HEAD); review it"
   return 0
 }
 
