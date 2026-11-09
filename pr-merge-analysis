@@ -143,16 +143,15 @@ while [ -L "$CACHE" ]; do
   esac
 done
 touch "$CACHE" || exit 1
-# The standard output and standard error of "git merge-tree", which merge_tree
-# keeps apart.
-MERGE_TREE_OUT=$(mktemp) || exit 1
+# The standard error of "git merge-tree", which merge_tree keeps apart from its
+# standard output.
 MERGE_TREE_ERR=$(mktemp) || exit 1
 # A directory that holds, for each PR head, the names of the files that the PR
 # changes, as own_files writes them, and the output of diff_names.
 OWN_FILES_DIR=$(mktemp -d) || exit 1
 # The pruned cache, before it replaces the cache.
 NEW_CACHE=
-trap 'rm -rf "$MERGE_TREE_OUT" "$MERGE_TREE_ERR" "$OWN_FILES_DIR" ${NEW_CACHE:+"$NEW_CACHE"}' EXIT
+trap 'rm -rf "$MERGE_TREE_ERR" "$OWN_FILES_DIR" ${NEW_CACHE:+"$NEW_CACHE"}' EXIT
 
 if [ $# -gt 2 ]; then
   # Validating the numbers also keeps the unquoted uses of $P from
@@ -243,35 +242,37 @@ done <<< "$own_lines"
 # substitution per call would fork a subshell for each of thousands of pairs.
 
 # Runs "git merge-tree" on commits $1 and $2.  Sets RESULT to the object ID of
-# the merged tree, and the array MERGE_CONFLICTS to the names of the files on
-# which the commits conflict.  Such a file holds conflict markers, or, for a
-# binary file or a modify/delete conflict, one side's version.
+# the merged tree, MERGE_STATUS to "clean" or "conflict", and MERGE_FILES to the
+# names of the files on which the commits conflict, separated by spaces and
+# quoted as git quotes unusual file names.  A file on which they conflict holds
+# conflict markers, or, for a binary file or a modify/delete conflict, one
+# side's version.
 merge_tree() {
-  local status x
-  local -a out
-  # -z, because a file name can contain a newline.  Standard error is kept
-  # apart, so that a warning, such as one about merge.renameLimit, does not
-  # precede the tree's object ID or appear among the files.
-  "${G[@]}" merge-tree --write-tree --name-only -z "$1" "$2" > "$MERGE_TREE_OUT" 2> "$MERGE_TREE_ERR"
+  local out status
+  # Standard error is kept apart, so that a warning, such as one about
+  # merge.renameLimit, does not precede the tree's object ID or appear among
+  # the files.
+  out=$("${G[@]}" merge-tree --write-tree --name-only "$1" "$2" 2> "$MERGE_TREE_ERR")
   status=$?
-  mapfile -d '' out < "$MERGE_TREE_OUT"
   # A clean merge yields exit status 0, and a conflict yields exit status 1;
-  # either way, standard output starts with the tree's object ID, which is
-  # followed by the names of the conflicting files and then by an empty name.
+  # either way, standard output starts with the tree's object ID, and for a
+  # conflict, the next lines are the conflicting files, up to an empty line.
   # Any other result, including exit status 1 with other output, as for an
   # argument that is not a commit, is an error.
-  if [ $status -gt 1 ] || ! [[ ${out[0]-} =~ $OID_RE ]]; then
+  if [ $status -gt 1 ] || ! [[ ${out%%$'\n'*} =~ $OID_RE ]]; then
     echo "$0: git merge-tree $1 $2 failed:" >&2
     cat "$MERGE_TREE_ERR" >&2
-    tr '\0' '\n' < "$MERGE_TREE_OUT" >&2
+    [ -z "$out" ] || echo "$out" >&2
     exit 1
   fi
-  RESULT=${out[0]}
-  MERGE_CONFLICTS=()
-  for x in "${out[@]:1}"; do
-    [ -n "$x" ] || break
-    MERGE_CONFLICTS+=("$x")
-  done
+  RESULT=${out%%$'\n'*}
+  if [ $status -eq 0 ]; then
+    MERGE_STATUS=clean
+    MERGE_FILES=
+  else
+    MERGE_STATUS=conflict
+    MERGE_FILES=$(echo "$out" | sed -n '2,/^$/p' | tr '\n' ' ' | sed 's/ *$//')
+  fi
 }
 
 # Sets RESULT to "clean" or "conflict<TAB>files".
@@ -284,17 +285,9 @@ merge_result() {
   }
   local key="merge $x $y"
   if [ -z "${CACHED[$key]+set}" ]; then
-    local status=clean files=
     merge_tree "$x" "$y"
-    if [ ${#MERGE_CONFLICTS[@]} -gt 0 ]; then
-      status=conflict
-      files=${MERGE_CONFLICTS[*]}
-      # A control character in a file name, such as a tab or a newline, would
-      # break the cache line or the report.
-      files=${files//[[:cntrl:]]/?}
-    fi
-    CACHED[$key]="$status	$files"
-    printf '%s\tmerge\t%s\t%s\t%s\t%s\n' "$REPO" "$x" "$y" "$status" "$files" >> "$CACHE"
+    CACHED[$key]="$MERGE_STATUS	$MERGE_FILES"
+    printf '%s\tmerge\t%s\t%s\t%s\t%s\n' "$REPO" "$x" "$y" "$MERGE_STATUS" "$MERGE_FILES" >> "$CACHE"
   fi
   RESULT=${CACHED[$key]}
 }
@@ -389,23 +382,25 @@ merge_commits() {
   RESULT=$cur
 }
 
-# Sets the array BASES to the merge bases of commit $1 with master and with
-# commits $2, $3, and so on, omitting a merge base that does not exist.
+# Sets the array BASES to the distinct merge bases of commit $1 with master and
+# with commits $2, $3, and so on, omitting a merge base that does not exist.
 merge_bases() {
   local commit=$1 x
+  local -A seen=()
   shift
   BASES=()
-  merge_base "$MSHA" "$commit"
-  [ -z "$RESULT" ] || BASES+=("$RESULT")
-  for x in "$@"; do
+  for x in "$MSHA" "$@"; do
     merge_base "$commit" "$x"
-    [ -z "$RESULT" ] || BASES+=("$RESULT")
+    [ -n "$RESULT" ] && [ -z "${seen[$RESULT]+set}" ] || continue
+    seen[$RESULT]=1
+    BASES+=("$RESULT")
   done
 }
 
 # Sets the array DIFF_NAMES to the names of the files that differ between
 # commits $1 and $2:  those among files $3, $4, and so on, or any file if none
-# is given.
+# is given.  Also writes them to file "$OWN_FILES_DIR/diff", each followed by a
+# NUL.
 diff_names() {
   local x=$1 y=$2
   shift 2
@@ -440,11 +435,7 @@ own_files() {
   fi
   merge_commits "${BASES[@]}"
   diff_names "$RESULT" "$1"
-  if [ ${#DIFF_NAMES[@]} -eq 0 ]; then
-    : > "$OWN_FILES_DIR/$1"
-  else
-    printf '%s\0' "${DIFF_NAMES[@]}" > "$OWN_FILES_DIR/$1"
-  fi
+  mv "$OWN_FILES_DIR/diff" "$OWN_FILES_DIR/$1"
 }
 
 # Sets RESULT to "no" if commit $1 lacks commit $2's changes, otherwise to
