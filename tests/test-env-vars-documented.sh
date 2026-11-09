@@ -19,6 +19,9 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 TOPLEVEL="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)" || exit 1
 SCRIPT_NAME="$(basename -- "$0")"
 
+# shellcheck source=common-test-functions.sh
+. "${SCRIPT_DIR}/common-test-functions.sh"
+
 README="${TOPLEVEL}/README.md"
 
 # The commands, which are executable, and the files that they load, which are
@@ -44,17 +47,18 @@ script_language() {
       echo awk
       return
       ;;
-    *.sh)
-      echo shell
-      return
-      ;;
     *.py)
       echo python
       return
       ;;
   esac
+  # An assignment, so that the failure of script_shell is not ignored.
+  script_language_shell="$(script_shell "$1")" || exit 2
+  if [ -n "${script_language_shell}" ]; then
+    echo shell
+    return
+  fi
   case "$(head -n 1 -- "$1")" in
-    '#!/bin/sh' | '#!/bin/bash' | '#!/usr/bin/env sh' | '#!/usr/bin/env bash') echo shell ;;
     '#!/usr/bin/python3' | '#!/usr/bin/env python3') echo python ;;
     *)
       echo "${SCRIPT_NAME}: $1 is neither a shell script nor a Python script" >&2
@@ -175,9 +179,11 @@ COMMENT_IN_SUBSTITUTION="$(
   echo one # So is this:)
 )"
 COMMENT_IN_BACKTICKS=`
-  # It's a comment, whose "'" does not begin a quotation.
+  # It's a comment, whose "'" does not begin a quotation, and whose "<<" is
+  # not a here-document operator.
   echo one
 `
+QUOTED_IN_BACKTICKS=`echo "a<<b" 'c<<d'` # Not here-document operators.
 HASH_AFTER_SUBSTITUTION=$(echo $(echo one)#two $((1))#three) # Not comments.
 HASH_AFTER_ESCAPED_BLANK=$(echo one\ #two) # Not a comment either.
 if [ "${PLAIN}" -eq 1 ]; then CONDITIONAL=3; fi
@@ -213,6 +219,7 @@ ELEMENT[1]=one
 NESTED_SUBSCRIPT[${ELEMENT[1]}]=1
 QUOTED_SUBSCRIPT["a b"]=1
 ELEMENTS=(NOT_AN_ASSIGNMENT=1 "two words")
+HASH_IN_ARRAY=(one\ #two) # One element, "one #two", not a comment.
 MULTILINE_ARRAY=(
   NOT_AN_ASSIGNMENT_EITHER=1 # It's a comment, whose "'" is not a quotation mark.
 )
@@ -267,6 +274,7 @@ ESCAPED
 EXPORTED
 HASH_AFTER_ESCAPED_BLANK
 HASH_AFTER_SUBSTITUTION
+HASH_IN_ARRAY
 LAST_CASE_BODY
 LITERAL_QUOTE
 LOCAL_ARRAY
@@ -291,6 +299,7 @@ PIPED_SUBSHELL
 PLAIN
 PROMPTED
 QUOTED
+QUOTED_IN_BACKTICKS
 QUOTED_SUBSCRIPT
 READONLY_ARRAY
 READ_AFTER_PREFIX
@@ -355,6 +364,19 @@ END_OF_TEXT
 FIXTURE_END
 if (set_variables_in "${FIXTURE}" statement) > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: set_variables_in read a here-document in a command substitution as code" >&2
+  exit 2
+fi
+
+# A here-document within a command substitution in the older form is an error
+# as well, even after a quotation within the substitution has ended.
+cat > "${FIXTURE}" << 'FIXTURE_END'
+VALUE=`echo "it's" && cat << END_OF_TEXT
+SOMETHING=1
+END_OF_TEXT
+`
+FIXTURE_END
+if (set_variables_in "${FIXTURE}" statement) > /dev/null 2>&1; then
+  echo "${SCRIPT_NAME}: set_variables_in read a here-document in backticks as code" >&2
   exit 2
 fi
 

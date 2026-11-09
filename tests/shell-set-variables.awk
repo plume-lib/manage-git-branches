@@ -87,8 +87,8 @@ function word_at(s, p, w,   before, after) {
   return before !~ /[A-Za-z0-9_]/ && after !~ /[A-Za-z0-9_]/
 }
 # True if a "#" at position P of "line" begins a comment within a command
-# substitution:  the "#" begins a word, because it follows the beginning of
-# the line, a blank, or an operator character.  A character that a backslash
+# substitution or an array literal:  the "#" begins a word, because it
+# follows the beginning of the line, a blank, or an operator character.  A character that a backslash
 # quotes, as the blank of "\ #" is, or a ")" that ends an expansion, as the
 # one in "$(date)#" does, is part of a word, so a "#" after it continues that
 # word.
@@ -276,6 +276,9 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
   # The position of a character that continues the word before it, as
   # "comment_at" describes, or 0 if there is none.
   word_joined_at = 0
+  # A comment within a command substitution in the older form ends at the
+  # end of the line.
+  backtick_comment = 0
   while (pos <= len) {
     c = substr(line, pos, 1)
     if (context() == "single") {
@@ -296,10 +299,22 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
     }
     if (context() == "backtick") {
       # A command substitution in the older form ends at the next backtick
-      # that a backslash does not quote.  A quotation mark or a comment
-      # within it, as in "# it's", does not affect where it ends.
+      # that a backslash does not quote, even one within a quotation or a
+      # comment.  Quotation marks and comments within it determine only
+      # whether a "<<" is a here-document operator:  the "<<" of
+      # "`echo '<<'`" is not one, and the "'" of "# it's" begins no
+      # quotation.  "backtick_quote" is the quotation mark that begins the
+      # quotation that is open within the substitution, or "" if none is.
       if (c == "`") {
         pop_context()
+      } else if (backtick_comment) {
+        # Every character of a comment is part of it.
+      } else if (backtick_quote != "") {
+        if (c == backtick_quote) backtick_quote = ""
+      } else if (c == "'" || c == "\"") {
+        backtick_quote = c
+      } else if (comment_at(pos)) {
+        backtick_comment = 1
       } else if (heredoc_operator_at(pos)) {
         # A command substitution becomes part of a word, so a here-document
         # operator within one is not a token that "is_heredoc" can find.
@@ -340,6 +355,7 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
       # A command substitution in the older form, which can begin even
       # within double quotation marks.
       push_context("backtick")
+      backtick_quote = ""
       add_word(c)
       pos++
       continue
@@ -452,7 +468,7 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
     }
     if (context() == "array") {
       # A "#" that begins an element starts a comment, which ends the line.
-      if (c == "#" && (pos == 1 || substr(line, pos - 1, 1) ~ /[ \t(]/)) { break }
+      if (comment_at(pos)) { break }
       if (c == ")") pop_context()
       add_word(c)
       pos++
