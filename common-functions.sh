@@ -1367,7 +1367,7 @@ resolve_merge_conflicts() {
       fi
       resolve_contains_separator=no
       for resolve_stage in 1 2 3; do
-        # Only stage 1 is scanned for markers of the file's own length.
+        # Only stage 1 is scanned for markers of length ${resolve_size}.
         resolve_scan_size=''
         if [ "${resolve_stage}" -eq 1 ]; then
           resolve_scan_size="${resolve_size}"
