@@ -142,7 +142,7 @@ The commands are:
   Pulls from OTHER-REPO-DIR into the current directory, just as
   `git-push-to` does.
 * [`git-pull-upstream`](git-pull-upstream)
-  `[--nocompile] [--llm | --no-llm] [--claude | --codex]`:
+  `[--nocompile] [--allow-dependent] [--llm | --no-llm] [--claude | --codex]`:
   Merges the default branch of the remote `upstream` (or `origin`, if there
   is no `upstream`, or the only remote, if there is neither) into the current
   branch, compiles, then pushes the current branch if compilation succeeds.
@@ -152,6 +152,17 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of the upstream
   repository.
+
+  It does not merge into a branch whose open pull request builds on another
+  pull request:  one whose base branch is not the default branch, or whose
+  description says "Land after #N" for an open pull request N.  Such a
+  branch receives the default branch through the branch that it builds on,
+  and receiving it directly as well would make a later merge of that branch
+  a criss-cross merge, which has several merge bases.  Update such a branch
+  with `git-push-to`, as the chains that `pr-status` prints do, or pass
+  `--allow-dependent` to merge anyway.  It asks GitHub with `gh`, and it
+  skips this check if `gh` cannot be used.
+
   Unlike `git-pull-from`, it needs no working tree for the default branch.
   It handles conflicts and a failed build as `git-push-to` does.
 * [`pr-status`](pr-status)

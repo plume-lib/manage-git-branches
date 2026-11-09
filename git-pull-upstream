@@ -6,11 +6,14 @@
 # variable MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set.)
 #
 # Usage:
-#   git-pull-upstream [--nocompile] [--llm | --no-llm] [--claude | --codex]
+#   git-pull-upstream [--nocompile] [--allow-dependent] [--llm | --no-llm]
+#                     [--claude | --codex]
 #
 # By default, this script asks an AI agent to resolve merge conflicts and to
 # fix a failed build, as `git-push-to` does; the "--llm", "--no-llm",
-# "--claude", and "--codex" options are as for `git-push-to`.
+# "--claude", and "--codex" options are as for `git-push-to`.  The
+# "--allow-dependent" option is described in "Branches that build on another
+# pull request" below.
 #
 # The upstream repository is the remote named `upstream` if there is one, as
 # in a fork, then `origin`, then the clone's only remote if it has exactly
@@ -62,6 +65,37 @@
 # Unlike `git-pull-from`, this command needs no working tree for the upstream
 # repository's default branch, and it does not build that branch.
 
+# Branches that build on another pull request
+#
+# A branch whose pull request builds on another pull request, B, receives the
+# upstream repository's default branch through B's branch, which `git-push-to`
+# merges into it.  Merging the default branch into it directly as well would
+# give it the same changes by two paths, in two different merge commits, and
+# a later merge of B's branch would then be a criss-cross merge:  one with
+# several merge bases, whose conflicts are harder to resolve.  So, after
+# pulling, this script fails without merging if the current branch does not
+# already contain the default branch and an open pull request from the
+# current branch builds on another one:
+#  * its base branch, such as "feature-b", is not the default branch of the
+#    base repository, as for a pull request that is stacked on B's; or
+#  * its description has a line "Land after #N." (with or without the
+#    period), as `pr-status` writes, where N, such as 123, is the number of
+#    an open pull request of the same repository that is not a fix to the
+#    current branch's pull request, that is, whose base branch is not the
+#    current branch.  `pr-status` updates the current branch from N's branch.
+# Instead, update the branch with `git-push-to` from the branch that it builds
+# on; `pr-status` prints the `git-push-to` chains that do so.  The option
+# "--allow-dependent" merges anyway.
+#
+# The pull requests from the current branch are the ones that
+# `pr_repositories` in common-functions.sh describes.  The check is skipped,
+# silently, if `gh` is not installed or has no token for github.com, as when
+# no user has logged in with `gh auth login`, or if the current branch does
+# not push to a GitHub repository.  If GitHub cannot be asked, this script
+# says so and merges.  A dependence that only another pull request's
+# description states, as in "Land before #M" in B's description, or that only
+# the commits of the current branch show, is not detected.
+
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other files even when this script is
 # invoked through a symbolic link from elsewhere, such as ~/bin.
@@ -108,10 +142,100 @@ fi
 # shellcheck source=common-functions.sh
 . "${SCRIPT_DIR}/common-functions.sh"
 
+# Usage: check_not_dependent BRANCH
+# Returns 1, after printing a diagnostic, if an open pull request from BRANCH,
+# a branch of the clone in the current directory, builds on another pull
+# request, as "Branches that build on another pull request" above describes.
+# Returns 0 otherwise, including when GitHub is not or cannot be asked.
+check_not_dependent() {
+  command -v gh > /dev/null 2>&1 || return 0
+  gh auth token --hostname github.com > /dev/null 2>&1 || return 0
+  pr_repositories "$(pwd)" "$1" || return 0
+  # Each pull request yields a line "pr NUMBER BASE DEFAULT HEAD", where BASE
+  # is its base branch, DEFAULT is the base repository's default branch, and
+  # HEAD is the GitHub slug of its head repository, or "-" if that was
+  # deleted, followed by a line "body NUMBER TEXT" for each line TEXT of its
+  # description.  The `head` parameter names only the head repository's
+  # owner, who might have both the base repository and a fork of it.
+  # shellcheck disable=SC2016 # The expansions are for jq.
+  if ! cnd_answer="$(gh_query "cannot list the pull requests from ${pr_head_repo}:${pr_head_branch}" \
+    gh api -X GET "repos/${pr_base_repo}/pulls" \
+    -f "head=${pr_head_repo%%/*}:${pr_head_branch}" -f state=open -f per_page=100 \
+    --hostname github.com --paginate \
+    --jq '.[] | .number as $n | "pr \($n) \(.base.ref) \(.base.repo.default_branch) \(.head.repo.full_name // "-")", ((.body // "") | split("\n")[] | "body \($n) \(.)")')"; then
+    echo "${SCRIPT_NAME}: cannot tell whether the current branch builds on another pull request; merging anyway" >&2
+    return 0
+  fi
+  # Each word is "base:NUMBER:BASE:DEFAULT" for a pull request whose base
+  # branch is not the default branch, or "after:NUMBER:N" for each line
+  # "Land after #N." in its description.  A branch's name contains neither
+  # whitespace nor ":", so splitting the output yields each word intact.
+  # GitHub ignores the case of a repository's name, so a remote URL might
+  # spell it differently than GitHub's answer does.
+  cnd_findings="$(printf '%s\n' "${cnd_answer}" | awk -v head="${pr_head_repo}" '
+    $1 == "pr" {
+      ours[$2] = (tolower($5) == tolower(head))
+      if (ours[$2] && $3 != $4) print "base:" $2 ":" $3 ":" $4
+      next
+    }
+    $1 == "body" && ours[$2] {
+      text = $0
+      sub(/^body [0-9]+ /, "", text)
+      sub(/\r$/, "", text)
+      if (text ~ /^Land after #[0-9]+\.?[ \t]*$/) {
+        sub(/^Land after #/, "", text)
+        sub(/[^0-9].*$/, "", text)
+        print "after:" $2 ":" text
+      }
+    }')"
+  cnd_reason=''
+  for cnd_finding in ${cnd_findings}; do
+    cnd_kind="${cnd_finding%%:*}"
+    cnd_rest="${cnd_finding#*:}"
+    cnd_pr="${cnd_rest%%:*}"
+    cnd_rest="${cnd_rest#*:}"
+    case "${cnd_kind}" in
+      base)
+        cnd_reason="its base branch is ${cnd_rest%%:*}, not ${cnd_rest#*:}"
+        ;;
+      after)
+        cnd_after="${cnd_rest}"
+        [ "${cnd_after}" != "${cnd_pr}" ] || continue
+        # Each answer is "STATE BASE", where BASE is the pull request's base
+        # branch.
+        if ! cnd_other="$(gh_query "cannot ask GitHub about ${pr_base_repo}#${cnd_after}" \
+          gh api -X GET "repos/${pr_base_repo}/pulls/${cnd_after}" \
+          --hostname github.com --jq '"\(.state) \(.base.ref)"')"; then
+          echo "${SCRIPT_NAME}: ignoring the line \"Land after #${cnd_after}\" of ${pr_base_repo}#${cnd_pr}" >&2
+          continue
+        fi
+        [ "${cnd_other%% *}" = open ] || continue
+        # A fix to the current branch's pull request is merged into the
+        # current branch, not the other way around.  Only a pull
+        # request whose head repository is the base repository can have one.
+        if [ "${cnd_other#* }" = "${pr_head_branch}" ] \
+          && [ "$(lowercase "${pr_head_repo}")" = "$(lowercase "${pr_base_repo}")" ]; then
+          continue
+        fi
+        cnd_reason="its description says to land after ${pr_base_repo}#${cnd_after}"
+        ;;
+      *) continue ;;
+    esac
+    echo "${SCRIPT_NAME}: the current branch's pull request ${pr_base_repo}#${cnd_pr} builds on another pull request:  ${cnd_reason}" >&2
+    break
+  done
+  if [ -n "${cnd_reason}" ]; then
+    echo "${SCRIPT_NAME}: so this command does not merge ${upstream_ref#refs/remotes/} directly, which would make a later merge of the branch that it builds on a criss-cross merge; update the current branch with \`git-push-to\` from the branch that it builds on, as \`pr-status\` prints, or pass --allow-dependent" >&2
+    return 1
+  fi
+}
+
 nocompile=0
+allow_dependent=0
 while [ "$#" -ge 1 ]; do
   case "$1" in
     --nocompile) nocompile=1 ;;
+    --allow-dependent) allow_dependent=1 ;;
     *)
       if ! parse_llm_option "$1"; then break; fi
       ;;
@@ -120,7 +244,7 @@ while [ "$#" -ge 1 ]; do
 done
 
 if [ "$#" -ne 0 ]; then
-  echo "Usage: ${SCRIPT_NAME} [--nocompile] ${llm_options_usage}" >&2
+  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--allow-dependent] ${llm_options_usage}" >&2
   exit 1
 fi
 
@@ -223,6 +347,14 @@ fi
 # would reject a push of a branch that lacks the remote's new commits.
 if [ -z "${push_ref}" ] && ! git push --dry-run --quiet; then
   echo "${SCRIPT_NAME}: the current branch cannot be pushed, so this command does not merge it" >&2
+  exit 1
+fi
+
+# Ask after the pull, which can bring the default branch into the current
+# branch, so that a branch that need not merge is not refused.
+if [ "${allow_dependent}" -eq 0 ] \
+  && ! git merge-base --is-ancestor "${upstream_ref}" HEAD \
+  && ! check_not_dependent "${checked_out_branch}"; then
   exit 1
 fi
 
