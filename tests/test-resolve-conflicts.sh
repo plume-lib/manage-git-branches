@@ -159,8 +159,9 @@ case "${resolve_output}" in
 esac
 
 ## Of several chains, each runs, even after one fails; a directory whose name
-## contains a space is one argument; and a chain that fails makes
-## resolve-conflicts fail.
+## contains a space is one argument; a chain that fails makes
+## resolve-conflicts fail; and a chain after one that failed before it pulled
+## their first directory pulls it, without --no-pull-first.
 setup_case several
 STUB_CHAINS="$(printf 'myrepo-branch-main\tno such dir\nmyrepo-branch-main\tmyrepo-branch-feature')"
 resolve_conflicts
@@ -170,6 +171,9 @@ fi
 case "${resolve_output}" in
   *"no such directory: no such dir"*"the chain failed: myrepo-branch-main no such dir"*) ;;
   *) fail "several: wrong output for the failed chain: ${resolve_output}" ;;
+esac
+case "${resolve_output}" in
+  *"--no-pull-first"*) fail "several: a chain got --no-pull-first: ${resolve_output}" ;;
 esac
 expected="$(printf '%s\n' \
   'resolve-conflicts: the dependency chains that failed or that have changes to review:' \

@@ -2933,9 +2933,7 @@ pull_resolving() {
   pull_fetched=''
   # Otherwise, `git pull` would refuse to run, and the merge in progress would
   # seem to be the pull's.
-  if git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
-    echo "${SCRIPT_NAME}: a merge is in progress in ${pull_dir}; finish it, or abort it with \`git merge --abort\`" >&2
-    report_merge_in_progress_in "${pull_dir}" "It was in progress when \`${SCRIPT_NAME}\` tried to pull."
+  if ! refuse_merge_in_progress "${pull_dir}" "It was in progress when \`${SCRIPT_NAME}\` tried to pull."; then
     return 1
   fi
   # `git pull` decides, as usual, whether to rebase, to fast-forward, or to
@@ -2998,6 +2996,113 @@ pull_resolving() {
     fi
     commit_resolved_merge "${pull_resolver}" MERGE_HEAD "$(upstream_description)" "${pull_message}"
   )
+}
+
+## Usage: refuse_merge_in_progress DIRECTORY REASON
+## Returns 1, after printing a diagnostic, if a merge is in progress in
+## DIRECTORY, which it also reports with `report_merge_in_progress_in` and
+## REASON, such as "It was in progress when `git-push-to` tried to pull.", or
+## if the index of DIRECTORY has unmerged files, as after a cherry-pick, a
+## revert, or a `git stash apply` that stopped at conflicts.  `git pull`
+## refuses to run in either case.  Returns 0 otherwise.
+refuse_merge_in_progress() {
+  if git -C "$1" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    echo "${SCRIPT_NAME}: a merge is in progress in $1; finish it, or abort it with \`git merge --abort\`" >&2
+    report_merge_in_progress_in "$1" "$2"
+    return 1
+  fi
+  if [ -n "$(git -C "$1" ls-files --unmerged)" ]; then
+    echo "${SCRIPT_NAME}: $1 has unmerged files; resolve them, or abort the operation that left them, such as a cherry-pick" >&2
+    return 1
+  fi
+  return 0
+}
+
+## Usage: upstream_fetch_head DIRECTORY
+## Prints the head of the upstream branch of the branch checked out in
+## DIRECTORY, as a full hash such as
+## "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", that the latest fetch of that
+## upstream branch recorded in FETCH_HEAD, as a pull does, if the upstream
+## branch's repository is one whose branches were built where they were
+## pushed (see `is_built_remote`).  That commit's history was built there,
+## even if no remote-tracking branch records it, as when
+## `branch.BRANCH.remote` is a URL.  Returns 1, printing nothing, if the
+## first line of FETCH_HEAD is not for that upstream branch, as when the
+## latest fetch fetched another repository or branch, or if the branches of
+## the upstream branch's repository need not have been built.
+upstream_fetch_head() {
+  if ! fetch_head_branch="$(current_branch "$1")" \
+    || ! fetch_head_remote="$(git -C "$1" config --get "branch.${fetch_head_branch}.remote")" \
+    || ! fetch_head_merge="$(git -C "$1" config --get "branch.${fetch_head_branch}.merge")" \
+    || ! is_built_remote "$1" "${fetch_head_remote}" \
+    || ! fetch_head_url="$(git -C "$1" ls-remote --get-url "${fetch_head_remote}" 2> /dev/null)" \
+    || ! fetch_head_file="$(git -C "$1" rev-parse --path-format=absolute --git-path FETCH_HEAD)" \
+    || [ ! -f "${fetch_head_file}" ]; then
+    return 1
+  fi
+  # The first line of FETCH_HEAD is "HASH<TAB><TAB>branch 'BRANCH' of
+  # LOCATION" for the branch that a pull merges; see `pull_merge_message`.
+  IFS= read -r fetch_head_line < "${fetch_head_file}" || return 1
+  fetch_head_hash="${fetch_head_line%%"	"*}"
+  fetch_head_source="${fetch_head_line#*"		"}"
+  if [ "${fetch_head_source}" = "${fetch_head_line}" ]; then
+    return 1
+  fi
+  case "${fetch_head_source}" in
+    "branch '${fetch_head_merge#refs/heads/}' of "*) ;;
+    *) return 1 ;;
+  esac
+  if ! is_fetch_head_location "$1" "${fetch_head_source#"branch '${fetch_head_merge#refs/heads/}' of "}" "${fetch_head_url}" \
+    || ! git -C "$1" rev-parse --verify --quiet "${fetch_head_hash}^{commit}"; then
+    return 1
+  fi
+}
+
+## Usage: is_fetch_head_location DIRECTORY LOCATION URL
+## Returns 0 if LOCATION, the location of a repository as `git fetch` writes
+## it in FETCH_HEAD, such as "github.com:org/proj" or "/srv/proj", names the
+## repository that URL names in DIRECTORY, where URL is a URL as
+## `git ls-remote --get-url` prints it, such as "git@github.com:org/proj.git";
+## returns 1 otherwise.  `git fetch` writes the URL without trailing slashes
+## and then without a trailing ".git".  LOCATION is compared with URL
+## stripped that way, as well as by key (see `url_key`), because a pathname
+## that git wrote, such as "/srv/proj" for "/srv/proj.git", might name no
+## directory and so have no key.
+is_fetch_head_location() {
+  fetch_location_stripped="${3%"${3##*[!/]}"}"
+  fetch_location_stripped="${fetch_location_stripped%.git}"
+  if [ "${fetch_location_stripped}" = "$2" ]; then
+    return 0
+  fi
+  fetch_location_key="$(url_key "$1" "$2")"
+  [ -n "${fetch_location_key}" ] && [ "$(url_key "$1" "$3")" = "${fetch_location_key}" ]
+}
+
+## Usage: is_pulled_first_dir DIRECTORY
+## Returns 0 if DIRECTORY, the first directory of a chain of `git-push-to`,
+## is one of ${pulled_first_dirs}, the first directories, each followed by a
+## newline, that earlier chains of the same run pulled; returns 1 otherwise.
+## A later chain that starts with DIRECTORY does not pull it again, so that
+## every chain merges the same commit of it; see `git-push-to`, under
+## "Several chains".
+is_pulled_first_dir() {
+  case "
+${pulled_first_dirs:-}" in
+    *"
+$1
+"*) return 0 ;;
+  esac
+  return 1
+}
+
+## Usage: add_pulled_first_dir DIRECTORY
+## Adds DIRECTORY to ${pulled_first_dirs} (see `is_pulled_first_dir`), unless
+## it is already there.
+add_pulled_first_dir() {
+  if ! is_pulled_first_dir "$1"; then
+    pulled_first_dirs="${pulled_first_dirs:-}$1
+"
+  fi
 }
 
 ## Usage: report_merge_in_progress_in DIRECTORY [REASON]
@@ -3358,22 +3463,10 @@ fetch_head_location() {
 ## which updates no remote-tracking branch.  Returns 1, printing nothing, if
 ## no such remote-tracking branch exists.
 tracking_branch_of() {
-  tracking_of_key="$(url_key . "$2")"
   for tracking_of_remote in $(git remote); do
-    if ! git merge-base --is-ancestor "$3" "refs/remotes/${tracking_of_remote}/$1" 2> /dev/null \
-      || ! tracking_of_url="$(git ls-remote --get-url "${tracking_of_remote}" 2> /dev/null)"; then
-      continue
-    fi
-    # `git pull` writes the URL without trailing slashes and then without a
-    # trailing ".git".  The URL that it wrote is compared with the remote's
-    # URL stripped that way, as well as by key, because a pathname that it
-    # wrote, such as "/srv/proj" for "/srv/proj.git", might name no
-    # directory and so have no key.
-    tracking_of_stripped="${tracking_of_url%"${tracking_of_url##*[!/]}"}"
-    tracking_of_stripped="${tracking_of_stripped%.git}"
-    if [ "${tracking_of_stripped}" = "$2" ] \
-      || { [ -n "${tracking_of_key}" ] \
-        && [ "$(url_key . "${tracking_of_url}")" = "${tracking_of_key}" ]; }; then
+    if git merge-base --is-ancestor "$3" "refs/remotes/${tracking_of_remote}/$1" 2> /dev/null \
+      && tracking_of_url="$(git ls-remote --get-url "${tracking_of_remote}" 2> /dev/null)" \
+      && is_fetch_head_location . "$2" "${tracking_of_url}"; then
       printf '%s/%s\n' "${tracking_of_remote}" "$1"
       return 0
     fi

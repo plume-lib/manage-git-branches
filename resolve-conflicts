@@ -17,10 +17,9 @@
 #    --print-conflicting-push-chains` prints, adding the "--claude" option (or
 #    "--codex"; see `git-push-to`, under "Asking an AI agent") and any
 #    "--nocompile" option; a chain that fails does not stop the others,
-#  * add the "--no-pull-first" option for each chain whose first directory is
-#    the first directory of an earlier chain since `pr-status` ran, so that
-#    all of those chains merge the same commit of it (see `git-push-to`,
-#    under "Several chains"),
+#  * add the "--no-pull-first" option for each chain whose first directory an
+#    earlier chain since `pr-status` ran pulled, so that all of those chains
+#    merge the same commit of it (see `git-push-to`, under "Several chains"),
 #  * if every chain succeeded, start over, until no chain has conflicts.
 # It fails if a chain fails, or if chains with conflicts remain after
 # ${max_rounds} rounds.  It ends with a summary of the chains that failed or
@@ -166,22 +165,20 @@ while :; do
   fi
 
   num_failed=0
-  # The first directories of this round's chains so far, each followed by a
-  # newline.
-  first_dirs=''
+  # The first directories that this round's chains so far pulled; see
+  # `is_pulled_first_dir`.
+  pulled_first_dirs=''
   IFS="${newline}"
   for chain in ${chains}; do
     IFS="${tab}"
     # shellcheck disable=SC2086 # Split the chain into directories.
     set -- ${chain}
     IFS="${saved_ifs}"
-    case "${newline}${first_dirs}" in
-      *"${newline}$1${newline}"*) no_pull_first_option='--no-pull-first' ;;
-      *)
-        no_pull_first_option=''
-        first_dirs="${first_dirs}$1${newline}"
-        ;;
-    esac
+    if is_pulled_first_dir "$1"; then
+      no_pull_first_option='--no-pull-first'
+    else
+      no_pull_first_option=''
+    fi
     echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} ${no_pull_first_option} $*"
     : > "${push_summary}"
     # The chain does not read this script's standard input.
@@ -189,6 +186,11 @@ while :; do
     "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} ${no_pull_first_option} \
       --summary "${push_summary}" "$@" < /dev/null
     push_status=$?
+    # `git-push-to` exits with status 2 if it failed before it pulled the
+    # first directory, which a later chain then pulls.
+    if [ "${push_status}" -ne 2 ]; then
+      add_pulled_first_dir "$1"
+    fi
     push_lines="$(sed -e 's/^/    /' -- "${push_summary}")"
     if [ "${push_status}" -ne 0 ]; then
       echo "${SCRIPT_NAME}: the chain failed: $*" >&2

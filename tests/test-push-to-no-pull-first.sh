@@ -154,4 +154,46 @@ for dir in proj-fork-me-branch-part1 proj-fork-you-branch-part1; do
   fi
 done
 
+## A chain that fails before it pulls the first directory exits with status
+## 2, and a later chain of slugs pulls that directory again.  A chain that
+## does not pull it exits with status 1.  The `git` in failing-pull-bin logs
+## its arguments as the counting `git` does, and fails every pull of ${MAIN}.
+mkdir -p "${WORK_DIR}/failing-pull-bin"
+failing_pull_real="$(real_git "${WORK_DIR}/failing-pull-bin")"
+cat > "${WORK_DIR}/failing-pull-bin/git" << FAILING_PULL_END
+#!/bin/sh
+printf '%s\\n' "\$*" >> "\${GIT_COMMAND_LOG}"
+case "\$*" in
+  "-C ${WORK_DIR}/${MAIN} "*pull*)
+    echo "fatal: simulated failure to pull" >&2
+    exit 1
+    ;;
+esac
+exec "${failing_pull_real}" "\$@"
+FAILING_PULL_END
+chmod +x "${WORK_DIR}/failing-pull-bin/git"
+set +e
+PATH="${WORK_DIR}/failing-pull-bin:${PATH}" "${COMMANDS_DIR}/git-push-to" \
+  "${WORK_DIR}/${MAIN}" "${WORK_DIR}/proj-branch-part2" 2> /dev/null
+push_status=$?
+"${COMMANDS_DIR}/git-push-to" --no-pull-first \
+  "${WORK_DIR}/${MAIN}" "${WORK_DIR}/no-such-directory" 2> /dev/null
+no_pull_status=$?
+set -e
+if [ "${push_status}" -ne 2 ]; then
+  fail "git-push-to that could not pull the first directory exited with status ${push_status}, not 2"
+fi
+if [ "${no_pull_status}" -ne 1 ]; then
+  fail "git-push-to --no-pull-first exited with status ${no_pull_status}, not 1"
+fi
+: > "${GIT_COMMAND_LOG}"
+if (cd "${WORK_DIR}" && PATH="${WORK_DIR}/failing-pull-bin:${PATH}" \
+  "${COMMANDS_DIR}/git-push-to" upstream:main part1 2> "${WORK_DIR}/stderr"); then
+  fail "git-push-to on slugs succeeded without pulling ${MAIN}"
+fi
+pulls="$(grep -c -e "-C [^ ]*/${MAIN} .*pull" "${GIT_COMMAND_LOG}" || true)"
+if [ "${pulls}" -ne 2 ]; then
+  fail "two chains of slugs whose pulls of ${MAIN} failed pulled it ${pulls} times, not twice: $(cat "${WORK_DIR}/stderr")"
+fi
+
 echo "${SCRIPT_NAME}: OK"

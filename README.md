@@ -113,7 +113,8 @@ The commands are:
   that it builds on, and merging the latter into the former would later be a
   criss-cross merge, which has several merge bases.  `git-push-to` itself
   does so for the chains of slugs, and `pr-status` and `resolve-conflicts`
-  pass `--no-pull-first` to each such chain after the first.
+  pass `--no-pull-first` to each such chain after the first that pulled the
+  directory.
 
   When a merge or a pull has conflicts, it uses the resolutions that
   `git rerere` recorded, and it asks an AI agent, Claude (or, with
@@ -217,8 +218,8 @@ The commands are:
   `pr-status.md`, then runs `git-push-to` on each chain of its section
   "Dependency chains with conflicts",
   with `--claude` (or `--codex`), which asks an AI agent for help, and with
-  `--no-pull-first` for each chain that starts with the same directory as an
-  earlier chain since `pr-status` ran.
+  `--no-pull-first` for each chain whose first directory an earlier chain
+  since `pr-status` ran pulled.
   It ends with a summary of the chains that failed or that have changes by
   the agent to review, each with what `git-push-to --summary` wrote for it,
   which names the step that failed.
