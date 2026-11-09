@@ -934,24 +934,24 @@ class ApplyDescriptionUpdatesTest(unittest.TestCase):
         refresh.assert_not_called()
 
 
-class ChainHasConflictTest(unittest.TestCase):
-    """Tests for chain_has_conflict."""
+class ChainConflictPrsTest(unittest.TestCase):
+    """Tests for chain_conflict_prs."""
 
     def test_clean_chain(self):
         """A chain with no reported conflict is clean."""
         repo = types.SimpleNamespace(master_conflicts={}, pair_conflicts={})
-        self.assertFalse(pr_status.chain_has_conflict(repo, [1, 2, 3], True))
+        self.assertEqual(pr_status.chain_conflict_prs(repo, [1, 2, 3], True), set())
 
     def test_master_conflict_anywhere_in_chain(self):
         """An upstream conflict in a later PR affects the merge that reaches that PR."""
         repo = types.SimpleNamespace(master_conflicts={2: ["file"]}, pair_conflicts={})
-        self.assertTrue(pr_status.chain_has_conflict(repo, [1, 2, 3], True))
-        self.assertFalse(pr_status.chain_has_conflict(repo, [1, 2, 3], False))
+        self.assertEqual(pr_status.chain_conflict_prs(repo, [1, 2, 3], True), {2})
+        self.assertEqual(pr_status.chain_conflict_prs(repo, [1, 2, 3], False), set())
 
     def test_nonadjacent_pr_conflict(self):
-        """A later merge receives earlier, nonadjacent PRs in the chain."""
+        """A later merge receives earlier, nonadjacent PRs in the chain, through those between."""
         repo = types.SimpleNamespace(master_conflicts={}, pair_conflicts={(1, 3): ["file"]})
-        self.assertTrue(pr_status.chain_has_conflict(repo, [1, 2, 3], True))
+        self.assertEqual(pr_status.chain_conflict_prs(repo, [1, 2, 3, 4], True), {1, 2, 3})
 
 
 class PushChainsTest(unittest.TestCase):
@@ -971,7 +971,7 @@ class PushChainsTest(unittest.TestCase):
         repo = types.SimpleNamespace(
             gh="owner/repo",
             default_branch="master",
-            prs={n: {} for n in direct},
+            prs={n: {"owner": "owner"} for n in direct},
             master_conflicts=master_conflicts,
             pair_conflicts={},
         )
@@ -1025,17 +1025,18 @@ class NewSnapshotTest(unittest.TestCase):
     def test_round_trip(self):
         """The chains with conflicts of every repository, in order, survive a JSON round trip."""
         conflicting = [
-            pr_status.PushChains([["a", "a-branch-x"]], [], True),
-            pr_status.PushChains([], [1], True),
-            pr_status.PushChains([["b", "b-branch y"], ["b", "b-branch-z"]], [], True),
+            pr_status.PushChains(
+                [["a", "a-branch-x"]], [], True, [pr_status.MissingBranch("a", "owner:master")]
+            ),
+            pr_status.PushChains([], [1], True, []),
+            pr_status.PushChains(
+                [["b", "b-branch y"], ["b", "b-branch-z"]],
+                [],
+                True,
+                [pr_status.MissingBranch("b dir", "mernst:fix")],
+            ),
         ]
-        missing = [
-            pr_status.MissingBranch("a", "owner:master"),
-            pr_status.MissingBranch("b dir", "mernst:fix"),
-        ]
-        snapshot = json.loads(
-            json.dumps(pr_status.new_snapshot("now", {"repo": {}}, conflicting, missing))
-        )
+        snapshot = json.loads(json.dumps(pr_status.new_snapshot("now", {"repo": {}}, conflicting)))
         self.assertEqual((snapshot["time"], snapshot["facts"]), ("now", {"repo": {}}))
         self.assertEqual(
             pr_status.format_push_chains(snapshot),
@@ -1073,90 +1074,166 @@ class FormatPushChainsTest(unittest.TestCase):
 
 
 class MissingBranchesTest(unittest.TestCase):
-    """Tests for missing_branches."""
+    """Tests for the missing branches that push_chains computes."""
 
     @staticmethod
     def missing(
-        master_conflicts, conflicting=None, has_dir=(), has_upstream=False, deleted_heads=()
+        master_conflicts,
+        update_direct=None,
+        pair_conflicts=(),
+        has_dir=(),
+        has_upstream=False,
+        deleted_heads=(),
+        cycle_affected=(),
+        entries=None,
+        clone="repo",
     ):
-        """Run missing_branches on open PRs 1 through 5.
+        """Return the missing branches that push_chains computes, for open PRs 1 through 5.
 
-        PR n's branch is "branch<n>" of the fork of "mernst".
+        PR n's branch is "branch<n>" of the fork of "MErnst".
 
         Args:
             master_conflicts: a map from the number of each PR that conflicts with upstream
                 to its conflicting files
-            conflicting: a map from a PR's number to the numbers of the PRs that its branch is
-                updated from and conflicts with
+            update_direct: a map from a PR's number to the numbers of the PRs that its branch
+                is updated from, for the PRs that have any
+            pair_conflicts: the pairs of the numbers of PRs whose branches conflict
             has_dir: the numbers of the PRs that have a working copy
-            has_upstream: True if there is a working copy of upstream
+            has_upstream: True if the clone "repo" has the default branch checked out
             deleted_heads: the numbers of the PRs whose head repository has been deleted
+            cycle_affected: the numbers of the PRs that are in or after a cycle of the
+                update graph
+            entries: the git clones of the directory that holds the working copy directories,
+                as a map from each entry to its GitEntry, or None for just a clone "repo" of
+                the repository
+            clone: the repository's clone in the config
 
         Returns:
-            The branches, as "CLONE OWNER:BRANCH" strings.
+            The branches, as "DIRECTORY OWNER:BRANCH" strings.
         """
-        conflicting = conflicting or {}
+        update_direct = {n: set() for n in range(1, 6)} | (update_direct or {})
         prs = {
-            n: {"owner": "" if n in deleted_heads else "mernst", "headRefName": f"branch{n}"}
-            for n in range(1, 6)
+            n: {"owner": "" if n in deleted_heads else "MErnst", "headRefName": f"branch{n}"}
+            for n in update_direct
         }
         repo = types.SimpleNamespace(
             gh="Owner/repo",
             owner="Owner",
-            clone="repo",
+            clone=clone,
             default_branch="master",
             prs=prs,
             master_conflicts=master_conflicts,
+            pair_conflicts={(min(a, b), max(a, b)): ["file"] for a, b in pair_conflicts},
         )
+
+        def level(n):
+            """Return the level of PR n in the update graph, which has no cycle.
+
+            Returns:
+                1 if PR n has no prerequisite, or else 1 more than the greatest level of its
+                prerequisites.
+            """
+            return 1 + max((level(d) for d in update_direct[n]), default=0)
+
         model = types.SimpleNamespace(
             repo=repo,
             open=set(prs),
-            conflicting_prerequisites=lambda n: set(conflicting.get(n, ())),
+            update_direct=update_direct,
+            update_levels={n: level(n) for n in update_direct},
+            update_cycle_affected=set(cycle_affected),
         )
-        upstream = {"repo": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}
+        if entries is None:
+            branch = "master" if has_upstream else "other"
+            entries = {"repo": pr_status.GitEntry("owner", "repo", branch)}
         with (
-            mock.patch.object(pr_status, "git_entries", return_value=upstream),
+            mock.patch.object(pr_status, "git_entries", return_value=entries),
             mock.patch.object(
                 pr_status,
                 "pr_directories",
                 lambda _r, pr, _base: ["d"] if int(pr["headRefName"][6:]) in has_dir else [],
             ),
         ):
-            return [f"{b.clone} {b.branch}" for b in pr_status.missing_branches(model, "/base")]
+            missing = pr_status.push_chains(model, "/base").missing_branches
+        return [f"{b.directory} {b.branch}" for b in missing]
 
     def test_master_conflict(self):
-        """A conflict with upstream needs upstream and the PR's branch."""
-        self.assertEqual(self.missing({2: ["file"]}), ["repo Owner:master", "repo mernst:branch2"])
+        """A conflict with upstream needs upstream and the PR's branch, with lowercase owners."""
+        self.assertEqual(self.missing({2: ["file"]}), ["repo owner:master", "repo mernst:branch2"])
 
     def test_existing_working_copies(self):
         """A branch that has a working copy is not missing."""
-        self.assertEqual(self.missing({2: ["file"]}, has_dir={2}), ["repo Owner:master"])
+        self.assertEqual(self.missing({2: ["file"]}, has_dir={2}), ["repo owner:master"])
         self.assertEqual(self.missing({2: ["file"]}, has_upstream=True), ["repo mernst:branch2"])
 
     def test_prerequisite_conflict(self):
         """A conflict with a prerequisite needs both PRs' branches, but not upstream."""
-        self.assertEqual(self.missing({}, {4: {1}}, has_dir={4}), ["repo mernst:branch1"])
+        self.assertEqual(self.missing({}, {4: {1}}, [(1, 4)], has_dir={4}), ["repo mernst:branch1"])
 
     def test_both_conflicts(self):
         """A PR that conflicts with a prerequisite and with upstream needs all 3 branches."""
         self.assertEqual(
-            self.missing({4: ["file"]}, {4: {1}}),
-            ["repo Owner:master", "repo mernst:branch1", "repo mernst:branch4"],
+            self.missing({4: ["file"]}, {4: {1}}, [(1, 4)]),
+            ["repo owner:master", "repo mernst:branch1", "repo mernst:branch4"],
         )
 
     def test_no_duplicates(self):
         """A branch that several conflicts need appears once."""
         self.assertEqual(
-            self.missing({}, {3: {1}, 4: {1}}, has_dir={3, 4}), ["repo mernst:branch1"]
+            self.missing({}, {3: {1}, 4: {1}}, [(1, 3), (1, 4)], has_dir={3, 4}),
+            ["repo mernst:branch1"],
+        )
+
+    def test_nonadjacent_conflict(self):
+        """A conflict between nonadjacent PRs of a chain needs the PRs between them too."""
+        self.assertEqual(
+            self.missing({}, {2: {1}, 3: {2}}, [(1, 3)]),
+            ["repo mernst:branch1", "repo mernst:branch2", "repo mernst:branch3"],
+        )
+
+    def test_only_conflicting_part_of_chain(self):
+        """A PR of the chain that precedes every conflict is not needed."""
+        self.assertEqual(
+            self.missing({}, {2: {1}, 3: {2}}, [(2, 3)]),
+            ["repo mernst:branch2", "repo mernst:branch3"],
         )
 
     def test_deleted_head(self):
-        """The branch of a PR whose head repository has been deleted is omitted."""
-        self.assertEqual(self.missing({2: ["file"]}, deleted_heads={2}), ["repo Owner:master"])
+        """A PR whose head repository has been deleted needs no branch, not even upstream."""
+        self.assertEqual(self.missing({2: ["file"]}, deleted_heads={2}), [])
+
+    def test_cycle_affected(self):
+        """A PR in or after a cycle, which no chain contains, needs no branch."""
+        self.assertEqual(self.missing({2: ["file"]}, cycle_affected={2}), [])
+        self.assertEqual(self.missing({}, {4: {1}}, [(1, 4)], has_dir={1}, cycle_affected={4}), [])
+
+    def test_fork_clone_only(self):
+        """Without a clone of the repository itself, upstream cannot be checked out."""
+        entries = {"repo-fork-mernst": pr_status.GitEntry("mernst", "repo", "other")}
+        self.assertEqual(
+            self.missing({2: ["file"]}, entries=entries, clone="repo-fork-mernst"),
+            ["repo-fork-mernst mernst:branch2"],
+        )
+
+    def test_directory_in_base(self):
+        """The directory is in base, preferably the clone in the config."""
+        self.assertEqual(
+            self.missing({2: ["file"]}, clone="/elsewhere/repo"),
+            ["repo owner:master", "repo mernst:branch2"],
+        )
+        entries = {
+            "a": pr_status.GitEntry("owner", "repo", "x"),
+            "b": pr_status.GitEntry("owner", "repo", "y"),
+            "other": pr_status.GitEntry("owner", "other", "z"),
+        }
+        self.assertEqual(
+            self.missing({2: ["file"]}, entries=entries, clone="b"),
+            ["b owner:master", "b mernst:branch2"],
+        )
+        self.assertEqual(self.missing({2: ["file"]}, entries={}), [])
 
     def test_no_conflict(self):
         """Without a conflict, no branch is missing."""
-        self.assertEqual(self.missing({}), [])
+        self.assertEqual(self.missing({}, {2: {1}}), [])
 
 
 class FormatMissingBranchesTest(unittest.TestCase):
@@ -1203,8 +1280,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
         snapshot = pr_status.new_snapshot(
             "now",
             {},
-            [pr_status.PushChains([["a", "a-branch-x"], ["a", "a-branch y", "z"]], [], True)],
-            [],
+            [pr_status.PushChains([["a", "a-branch-x"], ["a", "a-branch y", "z"]], [], True, [])],
         )
         result = self.run_option(json.dumps(snapshot))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1219,7 +1295,9 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
 
     def test_prints_missing_branches(self):
         """`--print-missing-branches` prints only the branches, one per line."""
-        snapshot = pr_status.new_snapshot("now", {}, [], [pr_status.MissingBranch("a", "o:master")])
+        snapshot = pr_status.new_snapshot(
+            "now", {}, [pr_status.PushChains([], [], False, [pr_status.MissingBranch("a", "o:m")])]
+        )
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / pr_status_config.SNAPSHOT).write_text(json.dumps(snapshot))
             result = subprocess.run(
@@ -1229,7 +1307,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "a\to:master\n")
+        self.assertEqual(result.stdout, "a\to:m\n")
 
 
 class ExclusiveOptionsTest(unittest.TestCase):
