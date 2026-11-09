@@ -883,17 +883,24 @@ upstream_default_branch_git() {
 ## remote that the ref belongs to, such as "upstream", or to the URL that the
 ## ref was fetched from.
 ##
-## The upstream repository is the remote that `upstream_remote` chooses, with
-## one exception.  If that remote is not named "upstream", and
-## `fork_upstream` says that the GitHub repository at the remote's URL, such
-## as ME/PROJ, has another upstream repository, such as ORG/PROJ, then the
-## upstream repository is ORG/PROJ.  That is the clone's remote whose URL
-## names ORG/PROJ, if there is one, and otherwise the repository at the URL
-## that has the same form as the remote's, such as
-## "git@github.com:ORG/PROJ.git" for "git@github.com:ME/PROJ.git".  The
-## default branch at such a URL is fetched into the ref
-## `refs/fork-upstream/ORG/PROJ`, in lower case, rather than into a
-## remote-tracking branch, so the clone gains no remote.
+## The upstream repository is the remote that `upstream_remote` chooses,
+## unless that remote is not named "upstream" and one of these names another
+## repository:
+##  * The setting `remote.REMOTE.gh-resolved` of some remote REMOTE, which
+##    names the repository that `gh` uses by default (see `gh_resolved`):
+##    either a GitHub repository, such as ORG/PROJ, or REMOTE itself.
+##  * Otherwise, `fork_upstream`, if the chosen remote is a GitHub
+##    repository, such as ME/PROJ, whose upstream repository is another, such
+##    as ORG/PROJ.
+## A GitHub repository ORG/PROJ is the clone's remote whose URL names
+## ORG/PROJ, if there is one.  Otherwise, if the chosen remote is a GitHub
+## repository, it is the repository at the URL that has the same form as the
+## chosen remote's, such as "git@github.com:ORG/PROJ.git" for
+## "git@github.com:ME/PROJ.git".  The default branch at such a URL is fetched
+## into the ref `refs/fork-upstream/ORG/PROJ`, in lower case, rather than into
+## a remote-tracking branch, and without the URL's tags, so the clone gains no
+## remote and no tag.  Otherwise, the upstream repository is the chosen
+## remote.
 ##
 ## FETCH is as for `upstream_default_branch`.  If FETCH is 0, such a URL is
 ## not fetched, and the ref that an earlier call fetched it into is used.  If
@@ -909,45 +916,63 @@ find_upstream_ref() {
   # configuration, even if it is a fork.
   if [ "${upstream_source}" != upstream ]; then
     # `git remote get-url` applies `url.BASE.insteadOf`, which can map a
-    # GitHub URL to a mirror or a local copy; the configured URL still names
-    # GitHub.
+    # GitHub URL to a mirror or a local copy, so the configured URL might be
+    # the one that names GitHub.  It can also map a shortcut, such as
+    # "gh:ME/PROJ", to a GitHub URL, so the rewritten URL might be.
     fur_url="$(git config --get "remote.${upstream_source}.url")"
     fur_fork="$(github_slug "${fur_url}")"
-    if [ -n "${fur_fork}" ] \
-      && fur_parent="$(fork_upstream "${fur_fork}" "$1")" \
-      && [ -n "${fur_parent}" ]; then
+    if [ -z "${fur_fork}" ]; then
+      fur_url="$(git remote get-url "${upstream_source}")"
+      fur_fork="$(github_slug "${fur_url}")"
+    fi
+    fur_parent=''
+    if gh_resolved .; then
+      if [ "${gh_resolved_value}" = base ]; then
+        upstream_source="${gh_resolved_remote}"
+      else
+        fur_parent="${gh_resolved_value}"
+      fi
+    elif [ -n "${fur_fork}" ]; then
+      fork_upstream "${fur_fork}" "$1"
+      fur_parent="${fork_upstream_repo}"
+    fi
+    if [ -n "${fur_parent}" ] \
+      && fur_parent_lower="$(lowercase "${fur_parent}")" \
+      && [ "${fur_parent_lower}" != "$(lowercase "${fur_fork}")" ]; then
       # GitHub ignores the case of a repository's name, so a remote's URL
-      # might spell it differently than the recorded upstream repository does.
-      fur_parent_lower="$(lowercase "${fur_parent}")"
-      for fur_remote in $(git remote); do
-        if [ "$(lowercase "$(github_slug "$(git config --get "remote.${fur_remote}.url")")")" \
-          = "${fur_parent_lower}" ]; then
-          upstream_ref="$(upstream_default_branch "${fur_remote}" "$1")" || return 1
-          upstream_source="${fur_remote}"
-          return 0
-        fi
-      done
-      # `github_slug` recognized ${fur_url}, so it has an owner.
-      split_repository_url "${fur_url}"
-      case "${repo_url_repo}" in
-        *.git) fur_suffix='.git' ;;
-        *) fur_suffix='' ;;
-      esac
-      fur_parent_url="${repo_url_prefix}${fur_parent}${fur_suffix}"
-      fur_ref="refs/fork-upstream/${fur_parent_lower}"
-      if [ "$1" -eq 1 ]; then
-        if git fetch --quiet "${fur_parent_url}" "+HEAD:${fur_ref}"; then
+      # might spell it differently than ${fur_parent} does.
+      fur_remote="$(github_remote_slugs \
+        | awk -v slug="${fur_parent_lower}" 'tolower($2) == slug { print $1; exit }')"
+      if [ -n "${fur_remote}" ]; then
+        upstream_ref="$(upstream_default_branch "${fur_remote}" "$1")" || return 1
+        upstream_source="${fur_remote}"
+        return 0
+      fi
+      if [ -n "${fur_fork}" ]; then
+        # `github_slug` recognized ${fur_url}, so it has an owner.
+        split_repository_url "${fur_url}"
+        case "${repo_url_repo}" in
+          *.git) fur_suffix='.git' ;;
+          *) fur_suffix='' ;;
+        esac
+        fur_parent_url="${repo_url_prefix}${fur_parent}${fur_suffix}"
+        fur_ref="refs/fork-upstream/${fur_parent_lower}"
+        if [ "$1" -eq 1 ]; then
+          # Without `--no-tags`, the fetch would also create a local tag for
+          # each of the URL's tags that points into the fetched history.
+          if git fetch --quiet --no-tags "${fur_parent_url}" "+HEAD:${fur_ref}"; then
+            upstream_ref="${fur_ref}"
+            upstream_source="${fur_parent_url}"
+            return 0
+          fi
+          echo "${SCRIPT_NAME}: cannot fetch ${fur_parent_url}, the upstream repository of ${fur_fork}; using ${upstream_source} instead" >&2
+        elif git rev-parse --verify --quiet "${fur_ref}" > /dev/null; then
           upstream_ref="${fur_ref}"
           upstream_source="${fur_parent_url}"
           return 0
+        else
+          echo "${SCRIPT_NAME}: ${fur_parent_url}, the upstream repository of ${fur_fork}, has not been fetched; using ${upstream_source} instead" >&2
         fi
-        echo "${SCRIPT_NAME}: cannot fetch ${fur_parent_url}, the upstream repository of ${fur_fork}; using ${upstream_source} instead" >&2
-      elif git rev-parse --verify --quiet "${fur_ref}" > /dev/null; then
-        upstream_ref="${fur_ref}"
-        upstream_source="${fur_parent_url}"
-        return 0
-      else
-        echo "${SCRIPT_NAME}: ${fur_parent_url}, the upstream repository of ${fur_fork}, has not been fetched; using ${upstream_source} instead" >&2
       fi
     fi
   fi
@@ -955,45 +980,110 @@ find_upstream_ref() {
 }
 
 ## Usage: fork_upstream FORK FETCH
-## Prints the GitHub slug, such as "ORG/PROJ", of the upstream repository of
-## FORK, a GitHub repository's slug such as "ME/PROJ", or prints nothing if
-## FORK is its own upstream repository.  A fork that a user owns, such as
-## ME/PROJ, holds pull requests for its parent, such as ORG/PROJ, which is its
-## upstream repository.  A repository that is not a fork is its own upstream
-## repository.  So is a fork that an organization owns, such as typetools/jdk
-## (a fork of openjdk/jdk):  it is a downstream fork that carries its own
-## changes, and its pull requests target it, not its parent.
+## Sets ${fork_upstream_repo} to the GitHub slug, such as "ORG/PROJ", of the
+## upstream repository of FORK, a GitHub repository's slug such as "ME/PROJ"
+## (see `github_upstream`), or to the empty string if FORK is its own
+## upstream repository or if the upstream repository is unknown.
 ##
 ## The answer is recorded in the git configuration variable
-## `github-fork.FORK.upstream`, with FORK in lower case, such as
-## `github-fork.me/proj.upstream`, as a GitHub slug or as "none".  If that
-## variable is set, by an earlier call or by hand to override this function's
-## choice, prints its value (nothing for "none").  Otherwise, if FETCH is 1
-## and `gh` is installed, asks GitHub and records the answer.  If GitHub
-## cannot be asked, prints a diagnostic, records nothing, and prints nothing.
+## `github-fork.FORK.upstream` of the clone in the current directory, with
+## FORK in lower case, such as `github-fork.me/proj.upstream`, as a GitHub
+## slug or as "none".  If that variable is set, by an earlier call or by hand
+## to override this function's choice, uses its value.  Otherwise, if FETCH
+## is 1, asks GitHub and records the answer.  GitHub is not asked if `gh` is
+## not installed or has no token for github.com, as when no user has logged
+## in with `gh auth login`.  If asking GitHub fails, prints a diagnostic and
+## records nothing.
 fork_upstream() {
+  fork_upstream_repo=''
   fork_upstream_key="github-fork.$(lowercase "$1").upstream"
   if fork_upstream_value="$(git config --get "${fork_upstream_key}")"; then
     if [ "${fork_upstream_value}" != none ]; then
-      printf '%s\n' "${fork_upstream_value}"
+      fork_upstream_repo="${fork_upstream_value}"
     fi
     return 0
   fi
-  if [ "$2" -ne 1 ] || ! command -v gh > /dev/null 2>&1; then
+  if [ "$2" -ne 1 ] || ! command -v gh > /dev/null 2>&1 \
+    || ! gh auth token --hostname github.com > /dev/null 2>&1; then
     return 0
   fi
-  # The repository is named with its host, so that `gh` does not ask the host
-  # that ${GH_HOST} names instead.
-  if ! fork_upstream_value="$(gh_query "cannot determine whether $1 is a fork" \
-    gh repo view "github.com/$1" --json isInOrganization,parent \
-    --jq 'if .isInOrganization then empty else (.parent // empty | "\(.owner.login)/\(.name)") end')"; then
+  if ! github_upstream "$1"; then
     echo "${SCRIPT_NAME}: to compare with $1 without asking GitHub again, run:  git config ${fork_upstream_key} none" >&2
     return 0
   fi
-  git config "${fork_upstream_key}" "${fork_upstream_value:-none}"
-  if [ -n "${fork_upstream_value}" ]; then
-    printf '%s\n' "${fork_upstream_value}"
+  if [ "$(lowercase "${github_upstream_repo}")" = "$(lowercase "$1")" ]; then
+    git config "${fork_upstream_key}" none
+  else
+    git config "${fork_upstream_key}" "${github_upstream_repo}"
+    fork_upstream_repo="${github_upstream_repo}"
   fi
+}
+
+## Usage: github_upstream REPO
+## Sets ${github_upstream_repo} to the GitHub slug, such as "ORG/PROJ", of the
+## upstream repository of REPO, a GitHub repository's slug such as
+## "ME/PROJ", and sets ${github_upstream_default} to the name of REPO's
+## default branch, such as "main", or to "-" if REPO has none, as an empty
+## repository does.
+##
+## A fork that a user owns, such as ME/PROJ, holds pull requests for its
+## parent, such as ORG/PROJ, which is its upstream repository.  A repository
+## that is not a fork is its own upstream repository.  So is a fork that an
+## organization owns, such as typetools/jdk (a fork of openjdk/jdk):  it is a
+## downstream fork that carries its own changes, and its pull requests target
+## it, not its parent.
+##
+## Asks GitHub with `gh`, which must be installed, unless an earlier call in
+## the same process asked about REPO.  Returns 1, after printing a
+## diagnostic, if GitHub cannot be asked.
+github_upstream() {
+  github_upstream_answer="$(printf '%s\n' "${github_upstream_cache}" \
+    | awk -v repo="$1" '$1 == repo { print $2 " " $3; exit }')"
+  if [ -z "${github_upstream_answer}" ]; then
+    # The repository is named with its host, so that `gh` does not ask the
+    # host that ${GH_HOST} names instead.
+    github_upstream_answer="$(gh_query "cannot ask GitHub about $1" \
+      gh repo view "github.com/$1" \
+      --json owner,name,isInOrganization,parent,defaultBranchRef \
+      --jq '"\(if .parent and (.isInOrganization | not) then "\(.parent.owner.login)/\(.parent.name)" else "\(.owner.login)/\(.name)" end) \(.defaultBranchRef.name // "-")"')" \
+      || return 1
+    case "${github_upstream_answer}" in
+      ?*' '?*) ;;
+      *)
+        echo "${SCRIPT_NAME}: cannot ask GitHub about $1: unexpected answer [${github_upstream_answer}]" >&2
+        return 1
+        ;;
+    esac
+    github_upstream_cache="${github_upstream_cache}
+$1 ${github_upstream_answer}"
+  fi
+  github_upstream_repo="${github_upstream_answer%% *}"
+  # shellcheck disable=SC2034 # set for the caller
+  github_upstream_default="${github_upstream_answer#* }"
+}
+
+## The answers that `github_upstream` has received.  Each line is
+## "REPO UPSTREAM DEFAULT", as `github_upstream` describes them, so that every
+## branch of a project, which asks about the same repository, asks GitHub
+## only once.
+github_upstream_cache=''
+
+## Usage: gh_resolved DIRECTORY
+## Sets ${gh_resolved_remote} to the name of a remote REMOTE of the clone in
+## DIRECTORY that has the setting `remote.REMOTE.gh-resolved`, which
+## `gh repo set-default` writes to name the repository that `gh` uses by
+## default, and sets ${gh_resolved_value} to that setting:  either a GitHub
+## slug, such as "ORG/REPO", or "base" for REMOTE itself.  If several remotes
+## have the setting, uses the first that git lists.  Returns 1, after setting
+## both to the empty string, if no remote has that setting.
+gh_resolved() {
+  # A remote's name contains no whitespace.
+  gh_resolved_value="$(git -C "$1" config --get-regexp '^remote\..*\.gh-resolved$' | head -n 1)"
+  gh_resolved_remote="${gh_resolved_value%% *}"
+  gh_resolved_remote="${gh_resolved_remote#remote.}"
+  gh_resolved_remote="${gh_resolved_remote%.gh-resolved}"
+  gh_resolved_value="${gh_resolved_value#* }"
+  [ -n "${gh_resolved_value}" ]
 }
 
 ## Usage: check_conflict_resolution FILE CONTAINS_SEPARATOR
@@ -4278,21 +4368,15 @@ upstream_repository() {
     return 1
   fi
   upstream_repo_url="$(git -C "$1" config --get "remote.${ur_remote}.url")"
-  # The remote that names the upstream repository for `gh`, and the value
-  # that names it.  A remote's name contains no whitespace.
-  ur_resolved="$(git -C "$1" config --get-regexp '^remote\..*\.gh-resolved$' | head -n 1)"
-  ur_resolved_remote="${ur_resolved%% *}"
-  ur_resolved_remote="${ur_resolved_remote#remote.}"
-  ur_resolved_remote="${ur_resolved_remote%.gh-resolved}"
-  ur_resolved="${ur_resolved#* }"
-  case "${ur_resolved}" in
+  gh_resolved "$1" || true
+  case "${gh_resolved_value}" in
     */*)
-      upstream_repo_slug="${ur_resolved}"
-      upstream_repo_owner="${ur_resolved%%/*}"
+      upstream_repo_slug="${gh_resolved_value}"
+      upstream_repo_owner="${gh_resolved_value%%/*}"
       return 0
       ;;
     base)
-      ur_url="$(git -C "$1" config --get "remote.${ur_resolved_remote}.url")"
+      ur_url="$(git -C "$1" config --get "remote.${gh_resolved_remote}.url")"
       ;;
     *)
       ur_url="${upstream_repo_url}"
@@ -5513,11 +5597,41 @@ is_deleted_branch() {
 ## URL is URL, such as "git@github.com:ORG/REPO.git", or nothing if URL is not
 ## the URL of a GitHub repository.
 github_slug() {
-  printf '%s\n' "$1" | sed -e 's|/*$||' | sed -n \
-    -e 's|^git@github\.com:\([^/]*/[^/]*\)$|\1|p' \
-    -e 's|^ssh://git@github\.com/\([^/]*/[^/]*\)$|\1|p' \
-    -e 's|^https://\([^@/]*@\)\{0,1\}github\.com/\([^/]*/[^/]*\)$|\2|p' \
-    | sed -e 's|\.git$||'
+  github_slug_line="$(printf 'url %s\n' "$1" | github_slugs)"
+  if [ -n "${github_slug_line}" ]; then
+    printf '%s\n' "${github_slug_line#url }"
+  fi
+}
+
+## Usage: github_slugs
+## Reads lines of the form "KEY URL", where KEY contains no space, such as
+## "origin git@github.com:ORG/REPO.git", and prints "KEY SLUG" for each line
+## whose URL is the URL of a GitHub repository, where SLUG is that
+## repository's GitHub slug, such as "ORG/REPO".
+github_slugs() {
+  sed -n -e 's|/*$||' -e 's|\.git$||' \
+    -e 's|^\([^ ]*\) git@github\.com:\([^/]*/[^/]*\)$|\1 \2|p' \
+    -e 's|^\([^ ]*\) ssh://git@github\.com/\([^/]*/[^/]*\)$|\1 \2|p' \
+    -e 's|^\([^ ]*\) https://\([^@/]*@\)\{0,1\}github\.com/\([^/]*/[^/]*\)$|\1 \3|p'
+}
+
+## Usage: github_remote_slugs
+## Prints a line "REMOTE SLUG" for each URL of each remote REMOTE of the clone
+## in the current directory that is the URL of a GitHub repository, where
+## SLUG is that repository's GitHub slug, such as "typetools/jdk".  Each URL
+## is considered both as configured and as `url.BASE.insteadOf` rewrites it,
+## so a remote can appear more than once.
+github_remote_slugs() {
+  github_remote_slugs_tab="$(printf '\t')"
+  # `git config` prints "remote.REMOTE.url URL", and `git remote -v` prints
+  # "REMOTE<tab>URL (fetch)" and "REMOTE<tab>URL (push)".
+  {
+    git config --get-regexp '^remote\..*\.url$'
+    git remote -v
+  } | sed -n \
+    -e 's/^remote\.\(.*\)\.url /\1 /p' \
+    -e "s/^\\([^ ${github_remote_slugs_tab}]*\\)${github_remote_slugs_tab}\\(.*\\) (fetch)\$/\\1 \\2/p" \
+    | github_slugs
 }
 
 ## The number of seconds that a query of GitHub can take before it is
@@ -5663,8 +5777,7 @@ push_destination() {
 ##
 ## The head repository, the remote, and the head branch are the ones that
 ## `push_destination` names.  The base repository is the head repository's
-## parent, if the head repository is a fork, and the head repository itself
-## otherwise.  A pull request from a branch of the same name in another
+## upstream repository, which `github_upstream` describes.  A pull request from a branch of the same name in another
 ## repository, even the base repository, is someone else's.
 ##
 ## Fails if `gh` is not installed, if a query fails, or if `push_destination`
@@ -5676,40 +5789,16 @@ push_destination() {
 pr_repositories() {
   command -v gh > /dev/null 2>&1 || return 1
   push_destination "$1" "$2" || return 1
-  pr_repositories_head="${push_destination_repo}"
-  pr_repositories_branch="${push_destination_branch}"
-  # Every branch of a project asks about the same repository, so remember each
-  # answer.  Each line of ${pr_repositories_cache} is "HEAD BASE DEFAULT",
-  # where DEFAULT is HEAD's default branch, or "-" if it has none.  The
-  # repository is named with its host, so that `gh` does not ask the host
-  # that ${GH_HOST} names instead.
-  pr_repositories_answer="$(printf '%s\n' "${pr_repositories_cache}" \
-    | awk -v head="${pr_repositories_head}" '$1 == head { print $2 " " $3; exit }')"
-  if [ -z "${pr_repositories_answer}" ]; then
-    pr_repositories_answer="$(with_timeout "${github_query_seconds}" \
-      gh repo view "github.com/${pr_repositories_head}" \
-      --json owner,name,parent,defaultBranchRef \
-      --jq '"\(if .parent then "\(.parent.owner.login)/\(.parent.name)" else "\(.owner.login)/\(.name)" end) \(.defaultBranchRef.name // "-")"' \
-      < /dev/null 2> /dev/null)" || return 1
-    case "${pr_repositories_answer}" in
-      ?*' '?*) ;;
-      *) return 1 ;;
-    esac
-    pr_repositories_cache="${pr_repositories_cache}
-${pr_repositories_head} ${pr_repositories_answer}"
-  fi
-  if [ "${pr_repositories_branch}" = "${pr_repositories_answer#* }" ]; then
+  github_upstream "${push_destination_repo}" 2> /dev/null || return 1
+  if [ "${push_destination_branch}" = "${github_upstream_default}" ]; then
     return 1
   fi
   # shellcheck disable=SC2034 # set for the caller
-  pr_base_repo="${pr_repositories_answer%% *}"
+  pr_base_repo="${github_upstream_repo}"
   # shellcheck disable=SC2034 # set for the caller
-  pr_head_repo="${pr_repositories_head}"
+  pr_head_repo="${push_destination_repo}"
   # shellcheck disable=SC2034 # set for the caller
   pr_head_remote="${push_destination_remote}"
   # shellcheck disable=SC2034 # set for the caller
-  pr_head_branch="${pr_repositories_branch}"
+  pr_head_branch="${push_destination_branch}"
 }
-
-## The answers of `gh repo view` that `pr_repositories` has received.
-pr_repositories_cache=''

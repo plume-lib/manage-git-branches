@@ -300,9 +300,10 @@ The commands are:
   the only remote, if there is neither), then shows the differences between
   its default branch and the working tree, ignoring changes in the amount of
   whitespace and using the patience diff algorithm.
-  If there is no `upstream` and the remote is a GitHub fork that a user (not
-  an organization) owns, it uses the fork's parent instead, without adding a
-  remote.
+  If there is no `upstream`, it uses instead the repository that `gh` uses
+  by default, if `gh repo set-default` has named one, or else, if the remote
+  is a GitHub fork that a user (not an organization) owns, the fork's parent,
+  without adding a remote.
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
 * [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:  Cancels certain
