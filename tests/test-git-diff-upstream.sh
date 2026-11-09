@@ -140,19 +140,21 @@ if [ -n "${git_minor}" ] && [ "${git_minor}" -ge 48 ] \
 fi
 
 # A clone of a GitHub fork, me/proj, of someone/proj.  A fake `gh` stands in
-# for GitHub:  `gh repo view` prints the parent of me/proj, someone/proj, and
-# nothing for any other repository, as the real `gh` does with this command's
-# `--jq` filter for a repository that is not a fork or that an organization
-# owns.  Each call's arguments
-# are appended to ${testdir}/gh.log.  `url.BASE.insteadOf` maps each GitHub
-# URL to a local repository, so the test needs no network.
+# for GitHub:  `gh repo view` prints what the real `gh` does with this
+# command's `--jq` filter:  the upstream repository and the default branch,
+# which for me/proj are its parent, someone/proj, and for any other
+# repository are the repository itself.  `gh auth token` succeeds unless
+# ${FAKE_GH_NO_TOKEN} is non-empty, as when no user has logged in.  Each
+# call's arguments are appended to ${testdir}/gh.log.  `url.BASE.insteadOf`
+# maps each GitHub URL to a local repository, so the test needs no network.
 mkdir -p "${testdir}/bin"
 cat > "${testdir}/bin/gh" << EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "${testdir}/gh.log"
 case "\$1 \$2 \$3" in
-  'repo view github.com/me/proj') echo 'someone/proj' ;;
-  'repo view '*) ;;
+  'auth token '*) [ -z "\${FAKE_GH_NO_TOKEN}" ] && echo 'fake-token' ;;
+  'repo view github.com/me/proj') echo 'someone/proj trunk' ;;
+  'repo view github.com/'*) echo "\${3#github.com/} trunk" ;;
   *) exit 1 ;;
 esac
 EOF
@@ -177,13 +179,15 @@ make_fork_clone() {
   git clone -q 'https://github.com/me/proj.git' "${fork}"
   git -C "${fork}" switch -q -c feature
   commit_file "${fork}" a.txt 'a2'
-  git -C "${fork}" fetch -q 'https://github.com/someone/proj.git' "$(git -C "${gh_parent_work}" branch --show-current)" \
+  git -C "${fork}" fetch -q --no-tags 'https://github.com/someone/proj.git' "$(git -C "${gh_parent_work}" branch --show-current)" \
     && git -C "${fork}" merge -q --no-edit FETCH_HEAD
 }
 
-# The parent gains a commit that the fork's default branch lacks.
+# The parent gains a commit, with a tag, that the fork's default branch
+# lacks.
 commit_file "${gh_parent_work}" e.txt 'e1'
-git -C "${gh_parent_work}" push -q origin HEAD
+git -C "${gh_parent_work}" tag parent-tag
+git -C "${gh_parent_work}" push -q origin HEAD parent-tag
 
 # With `--no-fetch`, this command does not ask GitHub, so it diffs from the
 # fork's default branch.
@@ -212,14 +216,18 @@ expect_recorded() {
   fi
 }
 
-# Otherwise, this command fetches the parent's default branch from a URL of
-# the fork's form, diffs from it, adds no remote, and records the parent.
+# Otherwise, this command fetches the parent's default branch, without its
+# tags, from a URL of the fork's form, diffs from it, adds no remote, and
+# records the parent.
 make_fork_clone "${testdir}/gh-clone"
 expect_files 'fork' 'a.txt' --name-only
 expect_no_upstream_remote 'fork'
 expect_recorded 'fork' me/proj someone/proj
 if ! git -C "${fork}" rev-parse --verify --quiet refs/fork-upstream/someone/proj > /dev/null; then
   fail 'fork: did not fetch into refs/fork-upstream/someone/proj'
+fi
+if [ -n "$(git -C "${fork}" tag --list parent-tag)" ]; then
+  fail "fork: fetched the parent's tag"
 fi
 
 # Later runs use the recorded parent and do not ask GitHub again.  With
@@ -248,6 +256,47 @@ if [ -n "$(git -C "${fork}" for-each-ref refs/fork-upstream)" ]; then
   fail 'fork with a remote for the parent: fetched into refs/fork-upstream'
 fi
 git config --global --unset "url.${gh_parent}.insteadOf" 'https://github.com/SomeOne/proj.git'
+
+# A remote whose URL is a shortcut that `url.BASE.insteadOf` expands to a
+# GitHub URL is recognized as a GitHub repository.  The fork's URL is not
+# fetched, so the shortcut need not reach a local repository.
+make_fork_clone "${testdir}/gh-clone-shortcut"
+git -C "${fork}" config url.https://github.com/.insteadOf gh:
+git -C "${fork}" config remote.origin.url gh:me/proj.git
+expect_files 'fork with a shortcut URL' 'a.txt' --name-only
+expect_recorded 'fork with a shortcut URL' me/proj someone/proj
+
+# The repository that `gh` uses by default, which `remote.REMOTE.gh-resolved`
+# names, is the upstream repository, and GitHub is not asked.
+make_fork_clone "${testdir}/gh-clone-resolved"
+git -C "${fork}" config remote.origin.gh-resolved someone/proj
+: > "${testdir}/gh.log"
+expect_files 'gh-resolved names the parent' 'a.txt' --name-only
+make_fork_clone "${testdir}/gh-clone-resolved-base"
+git -C "${fork}" config remote.origin.gh-resolved base
+expect_files 'gh-resolved names the fork' 'a.txt
+e.txt' --name-only
+if [ -s "${testdir}/gh.log" ]; then
+  fail "gh-resolved: ran gh $(cat "${testdir}/gh.log")"
+fi
+expect_recorded 'gh-resolved names the fork' me/proj ''
+
+# A `gh` that has no token for github.com is not asked, so this command diffs
+# from the fork, silently, and records nothing.
+make_fork_clone "${testdir}/gh-clone-no-token"
+: > "${testdir}/gh.log"
+FAKE_GH_NO_TOKEN=1
+export FAKE_GH_NO_TOKEN
+expect_files 'gh without a token' 'a.txt
+e.txt' --name-only
+unset FAKE_GH_NO_TOKEN
+if [ -s "${testdir}/errors" ]; then
+  fail "gh without a token: printed $(cat "${testdir}/errors")"
+fi
+if grep -q -F 'repo view' "${testdir}/gh.log"; then
+  fail "gh without a token: ran gh $(cat "${testdir}/gh.log")"
+fi
+expect_recorded 'gh without a token' me/proj ''
 
 # A GitHub repository that is not a fork is the upstream repository.
 fork="${testdir}/gh-clone-parent"

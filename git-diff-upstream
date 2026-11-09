@@ -9,32 +9,42 @@
 # Usage:
 #   git-diff-upstream [--no-fetch] [GIT-DIFF-ARGS]
 #
-# The upstream repository is the remote named `upstream` if there is one, as
-# in a fork, then `origin`, then the clone's only remote if it has exactly
-# one.  Its default branch is `REMOTE/HEAD`, such as `upstream/master`.
+# The upstream repository is usually the remote named `upstream` if there is
+# one, as in a fork, then `origin`, then the clone's only remote if it has
+# exactly one.  Its default branch is the remote-tracking branch that
+# `REMOTE/HEAD` names, such as `upstream/master`.
 #
 # A clone of a fork might have no `upstream` remote, so that the remote chosen
 # that way is the fork, such as `origin` for `git@github.com:ME/PROJ.git`.  A
 # fork's default branch can lag behind its parent's.  If the current branch
 # has merged the parent's newer commits, a diff from the fork's default branch
 # shows those commits as changes of the current branch, though a pull request
-# against the parent would not.  So, if that remote is a GitHub repository
-# that a user (not an organization) owns and that GitHub says is a fork, this
-# command diffs from the default branch of the fork's parent instead, such as
-# `ORG/PROJ`:  the clone's remote for the parent if it has one, and otherwise
-# the parent's URL, whose form is the same as the fork's, such as
-# `git@github.com:ORG/PROJ.git`.  It fetches that URL's default branch into
-# `refs/fork-upstream/org/proj`, and it adds no remote.  A fork that an
-# organization owns, such as `typetools/jdk` (a fork of `openjdk/jdk`), is a
-# downstream fork whose pull requests target the fork itself, so this command
-# diffs from the fork's default branch.  Asking GitHub needs `gh`; without
-# it, this command uses the remote chosen as above.  The answer is recorded in
-# the git configuration variable `github-fork.ME/PROJ.upstream` (in lower
-# case), as `ORG/PROJ` or as `none`, so GitHub is asked only once per clone;
-# set that variable to override the answer.  With `--no-fetch`, this command
-# does not ask GitHub and fetches nothing, but it uses a recorded answer and
-# what an earlier run fetched.  `git-pull-upstream` chooses the upstream
-# repository the same way.
+# against the parent would not.  So, if there is no `upstream` remote, the
+# upstream repository is another one in two cases:
+#  * If some remote REMOTE has the setting `remote.REMOTE.gh-resolved`, which
+#    `gh repo set-default` writes to name the repository that `gh` uses by
+#    default, the upstream repository is that one:  either REMOTE itself (for
+#    the value `base`) or the GitHub repository that the value names, such as
+#    `ORG/PROJ`.
+#  * Otherwise, if the remote chosen as above is a GitHub repository that a
+#    user (not an organization) owns and that GitHub says is a fork, the
+#    upstream repository is the fork's parent, such as `ORG/PROJ`.  A fork
+#    that an organization owns, such as `typetools/jdk` (a fork of
+#    `openjdk/jdk`), is a downstream fork whose pull requests target the fork
+#    itself, so it is the upstream repository.  Asking GitHub needs `gh`,
+#    logged in to github.com; without it, the upstream repository is the
+#    remote chosen as above.  The answer is recorded in the git configuration
+#    variable `github-fork.ME/PROJ.upstream` (in lower case), as `ORG/PROJ` or
+#    as `none`, so GitHub is asked only once per clone; set that variable to
+#    override the answer.
+# The upstream repository `ORG/PROJ` is the clone's remote for it if the
+# clone has one.  Otherwise, it is the repository at the URL whose form is the
+# same as the fork's, such as `git@github.com:ORG/PROJ.git`.  This command
+# fetches that URL's default branch, without tags, into the ref
+# `refs/fork-upstream/org/proj` (in lower case) and diffs from that ref; it
+# adds no remote.  With `--no-fetch`, this command does not ask GitHub and
+# fetches nothing, but it uses a recorded answer and what an earlier run
+# fetched.  `git-pull-upstream` chooses the upstream repository the same way.
 #
 # This command first fetches the remote and updates `REMOTE/HEAD` to name the
 # remote's default branch, in case the remote has renamed it.  With
@@ -47,8 +57,9 @@
 # such a BRANCH, run `git diff -b --patience --merge-base REMOTE/BRANCH`
 # instead.
 #
-# It runs `git diff -b --patience --merge-base REMOTE/HEAD GIT-DIFF-ARGS`.
-# Without `--merge-base`, the diff would be from the tip of REMOTE/HEAD, and
+# It runs `git diff -b --patience --merge-base UPSTREAM GIT-DIFF-ARGS`, where
+# UPSTREAM is `REMOTE/HEAD` or, for a URL, `refs/fork-upstream/org/proj`.
+# Without `--merge-base`, the diff would be from the tip of UPSTREAM, and
 # would show every upstream change that HEAD lacks as its reversal.
 # GIT-DIFF-ARGS, such as `--stat` or `-- PATH`, are passed to `git diff`.
 # Like any `git diff` against a commit, it compares only tracked files:  a new

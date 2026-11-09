@@ -370,14 +370,18 @@ fi
 
 # In a clone of a GitHub fork that a user owns and that has no remote named
 # "upstream", the upstream repository is the fork's parent.  A stub `gh` says
-# that me/proj is a fork of someone/proj, and `url.BASE.insteadOf` maps their
-# GitHub URLs to local bare repositories.
+# that me/proj is a fork of someone/proj:  `gh repo view` prints the upstream
+# repository and the default branch, which for me/proj are its parent,
+# someone/proj, and for any other repository are the repository itself, and
+# `gh auth token` succeeds.  `url.BASE.insteadOf` maps their GitHub URLs to
+# local bare repositories.
 mkdir "${testdir}/bin"
 cat > "${testdir}/bin/gh" << EOF
 #!/bin/sh
 case "\$1 \$2 \$3" in
-  'repo view github.com/me/proj') echo 'someone/proj' ;;
-  'repo view '*) ;;
+  'auth token '*) echo 'fake-token' ;;
+  'repo view github.com/me/proj') echo 'someone/proj trunk' ;;
+  'repo view github.com/'*) echo "\${3#github.com/} trunk" ;;
   *) exit 1 ;;
 esac
 EOF

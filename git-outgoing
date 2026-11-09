@@ -149,10 +149,8 @@ fi
 # The repository's object directory.  `git merge-tree` writes the merge
 # results as objects; git_scratch puts them in ${tmpdir} instead.
 objects="$(git rev-parse --path-format=absolute --git-path objects)" || exit 1
-tmpdir="$(mktemp -d)" || exit 1
-trap 'rm -rf "${tmpdir}"' EXIT
-trap 'rm -rf "${tmpdir}"; trap - INT; kill -s INT "$$"' INT
-trap 'rm -rf "${tmpdir}"; trap - TERM; kill -s TERM "$$"' TERM
+make_temp_dir
+tmpdir="${temp_dir}"
 mkdir "${tmpdir}/objects" "${tmpdir}/objects/info" || exit 1
 # The scratch object directory borrows the repository's objects through its
 # alternates file, which separates entries by newlines.  Setting
