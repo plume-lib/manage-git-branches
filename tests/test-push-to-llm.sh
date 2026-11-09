@@ -501,7 +501,7 @@ check_resolved claude "instructions"
 for instruction in 'git diff HEAD...MERGE_HEAD' 'git diff MERGE_HEAD...HEAD' \
   'edit any part of any file' 'by taking one side' 'Step 3:  check that no change was lost' \
   'HEAD is feature, and MERGE_HEAD is main' '# Rules for this session' \
-  'you need not read that file, or use a skill' 'Write one only after checking each change of the other side'; do
+  'you need not read that file, or use a skill' 'discards the other side'"'"'s changes that git'; do
   if ! grep -q -F -- "${instruction}" "${STUB_PROMPT}"; then
     fail "instructions: they lack \"${instruction}\": $(cat "${STUB_PROMPT}")"
   fi

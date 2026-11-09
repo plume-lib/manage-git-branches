@@ -46,7 +46,13 @@ uses something that a conflicted file or the other side changes.
   would.  For each conflict, determine what each side changed relative to
   the merge base, and write text that makes both changes.  Taking one side's
   text is correct only if the other side's change is already present in it,
-  or if the other side's change is obsolete; then say so.
+  or if the other side's change is obsolete; then say so.  Taking one side's
+  version of a whole file also discards the other side's changes that git
+  merged cleanly, so check each of them first.  A side's version already
+  contains the other side's changes if the other side's version of the file
+  appears in that side's history after the merge base, as when one side
+  merged a branch and the other side merged a squashed copy of it;
+  `git log` and `git merge-base` can show that.
 * Keep every hunk that git merged cleanly, but edit any part of any file,
   including text outside the conflict regions and files that have no
   conflicts, wherever combining the two sides requires it:  for example,

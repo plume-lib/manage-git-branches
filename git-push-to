@@ -169,9 +169,8 @@
 # fixes a failed build can do the same.  This script rejects any file that the
 # agent changed that contains a conflict marker line that git's merge did not
 # put there.  It accepts a resolution of a file that is identical to either
-# side's version of the file, which keeps none of the other side's changes
-# to the file:  the agent is told to write one only if every change of the
-# other side to the file is already present or is obsolete.
+# side's version of the file; merge-conflict-instructions.md says when one is
+# correct.
 # Whether or not it accepts the agent's work, it lists the files outside the
 # conflicted ones that the agent changed, each conflicted file in which the
 # agent changed text outside the conflict regions, and each resolution by
