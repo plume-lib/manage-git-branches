@@ -23,15 +23,17 @@ Each run:
   * runs pr-merge-analysis (cached) on them, for each repository,
   * computes the dependencies:  a PR depends on another if its description says
     so, if its base branch is the other PR's branch, if its branch contains all of the
-    other PR's non-merge commits and their changes (a branch lacks the changes if it leaves
-    unchanged every file that the other PR's own commits change, as when it merged the
-    other PR's branch and then reverted them; a PR's own commits exclude those of a PR that
-    it builds on), or if the config says so; a PR whose base branch is another PR's branch,
-    but whose description says to land before it (or whose base PR's description says to
-    land after it), is a fix to that PR, which lands into that PR's branch first, although
-    its branch is updated from that PR's branch; PRs that land together (possibly in
-    different repositories) are one unit, whose members depend on each other's
-    prerequisites but not on each other,
+    other PR's non-merge commits and their changes (a PR's changes are the files that differ
+    between its branch and the merge of its merge bases with master and with the PRs that it
+    builds on; a branch lacks them if, for each such file, the branch's version is the same
+    as at the branch's merge base with master or with a PR that the branch or the PR builds
+    on, unless that merge base has some of the PR's own commits, as when the branch merged
+    the PR's branch and then reverted them, or when the PR has no changes), or if the config
+    says so; a PR whose base branch is another PR's branch, but whose description says to
+    land before it (or whose base PR's description says to land after it), is a fix to that
+    PR, which lands into that PR's branch first, although its branch is updated from that
+    PR's branch; PRs that land together (possibly in different repositories) are one unit,
+    whose members depend on each other's prerequisites but not on each other,
   * warns about each cycle of dependencies, and omits from the generated push commands
     the PRs whose branches are updated in a cycle and the PRs whose branches are updated
     from theirs,
@@ -2894,11 +2896,19 @@ def dependency_document(
         (
             'A PR depends on another PR if its description says so (for example, "Land after #N"),'
             " if its base branch is the other PR's branch,"
-            " if its branch contains all of the other PR's non-merge commits and their changes"
-            " (a branch lacks the changes if it leaves unchanged every file that the other PR's"
-            " own commits change, as when it merged the other PR's branch and then reverted"
-            " them; a PR's own commits exclude those of a PR that it builds on),"
+            " if its branch contains all of the other PR's non-merge commits and their changes,"
             f" or if `{CONFIG}` says so."
+            " A PR's changes are the files that differ between its branch and the merge of its"
+            " merge bases with master and with the PRs that it builds on, so they include the"
+            " conflicts that the PR's merges resolve and omit a file that the PR changed and then"
+            " changed back."
+            " A branch has the PR's change to such a file if the branch's version differs from the"
+            " version at each of the branch's merge bases with master and with the PRs that the"
+            " branch or the PR builds on, except a merge base that has some of the PR's own"
+            " commits (which exclude those of a PR that it builds on), because each of those"
+            " versions is one that the branch could have without the PR."
+            " A branch lacks the PR's changes if it has none of them, as when it merged the PR's"
+            " branch and then reverted them, or when the PR has no changes."
             ' PRs that land together, as "Land with #N" says, are one unit,'
             " which may span repositories:  each member depends on every prerequisite of every"
             " member, and on no member, even if its branch contains another member's commits."
