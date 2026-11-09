@@ -368,6 +368,131 @@ if pull_upstream "${fork}" extra; then
   fail "extra argument: succeeded"
 fi
 
+# In a clone of a GitHub fork that a user owns and that has no remote named
+# "upstream", the upstream repository is the fork's parent.  A stub `gh` says
+# that me/proj is a fork of someone/proj, and `url.BASE.insteadOf` maps their
+# GitHub URLs to local bare repositories.
+mkdir "${testdir}/bin"
+cat > "${testdir}/bin/gh" << EOF
+#!/bin/sh
+case "\$1 \$2 \$3" in
+  'repo view github.com/me/proj') echo 'someone/proj' ;;
+  'repo view '*) ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "${testdir}/bin/gh"
+saved_path="${PATH}"
+PATH="${testdir}/bin:${PATH}"
+gh_parent="${testdir}/gh-parent.git"
+gh_fork="${testdir}/gh-fork.git"
+git clone -q --bare "${canonical}" "${gh_parent}"
+git clone -q --bare "${canonical}" "${gh_fork}"
+git config --global "url.${gh_parent}.insteadOf" 'https://github.com/someone/proj.git'
+git config --global --add "url.${gh_parent}.insteadOf" 'git@github.com:someone/proj.git'
+git config --global "url.${gh_fork}.insteadOf" 'https://github.com/me/proj.git'
+gh_parent_work="${testdir}/gh-parent-work"
+git clone -q 'https://github.com/someone/proj.git' "${gh_parent_work}" 2> /dev/null
+
+# Usage: gh_parent_commit FILE
+# Commits FILE to the parent's default branch.
+gh_parent_commit() {
+  commit_file "${gh_parent_work}" "$1" "$1"
+  git -C "${gh_parent_work}" push -q origin HEAD
+}
+
+# Usage: make_gh_fork_clone DIRECTORY
+# Clones the fork into DIRECTORY, which has only the remote `origin`, and
+# checks out a branch `feature` that tracks and pushes to `origin/feature`.
+# Sets ${fork} to DIRECTORY.
+make_gh_fork_clone() {
+  fork="$1"
+  git clone -q 'https://github.com/me/proj.git' "${fork}"
+  git -C "${fork}" switch -q -c "feature-${fork##*/}"
+  commit_file "${fork}" "${fork##*/}.txt" 'fork'
+  git -C "${fork}" push -q -u origin HEAD
+}
+
+# Usage: gh_fork_pushed_head
+# Prints the commit that ${fork}'s current branch has in the fork's GitHub
+# repository.
+gh_fork_pushed_head() {
+  git -C "${gh_fork}" rev-parse "refs/heads/$(git -C "${fork}" branch --show-current)"
+}
+
+# Usage: expect_gh_merge DESCRIPTION SUBJECT FILE
+# Runs this command in ${fork}, and checks that it merges FILE with a merge
+# commit whose subject is SUBJECT and pushes to the fork.
+expect_gh_merge() {
+  if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+    fail "$1: failed: $(cat "${testdir}/errors")"
+    return
+  fi
+  expect_gh_merge_subject="$(git -C "${fork}" log -1 --format=%s)"
+  if [ "${expect_gh_merge_subject}" != "$2" ]; then
+    fail "$1: wrong merge message: ${expect_gh_merge_subject}"
+  elif [ ! -e "${fork}/$3" ]; then
+    fail "$1: did not merge $3"
+  elif [ "$(gh_fork_pushed_head)" != "$(git -C "${fork}" rev-parse HEAD)" ]; then
+    fail "$1: did not push"
+  fi
+}
+
+# Usage: expect_gh_refused DESCRIPTION BRANCH
+# Runs this command in ${fork}, and checks that it fails, says that it does
+# not push, and leaves the parent without BRANCH.
+expect_gh_refused() {
+  if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+    fail "$1: succeeded"
+  elif git -C "${gh_parent}" rev-parse --verify --quiet "refs/heads/$2" > /dev/null; then
+    fail "$1: pushed to the parent"
+  elif ! grep -q 'does not push it' "${testdir}/errors"; then
+    fail "$1: wrong message: $(cat "${testdir}/errors")"
+  fi
+}
+
+# The parent, which is not a remote of the clone, is fetched from its URL into
+# refs/fork-upstream, and the merge message names the URL as `git pull` would.
+make_gh_fork_clone "${testdir}/gh-clone"
+gh_parent_commit l.txt
+expect_gh_merge 'fork' "Merge https://github.com/someone/proj into feature-gh-clone" l.txt
+if git -C "${fork}" config --get remote.upstream.url > /dev/null; then
+  fail 'fork: added remote upstream'
+fi
+if ! git -C "${fork}" rev-parse --verify --quiet refs/fork-upstream/someone/proj > /dev/null; then
+  fail 'fork: did not fetch into refs/fork-upstream/someone/proj'
+fi
+
+# A branch that pushes to the parent's URL is not pushed, even when the URL
+# is spelled differently from the one that was fetched.
+git -C "${fork}" switch -q -c to-parent-url
+git -C "${fork}" config branch.to-parent-url.remote origin
+git -C "${fork}" config branch.to-parent-url.merge refs/heads/feature-gh-clone
+git -C "${fork}" config branch.to-parent-url.pushRemote 'git@github.com:someone/proj.git'
+git -C "${fork}" config push.default current
+gh_parent_commit m.txt
+expect_gh_refused 'push to the parent URL' to-parent-url
+
+# The clone's remote for the parent is the upstream repository.  A branch that
+# pushes to the parent through another remote for it is not pushed.
+make_gh_fork_clone "${testdir}/gh-clone-remotes"
+git -C "${fork}" remote add canonical 'https://github.com/someone/proj.git'
+git -C "${fork}" remote add canonical-ssh 'git@github.com:someone/proj.git'
+gh_parent_commit n.txt
+expect_gh_merge 'fork with a remote for the parent' \
+  "Merge remote-tracking branch 'canonical/trunk' into feature-gh-clone-remotes" n.txt
+if [ -n "$(git -C "${fork}" for-each-ref refs/fork-upstream)" ]; then
+  fail 'fork with a remote for the parent: fetched into refs/fork-upstream'
+fi
+git -C "${fork}" switch -q -c to-parent-remote
+git -C "${fork}" config branch.to-parent-remote.remote origin
+git -C "${fork}" config branch.to-parent-remote.merge refs/heads/feature-gh-clone-remotes
+git -C "${fork}" config branch.to-parent-remote.pushRemote canonical-ssh
+git -C "${fork}" config push.default current
+gh_parent_commit o.txt
+expect_gh_refused 'push to the parent through another remote' to-parent-remote
+PATH="${saved_path}"
+
 if [ "${failures}" -ne 0 ]; then
   echo "${SCRIPT_NAME}: ${failures} failure(s)" >&2
   exit 1
