@@ -12,9 +12,22 @@
 # fix a failed build, as `git-push-to` does; the "--llm", "--no-llm",
 # "--claude", and "--codex" options are as for `git-push-to`.
 #
-# The upstream repository is the remote named `upstream` if there is one, as
-# in a fork, then `origin`, then the clone's only remote if it has exactly
-# one.  Its default branch is `REMOTE/HEAD`, such as `upstream/master`.
+# The upstream repository is usually the remote named `upstream` if there is
+# one, as in a fork, then `origin`, then the clone's only remote if it has
+# exactly one.  Its default branch is the remote-tracking branch that
+# `REMOTE/HEAD` names, such as `upstream/master`.
+#
+# A clone of a fork might have no `upstream` remote, so that the remote chosen
+# that way is the fork, such as `origin` for `git@github.com:ME/PROJ.git`.  A
+# fork's default branch can lag behind its parent's, which a pull request
+# against the parent must merge.  So, if there is no `upstream` remote, the
+# upstream repository is the fork's parent, such as `ORG/PROJ`, in the same
+# cases, and found the same way, as for `git-diff-upstream`:  see its
+# documentation.  If the clone has no remote for the parent, this command
+# fetches the parent's default branch from the URL, without tags, into the
+# ref `refs/fork-upstream/org/proj` (in lower case) and merges that ref; it
+# adds no remote.  The merge message then names the URL, as in
+# "Merge git@github.com:ORG/PROJ into feature".
 #
 # This script does the following:
 #  * fetch the upstream repository, and update `REMOTE/HEAD` to name its
@@ -45,9 +58,9 @@
 # It fails, without pulling, merging, or pushing, if the current branch
 # pushes to the upstream repository's default branch, as a fork's `master`
 # that tracks `upstream/master` does, or if it is in a fork and pushes to any
-# branch of the remote `upstream`, or if `git push` might push other branches
-# too, because `push.default` is "matching" or `remote.REMOTE.mirror` or
-# `remote.REMOTE.push` is set.
+# branch of the upstream repository, such as one of the remote `upstream`, or
+# if `git push` might push other branches too, because `push.default` is
+# "matching" or `remote.REMOTE.mirror` or `remote.REMOTE.push` is set.
 # It fails after pulling, but without merging, if `git push --dry-run` shows
 # that the current branch cannot be pushed.
 #
@@ -129,16 +142,21 @@ if [ -z "${checked_out_branch}" ]; then
 fi
 # The fetch can prompt, as the push below can, so that a user who must type a
 # passphrase can do so for every one of them.
-if ! remote="$(upstream_remote)" \
-  || ! upstream_ref="$(upstream_default_branch "${remote}" 1)"; then
+if ! find_upstream_ref 1; then
+  exit 1
+fi
+# The remote that `find_upstream_ref` starts from.  When ${upstream_source}
+# differs from it, the clone is a fork and ${upstream_source} is its parent.
+if ! own_remote="$(upstream_remote)"; then
   exit 1
 fi
 
 # Refuse a push that would publish the current branch in the upstream
 # repository by mistake:
-#  * In a fork, whose upstream remote is named "upstream", any push to that
-#    remote, as for a branch created from `upstream/master` when
-#    `push.default` is "current".  The fork is where its branches belong.
+#  * In a fork, whose upstream remote is named "upstream" or is the fork's
+#    parent, any push to that remote, as for a branch created from
+#    `upstream/master` when `push.default` is "current".  The fork is where
+#    its branches belong.
 #  * In any clone, a push to the branch that this command merges from, as when
 #    a fork's `master` tracks `upstream/master`.  Merging that branch into
 #    itself does nothing, so the only effect of the run would be to publish
@@ -152,8 +170,10 @@ push_fields="$(git for-each-ref --format='%(push) %(push:remotename)' \
   "refs/heads/${checked_out_branch}")"
 push_ref="${push_fields%% *}"
 push_remote_name="${push_fields#* }"
-if [ "${remote}" = upstream ] && [ "${push_remote_name}" = upstream ]; then
-  echo "${SCRIPT_NAME}: the current branch pushes to the remote \"upstream\" rather than to the fork, so this command does not push it; if you mean to, run \`git push\`" >&2
+if [ "${push_remote_name}" = "${upstream_source}" ] \
+  && { [ "${upstream_source}" = upstream ] \
+    || [ "${upstream_source}" != "${own_remote}" ]; }; then
+  echo "${SCRIPT_NAME}: the current branch pushes to the remote \"${upstream_source}\" rather than to the fork, so this command does not push it; if you mean to, run \`git push\`" >&2
   exit 1
 fi
 if [ "${push_ref}" = "${upstream_ref}" ]; then
@@ -215,6 +235,10 @@ fi
 #
 #   Merge remote-tracking branch 'upstream/master' into feature
 #
+# or, for a ref fetched from a URL, one that names the URL:
+#
+#   Merge git@github.com:ORG/PROJ into feature
+#
 # If the current branch already contains the commit, the merge does nothing.
 if ! upstream_head="$(git rev-parse --verify --quiet "${upstream_ref}")"; then
   echo "${SCRIPT_NAME}: cannot read ${upstream_ref}" >&2
@@ -224,13 +248,21 @@ fi
 # was pushed, unless that repository's branches need not have been built (see
 # `is_built_remote`).  So was the head that the pull fetched, even if no
 # remote-tracking branch records it.
-if is_built_remote . "${remote}"; then
+if is_built_remote . "${upstream_source}"; then
   upstream_built="${upstream_ref}"
 else
   upstream_built=''
 fi
+case "${upstream_ref}" in
+  refs/remotes/*) upstream_description="remote-tracking branch '${upstream_ref#refs/remotes/}' of ." ;;
+  *)
+    # `git pull URL` strips trailing slashes and then a trailing ".git".
+    upstream_description="${upstream_source%"${upstream_source##*[!/]}"}"
+    upstream_description="${upstream_description%.git}"
+    ;;
+esac
 if ! merge_build_push "${upstream_head}" \
-  "remote-tracking branch '${upstream_ref#refs/remotes/}'" "${upstream_ref}" \
+  "${upstream_description}" "${upstream_ref}" \
   "${nocompile}" "${llm_agent}" "${upstream_built} ${pull_fetched}"; then
   exit 1
 fi

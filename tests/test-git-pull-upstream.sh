@@ -368,6 +368,102 @@ if pull_upstream "${fork}" extra; then
   fail "extra argument: succeeded"
 fi
 
+# A clone of a GitHub fork, me/proj, of someone/proj.  A fake `gh` stands in
+# for GitHub:  `gh repo view` prints what the real `gh` does with the `--jq`
+# filter of `github_upstream`:  the upstream repository and the default
+# branch, which for me/proj are its parent, someone/proj, and for any other
+# repository are the repository itself.  `url.BASE.insteadOf` maps each
+# GitHub URL to a local repository, so the test needs no network.
+mkdir -p "${testdir}/bin"
+cat > "${testdir}/bin/gh" << 'GH'
+#!/bin/sh
+case "$1 $2 $3" in
+  'auth token '*) echo 'fake-token' ;;
+  'repo view github.com/me/proj') echo 'someone/proj trunk' ;;
+  'repo view github.com/'*) echo "${3#github.com/} trunk" ;;
+  *) exit 1 ;;
+esac
+GH
+chmod +x "${testdir}/bin/gh"
+saved_path="${PATH}"
+PATH="${testdir}/bin:${PATH}"
+gh_parent="${testdir}/gh-parent.git"
+gh_fork="${testdir}/gh-fork.git"
+git clone -q --bare "${canonical}" "${gh_parent}"
+git clone -q --bare "${canonical}" "${gh_fork}"
+git config --global "url.${gh_parent}.insteadOf" 'https://github.com/someone/proj.git'
+git config --global "url.${gh_fork}.insteadOf" 'https://github.com/me/proj.git'
+gh_parent_work="${testdir}/gh-parent-work"
+git clone -q 'https://github.com/someone/proj.git' "${gh_parent_work}" 2> /dev/null
+
+# Usage: make_fork_clone DIRECTORY FILE
+# Clones the fork into DIRECTORY, which has only the remote `origin`, and
+# checks out and pushes a new branch named for DIRECTORY's last component.
+# Then commits FILE to the parent's default branch, which the fork's default
+# branch lacks.  Sets ${gh_clone} to DIRECTORY and ${gh_branch} to the
+# branch's name.
+make_fork_clone() {
+  gh_clone="$1"
+  gh_branch="$(basename -- "$1")"
+  git clone -q 'https://github.com/me/proj.git' "${gh_clone}"
+  git -C "${gh_clone}" switch -q -c "${gh_branch}"
+  commit_file "${gh_clone}" "${gh_branch}.txt" "${gh_branch}"
+  git -C "${gh_clone}" push -q -u origin "${gh_branch}"
+  commit_file "${gh_parent_work}" "$2" "$2"
+  git -C "${gh_parent_work}" push -q origin HEAD
+}
+
+# Without an `upstream` remote, this command merges the parent's default
+# branch, fetched from a URL of the fork's form, adds no remote, and pushes
+# to the fork.
+make_fork_clone "${testdir}/gh-clone" parent1.txt
+if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${gh_clone}"; then
+  fail "fork: failed: $(cat "${testdir}/errors")"
+else
+  subject="$(git -C "${gh_clone}" log -1 --format=%s)"
+  if [ "${subject}" != "Merge https://github.com/someone/proj into ${gh_branch}" ]; then
+    fail "fork: wrong merge message: ${subject}"
+  fi
+  if [ ! -e "${gh_clone}/parent1.txt" ]; then
+    fail "fork: did not merge the parent's default branch"
+  fi
+  if [ "$(git -C "${gh_fork}" rev-parse "refs/heads/${gh_branch}")" != "$(git -C "${gh_clone}" rev-parse HEAD)" ]; then
+    fail "fork: did not push to the fork"
+  fi
+  if git -C "${gh_clone}" config --get remote.upstream.url > /dev/null; then
+    fail "fork: added remote upstream"
+  fi
+fi
+
+# A remote of another name for the parent is used.  A branch that pushes to
+# it is neither pulled nor pushed.
+make_fork_clone "${testdir}/gh-clone-parent-remote" parent2.txt
+git -C "${gh_clone}" remote add canonical 'https://github.com/someone/proj.git'
+if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${gh_clone}"; then
+  fail "fork with a remote for the parent: failed: $(cat "${testdir}/errors")"
+else
+  subject="$(git -C "${gh_clone}" log -1 --format=%s)"
+  if [ "${subject}" != "Merge remote-tracking branch 'canonical/trunk' into ${gh_branch}" ]; then
+    fail "fork with a remote for the parent: wrong merge message: ${subject}"
+  elif [ ! -e "${gh_clone}/parent2.txt" ]; then
+    fail "fork with a remote for the parent: did not merge the parent's default branch"
+  fi
+fi
+git -C "${gh_clone}" switch -q -c topic canonical/trunk
+git -C "${gh_clone}" config push.default current
+commit_file "${gh_clone}" topic.txt 't'
+before="$(git -C "${gh_clone}" rev-parse HEAD)"
+if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${gh_clone}"; then
+  fail "push to the parent: succeeded"
+elif git -C "${gh_parent}" rev-parse --verify --quiet refs/heads/topic > /dev/null; then
+  fail "push to the parent: pushed"
+elif [ "$(git -C "${gh_clone}" rev-parse HEAD)" != "${before}" ]; then
+  fail "push to the parent: pulled"
+elif ! grep -q 'pushes to the remote "canonical"' "${testdir}/errors"; then
+  fail "push to the parent: wrong message: $(cat "${testdir}/errors")"
+fi
+PATH="${saved_path}"
+
 if [ "${failures}" -ne 0 ]; then
   echo "${SCRIPT_NAME}: ${failures} failure(s)" >&2
   exit 1

@@ -657,9 +657,9 @@ fi
 # ${UPSTREAM_NAME} to the remote-tracking branch, such as
 # `refs/remotes/upstream/master` and "upstream/master".
 #
-# The upstream repository is the remote that `upstream_remote` chooses, which
-# `git-pull-upstream` merges from.  This fetches it and updates `REMOTE/HEAD`,
-# which names its default branch, as `git-pull-upstream` does.  The fetch is
+# The upstream repository is the remote that `upstream_remote` chooses.  This
+# fetches it and updates `REMOTE/HEAD`, which names its default branch, as
+# `git-pull-upstream` does.  The fetch is
 # unnecessary if the pull above succeeded and fetched the same remote, which
 # brought the current branch up to date with it.  If the pull failed but
 # contacted the same remote, the remote is not fetched again, because a second

@@ -758,7 +758,7 @@ git_push_to() {
   # does not ask the agent about their merges.  FROM_DIR's own merges, such
   # as the one that the pull just made, are not among them.
   # Note: pwd=to_absolute
-  if ! merge_build_push "${merge_head}" "branch '${from_branch}'" \
+  if ! merge_build_push "${merge_head}" "branch '${from_branch}' of ." \
     "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}" \
     "${to_fetched} ${from_fetched}" "${from_absolute}"; then
     push_step="${merge_build_push_step}"

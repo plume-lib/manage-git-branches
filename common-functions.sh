@@ -3661,9 +3661,14 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [BUILT [DIRECTORY]]]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
-## pushes the current branch if the build succeeds.  DESCRIPTION is what
-## `git fmt-merge-msg` says that COMMIT is, such as "branch 'feature'" or
-## "remote-tracking branch 'upstream/master'".  SOURCE names COMMIT in
+## pushes the current branch if the build succeeds.  DESCRIPTION describes
+## COMMIT in the form that `git fetch` writes in FETCH_HEAD and
+## `git fmt-merge-msg` reads:  what COMMIT is, such as "branch 'feature'" or
+## "remote-tracking branch 'upstream/master'", then " of " and the repository
+## that COMMIT came from, which is "." for the local repository, as in
+## "branch 'feature' of ."; or, for the default branch of the repository at a
+## URL, the URL alone, such as "git@github.com:ORG/PROJ".  The merge message
+## names the repository unless it is ".".  SOURCE names COMMIT in
 ## diagnostics.  If the merge has conflicts, `resolve_merge_conflicts`
 ## resolves them, asking RESOLVER, if it is given and not empty, about any
 ## that `git rerere` did not resolve.  If the build fails,
@@ -3687,9 +3692,8 @@ merge_build_push() {
   # Let git compose the message, as it does for `git merge`, rather than
   # composing it by hand.  Git then writes the "into BRANCH" suffix, which it
   # omits on the default branch, and the commit summaries that `merge.log`
-  # turns on.  Saying that COMMIT came from ".", the local repository, keeps
-  # git from appending " of SOURCE" to the message.
-  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" | fmt_merge_message)"; then
+  # turns on.
+  if ! merge_message="$(printf '%s\t\t%s\n' "$1" "$2" | fmt_merge_message)"; then
     echo "${SCRIPT_NAME}: cannot compose a merge message for $3" >&2
     return 1
   fi
