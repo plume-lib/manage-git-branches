@@ -214,17 +214,19 @@ of the repository; an entry for a PR that is not open is ignored.
     excluded PRs that are open.
 * `"not_prerequisites"`:  a list of PR numbers.  A PR whose branch contains
   all of the non-merge commits of one of these PRs, and their changes, does
-  not depend on it for that reason.  (A branch that lacks a PR's changes,
-  as when the branch merged the PR's branch and then reverted the PR's
-  changes, does not depend on that PR even without this setting.  The branch
-  lacks them if each file that the PR's own commits change is the same in the
-  branch as where those commits start, combined with the branch's merge base
-  with master.  A PR's own commits exclude those of a PR that it builds on,
-  and start from that PR's branch, or else from master.  A file that a later
-  own commit changed back is not among the files that they change.)  (A PR
-  can still depend on it for another reason, such as
-  its description.)  This is useful for a PR whose commits other PRs
-  include but that will not land first.
+  not depend on it for that reason.  (A branch that lacks a PR's changes, as
+  when the branch merged the PR's branch and then reverted the PR's changes,
+  does not depend on that PR even without this setting.  The PR's changes are
+  those of its own commits, which exclude the commits of a PR that it builds
+  on.  A file that its own commits changed and then changed back is not among
+  them, unless master and a PR that the PR builds on conflict on that file.
+  The branch lacks the changes if, for each changed file, the branch's
+  version differs from the PR's version and is the same as at the branch's
+  merge base with master or with a PR that the PR builds on.  A branch never
+  lacks the changes of a PR whose own commits change no file, such as a PR
+  that only merges other PRs.)  (A PR can still depend on it for another
+  reason, such as its description.)  This is useful for a PR whose commits
+  other PRs include but that will not land first.
 * `"extra_dependencies"`:  a list of pairs of PR numbers, such as
   `[[530, 527]]`.  The pair `[A, B]` makes PR A depend on PR B, as if A's
   description said "Land after #B."
