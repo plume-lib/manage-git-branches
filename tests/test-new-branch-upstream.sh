@@ -483,4 +483,93 @@ case "${out}" in
   *) fail "no warning about the submodule that upstream/main updates: ${out}" ;;
 esac
 
+# A clone of a GitHub fork, me/proj, of someone/proj, that has no `upstream`
+# remote.  A fake `gh` stands in for GitHub:  `gh repo view` prints what the
+# real `gh` does with the `--jq` filter of `github_upstream`:  the upstream
+# repository and the default branch, which for me/proj are its parent,
+# someone/proj, and for any other repository are the repository itself.  Each
+# call's arguments are appended to ${work}/gh.log.  `url.BASE.insteadOf` maps
+# each GitHub URL to a local repository, so the test needs no network.  The
+# parent is a new repository, without the submodule that the tests above add.
+mkdir -p "${work}/bin"
+cat > "${work}/bin/gh" << GH
+#!/bin/sh
+printf '%s\n' "\$*" >> "${work}/gh.log"
+case "\$1 \$2 \$3" in
+  'auth token '*) echo 'fake-token' ;;
+  'repo view github.com/me/proj') echo 'someone/proj main' ;;
+  'repo view github.com/'*) echo "\${3#github.com/} main" ;;
+  *) exit 1 ;;
+esac
+GH
+chmod +x "${work}/bin/gh"
+saved_path="${PATH}"
+PATH="${work}/bin:${PATH}"
+gh_parent="${work}/gh-parent.git"
+gh_fork="${work}/gh-fork.git"
+gh_seed="${work}/gh-seed"
+git init -q --bare -b main "${gh_parent}"
+git clone -q "${gh_parent}" "${gh_seed}" 2> /dev/null
+commit_file "${gh_seed}" file.txt 'parent 1' || exit 1
+git -C "${gh_seed}" push -q origin main || exit 1
+git clone -q --bare "${gh_parent}" "${gh_fork}"
+git config --global "url.${gh_parent}.insteadOf" 'https://github.com/someone/proj.git'
+git config --global "url.${gh_fork}.insteadOf" 'https://github.com/me/proj.git'
+gh_clone="${work}/ghproj"
+git clone -q 'https://github.com/me/proj.git' "${gh_clone}"
+commit_file "${gh_seed}" file.txt 'parent 2' || exit 1
+git -C "${gh_seed}" push -q origin main || exit 1
+parent_head="$(git -C "${gh_seed}" rev-parse HEAD)"
+
+# On a branch other than the fork's default branch, the new branch starts at
+# the current commit, and GitHub is not asked.
+git -C "${gh_clone}" switch -q -c feature
+git -C "${gh_clone}" push -q -u origin feature
+: > "${work}/gh.log"
+run_new_branch "${gh_clone}" --clean gh-from-feature
+newdir="${work}/ghproj-branch-gh-from-feature"
+if [ "$(git -C "${newdir}" rev-parse HEAD)" != "$(git -C "${gh_clone}" rev-parse HEAD)" ]; then
+  fail "fork, feature branch: the new branch is not at the current commit"
+fi
+if [ -s "${work}/gh.log" ]; then
+  fail "fork, feature branch: ran gh $(cat "${work}/gh.log")"
+fi
+git -C "${gh_clone}" switch -q main
+
+# On the fork's default branch, which lags behind the parent's, the new
+# branch starts at the parent's default branch, fetched from a URL of the
+# fork's form, the current branch is fast-forwarded there, and no remote is
+# added.
+run_new_branch "${gh_clone}" --clean gh-from-main
+newdir="${work}/ghproj-branch-gh-from-main"
+if [ "$(git -C "${newdir}" rev-parse HEAD)" != "${parent_head}" ]; then
+  fail "fork: the new branch is not at the parent's default branch: ${out}"
+fi
+if [ "$(git -C "${gh_clone}" rev-parse HEAD)" != "${parent_head}" ]; then
+  fail "fork: ${gh_clone} was not fast-forwarded to the parent's default branch: ${out}"
+fi
+if git -C "${gh_clone}" config --get remote.upstream.url > /dev/null; then
+  fail "fork: added remote upstream"
+fi
+case "${out}" in
+  *"fast-forwarded ${gh_clone} to https://github.com/someone/proj.git, the upstream repository's default branch"*) ;;
+  *) fail "fork: no message about the fast-forward: ${out}" ;;
+esac
+
+# A remote of another name for the parent is used.
+commit_file "${gh_seed}" file.txt 'parent 3' || exit 1
+git -C "${gh_seed}" push -q origin main || exit 1
+parent_head="$(git -C "${gh_seed}" rev-parse HEAD)"
+git -C "${gh_clone}" remote add canonical 'https://github.com/someone/proj.git'
+run_new_branch "${gh_clone}" --clean gh-parent-remote
+newdir="${work}/ghproj-branch-gh-parent-remote"
+if [ "$(git -C "${newdir}" rev-parse HEAD)" != "${parent_head}" ]; then
+  fail "fork with a remote for the parent: the new branch is not at the parent's default branch: ${out}"
+fi
+case "${out}" in
+  *"fast-forwarded ${gh_clone} to canonical/main, the upstream repository's default branch"*) ;;
+  *) fail "fork with a remote for the parent: no message about the fast-forward: ${out}" ;;
+esac
+PATH="${saved_path}"
+
 exit "${status}"

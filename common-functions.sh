@@ -928,7 +928,8 @@ upstream_default_branch() {
 }
 
 ## Usage: upstream_default_branch_git BATCH GIT-ARGUMENT...
-## A helper for `upstream_default_branch`:  runs `git GIT-ARGUMENT...` in the
+## A helper for `upstream_default_branch` and `find_parent_ref`:  runs
+## `git GIT-ARGUMENT...` in the
 ## current directory, under `git_batch_ssh` if BATCH is 1.
 upstream_default_branch_git() {
   upstream_default_branch_git_batch="$1"
@@ -940,7 +941,7 @@ upstream_default_branch_git() {
   fi
 }
 
-## Usage: find_upstream_ref FETCH
+## Usage: find_upstream_ref FETCH [BATCH]
 ## Sets ${upstream_ref} to the full name of the ref for the default branch of
 ## the upstream repository of the clone in the current directory, such as
 ## `refs/remotes/upstream/master`.  Sets ${upstream_source} to the name of the
@@ -969,13 +970,30 @@ upstream_default_branch_git() {
 ## remote and no tag.  Otherwise, the upstream repository is the chosen
 ## remote.
 ##
-## FETCH is as for `upstream_default_branch`.  If FETCH is 0, such a URL is
-## not fetched, and the ref that an earlier call fetched it into is used.  If
-## the URL cannot be fetched, or FETCH is 0 and no earlier call fetched it,
-## prints a diagnostic and uses the remote that `upstream_remote` chooses.
-## Returns 1, after printing a diagnostic, on failure.
-# shellcheck disable=SC2034 # set for the caller
+## FETCH and BATCH are as for `upstream_default_branch`.  If FETCH is 0,
+## such a URL is not fetched, and the ref that an earlier call fetched it into
+## is used.  If the URL cannot be fetched, or FETCH is 0 and no earlier call
+## fetched it, prints a diagnostic and uses the remote that `upstream_remote`
+## chooses.  Returns 1, after printing a diagnostic, on failure.
 find_upstream_ref() {
+  find_parent_ref "$1" "${2:-0}"
+  case "$?" in
+    0) return 0 ;;
+    2) upstream_ref="$(upstream_default_branch "${upstream_source}" "$1" "${2:-0}")" ;;
+    *) return 1 ;;
+  esac
+}
+
+## Usage: find_parent_ref FETCH [BATCH]
+## Sets the variables that `find_upstream_ref` sets, and returns 0, if the
+## upstream repository is another repository than the remote that
+## `upstream_remote` chooses, as `find_upstream_ref` describes.  Otherwise,
+## sets ${upstream_source} to the remote that `upstream_remote` chooses and
+## ${upstream_is_parent} to 0, and returns 2, without fetching that remote.
+## FETCH and BATCH are as for `find_upstream_ref`.  Returns 1, after printing
+## a diagnostic, on failure.
+# shellcheck disable=SC2034 # set for the caller
+find_parent_ref() {
   upstream_is_parent=0
   if ! upstream_source="$(upstream_remote)"; then
     return 1
@@ -997,8 +1015,10 @@ find_upstream_ref() {
     if gh_resolved .; then
       if [ "${gh_resolved_value}" = base ]; then
         if [ "${gh_resolved_remote}" != "${upstream_source}" ]; then
+          upstream_ref="$(upstream_default_branch "${gh_resolved_remote}" "$1" "${2:-0}")" || return 1
           upstream_source="${gh_resolved_remote}"
           upstream_is_parent=1
+          return 0
         fi
       else
         fur_parent="${gh_resolved_value}"
@@ -1015,7 +1035,7 @@ find_upstream_ref() {
       fur_remote="$(github_remote_slugs \
         | awk -v slug="${fur_parent_lower}" 'tolower($2) == slug { print $1; exit }')"
       if [ -n "${fur_remote}" ]; then
-        upstream_ref="$(upstream_default_branch "${fur_remote}" "$1")" || return 1
+        upstream_ref="$(upstream_default_branch "${fur_remote}" "$1" "${2:-0}")" || return 1
         upstream_source="${fur_remote}"
         upstream_is_parent=1
         return 0
@@ -1032,7 +1052,8 @@ find_upstream_ref() {
         if [ "$1" -eq 1 ]; then
           # Without `--no-tags`, the fetch would also create a local tag for
           # each of the URL's tags that points into the fetched history.
-          if git fetch --quiet --no-tags "${fur_parent_url}" "+HEAD:${fur_ref}"; then
+          if upstream_default_branch_git "${2:-0}" \
+            fetch --quiet --no-tags "${fur_parent_url}" "+HEAD:${fur_ref}"; then
             upstream_ref="${fur_ref}"
             upstream_source="${fur_parent_url}"
             upstream_is_parent=1
@@ -1050,7 +1071,7 @@ find_upstream_ref() {
       fi
     fi
   fi
-  upstream_ref="$(upstream_default_branch "${upstream_source}" "$1")"
+  return 2
 }
 
 ## Usage: fork_upstream FORK FETCH

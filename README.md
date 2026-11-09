@@ -48,7 +48,12 @@ The commands are:
   sibling of the current working tree.  This command does not push the
   new branch.
 
-  The new branch starts at the current commit, after a `git pull`.
+  The new branch starts at the current commit, after a `git pull`.  But on
+  a fork's default branch that lags behind the upstream repository's, it
+  starts at the upstream repository's default branch, to which the current
+  branch is fast-forwarded.  In a clone of a fork that has no `upstream`
+  remote, the upstream repository is the fork's parent, as for
+  `git-diff-upstream`.
 
   By default, the new directory is a worktree (see [below](#worktrees)) whose
   contents are the same as the current directory's, including uncommitted

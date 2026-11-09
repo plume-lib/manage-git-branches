@@ -13,7 +13,10 @@
 # repository's default branch, and that default branch is a fast-forward of
 # the current commit (as for a fork's `master` that lags behind
 # `upstream/master`) then the current branch is fast-forwarded to the default
-# branch's latest commit, and the new branch starts there instead.  With
+# branch's latest commit, and the new branch starts there instead.  In a clone
+# of a GitHub fork that has no `upstream` remote, the upstream repository is
+# the fork's parent, as for `git-diff-upstream`, when the current branch is
+# the fork's default branch.  With
 # `--clean`, the new branch starts there even if the current branch's
 # uncommitted changes prevent the fast-forward.  This command creates no merge
 # commit, though the `git pull` can.
@@ -655,11 +658,25 @@ fi
 # initialized.  A fast-forward that updates or removes a submodule would leave
 # the submodule's checkout as it was.  Also sets ${UPSTREAM_REF} and
 # ${UPSTREAM_NAME} to the remote-tracking branch, such as
-# `refs/remotes/upstream/master` and "upstream/master".
+# `refs/remotes/upstream/master` and "upstream/master", or to the ref and the
+# URL of a fork's parent (see below).
 #
-# The upstream repository is the remote that `upstream_remote` chooses, which
-# `git-pull-upstream` merges from.  This fetches it and updates `REMOTE/HEAD`,
-# which names its default branch, as `git-pull-upstream` does.  The fetch is
+# A clone of a fork might have no `upstream` remote, so that `upstream_remote`
+# chooses the fork, such as `origin` for `git@github.com:ME/PROJ.git`, whose
+# default branch can lag behind its parent's.  So, if the current branch is
+# the default branch of that remote and pulls from it, the upstream
+# repository is the fork's parent, as `find_parent_ref` determines it, and
+# the condition above that the current branch has the default branch's name
+# does not apply.  If the clone has no remote for the parent, the parent's
+# default branch is fetched from its URL into `refs/fork-upstream/org/proj`,
+# and ${UPSTREAM_NAME} is that URL.  The fetch runs whether or not the pull
+# succeeded, because the pull did not contact the parent.  The parent is not
+# consulted for any other branch, so that a pull request's branch costs no
+# query of GitHub.
+#
+# Otherwise, the upstream repository is the remote that `upstream_remote`
+# chooses.  This fetches it and updates `REMOTE/HEAD`, which names its
+# default branch, as `git-pull-upstream` does.  The fetch is
 # unnecessary if the pull above succeeded and fetched the same remote, which
 # brought the current branch up to date with it.  If the pull failed but
 # contacted the same remote, the remote is not fetched again, because a second
@@ -680,38 +697,70 @@ fi
 # the new branch starts at the current commit, and lacks upstream commits
 # that it might have had.
 #
-# The fetch runs under `git_batch_ssh`, as the pull above does.  The upstream
-# repository might be another remote than the one that the pull contacted, so
-# a prompt here is possible even if the pull issued none.
+# Each fetch runs under `git_batch_ssh`, as the pull above does.  The
+# upstream repository might be another repository than the one that the pull
+# contacted, so a prompt here is possible even if the pull issued none.
 find_upstream_commit() {
   UPSTREAM_COMMIT=''
   if ! fuc_branch="$(current_branch)" \
     || ! UPSTREAM_REMOTE="$(upstream_remote 2> /dev/null)"; then
     return
   fi
-  fuc_fetch=1
-  if [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ]; then
-    if [ "${PULL_SUCCEEDED}" -eq 1 ]; then
+  fuc_cannot_fetch="${SCRIPT_NAME}: warning: cannot fetch the upstream repository's default branch, so the new branch cannot start at its latest commit; continuing."
+  fuc_same_name="refs/remotes/${UPSTREAM_REMOTE}/${fuc_branch}"
+  fuc_known="$(git symbolic-ref --quiet "refs/remotes/${UPSTREAM_REMOTE}/HEAD")"
+  # The current branch is the default branch of the remote that
+  # `upstream_remote` chose.  If that remote is a fork, the new branch starts
+  # at the fork's parent's default branch.
+  fuc_parent=0
+  if [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ] \
+    && [ "${fuc_known}" = "${fuc_same_name}" ]; then
+    find_parent_ref 1 1
+    case "$?" in
+      0)
+        fuc_parent=1
+        UPSTREAM_REF="${upstream_ref}"
+        case "${UPSTREAM_REF}" in
+          refs/remotes/*) UPSTREAM_NAME="${UPSTREAM_REF#refs/remotes/}" ;;
+          *) UPSTREAM_NAME="${upstream_source}" ;;
+        esac
+        ;;
+      2) ;;
+      *)
+        echo "${fuc_cannot_fetch}" >&2
+        return
+        ;;
+    esac
+  fi
+  if [ "${fuc_parent}" -eq 0 ]; then
+    fuc_fetch=1
+    if [ "${UPSTREAM_REMOTE}" = "$(git config "branch.${fuc_branch}.remote")" ]; then
+      if [ "${PULL_SUCCEEDED}" -eq 1 ]; then
+        return
+      fi
+      fuc_fetch=0
+    fi
+    if [ -n "${fuc_known}" ] \
+      && [ "${fuc_known}" != "${fuc_same_name}" ] \
+      && git rev-parse --verify --quiet "${fuc_known}" > /dev/null \
+      && ! git rev-parse --verify --quiet "${fuc_same_name}" > /dev/null; then
       return
     fi
-    fuc_fetch=0
-  fi
-  fuc_same_name="refs/remotes/${UPSTREAM_REMOTE}/${fuc_branch}"
-  if fuc_known="$(git symbolic-ref --quiet "refs/remotes/${UPSTREAM_REMOTE}/HEAD")" \
-    && [ "${fuc_known}" != "${fuc_same_name}" ] \
-    && git rev-parse --verify --quiet "${fuc_known}" > /dev/null \
-    && ! git rev-parse --verify --quiet "${fuc_same_name}" > /dev/null; then
-    return
-  fi
-  if ! UPSTREAM_REF="$(upstream_default_branch "${UPSTREAM_REMOTE}" "${fuc_fetch}" 1)" \
-    || ! fuc_commit="$(git rev-parse --verify --quiet "${UPSTREAM_REF}^{commit}")"; then
-    echo "${SCRIPT_NAME}: warning: cannot fetch the upstream repository's default branch, so the new branch cannot start at its latest commit; continuing." >&2
-    return
-  fi
-  if [ "${UPSTREAM_REF}" = "${fuc_same_name}" ] \
-    && [ "${fuc_commit}" != "$(git rev-parse HEAD)" ] \
-    && git merge-base --is-ancestor HEAD "${fuc_commit}"; then
+    if ! UPSTREAM_REF="$(upstream_default_branch "${UPSTREAM_REMOTE}" "${fuc_fetch}" 1)"; then
+      echo "${fuc_cannot_fetch}" >&2
+      return
+    fi
+    if [ "${UPSTREAM_REF}" != "${fuc_same_name}" ]; then
+      return
+    fi
     UPSTREAM_NAME="${UPSTREAM_REF#refs/remotes/}"
+  fi
+  if ! fuc_commit="$(git rev-parse --verify --quiet "${UPSTREAM_REF}^{commit}")"; then
+    echo "${fuc_cannot_fetch}" >&2
+    return
+  fi
+  if [ "${fuc_commit}" != "$(git rev-parse HEAD)" ] \
+    && git merge-base --is-ancestor HEAD "${fuc_commit}"; then
     # A submodule's mode is 160000.  `--ignore-submodules=none` overrides a
     # `submodule.<name>.ignore` setting, which would otherwise hide the
     # submodule from the comparison.  A commit with no `.gitmodules` has no
