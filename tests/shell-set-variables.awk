@@ -102,7 +102,7 @@ function at_command_in_subst(w) {
   return w ~ /(\(|;|&|\||\n)$/ \
     || w ~ /(^|[^A-Za-z0-9_])(!|do|elif|else|if|then|until|while)$/
 }
-# Whether T, the text of a comment within a command substitution, begins a
+# True if T, the text of a comment within a command substitution, begins a
 # quotation or a parenthesis that it does not end, or ends a parenthesis
 # that it did not begin, if it is read as code, as bash 3.2 reads it.
 function misread_comment(t,   i, ch, quote, parens) {

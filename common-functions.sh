@@ -1582,15 +1582,39 @@ squeezed_cksum() {
 ## happens, for example, when one side merged a branch and the other side
 ## merged a squashed copy of it.  Then the side's version is the resolution
 ## that git would have made if COMMIT were the merge base.  Prints nothing,
-## and returns 1, if no side's version qualifies, if BASES is empty, or if
-## both sides' versions qualify:  then each side reached the other side's
-## version and changed it further, and neither contains the other's later
-## changes, as when one side changed the file from version X to Y and the
-## other side changed it from Y to X.
+## and returns 1, if BASES is empty; if a side's version of FILE is not that
+## side's file at the pathname FILE, as when the side has the file under
+## another name, before or after a rename; if no side reached the other
+## side's version; or if both sides did:  then each side changed the other side's
+## version further, and neither contains the other's later changes, as when
+## one side changed the file from version X to Y and the other side changed
+## it from Y to X.  Also prints nothing, and returns 1, if the side that
+## reached the other side's version later returned FILE to a version that
+## it had before COMMIT (see `version_restored_after`), as when it
+## cherry-picked the other side's change and then reverted it:  then the
+## side's version was made from that earlier version, and need not contain
+## the other side's changes.
 side_containing_other() {
   if [ -z "$2" ]; then
     return 1
   fi
+  # The versions of FILE in the index, as lines "STAGE MODE HASH", such as
+  # "2 100644 3b18e512dba79e4c8300dd08aeb37f8e728b8dad".
+  sco_index="$(git --literal-pathspecs ls-files --format='%(stage) %(objectmode) %(objectname)' -- "$1")"
+  # Each side's version is at the conflicted pathname even if the side has
+  # the file under another name.  Then the side's history at that pathname
+  # is not the file's history, and can be that of an unrelated file, so it
+  # shows nothing.
+  for sco_stage in 2 3; do
+    merge_side "${sco_stage}"
+    sco_version="$(printf '%s\n' "${sco_index}" | sed -n -e "s/^${sco_stage} //p")"
+    if [ -z "${sco_version}" ] \
+      || [ "$(git --literal-pathspecs ls-tree --format='%(objectmode) %(objectname)' "${side_rev}" -- "$1")" != "${sco_version}" ]; then
+      return 1
+    fi
+  done
+  # "yes" once a side is found to have reached the other side's version.
+  sco_reached=''
   sco_found=''
   for sco_stage in 2 3; do
     merge_side "${sco_stage}"
@@ -1598,37 +1622,27 @@ side_containing_other() {
     # "100644 3b18e512dba79e4c8300dd08aeb37f8e728b8dad".  The mode is
     # compared too, so that a side whose version lacks the other side's
     # change of mode, such as to an executable file, does not qualify.
-    sco_other="$(git --literal-pathspecs ls-files --format='%(stage) %(objectmode) %(objectname)' -- "$1" \
-      | sed -n -e "s/^${side_other_stage} //p")"
-    if [ -z "${sco_other}" ]; then
-      continue
-    fi
+    sco_other="$(printf '%s\n' "${sco_index}" | sed -n -e "s/^${side_other_stage} //p")"
     # The commits in the side's history, after the merge bases, that changed
-    # FILE, most recent first.  The merge bases' hashes in BASES contain no
-    # character that field splitting or globbing would change, so the
-    # unquoted expansion is the list of hashes.
+    # FILE, and whose version of FILE has the other side's content, most
+    # recent first.  The merge bases' hashes in BASES contain no character
+    # that field splitting or globbing would change, so the unquoted
+    # expansion is the list of hashes.
     # shellcheck disable=SC2086
-    sco_commits="$(git --literal-pathspecs rev-list "${side_rev}" --not $2 -- "$1")"
-    if [ -z "${sco_commits}" ]; then
-      continue
-    fi
-    # The numbers of the lines of ${sco_commits} whose commit's version of
-    # FILE has the other side's content, one per line.  `git cat-file`
-    # prints a line for each commit:  the hash of the commit's version of
-    # FILE, or a line that ends with "missing" if the commit has no such
-    # file.  It does not print the mode, which `git ls-tree` prints for
-    # each of those commits.
-    sco_lines="$(printf '%s\n' "${sco_commits}" \
-      | SCO_FILE="$1" awk '{ print $0 ":" ENVIRON["SCO_FILE"] }' \
-      | git cat-file --batch-check='%(objectname)' \
-      | SCO_BLOB="${sco_other#* }" awk '$0 == ENVIRON["SCO_BLOB"] { print NR }')"
-    for sco_line in ${sco_lines}; do
-      sco_commit="$(printf '%s\n' "${sco_commits}" | sed -n -e "${sco_line}p")"
+    sco_candidates="$(git --literal-pathspecs rev-list "${side_rev}" --not $2 -- "$1" \
+      | file_versions "$1" \
+      | SCO_BLOB="${sco_other#* }" awk '$2 == ENVIRON["SCO_BLOB"] { print $1 }')"
+    # The most recent candidate whose version of FILE has the other side's
+    # mode too.
+    for sco_commit in ${sco_candidates}; do
       if [ "$(git --literal-pathspecs ls-tree --format='%(objectmode) %(objectname)' "${sco_commit}" -- "$1")" = "${sco_other}" ]; then
-        if [ -n "${sco_found}" ]; then
+        if [ -n "${sco_reached}" ]; then
           return 1
         fi
-        sco_found="${sco_stage} ${sco_commit}"
+        sco_reached=yes
+        if ! version_restored_after "$1" "$2" "${sco_commit}" "${side_rev}"; then
+          sco_found="${sco_stage} ${sco_commit}"
+        fi
         break
       fi
     done
@@ -1637,6 +1651,58 @@ side_containing_other() {
     return 1
   fi
   printf '%s\n' "${sco_found}"
+}
+
+## Usage: version_restored_after FILE BASES COMMIT REV
+## Succeeds if, after COMMIT, FILE returned to a version that it had before
+## COMMIT, as when a commit reverted COMMIT:  if a commit that descends from
+## COMMIT and is in the history of REV, a revision such as "HEAD", has the
+## same version of FILE as one of BASES has, or as a commit other than
+## COMMIT has that is in the history of COMMIT but not of BASES.  BASES is
+## the merge bases of a merge, one hash per line, as for
+## `side_containing_other`.  Only the content of FILE is compared, not its
+## mode.
+version_restored_after() {
+  # The versions of FILE after COMMIT, one hash per line.
+  vra_after="$(git --literal-pathspecs rev-list --ancestry-path "$3..$4" -- "$1" \
+    | file_versions "$1" | awk '$2 != "-" { print $2 }')"
+  if [ -z "${vra_after}" ]; then
+    return 1
+  fi
+  # The versions of FILE before COMMIT, one hash per line.  "$3^@" is the
+  # parents of COMMIT.  As in `side_containing_other`, the unquoted
+  # expansion of BASES is the list of hashes.
+  # shellcheck disable=SC2086
+  vra_before="$({
+    printf '%s\n' $2
+    git --literal-pathspecs rev-list "$3^@" --not $2 -- "$1"
+  } | file_versions "$1" | awk '$2 != "-" { print $2 }')"
+  if [ -z "${vra_before}" ]; then
+    return 1
+  fi
+  printf '%s\n' "${vra_after}" | grep -F -x -q -e "${vra_before}"
+}
+
+## Usage: file_versions FILE
+## Reads commit hashes, one per line, from standard input, and prints, for
+## each, a line "COMMIT BLOB", where BLOB is the hash of the commit's version
+## of FILE, as in "3b18e512dba79e4c8300dd08aeb37f8e728b8dad
+## 8ab686eafeb1f44702738c8b0f24f2567c36da6d", or "-" if the commit has no
+## FILE.  FILE is relative to the top level of the working tree.
+file_versions() {
+  fv_commits="$(cat)"
+  if [ -z "${fv_commits}" ]; then
+    return 0
+  fi
+  # `git cat-file` prints a line for each commit:  the hash of the commit's
+  # version of FILE, or a line that ends with " missing" if the commit has
+  # no such file.  A hash is the only line with one field.
+  printf '%s\n' "${fv_commits}" \
+    | FV_FILE="$1" awk '{ print $0 ":" ENVIRON["FV_FILE"] }' \
+    | git cat-file --batch-check='%(objectname)' \
+    | FV_COMMITS="${fv_commits}" awk '
+      BEGIN { split(ENVIRON["FV_COMMITS"], commits, "\n") }
+      { print commits[NR], (NF == 1 ? $0 : "-") }'
 }
 
 ## Usage: merge_side STAGE

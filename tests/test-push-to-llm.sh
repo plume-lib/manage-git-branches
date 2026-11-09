@@ -752,6 +752,54 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-before-base: the agent did not run: ${push_output}"
 fi
 
+## A side's version does not count as containing the other side's version
+## when, after reaching it, the side changed the file back to a version that
+## it had before, as by a revert.  Here feature reaches main's version, as by
+## cherry-picking main's change, then reverts that change, and then changes
+## the file further, so that its version lacks main's change to line 1.
+setup_case contained-reverted
+printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+git -C "${feature_dir}" revert --no-edit HEAD > /dev/null
+printf '%s\n' one two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Change feature again"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+push_to none --llm
+check_not_resolved "contained-reverted"
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "contained-reverted: the agent did not run: ${push_output}"
+fi
+case "${push_output}" in
+  *"took the version"*) fail "contained-reverted: a side's version was taken: ${push_output}" ;;
+esac
+
+## No side's version is taken when a side has the conflicted file under
+## another name, because then the history of the other side at the
+## conflicted pathname is not the file's history.  Here main renames
+## file.txt to new.txt, and feature's history after the merge base has an
+## unrelated new.txt, since deleted, whose content is main's version of
+## file.txt.
+setup_case contained-renamed
+git -C "${main_dir}" mv file.txt new.txt
+git -C "${main_dir}" commit -q -m "Rename file.txt to new.txt"
+git -C "${main_dir}" push -q
+printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/new.txt"
+git -C "${feature_dir}" add new.txt
+git -C "${feature_dir}" commit -q -m "Add new.txt"
+git -C "${feature_dir}" rm -q new.txt
+git -C "${feature_dir}" commit -q -m "Remove new.txt"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+push_to none --llm
+check_not_resolved "contained-renamed"
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "contained-renamed: the agent did not run: ${push_output}"
+fi
+case "${push_output}" in
+  *"took the version"*) fail "contained-renamed: a side's version was taken: ${push_output}" ;;
+esac
+
 ## The changes that a rejected agent made outside the conflicted files are
 ## reported.
 setup_case ours-other
