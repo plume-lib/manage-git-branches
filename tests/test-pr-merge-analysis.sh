@@ -866,6 +866,42 @@ expected_stacked_revert="## master conflicts
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_stacked_revert}" ]; then
   fail "stacked revert: expected [${expected_stacked_revert}], got [${analysis_output}]"
 fi
+## A branch that merged an earlier version of a PR's branch, by way of another
+## PR, and then the PR itself has the PR's changes.
+##  * 51 starts from main, adds ff.txt and hh.txt, and then removes hh.txt.
+##  * 52 starts from 51 before 51 removed hh.txt, and adds gg.txt.  So 52 has
+##    some of 51's commits, but not all of them.
+##  * 53 starts from main and merges 52 and 51.  Its ff.txt is the same as
+##    52's, but 52 has it only from 51, so 53 contains 51 as well as 52.
+git -C "${seed}" checkout -q --detach main
+printf '%s\n' fiftyone > "${seed}/ff.txt"
+printf '%s\n' fiftyone > "${seed}/hh.txt"
+git -C "${seed}" add ff.txt hh.txt
+git -C "${seed}" commit -q -m "PR 51"
+pr51_first="$(git -C "${seed}" rev-parse HEAD)"
+git -C "${seed}" rm -q hh.txt
+git -C "${seed}" commit -q -m "PR 51: move hh.txt to another PR"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/51/head
+commit_pr 52 "${pr51_first}" gg.txt fiftytwo
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 53: merge PR 52" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/52/head)"
+git -C "${seed}" merge -q --no-ff -m "PR 53: merge PR 51" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/51/head)"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/53/head
+git -C "${seed}" checkout -q main
+prs='51 52 53'
+: > "${cache}"
+analyze '' --prune
+expected_earlier_version="## master conflicts
+## containment (A contains all non-merge commits of B, and B's changes)
+53 contains 51
+53 contains 52
+## pairwise conflicts"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_earlier_version}" ]; then
+  fail "earlier version: expected [${expected_earlier_version}], got [${analysis_output}]"
+fi
+
 ## The conflicting files are listed as git quotes them:  a name that contains a
 ## control character, such as a tab, or a non-ASCII character is quoted, with
 ## C-style escapes, so that the report is ASCII and has one line per conflict.

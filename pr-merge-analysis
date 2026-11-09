@@ -188,8 +188,9 @@ EXCLUDED_RE='^(-|[0-9a-f]{40}([0-9a-f]{24})?(,[0-9a-f]{40}([0-9a-f]{24})?)*)$'
 # OWN maps a commit to one of its non-merge commits that is not in master, or to
 # the empty string if it has none.  EXCLUDED maps a commit to the value that
 # own_commits_excluded sets RESULT to.  MERGE_BASE maps two commits, as in "SHA1
-# SHA2", to the value that merge_base sets RESULT to.
-declare -A SHA CACHED CURRENT OWN EXCLUDED MERGE_BASE
+# SHA2", to the value that merge_base sets RESULT to.  OWN_COUNT maps a commit
+# to the number of its own commits (see own_commits_excluded).
+declare -A SHA CACHED CURRENT OWN EXCLUDED MERGE_BASE OWN_COUNT
 CURRENT[$MSHA]=1
 REFS=()
 for n in $P; do REFS+=("refs/remotes/pr/$n"); done
@@ -252,7 +253,9 @@ merge_tree() {
   # Standard error is kept apart, so that a warning, such as one about
   # merge.renameLimit, does not precede the tree's object ID or appear among
   # the files.
-  out=$("${G[@]}" merge-tree --write-tree --name-only "$1" "$2" 2> "$MERGE_TREE_ERR")
+  # core.quotePath=true, so that the quoting does not depend on the user's
+  # configuration.
+  out=$("${G[@]}" -c core.quotePath=true merge-tree --write-tree --name-only "$1" "$2" 2> "$MERGE_TREE_ERR")
   status=$?
   # A clean merge yields exit status 0, and a conflict yields exit status 1;
   # either way, standard output starts with the tree's object ID, and for a
@@ -399,8 +402,7 @@ merge_bases() {
 
 # Sets the array DIFF_NAMES to the names of the files that differ between
 # commits $1 and $2:  those among files $3, $4, and so on, or any file if none
-# is given.  Also writes them to file "$OWN_FILES_DIR/diff", each followed by a
-# NUL.
+# is given.
 diff_names() {
   local x=$1 y=$2
   shift 2
@@ -434,23 +436,41 @@ own_files() {
     return 0
   fi
   merge_commits "${BASES[@]}"
-  diff_names "$RESULT" "$1"
-  mv "$OWN_FILES_DIR/diff" "$OWN_FILES_DIR/$1"
+  "${G[@]}" diff --name-only --no-renames -z "$RESULT" "$1" > "$OWN_FILES_DIR/$1" \
+    || die "git diff $RESULT $1 failed"
+}
+
+# Sets RESULT to "yes" if commit $1 contains at least one of the own commits of
+# commit $2 (see own_commits_excluded), otherwise to "no".
+has_own_commit() {
+  local x n
+  local -a exclude=()
+  own_commits_excluded "$2"
+  for x in ${RESULT//[,-]/ }; do exclude+=("^$x"); done
+  if [ -z "${OWN_COUNT[$2]+set}" ]; then
+    OWN_COUNT[$2]=$("${G[@]}" rev-list --count --no-merges "$2" "^$MSHA" "${exclude[@]}") \
+      || die "git rev-list --count $2 ^$MSHA ${exclude[*]} failed"
+  fi
+  # The number of own commits of $2 that $1 does not contain.
+  n=$("${G[@]}" rev-list --count --no-merges "$2" "^$MSHA" "${exclude[@]}" "^$1") \
+    || die "git rev-list --count $2 ^$MSHA ${exclude[*]} ^$1 failed"
+  RESULT=no
+  [ "$n" -eq "${OWN_COUNT[$2]}" ] || RESULT=yes
 }
 
 # Sets RESULT to "no" if commit $1 lacks commit $2's changes, otherwise to
 # "yes".  $1 has $2's change to a file that own_files lists for $2 if $1's
 # version of the file differs from the version at each of $1's merge bases with
 # master and with the heads of the PRs whose commits are not among the own
-# commits of $1 or of $2, except the heads of $2 and of the PRs that contain all
-# of $2's commits.  Each such merge base has a version that $1 could have
-# without $2, so if $1's version is one of them, $1 does not need $2 for that
-# file.  $1 lacks $2's changes if it has none of them.  For example, $1 lacks
-# $2's changes if $1 merged $2 and then reverted $2's changes, so that $1's
-# diff against master contains nothing of $2; if $2 has no changes, as when
-# later own commits of $2 undid all of $2's changes or when $2 only merges
-# other PRs without conflicts; or if $2 only reverts a change of a PR that it
-# builds on, or resolves a conflict by keeping one side's version.
+# commits of $1 or of $2, except a merge base that contains some of $2's own
+# commits.  Each such merge base has a version that $1 could have without $2,
+# so if $1's version is one of them, $1 does not need $2 for that file.  $1
+# lacks $2's changes if it has none of them.  For example, $1 lacks $2's
+# changes if $1 merged $2 and then reverted $2's changes, so that $1's diff
+# against master contains nothing of $2; if $2 has no changes, as when later
+# own commits of $2 undid all of $2's changes or when $2 only merges other PRs
+# without conflicts; or if $2 only reverts a change of a PR that it builds on,
+# or resolves a conflict by keeping one side's version.
 changes_result() {
   own_commits_excluded "$2"
   local b_excluded=$RESULT
@@ -460,17 +480,21 @@ changes_result() {
   if [ -z "${CACHED[$key]+set}" ]; then
     local ok=no x base
     local -a files heads=()
-    local -A seen=()
     own_files "$2"
     mapfile -d '' files < "$OWN_FILES_DIR/$2"
     if [ ${#files[@]} -gt 0 ]; then
-      for x in ${a_excluded//[,-]/ } ${b_excluded//[,-]/ }; do
-        [ -z "${seen[$x]+set}" ] && [ "$x" != "$2" ] || continue
-        seen[$x]=1
-        commits_result "$x" "$2"
+      # The PRs whose commits are not among $2's own commits lack those
+      # commits, but a PR whose commits are not among $1's own commits can have
+      # some of them, as when it was created from an earlier version of $2.
+      for x in ${a_excluded//[,-]/ }; do
+        [ "$x" != "$2" ] || continue
+        merge_base "$1" "$x"
+        [ -n "$RESULT" ] || continue
+        has_own_commit "$RESULT" "$2"
         [ "$RESULT" = yes ] || heads+=("$x")
       done
-      merge_bases "$1" "${heads[@]}"
+      # shellcheck disable=SC2086 # The heads are words without glob characters.
+      merge_bases "$1" ${b_excluded//[,-]/ } "${heads[@]}"
       for base in "${BASES[@]}"; do
         # Keep the files whose versions in $1 differ from base's.
         diff_names "$base" "$1" "${files[@]}"

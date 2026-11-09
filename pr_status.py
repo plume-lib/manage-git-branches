@@ -27,13 +27,13 @@ Each run:
     between its branch and the merge of its merge bases with master and with the PRs that it
     builds on; a branch lacks them if, for each such file, the branch's version is the same
     as at the branch's merge base with master or with a PR that the branch or the PR builds
-    on and that lacks the PR's commits, as when the branch merged the PR's branch and then
-    reverted them, or when the PR has no changes), or if the config says so; a PR whose
-    base branch is another PR's branch, but whose description says to land before it (or
-    whose base PR's description says to land after it), is a fix to that PR, which lands
-    into that PR's branch first, although its branch is updated from that PR's branch; PRs
-    that land together (possibly in different repositories) are one unit, whose members
-    depend on each other's prerequisites but not on each other,
+    on, unless that merge base has some of the PR's own commits, as when the branch merged
+    the PR's branch and then reverted them, or when the PR has no changes), or if the config
+    says so; a PR whose base branch is another PR's branch, but whose description says to
+    land before it (or whose base PR's description says to land after it), is a fix to that
+    PR, which lands into that PR's branch first, although its branch is updated from that
+    PR's branch; PRs that land together (possibly in different repositories) are one unit,
+    whose members depend on each other's prerequisites but not on each other,
   * warns about each cycle of dependencies, and omits from the generated push commands
     the PRs whose branches are updated in a cycle and the PRs whose branches are updated
     from theirs,
@@ -2904,7 +2904,8 @@ def dependency_document(
             " changed back."
             " A branch has the PR's change to such a file if the branch's version differs from the"
             " version at each of the branch's merge bases with master and with the PRs that the"
-            " branch or the PR builds on and that lack the PR's commits, because each of those"
+            " branch or the PR builds on, except a merge base that has some of the PR's own"
+            " commits (which exclude those of a PR that it builds on), because each of those"
             " versions is one that the branch could have without the PR."
             " A branch lacks the PR's changes if it has none of them, as when it merged the PR's"
             " branch and then reverted them, or when the PR has no changes."
