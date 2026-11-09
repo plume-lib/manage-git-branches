@@ -155,7 +155,8 @@
 # which also suits a merge that you resolve yourself or with an agent
 # interactively, followed by rules specific to this script.  The agent is
 # told to examine every change of both sides of the merge, and to combine
-# them rather than taking either side's version.  It can edit any part of any
+# them; it takes either side's version only if the other side's changes are
+# already present in it or are obsolete.  It can edit any part of any
 # file that git tracks, not only the conflict regions, because git's
 # automatic merge of the rest can combine changes that do not fit together,
 # such as a call to a method that the other side renamed.  It can also
@@ -166,14 +167,22 @@
 # agent's sandbox.  It can, however, change a tracked file that a hook or the
 # build reads or runs, such as prek.toml or a Makefile, and this script's
 # commit and build then run that code outside the sandbox; the agent that
-# fixes a failed build can do the same.  This script rejects a resolution of
-# a file that is identical to either side's version of the file, apart from
-# whitespace and blank lines, and any file that the agent changed that
-# contains a conflict marker line that git's merge did not put there.
+# fixes a failed build can do the same.  This script rejects any file that the
+# agent changed that contains a conflict marker line that git's merge did not
+# put there.  It accepts a resolution of a file that is identical to either
+# side's version of the file; merge-conflict-instructions.md says when one is
+# correct.
 # Whether or not it accepts the agent's work, it lists the files outside the
 # conflicted ones that the agent changed, each conflicted file in which the
-# agent changed text outside the conflict regions, and each resolution by
-# `git rerere` that the agent changed, so that you can review them.
+# agent changed text outside the conflict regions, each resolution by
+# `git rerere` that the agent changed, and each resolution by the agent that
+# is identical to either side's version, apart from whitespace and blank
+# lines, so that you can review them.  Whether or not it accepts the agent's
+# work, it keeps `git rerere` from recording each such one-sided resolution,
+# even if you commit the merge later, and removes rerere's record of the
+# conflict:  the side's version also drops the other side's changes outside
+# the conflict regions, so a later merge with the same conflicts would
+# reject the replayed resolution.
 #
 # When the build of TO_DIR fails, and a merge on TO_DIR's branch might have
 # broken it, the agent edits files to fix it, without building; then this
@@ -206,11 +215,13 @@
 # that continues the agent's session interactively, or one such command for
 # each of the agent's attempts to fix the build.  In the resumed session,
 # you can ask the agent about its work, or tell it to finish in a way that
-# its instructions forbade, such as by taking one side's version of a file.
+# its instructions forbade, such as by creating a file.
 # Then commit the merge or the fix yourself, and run this script again.
 # This script also appends the command to the file AGENT-TODO.md at
 # the top level of the working tree, where you are less likely to overlook
-# it; delete the entry once you have dealt with it.  The resumed
+# it; delete the entry once you have dealt with it.  When the agent could not
+# resolve the conflicts, the entry also tells an AI agent that reads it to
+# ask a person for help with them.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
 # contains the text of the merged changes, which can include instructions
 # from other people.

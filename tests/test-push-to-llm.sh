@@ -48,9 +48,11 @@ fail() {
 ##   good:   removes the conflict marker lines and the merge base's text,
 ##           keeping both sides
 ##   clean:  as "good", but also changes a line that merged cleanly
-##   ours:   replaces file.txt with HEAD's version, discarding main's changes
+##   ours:   replaces file.txt with HEAD's version, discarding main's changes,
+##           and resolves the conflicts of other.txt, if any, as "good" does
 ##   theirs: replaces file.txt with MERGE_HEAD's version, discarding
-##           feature's changes
+##           feature's changes, and resolves the conflicts of other.txt, if
+##           any, as "good" does
 ##   ours-other: as "ours", but also changes other.txt, which git tracks, and
 ##           creates scratch.txt
 ##   ours-whitespace: as "ours", but also adds a blank line and indents a
@@ -141,6 +143,12 @@ if [ "${STUB_MODE}" = ours ] || [ "${STUB_MODE}" = ours-other ] \
   if [ "${STUB_MODE}" = theirs ]; then stub_stage=3; else stub_stage=2; fi
   git show ":${stub_stage}:file.txt" > file.txt.new
   mv file.txt.new file.txt
+  if [ "${STUB_MODE}" = ours ] || [ "${STUB_MODE}" = theirs ] \
+    && grep -q '^<<<<<<< ' other.txt 2> /dev/null; then
+    sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^=======$/d' -e '/^>>>>>>> /d' \
+      other.txt > other.txt.new
+    mv other.txt.new other.txt
+  fi
   if [ "${STUB_MODE}" = ours-other ]; then
     echo "agent" >> other.txt
     echo "scratch" > scratch.txt
@@ -494,14 +502,14 @@ else
 fi
 
 ## The instructions tell the agent to examine both sides' changes, permit it
-## to edit any part of any file, and forbid taking one side.
+## to edit any part of any file, and say when it can take one side.
 setup_case instructions
 push_to good --llm
 check_resolved claude "instructions"
 for instruction in 'git diff HEAD...MERGE_HEAD' 'git diff MERGE_HEAD...HEAD' \
   'edit any part of any file' 'by taking one side' 'Step 3:  check that no change was lost' \
   'HEAD is feature, and MERGE_HEAD is main' '# Rules for this session' \
-  'you need not read that file, or use a skill' 'even if that resolution is correct'; do
+  'you need not read that file, or use a skill' 'discards the other side'"'"'s changes that git'; do
   if ! grep -q -F -- "${instruction}" "${STUB_PROMPT}"; then
     fail "instructions: they lack \"${instruction}\": $(cat "${STUB_PROMPT}")"
   fi
@@ -522,42 +530,174 @@ case "${push_output}" in
   *) fail "change outside a conflict region: not reported: ${push_output}" ;;
 esac
 
-## A resolution that is identical to either side's version is rejected.
+## Usage: check_side_resolved DESCRIPTION EXPECTED
+## Checks that git-push-to committed and pushed the merge of main into
+## feature, and that its file.txt is EXPECTED.  DESCRIPTION names the test
+## case; used for diagnostics.
+check_side_resolved() {
+  if [ "${push_status}" -ne 0 ]; then
+    fail "$1: git-push-to failed: ${push_output}"
+  fi
+  side_remote_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
+  if [ "${side_remote_head}" != "$(git -C "${feature_dir}" rev-parse HEAD)" ]; then
+    fail "$1: the merge was not pushed"
+  fi
+  if [ "$(git -C "${remote}" rev-parse "${side_remote_head}^1")" != "${feature_head}" ] \
+    || [ "$(git -C "${remote}" rev-parse "${side_remote_head}^2")" != "$(git -C "${main_dir}" rev-parse HEAD)" ]; then
+    fail "$1: the pushed commit is not the merge of main into feature"
+  fi
+  if [ "$(git -C "${remote}" show "${side_remote_head}:file.txt")" != "$2" ]; then
+    fail "$1: wrong merge result: $(git -C "${remote}" show "${side_remote_head}:file.txt")"
+  fi
+}
+
+## Usage: read_recorded_resolutions DESCRIPTION
+## Sets ${recorded} to the content of each resolution that `git rerere`
+## recorded in ${feature_dir}, and ${recorded_conflicts} to the number of
+## conflicts that it recorded, each as a file preimage or preimage.N.  Fails
+## if ${feature_dir} has no rr-cache directory, in which `git rerere`
+## records each conflict when the merge stops.  DESCRIPTION names the test
+## case; used for diagnostics.
+read_recorded_resolutions() {
+  rr_cache="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path rr-cache)"
+  if [ ! -d "${rr_cache}" ]; then
+    fail "$1: \`git rerere\` recorded no conflict in ${rr_cache}"
+  fi
+  recorded="$(find "${rr_cache}" -name postimage -exec cat {} +)"
+  recorded_conflicts="$(find "${rr_cache}" -name 'preimage*' | wc -l | tr -d ' ')"
+}
+
+## A resolution that is identical to either side's version is accepted, and
+## AGENT-TODO.md is not written, but the script's output asks the user to
+## review it, because it drops the other side's changes that git merged
+## cleanly.  Here each side also adds other.txt, whose conflict the agent
+## resolves by keeping both sides.
 for side_mode in ours theirs; do
   setup_case "side-${side_mode}"
+  echo "other-feature" > "${feature_dir}/other.txt"
+  git -C "${feature_dir}" add other.txt
+  git -C "${feature_dir}" commit -q -m "Add other.txt"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  echo "other-main" > "${main_dir}/other.txt"
+  git -C "${main_dir}" add other.txt
+  git -C "${main_dir}" commit -q -m "Add other.txt"
+  git -C "${main_dir}" push -q
+  git -C "${feature_dir}" config rerere.enabled true
   push_to "${side_mode}" --llm
-  check_not_resolved "${side_mode}"
+  if [ "${side_mode}" = ours ]; then
+    side_expected="$(printf '%s\n' one two three four five six SEVEN-feature eight nine)"
+  else
+    side_expected="$(printf '%s\n' ONE two three four five six SEVEN-main eight nine)"
+  fi
+  check_side_resolved "${side_mode}" "${side_expected}"
   case "${side_mode}:${push_output}" in
-    ours:*"file.txt: the resolution is identical to the version on feature, so it keeps none of the changes of main"*" to the file"*) ;;
-    theirs:*"file.txt: the resolution is identical to the version in main"*", so it keeps none of the changes of feature to the file"*) ;;
-    *) fail "${side_mode}: wrong diagnostic: ${push_output}" ;;
+    ours:*"claude resolved file.txt as the version on feature, which keeps none of the changes of main"*" to the file; review it"*) ;;
+    theirs:*"claude resolved file.txt as the version in main"*", which keeps none of the changes of feature to the file; review it"*) ;;
+    *) fail "${side_mode}: the user is not asked to review: ${push_output}" ;;
   esac
+  # The dropped changes outside the conflict regions are not reported again.
+  case "${push_output}" in
+    *"changed text outside the conflict regions"*) fail "${side_mode}: reported twice: ${push_output}" ;;
+  esac
+  if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+    fail "${side_mode}: AGENT-TODO.md was written: $(cat "${feature_dir}/AGENT-TODO.md")"
+  fi
+  # `git rerere` records the resolution of other.txt but not that of
+  # file.txt, which a later merge with the same conflict would replay and
+  # then reject, and it keeps no record of file.txt's conflict.
+  read_recorded_resolutions "${side_mode}"
+  if [ "${recorded}" != "$(printf '%s\n' other-feature other-main)" ]; then
+    fail "${side_mode}: \`git rerere\` recorded the wrong resolutions: ${recorded}"
+  fi
+  if [ "${recorded_conflicts}" -ne 1 ]; then
+    fail "${side_mode}: \`git rerere\` kept ${recorded_conflicts} conflicts, not 1"
+  fi
 done
 
 ## So is a resolution that differs from a side's version only in whitespace
 ## and blank lines.
 setup_case side-whitespace
 push_to ours-whitespace --llm
-check_not_resolved "ours-whitespace"
+check_side_resolved "ours-whitespace" "$(printf '%s\n' one '  two' three four '' five six SEVEN-feature eight nine)"
 case "${push_output}" in
-  *"file.txt: the resolution differs from the version on feature only in whitespace and blank lines, so it keeps none of the changes of main"*" to the file"*) ;;
-  *) fail "ours-whitespace: wrong diagnostic: ${push_output}" ;;
+  *"claude resolved file.txt as the version on feature, apart from whitespace and blank lines, which keeps none of the changes of main"*" to the file; review it"*) ;;
+  *) fail "ours-whitespace: the user is not asked to review: ${push_output}" ;;
 esac
 
+## When one side's version of the conflicted file already contains every
+## change of the other side to it, because the other side's version is in
+## the first side's history after the merge base, an agent's resolution that
+## is that side's version is correct, and it is accepted, as in the merge of
+## a branch that merged a pull request's branch with a main branch that
+## landed the squashed pull request.  In contained-ours, feature first
+## reaches main's version of file.txt, as by merging a squashed copy of
+## main's change, and then changes it further, next to main's change but not
+## in it.  In contained-theirs, main reaches feature's version, and changes
+## it further.
+for side_mode in ours theirs; do
+  side_name="contained-${side_mode}"
+  setup_case "${side_name}"
+  case "${side_mode}" in
+    theirs)
+      printf '%s\n' one two three four five six SEVEN-feature eight nine > "${main_dir}/file.txt"
+      git -C "${main_dir}" commit -q -a -m "Reach feature's version"
+      printf '%s\n' ONE two three four five six SEVEN-feature EIGHT-later nine > "${main_dir}/file.txt"
+      git -C "${main_dir}" commit -q -a -m "Change main again"
+      git -C "${main_dir}" push -q
+      side_expected="$(printf '%s\n' ONE two three four five six SEVEN-feature EIGHT-later nine)"
+      side_taken="in main"
+      ;;
+    *)
+      printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+      git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+      printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
+      git -C "${feature_dir}" commit -q -a -m "Change feature again"
+      git -C "${feature_dir}" push -q
+      feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+      side_expected="$(printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine)"
+      side_taken="on feature"
+      ;;
+  esac
+  git -C "${feature_dir}" config rerere.enabled true
+  push_to "${side_mode}" --llm
+  check_side_resolved "${side_name}" "${side_expected}"
+  case "${push_output}" in
+    *"claude resolved file.txt as the version ${side_taken}"*", which keeps none of the changes of "*"; review it"*) ;;
+    *) fail "${side_name}: the user is not asked to review: ${push_output}" ;;
+  esac
+  # `git rerere` does not record the side's version as a resolution, which
+  # would drop the other side's changes outside the conflict regions from a
+  # later merge with the same conflict.
+  read_recorded_resolutions "${side_name}"
+  if [ -n "${recorded}" ] || [ "${recorded_conflicts}" -ne 0 ]; then
+    fail "${side_name}: \`git rerere\` recorded the side's version as a resolution, or kept the conflict: ${recorded}"
+  fi
+done
+
 ## The changes that a rejected agent made outside the conflicted files are
-## reported too.
+## reported.
 setup_case ours-other
 echo "other" > "${feature_dir}/other.txt"
 git -C "${feature_dir}" add other.txt
 git -C "${feature_dir}" commit -q -m "Add other.txt"
 git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+git -C "${feature_dir}" config rerere.enabled true
 push_to ours-other --llm
 check_not_resolved "ours-other"
 case "${push_output}" in
-  *"claude created a file: scratch.txt"*"claude also changed: other.txt"*"keeps none of the changes"*) ;;
+  *"claude created a file: scratch.txt"*"claude also changed: other.txt"*) ;;
   *) fail "ours-other: wrong diagnostic: ${push_output}" ;;
 esac
+## Even when the agent's work is rejected, `git rerere` does not record its
+## resolution that is one side's version, which a person can commit.
+git -C "${feature_dir}" add -u
+git -C "${feature_dir}" commit -q --no-edit
+read_recorded_resolutions "ours-other"
+if [ -n "${recorded}" ] || [ "${recorded_conflicts}" -ne 0 ]; then
+  fail "ours-other: \`git rerere\` recorded the one-sided resolution, or kept the conflict: ${recorded}"
+fi
 
 ## Deleting the conflicted file is rejected.
 setup_case delete-conflicted
@@ -571,7 +711,7 @@ esac
 ## When the agent's work is rejected, the user is told how to continue its
 ## session.
 setup_case session
-push_to ours --llm
+push_to create --llm
 check_not_resolved "rejected resolution"
 ## The command that continues Claude's session names the session that the
 ## stub was given.  The directory is a physical path, as on macOS, where
@@ -594,6 +734,10 @@ case "${session_id}" in
     if ! grep -q -x "## Resolve the conflicts in the merge of .* (git-push-to, .*)" "${todo}" \
       || ! grep -q -x -F "cd ${session_dir} && claude --resume ${session_id}" "${todo}"; then
       fail "rejected resolution: AGENT-TODO.md lacks the command: $(cat "${todo}")"
+    fi
+    ## The entry tells an agent that reads it to get a person's help.
+    if ! grep -q -x -F "claude, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${todo}"; then
+      fail "rejected resolution: AGENT-TODO.md does not ask for help: $(cat "${todo}")"
     fi
     ;;
 esac
@@ -697,7 +841,8 @@ case "${push_output}" in
   *"codex resume"*) fail "codex without a session id: a command to continue the session: ${push_output}" ;;
 esac
 if grep -q 'codex resume' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
-  || ! grep -q -x 'The merge of commit .* is in progress in .*' "${feature_dir}/AGENT-TODO.md" 2> /dev/null; then
+  || ! grep -q -x 'The merge of commit .* is in progress in .*' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
+  || ! grep -q -x -F "codex, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${feature_dir}/AGENT-TODO.md"; then
   fail "codex without a session id: wrong AGENT-TODO.md: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
 fi
 
@@ -1289,7 +1434,7 @@ check_todo_merge "AGENT-TODO.md with an agent, rerun"
 ## stopped, as when the agent's work was rejected, even if the files have no
 ## conflict markers.
 setup_case rerun-rejected
-push_to ours --llm
+push_to create --llm
 check_not_resolved "rejected agent"
 : > "${STUB_LOG}"
 push_to good --llm
@@ -1611,7 +1756,7 @@ case "${push_output}" in
   *) fail "change-rerere: the change was not reported: ${push_output}" ;;
 esac
 
-## But the agent cannot replace such a file with one side's version.
+## It can replace such a file with one side's version.
 setup_case theirs-rerere
 echo "other main" > "${main_dir}/other.txt"
 git -C "${main_dir}" add other.txt
@@ -1631,10 +1776,17 @@ printf '%s\n' "other feature" "other main" > "${feature_dir}/other.txt"
 git -C "${feature_dir}" rerere 2> /dev/null
 git -C "${feature_dir}" merge --abort
 push_to theirs-rerere --llm
-check_not_resolved "theirs-rerere"
+check_resolved claude "theirs-rerere"
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "other main" ]; then
+  fail "theirs-rerere: wrong other.txt: $(git -C "${remote}" show refs/heads/feature:other.txt)"
+fi
 case "${push_output}" in
-  *"claude changed the resolution that \`git rerere\` made of other.txt"*"other.txt: the resolution is identical to the version in main"*) ;;
-  *) fail "theirs-rerere: wrong diagnostic: ${push_output}" ;;
+  *"claude changed the resolution that \`git rerere\` made of other.txt"*) ;;
+  *) fail "theirs-rerere: the changed resolution is not reported: ${push_output}" ;;
+esac
+case "${push_output}" in
+  *"claude resolved other.txt as the version in main"*", which keeps none of the changes of feature to the file; review it"*) ;;
+  *) fail "theirs-rerere: the one-sided resolution is not reported: ${push_output}" ;;
 esac
 
 ## A resolution that `git rerere` recorded needs no agent, whether or not
