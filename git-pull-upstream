@@ -77,22 +77,29 @@
 # already contain the default branch and an open pull request from the
 # current branch builds on another one:
 #  * its base branch, such as "feature-b", is not the default branch of the
+#    base repository and is the head branch of an open pull request B of the
 #    base repository, as for a pull request that is stacked on B's; or
 #  * its description has a line "Land after #N." (with or without the
 #    period), as `pr-status` writes, where N, such as 123, is the number of
 #    an open pull request of the same repository that is not a fix to the
 #    current branch's pull request, that is, whose base branch is not the
 #    current branch.  `pr-status` updates the current branch from N's branch.
+#    As for `pr-status`, the line can name N as "ORG/REPO#N" or by its URL,
+#    and it can continue with text that names no other pull request, as in
+#    "Land after #123 (it adds the helper)."
 # Instead, update the branch with `git-push-to` from the branch that it builds
 # on; `pr-status` prints the `git-push-to` chains that do so.  The option
 # "--allow-dependent" merges anyway.
 #
-# The pull requests from the current branch are the ones that
-# `pr_repositories` in common-functions.sh describes.  The check is skipped,
-# silently, if `gh` is not installed or has no token for github.com, as when
-# no user has logged in with `gh auth login`, or if the current branch does
-# not push to a GitHub repository.  If GitHub cannot be asked, this script
-# says so and merges.  A dependence that only another pull request's
+# The pull requests from the current branch are the ones whose head is the
+# branch that it pushes to (see `push_destination` in common-functions.sh)
+# and whose base repository is the upstream repository, whose default branch
+# this script merges.  This script asks GitHub before pulling.  The check is
+# skipped, silently, if `gh` is not installed or has no token for
+# github.com, as when no user has logged in with `gh auth login`, or if the
+# current branch does not push to a GitHub repository, or if the upstream
+# repository is not on GitHub.  If GitHub cannot be asked, this script says
+# so and merges.  A dependence that only another pull request's
 # description states, as in "Land before #M" in B's description, or that only
 # the commits of the current branch show, is not detected.
 
@@ -142,92 +149,194 @@ fi
 # shellcheck source=common-functions.sh
 . "${SCRIPT_DIR}/common-functions.sh"
 
-# Usage: check_not_dependent BRANCH
-# Returns 1, after printing a diagnostic, if an open pull request from BRANCH,
-# a branch of the clone in the current directory, builds on another pull
-# request, as "Branches that build on another pull request" above describes.
-# Returns 0 otherwise, including when GitHub is not or cannot be asked.
-check_not_dependent() {
-  command -v gh > /dev/null 2>&1 || return 0
-  gh auth token --hostname github.com > /dev/null 2>&1 || return 0
-  pr_repositories "$(pwd)" "$1" || return 0
-  # Each pull request yields a line "pr NUMBER BASE DEFAULT HEAD", where BASE
-  # is its base branch, DEFAULT is the base repository's default branch, and
-  # HEAD is the GitHub slug of its head repository, or "-" if that was
-  # deleted, followed by a line "body NUMBER TEXT" for each line TEXT of its
-  # description.  The `head` parameter names only the head repository's
-  # owner, who might have both the base repository and a fork of it.
+# Usage: find_dependence BRANCH
+# Sets ${dependence} to a diagnostic that says how an open pull request from
+# BRANCH, a branch of the clone in the current directory, builds on another
+# pull request, as "Branches that build on another pull request" above
+# describes, or to the empty string if none does or if GitHub is not or
+# cannot be asked.  The upstream repository is the one that
+# ${upstream_source} names, as `find_upstream_ref` sets it.
+find_dependence() {
+  dependence=''
+  gh_usable || return 0
+  push_destination "$(pwd)" "$1" || return 0
+  fd_head_repo="${push_destination_repo}"
+  fd_head_branch="${push_destination_branch}"
+  # ${upstream_source} is a remote, or, for a fork's parent, a URL.
+  fd_base_repo="$(github_remote_slugs \
+    | awk -v remote="${upstream_source}" '$1 == remote { print $2; exit }')"
+  if [ -z "${fd_base_repo}" ]; then
+    fd_base_repo="$(github_slug "${upstream_source}")"
+  fi
+  [ -n "${fd_base_repo}" ] || return 0
+  # Each pull request yields a line "pr NUMBER BASE DEFAULT HEAD HEADDEFAULT",
+  # where BASE is its base branch, DEFAULT is the base repository's default
+  # branch, HEAD is the GitHub slug of its head repository, and HEADDEFAULT
+  # is the head repository's default branch, or "-" for both if the head
+  # repository was deleted, followed by a line "body NUMBER TEXT" for each
+  # line TEXT of its description.  The `head` parameter names only the head
+  # repository's owner, who might have both the base repository and a fork
+  # of it.
   # shellcheck disable=SC2016 # The expansions are for jq.
-  if ! cnd_answer="$(gh_query "cannot list the pull requests from ${pr_head_repo}:${pr_head_branch}" \
-    gh api -X GET "repos/${pr_base_repo}/pulls" \
-    -f "head=${pr_head_repo%%/*}:${pr_head_branch}" -f state=open -f per_page=100 \
+  if ! fd_answer="$(gh_query "cannot list the pull requests from ${fd_head_repo}:${fd_head_branch}" \
+    gh api -X GET "repos/${fd_base_repo}/pulls" \
+    -f "head=${fd_head_repo%%/*}:${fd_head_branch}" -f state=open -f per_page=100 \
     --hostname github.com --paginate \
-    --jq '.[] | .number as $n | "pr \($n) \(.base.ref) \(.base.repo.default_branch) \(.head.repo.full_name // "-")", ((.body // "") | split("\n")[] | "body \($n) \(.)")')"; then
-    echo "${SCRIPT_NAME}: cannot tell whether the current branch builds on another pull request; merging anyway" >&2
+    --jq '.[] | .number as $n | "pr \($n) \(.base.ref) \(.base.repo.default_branch) \(.head.repo.full_name // "-") \(.head.repo.default_branch // "-")", ((.body // "") | split("\n")[] | "body \($n) \(.)")')"; then
+    echo "${SCRIPT_NAME}: cannot tell whether the current branch builds on another pull request; assuming that it does not" >&2
     return 0
   fi
-  # Each word is "base:NUMBER:BASE:DEFAULT" for a pull request whose base
-  # branch is not the default branch, or "after:NUMBER:N" for each line
-  # "Land after #N." in its description.  A branch's name contains neither
-  # whitespace nor ":", so splitting the output yields each word intact.
-  # GitHub ignores the case of a repository's name, so a remote URL might
-  # spell it differently than GitHub's answer does.
-  cnd_findings="$(printf '%s\n' "${cnd_answer}" | awk -v head="${pr_head_repo}" '
+  # Each word is "base:NUMBER:BASE" for a pull request whose base branch,
+  # BASE, is not the default branch, or "after:NUMBER:N" for each line of its
+  # description that says to land after pull request N of the base
+  # repository.  A branch's name contains neither whitespace nor ":", so
+  # splitting the output yields each word intact.  A pull request from the
+  # head repository's default branch is ignored, as `pr_repositories` in
+  # common-functions.sh explains.
+  #
+  # A line says to land after N if `landing_line` in pr_status.py accepts it
+  # and it names N:  it starts with "Land after " and the pull request, which
+  # it names as "#N", as "ORG/REPO#N", or by its URL, and it names no other
+  # pull request.  GitHub ignores the case of a repository's name, so a
+  # remote URL or a description might spell it differently than GitHub's
+  # answer does.
+  fd_findings="$(printf '%s\n' "${fd_answer}" | awk \
+    -v head="${fd_head_repo}" -v head_branch="${fd_head_branch}" -v base="${fd_base_repo}" '
+    # Records a pull request that a line names, as "N" if it is in the base
+    # repository and as "org/repo#N" otherwise.
+    function add_ref(slug, n,    key) {
+      key = (tolower(slug) == tolower(base)) ? n : tolower(slug) "#" n
+      if (!(key in refs)) {
+        refs[key] = 1
+        nrefs++
+        ref = key
+      }
+    }
+    # Returns the pull request that a "Land after" line names, as add_ref
+    # records it, or "" if text is not such a line.
+    function landing_ref(text,    s, off, before, after, m, slug, n) {
+      if (text !~ /^Land after (#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[0-9]+)([^A-Za-z0-9_]|$)/)
+        return ""
+      split("", refs)
+      nrefs = 0
+      # "#N", not preceded by a word character or "/".
+      s = text
+      off = 0
+      while (match(s, /#[0-9]+/)) {
+        before = (off + RSTART > 1) ? substr(text, off + RSTART - 1, 1) : ""
+        after = substr(s, RSTART + RLENGTH, 1)
+        if (before !~ "[A-Za-z0-9_/]" && after !~ "[A-Za-z0-9_]")
+          add_ref(base, substr(s, RSTART + 1, RLENGTH - 1))
+        off += RSTART + RLENGTH - 1
+        s = substr(s, RSTART + RLENGTH)
+      }
+      # "ORG/REPO#N".
+      s = text
+      while (match(s, /[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+/)) {
+        m = substr(s, RSTART, RLENGTH)
+        after = substr(s, RSTART + RLENGTH, 1)
+        s = substr(s, RSTART + RLENGTH)
+        if (after !~ "[A-Za-z0-9_]")
+          add_ref(substr(m, 1, index(m, "#") - 1), substr(m, index(m, "#") + 1))
+      }
+      # A URL, whose "github.com/" is 11 characters long.
+      s = text
+      while (match(s, /github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[0-9]+/)) {
+        m = substr(s, RSTART + 11, RLENGTH - 11)
+        s = substr(s, RSTART + RLENGTH)
+        slug = m
+        sub(/\/pull\/[0-9]+$/, "", slug)
+        n = m
+        sub(/^.*\/pull\//, "", n)
+        add_ref(slug, n)
+      }
+      return (nrefs == 1) ? ref : ""
+    }
     $1 == "pr" {
-      ours[$2] = (tolower($5) == tolower(head))
-      if (ours[$2] && $3 != $4) print "base:" $2 ":" $3 ":" $4
+      ours[$2] = (tolower($5) == tolower(head) && $6 != head_branch)
+      if (ours[$2] && $3 != $4) print "base:" $2 ":" $3
       next
     }
     $1 == "body" && ours[$2] {
       text = $0
       sub(/^body [0-9]+ /, "", text)
       sub(/\r$/, "", text)
-      if (text ~ /^Land after #[0-9]+\.?[ \t]*$/) {
-        sub(/^Land after #/, "", text)
-        sub(/[^0-9].*$/, "", text)
-        print "after:" $2 ":" text
-      }
+      n = landing_ref(text)
+      if (n ~ /^[0-9]+$/ && n != $2) print "after:" $2 ":" n
     }')"
-  cnd_reason=''
-  for cnd_finding in ${cnd_findings}; do
-    cnd_kind="${cnd_finding%%:*}"
-    cnd_rest="${cnd_finding#*:}"
-    cnd_pr="${cnd_rest%%:*}"
-    cnd_rest="${cnd_rest#*:}"
-    case "${cnd_kind}" in
+  [ -n "${fd_findings}" ] || return 0
+
+  # One query asks GitHub about every pull request that the findings name:
+  # for each base branch BASE, the open pull requests whose head branch is
+  # BASE, which yield lines "bI NUMBER HEAD", where I is the index of BASE in
+  # ${fd_aliases} and HEAD is the GitHub slug of the pull request's head
+  # repository, or "-" if that was deleted; and for each N, pull request N,
+  # which yields a line "pN STATE BASE", where STATE is such as "OPEN" or
+  # "MERGED" and BASE is its base branch.  Each line of ${fd_aliases} is
+  # "bI BASE".  A finding's numbers consist of digits.
+  set --
+  fd_aliases=''
+  fd_declarations=''
+  fd_fields=''
+  fd_index=0
+  for fd_base in $(printf '%s\n' "${fd_findings}" | sed -n 's/^base:[0-9]*://p' | sort -u); do
+    fd_aliases="${fd_aliases}b${fd_index} ${fd_base}
+"
+    fd_declarations="${fd_declarations}, \$b${fd_index}: String!"
+    fd_fields="${fd_fields} b${fd_index}: pullRequests(headRefName: \$b${fd_index}, states: OPEN, first: 100) { nodes { number headRepository { nameWithOwner } } }"
+    set -- "$@" -f "b${fd_index}=${fd_base}"
+    fd_index=$((fd_index + 1))
+  done
+  for fd_number in $(printf '%s\n' "${fd_findings}" | sed -n 's/^after:[0-9]*://p' | sort -u); do
+    fd_fields="${fd_fields} p${fd_number}: pullRequest(number: ${fd_number}) { state baseRefName }"
+  done
+  # shellcheck disable=SC2016 # The expansions are for GraphQL and jq.
+  if ! fd_others="$(gh_query "cannot ask GitHub about the pull requests that ${fd_base_repo}'s pull requests from ${fd_head_repo}:${fd_head_branch} build on" \
+    gh api graphql --hostname github.com \
+    -f "owner=${fd_base_repo%%/*}" -f "name=${fd_base_repo#*/}" "$@" \
+    -f "query=query(\$owner: String!, \$name: String!${fd_declarations}) { repository(owner: \$owner, name: \$name) {${fd_fields} } }" \
+    --jq '.data.repository | to_entries[] | .key as $k | if ($k | startswith("b")) then (.value.nodes[] | "\($k) \(.number) \(.headRepository.nameWithOwner // "-")") else "\($k) \(.value.state) \(.value.baseRefName)" end')"; then
+    echo "${SCRIPT_NAME}: cannot tell whether the current branch builds on another pull request; assuming that it does not" >&2
+    return 0
+  fi
+
+  for fd_finding in ${fd_findings}; do
+    fd_kind="${fd_finding%%:*}"
+    fd_rest="${fd_finding#*:}"
+    fd_pr="${fd_rest%%:*}"
+    fd_rest="${fd_rest#*:}"
+    case "${fd_kind}" in
       base)
-        cnd_reason="its base branch is ${cnd_rest%%:*}, not ${cnd_rest#*:}"
+        # The base branch counts only if it is the branch of an open pull
+        # request, B, rather than a long-lived branch such as "release-1.x"
+        # or the branch of a pull request that has landed.  B's head
+        # repository is the base repository, where its branch is.
+        fd_alias="$(printf '%s' "${fd_aliases}" \
+          | awk -v base="${fd_rest}" '$2 == base { print $1; exit }')"
+        fd_other="$(printf '%s\n' "${fd_others}" \
+          | awk -v alias="${fd_alias}" -v repo="${fd_base_repo}" \
+            '$1 == alias && tolower($3) == tolower(repo) { print $2; exit }')"
+        [ -n "${fd_other}" ] || continue
+        fd_reason="its base branch is ${fd_rest}, the head branch of ${fd_base_repo}#${fd_other}"
         ;;
       after)
-        cnd_after="${cnd_rest}"
-        [ "${cnd_after}" != "${cnd_pr}" ] || continue
-        # Each answer is "STATE BASE", where BASE is the pull request's base
-        # branch.
-        if ! cnd_other="$(gh_query "cannot ask GitHub about ${pr_base_repo}#${cnd_after}" \
-          gh api -X GET "repos/${pr_base_repo}/pulls/${cnd_after}" \
-          --hostname github.com --jq '"\(.state) \(.base.ref)"')"; then
-          echo "${SCRIPT_NAME}: ignoring the line \"Land after #${cnd_after}\" of ${pr_base_repo}#${cnd_pr}" >&2
-          continue
-        fi
-        [ "${cnd_other%% *}" = open ] || continue
+        fd_other="$(printf '%s\n' "${fd_others}" \
+          | awk -v alias="p${fd_rest}" '$1 == alias { print $2 " " $3; exit }')"
+        [ "${fd_other%% *}" = OPEN ] || continue
         # A fix to the current branch's pull request is merged into the
-        # current branch, not the other way around.  Only a pull
-        # request whose head repository is the base repository can have one.
-        if [ "${cnd_other#* }" = "${pr_head_branch}" ] \
-          && [ "$(lowercase "${pr_head_repo}")" = "$(lowercase "${pr_base_repo}")" ]; then
+        # current branch, not the other way around.  Only a pull request
+        # whose head repository is the base repository can have one.
+        if [ "${fd_other#* }" = "${fd_head_branch}" ] \
+          && [ "$(lowercase "${fd_head_repo}")" = "$(lowercase "${fd_base_repo}")" ]; then
           continue
         fi
-        cnd_reason="its description says to land after ${pr_base_repo}#${cnd_after}"
+        fd_reason="its description says to land after ${fd_base_repo}#${fd_rest}"
         ;;
       *) continue ;;
     esac
-    echo "${SCRIPT_NAME}: the current branch's pull request ${pr_base_repo}#${cnd_pr} builds on another pull request:  ${cnd_reason}" >&2
-    break
+    dependence="${SCRIPT_NAME}: the current branch's pull request ${fd_base_repo}#${fd_pr} builds on another pull request:  ${fd_reason}"
+    return 0
   done
-  if [ -n "${cnd_reason}" ]; then
-    echo "${SCRIPT_NAME}: so this command does not merge ${upstream_ref#refs/remotes/} directly, which would make a later merge of the branch that it builds on a criss-cross merge; update the current branch with \`git-push-to\` from the branch that it builds on, as \`pr-status\` prints, or pass --allow-dependent" >&2
-    return 1
-  fi
 }
 
 nocompile=0
@@ -318,6 +427,15 @@ if [ -n "$(git config --get-all "remote.${push_remote_name}.push")" ]; then
   exit 1
 fi
 
+# Ask GitHub before the pull, which does not change GitHub's answer, so that
+# the query and its diagnostics precede any merge that the pull makes.  But
+# refuse only after the pull, which can bring the default branch into the
+# current branch, so that a branch that need not merge is not refused.
+dependence=''
+if [ "${allow_dependent}" -eq 0 ] && ! git merge-base --is-ancestor "${upstream_ref}" HEAD; then
+  find_dependence "${checked_out_branch}"
+fi
+
 # `--no-rebase` because a rebase would drop a merge from `upstream` that an
 # earlier run of this command made but did not push, as when its build
 # failed, and would copy that merge's commits onto the current branch.
@@ -332,7 +450,12 @@ fi
 # with `@{upstream}`, where it pulls from:  the two differ when
 # `branch.BRANCH.pushRemote` or `remote.pushDefault` is set.  If ${push_ref}
 # is empty or does not exist, as before the first push, do not stop.
-if git merge-base --is-ancestor "${upstream_ref}" HEAD \
+if git merge-base --is-ancestor "${upstream_ref}" HEAD; then
+  contains_upstream=1
+else
+  contains_upstream=0
+fi
+if [ "${contains_upstream}" -eq 1 ] \
   && push_head="$(git rev-parse --verify --quiet "${push_ref}")" \
   && [ "$(git rev-parse HEAD)" = "${push_head}" ]; then
   exit 0
@@ -350,11 +473,9 @@ if [ -z "${push_ref}" ] && ! git push --dry-run --quiet; then
   exit 1
 fi
 
-# Ask after the pull, which can bring the default branch into the current
-# branch, so that a branch that need not merge is not refused.
-if [ "${allow_dependent}" -eq 0 ] \
-  && ! git merge-base --is-ancestor "${upstream_ref}" HEAD \
-  && ! check_not_dependent "${checked_out_branch}"; then
+if [ "${contains_upstream}" -eq 0 ] && [ -n "${dependence}" ]; then
+  printf '%s\n' "${dependence}" >&2
+  echo "${SCRIPT_NAME}: so this command does not merge ${upstream_ref#refs/remotes/} directly, which would make a later merge of the branch that it builds on a criss-cross merge; update the current branch with \`git-push-to\` from the branch that it builds on, as \`pr-status\` prints, or pass --allow-dependent" >&2
   exit 1
 fi
 

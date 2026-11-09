@@ -1107,8 +1107,7 @@ fork_upstream() {
     fi
     return 0
   fi
-  if [ "$2" -ne 1 ] || ! command -v gh > /dev/null 2>&1 \
-    || ! gh auth token --hostname github.com > /dev/null 2>&1; then
+  if [ "$2" -ne 1 ] || ! gh_usable; then
     return 0
   fi
   if ! github_upstream "$1"; then
@@ -1121,6 +1120,14 @@ fork_upstream() {
     git config "${fork_upstream_key}" "${github_upstream_repo}"
     fork_upstream_repo="${github_upstream_repo}"
   fi
+}
+
+## Usage: gh_usable
+## Returns 0 if `gh` is installed and has a token for github.com, and 1
+## otherwise, as when no user has logged in with `gh auth login`.
+gh_usable() {
+  command -v gh > /dev/null 2>&1 \
+    && gh auth token --hostname github.com > /dev/null 2>&1
 }
 
 ## Usage: github_upstream REPO

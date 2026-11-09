@@ -375,8 +375,9 @@ fi
 # someone/proj, and for any other repository are the repository itself, and
 # `gh auth token` succeeds.  `gh api` prints what `--jq` would make of
 # GitHub's answer:  for the open pull requests from a branch, the file
-# ${testdir}/gh-pulls, and for pull request N, the file ${testdir}/gh-pull-N;
-# it fails if the file does not exist.  `url.BASE.insteadOf` maps their
+# ${testdir}/gh-pulls, and for a GraphQL query, the file
+# ${testdir}/gh-graphql, after writing its arguments, one per line, to
+# ${testdir}/gh-graphql-args; it fails if the file does not exist.  `url.BASE.insteadOf` maps their
 # GitHub URLs to local bare repositories.
 mkdir "${testdir}/bin"
 cat > "${testdir}/bin/gh" << EOF
@@ -388,9 +389,12 @@ case "\$1 \$2 \$3" in
   'api -X GET')
     case "\$4" in
       */pulls) cat "${testdir}/gh-pulls" 2> /dev/null ;;
-      */pulls/*) cat "${testdir}/gh-pull-\${4##*/}" 2> /dev/null ;;
       *) exit 1 ;;
     esac
+    ;;
+  'api graphql '*)
+    printf '%s\n' "\$@" > "${testdir}/gh-graphql-args"
+    cat "${testdir}/gh-graphql" 2> /dev/null
     ;;
   *) exit 1 ;;
 esac
@@ -528,39 +532,69 @@ expect_dependent_refused() {
 # is not merged into, unless "--allow-dependent" is passed.  A pull request
 # from a branch of the same name in another repository does not count.
 make_gh_fork_clone "${testdir}/gh-clone-dependent"
-printf 'pr 5 feature-b trunk me/proj\nbody 5 Stacked on #4.\n' > "${testdir}/gh-pulls"
+printf 'pr 5 feature-b trunk me/proj trunk\nbody 5 Stacked on #4.\n' > "${testdir}/gh-pulls"
+printf 'b0 3 me/proj\nb0 4 someone/proj\n' > "${testdir}/gh-graphql"
 gh_parent_commit p.txt
 expect_dependent_refused 'stacked pull request' p.txt
-if ! grep -q 'its base branch is feature-b, not trunk' "${testdir}/errors"; then
+if ! grep -q 'its base branch is feature-b, the head branch of someone/proj#4' "${testdir}/errors"; then
   fail "stacked pull request: does not name the base branch: $(cat "${testdir}/errors")"
+elif ! grep -q -x 'b0=feature-b' "${testdir}/gh-graphql-args"; then
+  fail "stacked pull request: does not ask about feature-b: $(cat "${testdir}/gh-graphql-args")"
 fi
 if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}" --allow-dependent; then
   fail "--allow-dependent: failed: $(cat "${testdir}/errors")"
 elif [ ! -e "${fork}/p.txt" ]; then
   fail "--allow-dependent: did not merge p.txt"
 fi
-printf 'pr 6 feature-b trunk Someone/Proj\npr 7 trunk trunk ME/PROJ\n' > "${testdir}/gh-pulls"
+printf 'pr 6 feature-b trunk Someone/Proj trunk\npr 7 trunk trunk ME/PROJ trunk\n' > "${testdir}/gh-pulls"
 gh_parent_commit q.txt
 expect_gh_merge 'pull request from another repository' \
   "Merge https://github.com/someone/proj into feature-gh-clone-dependent" q.txt
 
+# A base branch that is not the head branch of an open pull request of the
+# base repository, such as a release branch or the branch of a pull request
+# that has landed, does not count.
+printf 'pr 11 release-1 trunk me/proj trunk\n' > "${testdir}/gh-pulls"
+printf 'b0 12 me/proj\n' > "${testdir}/gh-graphql"
+gh_parent_commit q2.txt
+expect_gh_merge 'base branch without an open pull request' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" q2.txt
+
 # Nor is a branch whose pull request's description says to land after an
 # open pull request, even with a carriage return at the end of the line.
 # One that says to land after a closed pull request is merged into.
-printf 'pr 8 trunk trunk me/proj\nbody 8 Land after #9.\r\nbody 8 \nbody 8 Text.\n' > "${testdir}/gh-pulls"
-printf 'open trunk\n' > "${testdir}/gh-pull-9"
+printf 'pr 8 trunk trunk me/proj trunk\nbody 8 Land after #9.\r\nbody 8 \nbody 8 Text.\n' > "${testdir}/gh-pulls"
+printf 'p9 OPEN trunk\n' > "${testdir}/gh-graphql"
 gh_parent_commit r.txt
 expect_dependent_refused 'land after an open pull request' r.txt
 if ! grep -q 'its description says to land after someone/proj#9' "${testdir}/errors"; then
   fail "land after an open pull request: does not name it: $(cat "${testdir}/errors")"
+elif ! grep -q 'p9: pullRequest(number: 9)' "${testdir}/gh-graphql-args"; then
+  fail "land after an open pull request: does not ask about #9: $(cat "${testdir}/gh-graphql-args")"
 fi
-printf 'closed trunk\n' > "${testdir}/gh-pull-9"
-expect_gh_merge 'land after a closed pull request' \
+# The line can name the pull request as "ORG/REPO#N" or by its URL, and it
+# can continue with text that names no other pull request.
+for line in 'Land after Someone/Proj#9 (it adds the helper).' \
+  'Land after https://github.com/someone/proj/pull/9'; do
+  printf 'pr 8 trunk trunk me/proj trunk\nbody 8 %s\n' "${line}" > "${testdir}/gh-pulls"
+  expect_dependent_refused "${line}" r.txt
+done
+# A line that names several pull requests, or one in another repository, does
+# not count.
+printf 'pr 8 trunk trunk me/proj trunk\nbody 8 Land after #9 and #10.\nbody 8 Land after other/proj#9.\n' > "${testdir}/gh-pulls"
+rm -f "${testdir}/gh-graphql"
+expect_gh_merge 'land after several or another repository' \
   "Merge https://github.com/someone/proj into feature-gh-clone-dependent" r.txt
+printf 'pr 8 trunk trunk me/proj trunk\nbody 8 Land after #9.\n' > "${testdir}/gh-pulls"
+printf 'p9 CLOSED trunk\n' > "${testdir}/gh-graphql"
+gh_parent_commit r2.txt
+expect_gh_merge 'land after a closed pull request' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" r2.txt
 
 # A branch that already contains the default branch is built and pushed even
 # if its pull request builds on another one.
-printf 'pr 10 feature-b trunk me/proj\n' > "${testdir}/gh-pulls"
+printf 'pr 10 feature-b trunk me/proj trunk\n' > "${testdir}/gh-pulls"
+printf 'b0 4 someone/proj\n' > "${testdir}/gh-graphql"
 commit_file "${fork}" s.txt 's'
 if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
   fail "dependent, nothing to merge: failed: $(cat "${testdir}/errors")"
@@ -573,8 +607,17 @@ rm -f "${testdir}/gh-pulls"
 gh_parent_commit t.txt
 expect_gh_merge 'GitHub cannot be asked' \
   "Merge https://github.com/someone/proj into feature-gh-clone-dependent" t.txt
-if ! grep -q 'merging anyway' "${testdir}/errors"; then
+if ! grep -q 'assuming that it does not' "${testdir}/errors"; then
   fail "GitHub cannot be asked: does not say so: $(cat "${testdir}/errors")"
+fi
+# Nor if GitHub cannot be asked about the pull request that it builds on.
+printf 'pr 5 feature-b trunk me/proj trunk\n' > "${testdir}/gh-pulls"
+rm -f "${testdir}/gh-graphql"
+gh_parent_commit u.txt
+expect_gh_merge 'GitHub cannot be asked about the other pull request' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" u.txt
+if ! grep -q 'assuming that it does not' "${testdir}/errors"; then
+  fail "GitHub cannot be asked about the other pull request: does not say so: $(cat "${testdir}/errors")"
 fi
 PATH="${saved_path}"
 

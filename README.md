@@ -154,8 +154,9 @@ The commands are:
   repository.
 
   It does not merge into a branch whose open pull request builds on another
-  pull request:  one whose base branch is not the default branch, or whose
-  description says "Land after #N" for an open pull request N.  Such a
+  pull request:  one whose base branch is the branch of another open pull
+  request, or whose description says "Land after #N" for an open pull
+  request N.  Such a
   branch receives the default branch through the branch that it builds on,
   and receiving it directly as well would make a later merge of that branch
   a criss-cross merge, which has several merge bases.  Update such a branch
