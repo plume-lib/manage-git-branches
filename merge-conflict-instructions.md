@@ -48,12 +48,9 @@ uses something that a conflicted file or the other side changes.
   text is correct only if the other side's change is already present in it,
   or if the other side's change is obsolete; then say so.  Taking one side's
   version of a whole file also discards the other side's changes that git
-  merged cleanly, so check each of them first.  A side's version already
-  contains the other side's changes if the other side's version of the file
-  appears in that side's history after the merge base, as when one side
-  merged a branch and the other side merged a squashed copy of it, unless
-  that side later changed the lines that the other side changed, as by
-  reverting the change.  `git log` and `git merge-base` can show that.
+  merged cleanly, so check each of them first.  Git commands such as
+  `git log` and `git merge-base` can help you decide, as when one side
+  merged a branch and the other side merged a squashed copy of it.
 * Keep every hunk that git merged cleanly, but edit any part of any file,
   including text outside the conflict regions and files that have no
   conflicts, wherever combining the two sides requires it:  for example,
@@ -77,7 +74,9 @@ For each file that either side changed:
   which shows the changes on HEAD, possibly adapted to the changes being
   merged in.
 
-A hunk that is missing from either one is a lost change; restore it.
+A hunk that is missing from either one might be a lost change.  Restore it,
+unless the change is already present in another form or is obsolete; then
+say so.
 
 `git diff AUTO_MERGE` shows how the working tree differs from git's
 automatic merge, which contains the conflict markers.  Each change that it
