@@ -1245,6 +1245,76 @@ if [ -s "${STUB_LOG}" ]; then
   fail "marker-like line: an agent ran: $(cat "${STUB_LOG}")"
 fi
 
+## Usage: setup_criss_cross [MARKER]
+## Makes the merge of main into feature, in the case that `setup_case` just
+## created, a criss-cross merge whose merge bases are the heads of main and
+## feature before this function ran:  main merges feature, and feature
+## merges main's earlier head, each resolving the conflict in file.txt in
+## its own way.  Git's merge of the two merge bases conflicts in file.txt,
+## so the merge base that git makes of them contains conflict markers.  If
+## MARKER is given, feature first appends the line MARKER to file.txt, and
+## both merges remove it, so that only a merge base's version of file.txt
+## contains it.  Sets ${feature_head}.
+setup_criss_cross() {
+  if [ -n "${1-}" ]; then
+    printf '%s\n' "$1" >> "${feature_dir}/file.txt"
+    git -C "${feature_dir}" commit -q -a -m "Add a line"
+    git -C "${feature_dir}" push -q
+  fi
+  scc_main_head="$(git -C "${main_dir}" rev-parse HEAD)"
+  git -C "${main_dir}" fetch -q origin
+  git -C "${main_dir}" merge -q origin/feature > /dev/null 2>&1 || true
+  write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-both-main eight nine
+  git -C "${main_dir}" commit -q -a --no-edit
+  git -C "${main_dir}" push -q
+  git -C "${feature_dir}" fetch -q origin
+  git -C "${feature_dir}" merge -q "${scc_main_head}" > /dev/null 2>&1 || true
+  write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-both-feature eight nine
+  git -C "${feature_dir}" commit -q -a --no-edit
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  if [ "$(git -C "${feature_dir}" merge-base --all HEAD origin/main | grep -c .)" -ne 2 ]; then
+    fail "setup_criss_cross: the merge does not have two merge bases"
+  fi
+}
+
+## A criss-cross merge is resolved by the agent, although the merge base that
+## git makes contains conflict markers, which git wrote.
+setup_case criss-cross
+git -C "${feature_dir}" config merge.conflictStyle diff3
+setup_criss_cross
+push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "criss-cross: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "criss-cross: expected only claude to run, but ran: $(cat "${STUB_LOG}")"
+fi
+remote_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
+if [ "$(git -C "${remote}" rev-parse "${remote_head}^1")" != "${feature_head}" ] \
+  || [ "$(git -C "${remote}" rev-parse "${remote_head}^2")" != "$(git -C "${main_dir}" rev-parse HEAD)" ]; then
+  fail "criss-cross: the pushed commit is not the merge of main into feature"
+fi
+expected="$(printf '%s\n' ONE two three four five six SEVEN-both-feature SEVEN-both-main eight nine)"
+if [ "$(git -C "${remote}" show "${remote_head}:file.txt")" != "${expected}" ]; then
+  fail "criss-cross: wrong merge result: $(git -C "${remote}" show "${remote_head}:file.txt")"
+fi
+
+## A criss-cross merge is refused if a merge base's own version of a
+## conflicted file contains a line that looks like a conflict marker.
+setup_case criss-cross-marker
+git -C "${feature_dir}" config merge.conflictStyle diff3
+setup_criss_cross '>>>>>>> fixture'
+push_to good --llm
+check_not_resolved "criss-cross-marker"
+case "${push_output}" in
+  *"file.txt contains lines that look like conflict markers"*) ;;
+  *) fail "criss-cross-marker: wrong diagnostic: ${push_output}" ;;
+esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "criss-cross-marker: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
 ## A remaining separator is rejected.
 setup_case separator
 push_to separator --llm

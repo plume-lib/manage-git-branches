@@ -27,6 +27,8 @@ that have no conflicts, can be wrong too.
   a conflicted file.  `git show :1:FILE`, `git show :2:FILE`, and
   `git show :3:FILE` show its version in the merge base, on HEAD, and in
   MERGE_HEAD.
+* `git merge-base --all HEAD MERGE_HEAD` lists the merge bases.  If it
+  lists more than one, also follow the section "Several merge bases" below.
 
 Read every hunk of both diffs.  If the diffs are too large for that, use
 `git diff --stat` with the same arguments to list the changed files, and
@@ -83,3 +85,36 @@ automatic merge, which contains the conflict markers.  Each change that it
 shows outside a conflict region must be one that combining the two sides
 requires.  Investigate any other change; it usually means that the
 resolution undid one side's work.
+
+## Several merge bases
+
+A merge has several merge bases after criss-cross merges:  for example,
+when each side merged the other, or when each side merged a third branch at
+a different time.  Git then merges the merge bases into one, which `git show
+:1:FILE` shows, and uses that as the merge base.
+
+* Where git's merge of the merge bases conflicted, the merge base's text in
+  a conflict region (after the line `|||||||`) contains conflict markers of
+  its own, which are longer than 7 characters, such as
+  `<<<<<<<<< Temporary merge branch 1` and `=========`.  They belong to
+  neither side.  Remove them along with the rest of the merge base's text.
+* `git diff MERGE_HEAD...HEAD` and `git diff HEAD...MERGE_HEAD` use only
+  one of the merge bases, so they can show changes that the other merge
+  base already has.  To learn what each side changed, use instead
+  `git log --no-merges -p MERGE_HEAD..HEAD -- FILE` and
+  `git log --no-merges -p HEAD..MERGE_HEAD -- FILE`, which show the commits
+  that only HEAD and only MERGE_HEAD contain; and
+  `git log --remerge-diff -p MERGE_HEAD..HEAD -- FILE` and
+  `git log --remerge-diff -p HEAD..MERGE_HEAD -- FILE`, which show how each
+  side's merge commits resolved their own conflicts.  `git show BASE:FILE`
+  shows the version of FILE in one merge base, BASE.  Use these in Step 3
+  too, in place of the diffs that use `...`.
+* Often both sides changed the same code in different ways, as when each
+  side resolved the same earlier conflict, or each side made the same fix
+  independently.  Then the conflict is between two versions of one change.
+  Determine what each version does, and write text that does both, rather
+  than keeping both versions.
+* Git's merge of text outside the conflict regions can then combine the two
+  versions of a change into duplicates, such as two definitions of one
+  method or class.  Look for them in each file that both sides changed, and
+  keep one definition that does what both did.
