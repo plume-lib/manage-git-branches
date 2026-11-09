@@ -1077,6 +1077,18 @@ resolve_merge_conflicts() {
         printf 'separator %s\n' "${resolve_file}"
       fi
       if check_conflict_resolution "${resolve_file}" "${resolve_contains_separator}" 2> /dev/null; then
+        # A side's version that an earlier run took before it stopped can
+        # pass the check, as when the side's version also has the other
+        # side's changes outside the conflict regions.  It is taken again,
+        # rather than taken for a resolution by `git rerere`.  The hashes are
+        # compared first, because they are cheaper to compute.
+        resolve_hash="$(git hash-object -- "${resolve_file}")"
+        if { [ "${resolve_hash}" = "$(git rev-parse --verify --quiet ":2:${resolve_file}")" ] \
+          || [ "${resolve_hash}" = "$(git rev-parse --verify --quiet ":3:${resolve_file}")" ]; } \
+          && resolve_take="$(side_containing_other "${resolve_file}" "${resolve_bases}")" \
+          && [ "${resolve_hash}" = "$(git rev-parse --verify --quiet ":${resolve_take%% *}:${resolve_file}")" ]; then
+          printf 'take %s %s\n' "${resolve_take}" "${resolve_file}"
+        fi
         continue
       fi
       # The version of a side that already contains the other side's changes
@@ -1122,21 +1134,13 @@ resolve_merge_conflicts() {
       resolve_take="${resolve_take#* }"
       resolve_take_commit="${resolve_take%% *}"
       resolve_file="${resolve_take#* }"
-      if [ "${resolve_take_stage}" -eq 2 ]; then
-        resolve_take_option=--ours
-        resolve_taken_side="on ${resolve_branch}"
-        resolve_other_side="in ${resolve_source}"
-      else
-        resolve_take_option=--theirs
-        resolve_taken_side="in ${resolve_source}"
-        resolve_other_side="on ${resolve_branch}"
-      fi
-      if ! git --literal-pathspecs checkout -q "${resolve_take_option}" -- "${resolve_file}"; then
-        echo "${SCRIPT_NAME}: cannot write the version ${resolve_taken_side} of ${resolve_file}" >&2
+      merge_side "${resolve_take_stage}"
+      if ! git --literal-pathspecs checkout -q "${side_option}" -- "${resolve_file}"; then
+        echo "${SCRIPT_NAME}: cannot write the version ${side_place} of ${resolve_file}" >&2
         resolve_take_status=1
         continue
       fi
-      echo "${SCRIPT_NAME}: ${resolve_file}: took the version ${resolve_taken_side}, whose history after the merge base contains the version ${resolve_other_side}, at commit $(git rev-parse --short "${resolve_take_commit}"), so it contains every change to the file ${resolve_other_side}" >&2
+      echo "${SCRIPT_NAME}: ${resolve_file}: took the version ${side_place}, whose history after the merge base contains the version ${side_other_place}, at commit $(git rev-parse --short "${resolve_take_commit}"), so it contains every change to the file ${side_other_place}" >&2
       printf '%s\n' "${resolve_file}"
     done
     exit "${resolve_take_status}"
@@ -1383,8 +1387,11 @@ Finish with a summary that says, for each conflict, what each side changed and h
     printf '%s\n' "${resolve_agent_other}" | sed -e '/^$/d' -e "s/^/${SCRIPT_NAME}: ${resolve_with} also changed: /" >&2
     printf '%s\n' "${resolve_unresolved}" | while IFS= read -r resolve_file; do
       resolve_file_separator="$(separator_permitted "${resolve_file}")"
+      # A resolution that is one side's version drops the other side's
+      # changes outside the conflict regions too; it is reported once.
       if [ -f "${resolve_file}" ] \
         && check_conflict_markers "${resolve_file}" "${resolve_file_separator}" 2> /dev/null \
+        && ! report_one_sided_resolution "${resolve_file}" \
         && ! check_conflict_resolution "${resolve_file}" "${resolve_file_separator}" 2> /dev/null; then
         echo "${SCRIPT_NAME}: ${resolve_with} changed text outside the conflict regions of ${resolve_file}" >&2
       fi
@@ -1392,16 +1399,13 @@ Finish with a summary that says, for each conflict, what each side changed and h
     printf '%s\n' "${resolve_rerere}" | while IFS= read -r resolve_file; do
       if [ -n "${resolve_file}" ] && ! prior_resolution_unchanged "${resolve_file}"; then
         echo "${SCRIPT_NAME}: ${resolve_with} changed the resolution that \`git rerere\` made of ${resolve_file}" >&2
+        report_one_sided_resolution "${resolve_file}" || true
       fi
     done
     printf '%s\n' "${resolve_taken_files}" | while IFS= read -r resolve_file; do
       if [ -n "${resolve_file}" ] && ! prior_resolution_unchanged "${resolve_file}"; then
         echo "${SCRIPT_NAME}: ${resolve_with} changed the side's version that the script took of ${resolve_file}" >&2
-      fi
-    done
-    printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
-      if ! prior_resolution_unchanged "${resolve_file}"; then
-        report_one_sided_resolution "${resolve_file}"
+        report_one_sided_resolution "${resolve_file}" || true
       fi
     done
     if ! printf '%s\n' "${resolve_agent_other}" | {
@@ -1484,34 +1488,28 @@ prior_resolution_unchanged() {
 ## (see `side_difference`).  Such a resolution keeps none of the changes that
 ## the other side made to the file, including the changes that git merged
 ## cleanly.  It is correct only if every change of the other side is already
-## present in it or is obsolete, which a person should confirm.  Only
-## `resolve_with_agent` calls this function, which reads the variables of
+## present in it or is obsolete, which a person should confirm.  Returns 0
+## if it printed a diagnostic, and 1 otherwise.  Only `resolve_with_agent`
+## calls this function, which reads the variables of
 ## `resolve_merge_conflicts` and of `resolve_with_agent`.
 report_one_sided_resolution() {
   if [ ! -f "$1" ]; then
-    return 0
+    return 1
   fi
   for rosr_stage in 2 3; do
-    if [ "${rosr_stage}" -eq 2 ]; then
-      rosr_other_stage=3
-      rosr_side="on ${resolve_branch}"
-      rosr_other_side="of ${resolve_source}"
-    else
-      rosr_other_stage=2
-      rosr_side="in ${resolve_source}"
-      rosr_other_side="of ${resolve_branch}"
-    fi
-    case "$(side_difference "$1" "${rosr_stage}" "${rosr_other_stage}")" in
+    merge_side "${rosr_stage}"
+    case "$(side_difference "$1" "${rosr_stage}" "${side_other_stage}")" in
       identical)
-        echo "${SCRIPT_NAME}: ${resolve_with} resolved $1 as the version ${rosr_side}, which keeps none of the changes ${rosr_other_side} to the file; review it" >&2
+        echo "${SCRIPT_NAME}: ${resolve_with} resolved $1 as the version ${side_place}, which keeps none of the changes of ${side_other_name} to the file; review it" >&2
         return 0
         ;;
       whitespace)
-        echo "${SCRIPT_NAME}: ${resolve_with} resolved $1 as the version ${rosr_side}, apart from whitespace and blank lines, which keeps none of the changes ${rosr_other_side} to the file; review it" >&2
+        echo "${SCRIPT_NAME}: ${resolve_with} resolved $1 as the version ${side_place}, apart from whitespace and blank lines, which keeps none of the changes of ${side_other_name} to the file; review it" >&2
         return 0
         ;;
     esac
   done
+  return 1
 }
 
 ## Usage: side_difference FILE STAGE OTHER_STAGE
@@ -1573,14 +1571,14 @@ side_containing_other() {
   fi
   sco_found=''
   for sco_stage in 2 3; do
-    if [ "${sco_stage}" -eq 2 ]; then
-      sco_rev=HEAD
-      sco_other_stage=3
-    else
-      sco_rev=MERGE_HEAD
-      sco_other_stage=2
-    fi
-    if ! sco_blob="$(git rev-parse --verify --quiet ":${sco_other_stage}:$1")"; then
+    merge_side "${sco_stage}"
+    # The other side's version of FILE, as "MODE HASH", such as
+    # "100644 3b18e512dba79e4c8300dd08aeb37f8e728b8dad".  The mode is
+    # compared too, so that a side whose version lacks the other side's
+    # change of mode, such as to an executable file, does not qualify.
+    sco_other="$(git --literal-pathspecs ls-files --format='%(stage) %(objectmode) %(objectname)' -- "$1" \
+      | sed -n -e "s/^${side_other_stage} //p")"
+    if [ -z "${sco_other}" ]; then
       continue
     fi
     # The commits in the side's history, after the merge bases, that changed
@@ -1588,29 +1586,68 @@ side_containing_other() {
     # character that field splitting or globbing would change, so the
     # unquoted expansion is the list of hashes.
     # shellcheck disable=SC2086
-    sco_commits="$(git --literal-pathspecs rev-list "${sco_rev}" --not $2 -- "$1")"
+    sco_commits="$(git --literal-pathspecs rev-list "${side_rev}" --not $2 -- "$1")"
     if [ -z "${sco_commits}" ]; then
       continue
     fi
-    # The number of the first line of ${sco_commits} whose commit's version
-    # of FILE is the other side's version.  `git cat-file` prints a line for
-    # each commit:  the hash of the commit's version of FILE, or a line that
-    # ends with "missing" if the commit has no such file.
-    sco_line="$(printf '%s\n' "${sco_commits}" \
+    # The numbers of the lines of ${sco_commits} whose commit's version of
+    # FILE has the other side's content, one per line.  `git cat-file`
+    # prints a line for each commit:  the hash of the commit's version of
+    # FILE, or a line that ends with "missing" if the commit has no such
+    # file.  It does not print the mode, which `git ls-tree` prints for
+    # each of those commits.
+    sco_lines="$(printf '%s\n' "${sco_commits}" \
       | SCO_FILE="$1" awk '{ print $0 ":" ENVIRON["SCO_FILE"] }' \
       | git cat-file --batch-check='%(objectname)' \
-      | SCO_BLOB="${sco_blob}" awk '$0 == ENVIRON["SCO_BLOB"] { print NR; exit }')"
-    if [ -n "${sco_line}" ]; then
-      if [ -n "${sco_found}" ]; then
-        return 1
+      | SCO_BLOB="${sco_other#* }" awk '$0 == ENVIRON["SCO_BLOB"] { print NR }')"
+    for sco_line in ${sco_lines}; do
+      sco_commit="$(printf '%s\n' "${sco_commits}" | sed -n -e "${sco_line}p")"
+      if [ "$(git --literal-pathspecs ls-tree --format='%(objectmode) %(objectname)' "${sco_commit}" -- "$1")" = "${sco_other}" ]; then
+        if [ -n "${sco_found}" ]; then
+          return 1
+        fi
+        sco_found="${sco_stage} ${sco_commit}"
+        break
       fi
-      sco_found="${sco_stage} $(printf '%s\n' "${sco_commits}" | sed -n -e "${sco_line}p")"
-    fi
+    done
   done
   if [ -z "${sco_found}" ]; then
     return 1
   fi
   printf '%s\n' "${sco_found}"
+}
+
+## Usage: merge_side STAGE
+## Sets these variables to describe the side of the merge in progress in the
+## current directory whose version of a conflicted file is at STAGE of the
+## index, 2 (HEAD's version) or 3 (MERGE_HEAD's version):
+##   side_rev:  "HEAD" or "MERGE_HEAD"
+##   side_option:  the option of `git checkout` that writes the side's
+##     version of a conflicted file, "--ours" or "--theirs"
+##   side_place:  where the side's version is, for diagnostics, such as
+##     "on feature" for HEAD or "in branch 'main'" for MERGE_HEAD
+##   side_other_stage:  the other side's stage, 3 or 2
+##   side_other_place:  where the other side's version is, as for side_place
+##   side_other_name:  the other side's name, for diagnostics, such as
+##     "feature" for HEAD or "branch 'main'" for MERGE_HEAD
+## Reads ${resolve_branch} and ${resolve_source} of
+## `resolve_merge_conflicts`, which name HEAD and MERGE_HEAD.
+merge_side() {
+  if [ "$1" -eq 2 ]; then
+    side_rev=HEAD
+    side_option=--ours
+    side_place="on ${resolve_branch}"
+    side_other_stage=3
+    side_other_place="in ${resolve_source}"
+    side_other_name="${resolve_source}"
+  else
+    side_rev=MERGE_HEAD
+    side_option=--theirs
+    side_place="in ${resolve_source}"
+    side_other_stage=2
+    side_other_place="on ${resolve_branch}"
+    side_other_name="${resolve_branch}"
+  fi
 }
 
 ## Usage: rerere_skip_files FILES

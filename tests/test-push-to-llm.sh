@@ -559,6 +559,10 @@ for side_mode in ours theirs; do
     theirs:*"claude resolved file.txt as the version in main"*", which keeps none of the changes of feature to the file; review it"*) ;;
     *) fail "${side_mode}: the user is not asked to review: ${push_output}" ;;
   esac
+  # The dropped changes outside the conflict regions are not reported again.
+  case "${push_output}" in
+    *"changed text outside the conflict regions"*) fail "${side_mode}: reported twice: ${push_output}" ;;
+  esac
 done
 
 ## So is a resolution that differs from a side's version only in whitespace
@@ -671,6 +675,58 @@ push_to none --llm
 check_not_resolved "contained-both"
 if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-both: the agent did not run: ${push_output}"
+fi
+
+## No side's version is taken when its history after the merge base
+## contains the other side's content but not the other side's mode:  here
+## main also makes file.txt executable.
+setup_case contained-mode
+printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Change feature again"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+chmod +x "${main_dir}/file.txt"
+git -C "${main_dir}" commit -q -a -m "Make file.txt executable"
+git -C "${main_dir}" push -q
+push_to none --llm
+check_not_resolved "contained-mode"
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "contained-mode: the agent did not run: ${push_output}"
+fi
+
+## A rerun after a run that took a side and then stopped takes the side
+## again, rather than taking its version for a resolution by `git rerere`.
+## Here the first run stops because other.txt has conflicts too.
+setup_case contained-rerun
+printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+echo "other feature" > "${feature_dir}/other.txt"
+git -C "${feature_dir}" add other.txt
+git -C "${feature_dir}" commit -q -a -m "Change feature again"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+echo "other main" > "${main_dir}/other.txt"
+git -C "${main_dir}" add other.txt
+git -C "${main_dir}" commit -q -m "Add other.txt on main"
+git -C "${main_dir}" push -q
+push_to none --no-llm
+check_not_resolved "contained-rerun, first run"
+case "${push_output}" in
+  *"file.txt: took the version on feature"*) ;;
+  *) fail "contained-rerun, first run: the side was not taken: ${push_output}" ;;
+esac
+push_to none --llm
+check_not_resolved "contained-rerun"
+case "${push_output}" in
+  *"file.txt: took the version on feature"*) ;;
+  *) fail "contained-rerun: the side was not taken again: ${push_output}" ;;
+esac
+if ! grep -q -F "by taking one side's version of each file" "${STUB_PROMPT}" \
+  || grep -q -F "\`git rerere\` resolved the conflicts in these files" "${STUB_PROMPT}"; then
+  fail "contained-rerun: the instructions misdescribe file.txt: $(cat "${STUB_PROMPT}")"
 fi
 
 ## A side's version does not count as containing the other side's version
