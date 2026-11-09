@@ -866,8 +866,9 @@ expected_stacked_revert="## master conflicts
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_stacked_revert}" ]; then
   fail "stacked revert: expected [${expected_stacked_revert}], got [${analysis_output}]"
 fi
-## The conflicting files are listed by name as it is, except that a control
-## character, such as a tab, becomes "?".
+## The conflicting files are listed as git quotes them:  a name that contains a
+## control character, such as a tab, or a non-ASCII character is quoted, with
+## C-style escapes, so that the report is ASCII and has one line per conflict.
 ##  * Main adds "a b.txt", "c<TAB>d.txt", and "déjà.txt".
 ##  * 49 and 50 start from main and change those files differently.
 git -C "${seed}" checkout -q main
@@ -892,7 +893,7 @@ analyze '' --prune
 expected_names="## master conflicts
 ## containment (A contains all non-merge commits of B, and B's changes)
 ## pairwise conflicts
-49 vs 50: a b.txt c?d.txt déjà.txt"
+"'49 vs 50: a b.txt "c\td.txt" "d\303\251j\303\240.txt"'
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_names}" ]; then
   fail "names: expected [${expected_names}], got [${analysis_output}]"
 fi

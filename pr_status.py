@@ -289,11 +289,7 @@ def load_repo(repo: Repo, pairwise: bool = True) -> None:
         ]
     )
     section = None
-    # Split only at newlines, because a file name in a list of conflicting files
-    # can contain another line break, such as a form feed or U+2028.
-    for line in out.split("\n"):
-        if not line:
-            continue
+    for line in out.splitlines():
         if line.startswith("## "):
             section = line.split()[1]
             continue
@@ -2900,8 +2896,9 @@ def dependency_document(
         (
             'A PR depends on another PR if its description says so (for example, "Land after #N"),'
             " if its base branch is the other PR's branch,"
-            " if its branch contains all of the other PR's non-merge commits and their changes"
-            " (a PR's changes are the files that differ between its branch and the merge of its"
+            " if its branch contains all of the other PR's non-merge commits and their changes,"
+            f" or if `{CONFIG}` says so."
+            " A PR's changes are the files that differ between its branch and the merge of its"
             " merge bases with master and with the PRs that it builds on, so they include the"
             " conflicts that the PR's merges resolve and omit a file that the PR changed and then"
             " changed back."
@@ -2909,9 +2906,8 @@ def dependency_document(
             " version at each of the branch's merge bases with master and with the PRs that the"
             " branch or the PR builds on and that lack the PR's commits, because each of those"
             " versions is one that the branch could have without the PR."
-            " A branch lacks the changes if it has none of them, as when it merged the PR's"
-            " branch and then reverted them, or when the PR has no changes),"
-            f" or if `{CONFIG}` says so."
+            " A branch lacks the PR's changes if it has none of them, as when it merged the PR's"
+            " branch and then reverted them, or when the PR has no changes."
             ' PRs that land together, as "Land with #N" says, are one unit,'
             " which may span repositories:  each member depends on every prerequisite of every"
             " member, and on no member, even if its branch contains another member's commits."
