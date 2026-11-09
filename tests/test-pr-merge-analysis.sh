@@ -482,6 +482,11 @@ fi
 ##    contain 15.
 ##  * 19 starts from main, merges 18, and changes s.txt further.  So 19
 ##    contains 15 and 18.
+##  * 20 starts from main, merges 18, and adds u.txt.  So 20 contains 18, whose
+##    change it keeps, but not 15, whose change it lacks.
+##  * 21 is stacked on 15:  it changes s.txt.
+##  * 22 starts from main, merges 21, and restores 15's s.txt, which reverts
+##    21's change but keeps 15's.  So 22 contains 15 but not 21.
 commit_pr 15 main s.txt fifteen
 pr15="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/15/head)"
 commit_pr 16 "${pr15}" s.txt sixteen
@@ -504,8 +509,17 @@ git -C "${seed}" checkout -q --detach main
 git -C "${seed}" merge -q --no-ff -m "PR 19: merge PR 18" \
   "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/18/head)"
 commit_pr 19 HEAD s.txt nineteen
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 20: merge PR 18" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/18/head)"
+commit_pr 20 HEAD u.txt twenty
+commit_pr 21 "${pr15}" s.txt twentyone
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 22: merge PR 21" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/21/head)"
+commit_pr 22 HEAD s.txt fifteen
 git -C "${seed}" checkout -q main
-prs='15 16 17 18 19'
+prs='15 16 17 18 19 20 21 22'
 : > "${cache}"
 analyze '' --prune
 expected_stacked_undone="## master conflicts
@@ -514,9 +528,112 @@ expected_stacked_undone="## master conflicts
 17 contains 15
 19 contains 15
 19 contains 18
-## pairwise conflicts"
+20 contains 18
+21 contains 15
+22 contains 15
+## pairwise conflicts
+18 vs 21: s.txt
+19 vs 21: s.txt
+20 vs 21: s.txt"
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_stacked_undone}" ]; then
   fail "stacked undone own change: expected [${expected_stacked_undone}], got [${analysis_output}]"
+fi
+
+## A PR whose own commits start from more than one commit:  it is stacked on
+## other PRs and merged a newer main.
+##  * 23 starts from main and adds x.txt.
+##  * 24 starts from main and adds y.txt.
+##  * Then main changes n.txt.
+##  * 25 starts from 23, merges 24 and main, adds q.txt, changes x.txt, and then
+##    restores 23's x.txt.  Its own commits start from the merge of 23, 24, and
+##    main.  So 25 changes only q.txt.
+##  * 26 starts from main, merges 25, and removes q.txt, which reverts 25's
+##    change.  So 26 contains 23 and 24 but not 25.
+commit_pr 23 main x.txt twentythree
+pr23="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/23/head)"
+commit_pr 24 main y.txt twentyfour
+pr24="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/24/head)"
+git -C "${seed}" checkout -q main
+printf '%s\n' main > "${seed}/n.txt"
+git -C "${seed}" add n.txt
+git -C "${seed}" commit -q -m "Change main again"
+git -C "${seed}" push -q "${STUB_REMOTE}" main
+git -C "${seed}" checkout -q --detach "${pr23}"
+git -C "${seed}" merge -q --no-ff -m "PR 25: merge PR 24" "${pr24}"
+git -C "${seed}" merge -q --no-ff -m "PR 25: merge main" main
+printf '%s\n' twentyfive > "${seed}/q.txt"
+printf '%s\n' twentyfive > "${seed}/x.txt"
+git -C "${seed}" add q.txt x.txt
+git -C "${seed}" commit -q -m "PR 25"
+printf '%s\n' twentythree > "${seed}/x.txt"
+git -C "${seed}" commit -q -a -m "PR 25: restore x.txt"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/25/head
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 26: merge PR 25" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/25/head)"
+git -C "${seed}" rm -q q.txt
+git -C "${seed}" commit -q -m "PR 26"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/26/head
+git -C "${seed}" checkout -q main
+prs='23 24 25 26'
+: > "${cache}"
+analyze '' --prune
+expected_starts="## master conflicts
+## containment (A contains all non-merge commits of B, and B's changes)
+25 contains 23
+25 contains 24
+26 contains 23
+26 contains 24
+## pairwise conflicts"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_starts}" ]; then
+  fail "several starts: expected [${expected_starts}], got [${analysis_output}]"
+fi
+
+## A PR whose own commits start from commits that conflict.  Then its changes
+## are all the files that its own commits change.
+##  * 27 starts from main and changes k.txt.
+##  * Then main changes k.txt differently.
+##  * 28 starts from 27, merges main and resolves the conflict, adds r.txt and
+##    j.txt, and then removes j.txt.  Its own commits start from 27 and main,
+##    which conflict, so 28 changes r.txt and j.txt.
+##  * 29 starts from main, merges 28, removes r.txt, and adds its own j.txt.  So
+##    29 contains 28.
+commit_pr 27 main k.txt twentyseven
+git -C "${seed}" checkout -q main
+printf '%s\n' main > "${seed}/k.txt"
+git -C "${seed}" add k.txt
+git -C "${seed}" commit -q -m "Change main's k.txt"
+git -C "${seed}" push -q "${STUB_REMOTE}" main
+git -C "${seed}" checkout -q --detach "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/27/head)"
+git -C "${seed}" merge -q -m "PR 28: merge main" main > /dev/null 2>&1 || true
+printf '%s\n' resolved > "${seed}/k.txt"
+git -C "${seed}" add k.txt
+git -C "${seed}" commit -q --no-edit
+printf '%s\n' twentyeight > "${seed}/r.txt"
+printf '%s\n' twentyeight > "${seed}/j.txt"
+git -C "${seed}" add r.txt j.txt
+git -C "${seed}" commit -q -m "PR 28"
+git -C "${seed}" rm -q j.txt
+git -C "${seed}" commit -q -m "PR 28: move j.txt to another PR"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/28/head
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 29: merge PR 28" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/28/head)"
+git -C "${seed}" rm -q r.txt
+commit_pr 29 HEAD j.txt twentynine
+git -C "${seed}" checkout -q main
+prs='27 28 29'
+: > "${cache}"
+analyze '' --prune
+expected_conflicting_starts="## master conflicts
+27: k.txt
+## containment (A contains all non-merge commits of B, and B's changes)
+28 contains 27
+29 contains 27
+29 contains 28
+## pairwise conflicts"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_conflicting_starts}" ]; then
+  fail "conflicting starts: expected [${expected_conflicting_starts}], got [${analysis_output}]"
 fi
 prs='1 2 3 4'
 

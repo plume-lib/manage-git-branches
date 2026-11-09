@@ -23,15 +23,17 @@ Each run:
   * runs pr-merge-analysis (cached) on them, for each repository,
   * computes the dependencies:  a PR depends on another if its description says
     so, if its base branch is the other PR's branch, if its branch contains all of the
-    other PR's non-merge commits and their changes (a branch lacks the changes if it leaves
-    unchanged every file that the other PR's own commits still change, as when it merged the
-    other PR's branch and then reverted them; a PR's own commits exclude those of a PR that
-    it builds on), or if the config says so; a PR whose base branch is another PR's branch,
-    but whose description says to land before it (or whose base PR's description says to
-    land after it), is a fix to that PR, which lands into that PR's branch first, although
-    its branch is updated from that PR's branch; PRs that land together (possibly in
-    different repositories) are one unit, whose members depend on each other's
-    prerequisites but not on each other,
+    other PR's non-merge commits and their changes (a branch lacks the changes if each file
+    that the other PR's own commits change is the same in the branch as where those commits
+    start, combined with the branch's merge base with master, as when it merged the other
+    PR's branch and then reverted them; a PR's own commits exclude those of a PR that it
+    builds on, and start from that PR's branch, or else from master; a file that a later own
+    commit changed back is not among the files that they change), or if the config says so;
+    a PR whose base branch is another PR's branch, but whose description says to land before
+    it (or whose base PR's description says to land after it), is a fix to that PR, which
+    lands into that PR's branch first, although its branch is updated from that PR's
+    branch; PRs that land together (possibly in different repositories) are one unit,
+    whose members depend on each other's prerequisites but not on each other,
   * warns about each cycle of dependencies, and omits from the generated push commands
     the PRs whose branches are updated in a cycle and the PRs whose branches are updated
     from theirs,
@@ -2895,9 +2897,12 @@ def dependency_document(
             'A PR depends on another PR if its description says so (for example, "Land after #N"),'
             " if its base branch is the other PR's branch,"
             " if its branch contains all of the other PR's non-merge commits and their changes"
-            " (a branch lacks the changes if it leaves unchanged every file that the other PR's"
-            " own commits still change, as when it merged the other PR's branch and then reverted"
-            " them; a PR's own commits exclude those of a PR that it builds on),"
+            " (a branch lacks the changes if each file that the other PR's own commits change"
+            " is the same in the branch as where those commits start, combined with the branch's"
+            " merge base with master, as when it merged the other PR's branch and then reverted"
+            " them; a PR's own commits exclude those of a PR that it builds on, and start from"
+            " that PR's branch, or else from master; a file that a later own commit changed back"
+            " is not among the files that they change),"
             f" or if `{CONFIG}` says so."
             ' PRs that land together, as "Land with #N" says, are one unit,'
             " which may span repositories:  each member depends on every prerequisite of every"
