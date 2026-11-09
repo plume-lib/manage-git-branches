@@ -76,7 +76,7 @@ The commands are:
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] [--llm | --no-llm] [--claude | --codex]
-  FROM_DIR TO_DIR ...`:
+  [--report FILE] FROM_DIR TO_DIR ...`:
 
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.  Each directory must be the top level
@@ -118,6 +118,9 @@ The commands are:
   If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
   prints a command that continues
   the agent's session interactively.
+
+  With `--report FILE`, it appends to FILE each change by the agent to
+  review and, if a push or rebase fails, the step that failed.
 
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]
@@ -186,8 +189,9 @@ The commands are:
   `pr-status.md`, then runs `git-push-to` on each chain of its section
   "Dependency chains with conflicts",
   with `--claude` (or `--codex`), which asks an AI agent for help.
-  If any chain fails, it ends with a summary of the failed chains, each with
-  the diagnostics of `git-push-to`, which name the merge that failed.
+  It ends with a summary of the chains that failed or that have changes by
+  the agent to review, each with the report of `git-push-to --report`,
+  which names the step that failed.
 * [`crreview-resolve-all`](crreview-resolve-all)
   `[--dry-run] [--agent claude|codex] [-C DIR]`:
   Runs

@@ -162,10 +162,10 @@ case "${resolve_output}" in
   *) fail "several: wrong output for the failed chain: ${resolve_output}" ;;
 esac
 expected="$(printf '%s\n' \
-  'resolve-conflicts: 1 of 2 dependency chains failed:' \
-  '* myrepo-branch-main no such dir' \
-  '    git-push-to: no such directory: no such dir' \
-  '    git-push-to: failed to push myrepo-branch-main into no such dir')"
+  'resolve-conflicts: the dependency chains that failed or that have changes to review:' \
+  '* myrepo-branch-main no such dir (failed)' \
+  '    failed to push myrepo-branch-main into no such dir, while checking the directories' \
+  'resolve-conflicts: 1 of 2 dependency chains failed')"
 if [ "$(printf '%s\n' "${resolve_output}" | tail -n 4)" != "${expected}" ]; then
   fail "several: wrong summary: ${resolve_output}"
 fi

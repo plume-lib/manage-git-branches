@@ -162,17 +162,8 @@ require_git 31
 collect_dir=""
 collected=0
 if [ -n "${remove}" ]; then
-  if ! collect_dir="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" \
-    || [ -z "${collect_dir}" ]; then
-    echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
-    exit 1
-  fi
-  # The signal handlers re-raise the signal with the handler removed, so that
-  # this script dies of the signal rather than resuming where it was
-  # interrupted, and so that the caller sees that it was killed by a signal.
-  trap 'rm -rf -- "${collect_dir}"' EXIT
-  trap 'rm -rf -- "${collect_dir}"; trap - INT; kill -s INT "$$"' INT
-  trap 'rm -rf -- "${collect_dir}"; trap - TERM; kill -s TERM "$$"' TERM
+  make_temp_dir
+  collect_dir="${temp_dir}"
 fi
 
 # Prints its argument, followed by a NUL character if --print0 was given and by

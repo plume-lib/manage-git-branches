@@ -169,6 +169,50 @@ branch_cleanup() {
   fi
 }
 
+## Usage: make_temp_dir
+## Creates a new temporary directory, sets ${temp_dir} to its absolute
+## pathname, and installs traps that remove the directory when this shell
+## exits or is killed by SIGHUP, SIGINT, or SIGTERM.  The traps replace any
+## earlier traps for those conditions.  Exits with status 1, after printing a
+## diagnostic, if the directory cannot be created.  As in
+## `trap_branch_cleanup`, each signal handler restores the default disposition
+## and re-sends the signal to this shell, so that the caller sees that this
+## shell was killed by the signal.
+make_temp_dir() {
+  if ! temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" \
+    || [ -z "${temp_dir}" ]; then
+    echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
+    exit 1
+  fi
+  trap 'rm -rf -- "${temp_dir}"' EXIT
+  trap 'rm -rf -- "${temp_dir}"; trap - HUP EXIT; kill -s HUP "$$"' HUP
+  trap 'rm -rf -- "${temp_dir}"; trap - INT EXIT; kill -s INT "$$"' INT
+  trap 'rm -rf -- "${temp_dir}"; trap - TERM EXIT; kill -s TERM "$$"' TERM
+}
+
+## Usage: report_review MESSAGE
+## Prints MESSAGE, which names something that an AI agent did that a person
+## should review, as a diagnostic, and appends it to the report (see
+## `append_report`), prefixed by the current directory, as in
+## "in /home/me/myrepo-branch-feature: claude also changed: README.md".
+report_review() {
+  printf '%s\n' "${SCRIPT_NAME}: $1" >&2
+  append_report "in $(pwd): $1"
+}
+
+## Usage: append_report LINE
+## Appends LINE, followed by a newline, to the file named by ${report_file}, if
+## that variable is set and not empty.  The report lists what a person should
+## look at after a run:  each change by an AI agent to review, and the step
+## that failed.  `git-push-to --report` sets ${report_file}.  A failure to
+## write the report goes unreported, because the same information is printed
+## as a diagnostic.
+append_report() {
+  if [ -n "${report_file:-}" ]; then
+    printf '%s\n' "$1" >> "${report_file}" 2> /dev/null || true
+  fi
+}
+
 ## Usage: add_worktree WORKTREE BRANCH [START-POINT [OPTION...]]
 ## Runs `git worktree add` in the current repository, or in the repository of
 ## the working tree WORKTREE_HOST if that variable is non-empty, with the
@@ -1323,7 +1367,11 @@ Finish with a summary that says, for each conflict, what each side changed and h
   resolve_rerere_changed=''
   if [ "${resolve_refs_ok}" -eq 1 ]; then
     resolve_agent_other="$(resolve_other_changes)"
-    printf '%s\n' "${resolve_agent_other}" | sed -e '/^$/d' -e "s/^/${SCRIPT_NAME}: ${resolve_with} also changed: /" >&2
+    printf '%s\n' "${resolve_agent_other}" | while IFS= read -r resolve_file; do
+      if [ -n "${resolve_file}" ]; then
+        report_review "${resolve_with} also changed: ${resolve_file}"
+      fi
+    done
     # The loop runs in this shell, not in a pipe's subshell, so that its
     # assignments last.  The shell splits ${resolve_files} on newlines, with
     # globbing off so that no pathname is expanded; the body restores both.
@@ -1349,7 +1397,7 @@ Finish with a summary that says, for each conflict, what each side changed and h
         && resolve_description="$(one_sided_description "${resolve_file}" "${resolve_hash}")"; then
         resolve_one_sided_files="${resolve_one_sided_files}${resolve_file}
 "
-        printf '%s\n' "${SCRIPT_NAME}: ${resolve_description}; review it" >&2
+        report_review "${resolve_description}; review it"
       fi
     done
     set +f
@@ -1367,10 +1415,12 @@ Finish with a summary that says, for each conflict, what each side changed and h
         && check_conflict_markers "${resolve_file}" "${resolve_file_separator}" 2> /dev/null \
         && ! printf '%s\n' "${resolve_one_sided_files}" | grep -F -x -q -- "${resolve_file}" \
         && ! check_conflict_resolution "${resolve_file}" "${resolve_file_separator}" 2> /dev/null; then
-        echo "${SCRIPT_NAME}: ${resolve_with} changed text outside the conflict regions of ${resolve_file}" >&2
+        report_review "${resolve_with} changed text outside the conflict regions of ${resolve_file}"
       fi
     done
-    printf '%s' "${resolve_rerere_changed}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} changed the resolution that \`git rerere\` made of /" >&2
+    printf '%s' "${resolve_rerere_changed}" | while IFS= read -r resolve_file; do
+      report_review "${resolve_with} changed the resolution that \`git rerere\` made of ${resolve_file}"
+    done
     if ! printf '%s\n' "${resolve_agent_other}" | {
       resolve_loop_ok=1
       while IFS= read -r resolve_file; do
@@ -3388,9 +3438,13 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
 ## comes from, if DIRECTORY is given and not empty.  The merge commit can be
 ## the one that this call made, one that a pull made, or one that an earlier
 ## call made but did not push, as when its build failed.
-## Returns 1, after printing a diagnostic, on failure.
+## Returns 1, after printing a diagnostic, on failure.  Sets
+## ${merge_build_push_step} to the step that it reached:  "merging",
+## "building", or "pushing".
 ## ${SCRIPT_DIR} must be set; see the top of this file.
+# shellcheck disable=SC2034 # git-push-to reads ${merge_build_push_step}.
 merge_build_push() {
+  merge_build_push_step='merging'
   # Let git compose the message, as it does for `git merge`, rather than
   # composing it by hand.  Git then writes the "into BRANCH" suffix, which it
   # omits on the default branch, and the commit summaries that `merge.log`
@@ -3445,6 +3499,7 @@ merge_build_push() {
   fi
 
   if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+    merge_build_push_step='building'
     if ! merge_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-build.log)"; then
       echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
       return 1
@@ -3483,6 +3538,7 @@ merge_build_push() {
     fi
   fi
 
+  merge_build_push_step='pushing'
   if ! git push --quiet; then
     echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
     return 1

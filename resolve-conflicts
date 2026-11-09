@@ -19,13 +19,13 @@
 #    "--nocompile" option; a chain that fails does not stop the others,
 #  * if every chain succeeded, start over, until no chain has conflicts.
 # It fails if a chain fails, or if chains with conflicts remain after
-# ${max_rounds} rounds.  When chains fail, it ends with a summary that lists
-# each failed chain with the diagnostics that `git-push-to` printed for it
-# (the lines of its standard error that begin with "git-push-to: "), the last
-# of which usually names the merge that failed, as in
-#   * myrepo-branch-main myrepo-branch-feature
-#       git-push-to: the merge of ... is still in progress in ...
-#       git-push-to: failed to push myrepo-branch-main into myrepo-branch-feature
+# ${max_rounds} rounds.  It ends with a summary of the chains that failed or
+# that have changes by an AI agent to review, each with what
+# `git-push-to --report` reported for it, as in
+#   * myrepo-branch-main myrepo-branch-feature myrepo-branch-part2 (failed)
+#       in /home/me/myrepo-branch-feature: claude also changed: README.md
+#       failed to push myrepo-branch-feature into myrepo-branch-part2, while building
+# The diagnostics above the summary give the details.
 
 script_path="$0"
 case "${script_path}" in
@@ -63,6 +63,13 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+
 # The number of times to run `pr-status` and the chains that it lists.
 max_rounds=3
 
@@ -99,27 +106,38 @@ fi
 # Each chain is split into directories, which must not be expanded as patterns.
 set -f
 
-# Holds a copy of the standard error of each run of `git-push-to`.
-if ! work="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" || [ -z "${work}" ]; then
-  echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
-  exit 1
-fi
-trap 'rm -rf "${work}"' EXIT
-trap 'rm -rf "${work}"; trap - INT; kill -s INT "$$"' INT
-trap 'rm -rf "${work}"; trap - TERM; kill -s TERM "$$"' TERM
-push_log="${work}/git-push-to.log"
+# Holds the report of each run of `git-push-to`.
+make_temp_dir
+work="${temp_dir}"
+push_report="${work}/report"
 
 newline='
 '
 tab='	'
+
+# For each run of `git-push-to` that failed or that reported changes to
+# review, in every round, a line "* " followed by the chain, then each line
+# of its report, indented.
+summary=''
+
+## Prints ${summary}, if it is not empty, as a diagnostic.
+print_summary() {
+  if [ -n "${summary}" ]; then
+    echo "${SCRIPT_NAME}: the dependency chains that failed or that have changes to review:" >&2
+    printf '%s' "${summary}" >&2
+  fi
+}
+
 round=1
 while :; do
   if ! "${pr_status}"; then
+    print_summary
     echo "${SCRIPT_NAME}: ${pr_status} failed in $(pwd)" >&2
     exit 1
   fi
   # One chain per line, its directories separated by tabs.
   if ! chains="$("${pr_status}" --print-conflicting-push-chains)"; then
+    print_summary
     echo "${SCRIPT_NAME}: ${pr_status} --print-conflicting-push-chains failed in $(pwd)" >&2
     exit 1
   fi
@@ -133,18 +151,17 @@ while :; do
   IFS="${saved_ifs}"
 
   if [ "${num_chains}" -eq 0 ]; then
+    print_summary
     echo "${SCRIPT_NAME}: no dependency chain has conflicts"
     exit 0
   fi
   if [ "${round}" -gt "${max_rounds}" ]; then
+    print_summary
     echo "${SCRIPT_NAME}: ${num_chains} dependency chains still have conflicts after ${max_rounds} rounds" >&2
     exit 1
   fi
 
   num_failed=0
-  # For each failed chain, a line "* " followed by the chain, then the
-  # diagnostics of `git-push-to`, each indented.
-  failures=''
   IFS="${newline}"
   for chain in ${chains}; do
     IFS="${tab}"
@@ -152,43 +169,29 @@ while :; do
     set -- ${chain}
     IFS="${saved_ifs}"
     echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} $*"
-    # The status file stays empty if `git-push-to` does not finish.
-    : > "${push_log}.status"
-    # The chain does not read this script's standard input.  Its standard
-    # error goes to this script's standard error and to ${push_log}.  `tee`
-    # ignores SIGINT, so that after a Ctrl-C, it still copies the output that
-    # `git-push-to` prints when it is interrupted.
+    : > "${push_report}"
+    # The chain does not read this script's standard input.
     # shellcheck disable=SC2086 # ${nocompile_option} is empty or one word.
-    {
-      {
-        "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} "$@" \
-          < /dev/null 2>&1 1>&3 3>&-
-        echo "$?" > "${push_log}.status"
-      } | (
-        trap '' INT
-        exec tee -- "${push_log}" >&2 3>&-
-      )
-    } 3>&1
-    push_status="$(cat -- "${push_log}.status")"
-    if [ "${push_status:-1}" -ne 0 ]; then
+    "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} \
+      --report "${push_report}" "$@" < /dev/null
+    push_status=$?
+    push_lines="$(sed -e 's/^/    /' -- "${push_report}")"
+    if [ "${push_status}" -ne 0 ]; then
       echo "${SCRIPT_NAME}: the chain failed: $*" >&2
       num_failed=$((num_failed + 1))
-      push_diagnostics="$(sed -n -e 's/^git-push-to: /    &/p' -- "${push_log}")"
-      if [ -z "${push_diagnostics}" ]; then
-        if [ -n "${push_status}" ]; then
-          push_diagnostics="    (git-push-to printed no diagnostic; its exit status was ${push_status})"
-        else
-          push_diagnostics="    (git-push-to did not finish and printed no diagnostic)"
-        fi
+      if [ -z "${push_lines}" ]; then
+        push_lines="    (git-push-to failed with status ${push_status} and reported no step)"
       fi
-      failures="${failures}* $*${newline}${push_diagnostics}${newline}"
+      summary="${summary}* $* (failed)${newline}${push_lines}${newline}"
+    elif [ -n "${push_lines}" ]; then
+      summary="${summary}* $*${newline}${push_lines}${newline}"
     fi
   done
   IFS="${saved_ifs}"
 
   if [ "${num_failed}" -ne 0 ]; then
-    echo "${SCRIPT_NAME}: ${num_failed} of ${num_chains} dependency chains failed:" >&2
-    printf '%s' "${failures}" >&2
+    print_summary
+    echo "${SCRIPT_NAME}: ${num_failed} of ${num_chains} dependency chains failed" >&2
     exit 1
   fi
   round=$((round + 1))
