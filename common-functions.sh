@@ -1468,6 +1468,18 @@ Finish with a summary that says, for each conflict, what each side changed and h
     echo "${SCRIPT_NAME}: ${resolve_with} did not resolve the conflicts acceptably" >&2
     return 1
   fi
+  # The resolutions by the agent that are one side's version of the file,
+  # which were reported above.  The work is accepted, so the merge can be
+  # committed and pushed with them; they are also noted where the user is
+  # less likely to overlook them than in the script's output.
+  resolve_one_sided="$(printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
+    if ! prior_resolution_unchanged "${resolve_file}"; then
+      one_sided_description "${resolve_file}" || true
+    fi
+  done)"
+  if [ -n "${resolve_one_sided}" ]; then
+    note_one_sided_resolutions "${resolve_one_sided}"
+  fi
   return 0
 }
 
@@ -1507,68 +1519,86 @@ prior_resolution_unchanged() {
 ## Prints a diagnostic, for the user's review, if FILE, a conflicted file of
 ## the merge in progress in the current directory, is the same as its
 ## version on either side of the merge, apart from whitespace and blank lines
-## (see `side_difference`).  Such a resolution keeps none of the changes that
-## the other side made to the file, including the changes that git merged
-## cleanly.  It is correct only if every change of the other side is already
-## present in it or is obsolete, which a person should confirm.  The script
-## commits and pushes the resolution anyway, so the diagnostic is also
-## appended to AGENT-TODO.md (see `note_one_sided_resolution`), where the
-## user is less likely to overlook it than in the script's output.  Returns
-## 0 if it printed a diagnostic, and 1 otherwise.  Only `resolve_with_agent`
-## calls this function, which reads the variables of
-## `resolve_merge_conflicts` and of `resolve_with_agent`.
+## (see `one_sided_description`).  Returns 0 if it printed a diagnostic, and
+## 1 otherwise.  Only `resolve_with_agent` calls this function, which reads
+## the variables of `resolve_merge_conflicts` and of `resolve_with_agent`.
 report_one_sided_resolution() {
+  if ! rosr_text="$(one_sided_description "$1")"; then
+    return 1
+  fi
+  echo "${SCRIPT_NAME}: ${rosr_text}; review it" >&2
+}
+
+## Usage: one_sided_description FILE
+## Prints a description, such as "claude resolved foo.c as the version on
+## feature, which keeps none of the changes of branch 'main' to the file",
+## if FILE, a conflicted file of the merge in progress in the current
+## directory, is the same as its version on either side of the merge, apart
+## from whitespace and blank lines (see `side_difference`).  Such a
+## resolution keeps none of the changes that the other side made to the
+## file, including the changes that git merged cleanly.  It is correct only
+## if every change of the other side is already present in it or is
+## obsolete, which a person should confirm.  Prints nothing, and returns 1,
+## if FILE is not such a resolution.  Reads the variables of
+## `resolve_merge_conflicts` and of `resolve_with_agent`.
+one_sided_description() {
   if [ ! -f "$1" ]; then
     return 1
   fi
-  for rosr_stage in 2 3; do
-    merge_side "${rosr_stage}"
-    case "$(side_difference "$1" "${rosr_stage}" "${side_other_stage}")" in
+  for osd_stage in 2 3; do
+    merge_side "${osd_stage}"
+    case "$(side_difference "$1" "${osd_stage}" "${side_other_stage}")" in
       identical)
-        rosr_text="${resolve_with} resolved $1 as the version ${side_place}, which keeps none of the changes of ${side_other_name} to the file"
+        printf '%s\n' "${resolve_with} resolved $1 as the version ${side_place}, which keeps none of the changes of ${side_other_name} to the file"
+        return 0
         ;;
       whitespace)
-        rosr_text="${resolve_with} resolved $1 as the version ${side_place}, apart from whitespace and blank lines, which keeps none of the changes of ${side_other_name} to the file"
-        ;;
-      *)
-        continue
+        printf '%s\n' "${resolve_with} resolved $1 as the version ${side_place}, apart from whitespace and blank lines, which keeps none of the changes of ${side_other_name} to the file"
+        return 0
         ;;
     esac
-    echo "${SCRIPT_NAME}: ${rosr_text}; review it" >&2
-    note_one_sided_resolution "$1" "${rosr_text}"
-    return 0
   done
   return 1
 }
 
-## Usage: note_one_sided_resolution FILE TEXT
+## Usage: note_one_sided_resolutions DESCRIPTIONS
 ## Appends to AGENT-TODO.md (see `append_agent_todo`) an entry that asks the
-## user to review the resolution of FILE, a conflicted file of the merge in
-## progress in the current directory, that is one side's version of FILE.
-## TEXT describes the resolution, as in "claude resolved foo.c as the
-## version on feature, which keeps none of the changes of branch 'main' to
-## the file".  The entry also gives the command that continues the agent's
-## session, with which the user can ask the agent why it resolved FILE that
-## way.  Only `report_one_sided_resolution` calls this function, which reads
-## the variables of `resolve_merge_conflicts`, of `merge_side`, and of
-## `run_agent`.
-note_one_sided_resolution() {
+## user to review the resolutions that DESCRIPTIONS describes, one per line,
+## as `one_sided_description` prints them, in the merge in progress in the
+## current directory, whose resolution the script accepted.  The entry also
+## gives the command that continues the agent's session, with which the user
+## can ask the agent why it resolved the files that way.  Does nothing if
+## the file already has such an entry for this merge, as after a rerun.
+## Only `resolve_with_agent` calls this function, which reads the variables
+## of `resolve_merge_conflicts` and of `run_agent`.
+note_one_sided_resolutions() {
+  nosr_first="In the merge of ${resolve_source} (commit ${resolve_merge_head}) into ${resolve_branch} in $(pwd):"
+  if [ -n "${agent_session_todo:-}" ] && [ -f "${agent_session_todo}" ] \
+    && grep -F -x -q -- "${nosr_first}" "${agent_session_todo}"; then
+    return 0
+  fi
   nosr_entry="
-## Review the resolution of $1 in the merge of ${resolve_source} (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
+## Review the resolutions that keep one side's version (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
 
-In the merge of ${resolve_source} into ${resolve_branch} in $(pwd), $2.  That is correct only if every change of ${side_other_name} to the file is already present in the version that was kept, or is obsolete.  The script does not reject such a resolution, so it can commit and push the merge with it.  If the resolution is wrong, fix it; then delete this entry.
+${nosr_first}
+
+$(printf '%s\n' "$1" | sed -e 's/^/* /' -e 's/$/./')
+
+Such a resolution is correct only if every change of the other side to the file is already present in the version that was kept, or is obsolete.  The script accepted the resolutions, so it commits the merge and can push it.  If a resolution is wrong, fix it; then delete this entry.
 "
   if [ -n "${agent_session_ids:-}" ]; then
     # The most recent session is the one that resolved the conflicts.
     nosr_entry="${nosr_entry}
-To ask ${resolve_with} about it:
+To ask ${resolve_with} about them:
 
 \`\`\`sh
 cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${agent_session_ids##* }
 \`\`\`
 "
   fi
-  append_agent_todo "${agent_session_todo:-}" "${nosr_entry}" || true
+  if append_agent_todo "${agent_session_todo:-}" "${nosr_entry}"; then
+    echo "${SCRIPT_NAME}: noted the resolutions to review in ${agent_session_todo}" >&2
+  fi
 }
 
 ## Usage: side_difference FILE STAGE OTHER_STAGE
@@ -1626,11 +1656,11 @@ squeezed_cksum() {
 ## version further, and neither contains the other's later changes, as when
 ## one side changed the file from version X to Y and the other side changed
 ## it from Y to X.  Also prints nothing, and returns 1, if the side that
-## reached the other side's version later returned FILE to a version that
-## it had before COMMIT (see `version_restored_after`), as when it
-## cherry-picked the other side's change and then reverted it:  then the
-## side's version was made from that earlier version, and need not contain
-## the other side's changes.
+## reached the other side's version later changed the lines that the other
+## side changed (see `keeps_changes`), as when it cherry-picked the other
+## side's change and then reverted it.  Then the side's version need not
+## contain the other side's changes, and an agent must judge whether it
+## does.
 side_containing_other() {
   if [ -z "$2" ]; then
     return 1
@@ -1677,7 +1707,10 @@ side_containing_other() {
           return 1
         fi
         sco_reached=yes
-        if ! version_restored_after "$1" "$2" "${sco_commit}" "${side_rev}"; then
+        if keeps_changes \
+          "$(printf '%s\n' "${sco_index}" | sed -n -e 's/^1 [0-7]* //p')" \
+          "${sco_other#* }" \
+          "$(printf '%s\n' "${sco_index}" | sed -n -e "s/^${sco_stage} [0-7]* //p")"; then
           sco_found="${sco_stage} ${sco_commit}"
         fi
         break
@@ -1690,34 +1723,61 @@ side_containing_other() {
   printf '%s\n' "${sco_found}"
 }
 
-## Usage: version_restored_after FILE BASES COMMIT REV
-## Succeeds if, after COMMIT, FILE returned to a version that it had before
-## COMMIT, as when a commit reverted COMMIT:  if a commit that descends from
-## COMMIT and is in the history of REV, a revision such as "HEAD", has the
-## same version of FILE as one of BASES has, or as a commit other than
-## COMMIT has that is in the history of COMMIT but not of BASES.  BASES is
-## the merge bases of a merge, one hash per line, as for
-## `side_containing_other`.  Only the content of FILE is compared, not its
-## mode.
-version_restored_after() {
-  # The versions of FILE after COMMIT, one hash per line.
-  vra_after="$(git --literal-pathspecs rev-list --ancestry-path "$3..$4" -- "$1" \
-    | file_versions "$1" | awk '$2 != "-" { print $2 }')"
-  if [ -z "${vra_after}" ]; then
+## Usage: keeps_changes BASE OTHER SIDE
+## Succeeds if SIDE keeps every change from BASE to OTHER, where each of
+## them is the hash of a version of a file, such as
+## "3b18e512dba79e4c8300dd08aeb37f8e728b8dad":  if no change from OTHER to
+## SIDE touches a change from BASE to OTHER, compared line by line.  Each
+## change is a range of lines of OTHER:  the lines that a change from BASE
+## to OTHER wrote, or that a change from OTHER to SIDE replaced or removed.
+## A change from BASE to OTHER that only removes lines, or a change from
+## OTHER to SIDE that only inserts lines, is instead a place between two
+## lines of OTHER.  Two ranges of lines touch if they overlap; a place
+## touches the lines, or the place, that it is next to or within.  So a
+## change from OTHER to SIDE of a line next to lines that OTHER wrote is
+## permitted, but a change next to where OTHER removed lines, which could
+## restore them, is not.  Returns 1 if BASE is empty, as when the merge has
+## no base version of the file; if BASE and OTHER differ in no line, as for
+## a binary file; or if git cannot compare the versions.
+keeps_changes() {
+  if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ]; then
     return 1
   fi
-  # The versions of FILE before COMMIT, one hash per line.  "$3^@" is the
-  # parents of COMMIT.  As in `side_containing_other`, the unquoted
-  # expansion of BASES is the list of hashes.
-  # shellcheck disable=SC2086
-  vra_before="$({
-    printf '%s\n' $2
-    git --literal-pathspecs rev-list "$3^@" --not $2 -- "$1"
-  } | file_versions "$1" | awk '$2 != "-" { print $2 }')"
-  if [ -z "${vra_before}" ]; then
+  # `-U0` makes each hunk header give exactly the lines that changed, as in
+  # "@@ -7,2 +7 @@", where a missing count is 1, and a count of 0 means the
+  # place after the given line.
+  if ! kc_changes="$(git diff --no-color --no-ext-diff --no-textconv -U0 "$1" "$2")" \
+    || ! kc_later="$(git diff --no-color --no-ext-diff --no-textconv -U0 "$2" "$3")"; then
     return 1
   fi
-  printf '%s\n' "${vra_after}" | grep -F -x -q -e "${vra_before}"
+  {
+    printf '%s\n' "${kc_changes}" | sed -n -e 's/^@@ -[0-9,]* +\([0-9,]*\) @@.*/changed \1/p'
+    printf '%s\n' "${kc_later}" | sed -n -e 's/^@@ -\([0-9,]*\) +[0-9,]* @@.*/later \1/p'
+  } | awk '
+    # Sets lo and hi to the range of positions of RANGE, "START,COUNT" or
+    # "START", in the numbering of OTHER, in which line K is the half-open
+    # interval [K, K+1) and the place after line K is the point K+1.
+    function range(r,   n, p) {
+      n = split(r, p, ",")
+      if (n == 1) { p[2] = 1 }
+      if (p[2] == 0) { lo = p[1] + 1; hi = lo } else { lo = p[1]; hi = p[1] + p[2] }
+    }
+    $1 == "changed" { range($2); clo[++nc] = lo; chi[nc] = hi; next }
+    $1 == "later" { range($2); llo[++nl] = lo; lhi[nl] = hi; next }
+    END {
+      if (nc == 0) { exit 1 }
+      for (i = 1; i <= nc; i++) {
+        for (j = 1; j <= nl; j++) {
+          # Two sets of lines touch if they overlap.  A place touches lines
+          # or a place next to it.
+          if (clo[i] < chi[i] && llo[j] < lhi[j]) {
+            if (llo[j] < chi[i] && clo[i] < lhi[j]) { exit 1 }
+          } else if (llo[j] <= chi[i] && clo[i] <= lhi[j]) {
+            exit 1
+          }
+        }
+      }
+    }'
 }
 
 ## Usage: file_versions FILE
@@ -1727,19 +1787,13 @@ version_restored_after() {
 ## 8ab686eafeb1f44702738c8b0f24f2567c36da6d", or "-" if the commit has no
 ## FILE.  FILE is relative to the top level of the working tree.
 file_versions() {
-  fv_commits="$(cat)"
-  if [ -z "${fv_commits}" ]; then
-    return 0
-  fi
-  # `git cat-file` prints a line for each commit:  the hash of the commit's
-  # version of FILE, or a line that ends with " missing" if the commit has
-  # no such file.  A hash is the only line with one field.
-  printf '%s\n' "${fv_commits}" \
-    | FV_FILE="$1" awk '{ print $0 ":" ENVIRON["FV_FILE"] }' \
+  # `git cat-file` reads each commit and then its FILE, and prints a line for
+  # each:  the commit's hash, and then the hash of its version of FILE, or a
+  # line that ends with " missing" if the commit has no such file.  A hash
+  # is the only line with one field.
+  FV_FILE="$1" awk 'NF { print; print $0 ":" ENVIRON["FV_FILE"] }' \
     | git cat-file --batch-check='%(objectname)' \
-    | FV_COMMITS="${fv_commits}" awk '
-      BEGIN { split(ENVIRON["FV_COMMITS"], commits, "\n") }
-      { print commits[NR], (NF == 1 ? $0 : "-") }'
+    | awk 'NR % 2 == 1 { commit = $0; next } { print commit, (NF == 1 ? $0 : "-") }'
 }
 
 ## Usage: merge_side STAGE

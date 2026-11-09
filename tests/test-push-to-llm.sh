@@ -566,8 +566,8 @@ for side_mode in ours theirs; do
   # The request for review is also in AGENT-TODO.md, with the command that
   # continues the session of the agent.
   side_todo="${feature_dir}/AGENT-TODO.md"
-  if ! grep -q -x "## Review the resolution of file.txt in the merge of .* (git-push-to, .*)" "${side_todo}" 2> /dev/null \
-    || ! grep -q -F "claude resolved file.txt as the version" "${side_todo}" \
+  if ! grep -q -x "## Review the resolutions that keep one side's version (git-push-to, .*)" "${side_todo}" 2> /dev/null \
+    || ! grep -q -F "* claude resolved file.txt as the version" "${side_todo}" \
     || ! grep -q '^cd .* && claude --resume ' "${side_todo}"; then
     fail "${side_mode}: AGENT-TODO.md does not ask for review: $(cat "${side_todo}" 2> /dev/null)"
   fi
@@ -588,8 +588,8 @@ esac
 ## the first side's history after the merge base, the script takes that
 ## side's version, and no agent runs.  Here feature first reaches main's
 ## version of file.txt, as by merging a squashed copy of main's change, and
-## then changes it further.  Then main reaches feature's version, and
-## changes it further.
+## then changes it further, next to main's change but not in it.  Then main
+## reaches feature's version, and changes it further.
 for side_case in contained-ours:--llm contained-ours-no-llm:--no-llm contained-theirs:--llm; do
   side_name="${side_case%%:*}"
   setup_case "${side_name}"
@@ -597,20 +597,20 @@ for side_case in contained-ours:--llm contained-ours-no-llm:--no-llm contained-t
     contained-theirs)
       printf '%s\n' one two three four five six SEVEN-feature eight nine > "${main_dir}/file.txt"
       git -C "${main_dir}" commit -q -a -m "Reach feature's version"
-      printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${main_dir}/file.txt"
+      printf '%s\n' ONE two three four five six SEVEN-feature EIGHT-later nine > "${main_dir}/file.txt"
       git -C "${main_dir}" commit -q -a -m "Change main again"
       git -C "${main_dir}" push -q
-      side_expected="$(printf '%s\n' ONE two three four five six SEVEN-later eight nine)"
+      side_expected="$(printf '%s\n' ONE two three four five six SEVEN-feature EIGHT-later nine)"
       side_taken="in main"
       ;;
     *)
       printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
       git -C "${feature_dir}" commit -q -a -m "Reach main's version"
-      printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+      printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
       git -C "${feature_dir}" commit -q -a -m "Change feature again"
       git -C "${feature_dir}" push -q
       feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
-      side_expected="$(printf '%s\n' ONE two three four five six SEVEN-later eight nine)"
+      side_expected="$(printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine)"
       side_taken="on feature"
       ;;
   esac
@@ -639,7 +639,7 @@ done
 setup_case contained-blocked
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Reach main's version"
-printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
 printf '%s\n' '<<<<<<< feature' > "${feature_dir}/marker.txt"
 git -C "${feature_dir}" add marker.txt
 git -C "${feature_dir}" commit -q -a -m "Change feature again"
@@ -670,11 +670,11 @@ fi
 setup_case contained-both
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Reach main's version"
-printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Change feature again"
 git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
-printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${main_dir}/file.txt"
+printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${main_dir}/file.txt"
 git -C "${main_dir}" commit -q -a -m "Reach feature's version"
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${main_dir}/file.txt"
 git -C "${main_dir}" commit -q -a -m "Change main again"
@@ -691,7 +691,7 @@ fi
 setup_case contained-mode
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Reach main's version"
-printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Change feature again"
 git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
@@ -710,7 +710,7 @@ fi
 setup_case contained-rerun
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Reach main's version"
-printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
 echo "other feature" > "${feature_dir}/other.txt"
 git -C "${feature_dir}" add other.txt
 git -C "${feature_dir}" commit -q -a -m "Change feature again"
@@ -761,8 +761,8 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
 fi
 
 ## A side's version does not count as containing the other side's version
-## when, after reaching it, the side changed the file back to a version that
-## it had before, as by a revert.  Here feature reaches main's version, as by
+## when, after reaching it, the side changed the lines that the other side
+## changed, as by a revert.  Here feature reaches main's version, as by
 ## cherry-picking main's change, then reverts that change, and then changes
 ## the file further, so that its version lacks main's change to line 1.
 setup_case contained-reverted
@@ -781,6 +781,40 @@ fi
 case "${push_output}" in
   *"took the version"*) fail "contained-reverted: a side's version was taken: ${push_output}" ;;
 esac
+
+## So does a revert that restores no earlier version of the file:  here
+## feature reaches main's version, changes line 4, and then reverts the
+## change that reached main's version.
+setup_case contained-partly-reverted
+printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+printf '%s\n' ONE two three FOUR-later five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Change feature again"
+git -C "${feature_dir}" revert --no-edit HEAD~1 > /dev/null
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+push_to none --llm
+check_not_resolved "contained-partly-reverted"
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "contained-partly-reverted: the agent did not run: ${push_output}"
+fi
+
+## So does any later change to the lines that the other side changed, even
+## one that might keep the other side's change, which only an agent can
+## judge:  here feature reaches main's version and then changes main's line
+## 7 again.
+setup_case contained-overlap
+printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Change feature again"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+push_to none --llm
+check_not_resolved "contained-overlap"
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "contained-overlap: the agent did not run: ${push_output}"
+fi
 
 ## No side's version is taken when a side has the conflicted file under
 ## another name, because then the history of the other side at the
@@ -822,6 +856,11 @@ case "${push_output}" in
   *"claude created a file: scratch.txt"*"claude also changed: other.txt"*) ;;
   *) fail "ours-other: wrong diagnostic: ${push_output}" ;;
 esac
+## The rejected one-sided resolution is reported, but AGENT-TODO.md does not
+## say that the merge can be pushed with it.
+if grep -q -F "Review the resolutions that keep one side's version" "${feature_dir}/AGENT-TODO.md" 2> /dev/null; then
+  fail "ours-other: AGENT-TODO.md asks to review a rejected resolution: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
 
 ## Deleting the conflicted file is rejected.
 setup_case delete-conflicted
