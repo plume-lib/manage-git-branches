@@ -144,7 +144,7 @@ The commands are:
   It handles conflicts and a failed build as `git-push-to` does.
 * [`pr-status`](pr-status)
   `[--check | --print-document | --print-config |`
-  `--print-conflicting-push-chains] [-C DIR]`
+  `--print-conflicting-push-chains | --print-missing-branches] [-C DIR]`
   `[--highlight PR|bottleneck...]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
@@ -162,6 +162,14 @@ The commands are:
   prints the file name of the document that it regenerates and does nothing
   else.  With `--print-config`, it prints its config, with the defaults
   filled in, and does nothing else.
+  With `--print-missing-branches`, it prints the branches that resolving the
+  conflicts needs, but that have no working copy (as of its previous run),
+  and does nothing else:  one line per branch, holding a directory and the
+  branch as `OWNER:BRANCH`, separated by a tab.  The directory is an entry of
+  the directory that holds the working copy directories (`DIR`, with `-C`).
+  In that directory, `git-checkout-branch OWNER:BRANCH` makes a working copy
+  of the branch, as another entry of the directory that holds the working
+  copy directories, after which `git-push-to` can merge it.
   `--highlight PR...` highlights, wherever the documents that it regenerates
   name it, each given PR (such as `REPO#100` or `ORG/REPO#100`) and every
   PR that must land for it to land.
