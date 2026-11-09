@@ -627,17 +627,17 @@ check_resolution reject "no conflict markers in AUTO_MERGE" \
   a b c -- a b c
 # After criss-cross merges, the merge base's text contains git's longer
 # markers from merging the merge bases, which can be unbalanced.
-check_resolution accept "longer markers in the merge base's text" \
+check_resolution accept "longer markers in the text of the merge base" \
   a '<<<<<<< HEAD' c '||||||| merged common ancestors' '<<<<<<<<< Temporary merge branch 1' X1 \
   '||||||||| 0f1dad6' X '=========' X2 '>>>>>>>>> Temporary merge branch 2' '=======' d \
   '>>>>>>> main' b -- a c d b
-check_resolution accept "unbalanced longer markers in the merge base's text" \
+check_resolution accept "unbalanced longer markers in the text of the merge base" \
   a X1 '<<<<<<< HEAD' c '||||||| merged common ancestors' '||||||||| 0f1dad6' X '=========' X2 \
   '>>>>>>>>> Temporary merge branch 2' '=======' d '>>>>>>> main' b -- a X1 c d b
-check_resolution reject "unbalanced longer markers in the merge base's text, and markers remain" \
+check_resolution reject "unbalanced longer markers in the text of the merge base, and markers remain" \
   a X1 '<<<<<<< HEAD' c '||||||| merged common ancestors' '||||||||| 0f1dad6' X '=========' X2 \
   '>>>>>>>>> Temporary merge branch 2' '=======' d '>>>>>>> main' b -- a X1 c '=======' d '>>>>>>> main' b
-check_resolution reject "a longer marker from the merge base's text remains" \
+check_resolution reject "a longer marker from the text of the merge base remains" \
   a '<<<<<<< HEAD' c '||||||| merged common ancestors' X '>>>>>>>>> Temporary merge branch 2' \
   '=======' d '>>>>>>> main' b -- a c '>>>>>>>>> Temporary merge branch 2' d b
 # The attribute `conflict-marker-size` sets the length of the markers.
