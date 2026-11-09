@@ -37,17 +37,17 @@ fail() {
   exit 1
 }
 
-# `pr-merge-analysis` needs Bash 4 or later as the first "bash" on the PATH.
+# `pr-merge-analysis` needs Bash 4.4 or later as the first "bash" on the PATH.
 # With an older Bash, check only that it says so.
-if [ "$(bash -c 'echo "${BASH_VERSINFO[0]}"')" -lt 4 ]; then
+if [ "$(bash -c 'echo $((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1]))')" -lt 404 ]; then
   if output="$("${ANALYSIS}" dir owner/repo 1 2>&1)"; then
     fail "old Bash: pr-merge-analysis succeeded"
   fi
   case "${output}" in
-    *"needs Bash 4 or later"*) ;;
+    *"needs Bash 4.4 or later"*) ;;
     *) fail "old Bash: wrong diagnostic: ${output}" ;;
   esac
-  echo "${SCRIPT_NAME}: Bash is older than 4, so only the version check was tested"
+  echo "${SCRIPT_NAME}: Bash is older than 4.4, so only the version check was tested"
   exit 0
 fi
 

@@ -30,12 +30,13 @@
 #     (SHA1 < SHA2, so the order of the two branches does not matter)
 #   OWNER/REPO<TAB>containment<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>yes|no
 #
-# Requires Git 2.38 or later, gh, and Bash 4 or later as the first "bash" on
+# Requires Git 2.38 or later, gh, and Bash 4.4 or later as the first "bash" on
 # the PATH.  On macOS, /bin/bash is Bash 3.2, so put a newer Bash, such as
 # Homebrew's, earlier on the PATH.
 
-if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
-  echo "$0: needs Bash 4 or later as the first \"bash\" on the PATH, but is running Bash ${BASH_VERSION:-unknown}" >&2
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] \
+  || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+  echo "$0: needs Bash 4.4 or later as the first \"bash\" on the PATH, but is running Bash ${BASH_VERSION:-unknown}" >&2
   exit 2
 fi
 
