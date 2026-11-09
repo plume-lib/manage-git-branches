@@ -542,8 +542,9 @@ check_side_resolved() {
   fi
 }
 
-## A resolution that is identical to either side's version is accepted, and
-## the user is not asked to review it.
+## A resolution that is identical to either side's version is accepted, but
+## the user is asked to review it, because it drops the other side's changes
+## that git merged cleanly.
 for side_mode in ours theirs; do
   setup_case "side-${side_mode}"
   push_to "${side_mode}" --llm
@@ -553,8 +554,10 @@ for side_mode in ours theirs; do
     side_expected="$(printf '%s\n' ONE two three four five six SEVEN-main eight nine)"
   fi
   check_side_resolved "${side_mode}" "${side_expected}"
-  case "${push_output}" in
-    *review*) fail "${side_mode}: the user is asked to review: ${push_output}" ;;
+  case "${side_mode}:${push_output}" in
+    ours:*"claude resolved file.txt as the version on feature, which keeps none of the changes of main"*" to the file; review it"*) ;;
+    theirs:*"claude resolved file.txt as the version in main"*", which keeps none of the changes of feature to the file; review it"*) ;;
+    *) fail "${side_mode}: the user is not asked to review: ${push_output}" ;;
   esac
 done
 
@@ -563,6 +566,10 @@ done
 setup_case side-whitespace
 push_to ours-whitespace --llm
 check_side_resolved "ours-whitespace" "$(printf '%s\n' one '  two' three four '' five six SEVEN-feature eight nine)"
+case "${push_output}" in
+  *"claude resolved file.txt as the version on feature, apart from whitespace and blank lines, which keeps none of the changes of main"*" to the file; review it"*) ;;
+  *) fail "ours-whitespace: the user is not asked to review: ${push_output}" ;;
+esac
 
 ## When one side's version of the conflicted file already contains every
 ## change of the other side to it, because the other side's version is in
@@ -595,6 +602,10 @@ for side_case in contained-ours:--llm contained-ours-no-llm:--no-llm contained-t
       side_taken="on feature"
       ;;
   esac
+  # `git rerere` does not record the side's version as a resolution, which
+  # would drop main's change to line 1 from a later merge with the same
+  # conflict.
+  git -C "${feature_dir}" config rerere.enabled true
   push_to none "${side_case#*:}"
   check_side_resolved "${side_name}" "${side_expected}"
   if [ -s "${STUB_LOG}" ]; then
@@ -604,7 +615,63 @@ for side_case in contained-ours:--llm contained-ours-no-llm:--no-llm contained-t
     *"file.txt: took the version ${side_taken}"*", whose history after the merge base contains the version "*", so it contains every change to the file"*) ;;
     *) fail "${side_name}: wrong diagnostic: ${push_output}" ;;
   esac
+  side_rr_cache="${feature_dir}/$(git -C "${feature_dir}" rev-parse --git-path rr-cache)"
+  if [ -n "$(find "${side_rr_cache}" -name postimage 2> /dev/null)" ]; then
+    fail "${side_name}: \`git rerere\` recorded the side's version as a resolution"
+  fi
 done
+
+## No side's version is taken while another conflicted file cannot be
+## resolved:  here marker.txt, whose versions contain a line that looks like
+## a conflict marker, and which a file name sorts after file.txt.
+setup_case contained-blocked
+printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+printf '%s\n' '<<<<<<< feature' > "${feature_dir}/marker.txt"
+git -C "${feature_dir}" add marker.txt
+git -C "${feature_dir}" commit -q -a -m "Change feature again"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+printf '%s\n' '<<<<<<< main' > "${main_dir}/marker.txt"
+git -C "${main_dir}" add marker.txt
+git -C "${main_dir}" commit -q -m "Add marker.txt"
+git -C "${main_dir}" push -q
+push_to none --llm
+check_not_resolved "contained-blocked"
+case "${push_output}" in
+  *"marker.txt contains lines that look like conflict markers"*) ;;
+  *) fail "contained-blocked: wrong diagnostic: ${push_output}" ;;
+esac
+case "${push_output}" in
+  *"took the version"*) fail "contained-blocked: a side's version was taken: ${push_output}" ;;
+esac
+if ! grep -q '^<<<<<<< ' "${feature_dir}/file.txt"; then
+  fail "contained-blocked: file.txt lost its conflict markers: $(cat "${feature_dir}/file.txt")"
+fi
+
+## No side's version is taken when each side's history after the merge base
+## contains the other side's version:  here feature changes file.txt to
+## main's version and then to another, and main changes it to that other
+## version and then to its own.  Neither side then contains the other's
+## last change.
+setup_case contained-both
+printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Change feature again"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${main_dir}/file.txt"
+git -C "${main_dir}" commit -q -a -m "Reach feature's version"
+printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${main_dir}/file.txt"
+git -C "${main_dir}" commit -q -a -m "Change main again"
+git -C "${main_dir}" push -q
+push_to none --llm
+check_not_resolved "contained-both"
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "contained-both: the agent did not run: ${push_output}"
+fi
 
 ## A side's version does not count as containing the other side's version
 ## when the other side's version is in its history only before the merge
@@ -1497,7 +1564,7 @@ if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "other main" ]
   fail "theirs-rerere: wrong other.txt: $(git -C "${remote}" show refs/heads/feature:other.txt)"
 fi
 case "${push_output}" in
-  *"claude changed the resolution that \`git rerere\` made of other.txt"*) ;;
+  *"claude changed the resolution that \`git rerere\` made of other.txt"*"claude resolved other.txt as the version in main"*", which keeps none of the changes of feature to the file; review it"*) ;;
   *) fail "theirs-rerere: wrong diagnostic: ${push_output}" ;;
 esac
 

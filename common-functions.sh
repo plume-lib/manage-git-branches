@@ -938,10 +938,12 @@ ends_with_newline() {
 ## Resolves the conflicts of the merge of COMMIT that is in progress in the
 ## current directory, the top level of a working tree, and stages the result.
 ## Conflicts that `git rerere` has already resolved need no more work.  Nor
-## does a file whose version on one side already contains every change of the
-## other side to it (see `side_containing_other`):  this function takes that
-## side's version.  For any others, this function asks an AI agent, RESOLVER ("claude" or
-## "codex"), to resolve them, or fails if RESOLVER is empty or cannot be run.
+## does a file whose version on one side already contains every change of
+## the other side to it (see `side_containing_other`):  this function takes
+## that side's version, and keeps `git rerere` from recording it as a
+## resolution (see `rerere_skip_files`).  For any others, this function asks
+## an AI agent, RESOLVER ("claude" or "codex"), to resolve them, or fails if
+## RESOLVER is empty or cannot be run.
 ## The agent can edit any part of any file, not just the conflict regions
 ## (see `resolve_with_agent`).  This function checks each resolution that
 ## `git rerere` made with `check_conflict_resolution`, and the agent's work
@@ -1008,7 +1010,9 @@ resolve_merge_conflicts() {
   fi
 
   # Checks each conflicted file, and lists each one that `git rerere` did not
-  # resolve acceptably.
+  # resolve acceptably, with the side whose version to take, if any.  The
+  # loop changes no file, so that a failure leaves the working tree as git
+  # and `git rerere` left it; the sides are taken after it succeeds.
   #
   # Neither `check_conflict_resolution` nor `check_conflict_markers` can tell
   # a conflict marker from a line of the file that looks like one, as in a
@@ -1034,12 +1038,15 @@ resolve_merge_conflicts() {
     /^=======+\r?$/ { separator = 1 }
     END { if (marker) print "marker"; else if (separator) print "separator" }'
   # ${resolve_checks} has a line "separator FILE" for each conflicted file
-  # in which a line of 7 or more "=" is permitted; a line "taken FILE" for
-  # each one that `git rerere` did not resolve acceptably, but whose
-  # conflicts this script resolved by taking one side's version (see
-  # `side_containing_other`); and a line "unresolved FILE" for each other
-  # one that `git rerere` did not resolve acceptably.
+  # in which a line of 7 or more "=" is permitted; a line
+  # "take STAGE COMMIT FILE" for each one that `git rerere` did not resolve
+  # acceptably, but whose conflicts taking one side's version resolves, as
+  # `side_containing_other` prints STAGE and COMMIT; and a line
+  # "unresolved FILE" for each other one that `git rerere` did not resolve
+  # acceptably.
   resolve_branch="$(current_branch)" || resolve_branch="HEAD"
+  # The merge bases, one per line, or empty if git cannot compute them.
+  resolve_bases="$(git merge-base --all HEAD MERGE_HEAD)" || resolve_bases=''
   if ! resolve_checks="$(printf '%s\n' "${resolve_files}" | {
     resolve_status=0
     while IFS= read -r resolve_file; do
@@ -1075,24 +1082,8 @@ resolve_merge_conflicts() {
       # The version of a side that already contains the other side's changes
       # to the file needs no agent's judgment.  It replaces an unacceptable
       # resolution by `git rerere` too.
-      if resolve_taken="$(side_containing_other "${resolve_file}")"; then
-        resolve_taken_stage="${resolve_taken%% *}"
-        if ! git cat-file --filters --path="${resolve_file}" \
-          "$(git rev-parse --verify --quiet ":${resolve_taken_stage}:${resolve_file}")" \
-          > "${resolve_file}"; then
-          echo "${SCRIPT_NAME}: cannot write ${resolve_file}" >&2
-          resolve_status=1
-          continue
-        fi
-        if [ "${resolve_taken_stage}" -eq 2 ]; then
-          resolve_taken_side="on ${resolve_branch}"
-          resolve_other_side="in ${resolve_source}"
-        else
-          resolve_taken_side="in ${resolve_source}"
-          resolve_other_side="on ${resolve_branch}"
-        fi
-        echo "${SCRIPT_NAME}: ${resolve_file}: took the version ${resolve_taken_side}, whose history after the merge base contains the version ${resolve_other_side}, at commit $(git rev-parse --short "${resolve_taken#* }"), so it contains every change to the file ${resolve_other_side}" >&2
-        printf 'taken %s\n' "${resolve_file}"
+      if resolve_take="$(side_containing_other "${resolve_file}" "${resolve_bases}")"; then
+        printf 'take %s %s\n' "${resolve_take}" "${resolve_file}"
         continue
       fi
       # A file without a conflict region was resolved by `git rerere`, but
@@ -1115,15 +1106,50 @@ resolve_merge_conflicts() {
   # The files in which a line of 7 or more "=" is permitted, one per line;
   # `separator_permitted` reads it.
   resolve_separators="$(printf '%s\n' "${resolve_checks}" | sed -n -e 's/^separator //p')"
-  # The files whose conflicts this script resolved by taking one side's
-  # version, one per line.
-  resolve_taken_files="$(printf '%s\n' "${resolve_checks}" | sed -n -e 's/^taken //p')"
   # The files that neither `git rerere` nor this script resolved, one per
   # line.
   resolve_unresolved="$(printf '%s\n' "${resolve_checks}" | sed -n -e 's/^unresolved //p')"
+  # The files whose conflicts this script resolved by taking one side's
+  # version, one per line.  `git checkout --ours` or `--theirs` writes the
+  # side's version as a checkout would, such as through a smudge filter, and
+  # leaves the file unmerged in the index, as the other conflicted files are.
+  # Each pathname is the rest of its line, after STAGE and COMMIT, which
+  # contain no space.
+  resolve_take_status=0
+  resolve_taken_files="$(printf '%s\n' "${resolve_checks}" | sed -n -e 's/^take //p' | {
+    while IFS= read -r resolve_take; do
+      resolve_take_stage="${resolve_take%% *}"
+      resolve_take="${resolve_take#* }"
+      resolve_take_commit="${resolve_take%% *}"
+      resolve_file="${resolve_take#* }"
+      if [ "${resolve_take_stage}" -eq 2 ]; then
+        resolve_take_option=--ours
+        resolve_taken_side="on ${resolve_branch}"
+        resolve_other_side="in ${resolve_source}"
+      else
+        resolve_take_option=--theirs
+        resolve_taken_side="in ${resolve_source}"
+        resolve_other_side="on ${resolve_branch}"
+      fi
+      if ! git --literal-pathspecs checkout -q "${resolve_take_option}" -- "${resolve_file}"; then
+        echo "${SCRIPT_NAME}: cannot write the version ${resolve_taken_side} of ${resolve_file}" >&2
+        resolve_take_status=1
+        continue
+      fi
+      echo "${SCRIPT_NAME}: ${resolve_file}: took the version ${resolve_taken_side}, whose history after the merge base contains the version ${resolve_other_side}, at commit $(git rev-parse --short "${resolve_take_commit}"), so it contains every change to the file ${resolve_other_side}" >&2
+      printf '%s\n' "${resolve_file}"
+    done
+    exit "${resolve_take_status}"
+  })" || resolve_take_status=1
+  rerere_skip_files "${resolve_taken_files}"
   # Before an agent edits them, so that a later run can tell whether anyone
-  # changed them after this one stopped.
+  # changed them after this one stopped.  That includes the files whose side
+  # was taken, even if another could not be taken.
   record_conflicted_files
+  if [ "${resolve_take_status}" -ne 0 ]; then
+    resolve_stopped
+    return 1
+  fi
 
   if [ -z "${resolve_unresolved}" ]; then
     if [ -z "${resolve_taken_files}" ]; then
@@ -1347,9 +1373,11 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # conflict regions are found by the check that a resolution from
   # `git rerere` must pass; a file that still has conflict markers fails it
   # anyway, so it is not reported.  A change to a resolution that
-  # `git rerere` made is reported wherever it is.  Each other file that the
-  # agent changed is also checked for conflict markers, as when the agent
-  # copied a conflict region into it.
+  # `git rerere` or this script made is reported wherever it is.  So is a
+  # resolution by the agent that is one side's version of the file (see
+  # `report_one_sided_resolution`).  Each other file that the agent changed
+  # is also checked for conflict markers, as when the agent copied a
+  # conflict region into it.
   if [ "${resolve_refs_ok}" -eq 1 ]; then
     resolve_agent_other="$(resolve_other_changes)"
     printf '%s\n' "${resolve_agent_other}" | sed -e '/^$/d' -e "s/^/${SCRIPT_NAME}: ${resolve_with} also changed: /" >&2
@@ -1369,6 +1397,11 @@ Finish with a summary that says, for each conflict, what each side changed and h
     printf '%s\n' "${resolve_taken_files}" | while IFS= read -r resolve_file; do
       if [ -n "${resolve_file}" ] && ! prior_resolution_unchanged "${resolve_file}"; then
         echo "${SCRIPT_NAME}: ${resolve_with} changed the side's version that the script took of ${resolve_file}" >&2
+      fi
+    done
+    printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
+      if ! prior_resolution_unchanged "${resolve_file}"; then
+        report_one_sided_resolution "${resolve_file}"
       fi
     done
     if ! printf '%s\n' "${resolve_agent_other}" | {
@@ -1419,10 +1452,11 @@ Finish with a summary that says, for each conflict, what each side changed and h
 ## printing a diagnostic, if FILE no longer exists or if it contains a
 ## conflict marker line.  A line of 7 or more "=" is not a conflict marker if
 ## `separator_permitted` permits one in FILE.  A resolution that is identical
-## to one side's version of FILE is acceptable:  the agent's instructions say
-## when it is correct.  Only `resolve_with_agent` calls this function, which
-## reads the variables of `resolve_merge_conflicts` and of
-## `resolve_with_agent`.
+## to one side's version of FILE is acceptable, because the agent's
+## instructions say when it is correct, but `resolve_with_agent` reports it
+## for the user's review (see `report_one_sided_resolution`).  Only
+## `resolve_with_agent` calls this function, which reads the variables of
+## `resolve_merge_conflicts` and of `resolve_with_agent`.
 check_agent_resolution() {
   if [ ! -f "$1" ]; then
     echo "${SCRIPT_NAME}: $1: the conflicted file was deleted" >&2
@@ -1443,24 +1477,101 @@ prior_resolution_unchanged() {
     && printf '%s\n' "${resolve_prior_hashes}" | grep -F -x -q -- "${pru_hash} $1"
 }
 
-## Usage: side_containing_other FILE
+## Usage: report_one_sided_resolution FILE
+## Prints a diagnostic, for the user's review, if FILE, a conflicted file of
+## the merge in progress in the current directory, is the same as its
+## version on either side of the merge, apart from whitespace and blank lines
+## (see `side_difference`).  Such a resolution keeps none of the changes that
+## the other side made to the file, including the changes that git merged
+## cleanly.  It is correct only if every change of the other side is already
+## present in it or is obsolete, which a person should confirm.  Only
+## `resolve_with_agent` calls this function, which reads the variables of
+## `resolve_merge_conflicts` and of `resolve_with_agent`.
+report_one_sided_resolution() {
+  if [ ! -f "$1" ]; then
+    return 0
+  fi
+  for rosr_stage in 2 3; do
+    if [ "${rosr_stage}" -eq 2 ]; then
+      rosr_other_stage=3
+      rosr_side="on ${resolve_branch}"
+      rosr_other_side="of ${resolve_source}"
+    else
+      rosr_other_stage=2
+      rosr_side="in ${resolve_source}"
+      rosr_other_side="of ${resolve_branch}"
+    fi
+    case "$(side_difference "$1" "${rosr_stage}" "${rosr_other_stage}")" in
+      identical)
+        echo "${SCRIPT_NAME}: ${resolve_with} resolved $1 as the version ${rosr_side}, which keeps none of the changes ${rosr_other_side} to the file; review it" >&2
+        return 0
+        ;;
+      whitespace)
+        echo "${SCRIPT_NAME}: ${resolve_with} resolved $1 as the version ${rosr_side}, apart from whitespace and blank lines, which keeps none of the changes ${rosr_other_side} to the file; review it" >&2
+        return 0
+        ;;
+    esac
+  done
+}
+
+## Usage: side_difference FILE STAGE OTHER_STAGE
+## Prints how FILE, a conflicted file of the working tree, differs from its
+## version at STAGE of the index, where stage 2 is HEAD's version and stage 3
+## is MERGE_HEAD's; OTHER_STAGE is the other of 2 and 3.  Prints
+## "identical" if FILE is identical to that version; "whitespace" if they
+## differ only in whitespace and blank lines and the version at OTHER_STAGE
+## differs from the merge base's version (stage 1) in more than whitespace
+## and blank lines; and "other" otherwise.  When the other side's changes are
+## only to whitespace, a resolution that differs from STAGE's version only in
+## whitespace can keep those changes, so it does not count as "whitespace".
+side_difference() {
+  # `git hash-object` converts the file as `git add` would, such as from
+  # CRLF line endings, so that the hash is comparable to those in the index.
+  if [ "$(git hash-object -- "$1" 2> /dev/null)" = "$(git rev-parse --verify --quiet ":$2:$1")" ]; then
+    echo identical
+  elif [ "$(git cat-file blob ":1:$1" 2> /dev/null | squeezed_cksum)" \
+    != "$(git cat-file blob ":$3:$1" 2> /dev/null | squeezed_cksum)" ] \
+    && [ "$(squeezed_cksum < "$1")" = "$(git cat-file blob ":$2:$1" 2> /dev/null | squeezed_cksum)" ]; then
+    echo whitespace
+  else
+    echo other
+  fi
+}
+
+## Usage: squeezed_cksum
+## Prints the checksum, as `cksum` prints it, of standard input with all
+## whitespace removed from each line and the lines that become empty
+## removed.  Two files have the same such checksum if they differ only in
+## whitespace and blank lines (or, with negligible probability, otherwise).
+squeezed_cksum() {
+  awk '{ gsub(/[ \t\r\f\v]+/, ""); if ($0 != "") print }' | cksum
+}
+
+## Usage: side_containing_other FILE BASES
 ## Prints, as "STAGE COMMIT", the side of the merge in progress in the
 ## current directory whose version of FILE, a conflicted file, already
 ## contains every change that the other side made to FILE, and a commit that
 ## shows it, as in "2 3b18e512dba79e4c8300dd08aeb37f8e728b8dad".  STAGE is
-## the side's stage in the index:  2 for HEAD, and 3 for MERGE_HEAD.  A side's
-## version contains the other side's changes if the other side's version of
-## FILE is that of COMMIT, a commit in the side's history that is not in the
-## history of any merge base:  after the merge base, the side reached the
-## other side's version of the file, and then perhaps changed it further.
-## That happens, for example, when one side merged a branch and the other
-## side merged a squashed copy of it.  Then the side's version is the
-## resolution that git would have made if COMMIT were the merge base.
-## Prints nothing, and returns 1, if no side's version qualifies.
+## the side's stage in the index:  2 for HEAD, and 3 for MERGE_HEAD.  BASES
+## is the merge's merge bases, one hash per line, as
+## `git merge-base --all HEAD MERGE_HEAD` prints them.  A side's version
+## contains the other side's changes if the other side's version of FILE is
+## that of COMMIT, a commit in the side's history that is not in the history
+## of any merge base:  after the merge base, the side reached the other
+## side's version of the file, and then perhaps changed it further.  That
+## happens, for example, when one side merged a branch and the other side
+## merged a squashed copy of it.  Then the side's version is the resolution
+## that git would have made if COMMIT were the merge base.  Prints nothing,
+## and returns 1, if no side's version qualifies, if BASES is empty, or if
+## both sides' versions qualify:  then each side reached the other side's
+## version and changed it further, and neither contains the other's later
+## changes, as when one side changed the file from version X to Y and the
+## other side changed it from Y to X.
 side_containing_other() {
-  if ! sco_bases="$(git merge-base --all HEAD MERGE_HEAD)"; then
+  if [ -z "$2" ]; then
     return 1
   fi
+  sco_found=''
   for sco_stage in 2 3; do
     if [ "${sco_stage}" -eq 2 ]; then
       sco_rev=HEAD
@@ -1473,10 +1584,11 @@ side_containing_other() {
       continue
     fi
     # The commits in the side's history, after the merge bases, that changed
-    # FILE, most recent first.  The merge bases' hashes contain no character
-    # that field splitting or globbing would change.
+    # FILE, most recent first.  The merge bases' hashes in BASES contain no
+    # character that field splitting or globbing would change, so the
+    # unquoted expansion is the list of hashes.
     # shellcheck disable=SC2086
-    sco_commits="$(git --literal-pathspecs rev-list "${sco_rev}" --not ${sco_bases} -- "$1")"
+    sco_commits="$(git --literal-pathspecs rev-list "${sco_rev}" --not $2 -- "$1")"
     if [ -z "${sco_commits}" ]; then
       continue
     fi
@@ -1489,11 +1601,49 @@ side_containing_other() {
       | git cat-file --batch-check='%(objectname)' \
       | SCO_BLOB="${sco_blob}" awk '$0 == ENVIRON["SCO_BLOB"] { print NR; exit }')"
     if [ -n "${sco_line}" ]; then
-      printf '%s %s\n' "${sco_stage}" "$(printf '%s\n' "${sco_commits}" | sed -n -e "${sco_line}p")"
-      return 0
+      if [ -n "${sco_found}" ]; then
+        return 1
+      fi
+      sco_found="${sco_stage} $(printf '%s\n' "${sco_commits}" | sed -n -e "${sco_line}p")"
     fi
   done
-  return 1
+  if [ -z "${sco_found}" ]; then
+    return 1
+  fi
+  printf '%s\n' "${sco_found}"
+}
+
+## Usage: rerere_skip_files FILES
+## Keeps `git rerere` from recording the resolution of each of FILES, which
+## are conflicted files of the merge in progress in the current directory,
+## one per line, when the merge is committed.  Prints a diagnostic if it
+## cannot.  A file whose conflicts `resolve_merge_conflicts` resolved by
+## taking one side's version needs this:  the side's version also drops the
+## other side's changes outside the conflict regions, and a later merge with
+## the same conflicts, to which `git rerere` applied that resolution, would
+## fail `check_conflict_resolution`.
+rerere_skip_files() {
+  if [ -z "$1" ] \
+    || ! rsf_merge_rr="$(git rev-parse --git-path MERGE_RR)" \
+    || [ ! -f "${rsf_merge_rr}" ]; then
+    return 0
+  fi
+  # `git rerere` records the resolution of each file that MERGE_RR, in the
+  # git directory, lists.  Each entry of MERGE_RR is "ID<TAB>PATHNAME<NUL>",
+  # where ID names the conflict, as in
+  # "3b18e512dba79e4c8300dd08aeb37f8e728b8dad" or
+  # "3b18e512dba79e4c8300dd08aeb37f8e728b8dad.1".  No conflicted pathname
+  # contains a newline, which `resolve_merge_conflicts` refuses, so `tr` can
+  # turn each entry into a line.
+  if ! tr '\000' '\n' < "${rsf_merge_rr}" \
+    | RSF_FILES="$1" awk '
+      BEGIN { n = split(ENVIRON["RSF_FILES"], files, "\n"); for (i = 1; i <= n; i++) skip[files[i]] = 1 }
+      { pathname = $0; sub(/^[^\t]*\t/, "", pathname); if (!(pathname in skip)) print }' \
+    | tr '\n' '\000' > "${rsf_merge_rr}.new" \
+    || ! mv -f -- "${rsf_merge_rr}.new" "${rsf_merge_rr}"; then
+    rm -f -- "${rsf_merge_rr}.new"
+    echo "${SCRIPT_NAME}: cannot keep \`git rerere\` from recording the resolution of the files whose side this script took" >&2
+  fi
 }
 
 ## Usage: check_conflict_markers FILE CONTAINS_SEPARATOR
@@ -1886,11 +2036,11 @@ run_agent() {
 ## "cd /home/me/myrepo && claude --resume 1e55b89c-cfb5-468f-a783-cb104201809b".
 ## The user can then ask the agent about its work, or tell it to finish the
 ## work in a way that its instructions forbade, such as by creating a file.
-## Also appends the commands, under a heading that
-## gives TASK and the time, and after NOTE, a paragraph such as
-## `merge_in_progress_note` prints, if NOTE is given and not empty, to the
-## file ${agent_session_todo} (see `append_agent_todo`), where the user is
-## less likely to overlook them than in the script's output.  TASK is what
+## Also appends the commands, under a heading that gives TASK and the time,
+## and after NOTE, a paragraph such as `merge_in_progress_note` prints, if
+## NOTE is given and not empty, to the file ${agent_session_todo} (see
+## `append_agent_todo`), where the user is less likely to overlook them than
+## in the script's output.  TASK is what
 ## the agent was asked to do, such as "Fix the build after merging branch
 ## 'main'"; only its first line is used.  Neither prints nor writes anything
 ## if no session is recorded.
@@ -2066,11 +2216,12 @@ ${report_merge_note}
 ## the current directory, the top level of a working tree, MERGE_HEAD and the
 ## content of each of ${resolve_files}, the files that the merge in progress
 ## left conflicted, as they are in the working tree:  as git, `git rerere`,
-## and `resolve_merge_conflicts` left them, before any AI agent edits them.  `changed_conflicted_files`
-## reads the record.  Neither agent can write the git directory.  Only
-## `resolve_merge_conflicts` calls this function, which reads that function's
-## variables.  A failure to write the record goes unreported, because
-## without it `changed_conflicted_files` reports more files, not fewer.
+## and `resolve_merge_conflicts` left them, before any AI agent edits them.
+## `changed_conflicted_files` reads the record.  Neither agent can write the
+## git directory.  Only `resolve_merge_conflicts` calls this function, which
+## reads that function's variables.  A failure to write the record goes
+## unreported, because without it `changed_conflicted_files` reports more
+## files, not fewer.
 record_conflicted_files() {
   if ! record_conflicts="$(git rev-parse --path-format=absolute --git-path manage-git-branches-conflicts)"; then
     return 0
