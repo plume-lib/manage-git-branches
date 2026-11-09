@@ -592,13 +592,18 @@ esac
 
 ## When one side's version of the conflicted file already contains every
 ## change of the other side to it, because the other side's version is in
-## the first side's history after the merge base, the script takes that
-## side's version, and no agent runs.  Here feature first reaches main's
+## the first side's history after the merge base, an agent's resolution that
+## is that side's version is correct, and it is accepted, as in the merge of
+## a branch that merged a pull request's branch with a main branch that
+## landed the squashed pull request.  Here feature first reaches main's
 ## version of file.txt, as by merging a squashed copy of main's change, and
 ## then changes it further, next to main's change but not in it.  Then main
-## reaches feature's version, and changes it further.
-for side_case in contained-ours:--llm contained-ours-no-llm:--no-llm contained-theirs:--llm; do
+## reaches feature's version, and changes it further.  The script resolves
+## no such conflict itself:  with --no-llm, the merge stops.
+for side_case in contained-ours:ours:--llm contained-ours-no-llm:none:--no-llm contained-theirs:theirs:--llm; do
   side_name="${side_case%%:*}"
+  side_mode="${side_case#*:}"
+  side_mode="${side_mode%%:*}"
   setup_case "${side_name}"
   case "${side_name}" in
     contained-theirs)
@@ -621,28 +626,34 @@ for side_case in contained-ours:--llm contained-ours-no-llm:--no-llm contained-t
       side_taken="on feature"
       ;;
   esac
-  # `git rerere` does not record the side's version as a resolution, which
-  # would drop main's change to line 1 from a later merge with the same
-  # conflict.
   git -C "${feature_dir}" config rerere.enabled true
-  push_to none "${side_case#*:}"
-  check_side_resolved "${side_name}" "${side_expected}"
-  if [ -s "${STUB_LOG}" ]; then
-    fail "${side_name}: an agent ran: $(cat "${STUB_LOG}")"
+  push_to "${side_mode}" "${side_case##*:}"
+  if [ "${side_mode}" = none ]; then
+    check_not_resolved "${side_name}"
+    if [ -s "${STUB_LOG}" ]; then
+      fail "${side_name}: an agent ran: $(cat "${STUB_LOG}")"
+    fi
+    continue
   fi
+  check_side_resolved "${side_name}" "${side_expected}"
   case "${push_output}" in
-    *"file.txt: took the version ${side_taken}"*", whose history after the merge base contains the version "*", so it contains every change to the file"*) ;;
-    *) fail "${side_name}: wrong diagnostic: ${push_output}" ;;
+    *"claude resolved file.txt as the version ${side_taken}"*", which keeps none of the changes of "*"; review it"*) ;;
+    *) fail "${side_name}: the user is not asked to review: ${push_output}" ;;
   esac
+  # `git rerere` does not record the side's version as a resolution, which
+  # would drop the other side's changes outside the conflict regions from a
+  # later merge with the same conflict.
   side_rr_cache="${feature_dir}/$(git -C "${feature_dir}" rev-parse --git-path rr-cache)"
   if [ -n "$(find "${side_rr_cache}" -name postimage 2> /dev/null)" ]; then
     fail "${side_name}: \`git rerere\` recorded the side's version as a resolution"
   fi
 done
 
-## No side's version is taken while another conflicted file cannot be
-## resolved:  here marker.txt, whose versions contain a line that looks like
-## a conflict marker, and which a file name sorts after file.txt.
+## A conflicted file that must be resolved by hand stops the merge before
+## any agent runs, and leaves the other conflicted files as git left them:
+## here marker.txt, whose versions contain a line that looks like a
+## conflict marker, and which a file name sorts after file.txt, whose
+## version on feature contains main's changes.
 setup_case contained-blocked
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Reach main's version"
@@ -662,18 +673,23 @@ case "${push_output}" in
   *"marker.txt contains lines that look like conflict markers"*) ;;
   *) fail "contained-blocked: wrong diagnostic: ${push_output}" ;;
 esac
-case "${push_output}" in
-  *"took the version"*) fail "contained-blocked: a side's version was taken: ${push_output}" ;;
-esac
+if [ -s "${STUB_LOG}" ]; then
+  fail "contained-blocked: an agent ran: $(cat "${STUB_LOG}")"
+fi
 if ! grep -q '^<<<<<<< ' "${feature_dir}/file.txt"; then
   fail "contained-blocked: file.txt lost its conflict markers: $(cat "${feature_dir}/file.txt")"
 fi
 
-## No side's version is taken when each side's history after the merge base
-## contains the other side's version:  here feature changes file.txt to
-## main's version and then to another, and main changes it to that other
-## version and then to its own.  Neither side then contains the other's
-## last change.
+## In each of the following cases, a side's history after the merge base, or at
+## the conflicted pathname, contains the other side's version of the file, but
+## the side's version does not contain every change of the other side.  The
+## script does not resolve the conflict itself:  the agent runs, and here it
+## leaves the conflict markers in place.
+##
+## Each side's history after the merge base contains the other side's
+## version:  here feature changes file.txt to main's version and then to
+## another, and main changes it to that other version and then to its
+## own.  Neither side then contains the other's last change.
 setup_case contained-both
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Reach main's version"
@@ -692,9 +708,8 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-both: the agent did not run: ${push_output}"
 fi
 
-## No side's version is taken when its history after the merge base
-## contains the other side's content but not the other side's mode:  here
-## main also makes file.txt executable.
+## A side's history after the merge base contains the other side's content but
+## not the other side's mode:  here main also makes file.txt executable.
 setup_case contained-mode
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Reach main's version"
@@ -711,11 +726,10 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-mode: the agent did not run: ${push_output}"
 fi
 
-## No side's version is taken when the side reached the other side's
-## version, including its change of mode, and then changed the mode back:
-## here main makes file.txt executable, and feature reaches main's version,
-## and then makes file.txt not executable and changes a line that main did
-## not change.
+## A side reached the other side's version, including its change of mode, and
+## then changed the mode back:  here main makes file.txt executable, and
+## feature reaches main's version, and then makes file.txt not executable and
+## changes a line that main did not change.
 setup_case contained-mode-reverted
 chmod +x "${main_dir}/file.txt"
 git -C "${main_dir}" commit -q -a -m "Make file.txt executable"
@@ -733,50 +747,12 @@ check_not_resolved "contained-mode-reverted"
 if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-mode-reverted: the agent did not run: ${push_output}"
 fi
-case "${push_output}" in
-  *"took the version"*) fail "contained-mode-reverted: a side's version was taken: ${push_output}" ;;
-esac
 
-## A rerun after a run that took a side and then stopped takes the side
-## again, rather than taking its version for a resolution by `git rerere`.
-## Here the first run stops because other.txt has conflicts too.
-setup_case contained-rerun
-printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
-git -C "${feature_dir}" commit -q -a -m "Reach main's version"
-printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
-echo "other feature" > "${feature_dir}/other.txt"
-git -C "${feature_dir}" add other.txt
-git -C "${feature_dir}" commit -q -a -m "Change feature again"
-git -C "${feature_dir}" push -q
-feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
-echo "other main" > "${main_dir}/other.txt"
-git -C "${main_dir}" add other.txt
-git -C "${main_dir}" commit -q -m "Add other.txt on main"
-git -C "${main_dir}" push -q
-push_to none --no-llm
-check_not_resolved "contained-rerun, first run"
-case "${push_output}" in
-  *"file.txt: took the version on feature"*) ;;
-  *) fail "contained-rerun, first run: the side was not taken: ${push_output}" ;;
-esac
-push_to none --llm
-check_not_resolved "contained-rerun"
-case "${push_output}" in
-  *"file.txt: took the version on feature"*) ;;
-  *) fail "contained-rerun: the side was not taken again: ${push_output}" ;;
-esac
-if ! grep -q -F "by taking one side's version of each file" "${STUB_PROMPT}" \
-  || grep -q -F "\`git rerere\` resolved the conflicts in these files" "${STUB_PROMPT}"; then
-  fail "contained-rerun: the instructions misdescribe file.txt: $(cat "${STUB_PROMPT}")"
-fi
-
-## A side's version does not count as containing the other side's version
-## when the other side's version is in its history only before the merge
-## base:  then the other side changed the file back, as by a revert.  Here
-## main merges feature, keeping main's version, so that feature's head
-## becomes the merge base; then main changes file.txt back to the initial
-## version, which is in feature's history before the merge base, and feature
-## changes it further.
+## The other side's version is in a side's history only before the merge
+## base:  then the other side changed the file back, as by a revert.  Here main
+## merges feature, keeping main's version, so that feature's head becomes the
+## merge base; then main changes file.txt back to the initial version, which is
+## in feature's history before the merge base, and feature changes it further.
 setup_case contained-before-base
 git -C "${main_dir}" fetch -q
 git -C "${main_dir}" merge -q -s ours --no-edit origin/feature
@@ -793,10 +769,9 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-before-base: the agent did not run: ${push_output}"
 fi
 
-## A side's version does not count as containing the other side's version
-## when, after reaching it, the side changed the lines that the other side
-## changed, as by a revert.  Here feature reaches main's version, as by
-## cherry-picking main's change, then reverts that change, and then changes
+## After reaching the other side's version, a side changed the lines that the
+## other side changed, as by a revert.  Here feature reaches main's version, as
+## by cherry-picking main's change, then reverts that change, and then changes
 ## the file further, so that its version lacks main's change to line 1.
 setup_case contained-reverted
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
@@ -811,13 +786,11 @@ check_not_resolved "contained-reverted"
 if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-reverted: the agent did not run: ${push_output}"
 fi
-case "${push_output}" in
-  *"took the version"*) fail "contained-reverted: a side's version was taken: ${push_output}" ;;
-esac
 
-## So does a revert that restores no earlier version of the file:  here
-## feature reaches main's version, changes line 4, and then reverts the
-## change that reached main's version.
+## A side reverted the change that reached the other side's version, which
+## restores no earlier version of the file:  here feature reaches main's
+## version, changes line 4, and then reverts the change that reached main's
+## version.
 setup_case contained-partly-reverted
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Reach main's version"
@@ -832,10 +805,10 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-partly-reverted: the agent did not run: ${push_output}"
 fi
 
-## So does any later change to the lines that the other side changed, even
-## one that might keep the other side's change, which only an agent can
-## judge:  here feature reaches main's version and then changes main's line
-## 7 again.
+## After reaching the other side's version, a side changed the lines that the
+## other side changed in a way that might keep the other side's change, which
+## only an agent can judge:  here feature reaches main's version and then
+## changes main's line 7 again.
 setup_case contained-overlap
 printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
 git -C "${feature_dir}" commit -q -a -m "Reach main's version"
@@ -849,11 +822,10 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-overlap: the agent did not run: ${push_output}"
 fi
 
-## No side's version is taken when a side has the conflicted file under
-## another name, because then the history of the other side at the
-## conflicted pathname is not the file's history.  Here main renames
-## file.txt to new.txt, and feature's history after the merge base has an
-## unrelated new.txt, since deleted, whose content is main's version of
+## A side has the conflicted file under another name, so the history of the
+## other side at the conflicted pathname is not the file's history. Here main
+## renames file.txt to new.txt, and feature's history after the merge base has
+## an unrelated new.txt, since deleted, whose content is main's version of
 ## file.txt.
 setup_case contained-renamed
 git -C "${main_dir}" mv file.txt new.txt
@@ -871,9 +843,6 @@ check_not_resolved "contained-renamed"
 if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-renamed: the agent did not run: ${push_output}"
 fi
-case "${push_output}" in
-  *"took the version"*) fail "contained-renamed: a side's version was taken: ${push_output}" ;;
-esac
 
 ## The changes that a rejected agent made outside the conflicted files are
 ## reported.

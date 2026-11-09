@@ -14,14 +14,7 @@
 # here-document, whose lines are data rather than code; this program does not
 # skip them, so it would read them as code.  It prints "<unclosed>" if FILE
 # ends within a quotation, a command substitution, a parameter expansion, an
-# array literal, or a "case" statement.  It prints
-# "<comment-in-substitution> N", as in "<comment-in-substitution> 1050", for
-# each line N of FILE that has a comment, within a "$(...)" command
-# substitution, that begins a quotation or a parenthesis that it does not
-# end, or that ends a parenthesis that it did not begin.  Bash 3.2, which is
-# /bin/sh on macOS, does not recognize a comment within a command
-# substitution, so it reads such a comment as code:  the "'" of "# It's"
-# begins a quotation, and a ")" can end the substitution.
+# array literal, or a "case" statement.
 #
 # It parses FILE as a Bash script if FILE's first line is a "#!" line that
 # names bash, as in "#!/usr/bin/env bash", and as a POSIX shell script
@@ -101,28 +94,6 @@ function at_command_in_subst(w) {
   sub(/[ \t]+$/, "", w)
   return w ~ /(\(|;|&|\||\n)$/ \
     || w ~ /(^|[^A-Za-z0-9_])(!|do|elif|else|if|then|until|while)$/
-}
-# True if T, the text of a comment within a command substitution, begins a
-# quotation or a parenthesis that it does not end, or ends a parenthesis
-# that it did not begin, if it is read as code, as bash 3.2 reads it.
-function misread_comment(t,   i, ch, quote, parens) {
-  quote = ""
-  parens = 0
-  for (i = 1; i <= length(t); i++) {
-    ch = substr(t, i, 1)
-    if (quote != "") {
-      if (ch == quote) { quote = "" } else if (ch == "\\" && quote != "'") { i++ }
-    } else if (ch == "\\") {
-      i++
-    } else if (ch == "'" || ch == "\"" || ch == "`") {
-      quote = ch
-    } else if (ch == "(") {
-      parens++
-    } else if (ch == ")" && --parens < 0) {
-      return 1
-    }
-  }
-  return quote != "" || parens != 0
 }
 # Reports that the current logical line contains a here-document.  This
 # awk program does not skip the lines of a here-document, so it would read
@@ -407,11 +378,6 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
       }
     }
     if (context() == "subst") {
-      # A "#" that begins a word begins a comment, which ends the line.
-      if (c == "#" && (pos == 1 || substr(line, pos - 1, 1) ~ /[ \t;&|()]/)) {
-        if (misread_comment(substr(line, pos))) { print "<comment-in-substitution> " FNR }
-        break
-      }
       # A "case" statement within a command substitution ends each of its
       # patterns with ")".  That ")" closes no "(", so count the "case"
       # statements that are open, to keep it from ending the

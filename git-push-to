@@ -94,14 +94,13 @@
 # Conflicts
 #
 # When the merge of FROM_DIR's branch into TO_DIR has conflicts that
-# `git rerere`, this script, or an AI agent (see below) resolves, this script
-# checks the resolution; `resolve_merge_conflicts` in common-functions.sh
-# describes the check.  Otherwise, this script stops with the merge still in
-# progress, for the user to finish or to abort with `git merge --abort`.
-# Whenever this script stops with a merge in progress, it appends an entry
-# that says so to the file AGENT-TODO.md at the top level of the working
-# tree (see "Asking an AI agent" below), unless the file already has one for
-# that merge.
+# `git rerere` or an AI agent (see below) resolves, this script checks the
+# resolution; `resolve_merge_conflicts` in common-functions.sh describes the
+# check.  Otherwise, this script stops with the merge still in progress, for
+# the user to finish or to abort with `git merge --abort`.  Whenever this
+# script stops with a merge in progress, it appends an entry that says so to
+# the file AGENT-TODO.md at the top level of the working tree (see "Asking an
+# AI agent" below), unless the file already has one for that merge.
 #
 # A merge can already be in progress when this script starts, as one is
 # after this script stopped as just described.  In each directory except the
@@ -175,23 +174,14 @@
 # Whether or not it accepts the agent's work, it lists the files outside the
 # conflicted ones that the agent changed, each conflicted file in which the
 # agent changed text outside the conflict regions, each resolution by
-# `git rerere` and each side's version taken by this script (see below) that
-# the agent changed, and each resolution by the agent that is identical to
-# either side's version, apart from whitespace and blank lines, so that you
-# can review them.
-#
-# A conflicted file needs no agent when one side's version of it already
-# contains every change of the other side to it:  when the other side's
-# version of the file is that of a commit in the side's history after the
-# merge base, as when one side merged a branch and the other side merged a
-# squashed copy of it, and the side's later changes to the file do not touch
-# the lines that the other side changed, nor undo the other side's change of
-# the file's mode.  Then this script takes that side's version itself,
-# before any agent runs, and even with --no-llm.  It keeps `git rerere` from
-# recording that version as the resolution of the file's conflicts, because
-# the version also drops the other side's changes outside the conflict
-# regions.  For the same reason, it keeps `git rerere` from recording a
-# resolution by the agent that is one side's version.
+# `git rerere` that the agent changed, and each resolution by the agent that
+# is identical to either side's version, apart from whitespace and blank
+# lines, so that you can review them.  When it accepts the agent's work, it
+# also notes each such one-sided resolution in the file AGENT-TODO.md (see
+# "Asking an AI agent" below), and it keeps `git rerere` from recording the
+# resolution:  the side's version also drops the other side's changes
+# outside the conflict regions, so a later merge with the same conflicts
+# would reject the replayed resolution.
 #
 # When the build of TO_DIR fails, and a merge on TO_DIR's branch might have
 # broken it, the agent edits files to fix it, without building; then this
@@ -603,10 +593,8 @@ finish_merge_in_progress() {
     report_merge_in_progress "Its conflicted files changed after the merge stopped:  $(printf '%s\n' "${finish_changed}" | paste -s -d ' ' -)."
     return 1
   fi
-  # Every conflicted file is as git, `git rerere`, and this script left it:
-  # with conflict markers, resolved by `git rerere`, or replaced by a side's
-  # version that `resolve_merge_conflicts` took.  So `git rerere` changes
-  # only a file that still has conflict markers.
+  # Every conflicted file is as git and `git rerere` left it, so `git rerere`
+  # changes only a file that still has conflict markers.
   # `rerere.autoUpdate` false leaves each file that it resolves unmerged in
   # the index, where `resolve_merge_conflicts` finds it.
   if ! git -c rerere.autoUpdate=false rerere; then

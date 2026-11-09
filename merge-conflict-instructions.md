@@ -52,8 +52,8 @@ uses something that a conflicted file or the other side changes.
   contains the other side's changes if the other side's version of the file
   appears in that side's history after the merge base, as when one side
   merged a branch and the other side merged a squashed copy of it, unless
-  that side later reverted the change;
-  `git log` and `git merge-base` can show that.
+  that side later changed the lines that the other side changed, as by
+  reverting the change.  `git log` and `git merge-base` can show that.
 * Keep every hunk that git merged cleanly, but edit any part of any file,
   including text outside the conflict regions and files that have no
   conflicts, wherever combining the two sides requires it:  for example,
