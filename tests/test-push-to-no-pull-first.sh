@@ -144,7 +144,7 @@ if ! (cd "${WORK_DIR}" && PATH="${WORK_DIR}/test-bin:${PATH}" \
   "${COMMANDS_DIR}/git-push-to" upstream:main part1); then
   fail "git-push-to failed on slugs"
 fi
-pulls="$(grep -c -e "-C [^ ]*/${MAIN} .*pull" "${GIT_COMMAND_LOG}" || true)"
+pulls="$(grep -c -e "-C [[:graph:]]*/${MAIN} .*pull" "${GIT_COMMAND_LOG}" || true)"
 if [ "${pulls}" -ne 1 ]; then
   fail "two chains of slugs pulled ${MAIN} ${pulls} times, not once"
 fi
@@ -191,7 +191,7 @@ if (cd "${WORK_DIR}" && PATH="${WORK_DIR}/failing-pull-bin:${PATH}" \
   "${COMMANDS_DIR}/git-push-to" upstream:main part1 2> "${WORK_DIR}/stderr"); then
   fail "git-push-to on slugs succeeded without pulling ${MAIN}"
 fi
-pulls="$(grep -c -e "-C [^ ]*/${MAIN} .*pull" "${GIT_COMMAND_LOG}" || true)"
+pulls="$(grep -c -e "-C [[:graph:]]*/${MAIN} .*pull" "${GIT_COMMAND_LOG}" || true)"
 if [ "${pulls}" -ne 2 ]; then
   fail "two chains of slugs whose pulls of ${MAIN} failed pulled it ${pulls} times, not twice: $(cat "${WORK_DIR}/stderr")"
 fi
