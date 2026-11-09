@@ -5935,7 +5935,7 @@ push_destination() {
   push_destination_branch="${push_destination_branch_name}"
 }
 
-## Usage: pr_repositories DIRECTORY BRANCH
+## Usage: pr_repositories DIRECTORY BRANCH [BASE]
 ## Sets ${pr_base_repo} and ${pr_head_repo} to the GitHub slugs, such as
 ## "ORG/REPO", of the base and head repositories of the pull requests from a
 ## local branch BRANCH of the clone in DIRECTORY, sets ${pr_head_remote} to
@@ -5945,25 +5945,33 @@ push_destination() {
 ## requests, or if they say nothing about BRANCH.
 ##
 ## The head repository, the remote, and the head branch are the ones that
-## `push_destination` names.  The base repository is the head repository's
-## upstream repository, which `github_upstream` describes.  A pull request from a branch of the same name in another
-## repository, even the base repository, is someone else's.
+## `push_destination` names.  The base repository is BASE, a GitHub slug, if
+## it is given, and otherwise the head repository's upstream repository,
+## which `github_upstream` describes.  A pull request from a branch of the
+## same name in another repository, even the base repository, is someone
+## else's.
 ##
 ## Fails if `gh` is not installed, if a query fails, or if `push_destination`
 ## fails, because then nothing is known about the pull requests.  Fails if the
 ## head branch is the head repository's default branch:  a pull request from
 ## it, such as one that merges a release from `main` into a stable branch,
 ## says nothing about whether the branch's work is done, because the branch
-## outlives every such pull request.
+## outlives every such pull request.  If BASE is given, GitHub is not asked,
+## and the caller must ignore a pull request from the head repository's
+## default branch itself.
 pr_repositories() {
   command -v gh > /dev/null 2>&1 || return 1
   push_destination "$1" "$2" || return 1
-  github_upstream "${push_destination_repo}" 2> /dev/null || return 1
-  if [ "${push_destination_branch}" = "${github_upstream_default}" ]; then
-    return 1
+  pr_repositories_base="${3:-}"
+  if [ -z "${pr_repositories_base}" ]; then
+    github_upstream "${push_destination_repo}" 2> /dev/null || return 1
+    if [ "${push_destination_branch}" = "${github_upstream_default}" ]; then
+      return 1
+    fi
+    pr_repositories_base="${github_upstream_repo}"
   fi
   # shellcheck disable=SC2034 # set for the caller
-  pr_base_repo="${github_upstream_repo}"
+  pr_base_repo="${pr_repositories_base}"
   # shellcheck disable=SC2034 # set for the caller
   pr_head_repo="${push_destination_repo}"
   # shellcheck disable=SC2034 # set for the caller

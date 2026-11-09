@@ -156,18 +156,18 @@ The commands are:
   It does not merge into a branch whose open pull request builds on another
   pull request:  one whose base branch is the branch of another open pull
   request, or whose description says "Land after #N" for an open pull
-  request N.  Such a
-  branch receives the default branch through the branch that it builds on,
-  and receiving it directly as well would make a later merge of that branch
-  a criss-cross merge, which has several merge bases.  Update such a branch
-  with `git-push-to`, as the chains that `pr-status` prints do, or pass
-  `--allow-dependent` to merge anyway.  It asks GitHub with `gh`, and it
-  skips this check if `gh` cannot be used.
+  request N.  Such a branch receives the default branch through the branch
+  that it builds on, and receiving it directly as well would make a later
+  merge of that branch a criss-cross merge, which has several merge bases.
+  Update such a branch with `git-push-to`, as the chains that `pr-status`
+  prints do, or pass `--allow-dependent` to merge anyway.  It asks GitHub
+  with `gh`, and it skips this check if `gh` cannot be used.  It reads the
+  "Land after" lines with `pr-status --print-land-after`.
 
   Unlike `git-pull-from`, it needs no working tree for the default branch.
   It handles conflicts and a failed build as `git-push-to` does.
 * [`pr-status`](pr-status)
-  `[--check | --print-document | --print-config |`
+  `[--check | --print-document | --print-config | --print-land-after ORG/REPO |`
   `--print-conflicting-push-chains | --print-missing-branches] [-C DIR]`
   `[--highlight PR|bottleneck...]`:
   Computes the dependencies among the open pull requests, updates the "Land
@@ -186,6 +186,10 @@ The commands are:
   prints the file name of the document that it regenerates and does nothing
   else.  With `--print-config`, it prints its config, with the defaults
   filled in, and does nothing else.
+  With `--print-land-after ORG/REPO`, it reads the description of a pull
+  request of `ORG/REPO` on standard input, prints the number of the pull
+  request that each of its "Land after" lines names in `ORG/REPO`, one per
+  line, and does nothing else.
   With `--print-missing-branches`, it prints the branches that resolving the
   conflicts needs, but that have no working copy (as of its previous run),
   and does nothing else:  one line per branch, holding a directory and the
