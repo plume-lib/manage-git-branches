@@ -1346,7 +1346,9 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # of every change that it made.
   resolve_ok=1
   if [ -n "${resolve_changes}" ]; then
-    printf '%s\n' "${resolve_changes}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} /" >&2
+    printf '%s\n' "${resolve_changes}" | while IFS= read -r resolve_change; do
+      review_notice "${resolve_with} ${resolve_change}"
+    done
     resolve_ok=0
   fi
   if [ "${resolve_agent_status}" -eq 2 ]; then
@@ -1358,12 +1360,12 @@ Finish with a summary that says, for each conflict, what each side changed and h
   if [ "$(git rev-parse --verify HEAD)" != "${resolve_head}" ] \
     || [ "$(git rev-parse --verify --quiet MERGE_HEAD)" != "${resolve_merge_head}" ] \
     || [ "$(git rev-parse --verify --quiet AUTO_MERGE)" != "${resolve_auto_merge}" ]; then
-    echo "${SCRIPT_NAME}: ${resolve_with} changed HEAD, MERGE_HEAD, or AUTO_MERGE in $(pwd)" >&2
+    review_notice "${resolve_with} changed HEAD, MERGE_HEAD, or AUTO_MERGE"
     resolve_refs_ok=0
     resolve_ok=0
   fi
   if [ "$(git ls-files --stage -z | cksum)" != "${resolve_index}" ]; then
-    echo "${SCRIPT_NAME}: ${resolve_with} changed the index" >&2
+    review_notice "${resolve_with} changed the index"
     resolve_ok=0
   fi
   # The agent's changes outside the conflict regions deserve the user's
