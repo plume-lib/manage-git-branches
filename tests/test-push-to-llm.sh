@@ -711,6 +711,230 @@ case "${push_output}" in
   *) fail "failing agent that changes an untracked file: wrong diagnostic: ${push_output}" ;;
 esac
 
+## The cases from here to the matching "fi" are disabled; set
+## ${run_history_cases} to 1 to run them.  Each is a merge in which one
+## side's history contains the other side's version of a conflicted file,
+## which can suggest, rightly or wrongly, that the side's version already
+## has every change of the other side.  The stub agent judges nothing from
+## history, so each case checks only what other cases already check:  that
+## the agent runs, or that the merge stops before it does.  They are kept as
+## examples of such merges.
+run_history_cases=0
+if [ "${run_history_cases}" -eq 1 ]; then
+  ## With --no-llm, the merge stops even when a side's version of the
+  ## conflicted file contains every change of the other side:  here feature
+  ## reaches main's version of file.txt, as by merging a squashed copy of
+  ## main's change, and then changes it further, next to main's change but not
+  ## in it.
+  setup_case contained-ours-no-llm
+  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+  printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Change feature again"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  push_to none --no-llm
+  check_not_resolved "contained-ours-no-llm"
+  if [ -s "${STUB_LOG}" ]; then
+    fail "contained-ours-no-llm: an agent ran: $(cat "${STUB_LOG}")"
+  fi
+
+  ## A conflicted file that must be resolved by hand stops the merge before
+  ## any agent runs, and leaves the other conflicted files as git left them,
+  ## even one whose version on a side contains every change of the other side:
+  ## here marker.txt, whose versions contain a line that looks like a conflict
+  ## marker, and file.txt, whose version on feature contains main's changes.
+  setup_case contained-blocked
+  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+  printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
+  printf '%s\n' '<<<<<<< feature' > "${feature_dir}/marker.txt"
+  git -C "${feature_dir}" add marker.txt
+  git -C "${feature_dir}" commit -q -a -m "Change feature again"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  printf '%s\n' '<<<<<<< main' > "${main_dir}/marker.txt"
+  git -C "${main_dir}" add marker.txt
+  git -C "${main_dir}" commit -q -m "Add marker.txt"
+  git -C "${main_dir}" push -q
+  push_to none --llm
+  check_not_resolved "contained-blocked"
+  case "${push_output}" in
+    *"marker.txt contains lines that look like conflict markers"*) ;;
+    *) fail "contained-blocked: wrong diagnostic: ${push_output}" ;;
+  esac
+  if [ -s "${STUB_LOG}" ]; then
+    fail "contained-blocked: an agent ran: $(cat "${STUB_LOG}")"
+  fi
+  if ! grep -q '^<<<<<<< ' "${feature_dir}/file.txt"; then
+    fail "contained-blocked: file.txt lost its conflict markers: $(cat "${feature_dir}/file.txt")"
+  fi
+
+  ## In each of the following cases, a side's history after the merge base, or
+  ## at the conflicted pathname, contains the other side's version of the file,
+  ## but the side's version does not contain every change of the other side,
+  ## so a resolution that is that side's version would be wrong.  The agent
+  ## runs, and here it leaves the conflict markers in place.
+  ##
+  ## Each side's history after the merge base contains the other side's
+  ## version:  here feature changes file.txt to main's version and then to
+  ## another, and main changes it to that other version and then to its
+  ## own.  Neither side then contains the other's last change.
+  setup_case contained-both
+  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+  printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Change feature again"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${main_dir}/file.txt"
+  git -C "${main_dir}" commit -q -a -m "Reach feature's version"
+  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${main_dir}/file.txt"
+  git -C "${main_dir}" commit -q -a -m "Change main again"
+  git -C "${main_dir}" push -q
+  push_to none --llm
+  check_not_resolved "contained-both"
+  if [ "$(cat "${STUB_LOG}")" != claude ]; then
+    fail "contained-both: the agent did not run: ${push_output}"
+  fi
+
+  ## A side's history after the merge base contains the other side's content but
+  ## not the other side's mode:  here main also makes file.txt executable.
+  setup_case contained-mode
+  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+  printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Change feature again"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  chmod +x "${main_dir}/file.txt"
+  git -C "${main_dir}" commit -q -a -m "Make file.txt executable"
+  git -C "${main_dir}" push -q
+  push_to none --llm
+  check_not_resolved "contained-mode"
+  if [ "$(cat "${STUB_LOG}")" != claude ]; then
+    fail "contained-mode: the agent did not run: ${push_output}"
+  fi
+
+  ## A side reached the other side's version, including its change of mode, and
+  ## then changed the mode back:  here main makes file.txt executable, and
+  ## feature reaches main's version, and then makes file.txt not executable and
+  ## changes a line that main did not change.
+  setup_case contained-mode-reverted
+  chmod +x "${main_dir}/file.txt"
+  git -C "${main_dir}" commit -q -a -m "Make file.txt executable"
+  git -C "${main_dir}" push -q
+  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+  chmod +x "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+  printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
+  chmod -x "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Change feature again"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  push_to none --llm
+  check_not_resolved "contained-mode-reverted"
+  if [ "$(cat "${STUB_LOG}")" != claude ]; then
+    fail "contained-mode-reverted: the agent did not run: ${push_output}"
+  fi
+
+  ## The other side's version is in a side's history only before the merge
+  ## base:  then the other side changed the file back, as by a revert.  Here main
+  ## merges feature, keeping main's version, so that feature's head becomes the
+  ## merge base; then main changes file.txt back to the initial version, which is
+  ## in feature's history before the merge base, and feature changes it further.
+  setup_case contained-before-base
+  git -C "${main_dir}" fetch -q
+  git -C "${main_dir}" merge -q -s ours --no-edit origin/feature
+  printf '%s\n' one two three four five six seven eight nine > "${main_dir}/file.txt"
+  git -C "${main_dir}" commit -q -a -m "Change file.txt back to the initial version"
+  git -C "${main_dir}" push -q
+  printf '%s\n' one two three four five six SEVEN-feature-2 eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Change feature again"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  push_to none --llm
+  check_not_resolved "contained-before-base"
+  if [ "$(cat "${STUB_LOG}")" != claude ]; then
+    fail "contained-before-base: the agent did not run: ${push_output}"
+  fi
+
+  ## After reaching the other side's version, a side changed the lines that the
+  ## other side changed, as by a revert.  Here feature reaches main's version, as
+  ## by cherry-picking main's change, then reverts that change, and then changes
+  ## the file further, so that its version lacks main's change to line 1.
+  setup_case contained-reverted
+  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+  git -C "${feature_dir}" revert --no-edit HEAD > /dev/null
+  printf '%s\n' one two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Change feature again"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  push_to none --llm
+  check_not_resolved "contained-reverted"
+  if [ "$(cat "${STUB_LOG}")" != claude ]; then
+    fail "contained-reverted: the agent did not run: ${push_output}"
+  fi
+
+  ## A side reverted the change that reached the other side's version, which
+  ## restores no earlier version of the file:  here feature reaches main's
+  ## version, changes line 4, and then reverts the change that reached main's
+  ## version.
+  setup_case contained-partly-reverted
+  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+  printf '%s\n' ONE two three FOUR-later five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Change feature again"
+  git -C "${feature_dir}" revert --no-edit HEAD~1 > /dev/null
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  push_to none --llm
+  check_not_resolved "contained-partly-reverted"
+  if [ "$(cat "${STUB_LOG}")" != claude ]; then
+    fail "contained-partly-reverted: the agent did not run: ${push_output}"
+  fi
+
+  ## After reaching the other side's version, a side changed the lines that the
+  ## other side changed in a way that might keep the other side's change, which
+  ## only an agent can judge:  here feature reaches main's version and then
+  ## changes main's line 7 again.
+  setup_case contained-overlap
+  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+  printf '%s\n' ONE two three four five six SEVEN-later eight nine > "${feature_dir}/file.txt"
+  git -C "${feature_dir}" commit -q -a -m "Change feature again"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  push_to none --llm
+  check_not_resolved "contained-overlap"
+  if [ "$(cat "${STUB_LOG}")" != claude ]; then
+    fail "contained-overlap: the agent did not run: ${push_output}"
+  fi
+
+  ## A side has the conflicted file under another name, so the history of the
+  ## other side at the conflicted pathname is not the file's history.  Here main
+  ## renames file.txt to new.txt, and feature's history after the merge base has
+  ## an unrelated new.txt, since deleted, whose content is main's version of
+  ## file.txt.
+  setup_case contained-renamed
+  git -C "${main_dir}" mv file.txt new.txt
+  git -C "${main_dir}" commit -q -m "Rename file.txt to new.txt"
+  git -C "${main_dir}" push -q
+  printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/new.txt"
+  git -C "${feature_dir}" add new.txt
+  git -C "${feature_dir}" commit -q -m "Add new.txt"
+  git -C "${feature_dir}" rm -q new.txt
+  git -C "${feature_dir}" commit -q -m "Remove new.txt"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  push_to none --llm
+  check_not_resolved "contained-renamed"
+  if [ "$(cat "${STUB_LOG}")" != claude ]; then
+    fail "contained-renamed: the agent did not run: ${push_output}"
+  fi
+fi
+
 ## An agent that commits is rejected.
 setup_case commit
 push_to commit --llm
