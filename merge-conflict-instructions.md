@@ -107,8 +107,17 @@ a different time.  Git then merges the merge bases into one, which `git show
   `git log --remerge-diff -p MERGE_HEAD..HEAD -- FILE` and
   `git log --remerge-diff -p HEAD..MERGE_HEAD -- FILE`, which show how each
   side's merge commits resolved their own conflicts.  `git show BASE:FILE`
-  shows the version of FILE in one merge base, BASE.  Use these in Step 3
-  too, in place of the diffs that use `...`.
+  shows the version of FILE in one merge base, BASE.
+* Step 3 needs one cumulative diff per side, not the per-commit output of
+  `git log`, which includes changes that later commits replaced.  In place
+  of the diffs that use `...`, use these.  For a conflicted file,
+  `git diff :1:FILE :3:FILE` shows the changes being merged in, and
+  `git diff :1:FILE :2:FILE` shows the changes on HEAD, both relative to
+  the merge base that git made; ignore their changes to git's conflict
+  markers in that merge base.  For any other file, use
+  `git diff BASE MERGE_HEAD -- FILE` and `git diff BASE HEAD -- FILE` for
+  each merge base BASE:  a change that appears for every merge base is one
+  that the side made.
 * Often both sides changed the same code in different ways, as when each
   side resolved the same earlier conflict, or each side made the same fix
   independently.  Then the conflict is between two versions of one change.

@@ -640,19 +640,25 @@ check_resolution reject "unbalanced longer markers in the text of the merge base
 check_resolution reject "a longer marker from the text of the merge base remains" \
   a '<<<<<<< HEAD' c '||||||| merged common ancestors' X '>>>>>>>>> Temporary merge branch 2' \
   '=======' d '>>>>>>> main' b -- a c '>>>>>>>>> Temporary merge branch 2' d b
-# The attribute `conflict-marker-size` sets the length of the markers.
-printf 'f.txt conflict-marker-size=10\n' > "${WORK_DIR}/ccr/.gitattributes"
-check_resolution accept "longer markers from the attribute conflict-marker-size" \
+# The attribute `conflict-marker-size` sets the length of the markers.  The
+# length is that of the markers in AUTO_MERGE, which git wrote using the
+# attributes from before the merge, and not the length that the attributes
+# in the working tree give, which the merge can change.
+check_resolution accept "markers of 10 characters, as the attribute conflict-marker-size makes them" \
   a '<<<<<<<<<< HEAD' b '||||||||||' '>>>>>>>>>>>> Temporary merge branch 2' '==========' c \
   '>>>>>>>>>> other' d -- a b c d
-check_resolution reject "a marker that the attribute conflict-marker-size lengthens remains" \
+check_resolution reject "a marker of 10 characters remains" \
   a '<<<<<<<<<< HEAD' b '==========' c '>>>>>>>>>> other' d -- a b c '>>>>>>>>>> other' d
-check_resolution reject "markers of 7 characters, when the attribute conflict-marker-size is 10" \
+printf 'f.txt conflict-marker-size=10\n' > "${WORK_DIR}/ccr/.gitattributes"
+check_resolution accept "markers of 7 characters, when a merge set the attribute conflict-marker-size to 10" \
   a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- a b c d
-printf 'f.txt conflict-marker-size=5\n' > "${WORK_DIR}/ccr/.gitattributes"
-check_resolution reject "a marker that the attribute conflict-marker-size shortens remains" \
-  a '<<<<< HEAD' b '=====' c '>>>>> other' d -- a b c '>>>>> other' d
+check_resolution reject "a marker of 7 characters remains, when a merge set the attribute conflict-marker-size to 10" \
+  a '<<<<<<< HEAD' b '=======' c '>>>>>>> other' d -- a b c '>>>>>>> other' d
 rm "${WORK_DIR}/ccr/.gitattributes"
+# Markers shorter than 7 characters, as the attribute conflict-marker-size=5
+# makes them, are not recognized.
+check_resolution reject "markers of 5 characters" \
+  a '<<<<< HEAD' b '=====' c '>>>>> other' d -- a b c d
 
 ## Usage: check_resolution_raw EXPECTED DESCRIPTION AUTO_MERGE_TEXT RESOLUTION_TEXT
 ## Like `check_resolution_files`, but takes the files' contents as printf

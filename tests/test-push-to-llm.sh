@@ -1433,6 +1433,18 @@ case "${push_output}" in
   *) fail "remaining long separator: wrong diagnostic: ${push_output}" ;;
 esac
 
+## Git writes the conflict markers at the length that the attributes before
+## the merge give, so a merge that sets the attribute `conflict-marker-size`
+## does not change the length of the markers in AUTO_MERGE.
+setup_case marker-size-from-merge
+echo 'file.txt conflict-marker-size=10' > "${main_dir}/.gitattributes"
+git -C "${main_dir}" add .gitattributes
+git -C "${main_dir}" commit -q -m "Lengthen the conflict markers"
+git -C "${main_dir}" push -q
+push_to good --llm
+check_resolved claude "a merge that sets the attribute conflict-marker-size"
+check_no_outside_notice "a merge that sets the attribute conflict-marker-size"
+
 ## An agent that changes AUTO_MERGE is rejected.
 setup_case auto-merge
 push_to auto-merge --llm
