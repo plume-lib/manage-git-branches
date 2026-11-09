@@ -45,11 +45,21 @@ STUB_LOG="${WORK_DIR}/stub-log"
 export STUB_LOG
 
 ## The stub agent removes the conflict marker lines of file.txt and the merge
-## base's text, keeping both sides.
+## base's text, keeping both sides.  If ${STUB_ADVANCE} names a clone, the
+## stub's first run also pushes a new commit of that clone's branch, as when
+## upstream changes during a run.
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
 echo claude >> "${STUB_LOG}"
 cat > /dev/null
+if [ -n "${STUB_ADVANCE}" ] && ! grep -q -x advanced "${STUB_LOG}"; then
+  echo advanced >> "${STUB_LOG}"
+  git -C "${STUB_ADVANCE}" pull -q --no-rebase
+  echo "advanced line" >> "${STUB_ADVANCE}/other.txt"
+  git -C "${STUB_ADVANCE}" add other.txt
+  git -C "${STUB_ADVANCE}" commit -q -m "Advance"
+  git -C "${STUB_ADVANCE}" push -q
+fi
 sed -e '/^<<<<<<< /d' -e '/^||||||| /,/^=======$/d' -e '/^=======$/d' -e '/^>>>>>>> /d' \
   file.txt > file.txt.new
 mv file.txt.new file.txt
@@ -186,5 +196,37 @@ case "${resolve_output}" in
   *"the chain failed: myrepo-branch-main *"*) ;;
   *) fail "literal: wrong output: ${resolve_output}" ;;
 esac
+
+## Chains that start with the same directory merge the same commit of it, even
+## if its remote changes during the run:  the stub agent, which resolves the
+## first chain's conflict, pushes a new commit of main, which the second chain,
+## run with --no-pull-first, does not merge.
+setup_case pinned
+git -C "${case_dir}/seed" push -q origin main:refs/heads/other
+git clone -q -b other "${case_dir}/myrepo.git" "${case_dir}/myrepo-branch-other"
+git -C "${case_dir}/myrepo-branch-other" config pull.rebase false
+STUB_CHAINS="$(printf 'myrepo-branch-main\tmyrepo-branch-feature\nmyrepo-branch-main\tmyrepo-branch-other')"
+STUB_ADVANCE="${case_dir}/seed"
+export STUB_ADVANCE
+resolve_conflicts
+STUB_ADVANCE=''
+if [ "${resolve_status}" -ne 0 ]; then
+  fail "pinned: resolve-conflicts failed: ${resolve_output}"
+fi
+if ! grep -q -x advanced "${STUB_LOG}"; then
+  fail "pinned: the stub agent did not advance main"
+fi
+case "${resolve_output}" in
+  *"git-push-to --claude  --no-pull-first myrepo-branch-main myrepo-branch-other"*) ;;
+  *) fail "pinned: the second chain did not get --no-pull-first: ${resolve_output}" ;;
+esac
+main_head="$(git -C "${case_dir}/myrepo-branch-main" rev-parse HEAD)"
+advance_head="$(git -C "${case_dir}/seed" rev-parse HEAD)"
+if ! git -C "${case_dir}/myrepo.git" merge-base --is-ancestor "${main_head}" refs/heads/other; then
+  fail "pinned: the second chain did not merge main"
+fi
+if git -C "${case_dir}/myrepo.git" merge-base --is-ancestor "${advance_head}" refs/heads/other; then
+  fail "pinned: the second chain merged a commit of main that the first chain did not"
+fi
 
 echo "${SCRIPT_NAME}: all tests passed"

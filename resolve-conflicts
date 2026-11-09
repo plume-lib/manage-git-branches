@@ -17,6 +17,10 @@
 #    --print-conflicting-push-chains` prints, adding the "--claude" option (or
 #    "--codex"; see `git-push-to`, under "Asking an AI agent") and any
 #    "--nocompile" option; a chain that fails does not stop the others,
+#  * add the "--no-pull-first" option for each chain whose first directory is
+#    the first directory of an earlier chain since `pr-status` ran, so that
+#    all of those chains merge the same commit of it (see `git-push-to`,
+#    under "Several chains"),
 #  * if every chain succeeded, start over, until no chain has conflicts.
 # It fails if a chain fails, or if chains with conflicts remain after
 # ${max_rounds} rounds.  It ends with a summary of the chains that failed or
@@ -162,17 +166,27 @@ while :; do
   fi
 
   num_failed=0
+  # The first directories of this round's chains so far, each followed by a
+  # newline.
+  first_dirs=''
   IFS="${newline}"
   for chain in ${chains}; do
     IFS="${tab}"
     # shellcheck disable=SC2086 # Split the chain into directories.
     set -- ${chain}
     IFS="${saved_ifs}"
-    echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} $*"
+    case "${newline}${first_dirs}" in
+      *"${newline}$1${newline}"*) no_pull_first_option='--no-pull-first' ;;
+      *)
+        no_pull_first_option=''
+        first_dirs="${first_dirs}$1${newline}"
+        ;;
+    esac
+    echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} ${no_pull_first_option} $*"
     : > "${push_summary}"
     # The chain does not read this script's standard input.
-    # shellcheck disable=SC2086 # ${nocompile_option} is empty or one word.
-    "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} \
+    # shellcheck disable=SC2086 # Each option is empty or one word.
+    "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} ${no_pull_first_option} \
       --summary "${push_summary}" "$@" < /dev/null
     push_status=$?
     push_lines="$(sed -e 's/^/    /' -- "${push_summary}")"

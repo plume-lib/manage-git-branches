@@ -1662,6 +1662,38 @@ class GenPushCommandsTest(unittest.TestCase):
         )
 
 
+class PushCommandsTest(unittest.TestCase):
+    """Tests for push_commands."""
+
+    @staticmethod
+    def model():
+        """Return a model of a repository whose every PR has a working copy.
+
+        Returns:
+            A stand-in for a Model, with the attributes that push_commands reads.
+        """
+        return types.SimpleNamespace(repo=types.SimpleNamespace(), update_cycle_affected=set())
+
+    def test_no_pull_first_for_repeated_first_directory(self):
+        """A chain that starts with an earlier chain's first directory does not pull it."""
+        chains = [
+            pr_status.PushChains([["up", "a", "b"], ["up", "c"], ["b", "d"]], [], True, []),
+            pr_status.PushChains([["up2", "e"], ["up", "f"]], [], True, []),
+        ]
+        commands = pr_status.push_commands([self.model(), self.model()], chains, "/base")
+        self.assertEqual(
+            [line for line in commands.lines if line.startswith("git-push-to")],
+            [
+                "git-push-to \\",
+                "git-push-to --no-pull-first \\",
+                "git-push-to \\",
+                "git-push-to \\",
+                "git-push-to --no-pull-first \\",
+            ],
+        )
+        self.assertEqual(commands.chain_count, 5)
+
+
 class GenUpdatingBranchesTest(unittest.TestCase):
     """Tests for gen_updating_branches."""
 

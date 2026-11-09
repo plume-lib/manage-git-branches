@@ -8,12 +8,15 @@
 #   git-push-to [OPTIONS] FROM_DIR TO_DIR ...
 #   git-push-to [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ...
 #
-# OPTIONS are [--nocompile] [--rebase | --squash] [--llm | --no-llm]
-# [--claude | --codex] [--summary FILE].
+# OPTIONS are [--nocompile] [--no-pull-first] [--rebase | --squash]
+# [--llm | --no-llm] [--claude | --codex] [--summary FILE].
 #
 # Each argument names the top level of a working tree.
 # Each may be absolute directory names or relative to the current directory.
 # The "--nocompile" option skips the compilation step.
+# The "--no-pull-first" option skips pulling the first directory from its
+# remote, so that the chain merges the commit that the first directory already
+# has; see "Several chains" below.
 # The "--rebase" option rebases each branch onto the previous one after
 # pushing, and the "--squash" option makes each branch a single commit on top
 # of the previous one; see "Rebasing" below.  `git-rebase-to` is a shorthand
@@ -73,7 +76,29 @@
 #  * push TO_DIR to its remote if the build succeeds.
 #
 # If more than two directories are supplied, the procedure is performed on each
-# pair of adjacent directories in turn.
+# pair of adjacent directories in turn.  With "--no-pull-first", the first
+# directory, which is FROM_DIR of the first pair only, is not pulled.
+
+# Several chains
+#
+# A run that updates several chains, each of which starts with the same
+# directory, such as a working copy of the upstream default branch, pulls that
+# directory only for the first chain.  So every chain merges the same commit
+# of it, even if its remote changes during the run.  Otherwise, a branch could
+# merge a newer upstream commit than a branch that it builds on has; the next
+# merge of the latter branch into the former would then be a criss-cross
+# merge, which has several merge bases.
+#
+# This script does so for the chains of slugs:  each chain whose first
+# directory is the first directory of an earlier chain of the same run is
+# pushed as with "--no-pull-first".  `resolve-conflicts`, and the commands
+# that `pr-status` prints, run each chain with a separate run of this script;
+# they pass "--no-pull-first" for each such chain.
+#
+# Without the pull, this script still stops if a merge is in progress in the
+# first directory.  If the earlier chain did not pull the first directory,
+# as when it failed before the pull, the chain merges the commit that the
+# first directory already has, which is merely older.
 
 # Rebasing
 #
@@ -295,6 +320,10 @@
 #     MYDIR/myrepo-branch-allchanges
 
 nocompile=0
+# 1 if the first directory of a chain is not pulled; see "Several chains".
+no_pull_first=0
+# 1 if `git_push_to` does not pull FROM_DIR; `push_chain` sets it.
+skip_from_pull=0
 rebase=0
 squash=0
 # The file that `append_summary` in common-functions.sh appends to, or empty.
@@ -697,11 +726,23 @@ git_push_to() {
     return 1
   fi
 
-  push_step="pulling ${from}"
-  if ! pull_resolving "${llm_agent}" "${from_absolute}"; then
-    return 1
+  if [ "${skip_from_pull}" -eq 1 ]; then
+    # As `pull_resolving` does, refuse to merge from a directory with a
+    # merge in progress, whose branch lacks that merge.
+    push_step="checking ${from}"
+    if git -C "${from_absolute}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+      echo "${SCRIPT_NAME}: a merge is in progress in ${from_absolute}; finish it, or abort it with \`git merge --abort\`" >&2
+      report_merge_in_progress_in "${from_absolute}" "It was in progress when \`${SCRIPT_NAME}\` was about to merge from it."
+      return 1
+    fi
+    from_fetched=''
+  else
+    push_step="pulling ${from}"
+    if ! pull_resolving "${llm_agent}" "${from_absolute}"; then
+      return 1
+    fi
+    from_fetched="${pull_fetched}"
   fi
-  from_fetched="${pull_fetched}"
   push_step="checking ${to}"
 
   orig_dir=$(pwd)
@@ -1036,7 +1077,8 @@ chain_failed() {
   append_summary "$1"
 }
 
-## Pushes each given directory into the next one.  Then, if ${rebase} is 1,
+## Pushes each given directory into the next one, without pulling the first
+## directory if ${no_pull_first} is 1.  Then, if ${rebase} is 1,
 ## rebases each directory's branch, except the first, onto the previous one.
 ## Returns 1 at the first failure, after printing a diagnostic that names the
 ## step that failed, such as "git-push-to: failed to push myrepo-branch-main
@@ -1044,12 +1086,14 @@ chain_failed() {
 ## summary.
 push_chain() {
   prev=''
+  skip_from_pull="${no_pull_first}"
   for arg; do
     if [ -n "$prev" ]; then
       if ! git_push_to "$prev" "$arg"; then
         chain_failed "failed to push ${prev} into ${arg}, while ${push_step}"
         return 1
       fi
+      skip_from_pull=0
     fi
     prev="$arg"
   done
@@ -1251,6 +1295,7 @@ slug_matches() {
 while [ "$#" -ge 1 ]; do
   case "$1" in
     --nocompile) nocompile=1 ;;
+    --no-pull-first) no_pull_first=1 ;;
     --rebase) rebase=1 ;;
     --squash)
       rebase=1
@@ -1285,7 +1330,7 @@ if [ "$#" -lt 2 ]; then
   echo "${SCRIPT_NAME}: not enough arguments" >&2
   echo "Usage: ${SCRIPT_NAME} [OPTIONS] FROM_DIR TO_DIR ..." >&2
   echo "   or: ${SCRIPT_NAME} [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
-  echo "OPTIONS: [--nocompile] [--rebase | --squash] ${llm_options_usage} [--summary FILE]" >&2
+  echo "OPTIONS: [--nocompile] [--no-pull-first] [--rebase | --squash] ${llm_options_usage} [--summary FILE]" >&2
   exit 1
 fi
 
@@ -1368,6 +1413,8 @@ slugs="$*"
 
 status=0
 num_chains=0
+# The first directories of the chains so far, each followed by a newline.
+first_dirs=''
 IFS="${newline}"
 for key in ${keys}; do
   IFS="${saved_ifs}"
@@ -1397,10 +1444,19 @@ for key in ${keys}; do
     continue
   fi
   num_chains=$((num_chains + 1))
+  # Pull a directory that starts several chains only for the first of them;
+  # see "Several chains".
+  chain_first="${chain%%"${newline}"*}"
+  chain_no_pull_first="${no_pull_first}"
+  case "${newline}${first_dirs}" in
+    *"${newline}${chain_first}${newline}"*) chain_no_pull_first=1 ;;
+    *) first_dirs="${first_dirs}${chain_first}${newline}" ;;
+  esac
   # Run the chain in a subshell, because `git_push_to` changes the working
   # directory and does not change it back when it fails.  Continue with the
   # other chains after a failure, because they are independent of it.
   if ! (
+    no_pull_first="${chain_no_pull_first}"
     set -f
     IFS="${newline}"
     # shellcheck disable=SC2086 # Split ${chain} on newlines.

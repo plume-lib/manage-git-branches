@@ -80,8 +80,8 @@ The commands are:
 
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
-  `[--nocompile] [--rebase | --squash] [--llm | --no-llm] [--claude | --codex]
-  [--summary FILE] FROM_DIR TO_DIR ...`:
+  `[--nocompile] [--no-pull-first] [--rebase | --squash] [--llm | --no-llm]
+  [--claude | --codex] [--summary FILE] FROM_DIR TO_DIR ...`:
 
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.  Each directory must be the top level
@@ -103,6 +103,17 @@ The commands are:
   PROJECT.
 
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
+
+  With `--no-pull-first`, it does not pull the first directory, so the chain
+  merges the commit that the first directory already has.  A run of several
+  chains that start with the same directory, such as a working copy of the
+  upstream default branch, pulls it only for the first chain, so that every
+  chain merges the same commit of it, even if its remote changes during the
+  run.  Otherwise, a branch could get a newer upstream commit than a branch
+  that it builds on, and merging the latter into the former would later be a
+  criss-cross merge, which has several merge bases.  `git-push-to` itself
+  does so for the chains of slugs, and `pr-status` and `resolve-conflicts`
+  pass `--no-pull-first` to each such chain after the first.
 
   When a merge or a pull has conflicts, it uses the resolutions that
   `git rerere` recorded, and it asks an AI agent, Claude (or, with
@@ -129,8 +140,8 @@ The commands are:
   be continued, and, if a push or rebase fails, the step that failed.
 
 * [`git-rebase-to`](git-rebase-to)
-  `[--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]
-  [--summary FILE] FROM_DIR TO_DIR ...`:
+  `[--nocompile] [--no-pull-first] [--squash] [--llm | --no-llm]
+  [--claude | --codex] [--summary FILE] FROM_DIR TO_DIR ...`:
   Runs `git-push-to` on the arguments, then rebases each branch onto the
   previous branch, to eliminate merge commits, and force-pushes each
   branch.  This is useful for maintaining a stack of GitHub pull requests,
@@ -205,7 +216,9 @@ The commands are:
   Runs `pr-status`, which regenerates the dependency document
   `pr-status.md`, then runs `git-push-to` on each chain of its section
   "Dependency chains with conflicts",
-  with `--claude` (or `--codex`), which asks an AI agent for help.
+  with `--claude` (or `--codex`), which asks an AI agent for help, and with
+  `--no-pull-first` for each chain that starts with the same directory as an
+  earlier chain since `pr-status` ran.
   It ends with a summary of the chains that failed or that have changes by
   the agent to review, each with what `git-push-to --summary` wrote for it,
   which names the step that failed.
