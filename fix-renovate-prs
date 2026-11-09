@@ -218,13 +218,8 @@ if [ "${dry_run}" = false ] && ! agent_available claude; then
   exit 1
 fi
 
-if ! work="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" || [ -z "${work}" ]; then
-  echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
-  exit 1
-fi
-trap 'rm -rf "${work}"' EXIT
-trap 'rm -rf "${work}"; trap - INT; kill -s INT "$$"' INT
-trap 'rm -rf "${work}"; trap - TERM; kill -s TERM "$$"' TERM
+make_temp_dir
+work="${temp_dir}"
 
 tab="$(printf '\t')"
 status=0

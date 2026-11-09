@@ -76,7 +76,7 @@ The commands are:
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
   `[--nocompile] [--rebase | --squash] [--llm | --no-llm] [--claude | --codex]
-  FROM_DIR TO_DIR ...`:
+  [--summary FILE] FROM_DIR TO_DIR ...`:
 
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.  Each directory must be the top level
@@ -119,9 +119,13 @@ The commands are:
   prints a command that continues
   the agent's session interactively.
 
+  With `--summary FILE`, it appends to FILE each change by the agent to
+  review, each merge that it left in progress, each agent session that can
+  be continued, and, if a push or rebase fails, the step that failed.
+
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--squash] [--llm | --no-llm] [--claude | --codex]
-  FROM_DIR TO_DIR ...`:
+  [--summary FILE] FROM_DIR TO_DIR ...`:
   Runs `git-push-to` on the arguments, then rebases each branch onto the
   previous branch, to eliminate merge commits, and force-pushes each
   branch.  This is useful for maintaining a stack of GitHub pull requests,
@@ -194,6 +198,9 @@ The commands are:
   `pr-status.md`, then runs `git-push-to` on each chain of its section
   "Dependency chains with conflicts",
   with `--claude` (or `--codex`), which asks an AI agent for help.
+  It ends with a summary of the chains that failed or that have changes by
+  the agent to review, each with what `git-push-to --summary` wrote for it,
+  which names the step that failed.
 * [`crreview-resolve-all`](crreview-resolve-all)
   `[--dry-run] [--agent claude|codex] [-C DIR]`:
   Runs

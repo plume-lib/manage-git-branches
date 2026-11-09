@@ -169,6 +169,70 @@ branch_cleanup() {
   fi
 }
 
+## Usage: make_temp_dir
+## Creates a new temporary directory, sets ${temp_dir} to its absolute
+## pathname, and installs traps that remove the directory when this shell
+## exits or is killed by SIGHUP, SIGINT, or SIGTERM.  The traps replace any
+## earlier traps for those conditions.  Exits with status 1, after printing a
+## diagnostic, if the directory cannot be created.  As in
+## `trap_branch_cleanup`, each signal handler restores the default disposition
+## and re-sends the signal to this shell, so that the caller sees that this
+## shell was killed by the signal.
+make_temp_dir() {
+  if ! temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" \
+    || [ -z "${temp_dir}" ]; then
+    echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
+    exit 1
+  fi
+  # mktemp returns a relative pathname if ${TMPDIR} is relative.
+  case "${temp_dir}" in
+    /*) ;;
+    *) temp_dir="$(pwd)/${temp_dir}" ;;
+  esac
+  trap 'rm -rf -- "${temp_dir}"' EXIT
+  trap 'rm -rf -- "${temp_dir}"; trap - HUP EXIT; kill -s HUP "$$"' HUP
+  trap 'rm -rf -- "${temp_dir}"; trap - INT EXIT; kill -s INT "$$"' INT
+  trap 'rm -rf -- "${temp_dir}"; trap - TERM EXIT; kill -s TERM "$$"' TERM
+}
+
+## Usage: review_notice MESSAGE
+## Prints MESSAGE, which names something that an AI agent did that a person
+## should review, as a diagnostic, and appends it to the summary (see
+## `append_summary`), prefixed by the current directory, as in
+## "in /home/me/myrepo-branch-feature: claude also changed: README.md".
+review_notice() {
+  printf '%s\n' "${SCRIPT_NAME}: $1" >&2
+  append_summary "in $(pwd): $1"
+}
+
+## Usage: append_merge_note_summary NOTE
+## Appends to the summary (see `append_summary`) NOTE, a paragraph that
+## `merge_in_progress_note` printed, as one line, without its last line, which
+## says what to do, as in "The merge of commit 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b
+## is in progress in /home/me/myrepo-branch-feature.  No conflicted file
+## remains."
+append_merge_note_summary() {
+  if [ -n "$1" ]; then
+    append_summary "$(printf '%s\n' "$1" | sed -e '$d' \
+      | awk 'NR > 1 { printf "  " } { printf "%s", $0 } END { print "" }')"
+  fi
+}
+
+## Usage: append_summary LINE
+## Appends LINE, followed by a newline, to the file named by ${summary_file}, if
+## that variable is set and not empty.  The summary lists what a person should
+## look at after a run:  each change by an AI agent to review, each merge left
+## in progress and each agent session that can be continued (which
+## `report_merge_in_progress` and `report_agent_session` also note in
+## AGENT-TODO.md), and the step that failed.  `git-push-to --summary` sets
+## ${summary_file}.  A failure to write the summary goes unreported, because the
+## same information is printed as a diagnostic.
+append_summary() {
+  if [ -n "${summary_file:-}" ]; then
+    printf '%s\n' "$1" >> "${summary_file}" 2> /dev/null || true
+  fi
+}
+
 ## Usage: add_worktree WORKTREE BRANCH [START-POINT [OPTION...]]
 ## Runs `git worktree add` in the current repository, or in the repository of
 ## the working tree WORKTREE_HOST if that variable is non-empty, with the
@@ -1282,7 +1346,9 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # of every change that it made.
   resolve_ok=1
   if [ -n "${resolve_changes}" ]; then
-    printf '%s\n' "${resolve_changes}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} /" >&2
+    printf '%s\n' "${resolve_changes}" | while IFS= read -r resolve_change; do
+      review_notice "${resolve_with} ${resolve_change}"
+    done
     resolve_ok=0
   fi
   if [ "${resolve_agent_status}" -eq 2 ]; then
@@ -1294,12 +1360,12 @@ Finish with a summary that says, for each conflict, what each side changed and h
   if [ "$(git rev-parse --verify HEAD)" != "${resolve_head}" ] \
     || [ "$(git rev-parse --verify --quiet MERGE_HEAD)" != "${resolve_merge_head}" ] \
     || [ "$(git rev-parse --verify --quiet AUTO_MERGE)" != "${resolve_auto_merge}" ]; then
-    echo "${SCRIPT_NAME}: ${resolve_with} changed HEAD, MERGE_HEAD, or AUTO_MERGE in $(pwd)" >&2
+    review_notice "${resolve_with} changed HEAD, MERGE_HEAD, or AUTO_MERGE"
     resolve_refs_ok=0
     resolve_ok=0
   fi
   if [ "$(git ls-files --stage -z | cksum)" != "${resolve_index}" ]; then
-    echo "${SCRIPT_NAME}: ${resolve_with} changed the index" >&2
+    review_notice "${resolve_with} changed the index"
     resolve_ok=0
   fi
   # The agent's changes outside the conflict regions deserve the user's
@@ -1323,7 +1389,11 @@ Finish with a summary that says, for each conflict, what each side changed and h
   resolve_rerere_changed=''
   if [ "${resolve_refs_ok}" -eq 1 ]; then
     resolve_agent_other="$(resolve_other_changes)"
-    printf '%s\n' "${resolve_agent_other}" | sed -e '/^$/d' -e "s/^/${SCRIPT_NAME}: ${resolve_with} also changed: /" >&2
+    printf '%s\n' "${resolve_agent_other}" | while IFS= read -r resolve_file; do
+      if [ -n "${resolve_file}" ]; then
+        review_notice "${resolve_with} also changed: ${resolve_file}"
+      fi
+    done
     # The loop runs in this shell, not in a pipe's subshell, so that its
     # assignments last.  The shell splits ${resolve_files} on newlines, with
     # globbing off so that no pathname is expanded; the body restores both.
@@ -1349,7 +1419,7 @@ Finish with a summary that says, for each conflict, what each side changed and h
         && resolve_description="$(one_sided_description "${resolve_file}" "${resolve_hash}")"; then
         resolve_one_sided_files="${resolve_one_sided_files}${resolve_file}
 "
-        printf '%s\n' "${SCRIPT_NAME}: ${resolve_description}; review it" >&2
+        review_notice "${resolve_description}; review it"
       fi
     done
     set +f
@@ -1367,10 +1437,12 @@ Finish with a summary that says, for each conflict, what each side changed and h
         && check_conflict_markers "${resolve_file}" "${resolve_file_separator}" 2> /dev/null \
         && ! printf '%s\n' "${resolve_one_sided_files}" | grep -F -x -q -- "${resolve_file}" \
         && ! check_conflict_resolution "${resolve_file}" "${resolve_file_separator}" 2> /dev/null; then
-        echo "${SCRIPT_NAME}: ${resolve_with} changed text outside the conflict regions of ${resolve_file}" >&2
+        review_notice "${resolve_with} changed text outside the conflict regions of ${resolve_file}"
       fi
     done
-    printf '%s' "${resolve_rerere_changed}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} changed the resolution that \`git rerere\` made of /" >&2
+    printf '%s' "${resolve_rerere_changed}" | while IFS= read -r resolve_file; do
+      review_notice "${resolve_with} changed the resolution that \`git rerere\` made of ${resolve_file}"
+    done
     if ! printf '%s\n' "${resolve_agent_other}" | {
       resolve_loop_ok=1
       while IFS= read -r resolve_file; do
@@ -1967,7 +2039,8 @@ run_agent() {
 ## and after NOTE, a paragraph such as `merge_in_progress_note` prints, if
 ## NOTE is given and not empty, to the file ${agent_session_todo} (see
 ## `append_agent_todo`), where the user is less likely to overlook them than
-## in the script's output.  TASK is what
+## in the script's output, and appends NOTE and the commands to the summary (see
+## `append_summary`).  TASK is what
 ## the agent was asked to do, such as "Fix the build after merging branch
 ## 'main'"; only its first line is used.  Neither prints nor writes anything
 ## if no session is recorded.
@@ -1980,6 +2053,7 @@ report_agent_session() {
     return 0
   fi
   report_note="${2:-}"
+  append_merge_note_summary "${report_note}"
   # The UUIDs contain no character that field splitting or globbing would
   # change, so each unquoted expansion below is the list of UUIDs.
   # shellcheck disable=SC2086
@@ -2011,6 +2085,7 @@ Session ${report_index} of ${report_count}:
     # `echo` in some shells, such as dash, would interpret a backslash in the
     # directory.
     printf '%s\n' "${SCRIPT_NAME}: to continue ${report_session} of ${agent_session_agent}:  ${report_command}" >&2
+    append_summary "to continue ${report_session} of ${agent_session_agent} (${report_task}):  ${report_command}"
     report_entry="${report_entry}
 \`\`\`sh
 ${report_command}
@@ -2115,7 +2190,8 @@ merge_in_progress_note() {
 ## the top level of a working tree, as `merge_in_progress_note` writes it,
 ## given REASON.  Does nothing if no merge is in progress, or if the file
 ## already says that this merge is in progress in this directory, as after
-## an earlier run stopped at the same merge.  Runs git commands, so it must
+## an earlier run stopped at the same merge.  Appends the note to the summary
+## (see `append_merge_note_summary`) in either case.  Runs git commands, so it must
 ## not be called after an AI agent ran without its work being checked; see
 ## `report_agent_session`.
 report_merge_in_progress() {
@@ -2123,6 +2199,7 @@ report_merge_in_progress() {
   if [ -z "${report_merge_note}" ]; then
     return 0
   fi
+  append_merge_note_summary "${report_merge_note}"
   report_merge_first="$(printf '%s\n' "${report_merge_note}" | head -n 1)"
   report_merge_todo="$(agent_todo_path)" || report_merge_todo=''
   if [ -n "${report_merge_todo}" ] && [ -f "${report_merge_todo}" ] \
@@ -2432,9 +2509,10 @@ build_logged() {
 ## show it, such as "The script just merged commit 1a2b3c4d into branch
 ## feature.  Branch feature has commits that ...".  Once the build succeeds,
 ## commits the agent's changes, if any, with the message MESSAGE, such as
-## "Fix the build after merging branch 'main'".  Returns 1, after printing a
-## diagnostic, if the build still fails; the agent's changes then remain,
-## staged but not committed.
+## "Fix the build after merging branch 'main'", and prints a notice that
+## names the commit, for review (see `review_notice`).  Returns 1, after
+## printing a diagnostic, if the build still fails; the agent's changes then
+## remain, staged but not committed.
 build_fix_attempts=3
 fix_failed_build() {
   fix_with="$1"
@@ -2538,6 +2616,7 @@ $(tail -n 100 "${fix_log}")"
     echo "${SCRIPT_NAME}: cannot commit the changes of ${fix_with} in $(pwd)" >&2
     return 1
   fi
+  review_notice "${fix_with} fixed the build in commit $(git rev-parse --short HEAD); review it"
   return 0
 }
 
@@ -3388,9 +3467,13 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
 ## comes from, if DIRECTORY is given and not empty.  The merge commit can be
 ## the one that this call made, one that a pull made, or one that an earlier
 ## call made but did not push, as when its build failed.
-## Returns 1, after printing a diagnostic, on failure.
+## Returns 1, after printing a diagnostic, on failure.  Sets
+## ${merge_build_push_step} to the step that it reached:  "merging",
+## "building", or "pushing".
 ## ${SCRIPT_DIR} must be set; see the top of this file.
+# shellcheck disable=SC2034 # git-push-to reads ${merge_build_push_step}.
 merge_build_push() {
+  merge_build_push_step='merging'
   # Let git compose the message, as it does for `git merge`, rather than
   # composing it by hand.  Git then writes the "into BRANCH" suffix, which it
   # omits on the default branch, and the commit summaries that `merge.log`
@@ -3445,6 +3528,7 @@ merge_build_push() {
   fi
 
   if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+    merge_build_push_step='building'
     if ! merge_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-build.log)"; then
       echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
       return 1
@@ -3483,6 +3567,7 @@ merge_build_push() {
     fi
   fi
 
+  merge_build_push_step='pushing'
   if ! git push --quiet; then
     echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
     return 1

@@ -171,13 +171,8 @@ else
   set --
 fi
 
-if ! work="$(mktemp -d "${TMPDIR:-/tmp}/${SCRIPT_NAME}.XXXXXX")" || [ -z "${work}" ]; then
-  echo "${SCRIPT_NAME}: cannot create a temporary directory" >&2
-  exit 1
-fi
-trap 'rm -rf "${work}"' EXIT
-trap 'rm -rf "${work}"; trap - INT; kill -s INT "$$"' INT
-trap 'rm -rf "${work}"; trap - TERM; kill -s TERM "$$"' TERM
+make_temp_dir
+work="${temp_dir}"
 
 # The GitHub login of the user, such as "octocat".
 if ! me="$(with_timeout "${github_query_seconds}" gh api user --jq .login < /dev/null)" \

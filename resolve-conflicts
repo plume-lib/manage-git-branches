@@ -19,7 +19,13 @@
 #    "--nocompile" option; a chain that fails does not stop the others,
 #  * if every chain succeeded, start over, until no chain has conflicts.
 # It fails if a chain fails, or if chains with conflicts remain after
-# ${max_rounds} rounds.
+# ${max_rounds} rounds.  It ends with a summary of the chains that failed or
+# that have changes by an AI agent to review, each with what
+# `git-push-to --summary` wrote for it, as in
+#   * myrepo-branch-main myrepo-branch-feature myrepo-branch-part2 (failed)
+#       in /home/me/myrepo-branch-feature: claude also changed: README.md
+#       failed to push myrepo-branch-feature into myrepo-branch-part2, while building
+# The diagnostics above the summary give the details.
 
 script_path="$0"
 case "${script_path}" in
@@ -57,6 +63,13 @@ done
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
 SCRIPT_NAME="$(basename -- "$0")"
 
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+
 # The number of times to run `pr-status` and the chains that it lists.
 max_rounds=3
 
@@ -93,17 +106,38 @@ fi
 # Each chain is split into directories, which must not be expanded as patterns.
 set -f
 
+# Holds the summary that each run of `git-push-to` writes.
+make_temp_dir
+work="${temp_dir}"
+push_summary="${work}/summary"
+
 newline='
 '
 tab='	'
+
+# For each run of `git-push-to` that failed or that noted changes to
+# review, in every round, a line "* " followed by the chain, then each line
+# of the summary that it wrote, indented.
+summary=''
+
+## Prints ${summary}, if it is not empty, as a diagnostic.
+print_summary() {
+  if [ -n "${summary}" ]; then
+    echo "${SCRIPT_NAME}: the dependency chains that failed or that have changes to review:" >&2
+    printf '%s' "${summary}" >&2
+  fi
+}
+
 round=1
 while :; do
   if ! "${pr_status}"; then
+    print_summary
     echo "${SCRIPT_NAME}: ${pr_status} failed in $(pwd)" >&2
     exit 1
   fi
   # One chain per line, its directories separated by tabs.
   if ! chains="$("${pr_status}" --print-conflicting-push-chains)"; then
+    print_summary
     echo "${SCRIPT_NAME}: ${pr_status} --print-conflicting-push-chains failed in $(pwd)" >&2
     exit 1
   fi
@@ -117,10 +151,12 @@ while :; do
   IFS="${saved_ifs}"
 
   if [ "${num_chains}" -eq 0 ]; then
+    print_summary
     echo "${SCRIPT_NAME}: no dependency chain has conflicts"
     exit 0
   fi
   if [ "${round}" -gt "${max_rounds}" ]; then
+    print_summary
     echo "${SCRIPT_NAME}: ${num_chains} dependency chains still have conflicts after ${max_rounds} rounds" >&2
     exit 1
   fi
@@ -133,16 +169,28 @@ while :; do
     set -- ${chain}
     IFS="${saved_ifs}"
     echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} $*"
+    : > "${push_summary}"
     # The chain does not read this script's standard input.
     # shellcheck disable=SC2086 # ${nocompile_option} is empty or one word.
-    if ! "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} "$@" < /dev/null; then
+    "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} \
+      --summary "${push_summary}" "$@" < /dev/null
+    push_status=$?
+    push_lines="$(sed -e 's/^/    /' -- "${push_summary}")"
+    if [ "${push_status}" -ne 0 ]; then
       echo "${SCRIPT_NAME}: the chain failed: $*" >&2
       num_failed=$((num_failed + 1))
+      if [ -z "${push_lines}" ]; then
+        push_lines="    (git-push-to failed with status ${push_status} and named no step in its summary)"
+      fi
+      summary="${summary}* $* (failed)${newline}${push_lines}${newline}"
+    elif [ -n "${push_lines}" ]; then
+      summary="${summary}* $*${newline}${push_lines}${newline}"
     fi
   done
   IFS="${saved_ifs}"
 
   if [ "${num_failed}" -ne 0 ]; then
+    print_summary
     echo "${SCRIPT_NAME}: ${num_failed} of ${num_chains} dependency chains failed" >&2
     exit 1
   fi
