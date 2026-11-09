@@ -94,9 +94,9 @@
 # Conflicts
 #
 # When the merge of FROM_DIR's branch into TO_DIR has conflicts that
-# `git rerere` or an AI agent (see below) resolves, this script checks the
-# resolution; `resolve_merge_conflicts` in common-functions.sh describes the
-# check.  Otherwise, this script stops with the merge still in progress, for
+# `git rerere`, this script, or an AI agent (see below) resolves, this script
+# checks the resolution; `resolve_merge_conflicts` in common-functions.sh
+# describes the check.  Otherwise, this script stops with the merge still in progress, for
 # the user to finish or to abort with `git merge --abort`.  Whenever this
 # script stops with a merge in progress, it appends an entry that says so to
 # the file AGENT-TODO.md at the top level of the working tree (see "Asking an
@@ -166,14 +166,23 @@
 # agent's sandbox.  It can, however, change a tracked file that a hook or the
 # build reads or runs, such as prek.toml or a Makefile, and this script's
 # commit and build then run that code outside the sandbox; the agent that
-# fixes a failed build can do the same.  This script rejects a resolution of
-# a file that is identical to either side's version of the file, apart from
-# whitespace and blank lines, and any file that the agent changed that
-# contains a conflict marker line that git's merge did not put there.
+# fixes a failed build can do the same.  This script rejects any file that the
+# agent changed that contains a conflict marker line that git's merge did not
+# put there.  It accepts a resolution of a file that is identical to either
+# side's version of the file, which keeps none of the other side's changes
+# to the file:  the agent is told to write one only if every change of the
+# other side to the file is already present or is obsolete.
 # Whether or not it accepts the agent's work, it lists the files outside the
 # conflicted ones that the agent changed, each conflicted file in which the
 # agent changed text outside the conflict regions, and each resolution by
 # `git rerere` that the agent changed, so that you can review them.
+#
+# A conflicted file needs no agent when one side's version of it already
+# contains every change of the other side to it:  when the other side's
+# version of the file is that of a commit in the side's history after the
+# merge base, as when one side merged a branch and the other side merged a
+# squashed copy of it.  Then this script takes that side's version itself,
+# before any agent runs, and even with --no-llm.
 #
 # When the build of TO_DIR fails, and a merge on TO_DIR's branch might have
 # broken it, the agent edits files to fix it, without building; then this
@@ -206,7 +215,7 @@
 # that continues the agent's session interactively, or one such command for
 # each of the agent's attempts to fix the build.  In the resumed session,
 # you can ask the agent about its work, or tell it to finish in a way that
-# its instructions forbade, such as by taking one side's version of a file.
+# its instructions forbade, such as by creating a file.
 # Then commit the merge or the fix yourself, and run this script again.
 # This script also appends the command to the file AGENT-TODO.md at
 # the top level of the working tree, where you are less likely to overlook

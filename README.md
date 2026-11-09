@@ -100,8 +100,11 @@ The commands are:
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
 
   When a merge or a pull has conflicts, it uses the resolutions that
-  `git rerere` recorded, and it asks an AI agent, Claude (or, with
-  `--codex`, Codex), to resolve the conflicts that remain.  The agent
+  `git rerere` recorded.  For a file whose version on one side already
+  contains every change of the other side to it, because the other side's
+  version of the file is in the first side's history, it takes that side's
+  version.  It asks an AI agent, Claude (or, with `--codex`, Codex), to
+  resolve the conflicts that remain.  The agent
   examines every change of both sides of the merge and combines them; it
   can edit any part of any file, and it can delete files but not create
   them.  The script checks every resolution and lists, for your review, the
