@@ -430,6 +430,10 @@ fi
 ##  * 12 starts from main, merges 11, removes c.txt, which reverts 11's change,
 ##    and adds its own h.txt.  So 12 does not contain 11, although 12's h.txt
 ##    differs from main's.
+##  * 13 starts from main, adds e.txt, and then removes it.  So 13 changes
+##    nothing.
+##  * 14 starts from main, merges 13, and adds its own e.txt.  So 14 does not
+##    contain 13, because 13 changes nothing.
 git -C "${seed}" checkout -q --detach main
 printf '%s\n' eleven > "${seed}/c.txt"
 printf '%s\n' eleven > "${seed}/h.txt"
@@ -446,8 +450,16 @@ printf '%s\n' twelve > "${seed}/h.txt"
 git -C "${seed}" add h.txt
 git -C "${seed}" commit -q -m "PR 12"
 git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/12/head
+commit_pr 13 main e.txt thirteen
+git -C "${seed}" rm -q e.txt
+git -C "${seed}" commit -q -m "PR 13: move e.txt to another PR"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/13/head
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 14: merge PR 13" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/13/head)"
+commit_pr 14 HEAD e.txt fourteen
 git -C "${seed}" checkout -q main
-prs='11 12'
+prs='11 12 13 14'
 : > "${cache}"
 analyze '' --prune
 expected_undone="## master conflicts
@@ -455,6 +467,56 @@ expected_undone="## master conflicts
 ## pairwise conflicts"
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_undone}" ]; then
   fail "undone own change: expected [${expected_undone}], got [${analysis_output}]"
+fi
+
+## A stacked PR's changes are those that its own commits still make, compared
+## with the PR that it is stacked on, not with main.
+##  * 15 starts from main and adds s.txt.
+##  * 16 is stacked on 15:  it changes s.txt, adds t.txt, and then restores
+##    15's s.txt.  So 16 changes only t.txt, although its s.txt differs from
+##    main's.
+##  * 17 starts from main, merges 16, and removes t.txt, which reverts 16's
+##    change.  So 17 contains 15 but not 16.
+##  * 18 is stacked on 15:  it removes s.txt, which reverts 15's change.  So 18
+##    changes s.txt, although its s.txt is the same as main's.  18 does not
+##    contain 15.
+##  * 19 starts from main, merges 18, and changes s.txt further.  So 19
+##    contains 15 and 18.
+commit_pr 15 main s.txt fifteen
+pr15="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/15/head)"
+commit_pr 16 "${pr15}" s.txt sixteen
+printf '%s\n' sixteen > "${seed}/t.txt"
+printf '%s\n' fifteen > "${seed}/s.txt"
+git -C "${seed}" add s.txt t.txt
+git -C "${seed}" commit -q -m "PR 16: restore s.txt"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/16/head
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 17: merge PR 16" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/16/head)"
+git -C "${seed}" rm -q t.txt
+git -C "${seed}" commit -q -m "PR 17"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/17/head
+git -C "${seed}" checkout -q --detach "${pr15}"
+git -C "${seed}" rm -q s.txt
+git -C "${seed}" commit -q -m "PR 18"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/18/head
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 19: merge PR 18" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/18/head)"
+commit_pr 19 HEAD s.txt nineteen
+git -C "${seed}" checkout -q main
+prs='15 16 17 18 19'
+: > "${cache}"
+analyze '' --prune
+expected_stacked_undone="## master conflicts
+## containment (A contains all non-merge commits of B, and B's changes)
+16 contains 15
+17 contains 15
+19 contains 15
+19 contains 18
+## pairwise conflicts"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_stacked_undone}" ]; then
+  fail "stacked undone own change: expected [${expected_stacked_undone}], got [${analysis_output}]"
 fi
 prs='1 2 3 4'
 
