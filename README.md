@@ -168,8 +168,9 @@ The commands are:
   `[--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]`:
   For the given open pull requests of the GitHub repository OWNER/REPO (by
   default, all of them), reports which ones conflict with the default
-  branch, which ones contain every non-merge commit of another, and (unless
-  `--no-pairwise`) which pairs conflict with each other.  It fetches the
+  branch, which ones contain every non-merge commit of another and the
+  other's changes, and (unless `--no-pairwise`) which pairs conflict with
+  each other.  It fetches the
   pull requests into `REPO_DIR`, a clone of the repository, and caches its
   results in the current directory.  When the run covers every open pull
   request (no PR number is given, or `--prune` says that the given ones are

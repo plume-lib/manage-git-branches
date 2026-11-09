@@ -23,12 +23,15 @@ Each run:
   * runs pr-merge-analysis (cached) on them, for each repository,
   * computes the dependencies:  a PR depends on another if its description says
     so, if its base branch is the other PR's branch, if its branch contains all of the
-    other PR's non-merge commits, or if the config says so; a PR whose base branch is
-    another PR's branch, but whose description says to land before it (or whose base
-    PR's description says to land after it), is a fix to that PR, which lands into that
-    PR's branch first, although its branch is updated from that PR's branch; PRs that land
-    together (possibly in different repositories) are one unit, whose members depend on
-    each other's prerequisites but not on each other,
+    other PR's non-merge commits and their changes (a branch lacks the changes if it leaves
+    unchanged every file that the other PR's own commits change, as when it merged the
+    other PR's branch and then reverted them; a PR's own commits exclude those of a PR that
+    it builds on), or if the config says so; a PR whose base branch is another PR's branch,
+    but whose description says to land before it (or whose base PR's description says to
+    land after it), is a fix to that PR, which lands into that PR's branch first, although
+    its branch is updated from that PR's branch; PRs that land together (possibly in
+    different repositories) are one unit, whose members depend on each other's
+    prerequisites but not on each other,
   * warns about each cycle of dependencies, and omits from the generated push commands
     the PRs whose branches are updated in a cycle and the PRs whose branches are updated
     from theirs,
@@ -160,7 +163,7 @@ class Repo:
         self.show_author = cfg.get("show_author", False)
         self.prs: dict[int, dict[str, Any]] = {}  # number -> gh JSON
         self.master_conflicts: dict[int, list[str]] = {}  # number -> list of files
-        # (a, b): a contains all non-merge commits of b
+        # (a, b): a contains all non-merge commits of b, and b's changes
         self.contains: set[tuple[int, int]] = set()
         self.pair_conflicts: dict[tuple[int, int], list[str]] = {}  # (a, b) with a < b -> files
         # number -> "landed" | "closed" | None (not a PR)
@@ -2891,7 +2894,10 @@ def dependency_document(
         (
             'A PR depends on another PR if its description says so (for example, "Land after #N"),'
             " if its base branch is the other PR's branch,"
-            " if its branch contains all of the other PR's non-merge commits,"
+            " if its branch contains all of the other PR's non-merge commits and their changes"
+            " (a branch lacks the changes if it leaves unchanged every file that the other PR's"
+            " own commits change, as when it merged the other PR's branch and then reverted"
+            " them; a PR's own commits exclude those of a PR that it builds on),"
             f" or if `{CONFIG}` says so."
             ' PRs that land together, as "Land with #N" says, are one unit,'
             " which may span repositories:  each member depends on every prerequisite of every"

@@ -213,8 +213,12 @@ of the repository; an entry for a PR that is not open is ignored.
     decision", which gives the reason or, if there is none, lists the
     excluded PRs that are open.
 * `"not_prerequisites"`:  a list of PR numbers.  A PR whose branch contains
-  all of the non-merge commits of one of these PRs does not depend on it
-  for that reason.  (A PR can still depend on it for another reason, such as
+  all of the non-merge commits of one of these PRs, and their changes, does
+  not depend on it for that reason.  (A branch that leaves unchanged every
+  file that a PR's own commits change, as when the branch merged the PR's
+  branch and then reverted the PR's changes, does not depend on that PR even
+  without this setting.  A PR's own commits exclude those of a PR that it
+  builds on.)  (A PR can still depend on it for another reason, such as
   its description.)  This is useful for a PR whose commits other PRs
   include but that will not land first.
 * `"extra_dependencies"`:  a list of pairs of PR numbers, such as

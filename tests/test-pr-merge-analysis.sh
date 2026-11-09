@@ -37,17 +37,17 @@ fail() {
   exit 1
 }
 
-# `pr-merge-analysis` needs Bash 4 or later as the first "bash" on the PATH.
+# `pr-merge-analysis` needs Bash 4.4 or later as the first "bash" on the PATH.
 # With an older Bash, check only that it says so.
-if [ "$(bash -c 'echo "${BASH_VERSINFO[0]}"')" -lt 4 ]; then
+if [ "$(bash -c 'echo $((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1]))')" -lt 404 ]; then
   if output="$("${ANALYSIS}" dir owner/repo 1 2>&1)"; then
     fail "old Bash: pr-merge-analysis succeeded"
   fi
   case "${output}" in
-    *"needs Bash 4 or later"*) ;;
+    *"needs Bash 4.4 or later"*) ;;
     *) fail "old Bash: wrong diagnostic: ${output}" ;;
   esac
-  echo "${SCRIPT_NAME}: Bash is older than 4, so only the version check was tested"
+  echo "${SCRIPT_NAME}: Bash is older than 4.4, so only the version check was tested"
   exit 0
 fi
 
@@ -127,7 +127,7 @@ cache="${run_dir}/.pr-merge-analysis-cache.tsv"
 
 expected='## master conflicts
 4: m.txt
-## containment (A contains all non-merge commits of B)
+## containment (A contains all non-merge commits of B, and B'"'"'s changes)
 3 contains 1
 ## pairwise conflicts
 1 vs 2: f.txt
@@ -339,9 +339,90 @@ analyze rev-list --prune
 if [ "${analysis_status}" -eq 0 ]; then
   fail "rev-list failure: pr-merge-analysis succeeded: ${analysis_output}"
 fi
-if grep -q '	contains	' "${cache}"; then
+if grep -q '	contains	\|	changes	' "${cache}"; then
   fail "rev-list failure: cached a containment result: $(cat "${cache}")"
 fi
+
+## A PR whose branch contains another PR's commits but not its changes does not
+## contain the other PR.  PR 5 is PR 1 plus a commit that reverts PR 1's
+## change, as when a branch merges another PR's branch and then removes that
+## PR's changes.  PR 6 is PR 1 plus a commit that changes PR 1's file further,
+## so it might build on PR 1's change, and it contains PR 1.
+pr1="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/1/head)"
+commit_pr 5 "${pr1}" f.txt base
+commit_pr 6 "${pr1}" f.txt six
+prs='1 5 6'
+: > "${cache}"
+analyze '' --prune
+expected_reverted="## master conflicts
+## containment (A contains all non-merge commits of B, and B's changes)
+6 contains 1
+## pairwise conflicts
+5 vs 6: f.txt"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_reverted}" ]; then
+  fail "reverted changes: expected [${expected_reverted}], got [${analysis_output}]"
+fi
+## The second run uses the cache, and gives the same report.
+analyze rev-list --prune
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_reverted}" ]; then
+  fail "reverted changes: the second run did not use the cache: ${analysis_output}"
+fi
+
+## A PR's changes are those of its own commits, not those of a PR that its
+## branch was created from.  The PRs merge whole branches, and their merge
+## bases with main differ, so that a comparison with main would differ from a
+## comparison with a merge base.
+##  * 7 is stacked on 1:  it is 1 plus a commit that adds b.txt.
+##  * 8 starts from main, merges 7, and deletes b.txt, which reverts 7's own
+##    change but keeps 1's.  So 8 contains 1 but not 7.
+##  * 9 starts from main and merges 7.  So 9 contains 1 and 7.  Its non-merge
+##    commits are the same as 7's, so 7 also contains 9, and 9's commits do not
+##    make 7's own commits empty.
+##  * 10 starts from the initial commit, merges 4, which changes m.txt, and
+##    restores m.txt.  So 10 does not contain 4, although 10's m.txt differs
+##    from main's.
+commit_pr 7 "${pr1}" b.txt seven
+pr7="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/7/head)"
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 8: merge PR 7" "${pr7}"
+git -C "${seed}" rm -q b.txt
+git -C "${seed}" commit -q -m "PR 8"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/8/head
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 9: merge PR 7" "${pr7}"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/9/head
+git -C "${seed}" checkout -q --detach main~1
+git -C "${seed}" merge -q --no-ff -m "PR 10: merge PR 4" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/4/head)"
+commit_pr 10 HEAD m.txt base
+git -C "${seed}" checkout -q main
+prs='1 4 7 8 9 10'
+: > "${cache}"
+analyze '' --prune
+expected_stacked="## master conflicts
+4: m.txt
+## containment (A contains all non-merge commits of B, and B's changes)
+7 contains 1
+7 contains 9
+8 contains 1
+9 contains 1
+9 contains 7
+## pairwise conflicts
+4 vs 8: m.txt
+4 vs 9: m.txt"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_stacked}" ]; then
+  fail "stacked PRs: expected [${expected_stacked}], got [${analysis_output}]"
+fi
+## Pruning keeps the cached results for the current commits.
+if ! grep -q '	changes	' "${cache}"; then
+  fail "stacked PRs: pruning removed the cached changes results: $(cat "${cache}")"
+fi
+## The second run uses the cache, and gives the same report.
+analyze rev-list --prune
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_stacked}" ]; then
+  fail "stacked PRs: the second run did not use the cache: ${analysis_output}"
+fi
+prs='1 2 3 4'
 
 ## No run leaves a temporary file behind.
 leftovers="$(find "${run_dir}" -name '.pr-merge-analysis-cache.tsv.*')"
