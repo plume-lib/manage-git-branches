@@ -3947,9 +3947,13 @@ fork_url() {
 ## the same owner of repositories.  GitHub ignores the case of an owner's
 ## name.
 same_owner() {
-  [ -n "$1" ] \
-    && [ "$(printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]')" \
-      = "$(printf '%s\n' "$2" | tr '[:upper:]' '[:lower:]')" ]
+  [ -n "$1" ] && [ "$(lowercase "$1")" = "$(lowercase "$2")" ]
+}
+
+## Usage: lowercase STRING
+## Prints STRING in lower case, such as "typetools/jdk" for "TypeTools/JDK".
+lowercase() {
+  printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 ## Usage: is_working_tree_top DIRECTORY
