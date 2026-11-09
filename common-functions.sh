@@ -1077,11 +1077,11 @@ resolve_merge_conflicts() {
         printf 'separator %s\n' "${resolve_file}"
       fi
       if check_conflict_resolution "${resolve_file}" "${resolve_contains_separator}" 2> /dev/null; then
-        # A side's version that an earlier run took before it stopped can
-        # pass the check, as when the side's version also has the other
-        # side's changes outside the conflict regions.  It is taken again,
-        # rather than taken for a resolution by `git rerere`.  The hashes are
-        # compared first, because they are cheaper to compute.
+        # The version of a side that an earlier run took before it stopped
+        # can pass the check, as when the version of the side also has the
+        # changes of the other side outside the conflict regions.  It is
+        # taken again, rather than taken for a resolution by `git rerere`.
+        # The hashes are compared first, because they are cheaper to compute.
         resolve_hash="$(git hash-object -- "${resolve_file}")"
         if { [ "${resolve_hash}" = "$(git rev-parse --verify --quiet ":2:${resolve_file}")" ] \
           || [ "${resolve_hash}" = "$(git rev-parse --verify --quiet ":3:${resolve_file}")" ]; } \
@@ -1091,9 +1091,9 @@ resolve_merge_conflicts() {
         fi
         continue
       fi
-      # The version of a side that already contains the other side's changes
-      # to the file needs no agent's judgment.  It replaces an unacceptable
-      # resolution by `git rerere` too.
+      # The version of a side that already contains the changes of the other
+      # side to the file needs no judgment by an agent.  It replaces an
+      # unacceptable resolution by `git rerere` too.
       if resolve_take="$(side_containing_other "${resolve_file}" "${resolve_bases}")"; then
         printf 'take %s %s\n' "${resolve_take}" "${resolve_file}"
         continue
