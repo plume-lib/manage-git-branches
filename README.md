@@ -137,9 +137,12 @@ The commands are:
   Merges the default branch of the remote `upstream` (or `origin`, if there
   is no `upstream`, or the only remote, if there is neither) into the current
   branch, compiles, then pushes the current branch if compilation succeeds.
+  It chooses the upstream repository as `git-diff-upstream` does, so in a
+  GitHub fork that a user owns, it can merge from the fork's parent.
 
   It does not push a branch whose push destination is the default branch of
-  the upstream repository, nor, in a fork, any branch of `upstream`.
+  the upstream repository, nor, in a fork, any branch of the upstream
+  repository.
   Unlike `git-pull-from`, it needs no working tree for the default branch.
   It handles conflicts and a failed build as `git-push-to` does.
 * [`pr-status`](pr-status)
@@ -292,8 +295,9 @@ The commands are:
   the only remote, if there is neither), then shows the differences between
   its default branch and the working tree, ignoring changes in the amount of
   whitespace and using the patience diff algorithm.
-  If there is no `upstream` and the remote is a GitHub fork, it uses the
-  fork's parent instead, adding a remote `upstream` for the parent if needed.
+  If there is no `upstream` and the remote is a GitHub fork that a user (not
+  an organization) owns, it uses the fork's parent instead, without adding a
+  remote.
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
 * [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:  Cancels certain

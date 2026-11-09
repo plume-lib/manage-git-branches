@@ -876,6 +876,132 @@ upstream_default_branch_git() {
   fi
 }
 
+## Usage: find_upstream_ref FETCH
+## Sets ${upstream_ref} to the full name of the ref for the default branch of
+## the upstream repository of the clone in the current directory, such as
+## `refs/remotes/upstream/master`.  Sets ${upstream_source} to the name of the
+## remote that the ref belongs to, such as "upstream", or to the URL that the
+## ref was fetched from.  Sets ${upstream_is_parent} to 1 if the upstream
+## repository is a fork's upstream repository, as described below, and to 0
+## otherwise.
+##
+## The upstream repository is the remote that `upstream_remote` chooses, with
+## one exception.  If that remote is not named "upstream", and
+## `fork_upstream` says that the GitHub repository at the remote's URL, such
+## as ME/PROJ, has another upstream repository, such as ORG/PROJ, then the
+## upstream repository is ORG/PROJ.  That is the clone's remote whose URL
+## names ORG/PROJ, if there is one, and otherwise the repository at the URL
+## that has the same form as the remote's, such as
+## "git@github.com:ORG/PROJ.git" for "git@github.com:ME/PROJ.git".  The
+## default branch at such a URL is fetched into the ref
+## `refs/fork-upstream/ORG/PROJ`, in lower case, rather than into a
+## remote-tracking branch, so the clone gains no remote.
+##
+## FETCH is as for `upstream_default_branch`.  If FETCH is 0, such a URL is
+## not fetched, and the ref that an earlier call fetched it into is used.  If
+## the URL cannot be fetched, or FETCH is 0 and no earlier call fetched it,
+## prints a diagnostic and uses the remote that `upstream_remote` chooses.
+## Returns 1, after printing a diagnostic, on failure.
+# shellcheck disable=SC2034 # set for the caller
+find_upstream_ref() {
+  upstream_is_parent=0
+  if ! upstream_source="$(upstream_remote)"; then
+    return 1
+  fi
+  # A remote named "upstream" is the upstream repository by the clone's own
+  # configuration, even if it is a fork.
+  if [ "${upstream_source}" != upstream ]; then
+    # `git remote get-url` applies `url.BASE.insteadOf`, which can map a
+    # GitHub URL to a mirror or a local copy; the configured URL still names
+    # GitHub.
+    fur_url="$(git config --get "remote.${upstream_source}.url")"
+    fur_fork="$(github_slug "${fur_url}")"
+    if [ -n "${fur_fork}" ] \
+      && fur_parent="$(fork_upstream "${fur_fork}" "$1")" \
+      && [ -n "${fur_parent}" ]; then
+      # GitHub ignores the case of a repository's name, so a remote's URL
+      # might spell it differently than the recorded upstream repository does.
+      fur_parent_lower="$(lowercase "${fur_parent}")"
+      for fur_remote in $(git remote); do
+        if [ "$(lowercase "$(github_slug "$(git config --get "remote.${fur_remote}.url")")")" \
+          = "${fur_parent_lower}" ]; then
+          upstream_ref="$(upstream_default_branch "${fur_remote}" "$1")" || return 1
+          upstream_source="${fur_remote}"
+          upstream_is_parent=1
+          return 0
+        fi
+      done
+      # `github_slug` recognized ${fur_url}, so it has an owner.
+      split_repository_url "${fur_url}"
+      case "${repo_url_repo}" in
+        *.git) fur_suffix='.git' ;;
+        *) fur_suffix='' ;;
+      esac
+      fur_parent_url="${repo_url_prefix}${fur_parent}${fur_suffix}"
+      fur_ref="refs/fork-upstream/${fur_parent_lower}"
+      if [ "$1" -eq 1 ]; then
+        if git fetch --quiet "${fur_parent_url}" "+HEAD:${fur_ref}"; then
+          upstream_ref="${fur_ref}"
+          upstream_source="${fur_parent_url}"
+          upstream_is_parent=1
+          return 0
+        fi
+        echo "${SCRIPT_NAME}: cannot fetch ${fur_parent_url}, the upstream repository of ${fur_fork}; using ${upstream_source} instead" >&2
+      elif git rev-parse --verify --quiet "${fur_ref}" > /dev/null; then
+        upstream_ref="${fur_ref}"
+        upstream_source="${fur_parent_url}"
+        upstream_is_parent=1
+        return 0
+      else
+        echo "${SCRIPT_NAME}: ${fur_parent_url}, the upstream repository of ${fur_fork}, has not been fetched; using ${upstream_source} instead" >&2
+      fi
+    fi
+  fi
+  upstream_ref="$(upstream_default_branch "${upstream_source}" "$1")"
+}
+
+## Usage: fork_upstream FORK FETCH
+## Prints the GitHub slug, such as "ORG/PROJ", of the upstream repository of
+## FORK, a GitHub repository's slug such as "ME/PROJ", or prints nothing if
+## FORK is its own upstream repository.  A fork that a user owns, such as
+## ME/PROJ, holds pull requests for its parent, such as ORG/PROJ, which is its
+## upstream repository.  A repository that is not a fork is its own upstream
+## repository.  So is a fork that an organization owns, such as typetools/jdk
+## (a fork of openjdk/jdk):  it is a downstream fork that carries its own
+## changes, and its pull requests target it, not its parent.
+##
+## The answer is recorded in the git configuration variable
+## `github-fork.FORK.upstream`, with FORK in lower case, such as
+## `github-fork.me/proj.upstream`, as a GitHub slug or as "none".  If that
+## variable is set, by an earlier call or by hand to override this function's
+## choice, prints its value (nothing for "none").  Otherwise, if FETCH is 1
+## and `gh` is installed, asks GitHub and records the answer.  If GitHub
+## cannot be asked, prints a diagnostic, records nothing, and prints nothing.
+fork_upstream() {
+  fork_upstream_key="github-fork.$(lowercase "$1").upstream"
+  if fork_upstream_value="$(git config --get "${fork_upstream_key}")"; then
+    if [ "${fork_upstream_value}" != none ]; then
+      printf '%s\n' "${fork_upstream_value}"
+    fi
+    return 0
+  fi
+  if [ "$2" -ne 1 ] || ! command -v gh > /dev/null 2>&1; then
+    return 0
+  fi
+  # The repository is named with its host, so that `gh` does not ask the host
+  # that ${GH_HOST} names instead.
+  if ! fork_upstream_value="$(gh_query "cannot determine whether $1 is a fork" \
+    gh repo view "github.com/$1" --json isInOrganization,parent \
+    --jq 'if .isInOrganization then empty else (.parent // empty | "\(.owner.login)/\(.name)") end')"; then
+    echo "${SCRIPT_NAME}: to compare with $1 without asking GitHub again, run:  git config ${fork_upstream_key} none" >&2
+    return 0
+  fi
+  git config "${fork_upstream_key}" "${fork_upstream_value:-none}"
+  if [ -n "${fork_upstream_value}" ]; then
+    printf '%s\n' "${fork_upstream_value}"
+  fi
+}
+
 ## Usage: check_conflict_resolution FILE CONTAINS_SEPARATOR
 ## Checks the resolution of the conflicts in FILE against AUTO_MERGE, the git
 ## ref that names git's automatic merge, which contains the conflict markers:
@@ -3947,9 +4073,13 @@ fork_url() {
 ## the same owner of repositories.  GitHub ignores the case of an owner's
 ## name.
 same_owner() {
-  [ -n "$1" ] \
-    && [ "$(printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]')" \
-      = "$(printf '%s\n' "$2" | tr '[:upper:]' '[:lower:]')" ]
+  [ -n "$1" ] && [ "$(lowercase "$1")" = "$(lowercase "$2")" ]
+}
+
+## Usage: lowercase STRING
+## Prints STRING in lower case, such as "typetools/jdk" for "TypeTools/JDK".
+lowercase() {
+  printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 ## Usage: is_working_tree_top DIRECTORY

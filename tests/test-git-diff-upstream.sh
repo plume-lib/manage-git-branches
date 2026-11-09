@@ -142,7 +142,8 @@ fi
 # A clone of a GitHub fork, me/proj, of someone/proj.  A fake `gh` stands in
 # for GitHub:  `gh repo view` prints the parent of me/proj, someone/proj, and
 # nothing for any other repository, as the real `gh` does with this command's
-# `--jq` filter for a repository that is not a fork.  Each call's arguments
+# `--jq` filter for a repository that is not a fork or that an organization
+# owns.  Each call's arguments
 # are appended to ${testdir}/gh.log.  `url.BASE.insteadOf` maps each GitHub
 # URL to a local repository, so the test needs no network.
 mkdir -p "${testdir}/bin"
@@ -194,24 +195,57 @@ if [ -s "${testdir}/gh.log" ]; then
   fail "fork, --no-fetch: ran gh $(cat "${testdir}/gh.log")"
 fi
 
-# Otherwise, this command adds a remote `upstream` for the parent and diffs
-# from the parent's default branch.
+# Usage: expect_no_upstream_remote DESCRIPTION
+# Checks that ${fork} has no remote named `upstream`.
+expect_no_upstream_remote() {
+  if git -C "${fork}" config --get remote.upstream.url > /dev/null; then
+    fail "$1: added remote upstream"
+  fi
+}
+
+# Usage: expect_recorded DESCRIPTION SLUG EXPECTED
+# Checks that ${fork} records EXPECTED as the upstream repository of SLUG.
+expect_recorded() {
+  recorded="$(git -C "${fork}" config --get "github-fork.$2.upstream")"
+  if [ "${recorded}" != "$3" ]; then
+    fail "$1: recorded [${recorded}] as the upstream repository of $2, expected [$3]"
+  fi
+}
+
+# Otherwise, this command fetches the parent's default branch from a URL of
+# the fork's form, diffs from it, adds no remote, and records the parent.
 make_fork_clone "${testdir}/gh-clone"
 expect_files 'fork' 'a.txt' --name-only
-upstream_url="$(git -C "${fork}" config --get remote.upstream.url)"
-if [ "${upstream_url}" != 'https://github.com/someone/proj.git' ]; then
-  fail "fork: remote upstream has URL [${upstream_url}]"
+expect_no_upstream_remote 'fork'
+expect_recorded 'fork' me/proj someone/proj
+if ! git -C "${fork}" rev-parse --verify --quiet refs/fork-upstream/someone/proj > /dev/null; then
+  fail 'fork: did not fetch into refs/fork-upstream/someone/proj'
 fi
 
+# Later runs use the recorded parent and do not ask GitHub again.  With
+# `--no-fetch`, they use what the first run fetched.
+: > "${testdir}/gh.log"
+expect_files 'fork, second run' 'a.txt' --name-only
+expect_files 'fork, second run, --no-fetch' 'a.txt' --no-fetch --name-only
+if [ -s "${testdir}/gh.log" ]; then
+  fail "fork, second run: ran gh $(cat "${testdir}/gh.log")"
+fi
+
+# A recorded "none" makes this command diff from the fork.
+git -C "${fork}" config github-fork.me/proj.upstream none
+expect_files 'fork, recorded none' 'a.txt
+e.txt' --name-only
+
 # A remote for the parent of another name, whose URL spells the parent's name
-# in another case, is used, and no remote is added.
+# in another case, is used, and nothing is fetched into refs/fork-upstream.
 make_fork_clone "${testdir}/gh-clone-other-remote"
 git -C "${fork}" remote add canonical 'https://github.com/someone/proj.git'
 git -C "${fork}" config remote.canonical.url 'https://github.com/SomeOne/proj.git'
 git config --global --add "url.${gh_parent}.insteadOf" 'https://github.com/SomeOne/proj.git'
 expect_files 'fork with a remote for the parent' 'a.txt' --name-only
-if git -C "${fork}" config --get remote.upstream.url > /dev/null; then
-  fail 'fork with a remote for the parent: added remote upstream'
+expect_no_upstream_remote 'fork with a remote for the parent'
+if [ -n "$(git -C "${fork}" for-each-ref refs/fork-upstream)" ]; then
+  fail 'fork with a remote for the parent: fetched into refs/fork-upstream'
 fi
 git config --global --unset "url.${gh_parent}.insteadOf" 'https://github.com/SomeOne/proj.git'
 
@@ -221,9 +255,8 @@ git clone -q 'https://github.com/someone/proj.git' "${fork}"
 git -C "${fork}" switch -q -c feature
 commit_file "${fork}" a.txt 'a3'
 expect_files 'not a fork' 'a.txt' --name-only
-if git -C "${fork}" config --get remote.upstream.url > /dev/null; then
-  fail 'not a fork: added remote upstream'
-fi
+expect_no_upstream_remote 'not a fork'
+expect_recorded 'not a fork' someone/proj none
 PATH="${saved_path}"
 
 if [ "${failures}" -ne 0 ]; then
