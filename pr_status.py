@@ -24,7 +24,7 @@ Each run:
   * computes the dependencies:  a PR depends on another if its description says
     so, if its base branch is the other PR's branch, if its branch contains all of the
     other PR's non-merge commits and their changes (a branch lacks the changes if it leaves
-    unchanged every file that the other PR's own commits change, as when it merged the
+    unchanged every file that the other PR's own commits still change, as when it merged the
     other PR's branch and then reverted them; a PR's own commits exclude those of a PR that
     it builds on), or if the config says so; a PR whose base branch is another PR's branch,
     but whose description says to land before it (or whose base PR's description says to
@@ -2896,7 +2896,7 @@ def dependency_document(
             " if its base branch is the other PR's branch,"
             " if its branch contains all of the other PR's non-merge commits and their changes"
             " (a branch lacks the changes if it leaves unchanged every file that the other PR's"
-            " own commits change, as when it merged the other PR's branch and then reverted"
+            " own commits still change, as when it merged the other PR's branch and then reverted"
             " them; a PR's own commits exclude those of a PR that it builds on),"
             f" or if `{CONFIG}` says so."
             ' PRs that land together, as "Land with #N" says, are one unit,'

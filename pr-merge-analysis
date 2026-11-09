@@ -30,7 +30,7 @@
 #   OWNER/REPO<TAB>merge<TAB>SHA1<TAB>SHA2<TAB>clean|conflict<TAB>conflicting files
 #     (SHA1 < SHA2, so the order of the two branches does not matter)
 #   OWNER/REPO<TAB>contains<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>yes|no
-#   OWNER/REPO<TAB>changes<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>EXCLUDED<TAB>yes|no
+#   OWNER/REPO<TAB>net-changes<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>EXCLUDED<TAB>yes|no
 #     (EXCLUDED is the comma-separated heads of the PRs whose commits are not
 #     among B_SHA's own commits, as own_commits_excluded sets it)
 #
@@ -182,7 +182,7 @@ MSHA=$("${G[@]}" rev-parse refs/remotes/csm/master) || exit 1
 # Matches a commit's object ID, which is a SHA-1 or SHA-256 hash in hexadecimal.
 OID_RE='^[0-9a-f]{40}([0-9a-f]{24})?$'
 # Matches "-" or a comma-separated list of object IDs, as in the EXCLUDED field
-# of a "changes" cache line.
+# of a "net-changes" cache line.
 EXCLUDED_RE='^(-|[0-9a-f]{40}([0-9a-f]{24})?(,[0-9a-f]{40}([0-9a-f]{24})?)*)$'
 # OWN maps a commit to one of its non-merge commits that is not in master, or to
 # the empty string if it has none.  EXCLUDED maps a commit to the value that
@@ -225,9 +225,9 @@ while IFS=$'\t' read -r _ kind k1 k2 k3 rest; do
   elif [ "$kind" = contains ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE && $k3 =~ $OID_RE ]] \
     && [[ $rest = yes || $rest = no ]]; then
     CACHED["contains $k1 $k2 $k3"]="$rest"
-  elif [ "$kind" = changes ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE && $k3 =~ $OID_RE ]] \
+  elif [ "$kind" = net-changes ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE && $k3 =~ $OID_RE ]] \
     && [[ ${rest%%	*} =~ $EXCLUDED_RE ]] && [[ ${rest#*	} = yes || ${rest#*	} = no ]]; then
-    CACHED["changes $k1 $k2 $k3 ${rest%%	*}"]="${rest#*	}"
+    CACHED["net-changes $k1 $k2 $k3 ${rest%%	*}"]="${rest#*	}"
   fi
 done <<< "$own_lines"
 
@@ -329,8 +329,11 @@ own_commits_excluded() {
 }
 
 # Writes to file "$OWN_FILES_DIR/$1" the names of the files that the own commits
-# of commit $1 change, both sides of a rename included, each followed by a NUL.
-# The names are separated by NUL, because a file name can contain a newline.
+# of commit $1 change, both sides of a rename included, and that differ between
+# $1 and its merge base with master.  Each name is followed by a NUL.  The names
+# are separated by NUL, because a file name can contain a newline.  A file whose
+# changes a later own commit undid, as when they moved to another PR, is not
+# among them.
 own_files() {
   [ ! -e "$OWN_FILES_DIR/$1" ] || return 0
   own_commits_excluded "$1"
@@ -349,7 +352,17 @@ own_files() {
       seen[$x]=1
       printf '%s\0' "$x"
     }
-  done > "$OWN_FILES_DIR/$1"
+  done > "$OWN_FILES_DIR/$1.names"
+  mapfile -d '' names < "$OWN_FILES_DIR/$1.names"
+  merge_base "$1"
+  if [ ${#names[@]} -eq 0 ] || [ -z "${MERGE_BASE[$1]}" ]; then
+    mv "$OWN_FILES_DIR/$1.names" "$OWN_FILES_DIR/$1"
+    return 0
+  fi
+  # --literal-pathspecs, so that a file name is not taken for a glob pattern.
+  "${G[@]}" --literal-pathspecs diff --name-only --no-renames -z "${MERGE_BASE[$1]}" "$1" -- "${names[@]}" \
+    > "$OWN_FILES_DIR/$1.net" || die "git diff ${MERGE_BASE[$1]} $1 failed"
+  mv "$OWN_FILES_DIR/$1.net" "$OWN_FILES_DIR/$1"
 }
 
 # Sets MERGE_BASE[$1] to the merge base of commit $1 with master, or to the
@@ -364,16 +377,17 @@ merge_base() {
 }
 
 # Sets RESULT to "no" if commit $1 lacks commit $2's changes, otherwise to
-# "yes".  $1 lacks $2's changes if each file that the own commits of $2 change
-# (see own_commits_excluded) is the same in $1 as at $1's merge base with
-# master, and there is at least one such file.  For example, $1 lacks $2's
+# "yes".  $1 lacks $2's changes if each file that own_files lists for $2 (a
+# file that the own commits of $2 change, and that $2 still changes) is the
+# same in $1 as at $1's merge base with master, and there is at least one such
+# file.  For example, $1 lacks $2's
 # changes if $1 merged $2 and then reverted $2's changes, so that $1's diff
 # against master contains nothing of $2.  If $1 changes such a file further, $1
 # might build on $2's changes, so $1 is taken to contain them.
 changes_result() {
   own_commits_excluded "$2"
   local excluded=$RESULT
-  local key="changes $MSHA $1 $2 $excluded"
+  local key="net-changes $MSHA $1 $2 $excluded"
   if [ -z "${CACHED[$key]+set}" ]; then
     local ok=yes status
     local -a files
@@ -388,7 +402,7 @@ changes_result() {
       [ $status -eq 1 ] || ok=no
     fi
     CACHED[$key]=$ok
-    printf '%s\tchanges\t%s\t%s\t%s\t%s\t%s\n' "$REPO" "$MSHA" "$1" "$2" "$excluded" "$ok" >> "$CACHE"
+    printf '%s\tnet-changes\t%s\t%s\t%s\t%s\t%s\n' "$REPO" "$MSHA" "$1" "$2" "$excluded" "$ok" >> "$CACHE"
   fi
   RESULT=${CACHED[$key]}
 }
@@ -458,7 +472,7 @@ cp -p "$CACHE" "$NEW_CACHE" || exit 1
           done
         fi
         [ $current = no ] \
-          || printf '%s\tchanges\t%s\t%s\t%s\t%s\t%s\n' "$REPO" "${k[1]}" "${k[2]}" "${k[3]}" "${k[4]}" "${CACHED[$key]}"
+          || printf '%s\tnet-changes\t%s\t%s\t%s\t%s\t%s\n' "$REPO" "${k[1]}" "${k[2]}" "${k[3]}" "${k[4]}" "${CACHED[$key]}"
       fi
     fi
   done

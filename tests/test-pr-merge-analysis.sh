@@ -339,7 +339,7 @@ analyze rev-list --prune
 if [ "${analysis_status}" -eq 0 ]; then
   fail "rev-list failure: pr-merge-analysis succeeded: ${analysis_output}"
 fi
-if grep -q '	contains	\|	changes	' "${cache}"; then
+if grep -q '	contains	\|	net-changes	' "${cache}"; then
   fail "rev-list failure: cached a containment result: $(cat "${cache}")"
 fi
 
@@ -414,13 +414,47 @@ if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_stack
   fail "stacked PRs: expected [${expected_stacked}], got [${analysis_output}]"
 fi
 ## Pruning keeps the cached results for the current commits.
-if ! grep -q '	changes	' "${cache}"; then
+if ! grep -q '	net-changes	' "${cache}"; then
   fail "stacked PRs: pruning removed the cached changes results: $(cat "${cache}")"
 fi
 ## The second run uses the cache, and gives the same report.
 analyze rev-list --prune
 if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_stacked}" ]; then
   fail "stacked PRs: the second run did not use the cache: ${analysis_output}"
+fi
+
+## A PR's changes are those that its own commits still make, not those that a
+## later own commit undid.
+##  * 11 starts from main, adds c.txt and h.txt, and then removes h.txt, as when
+##    a change moves to another PR.  So 11 changes only c.txt.
+##  * 12 starts from main, merges 11, removes c.txt, which reverts 11's change,
+##    and adds its own h.txt.  So 12 does not contain 11, although 12's h.txt
+##    differs from main's.
+git -C "${seed}" checkout -q --detach main
+printf '%s\n' eleven > "${seed}/c.txt"
+printf '%s\n' eleven > "${seed}/h.txt"
+git -C "${seed}" add c.txt h.txt
+git -C "${seed}" commit -q -m "PR 11"
+git -C "${seed}" rm -q h.txt
+git -C "${seed}" commit -q -m "PR 11: move h.txt to another PR"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/11/head
+pr11="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/11/head)"
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 12: merge PR 11" "${pr11}"
+git -C "${seed}" rm -q c.txt
+printf '%s\n' twelve > "${seed}/h.txt"
+git -C "${seed}" add h.txt
+git -C "${seed}" commit -q -m "PR 12"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/12/head
+git -C "${seed}" checkout -q main
+prs='11 12'
+: > "${cache}"
+analyze '' --prune
+expected_undone="## master conflicts
+## containment (A contains all non-merge commits of B, and B's changes)
+## pairwise conflicts"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_undone}" ]; then
+  fail "undone own change: expected [${expected_undone}], got [${analysis_output}]"
 fi
 prs='1 2 3 4'
 
