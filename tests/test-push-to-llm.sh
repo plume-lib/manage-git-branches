@@ -563,6 +563,14 @@ for side_mode in ours theirs; do
   case "${push_output}" in
     *"changed text outside the conflict regions"*) fail "${side_mode}: reported twice: ${push_output}" ;;
   esac
+  # The request for review is also in AGENT-TODO.md, with the command that
+  # continues the session of the agent.
+  side_todo="${feature_dir}/AGENT-TODO.md"
+  if ! grep -q -x "## Review the resolution of file.txt in the merge of .* (git-push-to, .*)" "${side_todo}" 2> /dev/null \
+    || ! grep -q -F "claude resolved file.txt as the version" "${side_todo}" \
+    || ! grep -q '^cd .* && claude --resume ' "${side_todo}"; then
+    fail "${side_mode}: AGENT-TODO.md does not ask for review: $(cat "${side_todo}" 2> /dev/null)"
+  fi
 done
 
 ## So is a resolution that differs from a side's version only in whitespace

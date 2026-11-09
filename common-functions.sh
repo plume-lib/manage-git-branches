@@ -1510,8 +1510,11 @@ prior_resolution_unchanged() {
 ## (see `side_difference`).  Such a resolution keeps none of the changes that
 ## the other side made to the file, including the changes that git merged
 ## cleanly.  It is correct only if every change of the other side is already
-## present in it or is obsolete, which a person should confirm.  Returns 0
-## if it printed a diagnostic, and 1 otherwise.  Only `resolve_with_agent`
+## present in it or is obsolete, which a person should confirm.  The script
+## commits and pushes the resolution anyway, so the diagnostic is also
+## appended to AGENT-TODO.md (see `note_one_sided_resolution`), where the
+## user is less likely to overlook it than in the script's output.  Returns
+## 0 if it printed a diagnostic, and 1 otherwise.  Only `resolve_with_agent`
 ## calls this function, which reads the variables of
 ## `resolve_merge_conflicts` and of `resolve_with_agent`.
 report_one_sided_resolution() {
@@ -1522,16 +1525,50 @@ report_one_sided_resolution() {
     merge_side "${rosr_stage}"
     case "$(side_difference "$1" "${rosr_stage}" "${side_other_stage}")" in
       identical)
-        echo "${SCRIPT_NAME}: ${resolve_with} resolved $1 as the version ${side_place}, which keeps none of the changes of ${side_other_name} to the file; review it" >&2
-        return 0
+        rosr_text="${resolve_with} resolved $1 as the version ${side_place}, which keeps none of the changes of ${side_other_name} to the file"
         ;;
       whitespace)
-        echo "${SCRIPT_NAME}: ${resolve_with} resolved $1 as the version ${side_place}, apart from whitespace and blank lines, which keeps none of the changes of ${side_other_name} to the file; review it" >&2
-        return 0
+        rosr_text="${resolve_with} resolved $1 as the version ${side_place}, apart from whitespace and blank lines, which keeps none of the changes of ${side_other_name} to the file"
+        ;;
+      *)
+        continue
         ;;
     esac
+    echo "${SCRIPT_NAME}: ${rosr_text}; review it" >&2
+    note_one_sided_resolution "$1" "${rosr_text}"
+    return 0
   done
   return 1
+}
+
+## Usage: note_one_sided_resolution FILE TEXT
+## Appends to AGENT-TODO.md (see `append_agent_todo`) an entry that asks the
+## user to review the resolution of FILE, a conflicted file of the merge in
+## progress in the current directory, that is one side's version of FILE.
+## TEXT describes the resolution, as in "claude resolved foo.c as the
+## version on feature, which keeps none of the changes of branch 'main' to
+## the file".  The entry also gives the command that continues the agent's
+## session, with which the user can ask the agent why it resolved FILE that
+## way.  Only `report_one_sided_resolution` calls this function, which reads
+## the variables of `resolve_merge_conflicts`, of `merge_side`, and of
+## `run_agent`.
+note_one_sided_resolution() {
+  nosr_entry="
+## Review the resolution of $1 in the merge of ${resolve_source} (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
+
+In the merge of ${resolve_source} into ${resolve_branch} in $(pwd), $2.  That is correct only if every change of ${side_other_name} to the file is already present in the version that was kept, or is obsolete.  The script does not reject such a resolution, so it can commit and push the merge with it.  If the resolution is wrong, fix it; then delete this entry.
+"
+  if [ -n "${agent_session_ids:-}" ]; then
+    # The most recent session is the one that resolved the conflicts.
+    nosr_entry="${nosr_entry}
+To ask ${resolve_with} about it:
+
+\`\`\`sh
+cd $(shell_word "${agent_session_dir}") && ${agent_session_command} ${agent_session_ids##* }
+\`\`\`
+"
+  fi
+  append_agent_todo "${agent_session_todo:-}" "${nosr_entry}" || true
 }
 
 ## Usage: side_difference FILE STAGE OTHER_STAGE
@@ -2258,10 +2295,10 @@ append_agent_todo() {
         '# AI agent sessions to continue' \
         '' \
         'A script of manage-git-branches, such as `git-push-to`, appends an entry' \
-        'here when an AI agent fails, when the script rejects its work, or when' \
-        "the script leaves a merge in progress.  An entry's command continues the" \
-        "agent's session interactively.  Delete the entry once you have dealt with" \
-        'it.'
+        'here when an AI agent fails, when the script rejects its work, when the' \
+        "script asks you to review the agent's work, or when the script leaves a" \
+        "merge in progress.  An entry's command continues the agent's session" \
+        'interactively.  Delete the entry once you have dealt with it.'
     fi
     printf '%s' "$2"
   } >> "$1"; then

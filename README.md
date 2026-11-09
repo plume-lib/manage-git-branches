@@ -106,12 +106,12 @@ The commands are:
   and the first side did not later change the file back to an earlier
   version, as by a revert, it takes that side's version.  It asks an AI
   agent, Claude (or, with `--codex`, Codex), to resolve the conflicts that
-  remain.  The agent
-  examines every change of both sides of the merge and combines them; it
-  can edit any part of any file, and it can delete files but not create
-  them.  The script checks every resolution and lists, for your review, the
-  changes that the agent made outside the conflict regions, and each
-  resolution by the agent that is one side's version of the file.  The agent's
+  remain.  The agent examines every change of both sides of the merge and
+  combines them; it can edit any part of any file, and it can delete files
+  but not create them.  The script checks every resolution and lists, for
+  your review, the changes that the agent made outside the conflict
+  regions, and each resolution by the agent that is one side's version of
+  the file, which it also notes in the file `AGENT-TODO.md`.  The agent's
   instructions start with the file `merge-conflict-instructions.md`, which
   also suits a merge that you resolve yourself.  If the build
   fails, and TO_DIR's branch has a merge that neither its remote branches
