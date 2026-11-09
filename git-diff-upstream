@@ -44,7 +44,7 @@
 # `refs/fork-upstream/org/proj` (in lower case) and diffs from that ref; it
 # adds no remote.  With `--no-fetch`, this command does not ask GitHub and
 # fetches nothing, but it uses a recorded answer and what an earlier run
-# fetched.
+# fetched.  `git-pull-upstream` chooses the upstream repository the same way.
 #
 # This command first fetches the remote and updates `REMOTE/HEAD` to name the
 # remote's default branch, in case the remote has renamed it.  With

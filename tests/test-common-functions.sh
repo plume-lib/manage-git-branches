@@ -308,6 +308,25 @@ check_url_key 'example.com:8443/org/proj' 'example.com/8443/org/proj'
 # Only a host that ignores the case of its paths has its path in lower case.
 check_url_key 'https://example.com/Org/Proj' 'example.com/Org/Proj'
 
+## Usage: check_fetch_head_location URL EXPECTED
+## Checks that `fetch_head_location` prints EXPECTED for URL.
+check_fetch_head_location() {
+  check_fetch_head_location_actual="$(fetch_head_location "$1")"
+  if [ "${check_fetch_head_location_actual}" != "$2" ]; then
+    fail "fetch_head_location [$1] printed [${check_fetch_head_location_actual}], not [$2]"
+  fi
+}
+
+# A user name and password, trailing slashes, and a trailing ".git" are
+# removed, as `git fetch` removes them.
+check_fetch_head_location 'git@github.com:org/proj.git' 'github.com:org/proj'
+check_fetch_head_location 'https://user:token@github.com/org/proj.git/' 'https://github.com/org/proj'
+check_fetch_head_location 'ssh://git@github.com/org/proj' 'ssh://github.com/org/proj'
+# An "@" after the host is part of the path.
+check_fetch_head_location 'https://github.com/org/a@b.git' 'https://github.com/org/a@b'
+check_fetch_head_location 'github.com:org/a@b' 'github.com:org/a@b'
+check_fetch_head_location '/srv/git/proj.git' '/srv/git/proj'
+
 # A `file://` URL and the pathname of one directory are one repository, but
 # they reach it through different transports, so one answer to
 # `git ls-remote` does not serve both.

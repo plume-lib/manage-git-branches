@@ -945,7 +945,10 @@ upstream_default_branch_git() {
 ## the upstream repository of the clone in the current directory, such as
 ## `refs/remotes/upstream/master`.  Sets ${upstream_source} to the name of the
 ## remote that the ref belongs to, such as "upstream", or to the URL that the
-## ref was fetched from.
+## ref was fetched from.  Sets ${upstream_is_parent} to 1 if the upstream
+## repository is another repository than the remote that `upstream_remote`
+## chooses, such as a fork's upstream repository, as described below, and to
+## 0 otherwise.
 ##
 ## The upstream repository is the remote that `upstream_remote` chooses,
 ## unless that remote is not named "upstream" and one of these names another
@@ -973,6 +976,7 @@ upstream_default_branch_git() {
 ## Returns 1, after printing a diagnostic, on failure.
 # shellcheck disable=SC2034 # set for the caller
 find_upstream_ref() {
+  upstream_is_parent=0
   if ! upstream_source="$(upstream_remote)"; then
     return 1
   fi
@@ -992,7 +996,10 @@ find_upstream_ref() {
     fur_parent=''
     if gh_resolved .; then
       if [ "${gh_resolved_value}" = base ]; then
-        upstream_source="${gh_resolved_remote}"
+        if [ "${gh_resolved_remote}" != "${upstream_source}" ]; then
+          upstream_source="${gh_resolved_remote}"
+          upstream_is_parent=1
+        fi
       else
         fur_parent="${gh_resolved_value}"
       fi
@@ -1010,6 +1017,7 @@ find_upstream_ref() {
       if [ -n "${fur_remote}" ]; then
         upstream_ref="$(upstream_default_branch "${fur_remote}" "$1")" || return 1
         upstream_source="${fur_remote}"
+        upstream_is_parent=1
         return 0
       fi
       if [ -n "${fur_fork}" ]; then
@@ -1027,12 +1035,14 @@ find_upstream_ref() {
           if git fetch --quiet --no-tags "${fur_parent_url}" "+HEAD:${fur_ref}"; then
             upstream_ref="${fur_ref}"
             upstream_source="${fur_parent_url}"
+            upstream_is_parent=1
             return 0
           fi
           echo "${SCRIPT_NAME}: cannot fetch ${fur_parent_url}, the upstream repository of ${fur_fork}; using ${upstream_source} instead" >&2
         elif git rev-parse --verify --quiet "${fur_ref}" > /dev/null; then
           upstream_ref="${fur_ref}"
           upstream_source="${fur_parent_url}"
+          upstream_is_parent=1
           return 0
         else
           echo "${SCRIPT_NAME}: ${fur_parent_url}, the upstream repository of ${fur_fork}, has not been fetched; using ${upstream_source} instead" >&2
@@ -3274,6 +3284,37 @@ source_without_pathname() {
   printf '%s%s\n' "${source_path_description}" "${source_path_path##*/}"
 }
 
+## Usage: fetch_head_location URL
+## Prints URL, a repository's URL, as `git fetch URL` names it in FETCH_HEAD
+## and therefore in a merge message:  without the user name and password
+## that precede an "@", and without trailing slashes and then without a
+## trailing ".git".  For example, prints "github.com:org/proj" for
+## "git@github.com:org/proj.git", and "https://github.com/org/proj" for
+## "https://user:token@github.com/org/proj.git".  Unlike `git fetch`, does
+## not first rewrite URL by `url.BASE.insteadOf`.
+fetch_head_location() {
+  fetch_head_url="$1"
+  # Git removes the text through the first "@", if that "@" is in the part of
+  # the URL that names the host:  after the scheme and before the first "/"
+  # of a URL with a scheme, or before the first ":" of an scp-style URL such
+  # as "git@github.com:org/proj.git".
+  case "${fetch_head_url}" in
+    *://*)
+      fetch_head_rest="${fetch_head_url#*://}"
+      case "${fetch_head_rest%%/*}" in
+        *@*) fetch_head_url="${fetch_head_url%%://*}://${fetch_head_rest#*@}" ;;
+      esac
+      ;;
+    *:*)
+      case "${fetch_head_url%%:*}" in
+        *@*) fetch_head_url="${fetch_head_url#*@}" ;;
+      esac
+      ;;
+  esac
+  fetch_head_url="${fetch_head_url%"${fetch_head_url##*[!/]}"}"
+  printf '%s\n' "${fetch_head_url%.git}"
+}
+
 ## Usage: tracking_branch_of BRANCH URL COMMIT
 ## Prints the remote-tracking branch of the current repository, such as
 ## "origin/feature", that tracks BRANCH of the repository at URL, as
@@ -3661,12 +3702,19 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [BUILT [DIRECTORY]]]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
-## pushes the current branch if the build succeeds.  DESCRIPTION is what
-## `git fmt-merge-msg` says that COMMIT is, such as "branch 'feature'" or
-## "remote-tracking branch 'upstream/master'".  SOURCE names COMMIT in
-## diagnostics.  If the merge has conflicts, `resolve_merge_conflicts`
-## resolves them, asking RESOLVER, if it is given and not empty, about any
-## that `git rerere` did not resolve.  If the build fails,
+## pushes the current branch if the build succeeds.  DESCRIPTION is the
+## source of COMMIT as a line of FETCH_HEAD gives it, which
+## `git fmt-merge-msg` turns into the merge message:  either a description of
+## a ref of the local repository followed by " of .", such as
+## "branch 'feature' of ." or "remote-tracking branch 'upstream/master' of .",
+## for which the message is "Merge branch 'feature' into BRANCH" (the "."
+## keeps git from appending " of LOCATION"); or a repository's location alone,
+## such as "github.com:org/proj", for the head of that repository, for which
+## the message is "Merge github.com:org/proj into BRANCH".  SOURCE names
+## COMMIT in diagnostics.  If the merge has conflicts,
+## `resolve_merge_conflicts` resolves them, asking RESOLVER, if it is given
+## and not empty, about any that `git rerere` did not resolve.  If the build
+## fails,
 ## `fix_failed_build` asks RESOLVER, if it is given and not empty, to fix
 ## it, but only if a merge on the current branch might have broken the
 ## build, as `has_unbuilt_merge` determines.  Its argument is BUILT, a list
@@ -3687,9 +3735,8 @@ merge_build_push() {
   # Let git compose the message, as it does for `git merge`, rather than
   # composing it by hand.  Git then writes the "into BRANCH" suffix, which it
   # omits on the default branch, and the commit summaries that `merge.log`
-  # turns on.  Saying that COMMIT came from ".", the local repository, keeps
-  # git from appending " of SOURCE" to the message.
-  if ! merge_message="$(printf '%s\t\t%s of .\n' "$1" "$2" | fmt_merge_message)"; then
+  # turns on.
+  if ! merge_message="$(printf '%s\t\t%s\n' "$1" "$2" | fmt_merge_message)"; then
     echo "${SCRIPT_NAME}: cannot compose a merge message for $3" >&2
     return 1
   fi
