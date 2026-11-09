@@ -186,6 +186,8 @@ The commands are:
   `pr-status.md`, then runs `git-push-to` on each chain of its section
   "Dependency chains with conflicts",
   with `--claude` (or `--codex`), which asks an AI agent for help.
+  If any chain fails, it ends with a summary of the failed chains, each with
+  the diagnostics of `git-push-to`, which name the merge that failed.
 * [`crreview-resolve-all`](crreview-resolve-all)
   `[--dry-run] [--agent claude|codex] [-C DIR]`:
   Runs

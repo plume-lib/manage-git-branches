@@ -161,10 +161,14 @@ case "${resolve_output}" in
   *"no such directory: no such dir"*"the chain failed: myrepo-branch-main no such dir"*) ;;
   *) fail "several: wrong output for the failed chain: ${resolve_output}" ;;
 esac
-case "${resolve_output}" in
-  *"1 of 2 dependency chains failed"*) ;;
-  *) fail "several: wrong count: ${resolve_output}" ;;
-esac
+expected="$(printf '%s\n' \
+  'resolve-conflicts: 1 of 2 dependency chains failed:' \
+  '* myrepo-branch-main no such dir' \
+  '    git-push-to: no such directory: no such dir' \
+  '    git-push-to: failed to push myrepo-branch-main into no such dir')"
+if [ "$(printf '%s\n' "${resolve_output}" | tail -n 4)" != "${expected}" ]; then
+  fail "several: wrong summary: ${resolve_output}"
+fi
 expected="$(printf '%s\n' one two-feature two-main three)"
 if [ "$(git -C "${case_dir}/myrepo.git" show refs/heads/feature:file.txt)" != "${expected}" ]; then
   fail "several: the chain after the failed one was not pushed"

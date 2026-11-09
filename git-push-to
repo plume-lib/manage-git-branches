@@ -1007,12 +1007,15 @@ git_rebase_onto() {
 
 ## Pushes each given directory into the next one.  Then, if ${rebase} is 1,
 ## rebases each directory's branch, except the first, onto the previous one.
-## Returns 1 at the first failure.
+## Returns 1 at the first failure; when a push fails, it first prints a
+## diagnostic that names the two directories, such as
+## "git-push-to: failed to push myrepo-branch-main into myrepo-branch-feature".
 push_chain() {
   prev=''
   for arg; do
     if [ -n "$prev" ]; then
       if ! git_push_to "$prev" "$arg"; then
+        echo "${SCRIPT_NAME}: failed to push ${prev} into ${arg}" >&2
         return 1
       fi
     fi
