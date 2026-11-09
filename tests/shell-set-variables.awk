@@ -14,14 +14,7 @@
 # here-document, whose lines are data rather than code; this program does not
 # skip them, so it would read them as code.  It prints "<unclosed>" if FILE
 # ends within a quotation, a command substitution, a parameter expansion, an
-# array literal, or a "case" statement.  It prints
-# "<comment-in-substitution> N", as in "<comment-in-substitution> 1050", for
-# each line N of FILE that has a comment, within a "$(...)" command
-# substitution, that begins a quotation or a parenthesis that it does not
-# end, or that ends a parenthesis that it did not begin.  Bash 3.2, which is
-# /bin/sh on macOS, does not recognize a comment within a command
-# substitution, so it reads such a comment as code:  the "'" of "# It's"
-# begins a quotation, and a ")" can end the substitution.
+# array literal, or a "case" statement.
 #
 # It parses FILE as a Bash script if FILE's first line is a "#!" line that
 # names bash, as in "#!/usr/bin/env bash", and as a POSIX shell script
@@ -93,6 +86,22 @@ function word_at(s, p, w,   before, after) {
   after = substr(s, p + length(w), 1)
   return before !~ /[A-Za-z0-9_]/ && after !~ /[A-Za-z0-9_]/
 }
+# True if a "#" at position P of "line" begins a comment within a command
+# substitution:  the "#" begins a word, because it follows the beginning of
+# the line, a blank, or an operator character.  A character that a backslash
+# quotes, as the blank of "\ #" is, or a ")" that ends an expansion, as the
+# one in "$(date)#" does, is part of a word, so a "#" after it continues that
+# word.
+function comment_at(p) {
+  return substr(line, p, 1) == "#" && p != word_joined_at \
+    && (p == 1 || substr(line, p - 1, 1) ~ /[ \t;&|()<>]/)
+}
+# True if a here-document operator, "<<" or "<<-" but not the here-string
+# operator "<<<", begins at position P of "line".
+function heredoc_operator_at(p) {
+  return substr(line, p, 2) == "<<" && substr(line, p + 2, 1) != "<" \
+    && (p == 1 || substr(line, p - 1, 1) != "<")
+}
 # Whether a command may start at the end of W, which is the text of a
 # command substitution so far.  A command starts at the beginning of the
 # substitution, after a character that separates one command from the
@@ -101,28 +110,6 @@ function at_command_in_subst(w) {
   sub(/[ \t]+$/, "", w)
   return w ~ /(\(|;|&|\||\n)$/ \
     || w ~ /(^|[^A-Za-z0-9_])(!|do|elif|else|if|then|until|while)$/
-}
-# True if T, the text of a comment within a command substitution, begins a
-# quotation or a parenthesis that it does not end, or ends a parenthesis
-# that it did not begin, if it is read as code, as bash 3.2 reads it.
-function misread_comment(t,   i, ch, quote, parens) {
-  quote = ""
-  parens = 0
-  for (i = 1; i <= length(t); i++) {
-    ch = substr(t, i, 1)
-    if (quote != "") {
-      if (ch == quote) { quote = "" } else if (ch == "\\" && quote != "'") { i++ }
-    } else if (ch == "\\") {
-      i++
-    } else if (ch == "'" || ch == "\"" || ch == "`") {
-      quote = ch
-    } else if (ch == "(") {
-      parens++
-    } else if (ch == ")" && --parens < 0) {
-      return 1
-    }
-  }
-  return quote != "" || parens != 0
 }
 # Reports that the current logical line contains a here-document.  This
 # awk program does not skip the lines of a here-document, so it would read
@@ -286,6 +273,9 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
   len = length(line)
   pos = 1
   continued = 0
+  # The position of a character that continues the word before it, as
+  # "comment_at" describes, or 0 if there is none.
+  word_joined_at = 0
   while (pos <= len) {
     c = substr(line, pos, 1)
     if (context() == "single") {
@@ -301,6 +291,22 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
       if (pos == len) { continued = 1; pos++; continue }
       add_word(c substr(line, pos + 1, 1))
       pos += 2
+      word_joined_at = pos
+      continue
+    }
+    if (context() == "backtick") {
+      # A command substitution in the older form ends at the next backtick
+      # that a backslash does not quote.  A quotation mark or a comment
+      # within it, as in "# it's", does not affect where it ends.
+      if (c == "`") {
+        pop_context()
+      } else if (heredoc_operator_at(pos)) {
+        # A command substitution becomes part of a word, so a here-document
+        # operator within one is not a token that "is_heredoc" can find.
+        heredoc_in_substitution = 1
+      }
+      add_word(c)
+      pos++
       continue
     }
     if (c == "$" && substr(line, pos + 1, 1) == "$") {
@@ -331,10 +337,9 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
       continue
     }
     if (c == "`") {
-      # A command substitution in the older form.  Quoting starts afresh
-      # within it, even within double quotation marks, and one backtick
-      # ends what another began.
-      if (context() == "backtick") pop_context(); else push_context("backtick")
+      # A command substitution in the older form, which can begin even
+      # within double quotation marks.
+      push_context("backtick")
       add_word(c)
       pos++
       continue
@@ -364,7 +369,13 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
       if (c == "(") { arith_parens[depth]++; add_word(c); pos++; continue }
       if (c == ")") {
         if (arith_parens[depth] > 1) { arith_parens[depth]--; add_word(c); pos++; continue }
-        if (substr(line, pos + 1, 1) == ")") { pop_context(); add_word("))"); pos += 2; continue }
+        if (substr(line, pos + 1, 1) == ")") {
+          pop_context()
+          add_word("))")
+          pos += 2
+          word_joined_at = pos
+          continue
+        }
         # Not the "))" that ends an arithmetic expansion, so the "$((" was
         # a command substitution that begins with a subshell, as in
         # "$((cd dir; pwd) | cat)".  This ")" ends the subshell, and the
@@ -395,23 +406,13 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
     # Within a parameter expansion, every other character is part of the
     # word.
     if (context() == "param") { add_word(c); pos++; continue }
-    if (context() == "subst" || context() == "backtick") {
+    if (context() == "subst") {
       # A command substitution becomes part of a word, so a here-document
       # operator within one is not a token that "is_heredoc" can find.
-      # Note it here instead.  A here-string, "<<<", supplies its data on
-      # the same line, so it is not one.
-      if (c == "<" && substr(line, pos + 1, 1) == "<" \
-          && substr(line, pos + 2, 1) != "<" \
-          && (pos == 1 || substr(line, pos - 1, 1) != "<")) {
-        heredoc_in_substitution = 1
-      }
-    }
-    if (context() == "subst") {
-      # A "#" that begins a word begins a comment, which ends the line.
-      if (c == "#" && (pos == 1 || substr(line, pos - 1, 1) ~ /[ \t;&|()]/)) {
-        if (misread_comment(substr(line, pos))) { print "<comment-in-substitution> " FNR }
-        break
-      }
+      # Note it here instead.
+      if (heredoc_operator_at(pos)) { heredoc_in_substitution = 1 }
+      # A comment extends to the end of the line.
+      if (comment_at(pos)) { break }
       # A "case" statement within a command substitution ends each of its
       # patterns with ")".  That ")" closes no "(", so count the "case"
       # statements that are open, to keep it from ending the
@@ -437,13 +438,18 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
           pos++
           continue
         }
-        if (--subst_parens[depth] == 0) { pop_context(); add_word(c); pos++; continue }
+        if (--subst_parens[depth] == 0) {
+          pop_context()
+          add_word(c)
+          pos++
+          word_joined_at = pos
+          continue
+        }
       }
       add_word(c)
       pos++
       continue
     }
-    if (context() == "backtick") { add_word(c); pos++; continue }
     if (context() == "array") {
       # A "#" that begins an element starts a comment, which ends the line.
       if (c == "#" && (pos == 1 || substr(line, pos - 1, 1) ~ /[ \t(]/)) { break }

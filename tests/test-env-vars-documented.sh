@@ -9,8 +9,7 @@
 #
 # The exit status is 0 if every such variable is documented, 1 if some variable
 # is not, and 2 if this test cannot determine which variables the scripts set
-# or read, as when a script contains a construct that bash 3.2, which is
-# /bin/sh on macOS, reads differently than later shells do.
+# or read.
 
 # TODO: If this is generally useful, move it into plume-scripts or elsewhere.
 
@@ -95,20 +94,10 @@ script_code() {
 #
 # `shell-set-variables.awk` describes how this parses FILE.  It does not
 # handle here-documents, whose lines are data rather than code.  It fails,
-# rather than reading them as code, if a script contains one.  It also fails,
-# after printing the line number of each, if a script contains a comment
-# within a command substitution that bash 3.2 reads as code.
+# rather than reading them as code, if a script contains one.
 set_variables_in() {
   # An assignment, so that "set -e" exits if awk fails.
   assigned="$(awk -f "${SCRIPT_DIR}/shell-set-variables.awk" "$1")"
-  if printf '%s\n' "${assigned}" | grep -q '^<comment-in-substitution> '; then
-    printf '%s\n' "${assigned}" | sed -n -e 's/^<comment-in-substitution> //p' | while IFS= read -r line_number; do
-      echo "${SCRIPT_NAME}: $1:${line_number}: this comment within a command substitution begins a quotation or a parenthesis that it does not end, or ends one that it did not begin" >&2
-    done
-    echo "${SCRIPT_NAME}: bash 3.2, which is /bin/sh on macOS, reads such a comment as code" >&2
-    echo "${SCRIPT_NAME}: rephrase the comment, or move the code out of the command substitution, as into a function" >&2
-    exit 2
-  fi
   if printf '%s\n' "${assigned}" | grep -qxF '<here-document>'; then
     echo "${SCRIPT_NAME}: $1 contains a here-document, which set_variables_in does not parse" >&2
     echo "${SCRIPT_NAME}: extend set_variables_in to skip the lines of a here-document" >&2
@@ -181,6 +170,16 @@ MULTILINE_CASE=$(case ${PLAIN} in
   1) echo one ;;
   *) echo other ;;
 esac)
+COMMENT_IN_SUBSTITUTION="$(
+  # It's a comment, whose "'" and ")" are not code.
+  echo one # So is this:)
+)"
+COMMENT_IN_BACKTICKS=`
+  # It's a comment, whose "'" does not begin a quotation.
+  echo one
+`
+HASH_AFTER_SUBSTITUTION=$(echo $(echo one)#two $((1))#three) # Not comments.
+HASH_AFTER_ESCAPED_BLANK=$(echo one\ #two) # Not a comment either.
 if [ "${PLAIN}" -eq 1 ]; then CONDITIONAL=3; fi
 # COMMENTED=1
 ESCAPED="a \" b; c=d" # An escaped quotation mark does not end the value.
@@ -256,6 +255,8 @@ BACKTICKED
 CASE_BODY
 CASE_IN_SUBSTITUTION
 CASE_WORD
+COMMENT_IN_BACKTICKS
+COMMENT_IN_SUBSTITUTION
 CONDITIONAL
 DECLARED
 DECLARED_WITH_VALUE
@@ -264,6 +265,8 @@ ELEMENT
 ELEMENTS
 ESCAPED
 EXPORTED
+HASH_AFTER_ESCAPED_BLANK
+HASH_AFTER_SUBSTITUTION
 LAST_CASE_BODY
 LITERAL_QUOTE
 LOCAL_ARRAY
@@ -364,45 +367,6 @@ DROPPED=1
 FIXTURE_END
 if (set_variables_in "${FIXTURE}" statement) > /dev/null 2>&1; then
   echo "${SCRIPT_NAME}: set_variables_in accepted an unclosed command substitution" >&2
-  exit 2
-fi
-
-# A comment within a command substitution that bash 3.2 reads as code, because
-# it begins a quotation that it does not end, is an error.
-cat > "${FIXTURE}" << 'FIXTURE_END'
-VALUE="$(
-  # It's a comment.
-  echo one
-)"
-FIXTURE_END
-if (set_variables_in "${FIXTURE}" statement) > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: set_variables_in accepted a comment that bash 3.2 misreads" >&2
-  exit 2
-fi
-# So is one that ends a parenthesis that it did not begin, which bash 3.2
-# takes for the end of the command substitution.
-cat > "${FIXTURE}" << 'FIXTURE_END'
-VALUE="$(
-  # A comment:)
-  echo one
-)"
-FIXTURE_END
-if (set_variables_in "${FIXTURE}" statement) > /dev/null 2>&1; then
-  echo "${SCRIPT_NAME}: set_variables_in accepted a comment whose \")\" bash 3.2 misreads" >&2
-  exit 2
-fi
-# A comment whose quotations and parentheses each end on its line is not, and
-# the variables that follow it are found.
-cat > "${FIXTURE}" << 'FIXTURE_END'
-VALUE="$(
-  # A comment's "(" and ")" are quoted, as in the submodule's (one) and (two).
-  echo one
-)"
-AFTER_COMMENT=1
-FIXTURE_END
-if [ "$(set_variables_in "${FIXTURE}" statement)" != "AFTER_COMMENT
-VALUE" ]; then
-  echo "${SCRIPT_NAME}: set_variables_in mis-parsed a comment within a command substitution" >&2
   exit 2
 fi
 
