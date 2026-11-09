@@ -290,7 +290,11 @@ def load_repo(repo: Repo, pairwise: bool = True) -> None:
         ]
     )
     section = None
-    for line in out.splitlines():
+    # Split only at newlines, because a file name in a list of conflicting files
+    # can contain another line break, such as a form feed or U+2028.
+    for line in out.split("\n"):
+        if not line:
+            continue
         if line.startswith("## "):
             section = line.split()[1]
             continue
