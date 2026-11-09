@@ -292,6 +292,8 @@ The commands are:
   the only remote, if there is neither), then shows the differences between
   its default branch and the working tree, ignoring changes in the amount of
   whitespace and using the patience diff algorithm.
+  If there is no `upstream` and the remote is a GitHub fork, it uses the
+  fork's parent instead, adding a remote `upstream` for the parent if needed.
   Like a GitHub pull request, it diffs from the merge base, so upstream
   changes that have not been merged into the current branch do not appear.
 * [`cancel-blocked-ci`](cancel-blocked-ci) `[--dry-run]`:  Cancels certain

@@ -13,6 +13,20 @@
 # in a fork, then `origin`, then the clone's only remote if it has exactly
 # one.  Its default branch is `REMOTE/HEAD`, such as `upstream/master`.
 #
+# A clone of a fork might have no `upstream` remote, so that the remote chosen
+# that way is the fork, such as `origin` for `git@github.com:ME/PROJ.git`.  A
+# fork's default branch can lag behind its parent's.  If the current branch
+# has merged the parent's newer commits, a diff from the fork's default branch
+# shows those commits as changes of the current branch, though a pull request
+# against the parent would not.  So, if that remote is a GitHub repository
+# that GitHub says is a fork, this command uses the clone's remote for the
+# fork's parent instead, such as `ORG/PROJ`.  If the clone has no remote for
+# the parent, this command adds one, named `upstream`, whose URL has the same
+# form as the fork's, such as `git@github.com:ORG/PROJ.git`.  This needs `gh`;
+# without it, this command uses the remote chosen as above.  With
+# `--no-fetch`, this command does not consult GitHub, but a clone to which an
+# earlier run added `upstream` uses it.
+#
 # This command first fetches the remote and updates `REMOTE/HEAD` to name the
 # remote's default branch, in case the remote has renamed it.  With
 # `--no-fetch`, it does neither, except that it creates `REMOTE/HEAD` with
@@ -85,8 +99,75 @@ if [ "$#" -ge 1 ] && [ "$1" = "--no-fetch" ]; then
   shift
 fi
 
-if ! remote="$(upstream_remote)" \
-  || ! upstream_ref="$(upstream_default_branch "${remote}" "${fetch}")"; then
+## Usage: lowercase STRING
+## Prints STRING in lower case.
+lowercase() {
+  printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+## Usage: parent_remote REMOTE
+## Prints the name of the remote for the parent of the repository that REMOTE
+## names, if GitHub says that that repository is a fork, after adding a remote
+## named "upstream" for the parent if the clone has no remote for it.  Prints
+## REMOTE if REMOTE is not a GitHub repository, if it is not a fork, or if `gh`
+## is not installed.  If GitHub cannot be asked, prints a diagnostic and then
+## prints REMOTE.  Returns 1, after printing a diagnostic, if adding the remote
+## fails.
+parent_remote() {
+  # `git remote get-url` applies `url.BASE.insteadOf`, which can map a GitHub
+  # URL to a mirror or a local copy; the configured URL still names GitHub.
+  parent_remote_url="$(git config --get "remote.$1.url")"
+  parent_remote_fork="$(github_slug "${parent_remote_url}")"
+  if [ -z "${parent_remote_fork}" ] || ! command -v gh > /dev/null 2>&1; then
+    printf '%s\n' "$1"
+    return 0
+  fi
+  # The repository is named with its host, so that `gh` does not ask the host
+  # that ${GH_HOST} names instead.
+  if ! parent_remote_parent="$(gh_query "cannot determine whether ${parent_remote_fork} is a fork" \
+    gh repo view "github.com/${parent_remote_fork}" --json parent \
+    --jq '.parent // empty | "\(.owner.login)/\(.name)"')"; then
+    echo "${SCRIPT_NAME}: comparing with $1" >&2
+    printf '%s\n' "$1"
+    return 0
+  fi
+  if [ -z "${parent_remote_parent}" ]; then
+    printf '%s\n' "$1"
+    return 0
+  fi
+  # GitHub ignores the case of a repository's name, so a remote's URL might
+  # spell it differently than GitHub's answer does.
+  for parent_remote_name in $(git remote); do
+    if [ "$(lowercase "$(github_slug "$(git config --get "remote.${parent_remote_name}.url")")")" \
+      = "$(lowercase "${parent_remote_parent}")" ]; then
+      printf '%s\n' "${parent_remote_name}"
+      return 0
+    fi
+  done
+  case "${parent_remote_url}" in
+    git@github.com:*) parent_remote_new_url="git@github.com:${parent_remote_parent}.git" ;;
+    ssh://git@github.com/*) parent_remote_new_url="ssh://git@github.com/${parent_remote_parent}.git" ;;
+    *) parent_remote_new_url="https://github.com/${parent_remote_parent}.git" ;;
+  esac
+  if ! git remote add upstream "${parent_remote_new_url}"; then
+    echo "${SCRIPT_NAME}: cannot add remote upstream for ${parent_remote_parent}, the parent of ${parent_remote_fork}" >&2
+    return 1
+  fi
+  echo "${SCRIPT_NAME}: added remote upstream for ${parent_remote_parent}, the parent of ${parent_remote_fork}" >&2
+  printf '%s\n' upstream
+}
+
+if ! remote="$(upstream_remote)"; then
+  exit 1
+fi
+# A remote named "upstream" is the upstream repository by the clone's own
+# configuration, even if it is a fork.
+if [ "${fetch}" -eq 1 ] && [ "${remote}" != upstream ]; then
+  if ! remote="$(parent_remote "${remote}")"; then
+    exit 1
+  fi
+fi
+if ! upstream_ref="$(upstream_default_branch "${remote}" "${fetch}")"; then
   exit 1
 fi
 

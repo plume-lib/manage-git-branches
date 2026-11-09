@@ -139,6 +139,93 @@ if [ -n "${git_minor}" ] && [ "${git_minor}" -ge 48 ] \
   fail 'renamed default branch without --prune: ran git remote set-head'
 fi
 
+# A clone of a GitHub fork, me/proj, of someone/proj.  A fake `gh` stands in
+# for GitHub:  `gh repo view` prints the parent of me/proj, someone/proj, and
+# nothing for any other repository, as the real `gh` does with this command's
+# `--jq` filter for a repository that is not a fork.  Each call's arguments
+# are appended to ${testdir}/gh.log.  `url.BASE.insteadOf` maps each GitHub
+# URL to a local repository, so the test needs no network.
+mkdir -p "${testdir}/bin"
+cat > "${testdir}/bin/gh" << EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "${testdir}/gh.log"
+case "\$1 \$2 \$3" in
+  'repo view github.com/me/proj') echo 'someone/proj' ;;
+  'repo view '*) ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "${testdir}/bin/gh"
+saved_path="${PATH}"
+PATH="${testdir}/bin:${PATH}"
+gh_parent="${testdir}/gh-parent.git"
+gh_fork="${testdir}/gh-fork.git"
+git clone -q --bare "${canonical}" "${gh_parent}"
+git clone -q --bare "${canonical}" "${gh_fork}"
+git config --global "url.${gh_parent}.insteadOf" 'https://github.com/someone/proj.git'
+git config --global "url.${gh_fork}.insteadOf" 'https://github.com/me/proj.git'
+gh_parent_work="${testdir}/gh-parent-work"
+git clone -q 'https://github.com/someone/proj.git' "${gh_parent_work}" 2> /dev/null
+
+# Usage: make_fork_clone DIRECTORY
+# Clones the fork into DIRECTORY, which has only the remote `origin`, and
+# checks out a branch `feature` that changes a.txt and that merges the parent's
+# commits that the fork's default branch lacks.  Sets ${fork} to DIRECTORY.
+make_fork_clone() {
+  fork="$1"
+  git clone -q 'https://github.com/me/proj.git' "${fork}"
+  git -C "${fork}" switch -q -c feature
+  commit_file "${fork}" a.txt 'a2'
+  git -C "${fork}" fetch -q 'https://github.com/someone/proj.git' "$(git -C "${gh_parent_work}" branch --show-current)" \
+    && git -C "${fork}" merge -q --no-edit FETCH_HEAD
+}
+
+# The parent gains a commit that the fork's default branch lacks.
+commit_file "${gh_parent_work}" e.txt 'e1'
+git -C "${gh_parent_work}" push -q origin HEAD
+
+# With `--no-fetch`, this command does not ask GitHub, so it diffs from the
+# fork's default branch.
+make_fork_clone "${testdir}/gh-clone-no-fetch"
+: > "${testdir}/gh.log"
+expect_files 'fork, --no-fetch' 'a.txt
+e.txt' --no-fetch --name-only
+if [ -s "${testdir}/gh.log" ]; then
+  fail "fork, --no-fetch: ran gh $(cat "${testdir}/gh.log")"
+fi
+
+# Otherwise, this command adds a remote `upstream` for the parent and diffs
+# from the parent's default branch.
+make_fork_clone "${testdir}/gh-clone"
+expect_files 'fork' 'a.txt' --name-only
+upstream_url="$(git -C "${fork}" config --get remote.upstream.url)"
+if [ "${upstream_url}" != 'https://github.com/someone/proj.git' ]; then
+  fail "fork: remote upstream has URL [${upstream_url}]"
+fi
+
+# A remote for the parent of another name, whose URL spells the parent's name
+# in another case, is used, and no remote is added.
+make_fork_clone "${testdir}/gh-clone-other-remote"
+git -C "${fork}" remote add canonical 'https://github.com/someone/proj.git'
+git -C "${fork}" config remote.canonical.url 'https://github.com/SomeOne/proj.git'
+git config --global --add "url.${gh_parent}.insteadOf" 'https://github.com/SomeOne/proj.git'
+expect_files 'fork with a remote for the parent' 'a.txt' --name-only
+if git -C "${fork}" config --get remote.upstream.url > /dev/null; then
+  fail 'fork with a remote for the parent: added remote upstream'
+fi
+git config --global --unset "url.${gh_parent}.insteadOf" 'https://github.com/SomeOne/proj.git'
+
+# A GitHub repository that is not a fork is the upstream repository.
+fork="${testdir}/gh-clone-parent"
+git clone -q 'https://github.com/someone/proj.git' "${fork}"
+git -C "${fork}" switch -q -c feature
+commit_file "${fork}" a.txt 'a3'
+expect_files 'not a fork' 'a.txt' --name-only
+if git -C "${fork}" config --get remote.upstream.url > /dev/null; then
+  fail 'not a fork: added remote upstream'
+fi
+PATH="${saved_path}"
+
 if [ "${failures}" -ne 0 ]; then
   echo "${SCRIPT_NAME}: ${failures} failure(s)" >&2
   exit 1
