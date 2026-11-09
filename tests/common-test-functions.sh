@@ -280,3 +280,31 @@ count_remote_queries() {
     "${GIT_COMMAND_LOG}" || true)"
   echo "$((count_remote_queries_all - count_remote_queries_local))"
 }
+
+## Usage: script_shell FILE
+## Prints the shell that runs FILE, as a command such as "/bin/sh" or "bash",
+## or nothing if FILE is not a shell script, judging by FILE's "#!" line.  A
+## file whose name ends in ".sh" and that has no "#!" line is a shell script
+## that a script whose "#!" line names /bin/sh sources, so "/bin/sh" runs it.
+## Fails with status 2 if FILE's "#!" line names a shell that this function
+## does not recognize, so that no caller silently treats a shell script as
+## some other kind of file.
+script_shell() {
+  case "$(head -n 1 -- "$1")" in
+    '#!/bin/sh' | '#!/bin/sh '*) echo /bin/sh ;;
+    '#!/bin/bash' | '#!/bin/bash '*) echo /bin/bash ;;
+    '#!/usr/bin/env sh') echo sh ;;
+    '#!/usr/bin/env bash') echo bash ;;
+    '#!'*sh | '#!'*sh' '*)
+      echo "$(basename -- "$0"): cannot determine which shell runs $1" >&2
+      echo "$(basename -- "$0"): extend script_shell in tests/common-test-functions.sh" >&2
+      return 2
+      ;;
+    '#!'*) ;;
+    *)
+      case "$1" in
+        *.sh) echo /bin/sh ;;
+      esac
+      ;;
+  esac
+}
