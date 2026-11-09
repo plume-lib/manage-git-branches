@@ -714,35 +714,129 @@ if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_both_
   fail "both reverted: expected [${expected_both_reverted}], got [${analysis_output}]"
 fi
 
-## A branch that merges a PR whose own commits change no file contains it.
+## A PR's changes include the conflicts that its merges resolve.
 ##  * 36 starts from main and adds aa.txt.
-##  * 37 starts from main and adds bb.txt.
-##  * 38 starts from main and merges 36 and 37.  So it has no own commits.
+##  * 37 starts from main and adds a different aa.txt.
+##  * 38 starts from main, merges 36 and 37, and resolves their conflict.  It
+##    also adds and then removes g.txt.  So its own commits change nothing, but
+##    it changes aa.txt.
 ##  * 39 starts from main, merges 38, and adds cc.txt.  So 39 contains 36, 37,
 ##    and 38.
 commit_pr 36 main aa.txt thirtysix
-commit_pr 37 main bb.txt thirtyseven
+commit_pr 37 main aa.txt thirtyseven
 git -C "${seed}" checkout -q --detach main
 git -C "${seed}" merge -q --no-ff -m "PR 38: merge PR 36" \
   "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/36/head)"
 git -C "${seed}" merge -q --no-ff -m "PR 38: merge PR 37" \
-  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/37/head)"
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/37/head)" > /dev/null 2>&1 || true
+printf '%s\n' resolved > "${seed}/aa.txt"
+git -C "${seed}" add aa.txt
+git -C "${seed}" commit -q --no-edit
+printf '%s\n' thirtyeight > "${seed}/g.txt"
+git -C "${seed}" add g.txt
+git -C "${seed}" commit -q -m "PR 38"
+git -C "${seed}" rm -q g.txt
+git -C "${seed}" commit -q -m "PR 38: move g.txt to another PR"
 git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/38/head
 commit_pr 39 HEAD cc.txt thirtynine
 git -C "${seed}" checkout -q main
 prs='36 37 38 39'
 : > "${cache}"
 analyze '' --prune
-expected_only_merges="## master conflicts
+expected_resolution="## master conflicts
 ## containment (A contains all non-merge commits of B, and B's changes)
 38 contains 36
 38 contains 37
 39 contains 36
 39 contains 37
 39 contains 38
+## pairwise conflicts
+36 vs 37: aa.txt"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_resolution}" ]; then
+  fail "resolution: expected [${expected_resolution}], got [${analysis_output}]"
+fi
+
+## A PR's changes include a file on which the commits that its own commits
+## start from conflict, even if the conflict leaves no conflict markers.
+##  * Main adds d.txt.
+##  * 40 starts from main and removes d.txt.
+##  * Then main changes d.txt.
+##  * 41 is stacked on 40:  it merges main and resolves the modify/delete
+##    conflict by keeping main's d.txt.  It also adds and then removes e2.txt,
+##    so that its commits are not 40's.  So it changes d.txt, although its
+##    d.txt is the version that the conflicting merge of 40 and main keeps.
+##  * 42 starts from main and merges 41.  So 42 contains 41.  Its non-merge
+##    commits are the same as 41's, so 41 also contains 42.
+printf '%s\n' main > "${seed}/d.txt"
+git -C "${seed}" add d.txt
+git -C "${seed}" commit -q -m "Add d.txt to main"
+git -C "${seed}" push -q "${STUB_REMOTE}" main
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" rm -q d.txt
+git -C "${seed}" commit -q -m "PR 40"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/40/head
+git -C "${seed}" checkout -q main
+printf '%s\n' main2 > "${seed}/d.txt"
+git -C "${seed}" commit -q -a -m "Change main's d.txt"
+git -C "${seed}" push -q "${STUB_REMOTE}" main
+git -C "${seed}" checkout -q --detach "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/40/head)"
+git -C "${seed}" merge -q -m "PR 41: merge main" main > /dev/null 2>&1 || true
+git -C "${seed}" add d.txt
+git -C "${seed}" commit -q --no-edit
+printf '%s\n' fortyone > "${seed}/e2.txt"
+git -C "${seed}" add e2.txt
+git -C "${seed}" commit -q -m "PR 41"
+git -C "${seed}" rm -q e2.txt
+git -C "${seed}" commit -q -m "PR 41: move e2.txt to another PR"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/41/head
+git -C "${seed}" checkout -q --detach main
+git -C "${seed}" merge -q --no-ff -m "PR 42: merge PR 41" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/41/head)"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/42/head
+git -C "${seed}" checkout -q main
+prs='40 41 42'
+: > "${cache}"
+analyze '' --prune
+expected_modify_delete="## master conflicts
+40: d.txt
+## containment (A contains all non-merge commits of B, and B's changes)
+41 contains 42
+42 contains 41
 ## pairwise conflicts"
-if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_only_merges}" ]; then
-  fail "only merges: expected [${expected_only_merges}], got [${analysis_output}]"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_modify_delete}" ]; then
+  fail "modify/delete: expected [${expected_modify_delete}], got [${analysis_output}]"
+fi
+
+## A branch that is stacked on a PR, merged another PR, and reverted that PR's
+## change has only the first PR's version, so it lacks the other PR's change.
+##  * 43 starts from main and changes the last line of l.txt.
+##  * 44 starts from main and changes the first line of l.txt.
+##  * 45 is stacked on 43:  it merges 44 and then reverts 44's change.  So 45
+##    contains 43 but not 44.
+git -C "${seed}" checkout -q --detach main
+printf '%s\n' 1 2 3 4 fortythree > "${seed}/l.txt"
+git -C "${seed}" commit -q -a -m "PR 43"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/43/head
+git -C "${seed}" checkout -q --detach main
+printf '%s\n' fortyfour 2 3 4 main > "${seed}/l.txt"
+git -C "${seed}" commit -q -a -m "PR 44"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/44/head
+git -C "${seed}" checkout -q --detach "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/43/head)"
+git -C "${seed}" merge -q --no-ff -m "PR 45: merge PR 44" \
+  "$(git -C "${STUB_REMOTE}" rev-parse refs/pull/44/head)" > /dev/null
+printf '%s\n' 1 2 3 4 fortythree > "${seed}/l.txt"
+git -C "${seed}" commit -q -a -m "PR 45: revert PR 44"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/45/head
+git -C "${seed}" checkout -q main
+prs='43 44 45'
+: > "${cache}"
+analyze '' --prune
+expected_stacked_revert="## master conflicts
+## containment (A contains all non-merge commits of B, and B's changes)
+45 contains 43
+## pairwise conflicts"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_stacked_revert}" ]; then
+  fail "stacked revert: expected [${expected_stacked_revert}], got [${analysis_output}]"
 fi
 prs='1 2 3 4'
 

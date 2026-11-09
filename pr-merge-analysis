@@ -30,9 +30,10 @@
 #   OWNER/REPO<TAB>merge<TAB>SHA1<TAB>SHA2<TAB>clean|conflict<TAB>conflicting files
 #     (SHA1 < SHA2, so the order of the two branches does not matter)
 #   OWNER/REPO<TAB>contains<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>yes|no
-#   OWNER/REPO<TAB>net-changes<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>EXCLUDED<TAB>yes|no
-#     (EXCLUDED is the comma-separated heads of the PRs whose commits are not
-#     among B_SHA's own commits, as own_commits_excluded sets it)
+#   OWNER/REPO<TAB>net-changes<TAB>MASTER_SHA<TAB>A_SHA<TAB>B_SHA<TAB>B_EXCLUDED<TAB>A_EXCLUDED<TAB>yes|no
+#     (B_EXCLUDED is the comma-separated heads of the PRs whose commits are not
+#     among B_SHA's own commits, as own_commits_excluded sets it, and
+#     A_EXCLUDED is the same for A_SHA)
 #
 # Requires Git 2.38 or later, gh, and Bash 4.4 or later as the first "bash" on
 # the PATH.  On macOS, /bin/bash is Bash 3.2, so put a newer Bash, such as
@@ -142,15 +143,16 @@ while [ -L "$CACHE" ]; do
   esac
 done
 touch "$CACHE" || exit 1
-# The standard error of "git merge-tree", which merge_result keeps apart from
-# its standard output.
+# The standard output and standard error of "git merge-tree", which merge_tree
+# keeps apart.
+MERGE_TREE_OUT=$(mktemp) || exit 1
 MERGE_TREE_ERR=$(mktemp) || exit 1
-# A directory that holds, for each commit, the names of the files that its own
-# commits change, as own_files writes them.
+# A directory that holds, for each PR head, the names of the files that the PR
+# changes, as own_files writes them, and the output of diff_names.
 OWN_FILES_DIR=$(mktemp -d) || exit 1
 # The pruned cache, before it replaces the cache.
 NEW_CACHE=
-trap 'rm -rf "$MERGE_TREE_ERR" "$OWN_FILES_DIR" ${NEW_CACHE:+"$NEW_CACHE"}' EXIT
+trap 'rm -rf "$MERGE_TREE_OUT" "$MERGE_TREE_ERR" "$OWN_FILES_DIR" ${NEW_CACHE:+"$NEW_CACHE"}' EXIT
 
 if [ $# -gt 2 ]; then
   # Validating the numbers also keeps the unquoted uses of $P from
@@ -181,17 +183,14 @@ MSHA=$("${G[@]}" rev-parse refs/remotes/csm/master) || exit 1
 
 # Matches a commit's object ID, which is a SHA-1 or SHA-256 hash in hexadecimal.
 OID_RE='^[0-9a-f]{40}([0-9a-f]{24})?$'
-# Matches "-" or a comma-separated list of object IDs, as in the EXCLUDED field
-# of a "net-changes" cache line.
+# Matches "-" or a comma-separated list of object IDs, as in the B_EXCLUDED and
+# A_EXCLUDED fields of a "net-changes" cache line.
 EXCLUDED_RE='^(-|[0-9a-f]{40}([0-9a-f]{24})?(,[0-9a-f]{40}([0-9a-f]{24})?)*)$'
 # OWN maps a commit to one of its non-merge commits that is not in master, or to
 # the empty string if it has none.  EXCLUDED maps a commit to the value that
 # own_commits_excluded sets RESULT to.  MERGE_BASE maps two commits, as in "SHA1
-# SHA2", to the value that merge_base sets RESULT to.  OWN_START maps a commit to
-# the value that own_start sets RESULT to.  OWN_CHANGES_FILES maps a commit to
-# "yes" if its own commits change at least one file, otherwise to "no";
-# own_files sets it.
-declare -A SHA CACHED CURRENT OWN EXCLUDED MERGE_BASE OWN_START OWN_CHANGES_FILES
+# SHA2", to the value that merge_base sets RESULT to.
+declare -A SHA CACHED CURRENT OWN EXCLUDED MERGE_BASE
 CURRENT[$MSHA]=1
 REFS=()
 for n in $P; do REFS+=("refs/remotes/pr/$n"); done
@@ -228,14 +227,52 @@ while IFS=$'\t' read -r _ kind k1 k2 k3 rest; do
   elif [ "$kind" = contains ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE && $k3 =~ $OID_RE ]] \
     && [[ $rest = yes || $rest = no ]]; then
     CACHED["contains $k1 $k2 $k3"]="$rest"
-  elif [ "$kind" = net-changes ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE && $k3 =~ $OID_RE ]] \
-    && [[ ${rest%%	*} =~ $EXCLUDED_RE ]] && [[ ${rest#*	} = yes || ${rest#*	} = no ]]; then
-    CACHED["net-changes $k1 $k2 $k3 ${rest%%	*}"]="${rest#*	}"
+  elif [ "$kind" = net-changes ] && [[ $k1 =~ $OID_RE && $k2 =~ $OID_RE && $k3 =~ $OID_RE ]]; then
+    b_excluded=${rest%%	*}
+    rest=${rest#*	}
+    a_excluded=${rest%%	*}
+    rest=${rest#*	}
+    if [[ $b_excluded =~ $EXCLUDED_RE && $a_excluded =~ $EXCLUDED_RE ]] \
+      && [[ $rest = yes || $rest = no ]]; then
+      CACHED["net-changes $k1 $k2 $k3 $b_excluded $a_excluded"]=$rest
+    fi
   fi
 done <<< "$own_lines"
 
 # These functions set RESULT rather than printing it, because a command
 # substitution per call would fork a subshell for each of thousands of pairs.
+
+# Runs "git merge-tree" on commits $1 and $2.  Sets RESULT to the object ID of
+# the merged tree, and the array MERGE_CONFLICTS to the names of the files on
+# which the commits conflict.  Such a file holds conflict markers, or, for a
+# binary file or a modify/delete conflict, one side's version.
+merge_tree() {
+  local status x
+  local -a out
+  # -z, because a file name can contain a newline.  Standard error is kept
+  # apart, so that a warning, such as one about merge.renameLimit, does not
+  # precede the tree's object ID or appear among the files.
+  "${G[@]}" merge-tree --write-tree --name-only -z "$1" "$2" > "$MERGE_TREE_OUT" 2> "$MERGE_TREE_ERR"
+  status=$?
+  mapfile -d '' out < "$MERGE_TREE_OUT"
+  # A clean merge yields exit status 0, and a conflict yields exit status 1;
+  # either way, standard output starts with the tree's object ID, which is
+  # followed by the names of the conflicting files and then by an empty name.
+  # Any other result, including exit status 1 with other output, as for an
+  # argument that is not a commit, is an error.
+  if [ $status -gt 1 ] || ! [[ ${out[0]-} =~ $OID_RE ]]; then
+    echo "$0: git merge-tree $1 $2 failed:" >&2
+    cat "$MERGE_TREE_ERR" >&2
+    tr '\0' '\n' < "$MERGE_TREE_OUT" >&2
+    exit 1
+  fi
+  RESULT=${out[0]}
+  MERGE_CONFLICTS=()
+  for x in "${out[@]:1}"; do
+    [ -n "$x" ] || break
+    MERGE_CONFLICTS+=("$x")
+  done
+}
 
 # Sets RESULT to "clean" or "conflict<TAB>files".
 merge_result() {
@@ -247,34 +284,14 @@ merge_result() {
   }
   local key="merge $x $y"
   if [ -z "${CACHED[$key]+set}" ]; then
-    local out code status files
-    # Standard error is kept apart, so that a warning, such as one about
-    # merge.renameLimit, does not precede the tree's object ID or appear among
-    # the files.
-    out=$("${G[@]}" merge-tree --write-tree --name-only "$x" "$y" 2> "$MERGE_TREE_ERR")
-    code=$?
-    # A conflict yields exit status 1 and standard output that starts with the
-    # tree's object ID.  Any other failure, including exit status 1 with other
-    # output, as for an argument that is not a commit, is an error.
-    if [ $code -eq 1 ] && ! [[ ${out%%$'\n'*} =~ $OID_RE ]]; then
-      code=error
+    local status=clean files=
+    merge_tree "$x" "$y"
+    if [ ${#MERGE_CONFLICTS[@]} -gt 0 ]; then
+      status=conflict
+      files=${MERGE_CONFLICTS[*]}
+      # A tab or newline in a file name would break the cache line.
+      files=${files//[$'\t\n']/ }
     fi
-    case $code in
-      0)
-        status=clean
-        files=
-        ;;
-      1)
-        status=conflict
-        files=$(echo "$out" | sed -n '2,/^$/p' | tr '\n' ' ' | sed 's/ *$//')
-        ;;
-      *)
-        echo "$0: git merge-tree $x $y failed:" >&2
-        cat "$MERGE_TREE_ERR" >&2
-        [ -z "$out" ] || echo "$out" >&2
-        exit 1
-        ;;
-    esac
     CACHED[$key]="$status	$files"
     printf '%s\tmerge\t%s\t%s\t%s\t%s\n' "$REPO" "$x" "$y" "$status" "$files" >> "$CACHE"
   fi
@@ -345,12 +362,12 @@ merge_base() {
 }
 
 # Sets RESULT to a commit whose tree merges commits $1, $2, and so on, or to the
-# empty string if there are none.  Where the commits conflict, a file holds
-# conflict markers, so it differs from each version that resolves the conflict.
-# The commit is one of the given commits if the others are its ancestors;
-# otherwise it is a new merge commit, which no ref names.
+# empty string if there are none.  Adds to the array MERGE_ALL_CONFLICTS the
+# names of the files on which the merges conflict (see merge_tree).  The commit
+# is one of the given commits if the others are its ancestors; otherwise it is
+# a new merge commit, which no ref names.
 merge_commits() {
-  local out status tree cur x
+  local out cur x
   local -a independent
   RESULT=
   [ $# -gt 0 ] || return 0
@@ -359,62 +376,50 @@ merge_commits() {
   mapfile -t independent <<< "$out"
   cur=${independent[0]}
   for x in "${independent[@]:1}"; do
-    out=$("${G[@]}" merge-tree --write-tree "$cur" "$x" 2> "$MERGE_TREE_ERR")
-    status=$?
-    tree=${out%%$'\n'*}
-    # As in merge_result, a conflict yields exit status 1 and standard output
-    # that starts with the tree's object ID.
-    if [ $status -gt 1 ] || ! [[ $tree =~ $OID_RE ]]; then
-      cat "$MERGE_TREE_ERR" >&2
-      [ -z "$out" ] || echo "$out" >&2
-      die "git merge-tree $cur $x failed"
-    fi
+    merge_tree "$cur" "$x"
+    MERGE_ALL_CONFLICTS+=("${MERGE_CONFLICTS[@]}")
     # A fixed author, committer, and date, so that the same merge yields the
     # same commit, and so that a repository without user.name can make it.
     cur=$(GIT_AUTHOR_NAME=pr-merge-analysis GIT_AUTHOR_EMAIL=pr-merge-analysis \
       GIT_AUTHOR_DATE='@0 +0000' GIT_COMMITTER_NAME=pr-merge-analysis \
       GIT_COMMITTER_EMAIL=pr-merge-analysis GIT_COMMITTER_DATE='@0 +0000' \
-      "${G[@]}" commit-tree --no-gpg-sign -p "$cur" -p "$x" -m "pr-merge-analysis merge" "$tree") \
-      || die "git commit-tree $tree failed"
+      "${G[@]}" commit-tree --no-gpg-sign -p "$cur" -p "$x" -m "pr-merge-analysis merge" "$RESULT") \
+      || die "git commit-tree $RESULT failed"
   done
   RESULT=$cur
 }
 
 # Sets the array START_BASES to the merge bases of commit $1 with master and
-# with the heads of the PRs whose commits are not among the own commits of
-# commit $2 (see own_commits_excluded), omitting a merge base that does not
-# exist.  For example, if PR B's branch was created from PR X's branch, then
-# for B and B they are B's merge base with master and X's head.
+# with the heads of the PRs whose commits are not among the own commits of $1
+# or of commit $2 (see own_commits_excluded), omitting a merge base that does
+# not exist, and omitting the heads of $2 and of the PRs that contain all of
+# $2's commits.  For example, if PR B's branch was created from PR X's branch,
+# then for B and B they are B's merge base with master and X's head.
 start_bases() {
-  own_commits_excluded "$2"
-  local excluded=$RESULT x
+  local x
+  local -A seen=()
   START_BASES=()
   merge_base "$MSHA" "$1"
   [ -z "$RESULT" ] || START_BASES+=("$RESULT")
-  if [ "$excluded" != - ]; then
-    for x in ${excluded//,/ }; do
-      merge_base "$1" "$x"
-      [ -z "$RESULT" ] || START_BASES+=("$RESULT")
-    done
-  fi
+  own_commits_excluded "$1"
+  local excluded=$RESULT
+  own_commits_excluded "$2"
+  excluded+=,$RESULT
+  for x in ${excluded//[,-]/ }; do
+    [ -z "${seen[$x]+set}" ] && [ "$x" != "$2" ] || continue
+    seen[$x]=1
+    if [ "$1" != "$2" ]; then
+      commits_result "$x" "$2"
+      [ "$RESULT" = no ] || continue
+    fi
+    merge_base "$1" "$x"
+    [ -z "$RESULT" ] || START_BASES+=("$RESULT")
+  done
 }
 
-# Sets RESULT to the commit that the own commits of commit $1 start from, or to
-# the empty string if there is none.  Its tree merges the commits that
-# start_bases finds for $1 and $1.  For example, if PR B's branch was created
-# from PR X's branch, then B's own commits start from X's head; if B then merged
-# a newer master, they start from the merge of X's head and that master.
-own_start() {
-  if [ -z "${OWN_START[$1]+set}" ]; then
-    start_bases "$1" "$1"
-    merge_commits "${START_BASES[@]}"
-    OWN_START[$1]=$RESULT
-  fi
-  RESULT=${OWN_START[$1]}
-}
-
-# Sets the array DIFF_NAMES to the names of those of files $3, $4, and so on
-# that differ between commits $1 and $2.  There must be at least one file.
+# Sets the array DIFF_NAMES to the names of the files that differ between
+# commits $1 and $2:  those among files $3, $4, and so on, or any file if none
+# is given.
 diff_names() {
   local x=$1 y=$2
   shift 2
@@ -424,96 +429,81 @@ diff_names() {
   mapfile -d '' DIFF_NAMES < "$OWN_FILES_DIR/diff"
 }
 
-# Writes to file "$OWN_FILES_DIR/$1" the names of the files that the own commits
-# of commit $1 change, both sides of a rename included, and that differ between
-# $1 and the commit that own_start says those commits start from.  Each name is
-# followed by a NUL.  The names are separated by NUL, because a file name can
-# contain a newline.  A file whose changes a later own commit undid, as when
-# they moved to another PR, is not among them, unless own_start finds no
-# commit.  A file on which the merge in own_start conflicts is among them.  A
-# file is not among them if $1 merged a master that already makes the same
-# change, as when the PR that $1 was created from landed.  Also sets
-# OWN_CHANGES_FILES[$1].
+# Writes to file "$OWN_FILES_DIR/$1" the names of the files that PR head $1
+# changes, each followed by a NUL.  The names are separated by NUL, because a
+# file name can contain a newline.  They are the files that differ between $1
+# and the commit that $1's own commits start from, and the files on which that
+# commit's merge conflicts.  That commit merges the commits that start_bases
+# finds for $1 and $1; if there are none, they are all of $1's files.  For
+# example, if PR B's branch was created from PR X's branch, then B's own
+# commits start from X's head; if B then merged a newer master, they start from
+# the merge of X's head and that master.  So the files include those whose
+# conflicts $1's merges resolve, and they omit a file whose changes a later own
+# commit undid, as when they moved to another PR.  They also omit a file that
+# $1 changes as a master that $1 merged already does, as when the PR that $1
+# was created from landed.
 own_files() {
-  [ -z "${OWN_CHANGES_FILES[$1]+set}" ] || return 0
-  own_commits_excluded "$1"
-  local -a exclude=() all names=()
-  local -A seen=()
+  [ ! -e "$OWN_FILES_DIR/$1" ] || return 0
   local x
-  if [ "$RESULT" != - ]; then
-    for x in ${RESULT//,/ }; do exclude+=("^$x"); done
-  fi
-  "${G[@]}" log --no-merges --no-renames --name-only -z --format= "$1" "^$MSHA" "${exclude[@]}" \
-    > "$OWN_FILES_DIR/$1.tmp" || die "git log $1 ^$MSHA ${exclude[*]} failed"
-  # Remove the empty names and the duplicates.
-  mapfile -d '' all < "$OWN_FILES_DIR/$1.tmp"
-  for x in "${all[@]}"; do
-    [ -z "$x" ] || [ -n "${seen[$x]+set}" ] || {
-      seen[$x]=1
-      names+=("$x")
-    }
-  done
-  if [ ${#names[@]} -eq 0 ]; then
-    : > "$OWN_FILES_DIR/$1"
-    OWN_CHANGES_FILES[$1]=no
+  local -A seen=()
+  start_bases "$1" "$1"
+  if [ ${#START_BASES[@]} -eq 0 ]; then
+    "${G[@]}" ls-tree -r -z --name-only "$1" > "$OWN_FILES_DIR/$1" \
+      || die "git ls-tree $1 failed"
     return 0
   fi
-  own_start "$1"
-  if [ -n "$RESULT" ]; then
-    diff_names "$RESULT" "$1" "${names[@]}"
-    names=("${DIFF_NAMES[@]}")
-  fi
-  if [ ${#names[@]} -eq 0 ]; then
-    : > "$OWN_FILES_DIR/$1"
-  else
-    printf '%s\0' "${names[@]}" > "$OWN_FILES_DIR/$1"
-  fi
-  OWN_CHANGES_FILES[$1]=yes
+  MERGE_ALL_CONFLICTS=()
+  merge_commits "${START_BASES[@]}"
+  diff_names "$RESULT" "$1"
+  # Remove the duplicates.
+  for x in "${DIFF_NAMES[@]}" "${MERGE_ALL_CONFLICTS[@]}"; do
+    [ -n "${seen[$x]+set}" ] || {
+      seen[$x]=1
+      printf '%s\0' "$x"
+    }
+  done > "$OWN_FILES_DIR/$1"
 }
 
 # Sets RESULT to "no" if commit $1 lacks commit $2's changes, otherwise to
 # "yes".  $1 has $2's change to a file that own_files lists for $2 if $1's
 # version of the file is the same as $2's, or if it differs from the version in
 # each commit that start_bases finds for $1 and $2, so that $1 changes the file
-# further and might build on $2's change.  $1 lacks $2's changes if the own
-# commits of $2 change at least one file, and $1 has none of $2's changes.  For
-# example, $1 lacks $2's changes if $1 merged $2 and then reverted $2's
-# changes, so that $1's diff against master contains nothing of $2, or if later
-# own commits of $2 undid all of $2's changes.  But $1 does not lack the changes
-# of a $2 whose own commits change no file, such as a PR that only merges other
-# PRs, because $2's merges can resolve conflicts between them.
+# further and might build on $2's change.  $1 lacks $2's changes if it has none
+# of them.  For example, $1 lacks $2's changes if $1 merged $2 and then
+# reverted $2's changes, so that $1's diff against master contains nothing of
+# $2, or if $2 changes no file, as when later own commits of $2 undid all of
+# $2's changes or when $2 only merges other PRs without conflicts.
 changes_result() {
   own_commits_excluded "$2"
-  local excluded=$RESULT
-  local key="net-changes $MSHA $1 $2 $excluded"
+  local b_excluded=$RESULT
+  own_commits_excluded "$1"
+  local a_excluded=$RESULT
+  local key="net-changes $MSHA $1 $2 $b_excluded $a_excluded"
   if [ -z "${CACHED[$key]+set}" ]; then
-    local ok=yes base n
+    local ok=no base n
     local -a files
     own_files "$2"
     mapfile -d '' files < "$OWN_FILES_DIR/$2"
-    if [ "${OWN_CHANGES_FILES[$2]}" = yes ]; then
-      ok=no
-      if [ ${#files[@]} -gt 0 ]; then
-        n=${#files[@]}
-        # The files whose versions in $1 are not $2's.
-        diff_names "$2" "$1" "${files[@]}"
-        files=("${DIFF_NAMES[@]}")
-        if [ ${#files[@]} -lt "$n" ]; then
-          ok=yes
-        else
-          start_bases "$1" "$2"
-          for base in "${START_BASES[@]}"; do
-            # Keep the files whose versions in $1 also differ from base's.
-            diff_names "$base" "$1" "${files[@]}"
-            files=("${DIFF_NAMES[@]}")
-            [ ${#files[@]} -gt 0 ] || break
-          done
-          [ ${#files[@]} -eq 0 ] || ok=yes
-        fi
+    if [ ${#files[@]} -gt 0 ]; then
+      n=${#files[@]}
+      # The files whose versions in $1 are not $2's.
+      diff_names "$2" "$1" "${files[@]}"
+      files=("${DIFF_NAMES[@]}")
+      if [ ${#files[@]} -lt "$n" ]; then
+        ok=yes
+      else
+        start_bases "$1" "$2"
+        for base in "${START_BASES[@]}"; do
+          # Keep the files whose versions in $1 also differ from base's.
+          diff_names "$base" "$1" "${files[@]}"
+          files=("${DIFF_NAMES[@]}")
+          [ ${#files[@]} -gt 0 ] || break
+        done
+        [ ${#files[@]} -eq 0 ] || ok=yes
       fi
     fi
     CACHED[$key]=$ok
-    printf '%s\tnet-changes\t%s\t%s\t%s\t%s\t%s\n' "$REPO" "$MSHA" "$1" "$2" "$excluded" "$ok" >> "$CACHE"
+    printf '%s\tnet-changes\t%s\t%s\t%s\t%s\t%s\t%s\n' "$REPO" "$MSHA" "$1" "$2" "$b_excluded" "$a_excluded" "$ok" >> "$CACHE"
   fi
   RESULT=${CACHED[$key]}
 }
@@ -577,13 +567,11 @@ cp -p "$CACHE" "$NEW_CACHE" || exit 1
         printf '%s\tcontains\t%s\t%s\t%s\t%s\n' "$REPO" "${k[1]}" "${k[2]}" "${k[3]}" "${CACHED[$key]}"
       else
         current=yes
-        if [ "${k[4]}" != - ]; then
-          for x in ${k[4]//,/ }; do
-            [ -n "${CURRENT[$x]+set}" ] || current=no
-          done
-        fi
+        for x in ${k[4]//[,-]/ } ${k[5]//[,-]/ }; do
+          [ -n "${CURRENT[$x]+set}" ] || current=no
+        done
         [ $current = no ] \
-          || printf '%s\tnet-changes\t%s\t%s\t%s\t%s\t%s\n' "$REPO" "${k[1]}" "${k[2]}" "${k[3]}" "${k[4]}" "${CACHED[$key]}"
+          || printf '%s\tnet-changes\t%s\t%s\t%s\t%s\t%s\t%s\n' "$REPO" "${k[1]}" "${k[2]}" "${k[3]}" "${k[4]}" "${k[5]}" "${CACHED[$key]}"
       fi
     fi
   done
