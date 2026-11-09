@@ -21,7 +21,7 @@
 # It fails if a chain fails, or if chains with conflicts remain after
 # ${max_rounds} rounds.  It ends with a summary of the chains that failed or
 # that have changes by an AI agent to review, each with what
-# `git-push-to --report` reported for it, as in
+# `git-push-to --summary` wrote for it, as in
 #   * myrepo-branch-main myrepo-branch-feature myrepo-branch-part2 (failed)
 #       in /home/me/myrepo-branch-feature: claude also changed: README.md
 #       failed to push myrepo-branch-feature into myrepo-branch-part2, while building
@@ -106,18 +106,18 @@ fi
 # Each chain is split into directories, which must not be expanded as patterns.
 set -f
 
-# Holds the report of each run of `git-push-to`.
+# Holds the summary that each run of `git-push-to` writes.
 make_temp_dir
 work="${temp_dir}"
-push_report="${work}/report"
+push_summary="${work}/summary"
 
 newline='
 '
 tab='	'
 
-# For each run of `git-push-to` that failed or that reported changes to
+# For each run of `git-push-to` that failed or that noted changes to
 # review, in every round, a line "* " followed by the chain, then each line
-# of its report, indented.
+# of the summary that it wrote, indented.
 summary=''
 
 ## Prints ${summary}, if it is not empty, as a diagnostic.
@@ -169,18 +169,18 @@ while :; do
     set -- ${chain}
     IFS="${saved_ifs}"
     echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} $*"
-    : > "${push_report}"
+    : > "${push_summary}"
     # The chain does not read this script's standard input.
     # shellcheck disable=SC2086 # ${nocompile_option} is empty or one word.
     "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} \
-      --report "${push_report}" "$@" < /dev/null
+      --summary "${push_summary}" "$@" < /dev/null
     push_status=$?
-    push_lines="$(sed -e 's/^/    /' -- "${push_report}")"
+    push_lines="$(sed -e 's/^/    /' -- "${push_summary}")"
     if [ "${push_status}" -ne 0 ]; then
       echo "${SCRIPT_NAME}: the chain failed: $*" >&2
       num_failed=$((num_failed + 1))
       if [ -z "${push_lines}" ]; then
-        push_lines="    (git-push-to failed with status ${push_status} and reported no step)"
+        push_lines="    (git-push-to failed with status ${push_status} and named no step in its summary)"
       fi
       summary="${summary}* $* (failed)${newline}${push_lines}${newline}"
     elif [ -n "${push_lines}" ]; then

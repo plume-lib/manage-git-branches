@@ -9,7 +9,7 @@
 #   git-push-to [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ...
 #
 # OPTIONS are [--nocompile] [--rebase | --squash] [--llm | --no-llm]
-# [--claude | --codex] [--report FILE].
+# [--claude | --codex] [--summary FILE].
 #
 # Each argument names the top level of a working tree.
 # Each may be absolute directory names or relative to the current directory.
@@ -20,11 +20,14 @@
 # for "--rebase".  By default, this script asks an AI agent to resolve merge
 # conflicts and to fix a failed build; "--no-llm" prevents that.  See "Asking
 # an AI agent" below.
-# The "--report FILE" option appends to FILE a line for each thing that a
-# person should look at after the run, as `resolve-conflicts` does:  each
-# change by an AI agent to review (see "Asking an AI agent" below), as in
+# The "--summary FILE" option appends to FILE a line for each thing that a
+# person should look at after the run; `resolve-conflicts` combines these
+# lines into its own summary.  They are each change by an AI agent to review
+# (see "Asking an AI agent" below), as in
 #   in /home/me/myrepo-branch-feature: claude also changed: README.md
-# and, if a push or rebase fails, the step that failed, as in
+# each merge left in progress and each agent session that can be continued,
+# which are also noted in AGENT-TODO.md, and, if a push or rebase fails, the
+# step that failed, as in
 #   failed to push myrepo-branch-main into myrepo-branch-feature, while building
 # The same information is printed as diagnostics, along with the details of
 # each failure.
@@ -294,8 +297,8 @@
 nocompile=0
 rebase=0
 squash=0
-# The file that `append_report` in common-functions.sh appends to, or empty.
-report_file=''
+# The file that `append_summary` in common-functions.sh appends to, or empty.
+summary_file=''
 
 # Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
 # directory that contains this package's other scripts even when this script
@@ -1027,10 +1030,10 @@ git_rebase_onto() {
 
 ## Usage: chain_failed MESSAGE
 ## Prints MESSAGE, which says which step of `push_chain` failed, as a
-## diagnostic, and appends it to the report (see `append_report`).
+## diagnostic, and appends it to the summary (see `append_summary`).
 chain_failed() {
   echo "${SCRIPT_NAME}: $1" >&2
-  append_report "$1"
+  append_summary "$1"
 }
 
 ## Pushes each given directory into the next one.  Then, if ${rebase} is 1,
@@ -1038,7 +1041,7 @@ chain_failed() {
 ## Returns 1 at the first failure, after printing a diagnostic that names the
 ## step that failed, such as "git-push-to: failed to push myrepo-branch-main
 ## into myrepo-branch-feature, while building", and appending it to the
-## report.
+## summary.
 push_chain() {
   prev=''
   for arg; do
@@ -1253,16 +1256,22 @@ while [ "$#" -ge 1 ]; do
       rebase=1
       squash=1
       ;;
-    --report)
+    --summary)
       if [ "$#" -lt 2 ]; then
-        echo "${SCRIPT_NAME}: --report requires a file name" >&2
+        echo "${SCRIPT_NAME}: --summary requires a file name" >&2
         exit 1
       fi
       # `git_push_to` changes the current directory.
       case "$2" in
-        /*) report_file="$2" ;;
-        *) report_file="$(pwd)/$2" ;;
+        /*) summary_file="$2" ;;
+        *) summary_file="$(pwd)/$2" ;;
       esac
+      # `append_summary` does not diagnose a failure to write.  A failed
+      # redirection of the special built-in `:` would exit the shell.
+      if [ -z "$2" ] || ! true 2> /dev/null >> "${summary_file}"; then
+        echo "${SCRIPT_NAME}: cannot write the summary file: $2" >&2
+        exit 1
+      fi
       shift
       ;;
     *)
@@ -1276,7 +1285,7 @@ if [ "$#" -lt 2 ]; then
   echo "${SCRIPT_NAME}: not enough arguments" >&2
   echo "Usage: ${SCRIPT_NAME} [OPTIONS] FROM_DIR TO_DIR ..." >&2
   echo "   or: ${SCRIPT_NAME} [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
-  echo "OPTIONS: [--nocompile] [--rebase | --squash] ${llm_options_usage} [--report FILE]" >&2
+  echo "OPTIONS: [--nocompile] [--rebase | --squash] ${llm_options_usage} [--summary FILE]" >&2
   exit 1
 fi
 
