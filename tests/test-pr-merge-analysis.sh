@@ -127,7 +127,7 @@ cache="${run_dir}/.pr-merge-analysis-cache.tsv"
 
 expected='## master conflicts
 4: m.txt
-## containment (A contains all non-merge commits of B)
+## containment (A contains all non-merge commits of B, and B'"'"'s changes)
 3 contains 1
 ## pairwise conflicts
 1 vs 2: f.txt
@@ -339,9 +339,35 @@ analyze rev-list --prune
 if [ "${analysis_status}" -eq 0 ]; then
   fail "rev-list failure: pr-merge-analysis succeeded: ${analysis_output}"
 fi
-if grep -q '	contains	' "${cache}"; then
+if grep -q '	containment	' "${cache}"; then
   fail "rev-list failure: cached a containment result: $(cat "${cache}")"
 fi
+
+## A PR whose branch contains another PR's commits but not its changes does not
+## contain the other PR.  PR 5 is PR 1 plus a commit that reverts PR 1's
+## change, as when a branch merges another PR's branch and then removes that
+## PR's changes.  PR 6 is PR 1 plus a commit that changes PR 1's file further,
+## so it might build on PR 1's change, and it contains PR 1.
+pr1="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/1/head)"
+commit_pr 5 "${pr1}" f.txt base
+commit_pr 6 "${pr1}" f.txt six
+prs='1 5 6'
+: > "${cache}"
+analyze '' --prune
+expected_reverted="## master conflicts
+## containment (A contains all non-merge commits of B, and B's changes)
+6 contains 1
+## pairwise conflicts
+5 vs 6: f.txt"
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_reverted}" ]; then
+  fail "reverted changes: expected [${expected_reverted}], got [${analysis_output}]"
+fi
+## The second run uses the cache, and gives the same report.
+analyze rev-list --prune
+if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_reverted}" ]; then
+  fail "reverted changes: the second run did not use the cache: ${analysis_output}"
+fi
+prs='1 2 3 4'
 
 ## No run leaves a temporary file behind.
 leftovers="$(find "${run_dir}" -name '.pr-merge-analysis-cache.tsv.*')"
