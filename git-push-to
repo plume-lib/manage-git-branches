@@ -177,11 +177,12 @@
 # agent changed text outside the conflict regions, each resolution by
 # `git rerere` that the agent changed, and each resolution by the agent that
 # is identical to either side's version, apart from whitespace and blank
-# lines, so that you can review them.  When it accepts the agent's work, it
-# keeps `git rerere` from recording each such one-sided resolution:  the
-# side's version also drops the other side's changes outside the conflict
-# regions, so a later merge with the same conflicts would reject the
-# replayed resolution.
+# lines, so that you can review them.  Whether or not it accepts the agent's
+# work, it keeps `git rerere` from recording each such one-sided resolution,
+# even if you commit the merge later, and removes rerere's record of the
+# conflict:  the side's version also drops the other side's changes outside
+# the conflict regions, so a later merge with the same conflicts would
+# reject the replayed resolution.
 #
 # When the build of TO_DIR fails, and a merge on TO_DIR's branch might have
 # broken it, the agent edits files to fix it, without building; then this

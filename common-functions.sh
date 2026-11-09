@@ -1105,15 +1105,20 @@ resolve_merge_conflicts() {
     # `resolve_with_agent` reports as ${resolve_agent_status} 2.
     # The entry in AGENT-TODO.md is read by a person or by a later agent,
     # which should not try alone what this agent could not do.
-    resolve_agent_reason="${resolve_with}, an AI agent, did not resolve the merge's conflicts.  Ask a person for help with them before you finish the merge."
+    resolve_agent_reason="${resolve_with}, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge."
     resolve_note="$(merge_in_progress_note "${resolve_agent_reason}")"
     resolve_agent_status=0
+    # 1 once `resolve_with_agent` has started the agent.  If it failed
+    # before then, a rerun can succeed, so the note asks for no help.
+    resolve_agent_ran=0
     if ! resolve_with_agent; then
       if [ -n "${agent_session_ids:-}" ]; then
         report_agent_session "Resolve the conflicts in the merge of ${resolve_source}" "${resolve_note}"
         echo "${resolve_failed}" >&2
-      elif [ "${resolve_agent_status}" -ne 2 ]; then
+      elif [ "${resolve_agent_status}" -ne 2 ] && [ "${resolve_agent_ran}" -eq 1 ]; then
         resolve_stopped "${resolve_agent_reason}"
+      elif [ "${resolve_agent_status}" -ne 2 ]; then
+        resolve_stopped
       else
         echo "${resolve_failed}" >&2
       fi
@@ -1258,6 +1263,7 @@ ${resolve_instructions}
 Finish with a summary that says, for each conflict, what each side changed and how your resolution combines the changes; and that lists each change that you made outside the conflict regions, and why."
 
   echo "${SCRIPT_NAME}: asking ${resolve_with} to resolve the conflicts in $(pwd)" >&2
+  resolve_agent_ran=1
   run_agent "${resolve_with}" "${resolve_prompt}"
   resolve_agent_status=$?
   # The files that the agent can change or delete:  the tracked files, except
@@ -1426,18 +1432,13 @@ check_agent_resolution() {
   check_conflict_markers "$1" "$(separator_permitted "$1")"
 }
 
-## Usage: rerere_resolution_unchanged FILE [HASH]
+## Usage: rerere_resolution_unchanged FILE HASH
 ## Succeeds if FILE is one of the conflicted files that `git rerere`
-## resolved, and its content is the same as when `resolve_with_agent` asked
-## the agent to resolve the conflicts, as recorded in
-## ${resolve_rerere_hashes}.  HASH, if given, is FILE's hash, as
-## `git hash-object -- FILE` prints it.
+## resolved, and HASH, FILE's hash as `git hash-object -- FILE` prints it,
+## is the same as when `resolve_with_agent` asked the agent to resolve the
+## conflicts, as recorded in ${resolve_rerere_hashes}.
 rerere_resolution_unchanged() {
-  # `git hash-object` converts the file as `git add` would, such as from
-  # CRLF line endings, as it did when the hash was recorded.
-  rru_hash="${2:-$(git hash-object -- "$1" 2> /dev/null)}" \
-    && [ -n "${rru_hash}" ] \
-    && printf '%s\n' "${resolve_rerere_hashes}" | grep -F -x -q -- "${rru_hash} $1"
+  printf '%s\n' "${resolve_rerere_hashes}" | grep -F -x -q -- "$2 $1"
 }
 
 ## Usage: one_sided_description FILE HASH
@@ -1468,6 +1469,11 @@ one_sided_description() {
     osd_stage=2
   elif [ "$2" = "$(git rev-parse --verify --quiet ":3:$1")" ]; then
     osd_stage=3
+  elif grep -q -e '^<<<<<<<$' -e '^<<<<<<< ' -- "$1"; then
+    # A file that still has a conflict marker matches neither side, whose
+    # versions have no such line:  `resolve_merge_conflicts` refuses a
+    # file whose versions do.
+    return 1
   else
     # The merge base's version is read only if FILE matches a side.
     osd_file="$(squeezed_cksum < "$1")"
@@ -1539,25 +1545,22 @@ rerere_skip_files() {
   # directory rr-cache/3b18e512dba79e4c8300dd08aeb37f8e728b8dad.  No
   # conflicted pathname contains a newline, which `resolve_merge_conflicts`
   # refuses, so `tr` can turn each entry into a line.  The awk program
-  # prints the entries to keep, or with "ids", the IDs of the others.  Its
-  # "$0" is awk's, not the shell's.
+  # prints "keep ENTRY" for each entry to keep, and "skip ID" for each
+  # other one; its "$0" is awk's, not the shell's.  Its exit status, which
+  # is the pipeline's, is checked before MERGE_RR is replaced.
   # shellcheck disable=SC2016
-  rsf_filter='BEGIN { n = split(ENVIRON["RSF_FILES"], files, "\n"); for (i = 1; i <= n; i++) skip[files[i]] = 1 }
-    { id = $0; sub(/\t.*/, "", id); pathname = $0; sub(/^[^\t]*\t/, "", pathname) }
-    ENVIRON["RSF_IDS"] == "" && !(pathname in skip) { print }
-    ENVIRON["RSF_IDS"] != "" && (pathname in skip) && id ~ /^[0-9a-f]+(\.[0-9]+)?$/ { print id }'
-  if ! rsf_ids="$(tr '\000' '\n' < "${rsf_merge_rr}" | RSF_FILES="$1" RSF_IDS=ids awk "${rsf_filter}")" \
-    || ! {
-      tr '\000' '\n' < "${rsf_merge_rr}" \
-        | RSF_FILES="$1" RSF_IDS='' awk "${rsf_filter}" \
-        | tr '\n' '\000' > "${rsf_lock}"
-    } \
+  if ! rsf_entries="$(tr '\000' '\n' < "${rsf_merge_rr}" | RSF_FILES="$1" awk '
+      BEGIN { n = split(ENVIRON["RSF_FILES"], files, "\n"); for (i = 1; i <= n; i++) skip[files[i]] = 1 }
+      { id = $0; sub(/\t.*/, "", id); pathname = $0; sub(/^[^\t]*\t/, "", pathname) }
+      !(pathname in skip) { print "keep " $0; next }
+      id ~ /^[0-9a-f]+(\.[0-9]+)?$/ { print "skip " id }')" \
+    || ! printf '%s\n' "${rsf_entries}" | sed -n -e 's/^keep //p' | tr '\n' '\000' > "${rsf_lock}" \
     || ! mv -f -- "${rsf_lock}" "${rsf_merge_rr}"; then
     rm -f -- "${rsf_lock}"
     echo "${SCRIPT_NAME}: cannot keep \`git rerere\` from recording the resolutions that keep one side's version" >&2
     return 0
   fi
-  printf '%s\n' "${rsf_ids}" | while IFS= read -r rsf_id; do
+  printf '%s\n' "${rsf_entries}" | sed -n -e 's/^skip //p' | while IFS= read -r rsf_id; do
     if [ -n "${rsf_id}" ]; then
       case "${rsf_id}" in
         *.*) rsf_preimage="${rsf_rr_cache}/${rsf_id%%.*}/preimage.${rsf_id#*.}" ;;

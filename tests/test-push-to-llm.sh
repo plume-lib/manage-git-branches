@@ -736,7 +736,7 @@ case "${session_id}" in
       fail "rejected resolution: AGENT-TODO.md lacks the command: $(cat "${todo}")"
     fi
     ## The entry tells an agent that reads it to get a person's help.
-    if ! grep -q -x -F "claude, an AI agent, did not resolve the merge's conflicts.  Ask a person for help with them before you finish the merge." "${todo}"; then
+    if ! grep -q -x -F "claude, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${todo}"; then
       fail "rejected resolution: AGENT-TODO.md does not ask for help: $(cat "${todo}")"
     fi
     ;;
@@ -842,7 +842,7 @@ case "${push_output}" in
 esac
 if grep -q 'codex resume' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
   || ! grep -q -x 'The merge of commit .* is in progress in .*' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
-  || ! grep -q -x -F "codex, an AI agent, did not resolve the merge's conflicts.  Ask a person for help with them before you finish the merge." "${feature_dir}/AGENT-TODO.md"; then
+  || ! grep -q -x -F "codex, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${feature_dir}/AGENT-TODO.md"; then
   fail "codex without a session id: wrong AGENT-TODO.md: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
 fi
 
