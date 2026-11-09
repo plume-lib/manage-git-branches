@@ -1401,35 +1401,45 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # anyway, so it is not reported.  A change to a resolution that
   # `git rerere` or this script made is reported wherever it is.  So is a
   # resolution by the agent that is one side's version of the file (see
-  # `report_one_sided_resolution`).  Each other file that the agent changed
-  # is also checked for conflict markers, as when the agent copied a
-  # conflict region into it.
+  # `one_sided_description`).  Each other file that the agent changed is
+  # also checked for conflict markers, as when the agent copied a conflict
+  # region into it.
+  # The resolutions by the agent that are one side's version of the file, as
+  # two lines for each:  the file, and then its description, as
+  # `one_sided_description` prints it.  No conflicted pathname contains a
+  # newline, which `resolve_merge_conflicts` refuses.
+  resolve_one_sided=''
   if [ "${resolve_refs_ok}" -eq 1 ]; then
     resolve_agent_other="$(resolve_other_changes)"
     printf '%s\n' "${resolve_agent_other}" | sed -e '/^$/d' -e "s/^/${SCRIPT_NAME}: ${resolve_with} also changed: /" >&2
+    resolve_one_sided="$(printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
+      if ! prior_resolution_unchanged "${resolve_file}" \
+        && resolve_description="$(one_sided_description "${resolve_file}")"; then
+        printf '%s\n%s\n' "${resolve_file}" "${resolve_description}"
+      fi
+    done)"
+    resolve_one_sided_files="$(printf '%s\n' "${resolve_one_sided}" | sed -n -e 'p;n')"
     printf '%s\n' "${resolve_unresolved}" | while IFS= read -r resolve_file; do
       resolve_file_separator="$(separator_permitted "${resolve_file}")"
       # A resolution that is one side's version drops the other side's
       # changes outside the conflict regions too; it is reported once.
       if [ -f "${resolve_file}" ] \
         && check_conflict_markers "${resolve_file}" "${resolve_file_separator}" 2> /dev/null \
-        && ! report_one_sided_resolution "${resolve_file}" \
+        && ! printf '%s\n' "${resolve_one_sided_files}" | grep -F -x -q -- "${resolve_file}" \
         && ! check_conflict_resolution "${resolve_file}" "${resolve_file_separator}" 2> /dev/null; then
         echo "${SCRIPT_NAME}: ${resolve_with} changed text outside the conflict regions of ${resolve_file}" >&2
       fi
     done
-    printf '%s\n' "${resolve_rerere}" | while IFS= read -r resolve_file; do
-      if [ -n "${resolve_file}" ] && ! prior_resolution_unchanged "${resolve_file}"; then
-        echo "${SCRIPT_NAME}: ${resolve_with} changed the resolution that \`git rerere\` made of ${resolve_file}" >&2
-        report_one_sided_resolution "${resolve_file}" || true
-      fi
-    done
-    printf '%s\n' "${resolve_taken_files}" | while IFS= read -r resolve_file; do
-      if [ -n "${resolve_file}" ] && ! prior_resolution_unchanged "${resolve_file}"; then
+    printf '%s\n' "${resolve_prior}" | while IFS= read -r resolve_file; do
+      if [ -z "${resolve_file}" ] || prior_resolution_unchanged "${resolve_file}"; then
+        :
+      elif printf '%s\n' "${resolve_taken_files}" | grep -F -x -q -- "${resolve_file}"; then
         echo "${SCRIPT_NAME}: ${resolve_with} changed the side's version that the script took of ${resolve_file}" >&2
-        report_one_sided_resolution "${resolve_file}" || true
+      else
+        echo "${SCRIPT_NAME}: ${resolve_with} changed the resolution that \`git rerere\` made of ${resolve_file}" >&2
       fi
     done
+    printf '%s\n' "${resolve_one_sided}" | sed -n -e "n;s/^/${SCRIPT_NAME}: /;s/\$/; review it/p" >&2
     if ! printf '%s\n' "${resolve_agent_other}" | {
       resolve_loop_ok=1
       while IFS= read -r resolve_file; do
@@ -1468,17 +1478,14 @@ Finish with a summary that says, for each conflict, what each side changed and h
     echo "${SCRIPT_NAME}: ${resolve_with} did not resolve the conflicts acceptably" >&2
     return 1
   fi
-  # The resolutions by the agent that are one side's version of the file,
-  # which were reported above.  The work is accepted, so the merge can be
-  # committed and pushed with them; they are also noted where the user is
-  # less likely to overlook them than in the script's output.
-  resolve_one_sided="$(printf '%s\n' "${resolve_files}" | while IFS= read -r resolve_file; do
-    if ! prior_resolution_unchanged "${resolve_file}"; then
-      one_sided_description "${resolve_file}" || true
-    fi
-  done)"
+  # The work is accepted, so the merge can be committed and pushed with the
+  # resolutions that are one side's version of the file.  They are also
+  # noted where the user is less likely to overlook them than in the
+  # script's output.  As for a side's version that this script takes,
+  # `git rerere` does not record them (see `rerere_skip_files`).
   if [ -n "${resolve_one_sided}" ]; then
-    note_one_sided_resolutions "${resolve_one_sided}"
+    rerere_skip_files "${resolve_one_sided_files}"
+    note_one_sided_resolutions "$(printf '%s\n' "${resolve_one_sided}" | sed -n -e 'n;p')"
   fi
   return 0
 }
@@ -1492,7 +1499,7 @@ Finish with a summary that says, for each conflict, what each side changed and h
 ## `separator_permitted` permits one in FILE.  A resolution that is identical
 ## to one side's version of FILE is acceptable, because the agent's
 ## instructions say when it is correct, but `resolve_with_agent` reports it
-## for the user's review (see `report_one_sided_resolution`).  Only
+## for the user's review (see `one_sided_description`).  Only
 ## `resolve_with_agent` calls this function, which reads the variables of
 ## `resolve_merge_conflicts` and of `resolve_with_agent`.
 check_agent_resolution() {
@@ -1513,20 +1520,6 @@ prior_resolution_unchanged() {
   # CRLF line endings, as it did when the hash was recorded.
   pru_hash="$(git hash-object -- "$1" 2> /dev/null)" \
     && printf '%s\n' "${resolve_prior_hashes}" | grep -F -x -q -- "${pru_hash} $1"
-}
-
-## Usage: report_one_sided_resolution FILE
-## Prints a diagnostic, for the user's review, if FILE, a conflicted file of
-## the merge in progress in the current directory, is the same as its
-## version on either side of the merge, apart from whitespace and blank lines
-## (see `one_sided_description`).  Returns 0 if it printed a diagnostic, and
-## 1 otherwise.  Only `resolve_with_agent` calls this function, which reads
-## the variables of `resolve_merge_conflicts` and of `resolve_with_agent`.
-report_one_sided_resolution() {
-  if ! rosr_text="$(one_sided_description "$1")"; then
-    return 1
-  fi
-  echo "${SCRIPT_NAME}: ${rosr_text}; review it" >&2
 }
 
 ## Usage: one_sided_description FILE
@@ -1568,13 +1561,19 @@ one_sided_description() {
 ## current directory, whose resolution the script accepted.  The entry also
 ## gives the command that continues the agent's session, with which the user
 ## can ask the agent why it resolved the files that way.  Does nothing if
-## the file already has such an entry for this merge, as after a rerun.
-## Only `resolve_with_agent` calls this function, which reads the variables
-## of `resolve_merge_conflicts` and of `run_agent`.
+## the file already has an entry for this merge that lists each of these
+## resolutions, as after a rerun.  Only `resolve_with_agent` calls this
+## function, which reads the variables of `resolve_merge_conflicts` and of
+## `run_agent`.
 note_one_sided_resolutions() {
   nosr_first="In the merge of ${resolve_source} (commit ${resolve_merge_head}) into ${resolve_branch} in $(pwd):"
+  nosr_items="$(printf '%s\n' "$1" | sed -e 's/^/* /' -e 's/$/./')"
+  # The awk program succeeds if each item is a line of the file.
   if [ -n "${agent_session_todo:-}" ] && [ -f "${agent_session_todo}" ] \
-    && grep -F -x -q -- "${nosr_first}" "${agent_session_todo}"; then
+    && grep -F -x -q -- "${nosr_first}" "${agent_session_todo}" \
+    && printf '%s\n' "${nosr_items}" | awk 'NR == FNR { line[$0] = 1; next }
+      !($0 in line) { missing = 1 }
+      END { exit missing }' "${agent_session_todo}" -; then
     return 0
   fi
   nosr_entry="
@@ -1582,7 +1581,7 @@ note_one_sided_resolutions() {
 
 ${nosr_first}
 
-$(printf '%s\n' "$1" | sed -e 's/^/* /' -e 's/$/./')
+${nosr_items}
 
 Such a resolution is correct only if every change of the other side to the file is already present in the version that was kept, or is obsolete.  The script accepted the resolutions, so it commits the merge and can push it.  If a resolution is wrong, fix it; then delete this entry.
 "
@@ -1658,7 +1657,9 @@ squeezed_cksum() {
 ## it from Y to X.  Also prints nothing, and returns 1, if the side that
 ## reached the other side's version later changed the lines that the other
 ## side changed (see `keeps_changes`), as when it cherry-picked the other
-## side's change and then reverted it.  Then the side's version need not
+## side's change and then reverted it, or later changed the mode of FILE
+## after the other side changed it, as from executable back to not
+## executable.  Then the side's version need not
 ## contain the other side's changes, and an agent must judge whether it
 ## does.
 side_containing_other() {
@@ -1707,10 +1708,13 @@ side_containing_other() {
           return 1
         fi
         sco_reached=yes
-        if keeps_changes \
-          "$(printf '%s\n' "${sco_index}" | sed -n -e 's/^1 [0-7]* //p')" \
-          "${sco_other#* }" \
-          "$(printf '%s\n' "${sco_index}" | sed -n -e "s/^${sco_stage} [0-7]* //p")"; then
+        # The base's version and the side's version, as for ${sco_other}.
+        # The side keeps the other side's change of mode if it has the other
+        # side's mode, or if the other side did not change the mode.
+        sco_base="$(printf '%s\n' "${sco_index}" | sed -n -e 's/^1 //p')"
+        sco_own="$(printf '%s\n' "${sco_index}" | sed -n -e "s/^${sco_stage} //p")"
+        if { [ "${sco_own%% *}" = "${sco_other%% *}" ] || [ "${sco_base%% *}" = "${sco_other%% *}" ]; } \
+          && keeps_changes "${sco_base#* }" "${sco_other#* }" "${sco_own#* }"; then
           sco_found="${sco_stage} ${sco_commit}"
         fi
         break
@@ -1833,11 +1837,12 @@ merge_side() {
 ## Keeps `git rerere` from recording the resolution of each of FILES, which
 ## are conflicted files of the merge in progress in the current directory,
 ## one per line, when the merge is committed.  Prints a diagnostic if it
-## cannot.  A file whose conflicts `resolve_merge_conflicts` resolved by
-## taking one side's version needs this:  the side's version also drops the
-## other side's changes outside the conflict regions, and a later merge with
-## the same conflicts, to which `git rerere` applied that resolution, would
-## fail `check_conflict_resolution`.
+## cannot.  A file whose resolution is one side's version needs this,
+## whether `resolve_merge_conflicts` took that version or an agent wrote it:
+## the side's version also drops the other side's changes outside the
+## conflict regions, and a later merge with the same conflicts, to which
+## `git rerere` applied that resolution, would fail
+## `check_conflict_resolution`.
 rerere_skip_files() {
   if [ -z "$1" ] \
     || ! rsf_merge_rr="$(git rev-parse --git-path MERGE_RR)" \

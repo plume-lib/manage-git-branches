@@ -547,6 +547,7 @@ check_side_resolved() {
 ## that git merged cleanly.
 for side_mode in ours theirs; do
   setup_case "side-${side_mode}"
+  git -C "${feature_dir}" config rerere.enabled true
   push_to "${side_mode}" --llm
   if [ "${side_mode}" = ours ]; then
     side_expected="$(printf '%s\n' one two three four five six SEVEN-feature eight nine)"
@@ -570,6 +571,12 @@ for side_mode in ours theirs; do
     || ! grep -q -F "* claude resolved file.txt as the version" "${side_todo}" \
     || ! grep -q '^cd .* && claude --resume ' "${side_todo}"; then
     fail "${side_mode}: AGENT-TODO.md does not ask for review: $(cat "${side_todo}" 2> /dev/null)"
+  fi
+  # `git rerere` does not record the resolution, which a later merge with
+  # the same conflict would replay and then reject.
+  side_rr_cache="${feature_dir}/$(git -C "${feature_dir}" rev-parse --git-path rr-cache)"
+  if [ -n "$(find "${side_rr_cache}" -name postimage 2> /dev/null)" ]; then
+    fail "${side_mode}: \`git rerere\` recorded the one-sided resolution"
   fi
 done
 
@@ -703,6 +710,32 @@ check_not_resolved "contained-mode"
 if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "contained-mode: the agent did not run: ${push_output}"
 fi
+
+## No side's version is taken when the side reached the other side's
+## version, including its change of mode, and then changed the mode back:
+## here main makes file.txt executable, and feature reaches main's version,
+## and then makes file.txt not executable and changes a line that main did
+## not change.
+setup_case contained-mode-reverted
+chmod +x "${main_dir}/file.txt"
+git -C "${main_dir}" commit -q -a -m "Make file.txt executable"
+git -C "${main_dir}" push -q
+printf '%s\n' ONE two three four five six SEVEN-main eight nine > "${feature_dir}/file.txt"
+chmod +x "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Reach main's version"
+printf '%s\n' ONE two three four five six SEVEN-main EIGHT-later nine > "${feature_dir}/file.txt"
+chmod -x "${feature_dir}/file.txt"
+git -C "${feature_dir}" commit -q -a -m "Change feature again"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+push_to none --llm
+check_not_resolved "contained-mode-reverted"
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "contained-mode-reverted: the agent did not run: ${push_output}"
+fi
+case "${push_output}" in
+  *"took the version"*) fail "contained-mode-reverted: a side's version was taken: ${push_output}" ;;
+esac
 
 ## A rerun after a run that took a side and then stopped takes the side
 ## again, rather than taking its version for a resolution by `git rerere`.

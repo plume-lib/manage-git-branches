@@ -184,11 +184,14 @@
 # contains every change of the other side to it:  when the other side's
 # version of the file is that of a commit in the side's history after the
 # merge base, as when one side merged a branch and the other side merged a
-# squashed copy of it.  Then this script takes that side's version itself,
+# squashed copy of it, and the side's later changes to the file do not touch
+# the lines that the other side changed, nor undo the other side's change of
+# the file's mode.  Then this script takes that side's version itself,
 # before any agent runs, and even with --no-llm.  It keeps `git rerere` from
 # recording that version as the resolution of the file's conflicts, because
 # the version also drops the other side's changes outside the conflict
-# regions.
+# regions.  For the same reason, it keeps `git rerere` from recording a
+# resolution by the agent that is one side's version.
 #
 # When the build of TO_DIR fails, and a merge on TO_DIR's branch might have
 # broken it, the agent edits files to fix it, without building; then this
