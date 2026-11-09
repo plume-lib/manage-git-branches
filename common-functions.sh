@@ -1105,7 +1105,7 @@ resolve_merge_conflicts() {
     # `resolve_with_agent` reports as ${resolve_agent_status} 2.
     # The entry in AGENT-TODO.md is read by a person or by a later agent,
     # which should not try alone what this agent could not do.
-    resolve_agent_reason="${resolve_with} could not resolve its conflicts acceptably.  Ask a person for help with them before resolving them."
+    resolve_agent_reason="${resolve_with}, an AI agent, did not resolve the merge's conflicts.  Ask a person for help with them before you finish the merge."
     resolve_note="$(merge_in_progress_note "${resolve_agent_reason}")"
     resolve_agent_status=0
     if ! resolve_with_agent; then
@@ -1315,25 +1315,48 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # refuses.
   resolve_one_sided_files=''
   resolve_one_sided_descriptions=''
+  # The conflicted files that `git rerere` resolved and whose resolution the
+  # agent changed or deleted, one per line.
+  resolve_rerere_changed=''
   if [ "${resolve_refs_ok}" -eq 1 ]; then
     resolve_agent_other="$(resolve_other_changes)"
     printf '%s\n' "${resolve_agent_other}" | sed -e '/^$/d' -e "s/^/${SCRIPT_NAME}: ${resolve_with} also changed: /" >&2
-    # The loop reads a here-document, not a pipe, so that it runs in this
-    # shell and its assignments last.  `git hash-object` fails for a file
-    # that the agent deleted.
-    while IFS= read -r resolve_file; do
-      if [ -n "${resolve_file}" ] \
-        && resolve_hash="$(git hash-object -- "${resolve_file}" 2> /dev/null)" \
-        && ! rerere_resolution_unchanged "${resolve_file}" "${resolve_hash}" \
+    # The loop runs in this shell, not in a pipe's subshell, so that its
+    # assignments last.  The shell splits ${resolve_files} on newlines, with
+    # globbing off so that no pathname is expanded; the body restores both.
+    # It hashes each file once.
+    resolve_saved_ifs="${IFS}"
+    IFS='
+'
+    set -f
+    for resolve_file in ${resolve_files}; do
+      set +f
+      IFS="${resolve_saved_ifs}"
+      # `git hash-object` fails for a file that the agent deleted.
+      resolve_hash="$(git hash-object -- "${resolve_file}" 2> /dev/null)" || resolve_hash=''
+      if [ -n "${resolve_hash}" ] \
+        && rerere_resolution_unchanged "${resolve_file}" "${resolve_hash}"; then
+        continue
+      fi
+      if printf '%s\n' "${resolve_rerere}" | grep -F -x -q -- "${resolve_file}"; then
+        resolve_rerere_changed="${resolve_rerere_changed}${resolve_file}
+"
+      fi
+      if [ -n "${resolve_hash}" ] \
         && resolve_description="$(one_sided_description "${resolve_file}" "${resolve_hash}")"; then
         resolve_one_sided_files="${resolve_one_sided_files}${resolve_file}
 "
         resolve_one_sided_descriptions="${resolve_one_sided_descriptions}${resolve_description}
 "
       fi
-    done << EOF
-${resolve_files}
-EOF
+    done
+    set +f
+    IFS="${resolve_saved_ifs}"
+    # `git rerere` does not record a resolution that is one side's version
+    # (see `rerere_skip_files`), whether or not the agent's work is
+    # accepted:  after a rejection, a person who finishes the merge might
+    # keep it.
+    rerere_skip_files "${resolve_one_sided_files}"
     printf '%s\n' "${resolve_unresolved}" | while IFS= read -r resolve_file; do
       resolve_file_separator="$(separator_permitted "${resolve_file}")"
       # A resolution that is one side's version drops the other side's
@@ -1345,11 +1368,7 @@ EOF
         echo "${SCRIPT_NAME}: ${resolve_with} changed text outside the conflict regions of ${resolve_file}" >&2
       fi
     done
-    printf '%s\n' "${resolve_rerere}" | while IFS= read -r resolve_file; do
-      if [ -n "${resolve_file}" ] && ! rerere_resolution_unchanged "${resolve_file}"; then
-        echo "${SCRIPT_NAME}: ${resolve_with} changed the resolution that \`git rerere\` made of ${resolve_file}" >&2
-      fi
-    done
+    printf '%s' "${resolve_rerere_changed}" | sed -e "s/^/${SCRIPT_NAME}: ${resolve_with} changed the resolution that \`git rerere\` made of /" >&2
     printf '%s' "${resolve_one_sided_descriptions}" | sed -e "s/^/${SCRIPT_NAME}: /" -e 's/$/; review it/' >&2
     if ! printf '%s\n' "${resolve_agent_other}" | {
       resolve_loop_ok=1
@@ -1388,12 +1407,6 @@ EOF
   if [ "${resolve_ok}" -eq 0 ]; then
     echo "${SCRIPT_NAME}: ${resolve_with} did not resolve the conflicts acceptably" >&2
     return 1
-  fi
-  # The work is accepted, so the merge can be committed and pushed with the
-  # resolutions that are one side's version of the file, which
-  # `git rerere` does not record (see `rerere_skip_files`).
-  if [ -n "${resolve_one_sided_files}" ]; then
-    rerere_skip_files "${resolve_one_sided_files}"
   fi
   return 0
 }
@@ -1461,15 +1474,20 @@ one_sided_description() {
   elif [ "$2" = "$(git rev-parse --verify --quiet ":3:$1")" ]; then
     osd_stage=3
   else
+    # The merge base's version is read only if FILE matches a side.
     osd_file="$(squeezed_cksum < "$1")"
-    osd_base="$(git cat-file blob ":1:$1" 2> /dev/null | squeezed_cksum)"
     osd_ours="$(git cat-file blob ":2:$1" 2> /dev/null | squeezed_cksum)"
     osd_theirs="$(git cat-file blob ":3:$1" 2> /dev/null | squeezed_cksum)"
-    if [ "${osd_file}" = "${osd_ours}" ] && [ "${osd_base}" != "${osd_theirs}" ]; then
+    if [ "${osd_file}" = "${osd_ours}" ]; then
       osd_stage=2
-    elif [ "${osd_file}" = "${osd_theirs}" ] && [ "${osd_base}" != "${osd_ours}" ]; then
+      osd_other="${osd_theirs}"
+    elif [ "${osd_file}" = "${osd_theirs}" ]; then
       osd_stage=3
+      osd_other="${osd_ours}"
     else
+      return 1
+    fi
+    if [ "$(git cat-file blob ":1:$1" 2> /dev/null | squeezed_cksum)" = "${osd_other}" ]; then
       return 1
     fi
     osd_how=', apart from whitespace and blank lines'
@@ -1493,34 +1511,68 @@ squeezed_cksum() {
 ## Usage: rerere_skip_files FILES
 ## Keeps `git rerere` from recording the resolution of each of FILES, which
 ## are conflicted files of the merge in progress in the current directory,
-## one per line, when the merge is committed.  Prints a diagnostic if it
-## cannot.  A file whose resolution is one side's version, which an agent
-## wrote, needs this:  the side's version also drops the other side's
-## changes outside the conflict regions, and a later merge with the same
-## conflicts, to which `git rerere` applied that resolution, would fail
-## `check_conflict_resolution`.
+## one per line, when the merge is committed, and removes the record of
+## each one's conflict, its preimage.  Prints a diagnostic if it cannot.  A
+## file whose resolution is one side's version, which an agent wrote, needs
+## this:  the side's version also drops the other side's changes outside the
+## conflict regions, and a later merge with the same conflicts, to which
+## `git rerere` applied that resolution, would fail
+## `check_conflict_resolution`.  Without the removal, `git rerere` would
+## record the same conflict anew, as another variant of it, at each later
+## merge that had it.
 rerere_skip_files() {
   if [ -z "$1" ] \
     || ! rsf_merge_rr="$(git rev-parse --git-path MERGE_RR)" \
+    || ! rsf_rr_cache="$(git rev-parse --git-path rr-cache)" \
     || [ ! -f "${rsf_merge_rr}" ]; then
     return 0
   fi
-  # `git rerere` records the resolution of each file that MERGE_RR, in the
-  # git directory, lists.  Each entry of MERGE_RR is "ID<TAB>PATHNAME<NUL>",
-  # where ID names the conflict, as in
-  # "3b18e512dba79e4c8300dd08aeb37f8e728b8dad" or
-  # "3b18e512dba79e4c8300dd08aeb37f8e728b8dad.1".  No conflicted pathname
-  # contains a newline, which `resolve_merge_conflicts` refuses, so `tr` can
-  # turn each entry into a line.
-  if ! tr '\000' '\n' < "${rsf_merge_rr}" \
-    | RSF_FILES="$1" awk '
-      BEGIN { n = split(ENVIRON["RSF_FILES"], files, "\n"); for (i = 1; i <= n; i++) skip[files[i]] = 1 }
-      { pathname = $0; sub(/^[^\t]*\t/, "", pathname); if (!(pathname in skip)) print }' \
-    | tr '\n' '\000' > "${rsf_merge_rr}.new" \
-    || ! mv -f -- "${rsf_merge_rr}.new" "${rsf_merge_rr}"; then
-    rm -f -- "${rsf_merge_rr}.new"
-    echo "${SCRIPT_NAME}: cannot keep \`git rerere\` from recording the resolutions that keep one side's version" >&2
+  # Git writes MERGE_RR, in the git directory, as it writes its other files:
+  # it creates the lock MERGE_RR.lock, which must not exist, writes the new
+  # content there, and renames the lock to MERGE_RR.  This function does
+  # the same.  `set -C` makes the redirection fail if the lock exists.
+  rsf_lock="${rsf_merge_rr}.lock"
+  if ! (set -C && : > "${rsf_lock}") 2> /dev/null; then
+    echo "${SCRIPT_NAME}: cannot create ${rsf_lock}, so \`git rerere\` can record the resolutions that keep one side's version" >&2
+    return 0
   fi
+  # `git rerere` records the resolution of each file that MERGE_RR lists.
+  # Each entry of MERGE_RR is "ID<TAB>PATHNAME<NUL>", where ID names the
+  # conflict and its variant, as in "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"
+  # for variant 0 or "3b18e512dba79e4c8300dd08aeb37f8e728b8dad.1" for
+  # variant 1, whose preimage is the file preimage or preimage.1 in the
+  # directory rr-cache/3b18e512dba79e4c8300dd08aeb37f8e728b8dad.  No
+  # conflicted pathname contains a newline, which `resolve_merge_conflicts`
+  # refuses, so `tr` can turn each entry into a line.  The awk program
+  # prints the entries to keep, or with "ids", the IDs of the others.  Its
+  # "$0" is awk's, not the shell's.
+  # shellcheck disable=SC2016
+  rsf_filter='BEGIN { n = split(ENVIRON["RSF_FILES"], files, "\n"); for (i = 1; i <= n; i++) skip[files[i]] = 1 }
+    { id = $0; sub(/\t.*/, "", id); pathname = $0; sub(/^[^\t]*\t/, "", pathname) }
+    ENVIRON["RSF_IDS"] == "" && !(pathname in skip) { print }
+    ENVIRON["RSF_IDS"] != "" && (pathname in skip) && id ~ /^[0-9a-f]+(\.[0-9]+)?$/ { print id }'
+  if ! rsf_ids="$(tr '\000' '\n' < "${rsf_merge_rr}" | RSF_FILES="$1" RSF_IDS=ids awk "${rsf_filter}")" \
+    || ! {
+      tr '\000' '\n' < "${rsf_merge_rr}" \
+        | RSF_FILES="$1" RSF_IDS='' awk "${rsf_filter}" \
+        | tr '\n' '\000' > "${rsf_lock}"
+    } \
+    || ! mv -f -- "${rsf_lock}" "${rsf_merge_rr}"; then
+    rm -f -- "${rsf_lock}"
+    echo "${SCRIPT_NAME}: cannot keep \`git rerere\` from recording the resolutions that keep one side's version" >&2
+    return 0
+  fi
+  printf '%s\n' "${rsf_ids}" | while IFS= read -r rsf_id; do
+    if [ -n "${rsf_id}" ]; then
+      case "${rsf_id}" in
+        *.*) rsf_preimage="${rsf_rr_cache}/${rsf_id%%.*}/preimage.${rsf_id#*.}" ;;
+        *) rsf_preimage="${rsf_rr_cache}/${rsf_id}/preimage" ;;
+      esac
+      rm -f -- "${rsf_preimage}"
+      # The directory remains if it records another variant.
+      rmdir -- "${rsf_rr_cache}/${rsf_id%%.*}" 2> /dev/null || true
+    fi
+  done
 }
 
 ## Usage: check_conflict_markers FILE CONTAINS_SEPARATOR

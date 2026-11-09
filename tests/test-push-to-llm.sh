@@ -532,7 +532,8 @@ esac
 
 ## Usage: check_side_resolved DESCRIPTION EXPECTED
 ## Checks that git-push-to committed and pushed the merge of main into
-## feature, and that its file.txt is EXPECTED.
+## feature, and that its file.txt is EXPECTED.  DESCRIPTION names the test
+## case; used for diagnostics.
 check_side_resolved() {
   if [ "${push_status}" -ne 0 ]; then
     fail "$1: git-push-to failed: ${push_output}"
@@ -552,15 +553,18 @@ check_side_resolved() {
 
 ## Usage: read_recorded_resolutions DESCRIPTION
 ## Sets ${recorded} to the content of each resolution that `git rerere`
-## recorded in ${feature_dir}.  Fails if ${feature_dir} has no rr-cache
-## directory, in which `git rerere` records each conflict when the merge
-## stops.  DESCRIPTION names the test case; used for diagnostics.
+## recorded in ${feature_dir}, and ${recorded_conflicts} to the number of
+## conflicts that it recorded, each as a file preimage or preimage.N.  Fails
+## if ${feature_dir} has no rr-cache directory, in which `git rerere`
+## records each conflict when the merge stops.  DESCRIPTION names the test
+## case; used for diagnostics.
 read_recorded_resolutions() {
   rr_cache="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path rr-cache)"
   if [ ! -d "${rr_cache}" ]; then
     fail "$1: \`git rerere\` recorded no conflict in ${rr_cache}"
   fi
   recorded="$(find "${rr_cache}" -name postimage -exec cat {} +)"
+  recorded_conflicts="$(find "${rr_cache}" -name 'preimage*' | wc -l | tr -d ' ')"
 }
 
 ## A resolution that is identical to either side's version is accepted, and
@@ -601,10 +605,13 @@ for side_mode in ours theirs; do
   fi
   # `git rerere` records the resolution of other.txt but not that of
   # file.txt, which a later merge with the same conflict would replay and
-  # then reject.
+  # then reject, and it keeps no record of file.txt's conflict.
   read_recorded_resolutions "${side_mode}"
   if [ "${recorded}" != "$(printf '%s\n' other-feature other-main)" ]; then
     fail "${side_mode}: \`git rerere\` recorded the wrong resolutions: ${recorded}"
+  fi
+  if [ "${recorded_conflicts}" -ne 1 ]; then
+    fail "${side_mode}: \`git rerere\` kept ${recorded_conflicts} conflicts, not 1"
   fi
 done
 
@@ -663,8 +670,8 @@ for side_mode in ours theirs; do
   # would drop the other side's changes outside the conflict regions from a
   # later merge with the same conflict.
   read_recorded_resolutions "${side_name}"
-  if [ -n "${recorded}" ]; then
-    fail "${side_name}: \`git rerere\` recorded the side's version as a resolution: ${recorded}"
+  if [ -n "${recorded}" ] || [ "${recorded_conflicts}" -ne 0 ]; then
+    fail "${side_name}: \`git rerere\` recorded the side's version as a resolution, or kept the conflict: ${recorded}"
   fi
 done
 
@@ -676,12 +683,21 @@ git -C "${feature_dir}" add other.txt
 git -C "${feature_dir}" commit -q -m "Add other.txt"
 git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+git -C "${feature_dir}" config rerere.enabled true
 push_to ours-other --llm
 check_not_resolved "ours-other"
 case "${push_output}" in
   *"claude created a file: scratch.txt"*"claude also changed: other.txt"*) ;;
   *) fail "ours-other: wrong diagnostic: ${push_output}" ;;
 esac
+## Even when the agent's work is rejected, `git rerere` does not record its
+## resolution that is one side's version, which a person can commit.
+git -C "${feature_dir}" add -u
+git -C "${feature_dir}" commit -q --no-edit
+read_recorded_resolutions "ours-other"
+if [ -n "${recorded}" ] || [ "${recorded_conflicts}" -ne 0 ]; then
+  fail "ours-other: \`git rerere\` recorded the one-sided resolution, or kept the conflict: ${recorded}"
+fi
 
 ## Deleting the conflicted file is rejected.
 setup_case delete-conflicted
@@ -720,7 +736,7 @@ case "${session_id}" in
       fail "rejected resolution: AGENT-TODO.md lacks the command: $(cat "${todo}")"
     fi
     ## The entry tells an agent that reads it to get a person's help.
-    if ! grep -q -x -F "claude could not resolve its conflicts acceptably.  Ask a person for help with them before resolving them." "${todo}"; then
+    if ! grep -q -x -F "claude, an AI agent, did not resolve the merge's conflicts.  Ask a person for help with them before you finish the merge." "${todo}"; then
       fail "rejected resolution: AGENT-TODO.md does not ask for help: $(cat "${todo}")"
     fi
     ;;
@@ -826,7 +842,7 @@ case "${push_output}" in
 esac
 if grep -q 'codex resume' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
   || ! grep -q -x 'The merge of commit .* is in progress in .*' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
-  || ! grep -q -x -F 'codex could not resolve its conflicts acceptably.  Ask a person for help with them before resolving them.' "${feature_dir}/AGENT-TODO.md"; then
+  || ! grep -q -x -F "codex, an AI agent, did not resolve the merge's conflicts.  Ask a person for help with them before you finish the merge." "${feature_dir}/AGENT-TODO.md"; then
   fail "codex without a session id: wrong AGENT-TODO.md: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
 fi
 

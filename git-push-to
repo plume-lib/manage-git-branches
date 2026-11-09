@@ -155,7 +155,8 @@
 # which also suits a merge that you resolve yourself or with an agent
 # interactively, followed by rules specific to this script.  The agent is
 # told to examine every change of both sides of the merge, and to combine
-# them rather than taking either side's version.  It can edit any part of any
+# them; it takes either side's version only if the other side's changes are
+# already present in it or are obsolete.  It can edit any part of any
 # file that git tracks, not only the conflict regions, because git's
 # automatic merge of the rest can combine changes that do not fit together,
 # such as a call to a method that the other side renamed.  It can also
