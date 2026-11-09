@@ -799,7 +799,10 @@ git_push_to() {
   # `git pull PATH BRANCH` would instead write "Merge branch 'feature' of
   # ../myrepo-branch-feature into main", and would head the commit summaries
   # that `merge.log` turns on with "* 'feature' of ../myrepo-branch-feature:".
-  # `merge_build_push` describes the commit as a branch of this repository.
+  # So the description passed to `merge_build_push` names FROM_DIR's branch
+  # as if it were a branch of this repository, ".", for which git omits
+  # " of LOCATION" from the merge message (see `merge_build_push`).
+  #
   # The histories of the remote branches that FROM_DIR's branch pushes to and
   # pulls from, and of the heads that the pulls of FROM_DIR and TO_DIR
   # fetched (or, if FROM_DIR was not pulled, that the latest fetch of its
