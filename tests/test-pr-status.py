@@ -1002,14 +1002,11 @@ class PushChainsTest(unittest.TestCase):
             master_conflicts=master_conflicts,
             pair_conflicts={},
         )
-        levels = {n: 1 + len(ds) for n, ds in direct.items() if ds} | {
-            d: 1 for ds in direct.values() for d in ds
-        }
         model = types.SimpleNamespace(
             repo=repo,
             open=set(direct),
             update_direct=direct,
-            update_levels=levels,
+            update_levels=pr_status.Model.graph_levels(direct),
             update_cycle_affected=set(cycle_affected),
         )
         upstream = {"master": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}
@@ -1045,6 +1042,15 @@ class PushChainsTest(unittest.TestCase):
         """
         chains = self.chains({1: set(), 2: {1}, 3: {2}, 4: {2}}, {})
         self.assertEqual(chains, [["master", "pr1", "pr2", "pr3"], ["pr2", "pr4"]])
+
+    def test_root_with_larger_number(self):
+        """A chain that pushes from a PR's branch follows the chain that updates it.
+
+        The root PR's number is larger than those of its dependents, so only the PRs'
+        levels, not their numbers, order the chains.
+        """
+        chains = self.chains({5: set(), 2: {5}, 3: {2}, 4: {2}}, {})
+        self.assertEqual(chains, [["master", "pr5", "pr2", "pr3"], ["pr2", "pr4"]])
 
     def test_upstream_only_at_roots_without_upstream(self):
         """Without upstream, no chain starts with it."""

@@ -3472,11 +3472,11 @@ def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[s
             " prerequisites first."
         ),
         (
-            f"A chain starts with {upstream} if its first PR has no prerequisite among the PRs"
-            " that these commands update; otherwise, it starts with a PR whose branch an earlier"
-            f" command updates.  So the branch of a PR that has a prerequisite receives {upstream}"
-            " only through its prerequisites; receiving it directly as well would make later"
-            " merges criss-cross merges."
+            "A chain whose first PR has a prerequisite among the PRs that these commands update"
+            " starts with that PR, whose branch an earlier command updates.  Every other chain"
+            f" starts with {upstream}, if it has a working copy.  So the branch of a PR that has"
+            f" a prerequisite among those PRs receives {upstream} only through its prerequisites;"
+            " receiving it directly as well would make later merges criss-cross merges."
         ),
         f"A chain may consist of {upstream} and a single PR that has no prerequisite or dependent.",
         "`git-push-to` merges, compiles, and pushes; see its documentation.",
