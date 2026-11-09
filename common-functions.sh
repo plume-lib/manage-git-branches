@@ -881,7 +881,9 @@ upstream_default_branch_git() {
 ## the upstream repository of the clone in the current directory, such as
 ## `refs/remotes/upstream/master`.  Sets ${upstream_source} to the name of the
 ## remote that the ref belongs to, such as "upstream", or to the URL that the
-## ref was fetched from.
+## ref was fetched from.  Sets ${upstream_is_parent} to 1 if the upstream
+## repository is a fork's upstream repository, as described below, and to 0
+## otherwise.
 ##
 ## The upstream repository is the remote that `upstream_remote` chooses, with
 ## one exception.  If that remote is not named "upstream", and
@@ -902,6 +904,7 @@ upstream_default_branch_git() {
 ## Returns 1, after printing a diagnostic, on failure.
 # shellcheck disable=SC2034 # set for the caller
 find_upstream_ref() {
+  upstream_is_parent=0
   if ! upstream_source="$(upstream_remote)"; then
     return 1
   fi
@@ -924,6 +927,7 @@ find_upstream_ref() {
           = "${fur_parent_lower}" ]; then
           upstream_ref="$(upstream_default_branch "${fur_remote}" "$1")" || return 1
           upstream_source="${fur_remote}"
+          upstream_is_parent=1
           return 0
         fi
       done
@@ -939,12 +943,14 @@ find_upstream_ref() {
         if git fetch --quiet "${fur_parent_url}" "+HEAD:${fur_ref}"; then
           upstream_ref="${fur_ref}"
           upstream_source="${fur_parent_url}"
+          upstream_is_parent=1
           return 0
         fi
         echo "${SCRIPT_NAME}: cannot fetch ${fur_parent_url}, the upstream repository of ${fur_fork}; using ${upstream_source} instead" >&2
       elif git rev-parse --verify --quiet "${fur_ref}" > /dev/null; then
         upstream_ref="${fur_ref}"
         upstream_source="${fur_parent_url}"
+        upstream_is_parent=1
         return 0
       else
         echo "${SCRIPT_NAME}: ${fur_parent_url}, the upstream repository of ${fur_fork}, has not been fetched; using ${upstream_source} instead" >&2
