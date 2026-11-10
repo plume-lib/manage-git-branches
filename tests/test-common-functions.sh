@@ -496,6 +496,20 @@ git -C "${cap_repo}" commit -q -a -m 'Change line 8'
 if (cd "${cap_repo}" && changes_already_present file.txt feature main); then
   fail "changes_already_present accepted a change that feature lacks"
 fi
+# So is one that the filter cannot rule out, because a version on feature
+# contains main's new line within a different line; only the merge rules it
+# out.
+printf '%s\n' one two 'THREE changed by the pull request' four five six SEVEN-feature 'EIGHT-main, but longer' \
+  NINE-main > "${WORK_DIR}/cap-feature/file.txt"
+git -C "${WORK_DIR}/cap-feature" commit -q -a -m 'Change line 8 differently'
+cap_lookalike="$(git -C "${cap_repo}" rev-parse feature)"
+cpp_out="$(cd "${cap_repo}" && changes_present_plausible file.txt "$(git rev-parse 'main~1:file.txt')" \
+  "$(git rev-parse 'main:file.txt')" "${cap_lookalike}")"
+[ "${cpp_out}" = "${cap_lookalike}" ] \
+  || fail "changes_present_plausible ruled out a version that contains main's new line: [${cpp_out}]"
+if (cd "${cap_repo}" && changes_present_max_unfiltered=0 && changes_already_present file.txt feature main); then
+  fail "changes_already_present accepted a change that feature lacks, with the filter"
+fi
 
 # `changes_present_plausible` prints each candidate whose version contains
 # the lines that the result has more times than the merge's own version,
@@ -516,6 +530,34 @@ cpp_out="$(cd "${cap_repo}" && changes_present_plausible file.txt "${cpp_current
 [ "${cpp_out}" = "${cpp_initial}
 0000000000000000000000000000000000000001" ] \
   || fail "changes_present_plausible filtered after \`git grep\` failed: [${cpp_out}]"
+
+# `changes_already_present` recognizes a commit on main whose version of the
+# file is that of a commit on feature, when the repository lacks that
+# version, as a partial clone can.  `git rev-parse` recovers its hash, which
+# is all that the merge needs, because main's version is the merge base's.
+cap_missing_repo="${WORK_DIR}/cap-missing"
+git init -q -b main "${cap_missing_repo}"
+printf '%s\n' one two three > "${cap_missing_repo}/file.txt"
+git -C "${cap_missing_repo}" add file.txt
+git -C "${cap_missing_repo}" commit -q -m 'Initial commit'
+git -C "${cap_missing_repo}" worktree add -q -b feature "${WORK_DIR}/cap-missing-feature"
+printf '%s\n' one TWO three > "${WORK_DIR}/cap-missing-feature/file.txt"
+git -C "${WORK_DIR}/cap-missing-feature" commit -q -a -m 'Change line 2'
+printf '%s\n' one TWO three > "${cap_missing_repo}/file.txt"
+git -C "${cap_missing_repo}" commit -q -a -m 'Change line 2 (#1)'
+cap_missing_blob="$(git -C "${cap_missing_repo}" rev-parse 'main:file.txt')"
+cap_missing_object="$(git -C "${cap_missing_repo}" rev-parse --path-format=absolute \
+  --git-path "objects/$(printf '%s' "${cap_missing_blob}" | cut -c1-2)/$(printf '%s' "${cap_missing_blob}" | cut -c3-)")"
+mv "${cap_missing_object}" "${cap_missing_object}.hidden"
+if git -C "${cap_missing_repo}" cat-file -e "${cap_missing_blob}" 2> /dev/null; then
+  fail "the repository still has blob ${cap_missing_blob}"
+fi
+if ! (cd "${cap_missing_repo}" && changes_already_present file.txt feature main); then
+  fail "changes_already_present did not recognize a version that the repository lacks"
+fi
+if ! (cd "${cap_missing_repo}" && changes_present_max_unfiltered=0 && changes_already_present file.txt feature main); then
+  fail "changes_already_present did not recognize a version that the repository lacks, with the filter"
+fi
 
 # `undo_worktree_add` removes a worktree, its registration, and its branch,
 # and leaves everything else of the repository alone.

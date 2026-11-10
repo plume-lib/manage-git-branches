@@ -1978,8 +1978,13 @@ one_sided_description() {
 ## each such fetch makes a network round trip, and without a network it
 ## waits and then fails.  A merge that needs such an object counts as not
 ## making the change, as does one that has conflicts.
+##
+## When more than ${changes_present_max_unfiltered} commits are tried as Y,
+## `changes_present_plausible` first rules out most of those whose version of
+## FILE cannot yield C's.
 changes_present_max_commits=20
 changes_present_max_candidates=100
+changes_present_max_unfiltered=3
 changes_already_present() {
   cap_file="$1"
   cap_kept="$2"
@@ -2018,6 +2023,9 @@ changes_already_present() {
     || ! printf '%s\n' "${cap_candidates}" | awk '$0 !~ /^[0-9a-f]+$/ { exit 1 }'; then
     return 1
   fi
+  # shellcheck disable=SC2086 # Each candidate is one word.
+  set -- ${cap_candidates}
+  cap_count="$#"
   # One `git cat-file` reads every candidate's version of FILE, into
   # ${cap_blob_CANDIDATE}.  It prints a line such as "REV:FILE missing",
   # which becomes "-", for a candidate that lacks FILE, and also, in a partial
@@ -2054,12 +2062,22 @@ changes_already_present() {
     cap_current="$(git --no-lazy-fetch rev-parse --verify --quiet "${cap_parent}:${cap_file}")" \
       || cap_current="${cap_empty}"
     cap_found=''
-    # shellcheck disable=SC2086 # Each candidate is one word.
-    cap_plausible=" $(changes_present_plausible "${cap_file}" "${cap_current}" "${cap_want}" ${cap_candidates} \
-      | tr '\n' ' ')"
+    # The candidates that `changes_present_plausible` printed, each preceded
+    # and followed by a space; or "", which admits every candidate.  The
+    # filter costs more processes than a few merges, so it runs only for many
+    # candidates.  It omits a candidate whose version the repository lacks,
+    # which loses no match:  a merge needs that version unless the result is
+    # that version, and then WANT is that version, which the repository
+    # lacks too, so the filter prints every candidate.
+    cap_plausible=''
+    if [ "${cap_count}" -gt "${changes_present_max_unfiltered}" ]; then
+      # shellcheck disable=SC2086 # Each candidate is one word.
+      cap_plausible=" $(changes_present_plausible "${cap_file}" "${cap_current}" "${cap_want}" ${cap_candidates} \
+        | tr '\n' ' ')"
+    fi
     for cap_candidate in ${cap_candidates}; do
       case "${cap_plausible}" in
-        *" ${cap_candidate} "*) ;;
+        '' | *" ${cap_candidate} "*) ;;
         *) continue ;;
       esac
       eval "cap_candidate_blob=\${cap_blob_${cap_candidate}}"
@@ -2126,8 +2144,10 @@ changes_already_present() {
 ## `git grep` checks every CANDIDATE, whereas a merge needs several processes
 ## per CANDIDATE.
 ## Prints every CANDIDATE if no line qualifies, as when WANT only deletes
-## lines of CURRENT, or if `git grep` fails, as when a partial clone lacks a
-## version.
+## lines of CURRENT or the repository lacks CURRENT or WANT; or if git cannot
+## search the candidates, as when a CANDIDATE is not a commit or a line is
+## too long to pass as an argument.  Otherwise, does not print a CANDIDATE
+## whose version of FILE the repository lacks, as a partial clone can.
 changes_present_plausible() {
   cpp_file="$1"
   # The 10 longest lines that WANT has more times than CURRENT has, longest
@@ -2178,6 +2198,8 @@ changes_present_plausible() {
   IFS="${cpp_saved_ifs}"
   # `git grep` prints a line such as "REV:FILE" for each CANDIDATE whose
   # version contains every line, and exits with status 1 if there is none.
+  # It skips a version that it cannot read, with a message and without
+  # changing its exit status.
   # shellcheck disable=SC2086 # Each candidate is one word.
   if cpp_found="$(GIT_LITERAL_PATHSPECS=1 git --no-lazy-fetch grep --no-color -l --all-match -F \
     "$@" ${cpp_candidates} -- "${cpp_file}" 2> /dev/null)"; then
