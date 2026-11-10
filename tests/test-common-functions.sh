@@ -452,8 +452,10 @@ make_fake_git "${WORK_DIR}/oddgit" version 0 'git version unknown'
 if require_git_output="$( (PATH="${WORK_DIR}/oddgit:${PATH}" && require_git 31) 2>&1)"; then
   fail "require_git 31 accepted an unparsable version"
 fi
+# `git_at_least` reports the unparsable version, and `require_git` then
+# reports the requirement.
 case "${require_git_output}" in
-  *"cannot parse git version: unknown") ;;
+  *"cannot parse git version: unknown"*"requires git 2.31 or later, but found git unknown") ;;
   *) fail "unexpected message for an unparsable version: [${require_git_output}]" ;;
 esac
 

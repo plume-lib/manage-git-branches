@@ -123,14 +123,16 @@ The commands are:
   can edit any part of any file, and it can delete files but not create
   them.  The script checks every resolution and lists, for your review, the
   changes that the agent made outside the conflict regions, and each
-  resolution by the agent that is one side's version of the file.  The agent's
-  instructions start with the file `merge-conflict-instructions.md`, which
-  also suits a merge that you resolve yourself.  If the build
-  fails, and TO_DIR's branch has a merge that neither its remote branches
-  nor those of FROM_DIR's branch contain, such as the one that it just
-  made, it asks the agent to fix the build, up to 3 times, and commits the
-  fix.  `--no-llm` turns off the agent; `--llm`, `--claude` (the default),
-  and `--codex` turn it on.
+  resolution by the agent that is one side's version of the file, unless
+  that side already contains the other side's changes to the file, as when
+  the other side squash-merged a pull request whose branch the first side
+  merged.  The agent's instructions start with the file
+  `merge-conflict-instructions.md`, which also suits a merge that you
+  resolve yourself.  If the build fails, and TO_DIR's branch has a merge
+  that neither its remote branches nor those of FROM_DIR's branch contain,
+  such as the one that it just made, it asks the agent to fix the build, up
+  to 3 times, and commits the fix.  `--no-llm` turns off the agent;
+  `--llm`, `--claude` (the default), and `--codex` turn it on.
 
   If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
   prints a command that continues

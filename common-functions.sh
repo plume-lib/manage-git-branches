@@ -47,13 +47,14 @@ require_git() {
 }
 
 ## Usage: git_at_least MINOR
-## Succeeds if git is version 2.MINOR or later.  Exits with status 1, after
-## printing a diagnostic, if the version cannot be parsed.  It reads the
-## version as `require_git` does, and only once.
+## Succeeds if git is version 2.MINOR or later.  Fails, after printing a
+## diagnostic, if the version cannot be read or parsed, so that the caller
+## falls back as it would for an older git.  It reads the version as
+## `require_git` does, and only once.
 git_at_least() {
   if [ -z "${require_git_version}" ]; then
     # Output is like "git version 2.44.0" or "git version 2.44.0.windows.1".
-    require_git_version="$(git version)" || exit 1
+    require_git_version="$(git version)" || return 1
     require_git_version="${require_git_version#git version }"
   fi
   require_git_major="${require_git_version%%.*}"
@@ -62,7 +63,7 @@ git_at_least() {
   case "${require_git_major}.${require_git_minor}" in
     *[!0-9.]* | .* | *.)
       echo "${SCRIPT_NAME}: cannot parse git version: ${require_git_version}" >&2
-      exit 1
+      return 1
       ;;
   esac
   [ "${require_git_major}" -gt 2 ] \
@@ -1701,10 +1702,10 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # `git rerere` must pass; a file that still has conflict markers fails it
   # anyway, so it is not reported.  A change to a resolution that
   # `git rerere` made is reported wherever it is.  So is a resolution by the
-  # agent that is one side's version of the file (see
-  # `one_sided_description`).  Each other file that the agent changed is
-  # also checked for conflict markers, as when the agent copied a conflict
-  # region into it.
+  # agent that is one side's version of the file, unless that side already
+  # contains the other side's changes to it (see `one_sided_description`).
+  # Each other file that the agent changed is also checked for conflict
+  # markers, as when the agent copied a conflict region into it.
   # The conflicted files that the agent resolved as one side's version of
   # the file, one per line.  No conflicted pathname contains a newline,
   # which `resolve_merge_conflicts` refuses.
@@ -1714,6 +1715,14 @@ Finish with a summary that says, for each conflict, what each side changed and h
   resolve_rerere_changed=''
   if [ "${resolve_refs_ok}" -eq 1 ]; then
     resolve_agent_other="$(resolve_other_changes)"
+    # 1 if git can run `changes_already_present`, which
+    # `one_sided_description` calls, and 0 otherwise, as when git's version
+    # cannot be parsed; a one-sided resolution is then reported for review.
+    if git_at_least 44; then
+      resolve_check_present=1
+    else
+      resolve_check_present=0
+    fi
     printf '%s\n' "${resolve_agent_other}" | while IFS= read -r resolve_file; do
       if [ -n "${resolve_file}" ]; then
         review_notice "${resolve_with} also changed: ${resolve_file}"
@@ -1740,11 +1749,25 @@ Finish with a summary that says, for each conflict, what each side changed and h
         resolve_rerere_changed="${resolve_rerere_changed}${resolve_file}
 "
       fi
-      if [ -n "${resolve_hash}" ] \
-        && resolve_description="$(one_sided_description "${resolve_file}" "${resolve_hash}")"; then
-        resolve_one_sided_files="${resolve_one_sided_files}${resolve_file}
+      if [ -n "${resolve_hash}" ]; then
+        # `one_sided_description` runs in this shell, not in a command
+        # substitution's subshell, so that the merge bases that
+        # `changes_present_merge_base` caches last from one file to the next.
+        if one_sided_description "${resolve_file}" "${resolve_hash}"; then
+          resolve_one_sided_status=0
+        else
+          resolve_one_sided_status="$?"
+        fi
+        if [ "${resolve_one_sided_status}" -ne 1 ]; then
+          resolve_one_sided_files="${resolve_one_sided_files}${resolve_file}
 "
-        review_notice "${resolve_description}; review it"
+        fi
+        # A resolution whose side already contains the other side's changes
+        # needs no review, so it is reported only as a diagnostic.
+        case "${resolve_one_sided_status}" in
+          0) review_notice "${osd_description}; review it" ;;
+          2) printf '%s\n' "${SCRIPT_NAME}: ${osd_description}" >&2 ;;
+        esac
       fi
     done
     set +f
@@ -1818,7 +1841,8 @@ Finish with a summary that says, for each conflict, what each side changed and h
 ## `separator_permitted` permits one in FILE.  A resolution that is identical
 ## to one side's version of FILE is acceptable, because the agent's
 ## instructions say when it is correct, but `resolve_with_agent` reports it
-## for the user's review (see `one_sided_description`).  Only
+## for the user's review, unless that side already contains the other side's
+## changes to FILE (see `one_sided_description`).  Only
 ## `resolve_with_agent` calls this function, which reads the variables of
 ## `resolve_merge_conflicts` and of `resolve_with_agent`.
 check_agent_resolution() {
@@ -1839,11 +1863,11 @@ rerere_resolution_unchanged() {
 }
 
 ## Usage: one_sided_description FILE HASH
-## Prints a description, such as "claude resolved foo.c as the version on
-## feature, which keeps none of the changes of branch 'main' to the file",
-## if FILE, a conflicted file of the merge in progress in the current
-## directory, is the same as its version on either side of the merge, apart
-## from whitespace and blank lines.  HASH is FILE's hash, as
+## Sets ${osd_description} to a description, such as "claude resolved foo.c
+## as the version on feature, which keeps none of the changes of branch
+## 'main' to the file", if FILE, a conflicted file of the merge in progress
+## in the current directory, is the same as its version on either side of
+## the merge, apart from whitespace and blank lines.  HASH is FILE's hash, as
 ## `git hash-object -- FILE` prints it, such as
 ## "3b18e512dba79e4c8300dd08aeb37f8e728b8dad".  Such a resolution keeps none
 ## of the changes that the other side made to the file, including the
@@ -1853,10 +1877,20 @@ rerere_resolution_unchanged() {
 ## whitespace and blank lines counts only if the other side's version
 ## differs from the merge base's version in more than whitespace and blank
 ## lines:  when the other side's changes are only to whitespace, such a
-## resolution can keep them.  Prints nothing, and returns 1, if FILE is not
-## such a resolution.  Reads the variables of `resolve_merge_conflicts` and
-## of `resolve_with_agent`.
+## resolution can keep them.  Returns 1, and sets ${osd_description} to "",
+## if FILE is not such a resolution.
+##
+## Returns 2 if FILE is exactly the version of a side that already contains
+## the other side's changes to the file, as `changes_already_present`
+## determines when ${resolve_check_present} is 1; the description then says
+## so, as in "..., which keeps none of the changes of branch 'main' to the
+## file, but branch 'main' changed it only in commit 9ec8e71, whose change is
+## that of commit 7a3827e on feature".  A resolution that differs from that
+## side's version in whitespace does not qualify, because the agent's changes
+## to the whitespace deserve review.  Returns 0 otherwise.  Reads the
+## variables of `resolve_merge_conflicts` and of `resolve_with_agent`.
 one_sided_description() {
+  osd_description=''
   # Stage 1 of the index is the merge base's version, stage 2 is HEAD's, and
   # stage 3 is MERGE_HEAD's.  `git hash-object` converts the file as
   # `git add` would, such as from CRLF line endings, so that HASH is
@@ -1891,10 +1925,194 @@ one_sided_description() {
     osd_how=', apart from whitespace and blank lines'
   fi
   if [ "${osd_stage}" -eq 2 ]; then
-    printf '%s\n' "${resolve_with} resolved $1 as the version on ${resolve_branch}${osd_how}, which keeps none of the changes of ${resolve_source} to the file"
+    osd_description="${resolve_with} resolved $1 as the version on ${resolve_branch}${osd_how}, which keeps none of the changes of ${resolve_source} to the file"
+    osd_kept='HEAD'
+    osd_kept_name="${resolve_branch}"
+    osd_other_rev='MERGE_HEAD'
+    osd_other_name="${resolve_source}"
   else
-    printf '%s\n' "${resolve_with} resolved $1 as the version in ${resolve_source}${osd_how}, which keeps none of the changes of ${resolve_branch} to the file"
+    osd_description="${resolve_with} resolved $1 as the version in ${resolve_source}${osd_how}, which keeps none of the changes of ${resolve_branch} to the file"
+    osd_kept='MERGE_HEAD'
+    osd_kept_name="${resolve_source}"
+    osd_other_rev='HEAD'
+    osd_other_name="${resolve_branch}"
   fi
+  if [ -n "${osd_how}" ] || [ "${resolve_check_present}" -ne 1 ] \
+    || ! changes_already_present "$1" "${osd_kept}" "${osd_other_rev}"; then
+    return 0
+  fi
+  case "${cap_others}" in
+    *,*) osd_description="${osd_description}, but ${osd_other_name} changed it only in commits ${cap_others}, whose changes are those of" ;;
+    *) osd_description="${osd_description}, but ${osd_other_name} changed it only in commit ${cap_others}, whose change is that of" ;;
+  esac
+  case "${cap_kepts}" in
+    *,*) osd_description="${osd_description} commits ${cap_kepts} on ${osd_kept_name}" ;;
+    *) osd_description="${osd_description} commit ${cap_kepts} on ${osd_kept_name}" ;;
+  esac
+  return 2
+}
+
+## Usage: changes_already_present FILE KEPT OTHER
+## Succeeds if commit KEPT already contains every change that commit OTHER
+## made to FILE since their merge base, because each such change was made by a
+## commit that merged, into the history of OTHER, the changes of a commit that
+## KEPT contains:  for example, a squash-merge into OTHER of a pull request
+## whose branch KEPT merged.  KEPT and OTHER are revisions, such as "HEAD" and
+## "MERGE_HEAD".  FILE is a file name relative to the top level of the
+## working tree, such as "src/foo.c".  On success, sets ${cap_others} to the
+## abbreviated hashes of the commits on OTHER's side that changed FILE,
+## newest first, and ${cap_kepts} to the abbreviated hashes of the commits
+## that KEPT contains whose changes they made, each once, in the same order;
+## each is a list such as "9ec8e71" or "1a2b3c4, 5d6e7f8".  Requires git 2.44
+## or later.
+##
+## Fails if it cannot show that KEPT contains the changes:  if no commit on
+## OTHER's side changed FILE, as when only merge commits that made no change
+## of their own to FILE brought OTHER's changes to it; or if OTHER's side
+## changed FILE in a merge commit that made a change of its own to FILE, in
+## more than ${changes_present_max_commits} commits, or in a commit whose
+## change is not the merge of a commit that KEPT contains.
+##
+## A commit C on OTHER's side made the changes of a commit Y that KEPT
+## contains if C's version of FILE is the clean three-way merge of the
+## version of C's parent, with the merge base of C's parent and Y as the base
+## version and Y's version as the other version.  That is how GitHub
+## computes the squash-merge of a pull request whose last commit is Y, and
+## the merge uses the histogram diff algorithm, as GitHub's does.  Only the
+## ${changes_present_max_candidates} most recent commits that only KEPT
+## contains and that changed FILE are tried as Y, and only those that have
+## exactly one merge base with C's parent:  with several, as in a
+## criss-cross history, the base version is not well defined.
+changes_present_max_commits=20
+changes_present_max_candidates=100
+changes_already_present() {
+  cap_file="$1"
+  cap_kept="$2"
+  cap_other="$3"
+  cap_others=''
+  cap_kepts=''
+  # The merge base whose version of FILE is ${cap_base_blob}.  Most
+  # candidates share one merge base, the point where KEPT and OTHER forked.
+  cap_base=''
+  # The empty blob stands for FILE in a commit that lacks it.
+  cap_empty="$(git hash-object -w --stdin < /dev/null)" || return 1
+  # With its default history simplification, `git rev-list` lists a merge
+  # commit only if it made a change of its own to FILE.  It lists at most
+  # one commit more than the limit, so that exceeding the limit is detected.
+  # Each line is a commit's hash followed by the hashes of its parents,
+  # which `%P`, unlike `--parents`, does not rewrite to skip the commits that
+  # did not change FILE.  GIT_LITERAL_PATHSPECS keeps git from interpreting
+  # glob characters in FILE.
+  cap_commits="$(GIT_LITERAL_PATHSPECS=1 git rev-list --no-commit-header --format='%H %P' \
+    --max-count="$((changes_present_max_commits + 1))" "${cap_other}" --not "${cap_kept}" -- "${cap_file}")" \
+    || return 1
+  # A merge commit, which has several parents, does not qualify; nor does a
+  # root commit, which has none.  Each hash is checked, because it becomes
+  # part of a variable name.
+  if [ -z "${cap_commits}" ] \
+    || ! printf '%s\n' "${cap_commits}" | awk -v max="${changes_present_max_commits}" '
+        NR > max || NF != 2 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^[0-9a-f]+$/ { exit 1 }'; then
+    return 1
+  fi
+  cap_candidates="$(GIT_LITERAL_PATHSPECS=1 git rev-list \
+    --max-count="${changes_present_max_candidates}" "${cap_kept}" --not "${cap_other}" -- "${cap_file}")" \
+    || return 1
+  if [ -z "${cap_candidates}" ] \
+    || ! printf '%s\n' "${cap_candidates}" | awk '$0 !~ /^[0-9a-f]+$/ { exit 1 }'; then
+    return 1
+  fi
+  # One `git cat-file` reads every candidate's version of FILE, into
+  # ${cap_blob_CANDIDATE}.  It prints a line such as "REV:FILE missing" for
+  # a candidate that lacks FILE, which becomes "-".
+  cap_candidate_blobs="$(printf '%s\n' "${cap_candidates}" \
+    | CAP_FILE="${cap_file}" awk '{ print $0 ":" ENVIRON["CAP_FILE"] }' \
+    | git cat-file --batch-check='%(objectname)' \
+    | awk '/^[0-9a-f]+$/ { print; next } { print "-" }')" \
+    || return 1
+  # shellcheck disable=SC2086 # Each line is one word.
+  set -- ${cap_candidate_blobs}
+  for cap_candidate in ${cap_candidates}; do
+    if [ "$#" -eq 0 ]; then
+      return 1
+    elif [ "$1" = '-' ]; then
+      eval "cap_blob_${cap_candidate}=\${cap_empty}"
+    else
+      eval "cap_blob_${cap_candidate}=\$1"
+    fi
+    shift
+  done
+  # shellcheck disable=SC2086 # Each line is two words.
+  set -- ${cap_commits}
+  while [ "$#" -ge 2 ]; do
+    cap_commit="$1"
+    cap_parent="$2"
+    shift 2
+    # A commit that deleted FILE does not qualify.
+    cap_want="$(git rev-parse --verify --quiet "${cap_commit}:${cap_file}")" || return 1
+    cap_current="$(git rev-parse --verify --quiet "${cap_parent}:${cap_file}")" \
+      || cap_current="${cap_empty}"
+    cap_found=''
+    for cap_candidate in ${cap_candidates}; do
+      eval "cap_candidate_blob=\${cap_blob_${cap_candidate}}"
+      # Merging the parent's own version into it leaves the parent's
+      # version, which is not C's.
+      # shellcheck disable=SC2154 # The `eval` above sets cap_candidate_blob.
+      if [ "${cap_candidate_blob}" = "${cap_current}" ] \
+        || ! changes_present_merge_base "${cap_parent}" "${cap_candidate}"; then
+        continue
+      fi
+      if [ "${cpm_base}" != "${cap_base}" ]; then
+        cap_base="${cpm_base}"
+        cap_base_blob="$(git rev-parse --verify --quiet "${cap_base}:${cap_file}")" \
+          || cap_base_blob="${cap_empty}"
+      fi
+      # The merge is hashed without being written to the repository, as
+      # `git merge-file --object-id` without `-p` would write it.
+      # `git merge-file` fails if the merge has conflicts or a version is
+      # binary.  Its exit status is lost in the pipe, so on failure its
+      # output is followed by the hash ${cap_want}, which makes the hash of
+      # the whole differ from ${cap_want}:  a blob that contains its own hash
+      # is infeasible to find.
+      cap_merged="$({ git merge-file -p --object-id --diff-algorithm=histogram \
+        "${cap_current}" "${cap_base_blob}" "${cap_candidate_blob}" 2> /dev/null \
+        || printf '\n%s\n' "${cap_want}"; } | git hash-object --stdin)" || return 1
+      if [ "${cap_merged}" = "${cap_want}" ]; then
+        cap_found="${cap_candidate}"
+        break
+      fi
+    done
+    if [ -z "${cap_found}" ]; then
+      return 1
+    fi
+    cap_others="${cap_others:+${cap_others}, }$(git rev-parse --short "${cap_commit}")"
+    cap_found="$(git rev-parse --short "${cap_found}")"
+    case ", ${cap_kepts}, " in
+      *", ${cap_found}, "*) ;;
+      *) cap_kepts="${cap_kepts:+${cap_kepts}, }${cap_found}" ;;
+    esac
+  done
+}
+
+## Usage: changes_present_merge_base COMMIT1 COMMIT2
+## Sets ${cpm_base} to the hash of the merge base of the given commits, and
+## succeeds, if they have exactly one merge base; fails otherwise.  COMMIT1
+## and COMMIT2 are full hashes, such as
+## "3b18e512dba79e4c8300dd08aeb37f8e728b8dad".  The result is cached in
+## ${changes_present_merge_base_COMMIT1_COMMIT2}, which is "" if there is not
+## exactly one merge base, so that the conflicted files of a merge share it.
+changes_present_merge_base() {
+  eval "cpm_cached=\${changes_present_merge_base_$1_$2+1}"
+  if [ -n "${cpm_cached}" ]; then
+    eval "cpm_base=\${changes_present_merge_base_$1_$2}"
+  else
+    cpm_base="$(git merge-base --all "$1" "$2")" || cpm_base=''
+    case "${cpm_base}" in
+      *"
+"*) cpm_base='' ;;
+    esac
+    eval "changes_present_merge_base_$1_$2=\${cpm_base}"
+  fi
+  [ -n "${cpm_base}" ]
 }
 
 ## Usage: squeezed_cksum
