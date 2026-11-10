@@ -47,13 +47,14 @@ require_git() {
 }
 
 ## Usage: git_at_least MINOR
-## Succeeds if git is version 2.MINOR or later.  Exits with status 1, after
-## printing a diagnostic, if the version cannot be parsed.  It reads the
-## version as `require_git` does, and only once.
+## Succeeds if git is version 2.MINOR or later.  Fails, after printing a
+## diagnostic, if the version cannot be read or parsed, so that the caller
+## falls back as it would for an older git.  It reads the version as
+## `require_git` does, and only once.
 git_at_least() {
   if [ -z "${require_git_version}" ]; then
     # Output is like "git version 2.44.0" or "git version 2.44.0.windows.1".
-    require_git_version="$(git version)" || exit 1
+    require_git_version="$(git version)" || return 1
     require_git_version="${require_git_version#git version }"
   fi
   require_git_major="${require_git_version%%.*}"
@@ -62,7 +63,7 @@ git_at_least() {
   case "${require_git_major}.${require_git_minor}" in
     *[!0-9.]* | .* | *.)
       echo "${SCRIPT_NAME}: cannot parse git version: ${require_git_version}" >&2
-      exit 1
+      return 1
       ;;
   esac
   [ "${require_git_major}" -gt 2 ] \
@@ -1703,9 +1704,8 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # `git rerere` made is reported wherever it is.  So is a resolution by the
   # agent that is one side's version of the file, unless that side already
   # contains the other side's changes to it (see `one_sided_description`).
-  # Each other file that the agent changed is
-  # also checked for conflict markers, as when the agent copied a conflict
-  # region into it.
+  # Each other file that the agent changed is also checked for conflict
+  # markers, as when the agent copied a conflict region into it.
   # The conflicted files that the agent resolved as one side's version of
   # the file, one per line.  No conflicted pathname contains a newline,
   # which `resolve_merge_conflicts` refuses.
@@ -1716,10 +1716,9 @@ Finish with a summary that says, for each conflict, what each side changed and h
   if [ "${resolve_refs_ok}" -eq 1 ]; then
     resolve_agent_other="$(resolve_other_changes)"
     # 1 if git can run `changes_already_present`, which
-    # `one_sided_description` calls, and 0 otherwise.  `git_at_least` runs in
-    # a subshell because it exits if it cannot parse git's version; a
-    # one-sided resolution is then reported for review.
-    if (git_at_least 44); then
+    # `one_sided_description` calls, and 0 otherwise, as when git's version
+    # cannot be parsed; a one-sided resolution is then reported for review.
+    if git_at_least 44; then
       resolve_check_present=1
     else
       resolve_check_present=0
@@ -1753,7 +1752,7 @@ Finish with a summary that says, for each conflict, what each side changed and h
       if [ -n "${resolve_hash}" ]; then
         # `one_sided_description` runs in this shell, not in a command
         # substitution's subshell, so that the merge bases that
-        # `changes_already_present` caches last from one file to the next.
+        # `changes_present_merge_base` caches last from one file to the next.
         if one_sided_description "${resolve_file}" "${resolve_hash}"; then
           resolve_one_sided_status=0
         else
@@ -1992,6 +1991,9 @@ changes_already_present() {
   cap_other="$3"
   cap_others=''
   cap_kepts=''
+  # The merge base whose version of FILE is ${cap_base_blob}.  Most
+  # candidates share one merge base, the point where KEPT and OTHER forked.
+  cap_base=''
   # The empty blob stands for FILE in a commit that lacks it.
   cap_empty="$(git hash-object -w --stdin < /dev/null)" || return 1
   # With its default history simplification, `git rev-list` lists a merge
@@ -2059,12 +2061,22 @@ changes_already_present() {
         || ! changes_present_merge_base "${cap_parent}" "${cap_candidate}"; then
         continue
       fi
-      cap_base_blob="$(git rev-parse --verify --quiet "${cpm_base}:${cap_file}")" \
-        || cap_base_blob="${cap_empty}"
-      # `git merge-file` fails if the merge has conflicts.
-      if cap_merged="$(git merge-file --object-id --diff-algorithm=histogram \
-        "${cap_current}" "${cap_base_blob}" "${cap_candidate_blob}" 2> /dev/null)" \
-        && [ "${cap_merged}" = "${cap_want}" ]; then
+      if [ "${cpm_base}" != "${cap_base}" ]; then
+        cap_base="${cpm_base}"
+        cap_base_blob="$(git rev-parse --verify --quiet "${cap_base}:${cap_file}")" \
+          || cap_base_blob="${cap_empty}"
+      fi
+      # The merge is hashed without being written to the repository, as
+      # `git merge-file --object-id` without `-p` would write it.
+      # `git merge-file` fails if the merge has conflicts or a version is
+      # binary.  Its exit status is lost in the pipe, so on failure its
+      # output is followed by the hash ${cap_want}, which makes the hash of
+      # the whole differ from ${cap_want}:  a blob that contains its own hash
+      # is infeasible to find.
+      cap_merged="$({ git merge-file -p --object-id --diff-algorithm=histogram \
+        "${cap_current}" "${cap_base_blob}" "${cap_candidate_blob}" 2> /dev/null \
+        || printf '\n%s\n' "${cap_want}"; } | git hash-object --stdin)" || return 1
+      if [ "${cap_merged}" = "${cap_want}" ]; then
         cap_found="${cap_candidate}"
         break
       fi

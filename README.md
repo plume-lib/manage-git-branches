@@ -126,14 +126,13 @@ The commands are:
   resolution by the agent that is one side's version of the file, unless
   that side already contains the other side's changes to the file, as when
   the other side squash-merged a pull request whose branch the first side
-  merged.  The agent's
-  instructions start with the file `merge-conflict-instructions.md`, which
-  also suits a merge that you resolve yourself.  If the build
-  fails, and TO_DIR's branch has a merge that neither its remote branches
-  nor those of FROM_DIR's branch contain, such as the one that it just
-  made, it asks the agent to fix the build, up to 3 times, and commits the
-  fix.  `--no-llm` turns off the agent; `--llm`, `--claude` (the default),
-  and `--codex` turn it on.
+  merged.  The agent's instructions start with the file
+  `merge-conflict-instructions.md`, which also suits a merge that you
+  resolve yourself.  If the build fails, and TO_DIR's branch has a merge
+  that neither its remote branches nor those of FROM_DIR's branch contain,
+  such as the one that it just made, it asks the agent to fix the build, up
+  to 3 times, and commits the fix.  `--no-llm` turns off the agent;
+  `--llm`, `--claude` (the default), and `--codex` turn it on.
 
   If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
   prints a command that continues
