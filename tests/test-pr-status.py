@@ -739,6 +739,27 @@ class ModelTest(unittest.TestCase):
             ["2 (1 outdated) ❌ 🔀", "❌ 🔀", "🔀", "1 ✅"],
         )
 
+    def test_unresolved_threads_shows_unknown_reviews_and_ci(self):
+        """The cell shows "?" for the threads and CI results if GitHub could not say them."""
+        model = self.conflicting_model()
+        model.repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), known=False)
+        self.assertEqual(
+            [model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["? 🔀", "? 🔀", "? 🔀", "?"]
+        )
+
+    def test_load_reviews_and_ci_survives_github_failure(self):
+        """A failure to ask GitHub yields unknown reviews and CI results, and a warning."""
+        error = pr_status.CommandError(1, ["gh"], "", "HTTP 502: Bad Gateway\n")
+        with (
+            mock.patch.object(pr_status, "review_thread_query", side_effect=error),
+            mock.patch("sys.stderr") as stderr,
+        ):
+            result = pr_status.load_reviews_and_ci(REPO)
+        self.assertEqual(result, pr_status.ReviewsAndCi({}, set(), set(), known=False))
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("cannot read the review threads and CI results of owner/repo", written)
+        self.assertIn("HTTP 502: Bad Gateway", written)
+
     def test_depends_on_marks_conflicting_direct_prerequisites(self):
         """The cell shows 🔀 after each conflicting direct prerequisite, or else after master."""
         model = self.conflicting_model()
@@ -947,6 +968,71 @@ class ShellWordTest(unittest.TestCase):
         self.assertEqual(pr_status.shell_word("repo#100"), "repo#100")
         self.assertEqual(pr_status.shell_word("#100"), "'#100'")
         self.assertEqual(pr_status.shell_word("a#1, b#2"), "'a#1, b#2'")
+
+
+def completed(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
+    """Return the result of a command, as subprocess.run would, for a mock of it.
+
+    Returns:
+        A CompletedProcess with the given exit status and output.
+    """
+    return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+
+class RunTest(unittest.TestCase):
+    """Tests for run."""
+
+    def run_with(self, cmd: list[str], *results: subprocess.CompletedProcess):
+        """Run cmd with run, with subprocess.run returning results in turn and no waiting.
+
+        Returns:
+            The output of run, or the CommandError that it raised; and the mock of
+            subprocess.run.
+        """
+        with (
+            mock.patch.object(pr_status.subprocess, "run", side_effect=results) as sub,
+            mock.patch.object(pr_status, "GH_RETRY_DELAYS", (0, 0)),
+            mock.patch("sys.stderr"),
+        ):
+            try:
+                outcome = pr_status.run(cmd)
+            except pr_status.CommandError as error:
+                outcome = error
+        return outcome, sub
+
+    def test_error_message_includes_standard_error(self):
+        """The message of a failed command says why it failed."""
+        outcome, sub = self.run_with(
+            ["gh", "api"], completed(1, stderr="HTTP 401: Bad credentials\n")
+        )
+        self.assertIsInstance(outcome, subprocess.CalledProcessError)
+        self.assertIn("HTTP 401: Bad credentials", str(outcome))
+        self.assertEqual(sub.call_count, 1)
+
+    def test_transient_gh_failure_is_retried(self):
+        """A gh command that fails with a transient error is run again."""
+        outcome, sub = self.run_with(
+            ["gh", "api", "graphql"],
+            completed(1, stderr="gh: HTTP 502: Bad Gateway\n"),
+            completed(0, stdout="data\n"),
+        )
+        self.assertEqual(outcome, "data\n")
+        self.assertEqual(sub.call_count, 2)
+
+    def test_persistent_transient_gh_failure_fails(self):
+        """A gh command that keeps failing with a transient error fails after the retries."""
+        failure = completed(1, stderr="You have exceeded a secondary rate limit.\n")
+        outcome, sub = self.run_with(["gh", "api"], failure, failure, failure)
+        self.assertIsInstance(outcome, pr_status.CommandError)
+        self.assertEqual(sub.call_count, 3)
+
+    def test_other_command_is_not_retried(self):
+        """A command other than gh is not run again, whatever its error."""
+        outcome, sub = self.run_with(
+            ["git", "fetch"], completed(1, stderr="Connection timed out\n")
+        )
+        self.assertIsInstance(outcome, pr_status.CommandError)
+        self.assertEqual(sub.call_count, 1)
 
 
 class ApplyDescriptionUpdatesTest(unittest.TestCase):

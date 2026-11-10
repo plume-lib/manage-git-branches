@@ -78,6 +78,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from collections import Counter, defaultdict
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -102,13 +103,64 @@ class ConfigError(Exception):
     """There is no config file, and no default config can be constructed."""
 
 
+class CommandError(subprocess.CalledProcessError):
+    """A failure of a command that run ran, whose message includes the command's standard error.
+
+    The message of a subprocess.CalledProcessError gives only the command and its exit
+    status, so a traceback would not say why the command failed.
+    """
+
+    def __str__(self) -> str:
+        """Return a description of the failure.
+
+        Returns:
+            One line:  the command, its standard error, and its exit status.
+        """
+        return f"{command_failure(self)} (exit status {self.returncode})"
+
+
+# Matches the standard error of a `gh` command that failed for a reason that might go away
+# by itself, such as "HTTP 502: Bad Gateway", "You have exceeded a secondary rate limit", or
+# GraphQL's "Something went wrong while executing your query.  This may be the result of a
+# timeout".
+TRANSIENT_GH_ERROR_RE = re.compile(
+    r"HTTP 50[234]|secondary rate limit|timed? ?out|Something went wrong while executing"
+    r"|connection reset|unexpected EOF",
+    re.IGNORECASE,
+)
+
+# The number of seconds to wait before each retry of a `gh` command that failed for a reason
+# that TRANSIENT_GH_ERROR_RE matches.  A secondary rate limit lasts at least a minute.
+GH_RETRY_DELAYS = (10, 60)
+
+
 def run(cmd: list[str]) -> str:
     """Run a command, which must succeed.
+
+    A `gh` command that fails for a reason that might go away by itself, as
+    TRANSIENT_GH_ERROR_RE recognizes, is run again after each delay in GH_RETRY_DELAYS,
+    with a notice on standard error.  If the command fails, even after any retries, raises
+    a CommandError.
 
     Returns:
         The command's standard output.
     """
-    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    delays = list(GH_RETRY_DELAYS) if cmd[:1] == ["gh"] else []
+    while True:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout
+        error = CommandError(result.returncode, cmd, result.stdout, result.stderr)
+        if not delays or not TRANSIENT_GH_ERROR_RE.search(result.stderr):
+            raise error
+        delay = delays.pop(0)
+        # The whole command can contain a long GraphQL query, so name only its start.
+        print(
+            f"pr-status: {shlex.join(cmd[:3])} ... failed: {' '.join(result.stderr.split())};"
+            f" retrying in {delay} seconds",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
 
 
 def succeeds(cmd: list[str]) -> bool:
@@ -473,11 +525,14 @@ class ReviewsAndCi(NamedTuple):
             is outdated.
         ci_failed: the numbers of the PRs whose CI failed.
         ci_passed: the numbers of the PRs whose CI completed and passed.
+        known: True if they were read from GitHub; False if GitHub could not be asked, and
+            the other attributes are empty.
     """
 
     review_threads: dict[int, list[bool]]
     ci_failed: set[int]
     ci_passed: set[int]
+    known: bool = True
 
 
 def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
@@ -487,7 +542,30 @@ def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
         repo: a Repo.
 
     Returns:
-        The unresolved review threads and the CI results, read from GitHub.
+        The unresolved review threads and the CI results, read from GitHub; or, after a
+        warning on standard error, an empty ReviewsAndCi whose known is False if GitHub
+        cannot be asked, even after the retries that run makes.
+    """
+    try:
+        return read_reviews_and_ci(repo)
+    except subprocess.CalledProcessError as error:
+        print(
+            f"pr-status: cannot read the review threads and CI results of {repo.gh}, so the"
+            f" documents show them as unknown (?): {' '.join(error.stderr.split())}",
+            file=sys.stderr,
+        )
+        return ReviewsAndCi({}, set(), set(), known=False)
+
+
+def read_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
+    """Return the unresolved review threads and the CI results of the open PRs of repo.
+
+    Args:
+        repo: a Repo.
+
+    Returns:
+        The unresolved review threads and the CI results, read from GitHub.  If GitHub
+        cannot be asked, raises a subprocess.CalledProcessError.
     """
     result = ReviewsAndCi({}, set(), set())
     for pr in review_thread_query(
@@ -1334,12 +1412,13 @@ class Model:
             unresolved review threads and how many of them are outdated, if the PR has any;
             a red X if the PR's CI failed, or else a green checkmark if its CI completed and
             passed; and shuffle arrows (🔀) if merging the default branch, or a branch that
-            the PR's branch is updated from, into the PR would conflict, in any file.  The
-            result is "" if no part applies.
+            the PR's branch is updated from, into the PR would conflict, in any file.  If
+            GitHub could not say what the review threads and the CI results are, a "?"
+            replaces the first two parts.  The result is "" if no part applies.
         """
         reviews_and_ci = self.repo.reviews_and_ci
         threads = reviews_and_ci.review_threads.get(n, [])
-        cell = []
+        cell = [] if reviews_and_ci.known else ["?"]
         if threads:
             outdated = sum(threads)
             cell.append(str(len(threads)) + (f" ({outdated} outdated)" if outdated else ""))
