@@ -739,6 +739,27 @@ class ModelTest(unittest.TestCase):
             ["2 (1 outdated) ❌ 🔀", "❌ 🔀", "🔀", "1 ✅"],
         )
 
+    def test_unresolved_threads_shows_unknown_reviews_and_ci(self):
+        """The cell shows "?" for the threads and CI results if GitHub could not say them."""
+        model = self.conflicting_model()
+        model.repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), known=False)
+        self.assertEqual(
+            [model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["? 🔀", "? 🔀", "? 🔀", "?"]
+        )
+
+    def test_load_reviews_and_ci_survives_github_failure(self):
+        """A failure to ask GitHub yields unknown reviews and CI results, and a warning."""
+        error = pr_status.CommandError(1, ["gh"], "", "HTTP 502: Bad Gateway\n")
+        with (
+            mock.patch.object(pr_status, "review_thread_query", side_effect=error),
+            mock.patch("sys.stderr") as stderr,
+        ):
+            result = pr_status.load_reviews_and_ci(REPO)
+        self.assertEqual(result, pr_status.ReviewsAndCi({}, set(), set(), known=False))
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("cannot read the review threads and CI results of owner/repo", written)
+        self.assertIn("HTTP 502: Bad Gateway", written)
+
     def test_depends_on_marks_conflicting_direct_prerequisites(self):
         """The cell shows 🔀 after each conflicting direct prerequisite, or else after master."""
         model = self.conflicting_model()
@@ -900,8 +921,13 @@ class DependsOnTest(unittest.TestCase):
         repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(failed), set())
         return repo
 
-    def test_marks_failed_prerequisites(self):
-        """A direct, transitive, or external prerequisite whose CI failed has a red X."""
+    def prerequisites_model(self):
+        """Build a model in which #1 depends on #2, which depends on #3 and other/repo#5.
+
+        Returns:
+            The model of owner/repo, united with the model of other/repo, in which the CI of
+            #3 and of other/repo#5 failed.
+        """
         repo = self.repo("owner/repo", {3})
         repo.prs = {
             n: {"body": body, "baseRefName": "master", "owner": "owner", "headRefName": f"b{n}"}
@@ -919,12 +945,22 @@ class DependsOnTest(unittest.TestCase):
             model = pr_status.Model(repo, {"repos": {"owner/repo": {}}})
         other_model = pr_status.Model(other, {"repos": {"other/repo": {}}})
         pr_status.unite_partners([model, other_model])
+        return model
 
-        def link(gh, n):
-            return (
-                f"[{'#' if gh == 'owner/repo' else gh + '#'}{n}](https://github.com/{gh}/pull/{n})"
-            )
+    @staticmethod
+    def link(gh, n):
+        """Return the link that depends_on makes to a PR.
 
+        Returns:
+            A Markdown link to PR n of the repository whose GitHub slug is gh, such as
+            "owner/repo".
+        """
+        return f"[{'#' if gh == 'owner/repo' else gh + '#'}{n}](https://github.com/{gh}/pull/{n})"
+
+    def test_marks_failed_prerequisites(self):
+        """A direct, transitive, or external prerequisite whose CI failed has a red X."""
+        model = self.prerequisites_model()
+        link = self.link
         self.assertEqual(
             pr_status.depends_on(model, 2, mark_failed=True),
             f"{link('owner/repo', 3)} ❌ and {link('other/repo', 5)} ❌",
@@ -938,6 +974,21 @@ class DependsOnTest(unittest.TestCase):
             f"{link('owner/repo', 3)} and {link('other/repo', 5)}",
         )
 
+    def test_marks_prerequisites_whose_ci_is_unknown(self):
+        """An open prerequisite has a "?" if GitHub could not say what its CI results are."""
+        model = self.prerequisites_model()
+        for m in model.by_gh.values():
+            m.repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), known=False)
+        link = self.link
+        self.assertEqual(
+            pr_status.depends_on(model, 2, mark_failed=True),
+            f"{link('owner/repo', 3)} ? and {link('other/repo', 5)} ?",
+        )
+        self.assertEqual(
+            pr_status.depends_on(model, 1, mark_failed=True),
+            f"{link('owner/repo', 2)} ? (and transitively {link('owner/repo', 3)} ?)",
+        )
+
 
 class ShellWordTest(unittest.TestCase):
     """Tests for shell_word."""
@@ -947,6 +998,182 @@ class ShellWordTest(unittest.TestCase):
         self.assertEqual(pr_status.shell_word("repo#100"), "repo#100")
         self.assertEqual(pr_status.shell_word("#100"), "'#100'")
         self.assertEqual(pr_status.shell_word("a#1, b#2"), "'a#1, b#2'")
+
+
+def completed(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
+    """Return the result of a command, as subprocess.run would, for a mock of it.
+
+    Returns:
+        A CompletedProcess with the given exit status and output.
+    """
+    return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+
+class RunTest(unittest.TestCase):
+    """Tests for run."""
+
+    def run_with(self, cmd: list[str], *results: subprocess.CompletedProcess):
+        """Run cmd with run, with subprocess.run returning results in turn and no waiting.
+
+        Returns:
+            The output of run, or the CommandError that it raised; and the mock of
+            subprocess.run.
+        """
+        with (
+            mock.patch.object(pr_status.subprocess, "run", side_effect=results) as sub,
+            mock.patch.object(pr_status, "time") as clock,
+            mock.patch.object(pr_status, "GH_RETRIES_EXHAUSTED", self.exhausted),
+            mock.patch("sys.stderr") as self.stderr,
+        ):
+            self.sleep = clock.sleep
+            try:
+                outcome = pr_status.run(cmd)
+            except pr_status.CommandError as error:
+                outcome = error
+            self.exhausted = pr_status.GH_RETRIES_EXHAUSTED
+        return outcome, sub
+
+    def setUp(self):
+        """Start with no gh command that failed even after every retry."""
+        self.exhausted = False
+
+    def written(self):
+        """Return what the last run_with wrote to standard error.
+
+        Returns:
+            The text, concatenated.
+        """
+        return "".join(call.args[0] for call in self.stderr.write.call_args_list)
+
+    def test_error_message_includes_standard_error(self):
+        """The message of a failed command says why it failed."""
+        outcome, sub = self.run_with(
+            ["gh", "api"], completed(1, stderr="HTTP 401: Bad credentials\n")
+        )
+        self.assertIsInstance(outcome, subprocess.CalledProcessError)
+        self.assertIn("HTTP 401: Bad credentials", str(outcome))
+        self.assertEqual(sub.call_count, 1)
+
+    def test_transient_gh_failure_is_retried(self):
+        """A gh command that fails with a transient error is run again."""
+        outcome, sub = self.run_with(
+            ["gh", "api", "graphql"],
+            completed(1, stderr="gh: HTTP 502: Bad Gateway\n"),
+            completed(0, stdout="data\n"),
+        )
+        self.assertEqual(outcome, "data\n")
+        self.assertEqual(sub.call_count, 2)
+
+    def test_persistent_transient_gh_failure_fails(self):
+        """A gh command that keeps failing with a transient error fails after the retries."""
+        failure = completed(1, stderr="You have exceeded a secondary rate limit.\n")
+        outcome, sub = self.run_with(["gh", "api"], failure, failure, failure)
+        self.assertIsInstance(outcome, pr_status.CommandError)
+        self.assertEqual(sub.call_count, 3)
+
+    def test_gh_failures_that_are_retried(self):
+        """A gh command that fails with any of several transient errors is run again."""
+        for message in [
+            "error connecting to api.github.com\ncheck your internet connection",
+            "HTTP 500: Internal Server Error",
+            "dial tcp 140.82.112.6:443: connect: connection refused",
+            "Could not resolve host: api.github.com",
+            "Post https://api.github.com/graphql: net/http: TLS handshake timeout",
+            "GraphQL: Something went wrong while executing your query.",
+        ]:
+            with self.subTest(message=message):
+                outcome, sub = self.run_with(
+                    ["gh", "api"], completed(1, stderr=message + "\n"), completed(0, stdout="x")
+                )
+                self.assertEqual(outcome, "x")
+                self.assertEqual(sub.call_count, 2)
+
+    def test_retry_after_rate_limit_waits_a_minute(self):
+        """Each retry after a rate limit waits at least GH_RATE_LIMIT_DELAY seconds."""
+        failure = completed(1, stderr="You have exceeded a secondary rate limit.\n")
+        self.run_with(["gh", "api"], failure, failure, completed(0))
+        self.assertEqual(
+            [call.args[0] for call in self.sleep.call_args_list],
+            [pr_status.GH_RATE_LIMIT_DELAY, max(pr_status.GH_RETRY_DELAYS[1], 60)],
+        )
+
+    def test_retry_after_other_failure_waits_briefly(self):
+        """The first retry after a transient failure other than a rate limit waits briefly."""
+        failure = completed(1, stderr="HTTP 502: Bad Gateway\n")
+        self.run_with(["gh", "api"], failure, completed(0))
+        self.sleep.assert_called_once_with(pr_status.GH_RETRY_DELAYS[0])
+
+    def test_gh_is_not_retried_after_retries_are_exhausted(self):
+        """After a gh command fails even after every retry, later gh commands are not retried."""
+        failure = completed(1, stderr="HTTP 503: Service Unavailable\n")
+        self.run_with(["gh", "api"], failure, failure, failure)
+        self.assertTrue(self.exhausted)
+        outcome, sub = self.run_with(["gh", "pr", "view", "1"], failure)
+        self.assertIsInstance(outcome, pr_status.CommandError)
+        self.assertEqual(sub.call_count, 1)
+        self.sleep.assert_not_called()
+
+    def test_error_message_abbreviates_long_arguments(self):
+        """The message of a failed command is one line, even if an argument spans lines."""
+        query = "query={ viewer {\n" + "x" * 1000 + "\n} }"
+        outcome, _ = self.run_with(
+            ["gh", "api", "graphql", "-f", query], completed(1, stderr="HTTP 401: Bad\n")
+        )
+        message = str(outcome)
+        self.assertNotIn("\n", message)
+        self.assertNotIn("xxx", message)
+        self.assertIn("gh api graphql -f 'query={ viewer {...' failed: HTTP 401: Bad", message)
+
+    def test_retry_notice_abbreviates_long_arguments(self):
+        """The notice of a retry is one line, even if an argument spans lines."""
+        failure = completed(1, stderr="HTTP 502: Bad Gateway\n")
+        self.run_with(
+            ["gh", "api", "graphql", "-f", "query={\n" + "x" * 1000], failure, completed(0)
+        )
+        self.assertEqual(
+            self.written(),
+            "pr-status: gh api graphql -f 'query={...' failed: HTTP 502: Bad Gateway;"
+            f" retrying in {pr_status.GH_RETRY_DELAYS[0]} seconds\n",
+        )
+
+    def test_query_pr_states_retries_transient_failure(self):
+        """query_pr_states runs its query again after a transient failure."""
+        data = '{"data": {"r0": {"pullRequest": {"state": "MERGED"}}}}'
+        with (
+            mock.patch.object(
+                pr_status.subprocess,
+                "run",
+                side_effect=[completed(1, stderr="HTTP 502: Bad Gateway\n"), completed(0, data)],
+            ) as sub,
+            mock.patch.object(pr_status, "time"),
+            mock.patch.object(pr_status, "GH_RETRIES_EXHAUSTED", False),
+            mock.patch("sys.stderr"),
+        ):
+            states = pr_status.query_pr_states(["o/r#1"])
+        self.assertEqual(states, {"o/r#1": "landed"})
+        self.assertEqual(sub.call_count, 2)
+
+    def test_query_pr_states_warns_of_failure(self):
+        """query_pr_states warns if GitHub cannot be asked."""
+        failure = completed(1, stderr="HTTP 401: Bad credentials\n")
+        with (
+            mock.patch.object(pr_status.subprocess, "run", return_value=failure),
+            mock.patch.object(pr_status, "GH_RETRIES_EXHAUSTED", False),
+            mock.patch("sys.stderr") as stderr,
+        ):
+            states = pr_status.query_pr_states(["o/r#1"])
+        self.assertEqual(states, {})
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("cannot read the states of the PRs", written)
+        self.assertIn("HTTP 401: Bad credentials", written)
+
+    def test_other_command_is_not_retried(self):
+        """A command other than gh is not run again, whatever its error."""
+        outcome, sub = self.run_with(
+            ["git", "fetch"], completed(1, stderr="Connection timed out\n")
+        )
+        self.assertIsInstance(outcome, pr_status.CommandError)
+        self.assertEqual(sub.call_count, 1)
 
 
 class ApplyDescriptionUpdatesTest(unittest.TestCase):

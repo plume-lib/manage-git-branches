@@ -78,10 +78,12 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from collections import Counter, defaultdict
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pr_status_config
+import request_util
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -102,13 +104,106 @@ class ConfigError(Exception):
     """There is no config file, and no default config can be constructed."""
 
 
+class CommandError(subprocess.CalledProcessError):
+    """A failure of a command that run ran, whose message includes the command's standard error.
+
+    The message of a subprocess.CalledProcessError gives only the command and its exit
+    status, so a traceback would not say why the command failed.
+    """
+
+    def __str__(self) -> str:
+        """Return a description of the failure.
+
+        Returns:
+            One line:  the command, its standard error, and its exit status.
+        """
+        return f"{command_failure(self)} (exit status {self.returncode})"
+
+
+# Matches the standard error of a `gh` command that failed for a reason that might go away
+# by itself, such as "HTTP 502: Bad Gateway", "error connecting to api.github.com", "You
+# have exceeded a secondary rate limit", or GraphQL's "Something went wrong while executing
+# your query.  This may be the result of a timeout".
+TRANSIENT_GH_ERROR_RE = re.compile(
+    "|".join(
+        f"(?:{p})"
+        for p in [
+            *request_util.TRANSIENT_NETWORK_PATTERNS,
+            r"error connecting to",
+            r"timed? ?out",
+            r"Something went wrong while executing",
+            r"unexpected EOF",
+        ]
+    ),
+    re.IGNORECASE,
+)
+
+# Matches the standard error of a `gh` command that failed because GitHub limits the rate of
+# requests, such as "You have exceeded a secondary rate limit" or "HTTP 429: Too Many
+# Requests".
+GH_RATE_LIMIT_RE = re.compile(r"rate limit|Too Many Requests|HTTP 429", re.IGNORECASE)
+
+# The number of seconds to wait before each retry of a `gh` command that failed for a reason
+# that TRANSIENT_GH_ERROR_RE matches.
+GH_RETRY_DELAYS = (10, 60)
+# The fewest seconds to wait before a retry of a `gh` command that failed for a reason that
+# GH_RATE_LIMIT_RE matches.  A secondary rate limit lasts at least a minute, and a request
+# made while it is in force can extend it.
+GH_RATE_LIMIT_DELAY = 60
+
+# True if a `gh` command failed for a reason that TRANSIENT_GH_ERROR_RE matches, even after
+# every retry.  GitHub is then probably unavailable, so run_retrying does not retry later
+# `gh` commands:  each of them fails quickly, instead of after a wait.
+GH_RETRIES_EXHAUSTED = False
+
+
+def run_retrying(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run the given command, and retry it if it is a `gh` command that failed transiently.
+
+    A `gh` command fails transiently if its standard error matches TRANSIENT_GH_ERROR_RE.
+    Such a command is run again after each delay in GH_RETRY_DELAYS (but at least
+    GH_RATE_LIMIT_DELAY seconds after a rate limit), with a notice on standard error, unless
+    GH_RETRIES_EXHAUSTED is true.
+
+    Args:
+        cmd: a command and its arguments, such as ["gh", "pr", "view", "123"].
+
+    Returns:
+        The result of the command's last run, with its exit status and its output.
+    """
+    global GH_RETRIES_EXHAUSTED
+    is_gh = cmd[:1] == ["gh"]
+    delays = [] if GH_RETRIES_EXHAUSTED else list(GH_RETRY_DELAYS)
+    while True:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if result.returncode == 0 or not is_gh or not TRANSIENT_GH_ERROR_RE.search(result.stderr):
+            return result
+        if not delays:
+            GH_RETRIES_EXHAUSTED = True
+            return result
+        delay = delays.pop(0)
+        if GH_RATE_LIMIT_RE.search(result.stderr):
+            delay = max(delay, GH_RATE_LIMIT_DELAY)
+        failure = CommandError(result.returncode, cmd, result.stdout, result.stderr)
+        print(
+            f"pr-status: {command_failure(failure)}; retrying in {delay} seconds", file=sys.stderr
+        )
+        time.sleep(delay)
+
+
 def run(cmd: list[str]) -> str:
     """Run a command, which must succeed.
+
+    A `gh` command that fails transiently is retried, as run_retrying does.  If the command
+    fails, even after any retries, raises a CommandError.
 
     Returns:
         The command's standard output.
     """
-    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    result = run_retrying(cmd)
+    if result.returncode != 0:
+        raise CommandError(result.returncode, cmd, result.stdout, result.stderr)
+    return result.stdout
 
 
 def succeeds(cmd: list[str]) -> bool:
@@ -120,13 +215,40 @@ def succeeds(cmd: list[str]) -> bool:
     return subprocess.run(cmd, check=False, capture_output=True).returncode == 0
 
 
+# The most characters of an argument that brief_command shows.
+BRIEF_ARGUMENT_LENGTH = 40
+
+
+def brief_command(cmd: list[str]) -> str:
+    """Return cmd as a shell command on one line, with each long argument abbreviated.
+
+    An argument that spans lines or that is longer than BRIEF_ARGUMENT_LENGTH characters,
+    such as a GraphQL query or a PR's body, is replaced by the start of its first line,
+    followed by "...", as in "gh api graphql -f 'query={ repository(owner: ...'".
+
+    Args:
+        cmd: a command and its arguments, such as ["gh", "pr", "view", "123"].
+
+    Returns:
+        The command, quoted as a shell would need it.
+    """
+
+    def brief(arg: str) -> str:
+        if "\n" not in arg and len(arg) <= BRIEF_ARGUMENT_LENGTH:
+            return arg
+        return arg.split("\n", 1)[0][:BRIEF_ARGUMENT_LENGTH] + "..."
+
+    return shlex.join(brief(arg) for arg in cmd)
+
+
 def command_failure(error: subprocess.CalledProcessError) -> str:
     """Describe a command that run raised error for.
 
     Returns:
-        One line:  the command and its standard error.
+        One line:  the command, with each long argument abbreviated as brief_command does,
+        and its standard error.
     """
-    return f"{shlex.join(error.cmd)} failed: {' '.join(error.stderr.split())}"
+    return f"{brief_command(error.cmd)} failed: {' '.join(error.stderr.split())}"
 
 
 def and_list(items: Iterable[str]) -> str:
@@ -224,8 +346,12 @@ class Repo:
         """Return the mark that a link to PR n carries if the PR's CI failed.
 
         Returns:
-            A space followed by FAILED_MARK if the PR's CI failed, or "" otherwise.
+            A space followed by FAILED_MARK if the PR's CI failed; a space followed by "?"
+            if the PR is open and GitHub could not say whether its CI failed; or ""
+            otherwise.
         """
+        if not self.reviews_and_ci.known:
+            return " ?" if n in self.prs else ""
         return " " + FAILED_MARK if n in self.reviews_and_ci.ci_failed else ""
 
     def refs(self, ns: Iterable[int]) -> str:
@@ -473,11 +599,14 @@ class ReviewsAndCi(NamedTuple):
             is outdated.
         ci_failed: the numbers of the PRs whose CI failed.
         ci_passed: the numbers of the PRs whose CI completed and passed.
+        known: True if they were read from GitHub; False if GitHub could not be asked, and
+            the other attributes are empty.
     """
 
     review_threads: dict[int, list[bool]]
     ci_failed: set[int]
     ci_passed: set[int]
+    known: bool = True
 
 
 def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
@@ -487,7 +616,30 @@ def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
         repo: a Repo.
 
     Returns:
-        The unresolved review threads and the CI results, read from GitHub.
+        The unresolved review threads and the CI results, read from GitHub; or, after a
+        warning on standard error, an empty ReviewsAndCi whose known is False if GitHub
+        cannot be asked, even after the retries that run makes.
+    """
+    try:
+        return read_reviews_and_ci(repo)
+    except subprocess.CalledProcessError as error:
+        print(
+            f"pr-status: cannot read the review threads and CI results of {repo.gh}, so the"
+            f" documents show them as unknown (?): {' '.join(error.stderr.split())}",
+            file=sys.stderr,
+        )
+        return ReviewsAndCi({}, set(), set(), known=False)
+
+
+def read_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
+    """Return the unresolved review threads and the CI results of the open PRs of repo.
+
+    Args:
+        repo: a Repo.
+
+    Returns:
+        The unresolved review threads and the CI results, read from GitHub.  If GitHub
+        cannot be asked, raises a subprocess.CalledProcessError.
     """
     result = ReviewsAndCi({}, set(), set())
     for pr in review_thread_query(
@@ -682,8 +834,9 @@ def query_pr_states(refs: Iterable[str]) -> dict[str, str | None]:
     """Look up the states of the PRs "owner/repo#N" in refs, with one GraphQL query.
 
     Returns:
-        A map from each ref to "open", "landed", "closed", or None (not a PR),
-        or {} if the query fails.
+        A map from each ref to "open", "landed", "closed", or None (not a PR); or, after a
+        warning on standard error, {} if GitHub cannot be asked, even after the retries
+        that run_retrying makes.
     """
     refs = sorted(set(refs))
     if not refs:
@@ -697,17 +850,17 @@ def query_pr_states(refs: Iterable[str]) -> dict[str, str | None]:
             f"{{ pullRequest(number: {int(n)}) {{ state }} }}"
         )
     # A ref that is not a PR yields an error but no output; the other refs still yield data.
-    result = subprocess.run(
-        ["gh", "api", "graphql", "-f", "query={" + " ".join(query) + "}"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_retrying(["gh", "api", "graphql", "-f", "query={" + " ".join(query) + "}"])
     try:
         data = json.loads(result.stdout).get("data")
     except json.JSONDecodeError:
         data = None
     if not data:
+        print(
+            "pr-status: cannot read the states of the PRs that PR descriptions mention with one"
+            f" query, so it asks about each one: {' '.join(result.stderr.split())}",
+            file=sys.stderr,
+        )
         return {}
     states = {}
     for i, ref in enumerate(refs):
@@ -1334,12 +1487,13 @@ class Model:
             unresolved review threads and how many of them are outdated, if the PR has any;
             a red X if the PR's CI failed, or else a green checkmark if its CI completed and
             passed; and shuffle arrows (🔀) if merging the default branch, or a branch that
-            the PR's branch is updated from, into the PR would conflict, in any file.  The
-            result is "" if no part applies.
+            the PR's branch is updated from, into the PR would conflict, in any file.  If
+            GitHub could not say what the review threads and the CI results are, a "?"
+            replaces the first two parts.  The result is "" if no part applies.
         """
         reviews_and_ci = self.repo.reviews_and_ci
         threads = reviews_and_ci.review_threads.get(n, [])
-        cell = []
+        cell = [] if reviews_and_ci.known else ["?"]
         if threads:
             outdated = sum(threads)
             cell.append(str(len(threads)) + (f" ({outdated} outdated)" if outdated else ""))
@@ -1718,8 +1872,8 @@ def external_failed_mark(model: Model, ref: str) -> str:
         ref: a PR in another repository, such as "owner/repo#5".
 
     Returns:
-        A space followed by FAILED_MARK if the PR's repository is one of the models that
-        unite_partners united with model and the PR's CI failed, or "" otherwise.
+        If the PR's repository is one of the models that unite_partners united with model,
+        the mark that Repo.failed_mark returns for the PR; or "" otherwise.
     """
     gh, n = ref.split("#")
     other = model.by_gh.get(gh.lower())
@@ -1729,7 +1883,8 @@ def external_failed_mark(model: Model, ref: str) -> str:
 def depends_on(model: Model, n: int, mark_failed: bool = False) -> str:
     """Return the "Depends on" cell of PR n.
 
-    If mark_failed is true, each prerequisite whose CI failed is followed by a red X.
+    If mark_failed is true, each prerequisite whose CI failed is followed by a red X, and
+    each open prerequisite whose CI results GitHub could not say is followed by a "?".
 
     Returns:
         The PR's direct prerequisites, followed by its transitive ones.  Shuffle arrows (🔀)

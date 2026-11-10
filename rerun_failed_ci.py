@@ -94,36 +94,9 @@ PROGRAM = Path(sys.argv[0]).name
 NORMALIZE_LOG = Path(__file__).resolve().parent / "normalize-log"
 
 # Regular expressions, each of which matches a line of a log that shows a transient
-# failure.  They are matched without regard to case.  A 403 status is transient
-# because GitHub responds with 403 to a client that exceeds its rate limit.
+# failure.  They are matched without regard to case.
 TRANSIENT_PATTERNS = [
-    r"(status|response) code:? (403|408|429|5[0-9][0-9])([^0-9]|$)",
-    r"HTTP[/0-9.]*( error| status)?:? (408|429|500|502|503|504)([^0-9]|$)",
-    r"The requested URL returned error: (408|429|5[0-9][0-9])",
-    r"Too Many Requests",
-    r"toomanyrequests",
-    r"rate limit (exceeded|reached)",
-    r"exceeded (a |the )?(secondary )?rate limit",
-    r"Service Unavailable",
-    r"Bad Gateway",
-    r"Gateway Time-?out",
-    r"Connect(ion)? timed out",
-    r"Connection (reset|refused)",
-    r"Read timed out",
-    r"SocketTimeoutException",
-    r"Network is unreachable",
-    r"UnknownHostException",
-    r"Temporary failure in name resolution",
-    r"Could not resolve host",
-    r"Premature end of Content-Length",
-    r"Remote host terminated the handshake",
-    r"TLS handshake timeout",
-    r"i/o timeout",
-    r"early EOF",
-    r"RPC failed",
-    r"remote end hung up unexpectedly",
-    r"gnutls_handshake\(\) failed",
-    r"SSL_ERROR_SYSCALL",
+    *request_util.TRANSIENT_NETWORK_PATTERNS,
     r"We stopped hearing from agent",
     r"runner has received a shutdown signal",
     r"lost communication with the server",
