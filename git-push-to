@@ -179,6 +179,14 @@
 #    it, as when this script rejected an AI agent's work, whose edits remain,
 #    or when you have begun to resolve the conflicts.
 # A merge in progress in the first directory makes this script stop.
+#
+# A pre-commit hook, such as one that runs a formatter, can reject a commit
+# that this script makes, of a merge or of a fix to the build, after changing
+# files that the commit changes.  Then this script stages the hook's changes
+# and commits once more, provided that the hook only modified files that the
+# commit changes and that the working tree had no unstaged changes before the
+# commit.  Otherwise, or if the second commit fails too, this script stops,
+# with the merge still in progress or the fix staged.
 
 # Asking an AI agent
 #

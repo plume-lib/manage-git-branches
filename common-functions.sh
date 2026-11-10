@@ -3271,7 +3271,7 @@ $(tail -n 100 "${fix_log}")"
     fi
     fix_attempt=$((fix_attempt + 1))
   done
-  if ! printf '%s\n' "$3" | git commit -q --cleanup=whitespace -F -; then
+  if ! commit_staged "$3"; then
     echo "${SCRIPT_NAME}: cannot commit the changes of ${fix_with} in $(pwd)" >&2
     return 1
   fi
@@ -3526,6 +3526,58 @@ report_merge_in_progress_in() {
   )
 }
 
+## Usage: commit_staged MESSAGE
+## Commits the changes that are staged in the current directory, the top
+## level of a working tree, with the message MESSAGE; the commit is a merge
+## commit if a merge is in progress.  `--cleanup=whitespace` keeps every line
+## of MESSAGE, whatever comment character the configuration names.
+##
+## A pre-commit hook, such as one that runs a formatter, can reject a commit
+## after changing the files that the commit changes, so that a commit of the
+## files as the hook left them succeeds.  If the commit fails, the working
+## tree matched the index before the commit, the hook left the index
+## unchanged, and the hook only modified files that the commit changes,
+## relative to HEAD, then this function prints the names of those files,
+## stages them, and commits once more.  It does not retry if the hook
+## changed nothing, deleted a file, or changed any other file.
+##
+## Returns 0 if a commit succeeded, and 1 otherwise.
+commit_staged() {
+  commit_staged_clean=0
+  if git diff --quiet; then
+    commit_staged_clean=1
+  fi
+  # `git write-tree` fails if the index has unmerged entries, as git's
+  # commit does.
+  commit_staged_tree="$(git write-tree 2> /dev/null)" || commit_staged_tree=''
+  if printf '%s\n' "$1" | git commit -q --cleanup=whitespace -F -; then
+    return 0
+  fi
+  if [ "${commit_staged_clean}" -ne 1 ] || [ -z "${commit_staged_tree}" ] \
+    || [ "$(git write-tree 2> /dev/null)" != "${commit_staged_tree}" ] \
+    || git diff --quiet \
+    || [ -n "$(git diff --name-only --diff-filter=m)" ]; then
+    return 1
+  fi
+  # As for ${resolve_files} in `resolve_merge_conflicts`, a pathname that
+  # contains a newline is not split.
+  if ! commit_staged_committed="$(git diff --cached --name-only -z HEAD | tr '\n\000' '\001\n')" \
+    || ! commit_staged_changed="$(git diff --name-only -z | tr '\n\000' '\001\n')"; then
+    return 1
+  fi
+  if printf '%s\n' "${commit_staged_changed}" | grep -F -x -v -q -- "${commit_staged_committed}"; then
+    return 1
+  fi
+  printf '%s\n' "${commit_staged_changed}" | while IFS= read -r commit_staged_file; do
+    echo "${SCRIPT_NAME}: a pre-commit hook changed ${commit_staged_file}; staging its changes" >&2
+  done
+  if ! git add -u; then
+    return 1
+  fi
+  echo "${SCRIPT_NAME}: committing again in $(pwd)" >&2
+  printf '%s\n' "$1" | git commit -q --cleanup=whitespace -F -
+}
+
 ## Usage: commit_resolved_merge RESOLVER COMMIT SOURCE MESSAGE
 ## Resolves the conflicts of the merge of COMMIT that is in progress in the
 ## current directory, the top level of a working tree, with
@@ -3537,10 +3589,9 @@ commit_resolved_merge() {
   if ! resolve_merge_conflicts "$1" "$2" "$3"; then
     return 1
   fi
-  # `-F` supplies MESSAGE, rather than MERGE_MSG, to which `git merge`
-  # appended a list of the conflicts.  `--cleanup=whitespace` keeps every
-  # line of MESSAGE, whatever comment character the configuration names.
-  if ! printf '%s\n' "$4" | git commit -q --cleanup=whitespace -F -; then
+  # The message is MESSAGE, rather than MERGE_MSG, to which `git merge`
+  # appended a list of the conflicts.
+  if ! commit_staged "$4"; then
     echo "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
     report_merge_in_progress "\`${SCRIPT_NAME}\` could not commit it."
     return 1

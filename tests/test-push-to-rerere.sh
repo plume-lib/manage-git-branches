@@ -293,4 +293,50 @@ push_to
 check_not_resolved "another change in the working tree" \
   "changed, but not conflicted: sub/keep.txt"
 
+## Usage: install_pre_commit_hook LINE...
+## Installs in ${feature_dir} a pre-commit hook that consists of the LINEs.
+install_pre_commit_hook() {
+  hook_dir="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path hooks)"
+  mkdir -p "${hook_dir}"
+  printf '%s\n' '#!/bin/sh' "$@" > "${hook_dir}/pre-commit"
+  chmod +x "${hook_dir}/pre-commit"
+}
+
+## A pre-commit hook that, like a formatter's, rejects the merge commit after
+## reformatting the merged file does not stop git-push-to, which commits the
+## file as the hook left it.
+setup_case hook-reformats
+record_resolution false
+install_pre_commit_hook \
+  "tr 'A-Z' 'a-z' < file.txt > hook.tmp" \
+  'if cmp -s file.txt hook.tmp; then rm hook.tmp; exit 0; fi' \
+  'mv hook.tmp file.txt' \
+  'exit 1'
+push_to
+check_resolved "a hook that reformats the merged file" "Merge branch 'main' into feature" \
+  one two three four five six same seven-feature seven-main same2 eight nine
+case "${push_output}" in
+  *"a pre-commit hook changed file.txt"*) ;;
+  *) fail "a hook that reformats the merged file: no diagnostic about the hook: ${push_output}" ;;
+esac
+
+## A hook that rejects the commit after changing a file that the merge does
+## not change stops git-push-to.
+setup_case hook-changes-other
+record_resolution false
+install_pre_commit_hook 'echo hooked >> other.txt' 'exit 1'
+push_to
+check_not_resolved "a hook that changes another file" "cannot commit the merge"
+
+## A hook that rejects every commit, changing the merged file each time, stops
+## git-push-to after one more commit.
+setup_case hook-always-fails
+record_resolution false
+install_pre_commit_hook 'echo hooked >> file.txt' 'exit 1'
+push_to
+check_not_resolved "a hook that always fails" "cannot commit the merge"
+if [ "$(grep -c -x hooked "${feature_dir}/file.txt")" -ne 2 ]; then
+  fail "a hook that always fails: the hook did not run exactly twice"
+fi
+
 echo "${SCRIPT_NAME}: all tests passed"
