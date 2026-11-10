@@ -201,15 +201,50 @@ class LandingLineTest(unittest.TestCase):
 
     def test_normalizes_ref(self):
         """A PR in the same repository is "#N", and others are "owner/repo#N"."""
-        self.assertEqual(pr_status.landing_line("Land after #10.", REPO), ("after", "#10"))
+        self.assertEqual(pr_status.landing_line("Land after #10.", REPO.gh), ("after", "#10"))
         self.assertEqual(
-            pr_status.landing_line("Land before https://github.com/owner/repo/pull/20", REPO),
+            pr_status.landing_line("Land before https://github.com/owner/repo/pull/20", REPO.gh),
             ("before", "#20"),
         )
         self.assertEqual(
-            pr_status.landing_line("Land with https://github.com/other/repo/pull/30", REPO),
+            pr_status.landing_line("Land with https://github.com/other/repo/pull/30", REPO.gh),
             ("with", "other/repo#30"),
         )
+
+
+class LandAfterNumbersTest(unittest.TestCase):
+    """Tests for land_after_numbers and pr-status --print-land-after."""
+
+    BODY = (
+        "Land after #9.\r\n"
+        "Land after Owner/Repo#09 (it adds the helper).\n"
+        "Land after https://github.com/owner/repo/pull/11\n"
+        "Land after #12 and #13.\n"
+        "Land after other/repo#14.\n"
+        "Land before #15.\n"
+        "Text that says Land after #16.\n"
+    )
+
+    def test_numbers(self):
+        """Only "Land after" lines that name one PR of the repository, in any case, count."""
+        self.assertEqual(pr_status.land_after_numbers(self.BODY, "owner/repo"), [9, 9, 11])
+
+    def test_print_land_after(self):
+        """pr-status --print-land-after prints the numbers, one per line."""
+        result = subprocess.run(
+            [
+                sys.executable,
+                PrintConflictingPushChainsTest.PR_STATUS,
+                "--print-land-after",
+                "owner/repo",
+            ],
+            input=self.BODY,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "9\n9\n11\n")
 
 
 class StatedPrerequisitesTest(unittest.TestCase):
@@ -1380,6 +1415,8 @@ class ExclusiveOptionsTest(unittest.TestCase):
             ["--check", "--print-conflicting-push-chains"],
             ["--print-document", "--print-conflicting-push-chains"],
             ["--print-config", "--print-document"],
+            ["--print-land-after", "o/r", "--check"],
+            ["--print-land-after", "o/r", "--highlight", "repo#1"],
             ["--print-conflicting-push-chains", "--highlight", "repo#1"],
             ["--print-conflicting-push-chains", "--print-missing-branches"],
             ["--print-missing-branches", "--highlight", "repo#1"],

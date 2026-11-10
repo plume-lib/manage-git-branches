@@ -373,8 +373,13 @@ fi
 # that me/proj is a fork of someone/proj:  `gh repo view` prints the upstream
 # repository and the default branch, which for me/proj are its parent,
 # someone/proj, and for any other repository are the repository itself, and
-# `gh auth token` succeeds.  `url.BASE.insteadOf` maps their GitHub URLs to
-# local bare repositories.
+# `gh auth token` succeeds.  `gh api -X GET` appends its arguments to
+# ${testdir}/gh-api-log and prints what `--jq` would make of GitHub's answer:
+# for the pull requests from a branch of me/proj, the file ${testdir}/gh-pulls;
+# for those from a branch of someone/proj, the file ${testdir}/gh-base-pulls;
+# and for pull request N, the file ${testdir}/gh-pull-N.  It fails if the file
+# does not exist.
+# `url.BASE.insteadOf` maps their GitHub URLs to local bare repositories.
 mkdir "${testdir}/bin"
 cat > "${testdir}/bin/gh" << EOF
 #!/bin/sh
@@ -382,6 +387,15 @@ case "\$1 \$2 \$3" in
   'auth token '*) echo 'fake-token' ;;
   'repo view github.com/me/proj') echo 'someone/proj trunk' ;;
   'repo view github.com/'*) echo "\${3#github.com/} trunk" ;;
+  'api -X GET')
+    printf '%s\n' "\$*" >> "${testdir}/gh-api-log"
+    case "\$4 \$*" in
+      */pulls' '*' head=me:'*) cat "${testdir}/gh-pulls" 2> /dev/null ;;
+      */pulls' '*' head=someone:'*) cat "${testdir}/gh-base-pulls" 2> /dev/null ;;
+      */pulls/*) cat "${testdir}/gh-pull-\${4##*/}" 2> /dev/null ;;
+      *) exit 1 ;;
+    esac
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -495,6 +509,123 @@ git -C "${fork}" config branch.to-parent-remote.pushRemote canonical-ssh
 git -C "${fork}" config push.default current
 gh_parent_commit o.txt
 expect_gh_refused 'push to the parent through another remote' to-parent-remote
+
+# Usage: expect_dependent_refused DESCRIPTION FILE
+# Runs this command in ${fork}, and checks that it fails, says that the
+# current branch builds on another pull request, and neither merges FILE nor
+# pushes.
+expect_dependent_refused() {
+  expect_dependent_refused_pushed="$(gh_fork_pushed_head)"
+  if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+    fail "$1: succeeded"
+  elif ! grep -q 'builds on another pull request' "${testdir}/errors" \
+    || ! grep -q -e '--allow-dependent' "${testdir}/errors"; then
+    fail "$1: wrong message: $(cat "${testdir}/errors")"
+  elif [ -e "${fork}/$2" ]; then
+    fail "$1: merged $2"
+  elif [ "$(gh_fork_pushed_head)" != "${expect_dependent_refused_pushed}" ]; then
+    fail "$1: pushed"
+  fi
+}
+
+# A branch whose pull request's base branch is another pull request's branch
+# is not merged into, unless "--allow-dependent" is passed.  A pull request
+# from a branch of the same name in another repository does not count.
+make_gh_fork_clone "${testdir}/gh-clone-dependent"
+printf 'pr 5 feature-b trunk trunk me/proj\nbody 5 Stacked on #4. me/proj\n' > "${testdir}/gh-pulls"
+printf '4 someone/proj\n' > "${testdir}/gh-base-pulls"
+gh_parent_commit p.txt
+expect_dependent_refused 'stacked pull request' p.txt
+if ! grep -q 'its base branch is feature-b, the head branch of someone/proj#4' "${testdir}/errors"; then
+  fail "stacked pull request: does not name the base branch: $(cat "${testdir}/errors")"
+elif ! grep -q 'repos/someone/proj/pulls -f head=someone:feature-b -f state=open' "${testdir}/gh-api-log"; then
+  fail "stacked pull request: does not ask about feature-b: $(cat "${testdir}/gh-api-log")"
+fi
+if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}" --allow-dependent; then
+  fail "--allow-dependent: failed: $(cat "${testdir}/errors")"
+elif [ ! -e "${fork}/p.txt" ]; then
+  fail "--allow-dependent: did not merge p.txt"
+fi
+printf 'pr 6 feature-b trunk trunk Someone/Proj\npr 7 trunk trunk trunk ME/PROJ\n' > "${testdir}/gh-pulls"
+gh_parent_commit q.txt
+expect_gh_merge 'pull request from another repository' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" q.txt
+
+# A base branch that is not the head branch of an open pull request of the
+# base repository, such as a release branch or the branch of a pull request
+# that has landed, does not count.
+printf 'pr 11 release-1 trunk trunk me/proj\n' > "${testdir}/gh-pulls"
+printf '12 someone/other\n' > "${testdir}/gh-base-pulls"
+gh_parent_commit q2.txt
+expect_gh_merge 'base branch without an open pull request' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" q2.txt
+
+# A "Land after" line that names no pull request, such as an issue, does not
+# hide a stacked base branch.
+printf 'pr 5 feature-b trunk trunk me/proj\nbody 5 Land after #20. me/proj\n' > "${testdir}/gh-pulls"
+printf '4 someone/proj\n' > "${testdir}/gh-base-pulls"
+gh_parent_commit q3.txt
+expect_dependent_refused 'stacked, and land after an issue' q3.txt
+
+# Nor is a branch whose pull request's description says to land after an
+# open pull request, even with a carriage return at the end of the line.
+# One that says to land after a closed pull request is merged into.
+printf 'pr 8 trunk trunk trunk me/proj\nbody 8 Land after #9.\r me/proj\nbody 8  me/proj\nbody 8 Text. me/proj\n' > "${testdir}/gh-pulls"
+printf 'open trunk\n' > "${testdir}/gh-pull-9"
+expect_dependent_refused 'land after an open pull request' q3.txt
+if ! grep -q 'its description says to land after someone/proj#9' "${testdir}/errors"; then
+  fail "land after an open pull request: does not name it: $(cat "${testdir}/errors")"
+fi
+# The line can name the pull request as "ORG/REPO#N", in any case, or by its
+# URL, and it can continue with text that names no other pull request.
+for line in 'Land after Someone/Proj#9 (it adds the helper).' \
+  'Land after https://github.com/someone/proj/pull/9'; do
+  printf 'pr 8 trunk trunk trunk me/proj\nbody 8 %s me/proj\n' "${line}" > "${testdir}/gh-pulls"
+  expect_dependent_refused "${line}" q3.txt
+done
+# A line that names several pull requests, or one in another repository, does
+# not count, so GitHub is not asked about the pull request.
+printf 'pr 8 trunk trunk trunk me/proj\nbody 8 Land after #9 and #10. me/proj\nbody 8 Land after other/proj#9. me/proj\n' > "${testdir}/gh-pulls"
+rm -f "${testdir}/gh-api-log"
+expect_gh_merge 'land after several or another repository' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" q3.txt
+if grep -q 'pulls/' "${testdir}/gh-api-log" || grep -q 'ignoring\|assuming' "${testdir}/errors"; then
+  fail "land after several or another repository: counted a line: $(cat "${testdir}/errors")"
+fi
+printf 'pr 8 trunk trunk trunk me/proj\nbody 8 Land after #9. me/proj\n' > "${testdir}/gh-pulls"
+printf 'closed trunk\n' > "${testdir}/gh-pull-9"
+gh_parent_commit r.txt
+expect_gh_merge 'land after a closed pull request' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" r.txt
+
+# A branch that already contains the default branch is built and pushed even
+# if its pull request builds on another one.
+printf 'pr 10 feature-b trunk trunk me/proj\n' > "${testdir}/gh-pulls"
+printf '4 someone/proj\n' > "${testdir}/gh-base-pulls"
+commit_file "${fork}" s.txt 's'
+if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  fail "dependent, nothing to merge: failed: $(cat "${testdir}/errors")"
+elif [ "$(gh_fork_pushed_head)" != "$(git -C "${fork}" rev-parse HEAD)" ]; then
+  fail "dependent, nothing to merge: did not push"
+fi
+
+# If GitHub cannot list the pull requests, this command says so and merges.
+rm -f "${testdir}/gh-pulls"
+gh_parent_commit t.txt
+expect_gh_merge 'GitHub cannot be asked' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" t.txt
+if ! grep -q 'assuming that it does not' "${testdir}/errors"; then
+  fail "GitHub cannot be asked: does not say so: $(cat "${testdir}/errors")"
+fi
+# Nor if GitHub cannot be asked about the base branch.
+printf 'pr 5 feature-b trunk trunk me/proj\n' > "${testdir}/gh-pulls"
+rm -f "${testdir}/gh-base-pulls"
+gh_parent_commit u.txt
+expect_gh_merge 'GitHub cannot be asked about the base branch' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" u.txt
+if ! grep -q 'assuming that it is not' "${testdir}/errors"; then
+  fail "GitHub cannot be asked about the base branch: does not say so: $(cat "${testdir}/errors")"
+fi
 PATH="${saved_path}"
 
 if [ "${failures}" -ne 0 ]; then

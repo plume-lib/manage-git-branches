@@ -154,7 +154,7 @@ The commands are:
   Pulls from OTHER-REPO-DIR into the current directory, just as
   `git-push-to` does.
 * [`git-pull-upstream`](git-pull-upstream)
-  `[--nocompile] [--llm | --no-llm] [--claude | --codex]`:
+  `[--nocompile] [--allow-dependent] [--llm | --no-llm] [--claude | --codex]`:
   Merges the default branch of the remote `upstream` (or `origin`, if there
   is no `upstream`, or the only remote, if there is neither) into the current
   branch, compiles, then pushes the current branch if compilation succeeds.
@@ -164,10 +164,25 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of the upstream
   repository.
+
+  It does not merge into a branch whose open pull request builds on another
+  pull request:  one whose base branch is the branch of another open pull
+  request, or whose description says "Land after #N" for an open pull
+  request N.  Such a branch receives the default branch through the branch
+  that it builds on, and receiving it directly as well would make a later
+  merge of that branch a criss-cross merge, which has several merge bases.
+  Update such a branch with `git-push-to`, as the chains that `pr-status`
+  prints do, or pass `--allow-dependent` to merge anyway.  It asks GitHub
+  with `gh`, and it skips this check if `gh` cannot be used.  It reads the
+  "Land after" lines with `pr-status --print-land-after`, which needs
+  Python 3.10 or later; if `python3` is older, it runs `pr-status` with
+  `uv`, if `uv` is installed (see [Python version](#python-version)), and
+  otherwise it ignores those lines.
+
   Unlike `git-pull-from`, it needs no working tree for the default branch.
   It handles conflicts and a failed build as `git-push-to` does.
 * [`pr-status`](pr-status)
-  `[--check | --print-document | --print-config |`
+  `[--check | --print-document | --print-config | --print-land-after ORG/REPO |`
   `--print-conflicting-push-chains | --print-missing-branches] [-C DIR]`
   `[--highlight PR|bottleneck...]`:
   Computes the dependencies among the open pull requests, updates the "Land
@@ -186,6 +201,10 @@ The commands are:
   prints the file name of the document that it regenerates and does nothing
   else.  With `--print-config`, it prints its config, with the defaults
   filled in, and does nothing else.
+  With `--print-land-after ORG/REPO`, it reads the description of a pull
+  request of `ORG/REPO` on standard input, prints the number of the pull
+  request that each of its "Land after" lines names in `ORG/REPO`, one per
+  line, and does nothing else.
   With `--print-missing-branches`, it prints the branches that resolving the
   conflicts needs, but that have no working copy (as of its previous run),
   and does nothing else:  one line per branch, holding a directory and the
@@ -466,6 +485,9 @@ options, both of which require
    ```sh
    alias pr-status='uv run --no-project --python 3.15 pr-status'
    ```
+
+   `git-pull-upstream`, which runs `pr-status`, does this itself if `uv` is
+   installed.
 
 ## Testing
 

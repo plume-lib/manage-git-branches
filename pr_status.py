@@ -693,22 +693,24 @@ class PrRefs(NamedTuple):
     external: set[str]
 
 
-def pr_refs(text: str, repo: Repo) -> PrRefs:
+def pr_refs(text: str, repo_gh: str) -> PrRefs:
     """Return the PRs that the given text names.
 
     Args:
         text: a part of a PR description, such as "Land after #12 and other/repo#34".
-        repo: the repository whose PRs text can name by number alone, as in "#12".
+        repo_gh: the GitHub slug, such as "ORG/REPO", of a repository, whose PRs text can
+            name by number alone, as in "#12".
 
     Returns:
-        The PRs that text names, as a PrRefs whose numbers are of PRs in repo.
+        The PRs that text names, as a PrRefs whose numbers are of PRs in the repository.
     """
     numbers = {int(n) for n in re.findall(r"(?<![\w/])#(\d+)\b", text)}
     external = set()
+    # GitHub ignores the case of a repository's name.
     for gh, n in re.findall(r"\b([\w.-]+/[\w.-]+)#(\d+)\b", text) + re.findall(
         r"github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)", text
     ):
-        if gh == repo.gh:
+        if gh.lower() == repo_gh.lower():
             numbers.add(int(n))
         else:
             external.add(f"{gh}#{n}")
@@ -770,7 +772,7 @@ def stated_relations(body: str, repo: Repo) -> StatedRelations:
             if keyword not in ("land", "merge"):
                 if re.match(r"\s*(this|it)\b", rest, re.IGNORECASE):
                     continue  # "#N depends on this PR":  #N is a dependent
-                refs = pr_refs(rest, repo)
+                refs = pr_refs(rest, repo.gh)
                 numbers |= refs.numbers
                 external |= refs.external
                 continue
@@ -787,7 +789,7 @@ def stated_relations(body: str, repo: Repo) -> StatedRelations:
             # land-with partner, and #C is a dependent.
             parts = re.split(r"\b(after|before|with)\b", rest, flags=re.IGNORECASE)
             for i in range(0, len(parts), 2):
-                refs = pr_refs(parts[i], repo)
+                refs = pr_refs(parts[i], repo.gh)
                 preposition = parts[i - 1].lower() if i else None
                 # In "To land after it:  #A", this PR is the object, so #A is a dependent.
                 if preposition in ("after", "before") and re.match(
@@ -805,22 +807,26 @@ def stated_relations(body: str, repo: Repo) -> StatedRelations:
     return StatedRelations(numbers, external, dependents, partners, external_partners)
 
 
-def landing_line(line: str, repo: Repo) -> tuple[str, str] | None:
-    """Parse a landing-order line of a description of a PR in repo.
+def landing_line(line: str, repo_gh: str) -> tuple[str, str] | None:
+    """Parse a landing-order line of a description of a PR.
 
     A landing-order line has the conventional format, such as "Land after #N.", except
-    that it may omit the final period and may continue with text that names no other PR.
-    It may name the PR as "owner/repo#N" or by its URL.
+    that it can omit the final period and can continue with text that names no other PR.
+    It can name the PR as "owner/repo#N" or by its URL.
+
+    Args:
+        line: a line of the description.
+        repo_gh: the GitHub slug, such as "ORG/REPO", of the PR's repository.
 
     Returns:
         The word "after", "with", or "before", and the PR that the line names, as "#N" if
-        it is in repo and as "owner/repo#N" otherwise; or None if line is not a
+        it is in the repository and as "owner/repo#N" otherwise; or None if line is not a
         landing-order line.
     """
     m = LANDING_START_RE.match(line)
     if not m:
         return None
-    refs = pr_refs(line, repo)
+    refs = pr_refs(line, repo_gh)
     if len(refs.numbers) + len(refs.external) != 1:
         return None
     return m[1], (f"#{refs.numbers.pop()}" if refs.numbers else refs.external.pop())
@@ -836,7 +842,27 @@ def malformed_landing_lines(body: str, repo: Repo) -> list[str]:
     return [
         line
         for line in body.splitlines()
-        if re.match(r"Land (after|with|before)\b", line) and not landing_line(line, repo)
+        if re.match(r"Land (after|with|before)\b", line) and not landing_line(line, repo.gh)
+    ]
+
+
+def land_after_numbers(body: str, repo_gh: str) -> list[int]:
+    """Return the PRs that the given description's "Land after" lines name in its repository.
+
+    Args:
+        body: the description of a PR.
+        repo_gh: the GitHub slug, such as "ORG/REPO", of the PR's repository.
+
+    Returns:
+        The number, such as 123, of the PR that each "Land after" line, as defined by
+        landing_line, names in the repository, in the order of the lines.
+    """
+    return [
+        int(ref[1:])
+        for line in body.splitlines()
+        if (parsed := landing_line(line, repo_gh))
+        and parsed[0] == "after"
+        and (ref := parsed[1]).startswith("#")
     ]
 
 
@@ -868,7 +894,7 @@ def updated_pr_description(
     """
     lines = body.splitlines()
     final_newline = body.endswith("\n")
-    landing = [(i, landing_line(line, repo)) for i, line in enumerate(lines)]
+    landing = [(i, landing_line(line, repo.gh)) for i, line in enumerate(lines)]
     landing = [(i, parsed) for i, parsed in landing if parsed]
     existing: dict[tuple[str, str], str] = {}
     for i, parsed in landing:
@@ -1518,7 +1544,7 @@ def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
                     file=sys.stderr,
                 )
             affected = model.cycle_affected
-            parsed = [p for line in body.splitlines() if (p := landing_line(line, model.repo))]
+            parsed = [p for line in body.splitlines() if (p := landing_line(line, model.repo.gh))]
             # The PRs in this repository that are open, including excluded ones, and that the
             # description's "Land after" lines and its "Land before" lines name.
             said = {
@@ -3878,6 +3904,15 @@ def main() -> None:
         help="print the config as JSON, with its defaults filled in, and do nothing else",
     )
     mode.add_argument(
+        "--print-land-after",
+        metavar="ORG/REPO",
+        help=(
+            "read the description of a PR of the repository ORG/REPO on standard input, print"
+            ' the number of the PR that each of its "Land after" lines names in that'
+            " repository, one per line, and do nothing else"
+        ),
+    )
+    mode.add_argument(
         "--print-conflicting-push-chains",
         action="store_true",
         help=(
@@ -3936,7 +3971,11 @@ def main() -> None:
         """
         return getattr(args, option.removeprefix("--").replace("-", "_"))
 
-    printing = [o for o in ["--print-document", "--print-config", *snapshot_printers] if given(o)]
+    printing = [
+        o
+        for o in ["--print-document", "--print-config", "--print-land-after", *snapshot_printers]
+        if given(o)
+    ]
     if args.highlight and printing:
         parser.error(f"--highlight is not allowed with {printing[0]}")
     check_only = args.check
@@ -3954,6 +3993,10 @@ def main() -> None:
         return
     if args.print_config:
         print(json.dumps(load_config("pr-status"), indent=2))
+        return
+    if args.print_land_after is not None:
+        for number in land_after_numbers(sys.stdin.read(), args.print_land_after):
+            print(number)
         return
     for option, formatter in snapshot_printers.items():
         if not given(option):

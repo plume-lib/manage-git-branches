@@ -949,7 +949,9 @@ git_maybe_batch() {
 ## ref was fetched from.  Sets ${upstream_is_parent} to 1 if the upstream
 ## repository is another repository than the remote that `upstream_remote`
 ## chooses, such as a fork's upstream repository, as described below, and to
-## 0 otherwise.
+## 0 otherwise.  Sets ${upstream_slug} to the GitHub slug, such as
+## "ORG/PROJ", of the upstream repository, or to the empty string if it is
+## not on GitHub.
 ##
 ## The upstream repository is the remote that `upstream_remote` chooses,
 ## unless that remote is not named "upstream" and one of these names another
@@ -1000,6 +1002,7 @@ find_upstream_ref() {
 # shellcheck disable=SC2034 # set for the caller
 find_parent_ref() {
   upstream_is_parent=0
+  upstream_slug=''
   if ! upstream_source="$(upstream_remote)"; then
     return 1
   fi
@@ -1016,12 +1019,14 @@ find_parent_ref() {
       fur_url="$(git remote get-url "${upstream_source}")"
       fur_fork="$(github_slug "${fur_url}")"
     fi
+    upstream_slug="${fur_fork}"
     fur_parent=''
     if gh_resolved .; then
       if [ "${gh_resolved_value}" = base ]; then
         if [ "${gh_resolved_remote}" != "${upstream_source}" ]; then
           upstream_ref="$(upstream_default_branch "${gh_resolved_remote}" "$1" "${2:-0}")" || return 1
           upstream_source="${gh_resolved_remote}"
+          upstream_slug="$(remote_slug "${gh_resolved_remote}")"
           upstream_is_parent=1
           return 0
         fi
@@ -1044,6 +1049,7 @@ find_parent_ref() {
       if [ -n "${fur_remote}" ]; then
         upstream_ref="$(upstream_default_branch "${fur_remote}" "$1" "${2:-0}")" || return 1
         upstream_source="${fur_remote}"
+        upstream_slug="${fur_parent}"
         upstream_is_parent=1
         return 0
       fi
@@ -1063,6 +1069,7 @@ find_parent_ref() {
             fetch --quiet --no-tags "${fur_parent_url}" "+HEAD:${fur_ref}"; then
             upstream_ref="${fur_ref}"
             upstream_source="${fur_parent_url}"
+            upstream_slug="${fur_parent}"
             upstream_is_parent=1
             return 0
           fi
@@ -1071,6 +1078,7 @@ find_parent_ref() {
         elif git rev-parse --verify --quiet "${fur_ref}" > /dev/null; then
           upstream_ref="${fur_ref}"
           upstream_source="${fur_parent_url}"
+          upstream_slug="${fur_parent}"
           upstream_is_parent=1
           return 0
         else
@@ -1079,8 +1087,26 @@ find_parent_ref() {
         fi
       fi
     fi
+  else
+    upstream_slug="$(remote_slug upstream)"
   fi
   return 2
+}
+
+## Usage: remote_slug REMOTE
+## Prints the GitHub slug, such as "ORG/PROJ", of the repository that the
+## remote REMOTE of the clone in the current directory names:  the one that
+## its configured URL names, or, if that is not a GitHub URL, the one that the
+## URL names as `url.BASE.insteadOf` rewrites it.  Prints nothing if neither
+## is a GitHub URL.
+remote_slug() {
+  remote_slug_value="$(github_slug "$(git config --get "remote.$1.url")")"
+  if [ -z "${remote_slug_value}" ]; then
+    remote_slug_value="$(github_slug "$(git remote get-url "$1" 2> /dev/null)")"
+  fi
+  if [ -n "${remote_slug_value}" ]; then
+    printf '%s\n' "${remote_slug_value}"
+  fi
 }
 
 ## Usage: fork_upstream FORK FETCH
@@ -1107,8 +1133,7 @@ fork_upstream() {
     fi
     return 0
   fi
-  if [ "$2" -ne 1 ] || ! command -v gh > /dev/null 2>&1 \
-    || ! gh auth token --hostname github.com > /dev/null 2>&1; then
+  if [ "$2" -ne 1 ] || ! gh_usable; then
     return 0
   fi
   if ! github_upstream "$1"; then
@@ -1121,6 +1146,14 @@ fork_upstream() {
     git config "${fork_upstream_key}" "${github_upstream_repo}"
     fork_upstream_repo="${github_upstream_repo}"
   fi
+}
+
+## Usage: gh_usable
+## Returns 0 if `gh` is installed and has a token for github.com, and 1
+## otherwise, as when no user has logged in with `gh auth login`.
+gh_usable() {
+  command -v gh > /dev/null 2>&1 \
+    && gh auth token --hostname github.com > /dev/null 2>&1
 }
 
 ## Usage: github_upstream REPO
@@ -6063,7 +6096,35 @@ push_destination() {
   push_destination_branch="${push_destination_branch_name}"
 }
 
-## Usage: pr_repositories DIRECTORY BRANCH
+## Usage: branch_pulls BASE HEAD BRANCH STATE JQ
+## Prints a line for each pull request to BASE, a GitHub repository's slug
+## such as "ORG/REPO", whose head is the branch BRANCH, such as "feature", of
+## the GitHub repository HEAD, such as "ME/REPO", and whose state is STATE:
+## "open", "closed", or "all".  Each line is a string that the jq expression
+## JQ, such as '"\(.number) \(.base.ref)"', yields for the pull request, as a
+## dict parsed from the JSON of GitHub's REST API with keys such as "number"
+## and "base", followed by a space and the slug of the pull request's head
+## repository as GitHub spells it.  JQ can yield several strings, or none.
+## A pull request from a branch of the same name in another repository is
+## not included; GitHub ignores the case of a repository's name, so the
+## comparison does too.
+## Returns 1, after printing a diagnostic, if GitHub cannot be asked, as
+## `gh_query` does.
+branch_pulls() {
+  # The `head` parameter names only the head repository's owner, who might
+  # have both the base repository and a fork of it.
+  branch_pulls_answer="$(gh_query "cannot list the pull requests from $2:$3" \
+    gh api -X GET "repos/$1/pulls" -f "head=${2%%/*}:$3" -f "state=$4" -f per_page=100 \
+    --hostname github.com --paginate \
+    --jq ".[] | (.head.repo.full_name // \"-\") as \$head | ($5) + \" \" + \$head")" \
+    || return 1
+  # "$(NF)" rather than "$NF", which tests/test-env-vars-documented.sh would
+  # take for a read of an environment variable.
+  printf '%s\n' "${branch_pulls_answer}" \
+    | awk -v head="$2" 'tolower($(NF)) == tolower(head)'
+}
+
+## Usage: pr_repositories DIRECTORY BRANCH [BASE]
 ## Sets ${pr_base_repo} and ${pr_head_repo} to the GitHub slugs, such as
 ## "ORG/REPO", of the base and head repositories of the pull requests from a
 ## local branch BRANCH of the clone in DIRECTORY, sets ${pr_head_remote} to
@@ -6073,25 +6134,33 @@ push_destination() {
 ## requests, or if they say nothing about BRANCH.
 ##
 ## The head repository, the remote, and the head branch are the ones that
-## `push_destination` names.  The base repository is the head repository's
-## upstream repository, which `github_upstream` describes.  A pull request from a branch of the same name in another
-## repository, even the base repository, is someone else's.
+## `push_destination` names.  The base repository is BASE, a GitHub slug, if
+## it is given, and otherwise the head repository's upstream repository,
+## which `github_upstream` describes.  A pull request from a branch of the
+## same name in another repository, even the base repository, is someone
+## else's.
 ##
 ## Fails if `gh` is not installed, if a query fails, or if `push_destination`
 ## fails, because then nothing is known about the pull requests.  Fails if the
 ## head branch is the head repository's default branch:  a pull request from
 ## it, such as one that merges a release from `main` into a stable branch,
 ## says nothing about whether the branch's work is done, because the branch
-## outlives every such pull request.
+## outlives every such pull request.  If BASE is given, GitHub is not asked,
+## and the caller must ignore a pull request from the head repository's
+## default branch itself.
 pr_repositories() {
   command -v gh > /dev/null 2>&1 || return 1
   push_destination "$1" "$2" || return 1
-  github_upstream "${push_destination_repo}" 2> /dev/null || return 1
-  if [ "${push_destination_branch}" = "${github_upstream_default}" ]; then
-    return 1
+  pr_repositories_base="${3:-}"
+  if [ -z "${pr_repositories_base}" ]; then
+    github_upstream "${push_destination_repo}" 2> /dev/null || return 1
+    if [ "${push_destination_branch}" = "${github_upstream_default}" ]; then
+      return 1
+    fi
+    pr_repositories_base="${github_upstream_repo}"
   fi
   # shellcheck disable=SC2034 # set for the caller
-  pr_base_repo="${github_upstream_repo}"
+  pr_base_repo="${pr_repositories_base}"
   # shellcheck disable=SC2034 # set for the caller
   pr_head_repo="${push_destination_repo}"
   # shellcheck disable=SC2034 # set for the caller
