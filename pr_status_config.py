@@ -28,6 +28,9 @@ SNAPSHOT = ".pr-status-snapshot.json"
 # The optional sections of the dependency document, which the config's
 # "documents": {"optional_sections": [...]} includes.
 OPTIONAL_SECTIONS = ("graph", "details", "prerequisites", "independent")
+# The default of a repository's "dormant_after_days":  the dependency chains with conflicts
+# omit a PR whose head commit is older than this many days.
+DEFAULT_DORMANT_AFTER_DAYS = 730
 
 
 def is_valid_filter(flt: Any) -> bool:
@@ -153,6 +156,14 @@ def pr_number_checker(value: Any, path: str, problems: list[str]) -> None:
     """Append to problems a description of value if it is not a PR number, such as 527."""
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         problems.append(f"{subject(path)} is {shown(value)}, not a PR number such as 527")
+
+
+def dormant_after_days_checker(value: Any, path: str, problems: list[str]) -> None:
+    """Append to problems a description of value if it is not a positive integer or null."""
+    if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
+        problems.append(
+            f"{subject(path)} is {shown(value)}, not a number of days such as 730, or null"
+        )
 
 
 def filter_checker(value: Any, path: str, problems: list[str]) -> None:
@@ -287,6 +298,7 @@ REPO_CHECKER = object_checker(
             {"prs": list_checker(pr_number_checker), "reason": LINE_CHECKER}, required=["prs"]
         ),
         "not_prerequisites": list_checker(pr_number_checker),
+        "dormant_after_days": dormant_after_days_checker,
         "extra_dependencies": list_checker(list_checker(pr_number_checker, length=2)),
         "extra_external_dependencies": map_checker(
             list_checker(pattern_checker(EXTERNAL_PR_RE, 'a PR such as "ORG/REPO#95"')),
