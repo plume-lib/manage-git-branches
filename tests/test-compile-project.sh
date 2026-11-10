@@ -284,11 +284,11 @@ fi
 
 # A Gradle build that fails while a Gradle daemon runs a deleted Java
 # executable is run again after that daemon is stopped.  The daemon is a copy
-# of `sh`, deleted after it starts, whose command line names Gradle's daemon
-# class and a version of Gradle that no real daemon has, so that the test
-# stops no real daemon.  The build fails while the daemon runs.  Only systems with /proc can
-# recognize such a daemon.
-if [ -d /proc ] && command -v pgrep > /dev/null 2>&1; then
+# of `sh` that is deleted after it starts.  The fake `gradlew` lists that
+# daemon alone as idle in its `--status` output, so that the test stops no
+# real daemon, and its build fails while the daemon runs.  Only systems with
+# /proc can recognize such a daemon.
+if [ -d /proc ]; then
   stale="${tmpdir}/stale"
   mkdir -p "${stale}"
   cp "$(command -v sh)" "${stale}/java"
@@ -296,9 +296,7 @@ if [ -d /proc ] && command -v pgrep > /dev/null 2>&1; then
   # daemon is started from a subshell that exits, so that it is not a child of
   # this shell, which would keep it as a zombie after it is stopped.
   stale_daemon="$(
-    "${stale}/java" -c 'while :; do sleep 1; done; :' \
-      org.gradle.launcher.daemon.bootstrap.GradleDaemon 0.0-compile-project-test \
-      < /dev/null > /dev/null 2>&1 &
+    "${stale}/java" -c 'while :; do sleep 1; done; :' < /dev/null > /dev/null 2>&1 &
     echo "$!"
   )"
   # Wait until the shell has replaced its fork with ${stale}/java.
@@ -311,16 +309,20 @@ if [ -d /proc ] && command -v pgrep > /dev/null 2>&1; then
   rm -f "${stale}/java"
   cat > "${stale}/gradlew" << EOF
 #!/bin/sh
+case " \$* " in
+  *" --status "*)
+    echo "   PID STATUS   INFO"
+    echo "${stale_daemon} IDLE     0.0"
+    exit 0
+    ;;
+esac
 if kill -0 ${stale_daemon} 2> /dev/null; then
-  echo "Failed to exec spawn helper" >&2
+  echo "error=0, Failed to exec spawn helper: pid: 1, exit value: 1" >&2
   exit 1
 fi
 echo built >> "${stale}/log"
 EOF
   chmod +x "${stale}/gradlew"
-  mkdir -p "${stale}/gradle/wrapper"
-  echo 'distributionUrl=https\://services.gradle.org/distributions/gradle-0.0-compile-project-test-bin.zip' \
-    > "${stale}/gradle/wrapper/gradle-wrapper.properties"
   stale_output="$("${COMPILE_PROJECT}" "${stale}" 2>&1)"
   stale_status=$?
   if [ "${stale_status}" != 0 ]; then
