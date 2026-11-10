@@ -2987,26 +2987,53 @@ def upstream_directories(repo: Repo, base: str) -> list[str]:
     return [d for d, info in git_entries(base).items() if info == wanted]
 
 
-def chain_conflict_prs(repo: Repo, prs: list[int], has_upstream: bool) -> set[int]:
+class UpdateChain(NamedTuple):
+    """A chain of PRs, each of whose branches `git-push-to` pushes into the next one's.
+
+    Attributes:
+        prs: the numbers of the PRs, such as [12, 34], in the order in which `git-push-to`
+            pushes their branches.
+        from_upstream: True if the chain starts with upstream, which `git-push-to` pushes
+            into the first PR's branch.  If it is false, the chain pushes the first PR's
+            branch but does not update it.
+    """
+
+    prs: list[int]
+    from_upstream: bool
+
+    def targets(self) -> list[int]:
+        """Return the PRs whose branches the chain pushes into, in the chain's order.
+
+        Returns:
+            The numbers of the PRs whose branches the chain pushes into:  all of them if the
+            chain starts with upstream, and all but the first otherwise.
+        """
+        return self.prs if self.from_upstream else self.prs[1:]
+
+
+def chain_conflict_prs(repo: Repo, chain: UpdateChain, has_upstream: bool) -> set[int]:
     """Return the PRs of the given chain that its textual conflicts involve.
 
     A later merge receives every earlier branch in the chain.  Therefore, a conflict
     between any 2 PRs in the chain can affect a merge, not only a conflict between 2
     adjacent PRs, and the PRs between the 2 carry the earlier one's changes to the later
-    one.  If the chain starts with upstream, every PR also receives upstream.
+    one.  If upstream is pushed, every PR that the chain pushes into also receives
+    upstream:  directly if the chain starts with upstream, and otherwise through the
+    chain's first PR, whose branch an earlier chain updated.
 
     Args:
         repo: a Repo.
-        prs: the numbers of a chain's PRs, such as [12, 34], in the order in which
-            `git-push-to` pushes their branches.
-        has_upstream: True if the chain starts with upstream.
+        chain: an UpdateChain.
+        has_upstream: True if upstream is pushed, by the chain or by an earlier chain.
 
     Returns:
-        The numbers of the PRs that conflict with upstream, if has_upstream is true, and,
-        for each 2 PRs of the chain whose branches conflict, those 2 PRs and the PRs between
-        them.  The set is empty if no merge in the chain would conflict.
+        The numbers of the PRs that the chain pushes into that conflict with upstream, if
+        has_upstream is true, and, for each 2 PRs of the chain whose branches conflict,
+        those 2 PRs and the PRs between them.  The set is empty if no merge in the chain
+        would conflict.
     """
-    result = {n for n in prs if n in repo.master_conflicts} if has_upstream else set()
+    prs = chain.prs
+    result = {n for n in chain.targets() if n in repo.master_conflicts} if has_upstream else set()
     for i, j in itertools.combinations(range(len(prs)), 2):
         if branches_conflict(repo, prs[i], prs[j]):
             result.update(prs[i : j + 1])
@@ -3047,33 +3074,40 @@ class PushChains(NamedTuple):
     missing_branches: list[MissingBranch]
 
 
-def update_chains(model: Model, prs: set[int], has_upstream: bool) -> list[list[int]]:
+def update_chains(model: Model, prs: set[int], has_upstream: bool) -> list[UpdateChain]:
     """Return the chains that update the branches of the given PRs.
 
     The chains update each PR's branch from the branches that it is updated from (see
     Model.update_deps).  A fix's branch is updated from its base PR's branch, but the base
     PR's branch is not updated from the fix's branch.
+    If has_upstream is true, a chain starts with upstream exactly when its first PR's
+    branch is not updated from the branch of another PR in prs.  Upstream reaches every
+    other PR's branch through that PR's prerequisites.  Pushing upstream into such a
+    branch directly as well would let the branch receive a newer upstream commit than its
+    prerequisite has, if upstream changes between the chains, and then merging the
+    prerequisite into the branch would be a criss-cross merge, which has 2 merge bases.
     A chain may contain a single PR, which has no direct prerequisite or dependent among prs
     in the update graph; such a chain exists only if has_upstream is true, because then
     upstream is pushed into it.
     Before a chain pushes into a PR's branch, the chains that precede it have updated that
-    PR's prerequisites.
+    PR's prerequisites.  Before a chain that does not start with upstream pushes from its
+    first PR's branch, the chains that precede it have updated that branch.
 
     Args:
         model: a Model.
         prs: the numbers of the PRs whose branches the chains push, such as {12, 34}.  No
             PR in it is in a cycle of the update graph or has a branch that is updated from
             the branch of a PR in one (see Model.update_cycle_affected).
-        has_upstream: True if each chain starts with upstream.
+        has_upstream: True if upstream is pushed into the PRs' branches.
 
     Returns:
-        The chains, each a list of PR numbers, each of whose branches `git-push-to` pushes
-        into the next one's.
+        The chains.
     """
     edges = {(d, n) for n in prs for d in model.update_direct[n] if d in prs}
     in_edge = {n for e in edges for n in e}
+    updated = {n for _, n in edges}
     level = model.update_levels
-    chains = []
+    chains: list[list[int]] = []
     for d, n in sorted(edges, key=lambda e: (level[e[0]], e)):
         if (d, n) not in edges:
             continue
@@ -3092,16 +3126,50 @@ def update_chains(model: Model, prs: set[int], has_upstream: bool) -> list[list[
     # A stable sort, which retains the order of the chains that start at the same level.
     # A PR that is not in the dependency graph has no level; it would be at level 1.
     chains.sort(key=lambda chain: level.get(chain[0], 1))
-    return chains
+    return [UpdateChain(chain, has_upstream and chain[0] not in updated) for chain in chains]
+
+
+def conflicting_chains(
+    repo: Repo, chains: list[UpdateChain], has_upstream: bool
+) -> list[UpdateChain]:
+    """Return the given chains that have conflicts, and the chains that those depend on.
+
+    A chain has conflicts if chain_conflict_prs returns a PR for it.  A chain that does not
+    start with upstream depends on each chain that pushes into its first PR's branch,
+    because without those chains its first PR's branch would lack upstream's changes and
+    those of the PR's prerequisites.
+
+    Args:
+        repo: a Repo.
+        chains: chains, as update_chains returns them.
+        has_upstream: True if upstream is pushed into the PRs' branches.
+
+    Returns:
+        The chains of chains that have conflicts or that a returned chain depends on, in the
+        order of chains.
+    """
+    retained = []
+    # The PRs whose branches a retained chain pushes from without updating them.
+    sources: set[int] = set()
+    # A chain that a chain depends on precedes it, so visit the chains in reverse order.
+    for chain in reversed(chains):
+        if chain_conflict_prs(repo, chain, has_upstream) or sources.intersection(chain.targets()):
+            retained.append(chain)
+            if not chain.from_upstream:
+                sources.add(chain.prs[0])
+    retained.reverse()
+    return retained
 
 
 def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushChains:
     """Compute the `git-push-to` chains that update every PR's branch.
 
     The chains are those of update_chains, for the PRs that have a working copy.
-    Each chain starts with a working copy of the upstream default branch, if there is one.
+    A chain that update_chains starts with upstream starts with a working copy of the
+    upstream default branch, if there is one.
     If conflicts_only is true, retain a whole chain only if merging it would encounter a
-    conflict between 2 of its PRs, or between upstream and one of its PRs.
+    conflict between 2 of its PRs, or between upstream and one of its PRs, or if a retained
+    chain depends on it (see conflicting_chains).
     No chain contains a PR that is in a cycle of the update graph or whose branch is updated
     from the branch of a PR in one (see Model.update_cycle_affected).
 
@@ -3125,10 +3193,12 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     missing = sorted(n for n in model.open if not dirs[n])
     acyclic = model.open - model.update_cycle_affected
     pushable = {n for n in acyclic if dirs[n]}
+    updates = update_chains(model, pushable, bool(upstream))
+    if conflicts_only:
+        updates = conflicting_chains(r, updates, bool(upstream))
     chains = [
-        upstream + [dirs[n][0] for n in chain]
-        for chain in update_chains(model, pushable, bool(upstream))
-        if not conflicts_only or chain_conflict_prs(r, chain, bool(upstream))
+        (upstream if chain.from_upstream else []) + [dirs[n][0] for n in chain.prs]
+        for chain in updates
     ]
     # The PRs whose branches can have a working copy.
     possible = pushable | {n for n in acyclic if r.prs[n]["owner"]}
@@ -3357,7 +3427,8 @@ def gen_push_commands(commands: PushCommands, base: str, conflicts_only: bool = 
         lines += [
             (
                 "This subset repeats a whole dependency chain if at least one merge in the chain"
-                " would result in a textual conflict."
+                " would result in a textual conflict.  It also repeats each chain that updates"
+                " the branch that a repeated chain starts with."
             ),
             "",
             (
@@ -3397,8 +3468,15 @@ def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[s
     lines = [
         "Each command updates one dependency chain.",
         (
-            f"It starts with {upstream}, then pushes each PR's branch into the branches of the PRs"
-            " that directly depend on it, prerequisites first."
+            "It pushes each PR's branch into the branches of the PRs that directly depend on it,"
+            " prerequisites first."
+        ),
+        (
+            "A chain whose first PR has a prerequisite among the PRs that these commands update"
+            " starts with that PR, whose branch an earlier command updates.  Every other chain"
+            f" starts with {upstream}, if it has a working copy.  So the branch of a PR that has"
+            f" a prerequisite among those PRs receives {upstream} only through its prerequisites;"
+            " receiving it directly as well would make later merges criss-cross merges."
         ),
         f"A chain may consist of {upstream} and a single PR that has no prerequisite or dependent.",
         "`git-push-to` merges, compiles, and pushes; see its documentation.",
