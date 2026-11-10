@@ -23,6 +23,9 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 trap 'rm -rf "${WORK_DIR}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
+# The physical path, because git-push-to's diagnostics name physical paths,
+# and on macOS the temporary directory is reached through a symbolic link.
+WORK_DIR="$(CDPATH='' cd -- "${WORK_DIR}" && pwd -P)" || exit 1
 
 # shellcheck source=lib-git-test-env.sh
 . "${TESTS_DIR}/lib-git-test-env.sh"
