@@ -209,11 +209,12 @@
 # agent fails, this script stops with the merge still in progress.
 #
 # An agent that fails, other than by running out of time, without changing
-# the index or any file that git does not ignore, as when its service is
-# briefly unavailable, did nothing that anyone must review.  This script runs
-# it again, up to 2 more times, each after a pause of
-# $MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE seconds, 60 by default.  That applies
-# to resolving conflicts and to fixing a build.
+# HEAD, the index, or any file, did nothing that anyone must review.  If the
+# agent is then not ready to run, as when its service is unavailable, this
+# script runs it again, up to 2 more times, each after a pause of
+# $MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE seconds, 60 by default.  An agent that
+# is ready to run although it failed so is not run again, because it would
+# fail again.  That applies to resolving conflicts and to fixing a build.
 #
 # The agent's instructions consist of the file merge-conflict-instructions.md,
 # which also suits a merge that you resolve yourself or with an agent
@@ -286,9 +287,11 @@
 # it; delete the entry once you have dealt with it.  When the agent could not
 # resolve the conflicts, the entry also tells an AI agent that reads it to
 # ask a person for help with them.  But when the agent was not ready to run,
-# or failed without changing any file, the entry instead says that running
-# this script again, once the agent can run, asks the agent to do its task
-# again.  The resumed
+# or failed without changing anything and then was not ready to run, the
+# entry instead says that running this script again, once the agent can run,
+# asks the agent to do its task again; for a merge in progress in the first
+# directory, whose pull such a merge makes this script refuse, the entry says
+# to abort the merge first.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
 # contains the text of the merged changes, which can include instructions
 # from other people.
@@ -707,6 +710,8 @@ git_push_to() {
   to="$2"
   push_step='checking the directories'
   from_pulled=0
+  # A rerun refuses to pull FROM_DIR while a merge is in progress there.
+  rerun_finishes_merge=0
 
   # A failure here is not yet an error, and it leaves the variable empty:  a
   # nonexistent directory fails here, and the tests just below diagnose that
@@ -798,6 +803,9 @@ git_push_to() {
   # the first directory makes `refuse_merge_in_progress` above, which
   # `pull_resolving` calls, fail.
   # Note: pwd=to_absolute
+  # From here on, a merge that this function leaves in progress is in
+  # TO_DIR, where a rerun finishes it.
+  rerun_finishes_merge=1
   push_step="finishing the merge in progress in ${to}"
   if ! finish_merge_in_progress "${to_absolute}"; then
     return 1

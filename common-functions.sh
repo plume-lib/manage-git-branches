@@ -1327,6 +1327,9 @@ ends_with_newline() {
 ## the command that continues the agent's session if one ran (see
 ## `report_merge_in_progress` and `report_agent_session`).  Before any agent
 ## runs, it records the conflicted files (see `record_conflicted_files`).
+## If the agent is not ready to run, or fails without changing anything and
+## then is not ready to run (see `run_agent`), the note says how to have it try again instead of asking
+## for a person's help (see `resolve_rerun_advice`).
 ## The merge must have been made with
 ## `rerere.autoUpdate` false, so that the index lists every conflicted file as
 ## unmerged, including each one that rerere resolved.
@@ -1492,7 +1495,7 @@ resolve_merge_conflicts() {
   elif ! agent_available "${resolve_with}"; then
     report_unresolved "${resolve_unresolved}"
     if [ -n "${agent_unavailable_reason}" ]; then
-      resolve_stopped "${agent_unavailable_reason}  $(agent_rerun_advice "${resolve_with}" 'resolve the conflicts')"
+      resolve_stopped "${agent_unavailable_reason}  $(resolve_rerun_advice)"
     else
       resolve_stopped
     fi
@@ -1505,17 +1508,17 @@ resolve_merge_conflicts() {
     # which should not try alone what this agent could not do.
     resolve_agent_reason="${resolve_with}, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge."
     resolve_note="$(merge_in_progress_note "${resolve_agent_reason}")"
-    # For an agent that failed without changing any file, as when it could
-    # not reach its service:  it tried nothing that a person must take over.
-    resolve_unchanged_reason="${resolve_with}, an AI agent, failed before changing any file.  $(agent_rerun_advice "${resolve_with}" 'resolve the conflicts')"
+    # For an agent that failed without changing anything and is not ready
+    # to run, as when it cannot reach its service, which `run_agent` reports
+    # as status 3:  it tried nothing that a person must take over.
+    resolve_unchanged_reason="${resolve_with}, an AI agent, failed before changing anything, and it is not ready to run, as when it cannot reach its service.  $(resolve_rerun_advice)"
     resolve_unchanged_note="$(merge_in_progress_note "${resolve_unchanged_reason}")"
     resolve_agent_status=0
     # 1 once `resolve_with_agent` has started the agent.  If it failed
     # before then, a rerun can succeed, so the note asks for no help.
     resolve_agent_ran=0
-    agent_failed_unchanged=0
     if ! resolve_with_agent; then
-      if [ "${resolve_agent_status}" -eq 1 ] && [ "${agent_failed_unchanged}" -eq 1 ]; then
+      if [ "${resolve_agent_status}" -eq 3 ]; then
         resolve_agent_reason="${resolve_unchanged_reason}"
         resolve_note="${resolve_unchanged_note}"
       fi
@@ -1544,6 +1547,24 @@ resolve_merge_conflicts() {
     return 1
   fi
   return 0
+}
+
+## Usage: resolve_rerun_advice
+## For `resolve_merge_conflicts`:  prints a sentence for an entry of
+## AGENT-TODO.md that says how to have the AI agent ${resolve_with} resolve
+## the conflicts of the merge in progress once it can run (see
+## `agent_rerun_advice`).  If ${rerun_finishes_merge} is 1, running this
+## script again finishes the merge in progress in the current directory;
+## otherwise, running it again refuses to start while the merge is in
+## progress, so the sentence says to abort the merge first.
+resolve_rerun_advice() {
+  if [ "${rerun_finishes_merge}" -eq 1 ]; then
+    agent_rerun_advice "${resolve_with}" 'resolve the conflicts'
+  else
+    # The backquotes are Markdown, not a command substitution.
+    # shellcheck disable=SC2016
+    agent_rerun_advice "${resolve_with}" 'resolve the conflicts' 'abort the merge with `git merge --abort`'
+  fi
 }
 
 ## Usage: resolve_stopped [REASON]
@@ -2549,12 +2570,18 @@ agent_available() {
   return 0
 }
 
-## Usage: agent_rerun_advice AGENT TASK
+## Usage: agent_rerun_advice AGENT TASK [STEP]
 ## Prints a sentence for an entry of AGENT-TODO.md that says that running
 ## this script again, once the AI agent AGENT can run, asks it to do TASK,
-## such as "resolve the conflicts", so that no person needs to.
+## such as "resolve the conflicts", so that no person needs to.  If STEP is
+## given, such as "abort the merge with `git merge --abort`", the sentence
+## says to do STEP before running this script again.
 agent_rerun_advice() {
-  printf 'Once %s can run, running %s again asks it to %s, so no person needs to.\n' "$1" "${SCRIPT_NAME}" "$2"
+  if [ -n "${3:-}" ]; then
+    printf 'Once %s can run, %s; then running %s again asks %s to %s, so no person needs to.\n' "$1" "$3" "${SCRIPT_NAME}" "$1" "$2"
+  else
+    printf 'Once %s can run, running %s again asks it to %s, so no person needs to.\n' "$1" "${SCRIPT_NAME}" "$2"
+  fi
 }
 
 ## Usage: agent_ready AGENT
@@ -2595,43 +2622,44 @@ agent_ready() {
 }
 
 ## The number of times that `run_agent` runs an agent again after it fails
-## without changing any file.
+## without changing anything while it is not ready to run.
 agent_retries=2
 
-## Usage: work_state_digest
-## Prints a checksum of the index, of each tracked file's difference from
-## HEAD, and of the name and contents of each untracked file that git does
-## not ignore, in the working tree that contains the current directory.  If
-## two runs print the same checksum, then none of those changed in between,
-## barring a checksum collision.  An ignored file, which might be build
-## output, is left out, because there can be many of them.
-work_state_digest() {
+## Usage: head_and_index_digest
+## Prints a checksum of HEAD and of the index of the current directory's
+## working tree, such as "1234567890 512".  If two runs print the same
+## checksum, then neither changed in between, barring a checksum collision.
+head_and_index_digest() {
   {
-    git --no-optional-locks ls-files --stage -z
-    git --no-optional-locks diff --no-ext-diff --no-textconv --binary HEAD
-    # With no untracked file, `cksum` reads its empty standard input.
-    git --no-optional-locks ls-files -z --others --exclude-standard | xargs -0 cksum --
-  } 2>&1 | cksum
+    git rev-parse --verify --quiet HEAD
+    git ls-files --stage -z
+  } | cksum
 }
 
 ## Usage: run_agent AGENT PROMPT
-## Runs the AI agent AGENT, "claude" or "codex", in the current directory, with
+## Runs the AI agent AGENT, "claude" or "codex", in the current directory, the
+## top level of a working tree, with
 ## the instructions PROMPT.  The agent can read and edit the files of the
 ## working tree and read the repository, but nothing else; PROMPT can contain
 ## text from other people, such as conflicting changes, which might try to
 ## make the agent do more.  Returns 2, after printing a diagnostic, if the
 ## agent changed git's configuration, attributes, or hooks, after which no git
-## command should run in the current directory.  Otherwise returns 1, after
-## printing a diagnostic, if the agent fails.
+## command should run in the current directory.  Returns 3, after printing a
+## diagnostic, if the agent failed without changing anything and is not ready
+## to run (see below).  Otherwise returns 1, after printing a diagnostic, if
+## the agent fails.
 ##
 ## An agent that fails, other than by running out of time, without changing
-## the index or any file that git does not ignore (see `work_state_digest`)
-## did no work that anyone must review, as when it could not reach its
-## service.  It is run again, up to ${agent_retries} more times, each after
-## a pause of ${MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE} seconds, 60 by default.
-## Sets ${agent_failed_unchanged} to 1 if the agent's last attempt failed so,
-## and to 0 otherwise.  Then running the agent again later, as by running
-## the script again, can succeed, and no person need finish its task.
+## HEAD, the index, or any file of the working tree, even one that git
+## ignores, did no work that anyone must review.  If it is then not ready to
+## run (see `agent_ready`), as when its service is unavailable, it is run
+## again, up to ${agent_retries} more times, each after a pause of
+## ${MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE} seconds, 60 by default.  If its last
+## attempt fails so, this function returns 3:  running the agent again once
+## it is ready, as by running the script again, can succeed, and no person
+## need finish its task.  An agent that fails so but is ready to run, as when
+## it rejects an option that this function passes, is not run again, because
+## it would fail again.
 ##
 ## Appends to ${agent_session_ids}, a blank-separated list, the UUID that
 ## names the agent's session, such as "1e55b89c-cfb5-468f-a783-cb104201809b";
@@ -2657,7 +2685,6 @@ work_state_digest() {
 ## secret from such a file into any file that git tracks, where no check
 ## finds it, and the script then commits and pushes that file.
 run_agent() {
-  agent_failed_unchanged=0
   # Each agent's sandbox keeps it from changing git's configuration or hooks,
   # which name commands that git runs.  Check that anyway.
   if ! run_agent_git_state="$(git_control_state)"; then
@@ -2704,9 +2731,23 @@ run_agent() {
   # repository, the system's programs and libraries (":minimal"), and Codex's
   # own installation, which its sandbox runs.
   run_agent_earlier_ids="${agent_session_ids:-}"
+  # A failed attempt changed nothing if it changed neither HEAD nor the
+  # index, compared by their contents, nor the working tree, compared by its
+  # pathnames and by each file's ctime, as `resolve_with_agent` explains.
+  # The marker, whose modification time each file's ctime is compared
+  # with, is in the git directory, which neither agent can write.  If the
+  # marker cannot be written, a failed attempt is not run again.
+  run_agent_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-attempt)" \
+    || run_agent_marker=''
   while :; do
     agent_session_ids="${run_agent_earlier_ids}"
-    run_agent_work="$(work_state_digest)"
+    run_agent_watched=0
+    if [ -n "${run_agent_marker}" ] && : > "${run_agent_marker}" \
+      && wait_for_later_time "${run_agent_marker}" "$(pwd)"; then
+      run_agent_watched=1
+      run_agent_paths="$(working_tree_paths)"
+      run_agent_index="$(head_and_index_digest)"
+    fi
     run_agent_start="$(date +%s)"
     case "$1" in
       claude)
@@ -2731,6 +2772,7 @@ run_agent() {
         if ! run_agent_repository="$(git rev-parse --path-format=absolute --git-common-dir)" \
           || ! run_agent_codex="$(codex_installation)"; then
           echo "${SCRIPT_NAME}: cannot find the files that codex needs to read" >&2
+          rm -f -- "${run_agent_marker}"
           return 1
         fi
         # Codex's sandbox protects some names in the working tree, even absent
@@ -2750,6 +2792,7 @@ run_agent() {
         # cannot write.
         if ! run_agent_git_dir="$(git rev-parse --absolute-git-dir)"; then
           echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
+          rm -f -- "${run_agent_marker}"
           return 1
         fi
         run_agent_log="${run_agent_git_dir}/manage-git-branches-agent-stderr"
@@ -2782,6 +2825,7 @@ run_agent() {
         ;;
       *)
         echo "${SCRIPT_NAME}: unknown AI agent: $1" >&2
+        rm -f -- "${run_agent_marker}"
         return 1
         ;;
     esac
@@ -2789,9 +2833,18 @@ run_agent() {
       agent_session_ids="${agent_session_ids:-}${agent_session_ids:+ }${run_agent_session}"
     fi
     if [ "$(git_control_state)" != "${run_agent_git_state}" ]; then
+      rm -f -- "${run_agent_marker}"
       echo "${SCRIPT_NAME}: $1 changed git's configuration, attributes, or hooks in $(pwd); check them before running git there" >&2
       return 2
     fi
+    # The agent left git's configuration unchanged, so git commands are safe.
+    run_agent_unchanged=0
+    if [ "${run_agent_status}" -ne 0 ] && [ "${run_agent_watched}" -eq 1 ] \
+      && [ "$(head_and_index_digest)" = "${run_agent_index}" ] \
+      && [ -z "$(: | working_tree_changes "${run_agent_paths}" "${run_agent_marker}")" ]; then
+      run_agent_unchanged=1
+    fi
+    rm -f -- "${run_agent_marker}"
     if [ "${run_agent_status}" -eq 0 ]; then
       return 0
     fi
@@ -2801,17 +2854,19 @@ run_agent() {
       return 1
     fi
     echo "${SCRIPT_NAME}: $1 failed with status ${run_agent_status}" >&2
-    # The agent left git's configuration unchanged, so git commands are safe.
-    if [ "$(work_state_digest)" != "${run_agent_work}" ]; then
+    if [ "${run_agent_unchanged}" -eq 0 ]; then
+      return 1
+    fi
+    if agent_ready "$1"; then
+      echo "${SCRIPT_NAME}: $1 failed before changing anything in $(pwd), although it is ready to run" >&2
       return 1
     fi
     if [ "${run_agent_retries_left}" -eq 0 ]; then
-      echo "${SCRIPT_NAME}: $1 failed before changing any file in $(pwd)" >&2
-      agent_failed_unchanged=1
-      return 1
+      echo "${SCRIPT_NAME}: $1 failed before changing anything in $(pwd)" >&2
+      return 3
     fi
     run_agent_retries_left=$((run_agent_retries_left - 1))
-    echo "${SCRIPT_NAME}: $1 changed no file; running it again in ${run_agent_pause} seconds" >&2
+    echo "${SCRIPT_NAME}: $1 changed nothing; running it again in ${run_agent_pause} seconds" >&2
     sleep "${run_agent_pause}"
   done
 }
@@ -3299,16 +3354,15 @@ build_logged() {
 ## "Fix the build after merging branch 'main'", and prints a notice that
 ## names the commit, for review (see `review_notice`).  Returns 1, after
 ## printing a diagnostic, if the build still fails; the agent's changes then
-## remain, staged but not committed, and ${fix_attempt} is the number of the
-## last attempt, such as 1, and ${agent_failed_unchanged} is 1 if that
-## attempt's agent failed without changing any file (see `run_agent`).
+## remain, staged but not committed.  Returns 3 instead if the agent failed
+## in the first attempt without changing anything and is not ready to run
+## (see `run_agent`), so that nothing remains to review.
 build_fix_attempts=3
 fix_failed_build() {
   fix_with="$1"
   fix_log="$2"
   # No session is reported if this function fails before the agent runs.
   agent_session_ids=''
-  agent_failed_unchanged=0
   # The agent's changes are committed below, and so would be any change that
   # the build made to tracked files.
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
@@ -3348,7 +3402,13 @@ The end of the build output:
 
 $(tail -n 100 "${fix_log}")"
     echo "${SCRIPT_NAME}: asking ${fix_with} to fix the build in $(pwd) (attempt ${fix_attempt} of ${build_fix_attempts})" >&2
-    if ! run_agent "${fix_with}" "${fix_prompt}"; then
+    run_agent "${fix_with}" "${fix_prompt}"
+    fix_agent_status=$?
+    if [ "${fix_agent_status}" -ne 0 ]; then
+      # After a later attempt, the earlier attempts' changes remain staged.
+      if [ "${fix_agent_status}" -eq 3 ] && [ "${fix_attempt}" -eq 1 ]; then
+        return 3
+      fi
       return 1
     fi
     if [ "$(git rev-parse --verify HEAD)" != "${fix_head}" ]; then
@@ -3409,6 +3469,11 @@ $(tail -n 100 "${fix_log}")"
   review_notice "${fix_with} fixed the build in commit $(git rev-parse --short HEAD); review it"
   return 0
 }
+
+## 1 if running the command again finishes a merge that it leaves in progress
+## in the current directory, as `git-push-to` does for its TO_DIR, and 0 if
+## running it again refuses to start while the merge is in progress.
+rerun_finishes_merge=0
 
 ## The AI agent that the commands ask to resolve merge conflicts and to fix a
 ## failed build:  "claude", "codex", or empty for none.  `parse_llm_option`
@@ -4822,15 +4887,16 @@ merge_build_push() {
       echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
       # Without the agent, stop as with "--no-llm".  Whether a merge might
       # have broken the build is decided only now, because deciding can
-      # fetch.
-      if [ -z "${5:-}" ] || ! agent_available "$5"; then
+      # fetch.  Whether the agent is ready to run is checked only once the
+      # agent is needed, because checking can cost a request to its service.
+      if [ -z "${5:-}" ]; then
         return 1
       fi
       merge_built="${6:-}"
       if [ -n "${7:-}" ]; then
         merge_built="${merge_built}${merge_built:+ }$(built_commits "$7")"
       fi
-      if ! has_unbuilt_merge "${merge_built}"; then
+      if ! has_unbuilt_merge "${merge_built}" || ! agent_available "$5"; then
         return 1
       fi
       # What this call's merge did, for the agent.
@@ -4848,12 +4914,12 @@ merge_build_push() {
       if [ -n "${merged_landed_prs}" ]; then
         merge_did="Before merging commit $1, the script merged into branch ${merge_fix_branch} the final version of each of the pull requests ${merged_landed_prs}, each followed by the commit that landed it; either kind of merge might have broken the build.  ${merge_did}"
       fi
-      if ! fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
-        # After a first attempt that changed nothing, a rerun starts afresh;
-        # after a later one, the earlier attempts' changes remain staged.
+      fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"
+      merge_fix_status=$?
+      if [ "${merge_fix_status}" -ne 0 ]; then
         merge_fix_note=''
-        if [ "${agent_failed_unchanged:-0}" -eq 1 ] && [ "${fix_attempt:-0}" -eq 1 ]; then
-          merge_fix_note="$5, an AI agent, failed before changing any file.  $(agent_rerun_advice "$5" 'fix the build')"
+        if [ "${merge_fix_status}" -eq 3 ]; then
+          merge_fix_note="$5, an AI agent, failed before changing anything, and it is not ready to run, as when it cannot reach its service.  $(agent_rerun_advice "$5" 'fix the build')"
         fi
         report_agent_session "${merge_fix_message}" "${merge_fix_note}"
         return 1
