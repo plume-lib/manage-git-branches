@@ -92,3 +92,17 @@ sanitize_git_env() {
 
   unset sanitize_git_env_dir
 }
+
+# Usage: install_git_hook DIRECTORY HOOK LINE...
+#
+# Installs, in the repository of the working tree DIRECTORY, the hook HOOK,
+# such as "pre-commit", as a shell script that consists of the LINEs.
+install_git_hook() {
+  install_git_hook_dir="$(git -C "$1" rev-parse --path-format=absolute --git-path hooks)" || return 1
+  install_git_hook_file="${install_git_hook_dir}/$2"
+  shift 2
+  mkdir -p "${install_git_hook_dir}" \
+    && printf '%s\n' '#!/bin/sh' "$@" > "${install_git_hook_file}" \
+    && chmod +x "${install_git_hook_file}" || return 1
+  unset install_git_hook_dir install_git_hook_file
+}

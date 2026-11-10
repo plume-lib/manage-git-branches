@@ -180,13 +180,20 @@
 #    or when you have begun to resolve the conflicts.
 # A merge in progress in the first directory makes this script stop.
 #
-# A pre-commit hook, such as one that runs a formatter, can reject a commit
-# that this script makes, of a merge or of a fix to the build, after changing
-# files that the commit changes.  Then this script stages the hook's changes
-# and commits once more, provided that the hook only modified files that the
-# commit changes and that the working tree had no unstaged changes before the
-# commit.  Otherwise, or if the second commit fails too, this script stops,
-# with the merge still in progress or the fix staged.
+# A hook, such as one that runs a formatter, can reject a commit that this
+# script makes, of a merge or of a fix to the build, after changing files
+# that the commit changes.  The hook is the pre-commit hook, or the
+# pre-merge-commit hook for a merge without conflicts.  Then this script
+# stages the hook's changes and commits once more, with `git commit`,
+# provided that
+#  * the working tree had no unstaged changes before the commit or the merge;
+#  * the hook staged nothing, and created or deleted no untracked file; and
+#  * the hook only modified files that the commit changes.
+# Before committing once more, this script builds a fix to the build again,
+# and it runs a pre-merge-commit hook again; `git commit` runs the pre-commit
+# hook.  If a condition does not hold, or if the build, the hook, or the
+# second commit fails, this script stops, with the merge still in progress or
+# the fix staged.
 
 # Asking an AI agent
 #
@@ -643,8 +650,9 @@ finish_merge_in_progress() {
   fi
   # `resolve_merge_conflicts` would say only that it cannot list the
   # conflicted files.  A merge in progress without conflicts is one whose
-  # conflicts someone resolved and staged, or one whose message `git pull`
-  # could not compose; either way, a person should look at it.
+  # conflicts someone resolved and staged, one whose commit a hook rejected,
+  # or one whose message `git pull` could not compose; in each case, a person
+  # should look at it.
   if [ -z "$(git ls-files --unmerged)" ]; then
     echo "${finish_in_progress}, and has no conflicted file; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
     report_merge_in_progress "No conflicted file remains."
