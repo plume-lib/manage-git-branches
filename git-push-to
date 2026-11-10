@@ -141,8 +141,10 @@
 # branch would have conflicts, this script first merges into TO_DIR the pull
 # request's final version, from the upstream repository's ref
 # `refs/pull/N/head`, and then the squash commit, if neither merge has
-# conflicts and they leave fewer conflicts for the merge of FROM_DIR's branch;
-# `merge_landed_pr_heads` in common-functions.sh says how.
+# conflicts, if they change the merge of FROM_DIR's branch only in files that
+# the pull request changes or that conflict either way, and if they leave
+# that merge fewer conflicts; `merge_landed_pr_heads` in common-functions.sh
+# says how.
 #
 # When the merge of FROM_DIR's branch into TO_DIR has conflicts that
 # `git rerere` or an AI agent (see below) resolves, this script checks the
