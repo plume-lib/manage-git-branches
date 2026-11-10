@@ -690,67 +690,72 @@ done
 
 ## A squash-merge into main of a pull request whose branch feature merged
 ## makes main's change to file.txt that of a commit that feature contains,
-## so a resolution that is feature's version needs no review, even though
-## feature changed the pull request's line further.  The pull request's
-## branch, pr, starts at main and changes line 3; feature merges it and then
-## changes line 3 again; main lands a squashed copy of pr.
-setup_case squash
-git -C "${feature_dir}" fetch -q origin
-git -C "${feature_dir}" branch -q pr origin/main
-git -C "${feature_dir}" checkout -q pr
-write_file "${feature_dir}/file.txt" ONE two THREE-pr four five six SEVEN-main eight nine
-git -C "${feature_dir}" commit -q -a -m "Change line 3"
-squash_pr="$(git -C "${feature_dir}" rev-parse --short HEAD)"
-git -C "${feature_dir}" checkout -q feature
-git -C "${feature_dir}" merge -q pr > /dev/null 2>&1 || :
-write_file "${feature_dir}/file.txt" ONE two THREE-pr four five six SEVEN-feature eight nine
-git -C "${feature_dir}" add file.txt
-git -C "${feature_dir}" commit -q --no-edit
-write_file "${feature_dir}/file.txt" ONE two THREE-feature four five six SEVEN-feature eight nine
-git -C "${feature_dir}" commit -q -a -m "Change line 3 further"
-git -C "${feature_dir}" push -q
-feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
-write_file "${main_dir}/file.txt" ONE two THREE-pr four five six SEVEN-main eight nine
-git -C "${main_dir}" commit -q -a -m "Change line 3 (#1)"
-git -C "${main_dir}" push -q
-squash_commit="$(git -C "${main_dir}" rev-parse --short HEAD)"
-push_to ours --llm
-check_side_resolved squash "$(printf '%s\n' ONE two THREE-feature four five six SEVEN-feature eight nine)"
-case "${push_output}" in
-  *"claude resolved file.txt as the version on feature, which keeps none of the changes of main"*" to the file, but main"*" changed it only in commit ${squash_commit}, whose change is that of commit ${squash_pr} on feature"*) ;;
-  *) fail "squash: the output does not name the squash-merge and the pull request's commit: ${push_output}" ;;
-esac
-case "${push_output}" in
-  *"review it"*) fail "squash: the user is asked to review: ${push_output}" ;;
-esac
-
-## A resolution that is feature's version drops main's change when feature
-## has no commit whose change main's commit made:  here pr changes line 3
-## differently from main's squashed copy of it.
-setup_case squash-differs
-git -C "${feature_dir}" fetch -q origin
-git -C "${feature_dir}" branch -q pr origin/main
-git -C "${feature_dir}" checkout -q pr
-write_file "${feature_dir}/file.txt" ONE two THREE-pr four five six SEVEN-main eight nine
-git -C "${feature_dir}" commit -q -a -m "Change line 3"
-git -C "${feature_dir}" checkout -q feature
-git -C "${feature_dir}" merge -q pr > /dev/null 2>&1 || :
-write_file "${feature_dir}/file.txt" ONE two THREE-pr four five six SEVEN-feature eight nine
-git -C "${feature_dir}" add file.txt
-git -C "${feature_dir}" commit -q --no-edit
-write_file "${feature_dir}/file.txt" ONE two THREE-feature four five six SEVEN-feature eight nine
-git -C "${feature_dir}" commit -q -a -m "Change line 3 further"
-git -C "${feature_dir}" push -q
-feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
-write_file "${main_dir}/file.txt" ONE two THREE-main four five six SEVEN-main eight nine
-git -C "${main_dir}" commit -q -a -m "Change line 3 differently"
-git -C "${main_dir}" push -q
-push_to ours --llm
-check_side_resolved squash-differs "$(printf '%s\n' ONE two THREE-feature four five six SEVEN-feature eight nine)"
-case "${push_output}" in
-  *"claude resolved file.txt as the version on feature, which keeps none of the changes of main"*" to the file; review it"*) ;;
-  *) fail "squash-differs: the user is not asked to review: ${push_output}" ;;
-esac
+## so a resolution that is exactly feature's version needs no review, even
+## though feature changed the pull request's line further.  The pull
+## request's branch, pr, starts at main and changes line 3; feature merges it
+## and then changes line 3 again; main lands a squashed copy of pr.  In
+## squash-whitespace, the resolution differs from feature's version in
+## whitespace, and the agent's changes to the whitespace need review.  In
+## squash-differs, main changes line 3 differently from pr, so that feature
+## has no commit whose change main's commit made, and the resolution, which
+## drops main's change, needs review.
+for squash_name in squash squash-whitespace squash-differs; do
+  case "${squash_name}" in
+    squash-differs) squash_main_line=THREE-main ;;
+    *) squash_main_line=THREE-pr ;;
+  esac
+  case "${squash_name}" in
+    squash-whitespace) squash_mode=ours-whitespace ;;
+    *) squash_mode=ours ;;
+  esac
+  setup_case "${squash_name}"
+  git -C "${feature_dir}" fetch -q origin
+  git -C "${feature_dir}" branch -q pr origin/main
+  git -C "${feature_dir}" checkout -q pr
+  write_file "${feature_dir}/file.txt" ONE two THREE-pr four five six SEVEN-main eight nine
+  git -C "${feature_dir}" commit -q -a -m "Change line 3"
+  squash_pr="$(git -C "${feature_dir}" rev-parse --short HEAD)"
+  git -C "${feature_dir}" checkout -q feature
+  git -C "${feature_dir}" merge -q pr > /dev/null 2>&1 || :
+  write_file "${feature_dir}/file.txt" ONE two THREE-pr four five six SEVEN-feature eight nine
+  git -C "${feature_dir}" add file.txt
+  git -C "${feature_dir}" commit -q --no-edit
+  write_file "${feature_dir}/file.txt" ONE two THREE-feature four five six SEVEN-feature eight nine
+  git -C "${feature_dir}" commit -q -a -m "Change line 3 further"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  write_file "${main_dir}/file.txt" ONE two "${squash_main_line}" four five six SEVEN-main eight nine
+  git -C "${main_dir}" commit -q -a -m "Change line 3 (#1)"
+  git -C "${main_dir}" push -q
+  squash_commit="$(git -C "${main_dir}" rev-parse --short HEAD)"
+  push_to "${squash_mode}" --llm
+  case "${squash_name}" in
+    squash)
+      check_side_resolved "${squash_name}" "$(printf '%s\n' ONE two THREE-feature four five six SEVEN-feature eight nine)"
+      case "${push_output}" in
+        *"claude resolved file.txt as the version on feature, which keeps none of the changes of main"*" to the file, but main"*" changed it only in commit ${squash_commit}, whose change is that of commit ${squash_pr} on feature"*) ;;
+        *) fail "${squash_name}: the output does not name the squash-merge and the pull request's commit: ${push_output}" ;;
+      esac
+      case "${push_output}" in
+        *"review it"*) fail "${squash_name}: the user is asked to review: ${push_output}" ;;
+      esac
+      ;;
+    squash-whitespace)
+      check_side_resolved "${squash_name}" "$(printf '%s\n' ONE '  two' THREE-feature four '' five six SEVEN-feature eight nine)"
+      case "${push_output}" in
+        *"claude resolved file.txt as the version on feature, apart from whitespace and blank lines, which keeps none of the changes of main"*" to the file; review it"*) ;;
+        *) fail "${squash_name}: the user is not asked to review: ${push_output}" ;;
+      esac
+      ;;
+    *)
+      check_side_resolved "${squash_name}" "$(printf '%s\n' ONE two THREE-feature four five six SEVEN-feature eight nine)"
+      case "${push_output}" in
+        *"claude resolved file.txt as the version on feature, which keeps none of the changes of main"*" to the file; review it"*) ;;
+        *) fail "${squash_name}: the user is not asked to review: ${push_output}" ;;
+      esac
+      ;;
+  esac
+done
 
 ## The changes that a rejected agent made outside the conflicted files are
 ## reported.
