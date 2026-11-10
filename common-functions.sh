@@ -4231,6 +4231,351 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
   return 0
 }
 
+## Usage: merge_conflicts COMMIT1 COMMIT2
+## Computes git's merge of COMMIT1 and COMMIT2, two revisions such as "HEAD"
+## and "upstream/main", without touching the working tree or the index, and
+## sets three variables that describe the merge:
+##
+##  * ${merge_conflicts_tree} is the hash of the merge's tree, in which each
+##    conflicted text file contains conflict markers.
+##  * ${merge_conflicts_files} is the list of the conflicted files, one per
+##    line, such as "data.bin" and "src/main.c", or is empty for a clean
+##    merge.  Each file is named relative to the top level of the working
+##    tree, and quoted as `git diff --name-only` quotes it.
+##  * ${merge_conflicts_regions} is the number of conflict regions, such as 0
+##    for a clean merge:  for each conflicted file, the number of lines that
+##    begin with the conflict marker "<<<<<<<", or 1 if there are none, as in
+##    a binary file.
+##
+## Returns 1, setting each variable to the empty string, if git cannot
+## compute the merge, as when the commits have no merge base.
+merge_conflicts() {
+  merge_conflicts_tree=''
+  merge_conflicts_files=''
+  merge_conflicts_regions=''
+  # `--no-messages` leaves the tree's hash, followed by the conflicted files,
+  # one per line.
+  if mc_output="$(git merge-tree --write-tree --name-only --no-messages "$1" "$2" 2> /dev/null)"; then
+    mc_status=0
+  else
+    mc_status="$?"
+  fi
+  if [ "${mc_status}" -gt 1 ]; then
+    return 1
+  fi
+  mc_tree="$(printf '%s\n' "${mc_output}" | sed -n -e '1p')"
+  if [ -z "${mc_tree}" ]; then
+    return 1
+  fi
+  mc_files="$(printf '%s\n' "${mc_output}" | sed -e '1d' | grep . | sort -u)"
+  mc_regions=0
+  # Each iteration removes the first line from ${mc_rest}.
+  mc_rest="${mc_files:+${mc_files}
+}"
+  while [ -n "${mc_rest}" ]; do
+    mc_file="${mc_rest%%
+*}"
+    mc_rest="${mc_rest#*
+}"
+    # A quoted name names no file in the tree, and so counts as 1.
+    mc_count="$(git cat-file blob "${mc_tree}:${mc_file}" 2> /dev/null | grep -c '^<<<<<<<')" || true
+    if [ "${mc_count:-0}" -lt 1 ]; then
+      mc_count=1
+    fi
+    mc_regions=$((mc_regions + mc_count))
+  done
+  merge_conflicts_tree="${mc_tree}"
+  merge_conflicts_files="${mc_files}"
+  merge_conflicts_regions="${mc_regions}"
+}
+
+## Usage: pull_request_location
+## Prints the location from which to fetch the pull requests of the clone in
+## the current directory:  the URL of its upstream repository, the GitHub
+## repository whose pull requests come from the clone's branches, such as
+## "git@github.com:ORG/REPO.git" (see `upstream_repository` and
+## `fork_upstream`).  The URL has the same form as the URL of the clone's
+## remote for its upstream repository, such as an scp-style one.  For a
+## remote that is not on GitHub, such as a repository in the local file
+## system, prints that remote's location.  Returns 1, printing nothing, if
+## the upstream repository is unknown.
+pull_request_location() {
+  upstream_repository "$(pwd)" 2> /dev/null || return 1
+  if [ -z "${upstream_repo_url}" ]; then
+    return 1
+  fi
+  prl_slug="$(github_slug "${upstream_repo_url}")"
+  if [ -z "${prl_slug}" ]; then
+    printf '%s\n' "${upstream_repo_url}"
+    return 0
+  fi
+  prl_upstream="${upstream_repo_slug}"
+  if [ -z "${prl_upstream}" ]; then
+    # The remote is a fork that the clone's name says is the user's own; its
+    # upstream repository is its parent on GitHub.
+    fork_upstream "${prl_slug}" 1 2> /dev/null || return 1
+    prl_upstream="${fork_upstream_repo:-${prl_slug}}"
+  fi
+  split_repository_url "${upstream_repo_url}" || return 1
+  printf '%s%s.git\n' "${repo_url_prefix}" "${prl_upstream}"
+}
+
+## Usage: merge_landed_pr_heads COMMIT SOURCE
+## Prepares the merge of COMMIT into the current branch:  if the current
+## branch merged an earlier version of a pull request that landed in COMMIT,
+## first merges the pull request's final version, and then the commit that
+## landed it.  SOURCE names COMMIT; used for diagnostics.
+##
+## When GitHub squash-merges a pull request #N, it lands the pull request's
+## changes as a single commit S, whose subject ends with " (#N)", such as
+## "Fix the parser (#123)".  Suppose that the current branch merged the pull
+## request's branch, and that the pull request's branch then changed again
+## before it landed.  Then S and the current branch contain different
+## versions of the same changes, and git's merge of COMMIT conflicts wherever
+## the versions differ, even in a binary file.  The merge of the final head
+## commit P of the pull request's branch brings the current branch the
+## pull request's later changes.  Then the merge of S makes no change to the
+## files that only the pull request changed, and the merge of COMMIT finds
+## the pull request's changes on both sides.
+##
+## Does nothing unless git's merge of COMMIT would have conflicts, and
+## accesses the network only if some commit S that is in COMMIT but not in
+## the current branch changes a file that the merge would leave conflicted.
+## The head commits come from the refs "refs/pull/N/head", which GitHub
+## provides, of the repository that `pull_request_location` names.  The pull
+## request #N of such an S is a candidate if P is not in the current branch,
+## and if the current branch and P have a merge base that COMMIT does not
+## contain, which is a commit of a pull request's branch.  A candidate
+## qualifies only if all of these hold:
+##
+##  * S has the tree of git's merge of P into the parent of S, as GitHub's
+##    squash merge of P does.  A fork's ref "refs/pull/N/head", for example,
+##    belongs to the fork's own pull request #N, not to the one that S landed.
+##  * Neither the merge of P nor the merge of S has conflicts.
+##  * The merges change the result of the merge of COMMIT only in files that
+##    S changes, or in files that the merge of COMMIT leaves conflicted with
+##    and without them.  P might bring other changes, such as the reversion
+##    of another pull request's branch that P merged earlier and that the
+##    current branch still contains.
+##
+## This function considers the candidates oldest first, and keeps each that
+## qualifies and that does not add conflict regions (see `merge_conflicts`)
+## to the merge of COMMIT, so that two pull requests that conflict in the
+## same file can both be kept.  If the kept merges leave the merge of COMMIT
+## fewer conflict regions than it has without them, this function makes them
+## with `git merge`, which runs the hooks, and prints a diagnostic for each
+## pull request; otherwise it makes none.  At most
+## ${landed_pr_max_commits} commits of COMMIT are examined.
+##
+## Sets ${merged_landed_prs} to the numbers of the pull requests whose final
+## versions it merged, such as "#5 #6", or to the empty string if it merged
+## none.  A failure to learn about the pull requests, or to make the merges,
+## is not an error:  it leaves the merge of COMMIT as it would otherwise be.
+## Returns 1, after printing a diagnostic, only if it cannot restore the
+## current branch after a failed merge.
+landed_pr_max_commits=200
+merge_landed_pr_heads() {
+  merged_landed_prs=''
+  mlph_commit="$1"
+  # `git merge-tree --write-tree --name-only` needs git 2.38; the merge that
+  # follows needs AUTO_MERGE (see `resolve_merge_conflicts`) anyway.
+  git_at_least 42 2> /dev/null || return 0
+  if ! mlph_tip="$(git rev-parse --verify HEAD)" \
+    || ! mlph_branch="$(git rev-parse --abbrev-ref HEAD)" \
+    || ! merge_conflicts "${mlph_tip}" "${mlph_commit}" \
+    || [ "${merge_conflicts_regions}" -eq 0 ]; then
+    return 0
+  fi
+  mlph_tree0="${merge_conflicts_tree}"
+  mlph_files0="${merge_conflicts_files}"
+  mlph_regions0="${merge_conflicts_regions}"
+  # Lines "S N", oldest first, for each S that changes a conflicted file.
+  # `--reverse` applies after `--max-count`, so these are among the most
+  # recent commits.  Each commit's line "<U+0001>S SUBJECT" precedes the
+  # files that it changes.
+  mlph_squashes="$(git log --no-merges --no-renames --reverse \
+    --max-count="${landed_pr_max_commits}" --name-only --format='%x01%H %s' \
+    "${mlph_tip}..${mlph_commit}" \
+    | MLPH_FILES="${mlph_files0}" awk '
+        BEGIN {
+          n = split(ENVIRON["MLPH_FILES"], files, "\n")
+          for (i = 1; i <= n; i++) {
+            conflicted[files[i]] = 1
+          }
+        }
+        /^\001/ {
+          sub(/^\001/, "")
+          squash = $1
+          pr = ""
+          if (match($0, / \(#[0-9]+\)$/)) {
+            pr = substr($0, RSTART + 3, RLENGTH - 4)
+          }
+          next
+        }
+        pr != "" && $0 != "" && ($0 in conflicted) {
+          print squash " " pr
+          pr = ""
+        }')"
+  if [ -z "${mlph_squashes}" ]; then
+    return 0
+  fi
+  mlph_location="$(pull_request_location)" || return 0
+  # Each line is "P<tab>refs/pull/N/head".
+  # shellcheck disable=SC2046 # Each ref name is one word.
+  if ! git_batch_ssh_capture . ls-remote "${mlph_location}" \
+    $(printf '%s\n' "${mlph_squashes}" | awk '{ print "refs/pull/" $2 "/head" }'); then
+    return 0
+  fi
+  mlph_heads="$(printf '%s\n' "${git_batch_ssh_capture_output}" \
+    | sed -n -e 's|^\([0-9a-f][0-9a-f]*\)	refs/pull/\([0-9][0-9]*\)/head$|\2 \1|p')"
+  if [ -z "${mlph_heads}" ]; then
+    return 0
+  fi
+  # Fetch the head commits that the clone lacks.  No ref records them, and
+  # FETCH_HEAD, which a caller can read, is left alone.
+  mlph_missing="$(printf '%s\n' "${mlph_heads}" | while read -r mlph_n mlph_p; do
+    if ! git cat-file -e "${mlph_p}^{commit}" 2> /dev/null; then
+      printf 'refs/pull/%s/head\n' "${mlph_n}"
+    fi
+  done)"
+  if [ -n "${mlph_missing}" ]; then
+    # shellcheck disable=SC2086 # Each ref name is one word.
+    git_batch_ssh_capture . fetch --quiet --no-tags --no-write-fetch-head \
+      "${mlph_location}" ${mlph_missing} || return 0
+  fi
+
+  # Try the merges with `git commit-tree`, which leaves the working tree and
+  # the index alone.  ${mlph_kept} has a line "S N P" for each kept pull
+  # request, and ${mlph_changed} lists the files that their commits S change.
+  mlph_old_head="${mlph_tip}"
+  mlph_regions="${mlph_regions0}"
+  mlph_kept=''
+  mlph_changed=''
+  # Each iteration removes the first line from ${mlph_rest}.
+  mlph_rest="${mlph_squashes}
+"
+  while [ -n "${mlph_rest}" ] && [ "${mlph_regions}" -gt 0 ]; do
+    mlph_line="${mlph_rest%%
+*}"
+    mlph_rest="${mlph_rest#*
+}"
+    mlph_s="${mlph_line%% *}"
+    mlph_n="${mlph_line#* }"
+    mlph_p="$(printf '%s\n' "${mlph_heads}" | awk -v n="${mlph_n}" '$1 == n { print $2; exit }')"
+    if [ -z "${mlph_p}" ] \
+      || ! git cat-file -e "${mlph_p}^{commit}" 2> /dev/null \
+      || git merge-base --is-ancestor "${mlph_p}" "${mlph_tip}"; then
+      continue
+    fi
+    # A merge base that COMMIT lacks is a commit of a pull request's branch,
+    # which reached COMMIT, if at all, only as a squash commit.
+    mlph_qualifies=0
+    for mlph_base in $(git merge-base --all "${mlph_tip}" "${mlph_p}"); do
+      if ! git merge-base --is-ancestor "${mlph_base}" "${mlph_commit}"; then
+        mlph_qualifies=1
+        break
+      fi
+    done
+    if [ "${mlph_qualifies}" -eq 0 ]; then
+      continue
+    fi
+    if ! mlph_squash_tree="$(git rev-parse --verify --quiet "${mlph_s}^{tree}")" \
+      || ! mlph_tree="$(git merge-tree --write-tree --no-messages "${mlph_s}^" "${mlph_p}" 2> /dev/null)" \
+      || [ "${mlph_tree}" != "${mlph_squash_tree}" ]; then
+      continue
+    fi
+    if ! mlph_tree="$(git merge-tree --write-tree --no-messages "${mlph_tip}" "${mlph_p}" 2> /dev/null)" \
+      || ! mlph_merged_p="$(echo 'Merge the final version of a pull request' \
+        | git commit-tree "${mlph_tree}" -p "${mlph_tip}" -p "${mlph_p}")" \
+      || ! mlph_tree="$(git merge-tree --write-tree --no-messages "${mlph_merged_p}" "${mlph_s}" 2> /dev/null)" \
+      || ! mlph_merged_s="$(echo 'Merge the commit that landed a pull request' \
+        | git commit-tree "${mlph_tree}" -p "${mlph_merged_p}" -p "${mlph_s}")" \
+      || ! merge_conflicts "${mlph_merged_s}" "${mlph_commit}" \
+      || [ "${merge_conflicts_regions}" -gt "${mlph_regions}" ] \
+      || ! mlph_changed_s="$(git diff-tree -r --no-renames --no-commit-id --name-only "${mlph_s}")"; then
+      continue
+    fi
+    # Print the first file in which the merges change the result of the
+    # merge of COMMIT but that neither a kept S nor this one changes and that
+    # is not conflicted with and without the merges.
+    mlph_unexplained="$(git diff-tree -r --no-renames --name-only "${mlph_tree0}" "${merge_conflicts_tree}" \
+      | MLPH_CHANGED="${mlph_changed}
+${mlph_changed_s}" MLPH_FILES0="${mlph_files0}" MLPH_FILES="${merge_conflicts_files}" awk '
+          BEGIN {
+            n = split(ENVIRON["MLPH_CHANGED"], files, "\n")
+            for (i = 1; i <= n; i++) {
+              changed[files[i]] = 1
+            }
+            n = split(ENVIRON["MLPH_FILES0"], files, "\n")
+            for (i = 1; i <= n; i++) {
+              conflicted0[files[i]] = 1
+            }
+            n = split(ENVIRON["MLPH_FILES"], files, "\n")
+            for (i = 1; i <= n; i++) {
+              conflicted[files[i]] = 1
+            }
+          }
+          !($0 in changed) && !($0 in conflicted0 && $0 in conflicted) {
+            print
+            exit
+          }')"
+    if [ -n "${mlph_unexplained}" ]; then
+      continue
+    fi
+    mlph_tip="${mlph_merged_s}"
+    mlph_regions="${merge_conflicts_regions}"
+    mlph_kept="${mlph_kept}${mlph_s} ${mlph_n} ${mlph_p}
+"
+    mlph_changed="${mlph_changed}
+${mlph_changed_s}"
+  done
+  if [ -z "${mlph_kept}" ] || [ "${mlph_regions}" -ge "${mlph_regions0}" ]; then
+    return 0
+  fi
+
+  # Make the merges for real, so that the hooks run.  The messages write
+  # "pull request N" rather than "#N", which would add an event to the
+  # timeline of pull request #N when the merges are pushed to GitHub.
+  mlph_notes=''
+  # Each iteration removes the first line from ${mlph_kept}.
+  while [ -n "${mlph_kept}" ]; do
+    mlph_line="${mlph_kept%%
+*}"
+    mlph_kept="${mlph_kept#*
+}"
+    mlph_s="${mlph_line%% *}"
+    mlph_line="${mlph_line#* }"
+    mlph_n="${mlph_line%% *}"
+    mlph_p="${mlph_line#* }"
+    mlph_short_p="$(git rev-parse --short "${mlph_p}")"
+    mlph_short_s="$(git rev-parse --short "${mlph_s}")"
+    if ! git merge -q --no-ff --no-edit --no-log \
+      -m "Merge the final version of pull request ${mlph_n}" \
+      -m "Pull request ${mlph_n} landed as commit ${mlph_short_s}, but branch ${mlph_branch} had merged an earlier
+version of it.  This merge brings the rest of it, from commit ${mlph_short_p}." \
+      "${mlph_p}" \
+      || ! git merge -q --no-ff --no-edit --no-log \
+        -m "Merge commit ${mlph_short_s}, which landed pull request ${mlph_n}" "${mlph_s}"; then
+      # The merge could not start, as when a modified file is in the way, or
+      # git's merge differs from `git merge-tree`'s.
+      if git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+        git merge --abort
+      fi
+      if ! git reset -q --keep "${mlph_old_head}"; then
+        echo "${SCRIPT_NAME}: cannot restore branch ${mlph_branch} in $(pwd) to commit ${mlph_old_head} after a failed merge of the final version of pull request #${mlph_n}" >&2
+        return 1
+      fi
+      echo "${SCRIPT_NAME}: cannot merge the final version of pull request #${mlph_n} into branch ${mlph_branch} in $(pwd); merging ${2} without the final versions of the pull requests" >&2
+      merged_landed_prs=''
+      return 0
+    fi
+    merged_landed_prs="${merged_landed_prs}${merged_landed_prs:+ }#${mlph_n}"
+    mlph_notes="${mlph_notes}${SCRIPT_NAME}: merged the final version of pull request #${mlph_n} (commit ${mlph_short_p}), and then commit ${mlph_short_s}, which landed it, before ${2}:  branch ${mlph_branch} had merged an earlier version of the pull request
+"
+  done
+  printf '%s' "${mlph_notes}" >&2
+}
+
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [BUILT [DIRECTORY]]]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
@@ -4243,7 +4588,10 @@ $(printf '%s\n' "${merge_fix_subjects}" | sed -e 's/^/* /')"
 ## keeps git from appending " of LOCATION"); or a repository's location alone,
 ## such as "github.com:org/proj", for the head of that repository, for which
 ## the message is "Merge github.com:org/proj into BRANCH".  SOURCE names
-## COMMIT in diagnostics.  If the merge has conflicts,
+## COMMIT in diagnostics.  Before merging COMMIT, merges the final version of
+## each pull request that landed in COMMIT and of which the current branch
+## merged an earlier version, if that avoids conflicts (see
+## `merge_landed_pr_heads`).  If the merge has conflicts,
 ## `resolve_merge_conflicts` resolves them, asking RESOLVER, if it is given
 ## and not empty, about any that `git rerere` did not resolve.  If the build
 ## fails,
@@ -4287,8 +4635,17 @@ merge_build_push() {
     echo "${SCRIPT_NAME}: the working tree of $(pwd) has uncommitted changes; commit or discard them" >&2
     return 1
   fi
-  # HEAD before the merge, so that the agent can be told what the merge did.
+  # HEAD before the merges, so that a merge that cannot start can be undone.
   if ! merge_old_head="$(git rev-parse --verify HEAD)"; then
+    echo "${SCRIPT_NAME}: cannot read HEAD in $(pwd)" >&2
+    return 1
+  fi
+  if ! merge_landed_pr_heads "$1" "$3"; then
+    return 1
+  fi
+  # HEAD before the merge of COMMIT, so that the agent can be told what the
+  # merge did.
+  if ! merge_premerge_head="$(git rev-parse --verify HEAD)"; then
     echo "${SCRIPT_NAME}: cannot read HEAD in $(pwd)" >&2
     return 1
   fi
@@ -4303,8 +4660,13 @@ merge_build_push() {
     # A failed merge without MERGE_HEAD did not start, for example because it
     # would overwrite a modified file; there are no conflicts to resolve.
     # Otherwise, `resolve_merge_conflicts` says what is wrong, if anything.
+    # Undo the merges of the pull requests' final versions too, which were
+    # made only for this merge.
     if ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
       echo "${SCRIPT_NAME}: problem merging $3 into $(pwd)" >&2
+      if [ -n "${merged_landed_prs}" ] && ! git reset -q --keep "${merge_old_head}"; then
+        echo "${SCRIPT_NAME}: the branch in $(pwd) also has the merges of the final versions of pull requests ${merged_landed_prs}; \`git reset --keep ${merge_old_head}\` removes them" >&2
+      fi
       return 1
     fi
     # Git names the conflicted files relative to the top level of the working
@@ -4312,6 +4674,9 @@ merge_build_push() {
     # the current directory unchanged.
     if ! merge_top="$(git rev-parse --show-toplevel)" \
       || ! (cd "${merge_top}" && commit_resolved_merge "${5:-}" "$1" "$3" "${merge_message}"); then
+      if [ -n "${merged_landed_prs}" ]; then
+        echo "${SCRIPT_NAME}: before merging $3, the branch in $(pwd) merged the final versions of pull requests ${merged_landed_prs}; if you abort the merge, \`git reset --keep ${merge_old_head}\` also removes those merges" >&2
+      fi
       return 1
     fi
   fi
@@ -4342,12 +4707,15 @@ merge_build_push() {
         echo "${SCRIPT_NAME}: cannot read HEAD in $(pwd)" >&2
         return 1
       fi
-      if [ "${merge_new_head}" = "${merge_old_head}" ]; then
+      if [ "${merge_new_head}" = "${merge_premerge_head}" ]; then
         merge_did="Branch ${merge_fix_branch} already contained commit $1, so the script's merge of it changed nothing."
       elif [ "${merge_new_head}" = "$(git rev-parse --verify --quiet "$1^{commit}")" ]; then
         merge_did="The script just fast-forwarded branch ${merge_fix_branch} to commit $1."
       else
         merge_did="The script just merged commit $1 into branch ${merge_fix_branch}."
+      fi
+      if [ -n "${merged_landed_prs}" ]; then
+        merge_did="Before merging commit $1, the script merged into branch ${merge_fix_branch} the final version of each of the pull requests ${merged_landed_prs}, each followed by the commit that landed it; either kind of merge might have broken the build.  ${merge_did}"
       fi
       if ! fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
         report_agent_session "${merge_fix_message}"
