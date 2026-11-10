@@ -972,21 +972,48 @@ class ApplyDescriptionUpdatesTest(unittest.TestCase):
 class ChainConflictPrsTest(unittest.TestCase):
     """Tests for chain_conflict_prs."""
 
+    @staticmethod
+    def chain(*prs, from_upstream=True):
+        """Return an UpdateChain of the given PRs.
+
+        Returns:
+            The UpdateChain.
+        """
+        return pr_status.UpdateChain(list(prs), from_upstream)
+
     def test_clean_chain(self):
         """A chain with no reported conflict is clean."""
         repo = types.SimpleNamespace(master_conflicts={}, pair_conflicts={})
-        self.assertEqual(pr_status.chain_conflict_prs(repo, [1, 2, 3], True), set())
+        self.assertEqual(pr_status.chain_conflict_prs(repo, self.chain(1, 2, 3), True), set())
 
     def test_master_conflict_anywhere_in_chain(self):
         """An upstream conflict in a later PR affects the merge that reaches that PR."""
         repo = types.SimpleNamespace(master_conflicts={2: ["file"]}, pair_conflicts={})
-        self.assertEqual(pr_status.chain_conflict_prs(repo, [1, 2, 3], True), {2})
-        self.assertEqual(pr_status.chain_conflict_prs(repo, [1, 2, 3], False), set())
+        self.assertEqual(pr_status.chain_conflict_prs(repo, self.chain(1, 2, 3), True), {2})
+        self.assertEqual(
+            pr_status.chain_conflict_prs(repo, self.chain(1, 2, 3, from_upstream=False), True),
+            {2},
+        )
+        self.assertEqual(
+            pr_status.chain_conflict_prs(repo, self.chain(1, 2, 3, from_upstream=False), False),
+            set(),
+        )
+
+    def test_master_conflict_of_first_pr_without_upstream(self):
+        """A chain that does not start with upstream does not merge into its first PR."""
+        repo = types.SimpleNamespace(master_conflicts={1: ["file"]}, pair_conflicts={})
+        self.assertEqual(pr_status.chain_conflict_prs(repo, self.chain(1, 2, 3), True), {1})
+        self.assertEqual(
+            pr_status.chain_conflict_prs(repo, self.chain(1, 2, 3, from_upstream=False), True),
+            set(),
+        )
 
     def test_nonadjacent_pr_conflict(self):
         """A later merge receives earlier, nonadjacent PRs in the chain, through those between."""
         repo = types.SimpleNamespace(master_conflicts={}, pair_conflicts={(1, 3): ["file"]})
-        self.assertEqual(pr_status.chain_conflict_prs(repo, [1, 2, 3, 4], True), {1, 2, 3})
+        self.assertEqual(
+            pr_status.chain_conflict_prs(repo, self.chain(1, 2, 3, 4), True), {1, 2, 3}
+        )
 
 
 class PushChainsTest(unittest.TestCase):
@@ -1010,14 +1037,11 @@ class PushChainsTest(unittest.TestCase):
             master_conflicts=master_conflicts,
             pair_conflicts={},
         )
-        levels = {n: 1 + len(ds) for n, ds in direct.items() if ds} | {
-            d: 1 for ds in direct.values() for d in ds
-        }
         model = types.SimpleNamespace(
             repo=repo,
             open=set(direct),
             update_direct=direct,
-            update_levels=levels,
+            update_levels=pr_status.Model.graph_levels(direct),
             update_cycle_affected=set(cycle_affected),
         )
         upstream = {"master": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}
@@ -1045,6 +1069,41 @@ class PushChainsTest(unittest.TestCase):
         """Without upstream, a single PR has nothing to push into it."""
         chains = self.chains({1: set(), 2: set(), 3: {2}}, {}, has_upstream=False)
         self.assertEqual(chains, [["pr2", "pr3"]])
+
+    def test_upstream_only_at_roots(self):
+        """A chain starts with upstream only if its first PR has no prerequisite.
+
+        PR 2's branch receives upstream through PR 1's branch, not directly as well.
+        """
+        chains = self.chains({1: set(), 2: {1}, 3: {2}, 4: {2}}, {})
+        self.assertEqual(chains, [["master", "pr1", "pr2", "pr3"], ["pr2", "pr4"]])
+
+    def test_root_with_larger_number(self):
+        """A chain that pushes from a PR's branch follows the chain that updates it.
+
+        The root PR's number is larger than those of its dependents, so only the PRs'
+        levels, not their numbers, order the chains.
+        """
+        chains = self.chains({5: set(), 2: {5}, 3: {2}, 4: {2}}, {})
+        self.assertEqual(chains, [["master", "pr5", "pr2", "pr3"], ["pr2", "pr4"]])
+
+    def test_upstream_only_at_roots_without_upstream(self):
+        """Without upstream, no chain starts with it."""
+        chains = self.chains({1: set(), 2: {1}, 3: {2}, 4: {2}}, {}, has_upstream=False)
+        self.assertEqual(chains, [["pr1", "pr2", "pr3"], ["pr2", "pr4"]])
+
+    def test_conflicts_only_retains_chain_that_updates_first_pr(self):
+        """A retained chain needs the chains that update the branch that it starts with.
+
+        Through that branch, the chain's other PRs' branches receive upstream.
+        """
+        chains = self.chains({1: set(), 2: {1}, 3: {2}, 4: {2}}, {4: ["file"]}, conflicts_only=True)
+        self.assertEqual(chains, [["master", "pr1", "pr2", "pr3"], ["pr2", "pr4"]])
+
+    def test_conflicts_only_omits_chain_that_only_pushes_from_conflicting_pr(self):
+        """A chain that does not start with upstream does not merge upstream into its first PR."""
+        chains = self.chains({1: set(), 2: {1}, 3: {2}, 4: {2}}, {2: ["file"]}, conflicts_only=True)
+        self.assertEqual(chains, [["master", "pr1", "pr2", "pr3"]])
 
     def test_no_chain_touches_cycle(self):
         """No chain pushes into or out of a PR in or after a cycle."""
@@ -1731,7 +1790,7 @@ class GenUpdatingBranchesTest(unittest.TestCase):
         """With a chain, the section has a heading and names upstream."""
         lines = self.generate(1)
         self.assertEqual(lines[:3], ["", "## Updating branches", ""])
-        self.assertIn("upstream `master`", lines[4])
+        self.assertIn("upstream `master`", lines[5])
 
 
 class SimpleSectionsTest(unittest.TestCase):

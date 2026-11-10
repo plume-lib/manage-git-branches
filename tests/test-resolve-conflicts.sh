@@ -174,6 +174,34 @@ if [ "$(git -C "${case_dir}/myrepo.git" show refs/heads/feature:file.txt)" != "$
   fail "several: the chain after the failed one was not pushed"
 fi
 
+## A chain is skipped if a chain that failed or was skipped would have pushed
+## into its first directory, but not if that directory is only the first
+## directory of a failed chain.
+setup_case skipped
+STUB_CHAINS="$(printf '%s\n' \
+  "$(printf 'myrepo-branch-main\tno such dir')" \
+  "$(printf 'no such dir\tother dir')" \
+  "$(printf 'other dir\tmyrepo-branch-feature')" \
+  "$(printf 'myrepo-branch-main\tmyrepo-branch-feature')")"
+resolve_conflicts
+if [ "${resolve_status}" -eq 0 ]; then
+  fail "skipped: resolve-conflicts succeeded: ${resolve_output}"
+fi
+expected="$(printf '%s\n' \
+  'resolve-conflicts: the dependency chains that failed or that have changes to review:' \
+  '* myrepo-branch-main no such dir (failed)' \
+  '    failed to push myrepo-branch-main into no such dir, while checking the directories' \
+  '* no such dir other dir (skipped)' \
+  '* other dir myrepo-branch-feature (skipped)' \
+  'resolve-conflicts: 1 of 4 dependency chains failed, and 2 were skipped')"
+if [ "$(printf '%s\n' "${resolve_output}" | tail -n 6)" != "${expected}" ]; then
+  fail "skipped: wrong summary: ${resolve_output}"
+fi
+expected="$(printf '%s\n' one two-feature two-main three)"
+if [ "$(git -C "${case_dir}/myrepo.git" show refs/heads/feature:file.txt)" != "${expected}" ]; then
+  fail "skipped: the chain that starts with a failed chain's first directory was not pushed"
+fi
+
 ## A chain's directory is passed literally, not expanded as a pattern, and a
 ## chain that fails makes resolve-conflicts fail.
 setup_case literal
