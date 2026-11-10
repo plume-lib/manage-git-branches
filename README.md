@@ -116,6 +116,15 @@ The commands are:
   pass `--no-pull-first` to each such chain after the first that pulled the
   directory.
 
+  Suppose that a branch merged an earlier version of a pull request, whose
+  branch then changed again before the pull request was squash-merged.
+  Then the squash commit and the branch contain different versions of the
+  same changes, and merging the squash commit into the branch conflicts
+  wherever they differ, even in binary files.  When a merge would have
+  conflicts, `git-push-to` first merges the pull request's final version,
+  from the upstream repository's ref `refs/pull/N/head`, and then the squash
+  commit, if that leaves fewer conflicts.
+
   When a merge or a pull has conflicts, it uses the resolutions that
   `git rerere` recorded, and it asks an AI agent, Claude (or, with
   `--codex`, Codex), to resolve the conflicts that remain.  The agent

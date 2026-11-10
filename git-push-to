@@ -132,6 +132,18 @@
 
 # Conflicts
 #
+# Suppose that TO_DIR's branch merged an earlier version of a pull request,
+# whose branch then changed again before GitHub squash-merged the pull
+# request into the upstream repository's default branch.  Then the squash
+# commit and TO_DIR's branch contain different versions of the same changes,
+# and merging FROM_DIR's branch, if it contains the squash commit, conflicts
+# wherever they differ, even in binary files.  When the merge of FROM_DIR's
+# branch would have conflicts, this script first merges into TO_DIR the pull
+# request's final version, from the upstream repository's ref
+# `refs/pull/N/head`, and then the squash commit, if neither merge has
+# conflicts and they leave fewer conflicts for the merge of FROM_DIR's branch;
+# `merge_landed_pr_heads` in common-functions.sh says how.
+#
 # When the merge of FROM_DIR's branch into TO_DIR has conflicts that
 # `git rerere` or an AI agent (see below) resolves, this script checks the
 # resolution; `resolve_merge_conflicts` in common-functions.sh describes the
