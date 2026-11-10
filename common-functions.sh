@@ -6025,8 +6025,10 @@ branch_pulls() {
     --hostname github.com --paginate \
     --jq ".[] | (.head.repo.full_name // \"-\") as \$head | ($5) + \" \" + \$head")" \
     || return 1
+  # "$(NF)" rather than "$NF", which tests/test-env-vars-documented.sh would
+  # take for a read of an environment variable.
   printf '%s\n' "${branch_pulls_answer}" \
-    | awk -v head="$2" 'tolower($NF) == tolower(head)'
+    | awk -v head="$2" 'tolower($(NF)) == tolower(head)'
 }
 
 ## Usage: pr_repositories DIRECTORY BRANCH [BASE]
