@@ -1077,6 +1077,65 @@ if [ "$(remote_branch_refs "${WORK_DIR}/ibr/clone")" != refs/remotes/bare/main ]
   fail "remote_branch_refs: a bare repository's branch does not count as built: $(remote_branch_refs "${WORK_DIR}/ibr/clone")"
 fi
 
+## Tests of upstream_fetch_head.  It prints the head that the latest fetch of
+## the upstream branch recorded, even when `branch.main.remote` is a URL, which
+## gives no remote-tracking branch, and nothing after a fetch of another
+## repository or when the upstream repository's branches need not be built.
+built_remote_cache=''
+git clone -q "${WORK_DIR}/ibr/bare.git" "${WORK_DIR}/ufh"
+git -C "${WORK_DIR}/ufh" config branch.main.remote "${WORK_DIR}/ibr/bare.git/"
+git -C "${WORK_DIR}/ufh" fetch -q
+ufh_expected="$(git -C "${WORK_DIR}/ibr/bare.git" rev-parse main)"
+if ! ufh_actual="$(upstream_fetch_head "${WORK_DIR}/ufh")" || [ "${ufh_actual}" != "${ufh_expected}" ]; then
+  fail "upstream_fetch_head printed [${ufh_actual}], not ${ufh_expected}"
+fi
+git -C "${WORK_DIR}/ufh" fetch -q "${WORK_DIR}/ibr/working" main
+if ufh_actual="$(upstream_fetch_head "${WORK_DIR}/ufh")" || [ -n "${ufh_actual}" ]; then
+  fail "upstream_fetch_head after a fetch of another repository printed [${ufh_actual}]"
+fi
+git -C "${WORK_DIR}/ufh" config branch.main.remote "${WORK_DIR}/ibr/working"
+git -C "${WORK_DIR}/ufh" fetch -q
+if ufh_actual="$(upstream_fetch_head "${WORK_DIR}/ufh")" || [ -n "${ufh_actual}" ]; then
+  fail "upstream_fetch_head for a working clone printed [${ufh_actual}]"
+fi
+
+## Tests of refuse_merge_in_progress.  It refuses unmerged files that a
+## cherry-pick left, without a merge in progress.
+git init -q -b main "${WORK_DIR}/rmip"
+echo one > "${WORK_DIR}/rmip/file.txt"
+git -C "${WORK_DIR}/rmip" add file.txt
+git -C "${WORK_DIR}/rmip" commit -q -m one
+if ! refuse_merge_in_progress "${WORK_DIR}/rmip" "unused" 2> /dev/null; then
+  fail "refuse_merge_in_progress refused a clean directory"
+fi
+git -C "${WORK_DIR}/rmip" checkout -q -b side
+echo two > "${WORK_DIR}/rmip/file.txt"
+git -C "${WORK_DIR}/rmip" commit -q -a -m two
+git -C "${WORK_DIR}/rmip" checkout -q main
+echo three > "${WORK_DIR}/rmip/file.txt"
+git -C "${WORK_DIR}/rmip" commit -q -a -m three
+git -C "${WORK_DIR}/rmip" cherry-pick side > /dev/null 2>&1 || true
+if rmip_out="$(refuse_merge_in_progress "${WORK_DIR}/rmip" "unused" 2>&1)"; then
+  fail "refuse_merge_in_progress accepted unmerged files"
+fi
+case "${rmip_out}" in
+  *"${WORK_DIR}/rmip has unmerged files"*) ;;
+  *) fail "refuse_merge_in_progress: wrong diagnostic for unmerged files: ${rmip_out}" ;;
+esac
+
+## Tests of is_pulled_first_dir and add_pulled_first_dir.  A directory
+## matches only as a whole.
+pulled_first_dirs=''
+add_pulled_first_dir dir-a
+add_pulled_first_dir dir-a
+if [ "${pulled_first_dirs}" != "dir-a
+" ]; then
+  fail "add_pulled_first_dir added a directory twice: [${pulled_first_dirs}]"
+fi
+if ! is_pulled_first_dir dir-a || is_pulled_first_dir dir || is_pulled_first_dir dir-a-b; then
+  fail "is_pulled_first_dir answered wrongly for [${pulled_first_dirs}]"
+fi
+
 ## Tests of current_branch.  A tag with the branch's name does not change the
 ## name that it prints.
 git init -q -b main "${WORK_DIR}/cb"

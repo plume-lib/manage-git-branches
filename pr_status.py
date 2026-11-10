@@ -3369,6 +3369,12 @@ def format_missing_branches(snapshot: dict[str, Any]) -> list[str]:
 def push_commands(models: list[Model], all_chains: list[PushChains], base: str) -> PushCommands:
     """Return the shell commands that run the given `git-push-to` chains.
 
+    Each chain whose first directory is the first directory of an earlier chain gets the
+    option `--no-pull-first`, so that every chain merges the commit of that directory, such
+    as a working copy of the upstream default branch, that the earliest one pulled.  The
+    commands stop at the first chain that fails, so each later chain runs only if the earlier
+    one pulled that directory.
+
     Args:
         models: a list of the models of the repositories, one per repository
         all_chains: the chains of each of models, as push_chains computes them
@@ -3380,11 +3386,19 @@ def push_commands(models: list[Model], all_chains: list[PushChains], base: str) 
     lines = [f"cd {base} && \\"]
     notes = []
     chain_count = 0
+    # The first directories of the chains so far.
+    first_dirs = set()
     for m, (chains, missing, has_upstream, _) in zip(models, all_chains, strict=True):
         r = m.repo
         chain_count += len(chains)
         for chain in chains:
-            lines += ["git-push-to \\", *(f"  {d} \\" for d in chain[:-1]), f"  {chain[-1]}"]
+            option = " --no-pull-first" if chain[0] in first_dirs else ""
+            first_dirs.add(chain[0])
+            lines += [
+                f"git-push-to{option} \\",
+                *(f"  {d} \\" for d in chain[:-1]),
+                f"  {chain[-1]}",
+            ]
             lines[-1] += " && \\"
         if missing:
             notes.append(
@@ -3479,6 +3493,11 @@ def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[s
             " receiving it directly as well would make later merges criss-cross merges."
         ),
         f"A chain may consist of {upstream} and a single PR that has no prerequisite or dependent.",
+        (
+            "A command whose chain starts with the same directory as an earlier command's chain"
+            " passes `--no-pull-first`, so that every chain merges the same commit of that"
+            " directory."
+        ),
         "`git-push-to` merges, compiles, and pushes; see its documentation.",
     ]
     return headed("Updating branches", None, lines)
