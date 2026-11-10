@@ -459,6 +459,64 @@ case "${require_git_output}" in
   *) fail "unexpected message for an unparsable version: [${require_git_output}]" ;;
 esac
 
+# `changes_already_present` recognizes a squash-merge into main of a pull
+# request whose branch feature merged, when main changed the file after the
+# pull request's branch started, so that the squash-merge is a three-way
+# merge rather than a copy of the pull request's version.  No commit on
+# feature has main's version, so only the pull request's commit matches.
+cap_repo="${WORK_DIR}/cap"
+git init -q -b main "${cap_repo}"
+printf '%s\n' one two three four five six seven eight nine > "${cap_repo}/file.txt"
+git -C "${cap_repo}" add file.txt
+git -C "${cap_repo}" commit -q -m 'Initial commit'
+git -C "${cap_repo}" branch pr
+git -C "${cap_repo}" branch feature
+printf '%s\n' one two three four five six seven eight NINE-main > "${cap_repo}/file.txt"
+git -C "${cap_repo}" commit -q -a -m 'Change line 9'
+git -C "${cap_repo}" worktree add -q "${WORK_DIR}/cap-pr" pr
+printf '%s\n' one two 'THREE changed by the pull request' four five six seven eight nine > "${WORK_DIR}/cap-pr/file.txt"
+git -C "${WORK_DIR}/cap-pr" commit -q -a -m 'Change line 3'
+cap_pr="$(git -C "${cap_repo}" rev-parse --short pr)"
+git -C "${cap_repo}" worktree add -q "${WORK_DIR}/cap-feature" feature
+git -C "${WORK_DIR}/cap-feature" merge -q --ff-only pr
+printf '%s\n' one two 'THREE changed by the pull request' four five six SEVEN-feature eight nine > "${WORK_DIR}/cap-feature/file.txt"
+git -C "${WORK_DIR}/cap-feature" commit -q -a -m 'Change line 7'
+git -C "${WORK_DIR}/cap-feature" merge -q --no-edit main > /dev/null
+printf '%s\n' one two 'THREE changed by the pull request' four five six seven eight NINE-main > "${cap_repo}/file.txt"
+git -C "${cap_repo}" commit -q -a -m 'Change line 3 (#1)'
+cap_squash="$(git -C "${cap_repo}" rev-parse --short HEAD)"
+if ! (cd "${cap_repo}" && changes_already_present file.txt feature main && echo "${cap_others}|${cap_kepts}") > "${WORK_DIR}/cap-out"; then
+  fail "changes_already_present did not recognize a squash-merge after a change to main"
+elif [ "$(cat "${WORK_DIR}/cap-out")" != "${cap_squash}|${cap_pr}" ]; then
+  fail "changes_already_present named [$(cat "${WORK_DIR}/cap-out")], not [${cap_squash}|${cap_pr}]"
+fi
+# A later change on main that feature lacks is not present.
+printf '%s\n' one two 'THREE changed by the pull request' four five six seven EIGHT-main NINE-main > "${cap_repo}/file.txt"
+git -C "${cap_repo}" commit -q -a -m 'Change line 8'
+if (cd "${cap_repo}" && changes_already_present file.txt feature main); then
+  fail "changes_already_present accepted a change that feature lacks"
+fi
+
+# `changes_present_plausible` prints each candidate whose version contains
+# the lines that the result has more times than the merge's own version,
+# every candidate when there are no such lines, and every candidate when
+# `git grep` fails.
+cpp_current="$(git -C "${cap_repo}" rev-parse 'main~2:file.txt')"
+cpp_want="$(git -C "${cap_repo}" rev-parse 'main~1:file.txt')"
+cpp_pr="$(git -C "${cap_repo}" rev-parse pr)"
+cpp_initial="$(git -C "${cap_repo}" rev-parse 'main~3')"
+cpp_out="$(cd "${cap_repo}" && changes_present_plausible file.txt "${cpp_current}" "${cpp_want}" "${cpp_initial}" "${cpp_pr}")"
+[ "${cpp_out}" = "${cpp_pr}" ] \
+  || fail "changes_present_plausible printed [${cpp_out}], not only the pull request's commit"
+cpp_deleted="$(printf '%s\n' one two three four six seven eight NINE-main | git -C "${cap_repo}" hash-object -w --stdin)"
+cpp_out="$(cd "${cap_repo}" && changes_present_plausible file.txt "${cpp_current}" "${cpp_deleted}" "${cpp_initial}" "${cpp_pr}")"
+[ "${cpp_out}" = "${cpp_initial}
+${cpp_pr}" ] || fail "changes_present_plausible filtered a deletion: [${cpp_out}]"
+cpp_out="$(cd "${cap_repo}" && changes_present_plausible file.txt "${cpp_current}" "${cpp_want}" "${cpp_initial}" 0000000000000000000000000000000000000001)"
+[ "${cpp_out}" = "${cpp_initial}
+0000000000000000000000000000000000000001" ] \
+  || fail "changes_present_plausible filtered after \`git grep\` failed: [${cpp_out}]"
+
 # `undo_worktree_add` removes a worktree, its registration, and its branch,
 # and leaves everything else of the repository alone.
 uwa_main="${WORK_DIR}/uwa-branch-main"
