@@ -40,6 +40,9 @@ Each run:
   * warns about each cycle of dependencies, and omits from the generated push commands
     the PRs whose branches are updated in a cycle and the PRs whose branches are updated
     from theirs,
+  * omits from the dependency chains with conflicts each PR whose head commit is older than
+    the repository's "stale_after_days" (see pr-status-config.md) and on whose branch no
+    newer PR builds,
   * updates each modeled PR description's "Land after" and "Land before" lines, but keeps
     the lines about a PR in or after a cycle of dependencies,
   * prints what changed since the previous snapshot (input for the summary),
@@ -169,6 +172,14 @@ class Repo:
         self.default_branch = repo_default_branch(cfg)
         self.keywords = cfg.get("dependency_keywords", [])
         self.show_author = cfg.get("show_author", False)
+        # The number of days, such as 730:  a PR is stale if its head commit's committer date
+        # is more than this many days ago.  None if no PR is stale.
+        self.stale_after_days: int | None = cfg.get(
+            "stale_after_days", pr_status_config.DEFAULT_STALE_AFTER_DAYS
+        )
+        # The numbers of the open PRs whose head commit's committer date is more than
+        # stale_after_days days ago.
+        self.stale: set[int] = set()
         self.prs: dict[int, dict[str, Any]] = {}  # number -> gh JSON
         self.master_conflicts: dict[int, list[str]] = {}  # number -> list of files
         # (a, b): a contains all non-merge commits of b, and b's changes
@@ -309,6 +320,78 @@ def load_repo(repo: Repo, pairwise: bool = True) -> None:
             m = re.match(r"(\d+) vs (\d+):(.*)", line)
             assert m, line
             repo.pair_conflicts[int(m[1]), int(m[2])] = m[3].split()
+    repo.stale = stale_prs(repo)
+
+
+def stale_prs(repo: Repo) -> set[int]:
+    """Return the open PRs of the given repository whose head commit is stale.
+
+    A head commit is stale if its committer date is more than repo.stale_after_days days
+    ago.  The head commits are those that pr-merge-analysis fetched into repo's clone; a
+    PR whose head commit the clone lacks is not stale.
+
+    Args:
+        repo: a Repo, which load_repo has read.
+
+    Returns:
+        The numbers, such as 147, of the PRs whose head commit is stale; the empty set if
+        repo.stale_after_days is None.
+    """
+    if repo.stale_after_days is None or not repo.prs:
+        return set()
+    by_oid = {pr["headRefOid"]: n for n, pr in repo.prs.items()}
+    out = run(
+        [
+            "git",
+            "-C",
+            repo.clone,
+            "log",
+            "--no-walk=unsorted",
+            "--ignore-missing",
+            "--format=%H %ct",
+            *sorted(by_oid),
+        ]
+    )
+    cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - repo.stale_after_days * 86400
+    result = set()
+    for line in out.splitlines():
+        oid, committed = line.split()
+        if oid in by_oid and int(committed) < cutoff:
+            result.add(by_oid[oid])
+    return result
+
+
+def stale_omitted(model: Model) -> set[int]:
+    """Return the stale PRs that the dependency chains with conflicts omit.
+
+    The chains omit each stale PR (see stale_prs) whose branch no PR that is not stale is
+    updated from, directly or transitively.  A PR that is not stale and that builds on a
+    stale PR keeps the stale PR's branch in use, so the chains keep both.  Every PR whose
+    branch is updated from an omitted PR's branch is also omitted, so no chain pushes from
+    an omitted branch.
+
+    Args:
+        model: a Model.
+
+    Returns:
+        The numbers, such as 147, of the omitted PRs.
+    """
+    stale = model.repo.stale & model.open
+    dependents: defaultdict[int, set[int]] = defaultdict(set)
+    for n in model.open:
+        for d in model.update_direct[n]:
+            dependents[d].add(n)
+    omitted = set()
+    for n in stale:
+        reached = {n}
+        pending = [n]
+        while pending:
+            for m in dependents[pending.pop()] - reached:
+                reached.add(m)
+                pending.append(m)
+        if reached <= stale:
+            omitted.add(n)
+    return omitted
 
 
 def branches_conflict(repo: Repo, a: int, b: int) -> bool:
@@ -2360,7 +2443,8 @@ def gen_status(models: list[Model]) -> list[str]:
 
     Returns:
         The section's lines:  a "Status" heading and which PRs are in a cycle of dependencies,
-        which PRs conflict with the default branch, and which dependent branches lack their
+        which PRs conflict with the default branch, which stale PRs the dependency chains with
+        conflicts omit (see stale_omitted), and which dependent branches lack their
         prerequisites' current commits; or no lines if there is no such PR or branch.
     """
     lines = []
@@ -2372,6 +2456,12 @@ def gen_status(models: list[Model]) -> list[str]:
         if conflicting:
             lines.append(
                 f"* {r.label} PRs that conflict with `{r.default_branch}`: {r.links(conflicting)}."
+            )
+        omitted = stale_omitted(m)
+        if omitted:
+            lines.append(
+                f"* {r.label} PRs whose head commit is more than {r.stale_after_days} days old,"
+                f" which the dependency chains with conflicts omit: {r.links(omitted)}."
             )
     behind = []
     for m in models:
@@ -3198,6 +3288,7 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     chain depends on it (see conflicting_chains).
     No chain contains a PR that is in a cycle of the update graph or whose branch is updated
     from the branch of a PR in one (see Model.update_cycle_affected).
+    If conflicts_only is true, no chain contains a stale PR that stale_omitted returns.
 
     The missing branches are those that the chains with conflicts would contain if every
     branch had a working copy, and that the conflicts involve (see chain_conflict_prs), but
@@ -3218,6 +3309,8 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     dirs = {n: pr_directories(r, r.prs[n], base) for n in model.open}
     missing = sorted(n for n in model.open if not dirs[n])
     acyclic = model.open - model.update_cycle_affected
+    if conflicts_only:
+        acyclic -= stale_omitted(model)
     pushable = {n for n in acyclic if dirs[n]}
     updates = update_chains(model, pushable, bool(upstream))
     if conflicts_only:

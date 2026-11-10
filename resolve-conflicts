@@ -12,7 +12,8 @@
 # This script does the following:
 #  * run `pr-status`, which regenerates the dependency document and records the
 #    dependency chains with conflicts (the chains of the document's section
-#    "Dependency chains with conflicts"),
+#    "Dependency chains with conflicts", which omit a PR whose head commit is
+#    old; see "stale_after_days" in pr-status-config.md),
 #  * run `git-push-to` on each chain that `pr-status
 #    --print-conflicting-push-chains` prints, adding the "--claude" option (or
 #    "--codex"; see `git-push-to`, under "Asking an AI agent") and any

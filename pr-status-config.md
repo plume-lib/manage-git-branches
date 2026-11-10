@@ -57,6 +57,7 @@ each repository:
       "label": "Daikon",
       "node_prefix": "daikon_",
       "routine_files": ["CHANGELOG.md"],
+      "stale_after_days": 365,
       "excluded": {
         "prs": [512],
         "reason": "#512 is an experiment that will not land."
@@ -192,6 +193,17 @@ The repository object's key in `"repos"` is the repository's name, such as
   directory.  The default is `[]`.  A PR that conflicts with the default
   branch only in routine files gets the note "routine files in `master`"
   (with the actual default branch) in its "Textual conflicts" cell.
+* `"stale_after_days"`:  a number of days, such as `730`, or `null`.  A PR
+  is stale if the committer date of its head commit is more than this many
+  days ago.  The section "Dependency chains with conflicts", which
+  `resolve-conflicts` runs `git-push-to` on, omits each stale PR whose
+  branch no PR that is not stale is updated from, directly or
+  transitively.  For example, if #147 is stale and no other PR builds on it,
+  the chains omit #147; if a recently updated PR #150 builds on #147, the
+  chains keep both.  A stale PR still appears in the tables of PRs, in the
+  dependencies, and in the section "All dependency chains", and the
+  "Status" section lists each stale PR that the chains with conflicts omit.
+  `null` makes no PR stale.  The default is `730`, which is 2 years.
 
 ### Optional keys that change the dependencies
 

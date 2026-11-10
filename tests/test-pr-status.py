@@ -1021,11 +1021,16 @@ class PushChainsTest(unittest.TestCase):
 
     @staticmethod
     def chains(
-        direct, master_conflicts, has_upstream=True, conflicts_only=False, cycle_affected=()
+        direct,
+        master_conflicts,
+        has_upstream=True,
+        conflicts_only=False,
+        cycle_affected=(),
+        stale=(),
     ):
         """Run push_chains on PRs whose direct prerequisites in the update graph are direct.
 
-        Each PR n has the working copy "pr<n>".
+        Each PR n has the working copy "pr<n>".  The PRs in stale are stale.
 
         Returns:
             The chains.
@@ -1036,6 +1041,7 @@ class PushChainsTest(unittest.TestCase):
             prs={n: {"owner": "owner"} for n in direct},
             master_conflicts=master_conflicts,
             pair_conflicts={},
+            stale=set(stale),
         )
         model = types.SimpleNamespace(
             repo=repo,
@@ -1104,6 +1110,30 @@ class PushChainsTest(unittest.TestCase):
         """A chain that does not start with upstream does not merge upstream into its first PR."""
         chains = self.chains({1: set(), 2: {1}, 3: {2}, 4: {2}}, {2: ["file"]}, conflicts_only=True)
         self.assertEqual(chains, [["master", "pr1", "pr2", "pr3"]])
+
+    def test_conflicts_only_omits_stale_pr(self):
+        """The chains with conflicts omit a stale PR; the other chains keep it."""
+        chains = self.chains({1: set(), 2: set()}, {1: ["file"], 2: ["file"]}, stale={1})
+        self.assertEqual(chains, [["master", "pr1"], ["master", "pr2"]])
+        chains = self.chains(
+            {1: set(), 2: set()}, {1: ["file"], 2: ["file"]}, conflicts_only=True, stale={1}
+        )
+        self.assertEqual(chains, [["master", "pr2"]])
+
+    def test_conflicts_only_omits_stale_pr_and_stale_dependents(self):
+        """A stale PR whose dependents are all stale is omitted with them."""
+        chains = self.chains(
+            {1: set(), 2: {1}, 3: set()},
+            {1: ["file"], 3: ["file"]},
+            conflicts_only=True,
+            stale={1, 2},
+        )
+        self.assertEqual(chains, [["master", "pr3"]])
+
+    def test_conflicts_only_keeps_stale_pr_with_newer_dependent(self):
+        """A stale PR that a PR that is not stale builds on stays in the chains."""
+        chains = self.chains({1: set(), 2: {1}}, {1: ["file"]}, conflicts_only=True, stale={1})
+        self.assertEqual(chains, [["master", "pr1", "pr2"]])
 
     def test_no_chain_touches_cycle(self):
         """No chain pushes into or out of a PR in or after a cycle."""
@@ -1218,6 +1248,7 @@ class MissingBranchesTest(unittest.TestCase):
             prs=prs,
             master_conflicts=master_conflicts,
             pair_conflicts={(min(a, b), max(a, b)): ["file"] for a, b in pair_conflicts},
+            stale=set(),
         )
 
         def level(n):
@@ -1862,11 +1893,44 @@ class SimpleSectionsTest(unittest.TestCase):
             master_conflicts={1: ["file"]},
             default_branch="master",
             links=lambda ns: ", ".join(f"#{n}" for n in ns),
+            stale=set(),
         )
         model = types.SimpleNamespace(repo=repo, cyclic=[], open=set())
         self.assertEqual(
             pr_status.gen_status([model]),
             ["", "## Status", "", "* repo PRs that conflict with `master`: #1.", ""],
+        )
+
+    def test_status_stale(self):
+        """The section lists the stale PRs that the chains with conflicts omit."""
+        repo = types.SimpleNamespace(
+            label="repo",
+            master_conflicts={},
+            default_branch="master",
+            links=lambda ns: ", ".join(f"#{n}" for n in sorted(ns)),
+            stale={1, 2, 3},
+            stale_after_days=730,
+        )
+        model = types.SimpleNamespace(
+            repo=repo,
+            cyclic=[],
+            open={1, 2, 3, 4},
+            update_direct={1: set(), 2: set(), 3: set(), 4: {3}},
+            # PR 4's branch has PR 3's current commits.
+            head_status=lambda _n, _d: "yes",
+        )
+        self.assertEqual(
+            pr_status.gen_status([model]),
+            [
+                "",
+                "## Status",
+                "",
+                (
+                    "* repo PRs whose head commit is more than 730 days old, which the"
+                    " dependency chains with conflicts omit: #1, #2."
+                ),
+                "",
+            ],
         )
 
 
@@ -2007,6 +2071,38 @@ def config_repo(**extra):
             **extra,
         },
     )
+
+
+class StalePrsTest(unittest.TestCase):
+    """Tests for stale_prs."""
+
+    def test_old_head_commits_are_stale(self):
+        """A PR whose head commit is older than the threshold is stale; a newer one is not."""
+        repo = config_repo(stale_after_days=10)
+        repo.prs = {1: {"headRefOid": "aaa"}, 2: {"headRefOid": "bbb"}, 3: {"headRefOid": "ccc"}}
+        now = 100 * 86400
+        # The clone lacks PR 3's head commit, so git prints nothing for it.
+        log = f"aaa {now - 11 * 86400}\nbbb {now - 9 * 86400}\n"
+        with (
+            mock.patch.object(pr_status, "run", return_value=log) as run,
+            mock.patch.object(pr_status.dt, "datetime") as datetime,
+        ):
+            datetime.now.return_value.timestamp.return_value = now
+            self.assertEqual(pr_status.stale_prs(repo), {1})
+        self.assertEqual(run.call_args.args[0][:3], ["git", "-C", "/base/repo"])
+        self.assertIn("--ignore-missing", run.call_args.args[0])
+
+    def test_null_makes_no_pr_stale(self):
+        """With "stale_after_days" null, no PR is stale, and git does not run."""
+        repo = config_repo(stale_after_days=None)
+        repo.prs = {1: {"headRefOid": "aaa"}}
+        with mock.patch.object(pr_status, "run") as run:
+            self.assertEqual(pr_status.stale_prs(repo), set())
+        run.assert_not_called()
+
+    def test_default(self):
+        """The default threshold is DEFAULT_STALE_AFTER_DAYS."""
+        self.assertEqual(config_repo().stale_after_days, pr_status_config.DEFAULT_STALE_AFTER_DAYS)
 
 
 class DefaultBranchTest(unittest.TestCase):
