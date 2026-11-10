@@ -424,6 +424,10 @@ takes effect when it is set to a non-empty value.
   run when it resolves merge conflicts.  An agent that runs longer is stopped,
   and the merge is left in progress.  The default is 1800 (30 minutes); 0
   means no limit.
+* `MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE`: the number of seconds that
+  `git-push-to`, `git-pull-from`, `git-pull-upstream`, and `git-rebase-to`
+  wait before running an AI agent again after it failed without changing any
+  file, as when its service was briefly unavailable.  The default is 60.
 * `MANAGE_GIT_BRANCHES_RENOVATE_TIMEOUT`: the number of seconds that
   `fix-renovate-prs` lets Claude Code run on one pull request.  A session
   that runs longer is stopped, and nothing is pushed.  The default is 7200

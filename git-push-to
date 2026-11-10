@@ -188,7 +188,11 @@
 # "--no-llm", and "--no-llm" overrides any of them that precedes it.
 # "--llm" turns on the agent that the last "--claude" or "--codex" chose.
 # If the agent cannot be run because its command is not on the PATH, this
-# script acts as it does with "--no-llm".
+# script acts as it does with "--no-llm".  So it does if the agent is not
+# ready to run, as when it is not logged in:  before it asks the agent to
+# resolve a merge's conflicts or to fix a build, this script checks with
+# `codex login status`, or by asking Claude for a one-word reply, which also
+# fails if Claude has reached a usage limit or cannot reach its service.
 # The agent runs in a sandbox, which requires a recent version of it:
 # Claude Code with the `--restricted` option and the setting
 # `permissions.blockReadsOutsideWorkingDirectories`, or Codex with permission
@@ -203,6 +207,13 @@
 # The pull of TO_DIR merges even if `pull.rebase` is set; a pull of FROM_DIR
 # that rebases, as `pull.rebase` can make it do, is not resolved.  If the
 # agent fails, this script stops with the merge still in progress.
+#
+# An agent that fails, other than by running out of time, without changing
+# the index or any file that git does not ignore, as when its service is
+# briefly unavailable, did nothing that anyone must review.  This script runs
+# it again, up to 2 more times, each after a pause of
+# $MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE seconds, 60 by default.  That applies
+# to resolving conflicts and to fixing a build.
 #
 # The agent's instructions consist of the file merge-conflict-instructions.md,
 # which also suits a merge that you resolve yourself or with an agent
@@ -274,7 +285,10 @@
 # the top level of the working tree, where you are less likely to overlook
 # it; delete the entry once you have dealt with it.  When the agent could not
 # resolve the conflicts, the entry also tells an AI agent that reads it to
-# ask a person for help with them.  The resumed
+# ask a person for help with them.  But when the agent was not ready to run,
+# or failed without changing any file, the entry instead says that running
+# this script again, once the agent can run, asks the agent to do its task
+# again.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
 # contains the text of the merged changes, which can include instructions
 # from other people.

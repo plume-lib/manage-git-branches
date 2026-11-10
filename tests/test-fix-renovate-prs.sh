@@ -285,9 +285,16 @@ EOF
 # for "nocommit" and "resumed", it reports FIXED without committing; for
 # "untracked", it commits a fix but not the new file that the fix needs, and
 # reports FIXED.  It reports with Markdown
-# emphasis, blank lines, and a carriage return, as Claude might.
+# emphasis, blank lines, and a carriage return, as Claude might.  It answers
+# the check of `agent_ready` that it can run, which it does not log.
 cat > "${work}/bin/claude" << EOF
 #!/bin/sh
+case "\$*" in
+  *--no-session-persistence*)
+    echo OK
+    exit 0
+    ;;
+esac
 dir="\$(basename -- "\$(pwd)")"
 echo "\${dir} \$*" >> "${work}/claude.log"
 cat > "${work}/prompt.\${dir}"

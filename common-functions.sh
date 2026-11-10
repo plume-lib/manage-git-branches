@@ -1485,23 +1485,40 @@ resolve_merge_conflicts() {
 
   if [ -z "${resolve_unresolved}" ]; then
     echo "${SCRIPT_NAME}: \`git rerere\` resolved the conflicts in $(pwd)" >&2
-  elif [ -z "${resolve_with}" ] || ! agent_available "${resolve_with}"; then
+  elif [ -z "${resolve_with}" ]; then
     report_unresolved "${resolve_unresolved}"
     resolve_stopped
     return 1
+  elif ! agent_available "${resolve_with}"; then
+    report_unresolved "${resolve_unresolved}"
+    if [ -n "${agent_unavailable_reason}" ]; then
+      resolve_stopped "${agent_unavailable_reason}  $(agent_rerun_advice "${resolve_with}" 'resolve the conflicts')"
+    else
+      resolve_stopped
+    fi
+    return 1
   else
-    # The note is composed before the agent runs, because no git command
+    # The notes are composed before the agent runs, because no git command
     # should run after an agent has changed git's configuration, which
     # `resolve_with_agent` reports as ${resolve_agent_status} 2.
     # The entry in AGENT-TODO.md is read by a person or by a later agent,
     # which should not try alone what this agent could not do.
     resolve_agent_reason="${resolve_with}, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge."
     resolve_note="$(merge_in_progress_note "${resolve_agent_reason}")"
+    # For an agent that failed without changing any file, as when it could
+    # not reach its service:  it tried nothing that a person must take over.
+    resolve_unchanged_reason="${resolve_with}, an AI agent, failed before changing any file.  $(agent_rerun_advice "${resolve_with}" 'resolve the conflicts')"
+    resolve_unchanged_note="$(merge_in_progress_note "${resolve_unchanged_reason}")"
     resolve_agent_status=0
     # 1 once `resolve_with_agent` has started the agent.  If it failed
     # before then, a rerun can succeed, so the note asks for no help.
     resolve_agent_ran=0
+    agent_failed_unchanged=0
     if ! resolve_with_agent; then
+      if [ "${resolve_agent_status}" -eq 1 ] && [ "${agent_failed_unchanged}" -eq 1 ]; then
+        resolve_agent_reason="${resolve_unchanged_reason}"
+        resolve_note="${resolve_unchanged_note}"
+      fi
       if [ -n "${agent_session_ids:-}" ]; then
         report_agent_session "Resolve the conflicts in the merge of ${resolve_source}" "${resolve_note}"
         echo "${resolve_failed}" >&2
@@ -2512,14 +2529,89 @@ resolve_other_changes() {
 }
 
 ## Usage: agent_available AGENT
-## Succeeds if the command AGENT, "claude" or "codex", can be found.
-## Otherwise prints a diagnostic and returns 1.
+## Succeeds if the command AGENT, "claude" or "codex", can be found and is
+## ready to run (see `agent_ready`).  Otherwise prints a diagnostic and
+## returns 1, after setting ${agent_unavailable_reason} to a sentence for an
+## entry of AGENT-TODO.md that says why, such as "claude, an AI agent, did
+## not run, because it was not ready to run, as when it is not logged in.",
+## or to the empty string if AGENT is not on the PATH, as when the user does
+## not use it.
 agent_available() {
-  if command -v "$1" > /dev/null 2>&1; then
+  agent_unavailable_reason=''
+  if ! command -v "$1" > /dev/null 2>&1; then
+    echo "${SCRIPT_NAME}: cannot run $1, which is not on the PATH" >&2
+    return 1
+  fi
+  if ! agent_ready "$1"; then
+    agent_unavailable_reason="$1, an AI agent, did not run, because it was not ready to run, as when it is not logged in."
+    return 1
+  fi
+  return 0
+}
+
+## Usage: agent_rerun_advice AGENT TASK
+## Prints a sentence for an entry of AGENT-TODO.md that says that running
+## this script again, once the AI agent AGENT can run, asks it to do TASK,
+## such as "resolve the conflicts", so that no person needs to.
+agent_rerun_advice() {
+  printf 'Once %s can run, running %s again asks it to %s, so no person needs to.\n' "$1" "${SCRIPT_NAME}" "$2"
+}
+
+## Usage: agent_ready AGENT
+## Succeeds if the AI agent AGENT, "claude" or "codex", is ready to run.
+## Otherwise prints a diagnostic, which includes the agent's own message, and
+## returns 1.  For Claude, which can report that a user is logged in although
+## the login has expired, this function asks it for a one-word reply, which
+## fails if it is not logged in, if it has reached a usage limit, or if its
+## service is unreachable; the reply costs a fraction of a cent.  The
+## question runs in the root directory, so that no file of a working tree
+## configures Claude.  For Codex, this function runs `codex login status`,
+## which fails if Codex is not logged in.
+agent_ready() {
+  case "$1" in
+    claude)
+      agent_ready_output="$(cd / && printf '%s\n' 'Reply with the single word OK.' \
+        | run_with_time_limit 120 claude -p --restricted --strict-mcp-config \
+          --no-session-persistence --tools '' 2>&1)"
+      ;;
+    codex)
+      agent_ready_output="$(codex login status < /dev/null 2>&1)"
+      ;;
+    *)
+      echo "${SCRIPT_NAME}: unknown AI agent: $1" >&2
+      return 1
+      ;;
+  esac
+  agent_ready_status=$?
+  if [ "${agent_ready_status}" -eq 0 ]; then
     return 0
   fi
-  echo "${SCRIPT_NAME}: cannot run $1, which is not on the PATH" >&2
+  case "$1" in
+    claude) agent_ready_login='claude auth login' ;;
+    codex) agent_ready_login='codex login' ;;
+  esac
+  echo "${SCRIPT_NAME}: $1 is not ready to run (status ${agent_ready_status}); if it is not logged in, log in with \`${agent_ready_login}\`.  It said: ${agent_ready_output}" >&2
   return 1
+}
+
+## The number of times that `run_agent` runs an agent again after it fails
+## without changing any file.
+agent_retries=2
+
+## Usage: work_state_digest
+## Prints a checksum of the index, of each tracked file's difference from
+## HEAD, and of the name and contents of each untracked file that git does
+## not ignore, in the working tree that contains the current directory.  If
+## two runs print the same checksum, then none of those changed in between,
+## barring a checksum collision.  An ignored file, which might be build
+## output, is left out, because there can be many of them.
+work_state_digest() {
+  {
+    git --no-optional-locks ls-files --stage -z
+    git --no-optional-locks diff --no-ext-diff --no-textconv --binary HEAD
+    # With no untracked file, `cksum` reads its empty standard input.
+    git --no-optional-locks ls-files -z --others --exclude-standard | xargs -0 cksum --
+  } 2>&1 | cksum
 }
 
 ## Usage: run_agent AGENT PROMPT
@@ -2532,8 +2624,19 @@ agent_available() {
 ## command should run in the current directory.  Otherwise returns 1, after
 ## printing a diagnostic, if the agent fails.
 ##
+## An agent that fails, other than by running out of time, without changing
+## the index or any file that git does not ignore (see `work_state_digest`)
+## did no work that anyone must review, as when it could not reach its
+## service.  It is run again, up to ${agent_retries} more times, each after
+## a pause of ${MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE} seconds, 60 by default.
+## Sets ${agent_failed_unchanged} to 1 if the agent's last attempt failed so,
+## and to 0 otherwise.  Then running the agent again later, as by running
+## the script again, can succeed, and no person need finish its task.
+##
 ## Appends to ${agent_session_ids}, a blank-separated list, the UUID that
-## names the agent's session, such as "1e55b89c-cfb5-468f-a783-cb104201809b".
+## names the agent's session, such as "1e55b89c-cfb5-468f-a783-cb104201809b";
+## when the agent is run again, only its last attempt's session, because the
+## earlier ones did nothing worth continuing.
 ## A caller that sets ${agent_session_ids} to the empty string first can
 ## report every session that the agent ran in since then, such as one per
 ## attempt to fix a build.  Prints a diagnostic and appends nothing if the
@@ -2554,6 +2657,7 @@ agent_available() {
 ## secret from such a file into any file that git tracks, where no check
 ## finds it, and the script then commits and pushes that file.
 run_agent() {
+  agent_failed_unchanged=0
   # Each agent's sandbox keeps it from changing git's configuration or hooks,
   # which name commands that git runs.  Check that anyway.
   if ! run_agent_git_state="$(git_control_state)"; then
@@ -2567,7 +2671,14 @@ run_agent() {
       return 1
       ;;
   esac
-  run_agent_start="$(date +%s)"
+  run_agent_pause="${MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE:-60}"
+  case "${run_agent_pause}" in
+    *[!0-9]*)
+      echo "${SCRIPT_NAME}: MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE is not a number of seconds: ${run_agent_pause}" >&2
+      return 1
+      ;;
+  esac
+  run_agent_retries_left="${agent_retries}"
   agent_session_agent="$1"
   agent_session_dir="$(pwd)"
   run_agent_session=''
@@ -2592,100 +2703,117 @@ run_agent() {
   # working tree, other than `.git`, and read only the working tree, the
   # repository, the system's programs and libraries (":minimal"), and Codex's
   # own installation, which its sandbox runs.
-  case "$1" in
-    claude)
-      agent_session_command="claude --resume"
-      run_agent_session="$(new_uuid)"
-      if [ -z "${run_agent_session}" ]; then
-        echo "${SCRIPT_NAME}: cannot make a UUID to name claude's session, so no command will be able to continue it" >&2
-      fi
-      # The UUID contains no character that field splitting or globbing
-      # would change, so the unquoted expansion is one option and its value.
-      # shellcheck disable=SC2086
-      printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" claude -p --restricted --strict-mcp-config \
-        ${run_agent_session:+--session-id ${run_agent_session}} \
-        --settings '{"permissions": {"blockReadsOutsideWorkingDirectories": true}}' \
-        --tools 'Read,Edit,Write,Grep,Glob,Bash' --permission-mode acceptEdits \
-        --allowedTools 'Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git merge-base:*)' \
-        --disallowedTools 'Bash(git diff *--output*),Bash(git log *--output*),Bash(git show *--output*)'
-      run_agent_status=$?
-      ;;
-    codex)
-      agent_session_command="codex resume"
-      if ! run_agent_repository="$(git rev-parse --path-format=absolute --git-common-dir)" \
-        || ! run_agent_codex="$(codex_installation)"; then
-        echo "${SCRIPT_NAME}: cannot find the files that codex needs to read" >&2
-        return 1
-      fi
-      # Codex's sandbox protects some names in the working tree, even absent
-      # ones, by creating an empty directory to mount over.  Each such
-      # directory that did not exist before is removed afterwards.
-      run_agent_absent=''
-      for run_agent_name in .agents .aws .codex; do
-        if [ ! -e "${run_agent_name}" ] && [ ! -L "${run_agent_name}" ]; then
-          run_agent_absent="${run_agent_absent} ${run_agent_name}"
+  run_agent_earlier_ids="${agent_session_ids:-}"
+  while :; do
+    agent_session_ids="${run_agent_earlier_ids}"
+    run_agent_work="$(work_state_digest)"
+    run_agent_start="$(date +%s)"
+    case "$1" in
+      claude)
+        agent_session_command="claude --resume"
+        run_agent_session="$(new_uuid)"
+        if [ -z "${run_agent_session}" ]; then
+          echo "${SCRIPT_NAME}: cannot make a UUID to name claude's session, so no command will be able to continue it" >&2
         fi
-      done
-      # Codex chooses its session's UUID and prints it on standard error, in
-      # a header line such as "session id: 01a19ac9-dab5-7570-93b6-6ba41bf65093".
-      # `tee` copies standard error to a file, from which the first such line
-      # is read, and still shows it to the user.  The file and the file that
-      # holds Codex's exit status are in the git directory, which Codex
-      # cannot write.
-      if ! run_agent_git_dir="$(git rev-parse --absolute-git-dir)"; then
-        echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
-        return 1
-      fi
-      run_agent_log="${run_agent_git_dir}/manage-git-branches-agent-stderr"
-      run_agent_status_file="${run_agent_git_dir}/manage-git-branches-agent-status"
-      rm -f -- "${run_agent_status_file}"
-      {
+        # The UUID contains no character that field splitting or globbing
+        # would change, so the unquoted expansion is one option and its value.
+        # shellcheck disable=SC2086
+        printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" claude -p --restricted --strict-mcp-config \
+          ${run_agent_session:+--session-id ${run_agent_session}} \
+          --settings '{"permissions": {"blockReadsOutsideWorkingDirectories": true}}' \
+          --tools 'Read,Edit,Write,Grep,Glob,Bash' --permission-mode acceptEdits \
+          --allowedTools 'Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*),Bash(git merge-base:*)' \
+          --disallowedTools 'Bash(git diff *--output*),Bash(git log *--output*),Bash(git show *--output*)'
+        run_agent_status=$?
+        ;;
+      codex)
+        agent_session_command="codex resume"
+        if ! run_agent_repository="$(git rev-parse --path-format=absolute --git-common-dir)" \
+          || ! run_agent_codex="$(codex_installation)"; then
+          echo "${SCRIPT_NAME}: cannot find the files that codex needs to read" >&2
+          return 1
+        fi
+        # Codex's sandbox protects some names in the working tree, even absent
+        # ones, by creating an empty directory to mount over.  Each such
+        # directory that did not exist before is removed afterwards.
+        run_agent_absent=''
+        for run_agent_name in .agents .aws .codex; do
+          if [ ! -e "${run_agent_name}" ] && [ ! -L "${run_agent_name}" ]; then
+            run_agent_absent="${run_agent_absent} ${run_agent_name}"
+          fi
+        done
+        # Codex chooses its session's UUID and prints it on standard error, in
+        # a header line such as "session id: 01a19ac9-dab5-7570-93b6-6ba41bf65093".
+        # `tee` copies standard error to a file, from which the first such line
+        # is read, and still shows it to the user.  The file and the file that
+        # holds Codex's exit status are in the git directory, which Codex
+        # cannot write.
+        if ! run_agent_git_dir="$(git rev-parse --absolute-git-dir)"; then
+          echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
+          return 1
+        fi
+        run_agent_log="${run_agent_git_dir}/manage-git-branches-agent-stderr"
+        run_agent_status_file="${run_agent_git_dir}/manage-git-branches-agent-status"
+        rm -f -- "${run_agent_status_file}"
         {
-          printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" codex exec -c 'default_permissions="resolve_conflicts"' \
-            -c "permissions.resolve_conflicts.filesystem={\":minimal\" = \"read\", \":project_roots\" = {\".\" = \"write\"}, $(toml_string "${run_agent_repository}") = \"read\", $(toml_string "${run_agent_codex}") = \"read\"}" \
-            - 2>&1 1>&3 3>&-
-          echo "$?" > "${run_agent_status_file}"
-        } | tee -- "${run_agent_log}" >&2
-      } 3>&1
-      run_agent_status="$(cat -- "${run_agent_status_file}" 2> /dev/null)"
-      case "${run_agent_status}" in
-        "" | *[!0-9]*) run_agent_status=1 ;;
-      esac
-      run_agent_session="$(sed -n -e 's/^session id: //p' "${run_agent_log}" 2> /dev/null | head -n 1)"
-      if ! is_uuid "${run_agent_session}"; then
-        run_agent_session=''
-        echo "${SCRIPT_NAME}: codex printed no line \"session id: UUID\", so no command will be able to continue its session" >&2
-      fi
-      rm -f -- "${run_agent_log}" "${run_agent_status_file}"
-      for run_agent_name in ${run_agent_absent}; do
-        if [ -d "${run_agent_name}" ] && [ ! -L "${run_agent_name}" ]; then
-          # `rmdir` removes only an empty directory.
-          rmdir -- "${run_agent_name}" 2> /dev/null || true
+          {
+            printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" codex exec -c 'default_permissions="resolve_conflicts"' \
+              -c "permissions.resolve_conflicts.filesystem={\":minimal\" = \"read\", \":project_roots\" = {\".\" = \"write\"}, $(toml_string "${run_agent_repository}") = \"read\", $(toml_string "${run_agent_codex}") = \"read\"}" \
+              - 2>&1 1>&3 3>&-
+            echo "$?" > "${run_agent_status_file}"
+          } | tee -- "${run_agent_log}" >&2
+        } 3>&1
+        run_agent_status="$(cat -- "${run_agent_status_file}" 2> /dev/null)"
+        case "${run_agent_status}" in
+          "" | *[!0-9]*) run_agent_status=1 ;;
+        esac
+        run_agent_session="$(sed -n -e 's/^session id: //p' "${run_agent_log}" 2> /dev/null | head -n 1)"
+        if ! is_uuid "${run_agent_session}"; then
+          run_agent_session=''
+          echo "${SCRIPT_NAME}: codex printed no line \"session id: UUID\", so no command will be able to continue its session" >&2
         fi
-      done
-      ;;
-    *)
-      echo "${SCRIPT_NAME}: unknown AI agent: $1" >&2
-      return 1
-      ;;
-  esac
-  if [ -n "${run_agent_session}" ]; then
-    agent_session_ids="${agent_session_ids:-}${agent_session_ids:+ }${run_agent_session}"
-  fi
-  if [ "$(git_control_state)" != "${run_agent_git_state}" ]; then
-    echo "${SCRIPT_NAME}: $1 changed git's configuration, attributes, or hooks in $(pwd); check them before running git there" >&2
-    return 2
-  fi
-  if [ "${run_agent_status}" -ne 0 ]; then
+        rm -f -- "${run_agent_log}" "${run_agent_status_file}"
+        for run_agent_name in ${run_agent_absent}; do
+          if [ -d "${run_agent_name}" ] && [ ! -L "${run_agent_name}" ]; then
+            # `rmdir` removes only an empty directory.
+            rmdir -- "${run_agent_name}" 2> /dev/null || true
+          fi
+        done
+        ;;
+      *)
+        echo "${SCRIPT_NAME}: unknown AI agent: $1" >&2
+        return 1
+        ;;
+    esac
+    if [ -n "${run_agent_session}" ]; then
+      agent_session_ids="${agent_session_ids:-}${agent_session_ids:+ }${run_agent_session}"
+    fi
+    if [ "$(git_control_state)" != "${run_agent_git_state}" ]; then
+      echo "${SCRIPT_NAME}: $1 changed git's configuration, attributes, or hooks in $(pwd); check them before running git there" >&2
+      return 2
+    fi
+    if [ "${run_agent_status}" -eq 0 ]; then
+      return 0
+    fi
     if [ "${run_agent_limit}" -ne 0 ] \
       && [ "$(($(date +%s) - run_agent_start))" -ge "${run_agent_limit}" ]; then
       echo "${SCRIPT_NAME}: $1 did not finish within ${run_agent_limit} seconds; set MANAGE_GIT_BRANCHES_LLM_TIMEOUT to change the limit" >&2
-    else
-      echo "${SCRIPT_NAME}: $1 failed with status ${run_agent_status}" >&2
+      return 1
     fi
-    return 1
-  fi
-  return 0
+    echo "${SCRIPT_NAME}: $1 failed with status ${run_agent_status}" >&2
+    # The agent left git's configuration unchanged, so git commands are safe.
+    if [ "$(work_state_digest)" != "${run_agent_work}" ]; then
+      return 1
+    fi
+    if [ "${run_agent_retries_left}" -eq 0 ]; then
+      echo "${SCRIPT_NAME}: $1 failed before changing any file in $(pwd)" >&2
+      agent_failed_unchanged=1
+      return 1
+    fi
+    run_agent_retries_left=$((run_agent_retries_left - 1))
+    echo "${SCRIPT_NAME}: $1 changed no file; running it again in ${run_agent_pause} seconds" >&2
+    sleep "${run_agent_pause}"
+  done
 }
 
 ## Usage: report_agent_session TASK [NOTE]
@@ -3171,13 +3299,16 @@ build_logged() {
 ## "Fix the build after merging branch 'main'", and prints a notice that
 ## names the commit, for review (see `review_notice`).  Returns 1, after
 ## printing a diagnostic, if the build still fails; the agent's changes then
-## remain, staged but not committed.
+## remain, staged but not committed, and ${fix_attempt} is the number of the
+## last attempt, such as 1, and ${agent_failed_unchanged} is 1 if that
+## attempt's agent failed without changing any file (see `run_agent`).
 build_fix_attempts=3
 fix_failed_build() {
   fix_with="$1"
   fix_log="$2"
   # No session is reported if this function fails before the agent runs.
   agent_session_ids=''
+  agent_failed_unchanged=0
   # The agent's changes are committed below, and so would be any change that
   # the build made to tracked files.
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
@@ -4718,7 +4849,13 @@ merge_build_push() {
         merge_did="Before merging commit $1, the script merged into branch ${merge_fix_branch} the final version of each of the pull requests ${merged_landed_prs}, each followed by the commit that landed it; either kind of merge might have broken the build.  ${merge_did}"
       fi
       if ! fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
-        report_agent_session "${merge_fix_message}"
+        # After a first attempt that changed nothing, a rerun starts afresh;
+        # after a later one, the earlier attempts' changes remain staged.
+        merge_fix_note=''
+        if [ "${agent_failed_unchanged:-0}" -eq 1 ] && [ "${fix_attempt:-0}" -eq 1 ]; then
+          merge_fix_note="$5, an AI agent, failed before changing any file.  $(agent_rerun_advice "$5" 'fix the build')"
+        fi
+        report_agent_session "${merge_fix_message}" "${merge_fix_note}"
         return 1
       fi
     fi

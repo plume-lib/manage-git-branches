@@ -9,8 +9,9 @@
 #   tests/test-push-to-llm.sh
 #
 # Stub `claude` and `codex` commands stand in for the agents.  Environment
-# variables STUB_MODE and STUB_BUILD say what the stubs do, and the `codex`
-# stub prints no session id if STUB_NO_SESSION is set.
+# variables STUB_MODE and STUB_BUILD say what the stubs do, the `codex`
+# stub prints no session id if STUB_NO_SESSION is set, and the check that an
+# agent is ready to run fails if STUB_READY is "fail".
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -36,6 +37,9 @@ sanitize_git_env "${WORK_DIR}"
 # The test repository contains no build file, so skip compilation.
 MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1
 export MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT
+# A stub agent that fails is run again at once.
+MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE=0
+export MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE
 
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $*" >&2
@@ -60,6 +64,7 @@ fail() {
 ##   delete-conflicted: deletes file.txt
 ##   none:   changes nothing
 ##   fail:   exits with status 3
+##   fail-once: as "fail" the first time, and as "good" afterward
 ##   fail-untracked: changes the untracked file notes.txt, then exits with
 ##           status 3
 ##   commit: as "good", but also commits the merge
@@ -109,10 +114,23 @@ fail() {
 ##   bad:    creates or changes notes.txt, which does not fix the build
 ##   once:   as "bad" the first time, and as "none" afterward
 ##   ignored: creates fix.local, a file that git ignores
+##   fail:   exits with status 3, changing nothing
 ##   none:   changes nothing (the default)
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
+# `agent_ready` checks that the agent can run; ${STUB_READY} "fail" makes
+# the check fail.
+case "$(basename -- "$0") $*" in
+  "codex login status" | *--no-session-persistence*)
+    if [ "${STUB_READY:-}" = fail ]; then
+      echo "Not logged in"
+      exit 1
+    fi
+    echo OK
+    exit 0
+    ;;
+esac
 basename -- "$0" >> "${STUB_LOG}"
 printf '%s\n' "$@" > "${STUB_ARGS}"
 if [ "$(basename -- "$0")" = codex ] && [ -z "${STUB_NO_SESSION:-}" ]; then
@@ -130,10 +148,12 @@ if ! grep -q '^<<<<<<< ' file.txt; then
       if [ ! -e notes.txt ]; then echo "an attempt" > notes.txt; fi
       ;;
     ignored) echo "a fix" > fix.local ;;
+    fail) exit 3 ;;
   esac
   exit 0
 fi
 if [ "${STUB_MODE}" = fail ]; then exit 3; fi
+if [ "${STUB_MODE}" = fail-once ] && [ "$(grep -c . "${STUB_LOG}")" -eq 1 ]; then exit 3; fi
 if [ "${STUB_MODE}" = fail-untracked ]; then
   echo "changed" >> notes.txt
   exit 3
@@ -924,7 +944,7 @@ case "${push_output}" in
 esac
 if grep -q 'codex resume' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
   || ! grep -q -x 'The merge of commit .* is in progress in .*' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
-  || ! grep -q -x -F "codex, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${feature_dir}/AGENT-TODO.md"; then
+  || ! grep -q -x -F "codex, an AI agent, failed before changing any file.  Once codex can run, running git-push-to again asks it to resolve the conflicts, so no person needs to." "${feature_dir}/AGENT-TODO.md"; then
   fail "codex without a session id: wrong AGENT-TODO.md: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
 fi
 
@@ -937,6 +957,67 @@ case "${push_output}" in
   *"claude failed with status 3"*"changed a file: notes.txt"*) ;;
   *) fail "failing agent that changes an untracked file: wrong diagnostic: ${push_output}" ;;
 esac
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "failing agent that changes an untracked file: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q -x -F "claude, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${feature_dir}/AGENT-TODO.md"; then
+  fail "failing agent that changes an untracked file: AGENT-TODO.md does not ask for help: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
+
+## An agent that fails without changing any file, as when its service is
+## briefly unavailable, is run again, twice.  AGENT-TODO.md then gives the
+## command that continues only the last session, and says that running
+## git-push-to again suffices; a rerun does resolve the conflicts.
+setup_case fail-unchanged
+push_to fail --llm
+check_not_resolved "agent that fails without changing any file"
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude claude)" ]; then
+  fail "agent that fails without changing any file: expected claude to run 3 times, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude changed no file; running it again in 0 seconds"*"claude failed before changing any file in "*) ;;
+  *) fail "agent that fails without changing any file: wrong diagnostic: ${push_output}" ;;
+esac
+todo="${feature_dir}/AGENT-TODO.md"
+if ! grep -q -x -F "claude, an AI agent, failed before changing any file.  Once claude can run, running git-push-to again asks it to resolve the conflicts, so no person needs to." "${todo}" \
+  || grep -q 'Ask a person' "${todo}" \
+  || [ "$(grep -c '^cd .* && claude --resume ' "${todo}")" -ne 1 ]; then
+  fail "agent that fails without changing any file: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+: > "${STUB_LOG}"
+push_to good --llm
+check_resolved claude "rerun after an agent that failed without changing any file"
+
+## An agent that fails once without changing any file succeeds when it is
+## run again.
+setup_case fail-once
+push_to fail-once --llm
+check_resolved "$(printf '%s\n' claude claude)" "agent that fails once"
+
+## An agent that is not ready to run, as when it is not logged in, is not
+## asked to resolve the conflicts.  AGENT-TODO.md says that running
+## git-push-to again suffices; a rerun, once the agent is ready, does
+## resolve the conflicts.
+setup_case not-ready
+STUB_READY=fail
+export STUB_READY
+push_to good --llm
+unset STUB_READY
+check_not_resolved "agent that is not ready"
+if [ -s "${STUB_LOG}" ]; then
+  fail "agent that is not ready: an agent ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude is not ready to run (status 1)"*"It said: Not logged in"*) ;;
+  *) fail "agent that is not ready: wrong diagnostic: ${push_output}" ;;
+esac
+todo="${feature_dir}/AGENT-TODO.md"
+if ! grep -q -x -F "claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, running git-push-to again asks it to resolve the conflicts, so no person needs to." "${todo}" \
+  || grep -q 'Ask a person' "${todo}"; then
+  fail "agent that is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+push_to good --llm
+check_resolved claude "rerun after an agent that was not ready"
 
 ## The cases from here to the matching "fi" are disabled; set
 ## ${run_history_cases} to 1 to run them.  Each is a merge in which one
@@ -2204,6 +2285,29 @@ case "${push_output}" in
 esac
 if [ -s "${STUB_LOG}" ]; then
   fail "rerun after a bad build fix: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## An agent that fails to fix the build without changing any file is run
+## again, twice.  AGENT-TODO.md then says that running git-push-to again
+## suffices; a rerun does fix the build.
+setup_case build-fail-unchanged build
+STUB_BUILD=fail push_to good --llm
+check_not_pushed "build-fixing agent that fails without changing any file"
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude claude claude)" ]; then
+  fail "build-fixing agent that fails without changing any file: expected claude to run 4 times, but ran: $(cat "${STUB_LOG}")"
+fi
+todo="${feature_dir}/AGENT-TODO.md"
+if ! grep -q -x -F "claude, an AI agent, failed before changing any file.  Once claude can run, running git-push-to again asks it to fix the build, so no person needs to." "${todo}" \
+  || [ "$(grep -c '^cd .* && claude --resume ' "${todo}")" -ne 1 ]; then
+  fail "build-fixing agent that fails without changing any file: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+: > "${STUB_LOG}"
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "rerun after a build-fixing agent that failed without changing any file: git-push-to failed: ${push_output}"
+fi
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+  fail "rerun after a build-fixing agent that failed without changing any file: the build was not fixed"
 fi
 
 ## Uncommitted changes are refused before the merge, which leaves no merge
