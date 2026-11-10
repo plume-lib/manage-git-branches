@@ -16,7 +16,10 @@
 #  * run `git-push-to` on each chain that `pr-status
 #    --print-conflicting-push-chains` prints, adding the "--claude" option (or
 #    "--codex"; see `git-push-to`, under "Asking an AI agent") and any
-#    "--nocompile" option; a chain that fails does not stop the others,
+#    "--nocompile" option; a chain that fails does not stop the others, but
+#    a chain is skipped if a chain that failed or was skipped would have
+#    pushed into the chain's first directory, because then that directory's
+#    branch lacks the updates that the chain would push from it,
 #  * add the "--no-pull-first" option for each chain whose first directory an
 #    earlier chain since `pr-status` ran pulled, so that all of those chains
 #    merge the same commit of it (see `git-push-to`, under "Several chains"),
@@ -165,6 +168,11 @@ while :; do
   fi
 
   num_failed=0
+  num_skipped=0
+  # The directories that a chain that failed or was skipped would have pushed
+  # into (every directory of the chain but the first), each followed by a
+  # newline.
+  stale_dirs="${newline}"
   # The first directories that this round's chains so far pulled; see
   # `is_pulled_first_dir`.
   pulled_first_dirs=''
@@ -174,6 +182,16 @@ while :; do
     # shellcheck disable=SC2086 # Split the chain into directories.
     set -- ${chain}
     IFS="${saved_ifs}"
+    case "${stale_dirs}" in
+      *"${newline}$1${newline}"*)
+        echo "${SCRIPT_NAME}: skipped the chain, because an earlier chain did not update its first directory: $*" >&2
+        num_skipped=$((num_skipped + 1))
+        summary="${summary}* $* (skipped)${newline}"
+        shift
+        for dir in "$@"; do stale_dirs="${stale_dirs}${dir}${newline}"; done
+        continue
+        ;;
+    esac
     if is_pulled_first_dir "$1"; then
       no_pull_first_option='--no-pull-first'
     else
@@ -199,6 +217,8 @@ while :; do
         push_lines="    (git-push-to failed with status ${push_status} and named no step in its summary)"
       fi
       summary="${summary}* $* (failed)${newline}${push_lines}${newline}"
+      shift
+      for dir in "$@"; do stale_dirs="${stale_dirs}${dir}${newline}"; done
     elif [ -n "${push_lines}" ]; then
       summary="${summary}* $*${newline}${push_lines}${newline}"
     fi
@@ -207,7 +227,11 @@ while :; do
 
   if [ "${num_failed}" -ne 0 ]; then
     print_summary
-    echo "${SCRIPT_NAME}: ${num_failed} of ${num_chains} dependency chains failed" >&2
+    if [ "${num_skipped}" -ne 0 ]; then
+      echo "${SCRIPT_NAME}: ${num_failed} of ${num_chains} dependency chains failed, and ${num_skipped} were skipped" >&2
+    else
+      echo "${SCRIPT_NAME}: ${num_failed} of ${num_chains} dependency chains failed" >&2
+    fi
     exit 1
   fi
   round=$((round + 1))
