@@ -706,10 +706,11 @@ def pr_refs(text: str, repo_gh: str) -> PrRefs:
     """
     numbers = {int(n) for n in re.findall(r"(?<![\w/])#(\d+)\b", text)}
     external = set()
+    # GitHub ignores the case of a repository's name.
     for gh, n in re.findall(r"\b([\w.-]+/[\w.-]+)#(\d+)\b", text) + re.findall(
         r"github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)", text
     ):
-        if gh == repo_gh:
+        if gh.lower() == repo_gh.lower():
             numbers.add(int(n))
         else:
             external.add(f"{gh}#{n}")

@@ -95,7 +95,10 @@
 # `pr_repositories` in common-functions.sh describes, except that their base
 # repository is the upstream repository, whose default branch this script
 # merges.  A "Land after" line is one that `pr-status --print-land-after`
-# reports.  This script asks GitHub before pulling.  The check is
+# reports.  `pr-status` needs Python 3.10 or later; if `python3` is older,
+# this script runs `pr-status` with a Python that `uv` provides, if `uv` is
+# installed (see "Python version" in README.md), and otherwise it says so and
+# ignores the "Land after" lines.  This script asks GitHub before pulling.  The check is
 # skipped, silently, if `gh` is not installed or has no token for
 # github.com, as when no user has logged in with `gh auth login`, or if the
 # current branch does not push to a GitHub repository, or if the upstream
@@ -150,38 +153,40 @@ fi
 # shellcheck source=common-functions.sh
 . "${SCRIPT_DIR}/common-functions.sh"
 
+# Usage: run_pr_status ARGUMENT...
+# Runs `pr-status` with the ARGUMENTs and with a Python that is new enough
+# for it:  `python3`, if it is Python 3.10 or later, as `pr-status` requires,
+# and otherwise a Python that `uv` provides, if `uv` is installed, as
+# "Python version" in README.md describes.
+run_pr_status() {
+  if python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2> /dev/null \
+    || ! command -v uv > /dev/null 2>&1; then
+    "${SCRIPT_DIR}/pr-status" "$@"
+  else
+    uv run --quiet --no-project --python '>=3.10' "${SCRIPT_DIR}/pr-status" "$@"
+  fi
+}
+
 # Usage: find_dependence BRANCH
 # Sets ${dependence} to a diagnostic that says how an open pull request from
 # BRANCH, a branch of the clone in the current directory, builds on another
 # pull request, as "Branches that build on another pull request" above
 # describes, or to the empty string if none does or if GitHub is not or
 # cannot be asked.  The upstream repository is the one that
-# ${upstream_source} names, as `find_upstream_ref` sets it.
+# ${upstream_slug} names, as `find_upstream_ref` sets it.
 find_dependence() {
   dependence=''
   gh_usable || return 0
-  # ${upstream_source} is a remote, or, for a fork's parent, a URL.
-  fd_base_repo="$(github_remote_slugs \
-    | awk -v remote="${upstream_source}" '$1 == remote { print $2; exit }')"
-  if [ -z "${fd_base_repo}" ]; then
-    fd_base_repo="$(github_slug "${upstream_source}")"
-  fi
-  [ -n "${fd_base_repo}" ] || return 0
-  pr_repositories "$(pwd)" "$1" "${fd_base_repo}" || return 0
-  # Each pull request yields a line "pr NUMBER BASE DEFAULT HEAD HEADDEFAULT",
+  [ -n "${upstream_slug}" ] || return 0
+  pr_repositories "$(pwd)" "$1" "${upstream_slug}" || return 0
+  # Each pull request yields a line "pr NUMBER BASE DEFAULT HEADDEFAULT HEAD",
   # where BASE is its base branch, DEFAULT is the base repository's default
-  # branch, HEAD is the GitHub slug of its head repository, and HEADDEFAULT
-  # is the head repository's default branch, or "-" for both if the head
-  # repository was deleted, followed by a line "body NUMBER TEXT" for each
-  # line TEXT of its description.  The `head` parameter names only the head
-  # repository's owner, who might have both the base repository and a fork
-  # of it.
+  # branch, HEADDEFAULT is the head repository's default branch, and HEAD is
+  # the head repository, followed by a line "body NUMBER TEXT HEAD" for each
+  # line TEXT of its description.
   # shellcheck disable=SC2016 # The expansions are for jq.
-  if ! fd_answer="$(gh_query "cannot list the pull requests from ${pr_head_repo}:${pr_head_branch}" \
-    gh api -X GET "repos/${pr_base_repo}/pulls" \
-    -f "head=${pr_head_repo%%/*}:${pr_head_branch}" -f state=open -f per_page=100 \
-    --hostname github.com --paginate \
-    --jq '.[] | .number as $n | "pr \($n) \(.base.ref) \(.base.repo.default_branch) \(.head.repo.full_name // "-") \(.head.repo.default_branch // "-")", ((.body // "") | split("\n")[] | "body \($n) \(.)")')"; then
+  if ! fd_answer="$(branch_pulls "${pr_base_repo}" "${pr_head_repo}" "${pr_head_branch}" open \
+    '.number as $n | "pr \($n) \(.base.ref) \(.base.repo.default_branch) \(.head.repo.default_branch)", ((.body // "") | split("\n")[] | "body \($n) \(.)")')"; then
     echo "${SCRIPT_NAME}: cannot tell whether the current branch builds on another pull request; assuming that it does not" >&2
     return 0
   fi
@@ -192,14 +197,11 @@ find_dependence() {
   # A branch's name contains neither whitespace nor ":", so splitting
   # ${fd_findings} yields each word intact.  A pull request from the head
   # repository's default branch is ignored, as `pr_repositories` explains.
-  # GitHub ignores the case of a repository's name, so a remote URL might
-  # spell it differently than GitHub's answer does.
-  # Each word of ${fd_prs} is "NUMBER:BASE:DEFAULT" for a pull request from
-  # the current branch.
+  # Each word of ${fd_prs} is "NUMBER:BASE:DEFAULT" for such a pull request.
   fd_findings=''
   fd_prs="$(printf '%s\n' "${fd_answer}" \
-    | awk -v head="${pr_head_repo}" -v head_branch="${pr_head_branch}" \
-      '$1 == "pr" && tolower($5) == tolower(head) && $6 != head_branch { print $2 ":" $3 ":" $4 }')"
+    | awk -v head_branch="${pr_head_branch}" \
+      '$1 == "pr" && $5 != head_branch { print $2 ":" $3 ":" $4 }')"
   for fd_pr_fields in ${fd_prs}; do
     fd_pr="${fd_pr_fields%%:*}"
     fd_base="${fd_pr_fields#*:}"
@@ -209,8 +211,8 @@ find_dependence() {
       fd_findings="${fd_findings} base:${fd_pr}:${fd_base}"
     fi
     if ! fd_numbers="$(printf '%s\n' "${fd_answer}" \
-      | awk -v pr="${fd_pr}" '$1 == "body" && $2 == pr { sub(/^body [0-9]+ /, ""); print }' \
-      | "${SCRIPT_DIR}/pr-status" --print-land-after "${pr_base_repo}")"; then
+      | awk -v pr="${fd_pr}" '$1 == "body" && $2 == pr { sub(/^body [0-9]+ /, ""); sub(/ [^ ]*$/, ""); print }' \
+      | run_pr_status --print-land-after "${pr_base_repo}")"; then
       echo "${SCRIPT_NAME}: cannot read the \"Land after\" lines of ${pr_base_repo}#${fd_pr}; ignoring them" >&2
       continue
     fi
@@ -220,22 +222,6 @@ find_dependence() {
       fi
     done
   done
-  [ -n "${fd_findings}" ] || return 0
-
-  # Each open pull request of the base repository yields a line
-  # "NUMBER BASE HEADBRANCH HEAD", where BASE is its base branch, HEADBRANCH
-  # is its head branch, and HEAD is the GitHub slug of its head repository,
-  # or "-" if that was deleted.  A number that names no open pull request,
-  # such as the number of an issue, is not listed.
-  # shellcheck disable=SC2016 # The expansions are for jq.
-  if ! fd_open="$(gh_query "cannot list the open pull requests of ${pr_base_repo}" \
-    gh api -X GET "repos/${pr_base_repo}/pulls" \
-    -f state=open -f per_page=100 \
-    --hostname github.com --paginate \
-    --jq '.[] | "\(.number) \(.base.ref) \(.head.ref) \(.head.repo.full_name // "-")"')"; then
-    echo "${SCRIPT_NAME}: cannot tell whether the current branch builds on another pull request; assuming that it does not" >&2
-    return 0
-  fi
 
   for fd_finding in ${fd_findings}; do
     fd_kind="${fd_finding%%:*}"
@@ -248,21 +234,30 @@ find_dependence() {
         # request, B, rather than a long-lived branch such as "release-1.x"
         # or the branch of a pull request that has landed.  B's head
         # repository is the base repository, where its branch is.
-        fd_other="$(printf '%s\n' "${fd_open}" \
-          | awk -v branch="${fd_rest}" -v repo="${pr_base_repo}" \
-            '$3 == branch && tolower($4) == tolower(repo) { print $1; exit }')"
+        if ! fd_other="$(branch_pulls "${pr_base_repo}" "${pr_base_repo}" "${fd_rest}" open '"\(.number)"')"; then
+          echo "${SCRIPT_NAME}: cannot tell whether ${fd_rest}, the base branch of ${pr_base_repo}#${fd_pr}, is the branch of another pull request; assuming that it is not" >&2
+          continue
+        fi
+        fd_other="$(printf '%s\n' "${fd_other}" | awk '{ print $1; exit }')"
         [ -n "${fd_other}" ] || continue
         fd_reason="its base branch is ${fd_rest}, the head branch of ${pr_base_repo}#${fd_other}"
         ;;
       after)
-        # The base branch of pull request N, if it is open.
-        fd_other="$(printf '%s\n' "${fd_open}" \
-          | awk -v number="${fd_rest}" '$1 == number { print $2; exit }')"
-        [ -n "${fd_other}" ] || continue
+        # Each answer is "STATE BASE", where BASE is the pull request's base
+        # branch.  GitHub fails for a number that names no pull request,
+        # such as the number of an issue.
+        # shellcheck disable=SC2016 # The expansions are for jq.
+        if ! fd_other="$(gh_query "cannot ask GitHub about ${pr_base_repo}#${fd_rest}" \
+          gh api -X GET "repos/${pr_base_repo}/pulls/${fd_rest}" \
+          --hostname github.com --jq '"\(.state) \(.base.ref)"')"; then
+          echo "${SCRIPT_NAME}: ignoring the line \"Land after #${fd_rest}\" of ${pr_base_repo}#${fd_pr}" >&2
+          continue
+        fi
+        [ "${fd_other%% *}" = open ] || continue
         # A fix to the current branch's pull request is merged into the
         # current branch, not the other way around.  Only a pull request
         # whose head repository is the base repository can have one.
-        if [ "${fd_other}" = "${pr_head_branch}" ] \
+        if [ "${fd_other#* }" = "${pr_head_branch}" ] \
           && [ "$(lowercase "${pr_head_repo}")" = "$(lowercase "${pr_base_repo}")" ]; then
           continue
         fi

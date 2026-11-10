@@ -517,15 +517,16 @@ shell_quote() {
 
 # Usage: rest_pr_states BASE HEAD BRANCH
 # Prints "- - STATE NUMBER REPOSITORY", one per line, for each pull request to
-# the GitHub repository BASE whose head is the branch BRANCH of a repository
-# of the owner of the GitHub repository HEAD.  REPOSITORY is the head
-# repository, or "-" if it was deleted.  The first two fields stand for the
-# ALIAS and MORE of a line of the GraphQL answer in `warn_about_closed_prs_in`,
-# so that one filter reads both.  Fails if the query does.
+# the GitHub repository BASE whose head is the branch BRANCH of the GitHub
+# repository HEAD, as `branch_pulls` finds them.  REPOSITORY is the head
+# repository.  The first two fields stand for the ALIAS and MORE of a line of
+# the GraphQL answer in `warn_about_closed_prs_in`, so that one filter reads
+# both.  Fails if the query does.
 rest_pr_states() {
-  gh api -X GET "repos/$1/pulls" -f "head=${2%%/*}:$3" -f state=all -f per_page=100 \
-    --hostname github.com --paginate --jq '.[] | "- - \(if .state == "open" then "OPEN" elif .merged_at then "MERGED" else "CLOSED" end) \(.number) \(.head.repo.full_name // "-")"' \
-    < /dev/null 2> /dev/null
+  # shellcheck disable=SC2016 # The expansions are for jq.
+  branch_pulls "$1" "$2" "$3" all \
+    '"- - \(if .state == "open" then "OPEN" elif .merged_at then "MERGED" else "CLOSED" end) \(.number)"' \
+    2> /dev/null
 }
 
 # Warns, on standard error, about directory $1, whose name matches

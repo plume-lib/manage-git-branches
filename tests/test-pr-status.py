@@ -217,7 +217,7 @@ class LandAfterNumbersTest(unittest.TestCase):
 
     BODY = (
         "Land after #9.\r\n"
-        "Land after owner/repo#09 (it adds the helper).\n"
+        "Land after Owner/Repo#09 (it adds the helper).\n"
         "Land after https://github.com/owner/repo/pull/11\n"
         "Land after #12 and #13.\n"
         "Land after other/repo#14.\n"
@@ -226,7 +226,7 @@ class LandAfterNumbersTest(unittest.TestCase):
     )
 
     def test_numbers(self):
-        """Only "Land after" lines that name one PR of the repository count."""
+        """Only "Land after" lines that name one PR of the repository, in any case, count."""
         self.assertEqual(pr_status.land_after_numbers(self.BODY, "owner/repo"), [9, 9, 11])
 
     def test_print_land_after(self):

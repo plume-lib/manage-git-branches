@@ -162,7 +162,10 @@ The commands are:
   Update such a branch with `git-push-to`, as the chains that `pr-status`
   prints do, or pass `--allow-dependent` to merge anyway.  It asks GitHub
   with `gh`, and it skips this check if `gh` cannot be used.  It reads the
-  "Land after" lines with `pr-status --print-land-after`.
+  "Land after" lines with `pr-status --print-land-after`, which needs
+  Python 3.10 or later; if `python3` is older, it runs `pr-status` with
+  `uv`, if `uv` is installed (see [Python version](#python-version)), and
+  otherwise it ignores those lines.
 
   Unlike `git-pull-from`, it needs no working tree for the default branch.
   It handles conflicts and a failed build as `git-push-to` does.
@@ -468,6 +471,9 @@ options, both of which require
    ```sh
    alias pr-status='uv run --no-project --python 3.15 pr-status'
    ```
+
+   `git-pull-upstream`, which runs `pr-status`, does this itself if `uv` is
+   installed.
 
 ## Testing
 
