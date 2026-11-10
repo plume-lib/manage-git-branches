@@ -30,6 +30,12 @@
 # If --clean is passed, then the project is cleaned before being compiled.
 # If the clean fails, the project is not compiled and the exit status is failure.
 # If variable GRADLE_ASSEMBLE_FLAGS is defined, it is passed to `gradlew assemble` or `gradle assemble`.
+# If a Gradle command fails, and some of the user's Gradle daemons run a Java
+# executable that was deleted after they started, as by an upgrade of the JDK,
+# this command stops those daemons, which cannot start processes, and runs the
+# Gradle command once more.  It does so only for a Gradle wrapper whose
+# version of Gradle it can read, and it stops only the daemons of that version.  It recognizes such daemons only where /proc
+# exists, as on Linux.
 # If variable MVN_COMPILE_FLAGS is defined, it is passed to `mvnw compile` or `mvn compile`.
 # If variable MAKE_FLAGS is defined, it is passed to `make`.
 # If variable ERR_IF_NO_BUILDFILE is non-empty, the script fails if no buildfile is found.
@@ -132,6 +138,94 @@ else
   exit 1
 fi
 
+# Prints the Gradle version that the Gradle wrapper of directory $1 uses, such
+# as "9.9.0", as the wrapper's gradle/wrapper/gradle-wrapper.properties gives
+# it, or nothing if that file does not give it.
+gradle_wrapper_version() {
+  sed -n -e 's|^distributionUrl=.*/gradle-\([^/]*\)-[a-z]*\.zip[[:space:]]*$|\1|p' \
+    "$1/gradle/wrapper/gradle-wrapper.properties" 2> /dev/null | head -n 1
+}
+
+# Prints, one per line, the process ids of the current user's Gradle daemons
+# that run a Java executable that was deleted after the daemon started, as
+# when a package upgrade replaced the JDK.  Such a daemon cannot start a
+# process:  Java fails with "Failed to exec spawn helper", so a build that
+# runs a program, such as `git`, fails.  Prints only the daemons of Gradle
+# version $1, such as "9.9.0", which a daemon's command line gives after its
+# main class.  Prints nothing on a system without /proc, where such a daemon
+# cannot be recognized.
+stale_gradle_daemons() {
+  if [ ! -d /proc ] || ! command -v pgrep > /dev/null 2>&1; then
+    return 0
+  fi
+  for stale_pid in $(pgrep -u "$(id -u)" -f org.gradle.launcher.daemon.bootstrap.GradleDaemon 2> /dev/null); do
+    # The kernel appends " (deleted)" to the name of a deleted executable.
+    case "$(readlink "/proc/${stale_pid}/exe" 2> /dev/null)" in
+      *' (deleted)') ;;
+      *) continue ;;
+    esac
+    if [ "$(tr '\000' '\n' < "/proc/${stale_pid}/cmdline" 2> /dev/null \
+      | awk 'found { print; exit } $0 == "org.gradle.launcher.daemon.bootstrap.GradleDaemon" { found = 1 }')" != "$1" ]; then
+      continue
+    fi
+    printf '%s\n' "${stale_pid}"
+  done
+}
+
+# Stops the current user's stale Gradle daemons of Gradle version $1 (see
+# `stale_gradle_daemons`), waiting up to 10 seconds for them to exit.
+# Returns 0, after printing a notice to standard error, if there were any,
+# and 1 otherwise, as when $1 is empty.
+stop_stale_gradle_daemons() {
+  if [ -z "$1" ]; then
+    return 1
+  fi
+  stale_pids="$(stale_gradle_daemons "$1")"
+  if [ -z "${stale_pids}" ]; then
+    return 1
+  fi
+  printf '%s: stopping Gradle daemons whose Java executable was deleted after they started, as by an upgrade of the JDK (process ids %s), and building again\n' \
+    "${SCRIPT_NAME}" "$(printf '%s\n' "${stale_pids}" | paste -s -d ' ' -)" >&2
+  # shellcheck disable=SC2086 # Each process id is one word.
+  kill ${stale_pids} 2> /dev/null
+  stale_waited=0
+  while [ "${stale_waited}" -lt 10 ]; do
+    stale_alive=0
+    for stale_pid in ${stale_pids}; do
+      if kill -0 "${stale_pid}" 2> /dev/null; then
+        stale_alive=1
+      fi
+    done
+    if [ "${stale_alive}" -eq 0 ]; then
+      break
+    fi
+    sleep 1
+    stale_waited=$((stale_waited + 1))
+  done
+  return 0
+}
+
+# Runs the Gradle command given by the arguments after the first, such as
+# `./gradlew --project-dir DIR assemble -q`, with standard input from
+# /dev/null.  $1 is the version of Gradle that the command runs, such as
+# "9.9.0", or empty if it is unknown.  If the command fails, and stale Gradle
+# daemons of that version, one of which it might have used, can be stopped
+# (see `stop_stale_gradle_daemons`), runs it once more.  Returns the exit
+# status of the last run.
+run_gradle() {
+  run_gradle_version="$1"
+  shift
+  if "$@" < /dev/null; then
+    return 0
+  else
+    run_gradle_status=$?
+  fi
+  if ! stop_stale_gradle_daemons "${run_gradle_version}"; then
+    return "${run_gradle_status}"
+  fi
+  "$@" < /dev/null
+}
+
 # Sets $buildfile_found_here to 1 if a buildfile was found in directory $1, or to 0
 # if none was.  Returns the status of the build; or, if --clean was given and the
 # clean failed, the status of the clean, without building; or 0 if no buildfile
@@ -144,17 +238,17 @@ compile_in_directory() {
 
   if [ -f "$dir/gradlew" ]; then
     if [ -n "$CLEAN" ]; then
-      "$dir/gradlew" --project-dir "$dir" clean -q < /dev/null || return $?
+      run_gradle "$(gradle_wrapper_version "$dir")" "$dir/gradlew" --project-dir "$dir" clean -q || return $?
     fi
     # shellcheck disable=SC2086 # Word splitting is desirable here.
-    "$dir/gradlew" --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
+    run_gradle "$(gradle_wrapper_version "$dir")" "$dir/gradlew" --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS}
     return $?
   elif [ -f "$dir/build.gradle" ]; then
     if [ -n "$CLEAN" ]; then
-      gradle --project-dir "$dir" clean -q < /dev/null || return $?
+      run_gradle "" gradle --project-dir "$dir" clean -q || return $?
     fi
     # shellcheck disable=SC2086 # Word splitting is desirable here.
-    gradle --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS} < /dev/null
+    run_gradle "" gradle --project-dir "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS}
     return $?
   elif [ -f "$dir/mvnw" ]; then
     if [ -n "$CLEAN" ]; then

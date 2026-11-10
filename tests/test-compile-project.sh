@@ -282,6 +282,76 @@ if [ "$(cat "${sentinel}/log")" != "cleaned" ]; then
   fail "with a clean that exited 222, expected only \"cleaned\" but got: $(cat "${sentinel}/log")"
 fi
 
+# A Gradle build that fails while a Gradle daemon runs a deleted Java
+# executable is run again after that daemon is stopped.  The daemon is a copy
+# of `sh`, deleted after it starts, whose command line names Gradle's daemon
+# class and a version of Gradle that no real daemon has, so that the test
+# stops no real daemon.  The build fails while the daemon runs.  Only systems with /proc can
+# recognize such a daemon.
+if [ -d /proc ] && command -v pgrep > /dev/null 2>&1; then
+  stale="${tmpdir}/stale"
+  mkdir -p "${stale}"
+  cp "$(command -v sh)" "${stale}/java"
+  # The loop's "; :" keeps the shell from replacing itself with `sleep`.  The
+  # daemon is started from a subshell that exits, so that it is not a child of
+  # this shell, which would keep it as a zombie after it is stopped.
+  stale_daemon="$(
+    "${stale}/java" -c 'while :; do sleep 1; done; :' \
+      org.gradle.launcher.daemon.bootstrap.GradleDaemon 0.0-compile-project-test \
+      < /dev/null > /dev/null 2>&1 &
+    echo "$!"
+  )"
+  # Wait until the shell has replaced its fork with ${stale}/java.
+  stale_tries=0
+  while [ "$(readlink "/proc/${stale_daemon}/exe" 2> /dev/null)" != "${stale}/java" ] \
+    && [ "${stale_tries}" -lt 50 ]; do
+    sleep 0.1
+    stale_tries=$((stale_tries + 1))
+  done
+  rm -f "${stale}/java"
+  cat > "${stale}/gradlew" << EOF
+#!/bin/sh
+if kill -0 ${stale_daemon} 2> /dev/null; then
+  echo "Failed to exec spawn helper" >&2
+  exit 1
+fi
+echo built >> "${stale}/log"
+EOF
+  chmod +x "${stale}/gradlew"
+  mkdir -p "${stale}/gradle/wrapper"
+  echo 'distributionUrl=https\://services.gradle.org/distributions/gradle-0.0-compile-project-test-bin.zip' \
+    > "${stale}/gradle/wrapper/gradle-wrapper.properties"
+  stale_output="$("${COMPILE_PROJECT}" "${stale}" 2>&1)"
+  stale_status=$?
+  if [ "${stale_status}" != 0 ]; then
+    fail "a build that failed because of a stale Gradle daemon was not run again: ${stale_output}"
+  fi
+  if [ "$(cat "${stale}/log" 2> /dev/null)" != "built" ]; then
+    fail "with a stale Gradle daemon, expected \"built\" but got: $(cat "${stale}/log" 2> /dev/null)"
+  fi
+  case "${stale_output}" in
+    *"stopping Gradle daemons whose Java executable was deleted"*"(process ids "*"${stale_daemon}"*) ;;
+    *) fail "no notice about stopping the stale Gradle daemon ${stale_daemon}: ${stale_output}" ;;
+  esac
+  if kill -0 "${stale_daemon}" 2> /dev/null; then
+    fail "the stale Gradle daemon ${stale_daemon} is still running"
+    kill "${stale_daemon}" 2> /dev/null
+  fi
+
+  # A Gradle build that fails with no stale daemon is not run again.
+  cat > "${stale}/gradlew" << EOF
+#!/bin/sh
+echo attempt >> "${stale}/attempts"
+exit 1
+EOF
+  if "${COMPILE_PROJECT}" "${stale}" > /dev/null 2>&1; then
+    fail "zero exit status from a failing Gradle build in ${stale}"
+  fi
+  if [ "$(cat "${stale}/attempts")" != "attempt" ]; then
+    fail "a failing Gradle build without a stale daemon was run more than once: $(cat "${stale}/attempts")"
+  fi
+fi
+
 # `compile-project` gets a temporary directory of its own, so that the checks
 # below can tell whether it removes its temporary files.
 quiet_tmp="${tmpdir}/quiet-tmp"
