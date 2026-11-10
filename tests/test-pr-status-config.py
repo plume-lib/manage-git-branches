@@ -195,22 +195,22 @@ class ReadConfigFileTest(unittest.TestCase):
             ],
         )
 
-    def test_stale_after_days(self):
+    def test_dormant_after_days(self):
         """A positive number of days, or null, is valid; anything else is reported."""
         for days in (1, 730, None):
             with self.subTest(days=days):
-                repo = {"gh": "o/daikon", "stale_after_days": days}
+                repo = {"gh": "o/daikon", "dormant_after_days": days}
                 cfg = self.read({"repos": {"daikon": repo}})
-                self.assertEqual(cfg["repos"]["daikon"]["stale_after_days"], days)
+                self.assertEqual(cfg["repos"]["daikon"]["dormant_after_days"], days)
         for days, text in ((0, "0"), (-5, "-5"), ("730", '"730"'), (True, "true"), (1.5, "1.5")):
             with self.subTest(days=days):
                 self.assertEqual(
                     self.problems(
-                        {"repos": {"daikon": {"gh": "o/daikon", "stale_after_days": days}}}
+                        {"repos": {"daikon": {"gh": "o/daikon", "dormant_after_days": days}}}
                     ),
                     [
                         (
-                            f"repos.daikon.stale_after_days is {text}, not a number of days"
+                            f"repos.daikon.dormant_after_days is {text}, not a number of days"
                             " such as 730, or null"
                         )
                     ],

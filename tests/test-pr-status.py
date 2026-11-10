@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -1016,40 +1017,88 @@ class ChainConflictPrsTest(unittest.TestCase):
         )
 
 
+def transitive_closure(direct):
+    """Return the transitive closure of the given graph.
+
+    Args:
+        direct: a graph, as a map from each PR's number to the numbers of the PRs that it
+            depends on directly.
+
+    Returns:
+        A map from each PR's number to the numbers of the PRs that it depends on, directly
+        or transitively.
+    """
+    result = {}
+    for n in direct:
+        reached = set()
+        pending = list(direct[n])
+        while pending:
+            d = pending.pop()
+            if d not in reached:
+                reached.add(d)
+                pending += direct[d]
+        result[n] = reached
+    return result
+
+
+def dormant_model(
+    direct, master_conflicts, dormant=(), cycle_affected=(), deleted_heads=(), all_deps=None
+):
+    """Return a stand-in for a Model, whose attributes about dormant PRs Model computes.
+
+    Args:
+        direct: the direct prerequisites of each PR in the update graph, as a map from its
+            number to theirs
+        master_conflicts: the files in which each PR conflicts with upstream, as a map from
+            its number to a list of files
+        dormant: the numbers of the dormant PRs
+        cycle_affected: the numbers of the PRs that are in or after a cycle of the update
+            graph
+        deleted_heads: the numbers of the PRs whose head repository has been deleted
+        all_deps: the transitive prerequisites of some PRs in the update graph, as a map from
+            each one's number to theirs, which replace those of the transitive closure of
+            direct
+
+    Returns:
+        The stand-in.
+    """
+    repo = types.SimpleNamespace(
+        gh="owner/repo",
+        default_branch="master",
+        prs={n: {"owner": "" if n in deleted_heads else "owner"} for n in direct},
+        master_conflicts=master_conflicts,
+        pair_conflicts={},
+        dormant=set(dormant),
+    )
+    model = types.SimpleNamespace(
+        repo=repo,
+        open=set(direct),
+        update_direct=direct,
+        update_all_deps=transitive_closure(direct) | (all_deps or {}),
+        update_levels=pr_status.Model.graph_levels(direct),
+        update_cycle_affected=set(cycle_affected),
+    )
+    model.chain_candidates = lambda: pr_status.Model.chain_candidates(model)
+    model.dormant_omitted = pr_status.Model.dormant_omitted.func(model)
+    model.dormant_conflicting = pr_status.Model.dormant_conflicting.func(model)
+    return model
+
+
 class PushChainsTest(unittest.TestCase):
     """Tests for push_chains."""
 
     @staticmethod
-    def chains(
-        direct,
-        master_conflicts,
-        has_upstream=True,
-        conflicts_only=False,
-        cycle_affected=(),
-        stale=(),
-    ):
+    def chains(direct, master_conflicts, has_upstream=True, conflicts_only=False, **kwargs):
         """Run push_chains on PRs whose direct prerequisites in the update graph are direct.
 
-        Each PR n has the working copy "pr<n>".  The PRs in stale are stale.
+        Each PR n has the working copy "pr<n>".  The keyword arguments are those of
+        dormant_model.
 
         Returns:
             The chains.
         """
-        repo = types.SimpleNamespace(
-            gh="owner/repo",
-            default_branch="master",
-            prs={n: {"owner": "owner"} for n in direct},
-            master_conflicts=master_conflicts,
-            pair_conflicts={},
-            stale=set(stale),
-        )
-        model = types.SimpleNamespace(
-            repo=repo,
-            open=set(direct),
-            update_direct=direct,
-            update_levels=pr_status.Model.graph_levels(direct),
-            update_cycle_affected=set(cycle_affected),
-        )
+        model = dormant_model(direct, master_conflicts, **kwargs)
+        repo = model.repo
         upstream = {"master": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}
         # pr_directories receives the PR's data, so look up the PR's number by identity.
         ids = {id(repo.prs[n]): n for n in direct}
@@ -1111,29 +1160,51 @@ class PushChainsTest(unittest.TestCase):
         chains = self.chains({1: set(), 2: {1}, 3: {2}, 4: {2}}, {2: ["file"]}, conflicts_only=True)
         self.assertEqual(chains, [["master", "pr1", "pr2", "pr3"]])
 
-    def test_conflicts_only_omits_stale_pr(self):
-        """The chains with conflicts omit a stale PR; the other chains keep it."""
-        chains = self.chains({1: set(), 2: set()}, {1: ["file"], 2: ["file"]}, stale={1})
+    def test_conflicts_only_omits_dormant_pr(self):
+        """The chains with conflicts omit a dormant PR; the other chains keep it."""
+        chains = self.chains({1: set(), 2: set()}, {1: ["file"], 2: ["file"]}, dormant={1})
         self.assertEqual(chains, [["master", "pr1"], ["master", "pr2"]])
         chains = self.chains(
-            {1: set(), 2: set()}, {1: ["file"], 2: ["file"]}, conflicts_only=True, stale={1}
+            {1: set(), 2: set()}, {1: ["file"], 2: ["file"]}, conflicts_only=True, dormant={1}
         )
         self.assertEqual(chains, [["master", "pr2"]])
 
-    def test_conflicts_only_omits_stale_pr_and_stale_dependents(self):
-        """A stale PR whose dependents are all stale is omitted with them."""
+    def test_conflicts_only_omits_dormant_pr_and_dormant_dependents(self):
+        """A dormant PR whose dependents are all dormant is omitted with them."""
         chains = self.chains(
             {1: set(), 2: {1}, 3: set()},
             {1: ["file"], 3: ["file"]},
             conflicts_only=True,
-            stale={1, 2},
+            dormant={1, 2},
         )
         self.assertEqual(chains, [["master", "pr3"]])
 
-    def test_conflicts_only_keeps_stale_pr_with_newer_dependent(self):
-        """A stale PR that a PR that is not stale builds on stays in the chains."""
-        chains = self.chains({1: set(), 2: {1}}, {1: ["file"]}, conflicts_only=True, stale={1})
+    def test_conflicts_only_keeps_dormant_pr_with_newer_dependent(self):
+        """A dormant PR that a PR that is not dormant builds on stays in the chains."""
+        chains = self.chains({1: set(), 2: {1}}, {1: ["file"]}, conflicts_only=True, dormant={1})
         self.assertEqual(chains, [["master", "pr1", "pr2"]])
+
+    def test_conflicts_only_omits_dormant_pr_whose_dependents_are_in_no_chain(self):
+        """A dependent in or after a cycle, or with a deleted head, keeps no dormant PR."""
+        for kwargs in ({"cycle_affected": {2}}, {"deleted_heads": {2}}):
+            with self.subTest(**kwargs):
+                chains = self.chains(
+                    {1: set(), 2: {1}}, {1: ["file"]}, conflicts_only=True, dormant={1}, **kwargs
+                )
+                self.assertEqual(chains, [])
+
+    def test_conflicts_only_keeps_dormant_pr_with_transitive_newer_dependent(self):
+        """A dormant PR that a PR that is not dormant builds on transitively stays."""
+        # PR 3's branch contains PR 1's commits through PR 2's, so the update graph lacks
+        # the edge from PR 2 to PR 1.
+        chains = self.chains(
+            {1: set(), 2: set(), 3: {2}},
+            {1: ["file"]},
+            conflicts_only=True,
+            dormant={1, 2},
+            all_deps={3: {1, 2}},
+        )
+        self.assertEqual(chains, [["master", "pr1"]])
 
     def test_no_chain_touches_cycle(self):
         """No chain pushes into or out of a PR in or after a cycle."""
@@ -1150,14 +1221,19 @@ class NewSnapshotTest(unittest.TestCase):
         """The chains with conflicts of every repository, in order, survive a JSON round trip."""
         conflicting = [
             pr_status.PushChains(
-                [["a", "a-branch-x"]], [], True, [pr_status.MissingBranch("a", "owner:master")]
+                [["a", "a-branch-x"]],
+                [],
+                True,
+                [pr_status.MissingBranch("a", "owner:master")],
+                [],
             ),
-            pr_status.PushChains([], [1], True, []),
+            pr_status.PushChains([], [1], True, [], []),
             pr_status.PushChains(
                 [["b", "b-branch y"], ["b", "b-branch-z"]],
                 [],
                 True,
                 [pr_status.MissingBranch("b dir", "mernst:fix")],
+                [],
             ),
         ]
         snapshot = json.loads(json.dumps(pr_status.new_snapshot("now", {"repo": {}}, conflicting)))
@@ -1248,7 +1324,6 @@ class MissingBranchesTest(unittest.TestCase):
             prs=prs,
             master_conflicts=master_conflicts,
             pair_conflicts={(min(a, b), max(a, b)): ["file"] for a, b in pair_conflicts},
-            stale=set(),
         )
 
         def level(n):
@@ -1405,7 +1480,11 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
         snapshot = pr_status.new_snapshot(
             "now",
             {},
-            [pr_status.PushChains([["a", "a-branch-x"], ["a", "a-branch y", "z"]], [], True, [])],
+            [
+                pr_status.PushChains(
+                    [["a", "a-branch-x"], ["a", "a-branch y", "z"]], [], True, [], []
+                )
+            ],
         )
         result = self.run_option(json.dumps(snapshot))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1421,7 +1500,9 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
     def test_prints_missing_branches(self):
         """`--print-missing-branches` prints only the branches, one per line."""
         snapshot = pr_status.new_snapshot(
-            "now", {}, [pr_status.PushChains([], [], False, [pr_status.MissingBranch("a", "o:m")])]
+            "now",
+            {},
+            [pr_status.PushChains([], [], False, [pr_status.MissingBranch("a", "o:m")], [])],
         )
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / pr_status_config.SNAPSHOT).write_text(json.dumps(snapshot))
@@ -1804,8 +1885,8 @@ class PushCommandsTest(unittest.TestCase):
     def test_no_pull_first_for_repeated_first_directory(self):
         """A chain that starts with an earlier chain's first directory does not pull it."""
         chains = [
-            pr_status.PushChains([["up", "a", "b"], ["up", "c"], ["b", "d"]], [], True, []),
-            pr_status.PushChains([["up2", "e"], ["up", "f"]], [], True, []),
+            pr_status.PushChains([["up", "a", "b"], ["up", "c"], ["b", "d"]], [], True, [], []),
+            pr_status.PushChains([["up2", "e"], ["up", "f"]], [], True, [], []),
         ]
         commands = pr_status.push_commands([self.model(), self.model()], chains, "/base")
         self.assertEqual(
@@ -1819,6 +1900,26 @@ class PushCommandsTest(unittest.TestCase):
             ],
         )
         self.assertEqual(commands.chain_count, 5)
+
+    def test_dormant_note(self):
+        """The notes list the omitted dormant PRs with conflicts, not as lacking a working copy."""
+        repo = types.SimpleNamespace(
+            label="repo", links=lambda ns: ", ".join(f"#{n}" for n in ns), dormant_after_days=730
+        )
+        model = types.SimpleNamespace(
+            repo=repo, update_cycle_affected=set(), open={1, 2, 3}, dormant_conflicting=[1]
+        )
+        chains = [pr_status.PushChains([], [1, 2, 3], True, [], [1, 3])]
+        self.assertEqual(
+            pr_status.push_commands([model], chains, "/base").notes,
+            [
+                "repo PRs with no working copy, which these commands omit: #2",
+                (
+                    "repo PRs whose head commit is more than 730 days old, which the dependency"
+                    " chains with conflicts omit: #1"
+                ),
+            ],
+        )
 
 
 class GenUpdatingBranchesTest(unittest.TestCase):
@@ -1893,32 +1994,23 @@ class SimpleSectionsTest(unittest.TestCase):
             master_conflicts={1: ["file"]},
             default_branch="master",
             links=lambda ns: ", ".join(f"#{n}" for n in ns),
-            stale=set(),
         )
-        model = types.SimpleNamespace(repo=repo, cyclic=[], open=set())
+        model = types.SimpleNamespace(repo=repo, cyclic=[], open=set(), dormant_conflicting=[])
         self.assertEqual(
             pr_status.gen_status([model]),
             ["", "## Status", "", "* repo PRs that conflict with `master`: #1.", ""],
         )
 
-    def test_status_stale(self):
-        """The section lists the stale PRs that the chains with conflicts omit."""
+    def test_status_dormant(self):
+        """The section lists the dormant PRs that the chains with conflicts would contain."""
         repo = types.SimpleNamespace(
             label="repo",
             master_conflicts={},
             default_branch="master",
-            links=lambda ns: ", ".join(f"#{n}" for n in sorted(ns)),
-            stale={1, 2, 3},
-            stale_after_days=730,
+            links=lambda ns: ", ".join(f"#{n}" for n in ns),
+            dormant_after_days=730,
         )
-        model = types.SimpleNamespace(
-            repo=repo,
-            cyclic=[],
-            open={1, 2, 3, 4},
-            update_direct={1: set(), 2: set(), 3: set(), 4: {3}},
-            # PR 4's branch has PR 3's current commits.
-            head_status=lambda _n, _d: "yes",
-        )
+        model = types.SimpleNamespace(repo=repo, cyclic=[], open=set(), dormant_conflicting=[1, 2])
         self.assertEqual(
             pr_status.gen_status([model]),
             [
@@ -2073,36 +2165,49 @@ def config_repo(**extra):
     )
 
 
-class StalePrsTest(unittest.TestCase):
-    """Tests for stale_prs."""
+class DormantPrsTest(unittest.TestCase):
+    """Tests for dormant_prs."""
 
-    def test_old_head_commits_are_stale(self):
-        """A PR whose head commit is older than the threshold is stale; a newer one is not."""
-        repo = config_repo(stale_after_days=10)
+    def test_old_head_commits_are_dormant(self):
+        """A PR whose head commit is older than the threshold is dormant; a newer one is not."""
+        repo = config_repo(dormant_after_days=10)
         repo.prs = {1: {"headRefOid": "aaa"}, 2: {"headRefOid": "bbb"}, 3: {"headRefOid": "ccc"}}
-        now = 100 * 86400
+        now = int(time.time())
         # The clone lacks PR 3's head commit, so git prints nothing for it.
         log = f"aaa {now - 11 * 86400}\nbbb {now - 9 * 86400}\n"
-        with (
-            mock.patch.object(pr_status, "run", return_value=log) as run,
-            mock.patch.object(pr_status.dt, "datetime") as datetime,
-        ):
-            datetime.now.return_value.timestamp.return_value = now
-            self.assertEqual(pr_status.stale_prs(repo), {1})
+        with mock.patch.object(pr_status, "run", return_value=log) as run:
+            self.assertEqual(pr_status.dormant_prs(repo), {1})
         self.assertEqual(run.call_args.args[0][:3], ["git", "-C", "/base/repo"])
         self.assertIn("--ignore-missing", run.call_args.args[0])
 
-    def test_null_makes_no_pr_stale(self):
-        """With "stale_after_days" null, no PR is stale, and git does not run."""
-        repo = config_repo(stale_after_days=None)
+    def test_null_makes_no_pr_dormant(self):
+        """With "dormant_after_days" null, no PR is dormant, and git does not run."""
+        repo = config_repo(dormant_after_days=None)
         repo.prs = {1: {"headRefOid": "aaa"}}
         with mock.patch.object(pr_status, "run") as run:
-            self.assertEqual(pr_status.stale_prs(repo), set())
+            self.assertEqual(pr_status.dormant_prs(repo), set())
         run.assert_not_called()
 
     def test_default(self):
-        """The default threshold is DEFAULT_STALE_AFTER_DAYS."""
-        self.assertEqual(config_repo().stale_after_days, pr_status_config.DEFAULT_STALE_AFTER_DAYS)
+        """The default threshold is DEFAULT_DORMANT_AFTER_DAYS."""
+        self.assertEqual(
+            config_repo().dormant_after_days, pr_status_config.DEFAULT_DORMANT_AFTER_DAYS
+        )
+
+
+class DormantConflictingTest(unittest.TestCase):
+    """Tests for Model.dormant_conflicting."""
+
+    def test_only_prs_that_the_chains_with_conflicts_would_contain(self):
+        """An omitted dormant PR with no conflict, or in or after a cycle, is not listed."""
+        model = dormant_model(
+            {1: set(), 2: {1}, 3: set(), 4: set(), 5: set()},
+            {2: ["file"], 4: ["file"]},
+            dormant={1, 2, 3, 4},
+            cycle_affected={4},
+        )
+        self.assertEqual(model.dormant_omitted, {1, 2, 3})
+        self.assertEqual(model.dormant_conflicting, [1, 2])
 
 
 class DefaultBranchTest(unittest.TestCase):

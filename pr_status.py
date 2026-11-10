@@ -41,7 +41,7 @@ Each run:
     the PRs whose branches are updated in a cycle and the PRs whose branches are updated
     from theirs,
   * omits from the dependency chains with conflicts each PR whose head commit is older than
-    the repository's "stale_after_days" (see pr-status-config.md) and on whose branch no
+    the repository's "dormant_after_days" (see pr-status-config.md) and on whose branch no
     newer PR builds,
   * updates each modeled PR description's "Land after" and "Land before" lines, but keeps
     the lines about a PR in or after a cycle of dependencies,
@@ -172,14 +172,14 @@ class Repo:
         self.default_branch = repo_default_branch(cfg)
         self.keywords = cfg.get("dependency_keywords", [])
         self.show_author = cfg.get("show_author", False)
-        # The number of days, such as 730:  a PR is stale if its head commit's committer date
-        # is more than this many days ago.  None if no PR is stale.
-        self.stale_after_days: int | None = cfg.get(
-            "stale_after_days", pr_status_config.DEFAULT_STALE_AFTER_DAYS
+        # The number of days, such as 730:  a PR is dormant if its head commit's committer
+        # date is more than this many days ago.  None if no PR is dormant.
+        self.dormant_after_days: int | None = cfg.get(
+            "dormant_after_days", pr_status_config.DEFAULT_DORMANT_AFTER_DAYS
         )
         # The numbers of the open PRs whose head commit's committer date is more than
-        # stale_after_days days ago.
-        self.stale: set[int] = set()
+        # dormant_after_days days ago.
+        self.dormant: set[int] = set()
         self.prs: dict[int, dict[str, Any]] = {}  # number -> gh JSON
         self.master_conflicts: dict[int, list[str]] = {}  # number -> list of files
         # (a, b): a contains all non-merge commits of b, and b's changes
@@ -320,24 +320,24 @@ def load_repo(repo: Repo, pairwise: bool = True) -> None:
             m = re.match(r"(\d+) vs (\d+):(.*)", line)
             assert m, line
             repo.pair_conflicts[int(m[1]), int(m[2])] = m[3].split()
-    repo.stale = stale_prs(repo)
+    repo.dormant = dormant_prs(repo)
 
 
-def stale_prs(repo: Repo) -> set[int]:
-    """Return the open PRs of the given repository whose head commit is stale.
+def dormant_prs(repo: Repo) -> set[int]:
+    """Return the open PRs of the given repository that are dormant.
 
-    A head commit is stale if its committer date is more than repo.stale_after_days days
-    ago.  The head commits are those that pr-merge-analysis fetched into repo's clone; a
-    PR whose head commit the clone lacks is not stale.
+    A PR is dormant if the committer date of its head commit is more than
+    repo.dormant_after_days days ago.  The head commits are those that pr-merge-analysis
+    fetched into repo's clone; a PR whose head commit the clone lacks is not dormant.
 
     Args:
         repo: a Repo, which load_repo has read.
 
     Returns:
-        The numbers, such as 147, of the PRs whose head commit is stale; the empty set if
-        repo.stale_after_days is None.
+        The numbers, such as 147, of the dormant PRs; the empty set if
+        repo.dormant_after_days is None.
     """
-    if repo.stale_after_days is None or not repo.prs:
+    if repo.dormant_after_days is None or not repo.prs:
         return set()
     by_oid = {pr["headRefOid"]: n for n, pr in repo.prs.items()}
     out = run(
@@ -352,46 +352,13 @@ def stale_prs(repo: Repo) -> set[int]:
             *sorted(by_oid),
         ]
     )
-    cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - repo.stale_after_days * 86400
+    cutoff = dt.datetime.now(dt.UTC).timestamp() - repo.dormant_after_days * 86400
     result = set()
     for line in out.splitlines():
         oid, committed = line.split()
         if oid in by_oid and int(committed) < cutoff:
             result.add(by_oid[oid])
     return result
-
-
-def stale_omitted(model: Model) -> set[int]:
-    """Return the stale PRs that the dependency chains with conflicts omit.
-
-    The chains omit each stale PR (see stale_prs) whose branch no PR that is not stale is
-    updated from, directly or transitively.  A PR that is not stale and that builds on a
-    stale PR keeps the stale PR's branch in use, so the chains keep both.  Every PR whose
-    branch is updated from an omitted PR's branch is also omitted, so no chain pushes from
-    an omitted branch.
-
-    Args:
-        model: a Model.
-
-    Returns:
-        The numbers, such as 147, of the omitted PRs.
-    """
-    stale = model.repo.stale & model.open
-    dependents: defaultdict[int, set[int]] = defaultdict(set)
-    for n in model.open:
-        for d in model.update_direct[n]:
-            dependents[d].add(n)
-    omitted = set()
-    for n in stale:
-        reached = {n}
-        pending = [n]
-        while pending:
-            for m in dependents[pending.pop()] - reached:
-                reached.add(m)
-                pending.append(m)
-        if reached <= stale:
-            omitted.add(n)
-    return omitted
 
 
 def branches_conflict(repo: Repo, a: int, b: int) -> bool:
@@ -1437,6 +1404,42 @@ class Model:
         """Each PR's level in the update graph (see graph_levels)."""
         return self.graph_levels(self.update_direct)
 
+    def chain_candidates(self) -> set[int]:
+        """Return the PRs that a `git-push-to` chain can contain.
+
+        Returns:
+            The numbers, such as 123, of the open PRs whose head repository exists and that
+            are not in or after a cycle of the update graph (see update_cycle_affected).
+        """
+        return {n for n in self.open - self.update_cycle_affected if self.repo.prs[n]["owner"]}
+
+    @functools.cached_property
+    def dormant_omitted(self) -> set[int]:
+        """The dormant PRs (see dormant_prs) that the dependency chains with conflicts omit.
+
+        The chains omit each dormant PR that chain_candidates returns and whose branch no
+        PR that is not dormant and that chain_candidates returns is updated from, directly
+        or transitively.  A PR that is not dormant and that builds on a dormant PR keeps the
+        dormant PR's branch in use, so the chains keep both.  Each dormant PR whose branch
+        is updated from an omitted PR's branch is also omitted, so no chain pushes from an
+        omitted branch.
+        """
+        candidates = self.chain_candidates()
+        dormant = self.repo.dormant & candidates
+        active = candidates - dormant
+        return {d for d in dormant if not any(d in self.update_all_deps[n] for n in active)}
+
+    @functools.cached_property
+    def dormant_conflicting(self) -> list[int]:
+        """The PRs of dormant_omitted that the dependency chains with conflicts would contain.
+
+        They are the PRs that the chains would contain if the chains omitted no dormant PR
+        and if every branch had a working copy, in order of PR number.
+        """
+        chains = update_chains(self, self.chain_candidates(), True)
+        in_chains = set().union(*(c.prs for c in conflicting_chains(self.repo, chains, True)))
+        return sorted(self.dormant_omitted & in_chains)
+
     def deepest_roots(self) -> set[int]:
         """Return the first PR of each longest path of prerequisites in the dependency graph.
 
@@ -2443,9 +2446,9 @@ def gen_status(models: list[Model]) -> list[str]:
 
     Returns:
         The section's lines:  a "Status" heading and which PRs are in a cycle of dependencies,
-        which PRs conflict with the default branch, which stale PRs the dependency chains with
-        conflicts omit (see stale_omitted), and which dependent branches lack their
-        prerequisites' current commits; or no lines if there is no such PR or branch.
+        which PRs conflict with the default branch, which dormant PRs the dependency chains
+        with conflicts omit (see Model.dormant_conflicting), and which dependent branches lack
+        their prerequisites' current commits; or no lines if there is no such PR or branch.
     """
     lines = []
     for m in models:
@@ -2457,12 +2460,8 @@ def gen_status(models: list[Model]) -> list[str]:
             lines.append(
                 f"* {r.label} PRs that conflict with `{r.default_branch}`: {r.links(conflicting)}."
             )
-        omitted = stale_omitted(m)
-        if omitted:
-            lines.append(
-                f"* {r.label} PRs whose head commit is more than {r.stale_after_days} days old,"
-                f" which the dependency chains with conflicts omit: {r.links(omitted)}."
-            )
+        if m.dormant_conflicting:
+            lines.append(f"* {dormant_note(m)}.")
     behind = []
     for m in models:
         r = m.repo
@@ -3182,12 +3181,16 @@ class PushChains(NamedTuple):
         missing_branches: the branches that have no working copy, but without whose working
             copies some conflict cannot be resolved by a chain:  the upstream default branch
             first, if it is one, then the PRs' branches in order of PR number.
+        dormant: the numbers, such as 147, of the dormant PRs that the chains omit (see
+            Model.dormant_omitted), in order; empty unless the chains are those with
+            conflicts.
     """
 
     chains: list[list[str]]
     missing: list[int]
     has_upstream: bool
     missing_branches: list[MissingBranch]
+    dormant: list[int]
 
 
 def update_chains(model: Model, prs: set[int], has_upstream: bool) -> list[UpdateChain]:
@@ -3288,7 +3291,7 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     chain depends on it (see conflicting_chains).
     No chain contains a PR that is in a cycle of the update graph or whose branch is updated
     from the branch of a PR in one (see Model.update_cycle_affected).
-    If conflicts_only is true, no chain contains a stale PR that stale_omitted returns.
+    If conflicts_only is true, no chain contains a PR of Model.dormant_omitted.
 
     The missing branches are those that the chains with conflicts would contain if every
     branch had a working copy, and that the conflicts involve (see chain_conflict_prs), but
@@ -3309,8 +3312,8 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     dirs = {n: pr_directories(r, r.prs[n], base) for n in model.open}
     missing = sorted(n for n in model.open if not dirs[n])
     acyclic = model.open - model.update_cycle_affected
-    if conflicts_only:
-        acyclic -= stale_omitted(model)
+    dormant = sorted(model.dormant_omitted) if conflicts_only else []
+    acyclic -= set(dormant)
     pushable = {n for n in acyclic if dirs[n]}
     updates = update_chains(model, pushable, bool(upstream))
     if conflicts_only:
@@ -3335,7 +3338,7 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
         directory = checkout_directory(r, base, owner)
         if directory is not None:
             missing_branches.append(MissingBranch(directory, f"{owner}:{branch}"))
-    return PushChains(chains, missing, bool(upstream), missing_branches)
+    return PushChains(chains, missing, bool(upstream), missing_branches, dormant)
 
 
 def checkout_directory(repo: Repo, base: str, owner: str) -> str | None:
@@ -3485,6 +3488,23 @@ def format_missing_branches(snapshot: dict[str, Any]) -> list[str]:
     return lines
 
 
+def dormant_note(model: Model) -> str:
+    """Return the note that lists the given model's Model.dormant_conflicting PRs.
+
+    Args:
+        model: a Model whose dormant_conflicting is not empty.
+
+    Returns:
+        The note, without final punctuation, such as "Randoop PRs whose head commit is more
+        than 730 days old, which the dependency chains with conflicts omit: #147".
+    """
+    r = model.repo
+    return (
+        f"{r.label} PRs whose head commit is more than {r.dormant_after_days} days old,"
+        f" which the dependency chains with conflicts omit: {r.links(model.dormant_conflicting)}"
+    )
+
+
 def push_commands(models: list[Model], all_chains: list[PushChains], base: str) -> PushCommands:
     """Return the shell commands that run the given `git-push-to` chains.
 
@@ -3507,7 +3527,7 @@ def push_commands(models: list[Model], all_chains: list[PushChains], base: str) 
     chain_count = 0
     # The first directories of the chains so far.
     first_dirs = set()
-    for m, (chains, missing, has_upstream, _) in zip(models, all_chains, strict=True):
+    for m, (chains, missing, has_upstream, _, dormant) in zip(models, all_chains, strict=True):
         r = m.repo
         chain_count += len(chains)
         for chain in chains:
@@ -3519,10 +3539,14 @@ def push_commands(models: list[Model], all_chains: list[PushChains], base: str) 
                 f"  {chain[-1]}",
             ]
             lines[-1] += " && \\"
-        if missing:
+        shown_missing = [n for n in missing if n not in dormant]
+        if shown_missing:
             notes.append(
-                f"{r.label} PRs with no working copy, which these commands omit: {r.links(missing)}"
+                f"{r.label} PRs with no working copy, which these commands omit:"
+                f" {r.links(shown_missing)}"
             )
+        if dormant and m.dormant_conflicting:
+            notes.append(dormant_note(m))
         if m.update_cycle_affected:
             notes.append(
                 f"{r.label} PRs in or after a cycle of dependencies, which these commands omit:"
