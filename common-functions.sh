@@ -1715,14 +1715,6 @@ Finish with a summary that says, for each conflict, what each side changed and h
   resolve_rerere_changed=''
   if [ "${resolve_refs_ok}" -eq 1 ]; then
     resolve_agent_other="$(resolve_other_changes)"
-    # 1 if git can run `changes_already_present`, which
-    # `one_sided_description` calls, and 0 otherwise, as when git's version
-    # cannot be parsed; a one-sided resolution is then reported for review.
-    if git_at_least 44; then
-      resolve_check_present=1
-    else
-      resolve_check_present=0
-    fi
     printf '%s\n' "${resolve_agent_other}" | while IFS= read -r resolve_file; do
       if [ -n "${resolve_file}" ]; then
         review_notice "${resolve_with} also changed: ${resolve_file}"
@@ -1882,13 +1874,13 @@ rerere_resolution_unchanged() {
 ##
 ## Returns 2 if FILE is exactly the version of a side that already contains
 ## the other side's changes to the file, as `changes_already_present`
-## determines when ${resolve_check_present} is 1; the description then says
-## so, as in "..., which keeps none of the changes of branch 'main' to the
-## file, but branch 'main' changed it only in commit 9ec8e71, whose change is
-## that of commit 7a3827e on feature".  A resolution that differs from that
-## side's version in whitespace does not qualify, because the agent's changes
-## to the whitespace deserve review.  Returns 0 otherwise.  Reads the
-## variables of `resolve_merge_conflicts` and of `resolve_with_agent`.
+## determines; the description then says so, as in "..., which keeps none of
+## the changes of branch 'main' to the file, but branch 'main' changed it only
+## in commit 9ec8e71, whose change is that of commit 7a3827e on feature".  A
+## resolution that differs from that side's version in whitespace does not
+## qualify, because the agent's changes to the whitespace deserve review.
+## Returns 0 otherwise.  Reads the variables of `resolve_merge_conflicts` and
+## of `resolve_with_agent`.
 one_sided_description() {
   osd_description=''
   # Stage 1 of the index is the merge base's version, stage 2 is HEAD's, and
@@ -1937,8 +1929,7 @@ one_sided_description() {
     osd_other_rev='HEAD'
     osd_other_name="${resolve_branch}"
   fi
-  if [ -n "${osd_how}" ] || [ "${resolve_check_present}" -ne 1 ] \
-    || ! changes_already_present "$1" "${osd_kept}" "${osd_other_rev}"; then
+  if [ -n "${osd_how}" ] || ! changes_already_present "$1" "${osd_kept}" "${osd_other_rev}"; then
     return 0
   fi
   case "${cap_others}" in
@@ -1963,15 +1954,14 @@ one_sided_description() {
 ## abbreviated hashes of the commits on OTHER's side that changed FILE,
 ## newest first, and ${cap_kepts} to the abbreviated hashes of the commits
 ## that KEPT contains whose changes they made, each once, in the same order;
-## each is a list such as "9ec8e71" or "1a2b3c4, 5d6e7f8".  Requires git 2.44
-## or later.
+## each is a list such as "9ec8e71" or "1a2b3c4, 5d6e7f8".
 ##
-## Fails if it cannot show that KEPT contains the changes:  if no commit on
-## OTHER's side changed FILE, as when only merge commits that made no change
-## of their own to FILE brought OTHER's changes to it; or if OTHER's side
-## changed FILE in a merge commit that made a change of its own to FILE, in
-## more than ${changes_present_max_commits} commits, or in a commit whose
-## change is not the merge of a commit that KEPT contains.
+## Fails if git is older than 2.44, or if it cannot show that KEPT contains
+## the changes:  if no commit on OTHER's side changed FILE, as when only merge
+## commits that made no change of their own to FILE brought OTHER's changes to
+## it; or if OTHER's side changed FILE in a merge commit that made a change of
+## its own to FILE, in more than ${changes_present_max_commits} commits, or in
+## a commit whose change is not the merge of a commit that KEPT contains.
 ##
 ## A commit C on OTHER's side made the changes of a commit Y that KEPT
 ## contains if C's version of FILE is the clean three-way merge of the
@@ -1983,14 +1973,26 @@ one_sided_description() {
 ## contains and that changed FILE are tried as Y, and only those that have
 ## exactly one merge base with C's parent:  with several, as in a
 ## criss-cross history, the base version is not well defined.
+##
+## In a partial clone, it fetches no object that the clone lacks, because
+## each such fetch makes a network round trip, and without a network it
+## waits and then fails.  A merge that needs such an object counts as not
+## making the change, as does one that has conflicts.
+##
+## When more than ${changes_present_max_unfiltered} commits are tried as Y,
+## `changes_present_plausible` first rules out most of those whose version of
+## FILE cannot yield C's.
 changes_present_max_commits=20
 changes_present_max_candidates=100
+changes_present_max_unfiltered=3
 changes_already_present() {
   cap_file="$1"
   cap_kept="$2"
   cap_other="$3"
   cap_others=''
   cap_kepts=''
+  # `git merge-file --object-id` and `git --no-lazy-fetch` need git 2.44.
+  git_at_least 44 || return 1
   # The merge base whose version of FILE is ${cap_base_blob}.  Most
   # candidates share one merge base, the point where KEPT and OTHER forked.
   cap_base=''
@@ -2003,7 +2005,7 @@ changes_already_present() {
   # which `%P`, unlike `--parents`, does not rewrite to skip the commits that
   # did not change FILE.  GIT_LITERAL_PATHSPECS keeps git from interpreting
   # glob characters in FILE.
-  cap_commits="$(GIT_LITERAL_PATHSPECS=1 git rev-list --no-commit-header --format='%H %P' \
+  cap_commits="$(GIT_LITERAL_PATHSPECS=1 git --no-lazy-fetch rev-list --no-commit-header --format='%H %P' \
     --max-count="$((changes_present_max_commits + 1))" "${cap_other}" --not "${cap_kept}" -- "${cap_file}")" \
     || return 1
   # A merge commit, which has several parents, does not qualify; nor does a
@@ -2014,19 +2016,24 @@ changes_already_present() {
         NR > max || NF != 2 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^[0-9a-f]+$/ { exit 1 }'; then
     return 1
   fi
-  cap_candidates="$(GIT_LITERAL_PATHSPECS=1 git rev-list \
+  cap_candidates="$(GIT_LITERAL_PATHSPECS=1 git --no-lazy-fetch rev-list \
     --max-count="${changes_present_max_candidates}" "${cap_kept}" --not "${cap_other}" -- "${cap_file}")" \
     || return 1
   if [ -z "${cap_candidates}" ] \
     || ! printf '%s\n' "${cap_candidates}" | awk '$0 !~ /^[0-9a-f]+$/ { exit 1 }'; then
     return 1
   fi
+  # shellcheck disable=SC2086 # Each candidate is one word.
+  set -- ${cap_candidates}
+  cap_count="$#"
   # One `git cat-file` reads every candidate's version of FILE, into
-  # ${cap_blob_CANDIDATE}.  It prints a line such as "REV:FILE missing" for
-  # a candidate that lacks FILE, which becomes "-".
+  # ${cap_blob_CANDIDATE}.  It prints a line such as "REV:FILE missing",
+  # which becomes "-", for a candidate that lacks FILE, and also, in a partial
+  # clone, for one whose version the clone lacks.  `git rev-parse`, which
+  # does not read the version, tells them apart.
   cap_candidate_blobs="$(printf '%s\n' "${cap_candidates}" \
     | CAP_FILE="${cap_file}" awk '{ print $0 ":" ENVIRON["CAP_FILE"] }' \
-    | git cat-file --batch-check='%(objectname)' \
+    | git --no-lazy-fetch cat-file --batch-check='%(objectname)' \
     | awk '/^[0-9a-f]+$/ { print; next } { print "-" }')" \
     || return 1
   # shellcheck disable=SC2086 # Each line is one word.
@@ -2035,7 +2042,10 @@ changes_already_present() {
     if [ "$#" -eq 0 ]; then
       return 1
     elif [ "$1" = '-' ]; then
-      eval "cap_blob_${cap_candidate}=\${cap_empty}"
+      # shellcheck disable=SC2034 # The `eval` below reads cap_blob.
+      cap_blob="$(git --no-lazy-fetch rev-parse --verify --quiet "${cap_candidate}:${cap_file}")" \
+        || cap_blob="${cap_empty}"
+      eval "cap_blob_${cap_candidate}=\${cap_blob}"
     else
       eval "cap_blob_${cap_candidate}=\$1"
     fi
@@ -2048,11 +2058,28 @@ changes_already_present() {
     cap_parent="$2"
     shift 2
     # A commit that deleted FILE does not qualify.
-    cap_want="$(git rev-parse --verify --quiet "${cap_commit}:${cap_file}")" || return 1
-    cap_current="$(git rev-parse --verify --quiet "${cap_parent}:${cap_file}")" \
+    cap_want="$(git --no-lazy-fetch rev-parse --verify --quiet "${cap_commit}:${cap_file}")" || return 1
+    cap_current="$(git --no-lazy-fetch rev-parse --verify --quiet "${cap_parent}:${cap_file}")" \
       || cap_current="${cap_empty}"
     cap_found=''
+    # The candidates that `changes_present_plausible` printed, each preceded
+    # and followed by a space; or "", which admits every candidate.  The
+    # filter costs more processes than a few merges, so it runs only for many
+    # candidates.  It omits a candidate whose version the repository lacks,
+    # which loses no match:  a merge needs that version unless the result is
+    # that version, and then WANT is that version, which the repository
+    # lacks too, so the filter prints every candidate.
+    cap_plausible=''
+    if [ "${cap_count}" -gt "${changes_present_max_unfiltered}" ]; then
+      # shellcheck disable=SC2086 # Each candidate is one word.
+      cap_plausible=" $(changes_present_plausible "${cap_file}" "${cap_current}" "${cap_want}" ${cap_candidates} \
+        | tr '\n' ' ')"
+    fi
     for cap_candidate in ${cap_candidates}; do
+      case "${cap_plausible}" in
+        '' | *" ${cap_candidate} "*) ;;
+        *) continue ;;
+      esac
       eval "cap_candidate_blob=\${cap_blob_${cap_candidate}}"
       # Merging the parent's own version into it leaves the parent's
       # version, which is not C's.
@@ -2063,19 +2090,27 @@ changes_already_present() {
       fi
       if [ "${cpm_base}" != "${cap_base}" ]; then
         cap_base="${cpm_base}"
-        cap_base_blob="$(git rev-parse --verify --quiet "${cap_base}:${cap_file}")" \
+        cap_base_blob="$(git --no-lazy-fetch rev-parse --verify --quiet "${cap_base}:${cap_file}")" \
           || cap_base_blob="${cap_empty}"
       fi
-      # The merge is hashed without being written to the repository, as
-      # `git merge-file --object-id` without `-p` would write it.
-      # `git merge-file` fails if the merge has conflicts or a version is
-      # binary.  Its exit status is lost in the pipe, so on failure its
-      # output is followed by the hash ${cap_want}, which makes the hash of
-      # the whole differ from ${cap_want}:  a blob that contains its own hash
-      # is infeasible to find.
-      cap_merged="$({ git merge-file -p --object-id --diff-algorithm=histogram \
-        "${cap_current}" "${cap_base_blob}" "${cap_candidate_blob}" 2> /dev/null \
-        || printf '\n%s\n' "${cap_want}"; } | git hash-object --stdin)" || return 1
+      if [ "${cap_candidate_blob}" = "${cap_base_blob}" ]; then
+        # The merge leaves the parent's version, as above.
+        continue
+      elif [ "${cap_base_blob}" = "${cap_current}" ]; then
+        # The merge yields the candidate's version.
+        cap_merged="${cap_candidate_blob}"
+      else
+        # The merge is hashed without being written to the repository, as
+        # `git merge-file --object-id` without `-p` would write it.
+        # `git merge-file` fails if the merge has conflicts or a version is
+        # binary or missing.  Its exit status is lost in the pipe, so on
+        # failure its output is followed by the hash ${cap_want}, which makes
+        # the hash of the whole differ from ${cap_want}:  a blob that
+        # contains its own hash is infeasible to find.
+        cap_merged="$({ git --no-lazy-fetch merge-file -p --object-id --diff-algorithm=histogram \
+          "${cap_current}" "${cap_base_blob}" "${cap_candidate_blob}" 2> /dev/null \
+          || printf '\n%s\n' "${cap_want}"; } | git hash-object --stdin)" || return 1
+      fi
       if [ "${cap_merged}" = "${cap_want}" ]; then
         cap_found="${cap_candidate}"
         break
@@ -2091,6 +2126,87 @@ changes_already_present() {
       *) cap_kepts="${cap_kepts:+${cap_kepts}, }${cap_found}" ;;
     esac
   done
+}
+
+## Usage: changes_present_plausible FILE CURRENT WANT CANDIDATE...
+## Prints, one per line, each CANDIDATE whose version of FILE could be the
+## other version in a clean three-way merge whose own version is CURRENT and
+## whose result is WANT.  CURRENT and WANT are hashes of blobs, such as
+## "3b18e512dba79e4c8300dd08aeb37f8e728b8dad", and each CANDIDATE is the full
+## hash of a commit.  FILE is a file name relative to the top level of the
+## working tree, such as "src/foo.c".
+##
+## Such a merge takes each line of its result from its own version or from
+## the other version, so the other version contains each line that WANT has
+## more times than CURRENT has.  Only the 10 longest such lines, which tend
+## to occur in the fewest other versions, are checked, and each only as a
+## substring of a line.  So the check is cheap and conservative:  one
+## `git grep` checks every CANDIDATE, whereas a merge needs several processes
+## per CANDIDATE.
+## Prints every CANDIDATE if no line qualifies, as when WANT only deletes
+## lines of CURRENT or the repository lacks CURRENT or WANT; or if git cannot
+## search the candidates, as when a CANDIDATE is not a commit or a line is
+## too long to pass as an argument.  Otherwise, does not print a CANDIDATE
+## whose version of FILE the repository lacks, as a partial clone can.
+changes_present_plausible() {
+  cpp_file="$1"
+  # The 10 longest lines that WANT has more times than CURRENT has, longest
+  # first, one per line.  A line that holds a NUL does not qualify, because
+  # the shell cannot pass it as an argument.
+  cpp_lines="$(git --no-lazy-fetch cat-file blob "$2" 2> /dev/null \
+    | LC_ALL=C CPP_WANT="$3" awk '
+        { count[$0]++ }
+        END {
+          cmd = "git --no-lazy-fetch cat-file blob " ENVIRON["CPP_WANT"] " 2> /dev/null"
+          while ((cmd | getline line) > 0) {
+            if (count[line] > 0) {
+              count[line]--
+            } else if (line != "" && line ~ /^[\t\r -~\200-\377]*$/ && !(line in seen)) {
+              seen[line] = 1
+              lines[++n] = line
+            }
+          }
+          close(cmd)
+          for (k = 1; k <= n && k <= 10; k++) {
+            longest = k
+            for (i = k + 1; i <= n; i++) {
+              if (length(lines[i]) > length(lines[longest])) {
+                longest = i
+              }
+            }
+            print lines[longest]
+            lines[longest] = lines[k]
+          }
+        }')"
+  shift 3
+  if [ -z "${cpp_lines}" ]; then
+    printf '%s\n' "$@"
+    return 0
+  fi
+  cpp_candidates="$*"
+  # The arguments become `-e LINE` for each line.  The shell splits
+  # ${cpp_lines} on newlines, with globbing off so that no line is expanded.
+  set --
+  cpp_saved_ifs="${IFS}"
+  IFS='
+'
+  set -f
+  for cpp_line in ${cpp_lines}; do
+    set -- "$@" -e "${cpp_line}"
+  done
+  set +f
+  IFS="${cpp_saved_ifs}"
+  # `git grep` prints a line such as "REV:FILE" for each CANDIDATE whose
+  # version contains every line, and exits with status 1 if there is none.
+  # It skips a version that it cannot read, with a message and without
+  # changing its exit status.
+  # shellcheck disable=SC2086 # Each candidate is one word.
+  if cpp_found="$(GIT_LITERAL_PATHSPECS=1 git --no-lazy-fetch grep --no-color -l --all-match -F \
+    "$@" ${cpp_candidates} -- "${cpp_file}" 2> /dev/null)"; then
+    printf '%s\n' "${cpp_found}" | sed 's/:.*//'
+  elif [ "$?" -ne 1 ]; then
+    printf '%s\n' ${cpp_candidates}
+  fi
 }
 
 ## Usage: changes_present_merge_base COMMIT1 COMMIT2
