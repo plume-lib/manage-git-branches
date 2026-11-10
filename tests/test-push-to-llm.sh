@@ -2135,6 +2135,55 @@ if [ "$(git -C "${remote}" rev-parse refs/heads/feature^1^2)" != "$(git -C "${ma
   fail "build fix: the fix is not on top of the merge"
 fi
 
+## A pre-commit hook that, like a formatter's, rejects the commit of the fix
+## after reformatting the fixed file does not stop git-push-to, which builds
+## the file as the hook left it and commits it.  The hook leaves a merge
+## commit alone.
+setup_case build-fix-hook build
+install_git_hook "${feature_dir}" pre-commit \
+  'if git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then exit 0; fi' \
+  "tr 'a-z' 'A-Z' < other.txt > hook.tmp" \
+  'if cmp -s other.txt hook.tmp; then rm hook.tmp; exit 0; fi' \
+  'mv hook.tmp other.txt' \
+  'exit 1'
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "build fix with a reformatting hook: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"the pre-commit hook changed other.txt"*) ;;
+  *) fail "build fix with a reformatting hook: no diagnostic about the hook: ${push_output}" ;;
+esac
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
+  fail "build fix with a reformatting hook: wrong message for the fix: ${message}"
+fi
+if [ "$(git -C "${remote}" rev-parse refs/heads/feature^1^2)" != "$(git -C "${main_dir}" rev-parse HEAD)" ]; then
+  fail "build fix with a reformatting hook: the fix is not on top of the merge"
+fi
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "FINE" ]; then
+  fail "build fix with a reformatting hook: wrong other.txt: $(git -C "${remote}" show refs/heads/feature:other.txt)"
+fi
+
+## A pre-commit hook that rejects the commit of the fix after breaking the
+## build stops git-push-to, which builds the files as the hook left them and
+## does not commit them.
+setup_case build-fix-hook-breaks build
+install_git_hook "${feature_dir}" pre-commit \
+  'if git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then exit 0; fi' \
+  'if grep -q HOOKED other.txt; then exit 0; fi' \
+  'echo "BROKEN HOOKED" >> other.txt' \
+  'exit 1'
+STUB_BUILD=fix push_to good --llm
+check_not_pushed "build fix with a hook that breaks the build"
+case "${push_output}" in
+  *"not committing again"*"cannot commit the changes of claude"*) ;;
+  *) fail "build fix with a hook that breaks the build: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" log -1 --format=%s HEAD)" != "Merge branch 'main' into feature" ]; then
+  fail "build fix with a hook that breaks the build: committed the fix"
+fi
+
 ## A merge in the history of the merged branch is not one that the fix
 ## follows:  it was built where that branch lives.  Main merges a side
 ## branch, so that its history has a merge commit.

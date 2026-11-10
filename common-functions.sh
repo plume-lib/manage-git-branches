@@ -3169,9 +3169,11 @@ build_logged() {
 ## feature.  Branch feature has commits that ...".  Once the build succeeds,
 ## commits the agent's changes, if any, with the message MESSAGE, such as
 ## "Fix the build after merging branch 'main'", and prints a notice that
-## names the commit, for review (see `review_notice`).  Returns 1, after
-## printing a diagnostic, if the build still fails; the agent's changes then
-## remain, staged but not committed.
+## names the commit, for review (see `review_notice`).  If a pre-commit hook
+## rejects the commit after changing files, builds again before committing
+## the files as the hook left them (see `commit_staged`).  Returns 1, after
+## printing a diagnostic, if the build still fails or the changes cannot be
+## committed; the agent's changes then remain, staged but not committed.
 build_fix_attempts=3
 fix_failed_build() {
   fix_with="$1"
@@ -3271,7 +3273,8 @@ $(tail -n 100 "${fix_log}")"
     fi
     fix_attempt=$((fix_attempt + 1))
   done
-  if ! printf '%s\n' "$3" | git commit -q --cleanup=whitespace -F -; then
+  # A pre-commit hook that changes the files is followed by another build.
+  if ! commit_staged "$3" "${SCRIPT_DIR}"/compile-project; then
     echo "${SCRIPT_NAME}: cannot commit the changes of ${fix_with} in $(pwd)" >&2
     return 1
   fi
@@ -3334,7 +3337,8 @@ parse_llm_option() {
 ## in DIRECTORY, if the pull fails without a merge in progress, as when the
 ## fetch fails or a rebase has conflicts, if the merge's message cannot be
 ## composed, or if the merge's conflicts are not resolved or the merge cannot
-## be committed.
+## be committed.  A merge without conflicts whose commit a pre-merge-commit
+## hook rejected is committed as `commit_rejected_merge` describes.
 pull_resolving() {
   pull_resolver="$1"
   pull_dir="$2"
@@ -3354,27 +3358,30 @@ pull_resolving() {
   # that fast-forwards, rebases, or stops at conflicts runs no editor.
   # `rerere.autoUpdate` false and the configured conflict style are as for
   # the merge in `merge_build_push`.
+  # The state of the working tree before the pull, for
+  # `commit_rejected_merge`.
+  commit_staged_clean=0
+  if pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)"; then
+    commit_staged_before "${pull_top}"
+  fi
   # shellcheck disable=SC2016 # the editor's shell expands the variables
   if SCRIPT_DIR="${SCRIPT_DIR}" SCRIPT_NAME="${SCRIPT_NAME}" \
     GIT_EDITOR='sh -c ". \"\${SCRIPT_DIR}/common-functions.sh\" && pull_merge_message > \"\$1\"" pull-merge-message' \
     git -C "${pull_dir}" -c rerere.autoUpdate=false pull -q --edit "$@"; then
-    pull_conflicted=0
+    pull_merging=0
   else
     echo "${SCRIPT_NAME}: problem pulling in ${pull_dir}" >&2
     if ! git -C "${pull_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
       return 1
     fi
-    # A merge without conflicts is in progress only if the editor failed.
-    if [ -z "$(git -C "${pull_dir}" ls-files --unmerged)" ]; then
-      echo "${SCRIPT_NAME}: cannot compose a message for the merge that the pull made in ${pull_dir}; the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
-      report_merge_in_progress_in "${pull_dir}" "\`${SCRIPT_NAME}\` could not compose its message."
-      return 1
-    fi
-    pull_conflicted=1
-    # A pull that stops at conflicts runs no editor, so the message is
-    # composed here.  It is composed at the top level of the working tree,
-    # where git runs the editor and against which git resolves a remote's
-    # relative URL.
+    pull_merging=1
+    # A pull that stops at conflicts runs no editor, and neither does one
+    # whose pre-merge-commit hook rejects the commit of a merge without
+    # conflicts, so the message is composed here.  (A merge without conflicts
+    # is also in progress if the editor failed; `commit_rejected_merge` then
+    # finds no change by a hook, and does not commit.)  The message is
+    # composed at the top level of the working tree, where git runs the
+    # editor and against which git resolves a remote's relative URL.
     if ! pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)" \
       || ! pull_message="$(cd -- "${pull_top}" && pull_merge_message)"; then
       echo "${SCRIPT_NAME}: cannot compose a message for the merge that the pull made in ${pull_dir}; the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
@@ -3391,11 +3398,11 @@ pull_resolving() {
     # shellcheck disable=SC2034 # used by the commands that source this file
     pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
   fi
-  if [ "${pull_conflicted}" -eq 0 ]; then
+  if [ "${pull_merging}" -eq 0 ]; then
     return 0
   fi
   # Git names the conflicted files relative to the top level of the working
-  # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
+  # tree, so `commit_resolved_merge` runs there, in a subshell that leaves
   # the current directory unchanged.
   (
     if ! pull_top="$(git -C "${pull_dir}" rev-parse --show-toplevel)" \
@@ -3526,21 +3533,149 @@ report_merge_in_progress_in() {
   )
 }
 
+## Usage: commit_staged_before DIRECTORY
+## Records the state of the working tree whose top level is DIRECTORY, before
+## a commit or a merge, for `commit_staged_again`:  sets
+## ${commit_staged_clean} to 1 if the working tree matches the index and its
+## untracked files can be listed, and to 0 otherwise, and sets
+## ${commit_staged_untracked} to those files, as `untracked_files` prints
+## them.
+commit_staged_before() {
+  commit_staged_clean=0
+  if git -C "$1" diff --quiet \
+    && commit_staged_untracked="$(cd -- "$1" && untracked_files)"; then
+    commit_staged_clean=1
+  fi
+}
+
+## Usage: commit_staged MESSAGE [COMMAND...]
+## Commits the changes that are staged in the current directory, the top
+## level of a working tree, with the message MESSAGE; the commit is a merge
+## commit if a merge is in progress.  `--cleanup=whitespace` keeps every line
+## of MESSAGE, whatever comment character the configuration names.  If a
+## pre-commit hook rejects the commit, commits again if
+## `commit_staged_again`, given COMMAND, can.
+##
+## Returns 0 if a commit succeeded, and a nonzero status otherwise.
+commit_staged() {
+  commit_staged_message="$1"
+  shift
+  commit_staged_before .
+  # `git write-tree` fails if the index has unmerged entries, as git's
+  # commit does.
+  commit_staged_tree="$(git write-tree 2> /dev/null)" || commit_staged_tree=''
+  if printf '%s\n' "${commit_staged_message}" | git commit -q --cleanup=whitespace -F -; then
+    return 0
+  fi
+  commit_staged_again pre-commit "${commit_staged_message}" "${commit_staged_tree}" "$@"
+}
+
+## Usage: commit_staged_again HOOK MESSAGE TREE [COMMAND...]
+## Commits again, with `git commit` and the message MESSAGE, in the current
+## directory, the top level of a working tree, after the hook HOOK, such as
+## "pre-commit", rejected a commit there.  A hook, such as one that runs a
+## formatter, can reject a commit after changing the files that the commit
+## changes, so that a commit of the files as the hook left them succeeds.
+## TREE is the tree that the rejected commit would have had, as a hash such
+## as "4b825dc642cb6eb9a060e54bf8d69288fbee4904", or empty if it is not
+## known.  This function commits again only if
+##  * the working tree matched the index before the commit, as
+##    ${commit_staged_clean} says (see `commit_staged_before`);
+##  * the index still has the tree TREE, so that the hook staged nothing;
+##  * the untracked files are still those in ${commit_staged_untracked}, so
+##    that the hook created and deleted none (a file that git ignores is not
+##    checked); and
+##  * the hook changed at least one file, deleted none, and only modified
+##    files that the commit changes, relative to HEAD.
+## Then it prints the names of those files and stages them.  If COMMAND is
+## given, it runs COMMAND, as a check of the files as the hook left them, and
+## commits only if COMMAND succeeds.
+##
+## Returns 0 if the commit succeeded, and a nonzero status otherwise.
+commit_staged_again() {
+  commit_again_hook="$1"
+  commit_again_message="$2"
+  commit_again_tree="$3"
+  shift 3
+  # The record is of the state before one commit, so it is not used again.
+  commit_again_clean="${commit_staged_clean:-0}"
+  commit_staged_clean=0
+  if [ "${commit_again_clean}" != 1 ] || [ -z "${commit_again_tree}" ] \
+    || [ "$(git write-tree 2> /dev/null)" != "${commit_again_tree}" ] \
+    || ! commit_again_untracked="$(untracked_files)" \
+    || [ "${commit_again_untracked}" != "${commit_staged_untracked}" ]; then
+    return 1
+  fi
+  # As for ${resolve_files} in `resolve_merge_conflicts`, `tr` turns each NUL
+  # into a newline and each newline within a pathname into the byte 001, so
+  # that a pathname that contains a newline is not split.
+  # `git diff --name-status -z` writes a status, such as "M" for a modified
+  # file, and then a pathname, for each file, so the lines alternate between
+  # the two.  `--no-renames` keeps git from pairing a deleted file with an
+  # added one.  The output of a git command that fails is empty, which makes
+  # this function return 1:  the hook seems to have changed nothing, or to
+  # have changed a file that the commit does not change.
+  commit_again_status="$(git diff --name-status --no-renames -z | tr '\n\000' '\001\n')"
+  commit_again_changed="$(printf '%s\n' "${commit_again_status}" | sed -n -e 'n;p')"
+  commit_again_committed="$(git diff --cached --name-only -z HEAD | tr '\n\000' '\001\n')"
+  if [ -z "${commit_again_status}" ] \
+    || printf '%s\n' "${commit_again_status}" | sed -n -e 'p;n' | grep -v -x -q M \
+    || printf '%s\n' "${commit_again_changed}" | grep -F -x -v -q -- "${commit_again_committed}"; then
+    return 1
+  fi
+  printf '%s\n' "${commit_again_changed}" | while IFS= read -r commit_again_file; do
+    echo "${SCRIPT_NAME}: the ${commit_again_hook} hook changed ${commit_again_file}; staging its changes" >&2
+  done
+  if ! git add -u; then
+    return 1
+  fi
+  if [ $# -gt 0 ] && ! "$@"; then
+    echo "${SCRIPT_NAME}: not committing again in $(pwd), because \`$*\` failed; the changes of the ${commit_again_hook} hook are staged" >&2
+    return 1
+  fi
+  echo "${SCRIPT_NAME}: committing again in $(pwd)" >&2
+  printf '%s\n' "${commit_again_message}" | git commit -q --cleanup=whitespace -F -
+}
+
+## Usage: commit_rejected_merge MESSAGE
+## Commits, with the message MESSAGE, the merge without conflicts that is in
+## progress in the current directory, the top level of a working tree, after
+## a pre-merge-commit hook rejected the commit that `git merge` or `git pull`
+## tried to make.  It commits as `commit_staged_again` describes, which
+## requires that `commit_staged_before` recorded the state of the working
+## tree before the merge.  Before committing, it runs the pre-merge-commit
+## hook again, on the files as the hook left them; `git commit` then runs the
+## pre-commit hook, as for a merge whose conflicts were resolved.
+##
+## Returns 0 if the commit succeeded, and a nonzero status otherwise.
+commit_rejected_merge() {
+  # The tree of the merge, which the index held when the hook ran.
+  commit_rejected_tree="$(git merge-tree --write-tree --no-messages HEAD MERGE_HEAD 2> /dev/null)" \
+    || commit_rejected_tree=''
+  commit_staged_again pre-merge-commit "$1" "${commit_rejected_tree}" \
+    git hook run --ignore-missing pre-merge-commit
+}
+
 ## Usage: commit_resolved_merge RESOLVER COMMIT SOURCE MESSAGE
 ## Resolves the conflicts of the merge of COMMIT that is in progress in the
 ## current directory, the top level of a working tree, with
 ## `resolve_merge_conflicts`, given RESOLVER, COMMIT, and SOURCE, and commits
-## the merge with the message MESSAGE.  Returns 1, after printing a
-## diagnostic, on failure, and leaves the merge in progress, which it notes
-## in AGENT-TODO.md, as `resolve_merge_conflicts` does.
+## the merge with the message MESSAGE.  A merge without conflicts, whose
+## commit a pre-merge-commit hook rejected, is committed with
+## `commit_rejected_merge` instead.  Returns 1, after printing a diagnostic,
+## on failure, and leaves the merge in progress, which it notes in
+## AGENT-TODO.md, as `resolve_merge_conflicts` does.
 commit_resolved_merge() {
-  if ! resolve_merge_conflicts "$1" "$2" "$3"; then
+  if [ -z "$(git ls-files --unmerged)" ]; then
+    commit_resolved_with=commit_rejected_merge
+  elif ! resolve_merge_conflicts "$1" "$2" "$3"; then
     return 1
+  else
+    commit_resolved_with=commit_staged
   fi
-  # `-F` supplies MESSAGE, rather than MERGE_MSG, to which `git merge`
-  # appended a list of the conflicts.  `--cleanup=whitespace` keeps every
-  # line of MESSAGE, whatever comment character the configuration names.
-  if ! printf '%s\n' "$4" | git commit -q --cleanup=whitespace -F -; then
+  # The message is MESSAGE, rather than MERGE_MSG, to which `git merge`
+  # appended a list of the conflicts.
+  if ! "${commit_resolved_with}" "$4"; then
     echo "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
     report_merge_in_progress "\`${SCRIPT_NAME}\` could not commit it."
     return 1
@@ -4593,7 +4728,9 @@ version of it.  This merge brings the rest of it, from commit ${mlph_short_p}." 
 ## merged an earlier version, if that avoids conflicts (see
 ## `merge_landed_pr_heads`).  If the merge has conflicts,
 ## `resolve_merge_conflicts` resolves them, asking RESOLVER, if it is given
-## and not empty, about any that `git rerere` did not resolve.  If the build
+## and not empty, about any that `git rerere` did not resolve.  A merge
+## without conflicts whose commit a pre-merge-commit hook rejected is
+## committed as `commit_rejected_merge` describes.  If the build
 ## fails,
 ## `fix_failed_build` asks RESOLVER, if it is given and not empty, to fix
 ## it, but only if a merge on the current branch might have broken the
@@ -4655,6 +4792,13 @@ merge_build_push() {
   # replays a resolution only for a conflict region that encloses the same
   # text as when the resolution was recorded, and the style determines which
   # lines a region encloses.
+  # The state of the working tree before the merge, for
+  # `commit_rejected_merge`.
+  if ! merge_top="$(git rev-parse --show-toplevel)"; then
+    echo "${SCRIPT_NAME}: cannot find the top level of the working tree $(pwd)" >&2
+    return 1
+  fi
+  commit_staged_before "${merge_top}"
   if ! git -c rerere.autoUpdate=false merge -q --no-edit --no-log \
     -m "${merge_message}" "$1"; then
     # A failed merge without MERGE_HEAD did not start, for example because it
@@ -4672,8 +4816,7 @@ merge_build_push() {
     # Git names the conflicted files relative to the top level of the working
     # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
     # the current directory unchanged.
-    if ! merge_top="$(git rev-parse --show-toplevel)" \
-      || ! (cd "${merge_top}" && commit_resolved_merge "${5:-}" "$1" "$3" "${merge_message}"); then
+    if ! (cd "${merge_top}" && commit_resolved_merge "${5:-}" "$1" "$3" "${merge_message}"); then
       if [ -n "${merged_landed_prs}" ]; then
         echo "${SCRIPT_NAME}: before merging $3, the branch in $(pwd) merged the final versions of pull requests ${merged_landed_prs}; if you abort the merge, \`git reset --keep ${merge_old_head}\` also removes those merges" >&2
       fi
