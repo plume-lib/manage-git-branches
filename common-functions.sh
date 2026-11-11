@@ -3575,7 +3575,11 @@ commit_staged() {
 ## directory, the top level of a working tree, after the hook HOOK, such as
 ## "pre-commit", rejected a commit there.  A hook, such as one that runs a
 ## formatter, can reject a commit after changing the files that the commit
-## changes, so that a commit of the files as the hook left them succeeds.
+## changes, so that a commit of the files as the hook left them succeeds.  A
+## hook that formats the whole project, such as one that runs
+## `./gradlew spotlessApply`, can also change a file that the commit does not
+## change, if that file was not formatted at HEAD; the commit then includes
+## the hook's changes to that file too.
 ## TREE is the tree that the rejected commit would have had, as a hash such
 ## as "4b825dc642cb6eb9a060e54bf8d69288fbee4904", or empty if it is not
 ## known.  This function commits again only if
@@ -3585,9 +3589,10 @@ commit_staged() {
 ##  * the untracked files are still those in ${commit_staged_untracked}, so
 ##    that the hook created and deleted none (a file that git ignores is not
 ##    checked); and
-##  * the hook changed at least one file, deleted none, and only modified
-##    files that the commit changes, relative to HEAD.
-## Then it prints the names of those files and stages them.  If COMMAND is
+##  * the hook changed at least one file and deleted none.
+## Then it prints the names of the files that the hook changed, saying which
+## of them the commit does not change, relative to HEAD, so that you can review
+## the hook's changes to them (see `append_summary`), and stages them.  If COMMAND is
 ## given, it runs COMMAND, as a check of the files as the hook left them, and
 ## commits only if COMMAND succeeds.
 ##
@@ -3613,18 +3618,21 @@ commit_staged_again() {
   # file, and then a pathname, for each file, so the lines alternate between
   # the two.  `--no-renames` keeps git from pairing a deleted file with an
   # added one.  The output of a git command that fails is empty, which makes
-  # this function return 1:  the hook seems to have changed nothing, or to
-  # have changed a file that the commit does not change.
+  # this function return 1:  the hook seems to have changed nothing.
   commit_again_status="$(git diff --name-status --no-renames -z | tr '\n\000' '\001\n')"
   commit_again_changed="$(printf '%s\n' "${commit_again_status}" | sed -n -e 'n;p')"
   commit_again_committed="$(git diff --cached --name-only -z HEAD | tr '\n\000' '\001\n')"
   if [ -z "${commit_again_status}" ] \
-    || printf '%s\n' "${commit_again_status}" | sed -n -e 'p;n' | grep -v -x -q M \
-    || printf '%s\n' "${commit_again_changed}" | grep -F -x -v -q -- "${commit_again_committed}"; then
+    || printf '%s\n' "${commit_again_status}" | sed -n -e 'p;n' | grep -v -x -q M; then
     return 1
   fi
   printf '%s\n' "${commit_again_changed}" | while IFS= read -r commit_again_file; do
-    echo "${SCRIPT_NAME}: the ${commit_again_hook} hook changed ${commit_again_file}; staging its changes" >&2
+    if printf '%s\n' "${commit_again_committed}" | grep -F -x -q -- "${commit_again_file}"; then
+      echo "${SCRIPT_NAME}: the ${commit_again_hook} hook changed ${commit_again_file}; staging its changes" >&2
+    else
+      echo "${SCRIPT_NAME}: the ${commit_again_hook} hook changed ${commit_again_file}, which the commit did not change; staging its changes, which you should review" >&2
+      append_summary "the ${commit_again_hook} hook changed $(pwd)/${commit_again_file}, which the commit did not change; review its changes, which the commit includes"
+    fi
   done
   if ! git add -u; then
     return 1

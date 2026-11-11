@@ -323,14 +323,25 @@ case "${push_output}" in
   *) fail "a hook that reformats the merged file: no diagnostic about the hook: ${push_output}" ;;
 esac
 
-## A hook that rejects the commit after changing a file that the merge does
-## not change stops git-push-to.
+## A hook that, like one that formats the whole project, rejects the commit
+## after reformatting a file that the merge does not change, does not stop
+## git-push-to, which commits that file too, as the hook left it, and lists
+## it for review.
 setup_case hook-changes-other
 record_resolution false
-install_git_hook "${feature_dir}" pre-commit 'echo hooked >> other.txt' 'exit 1'
+install_git_hook "${feature_dir}" pre-commit "tr 'a-z' 'A-Z' < other.txt > hook.tmp
+if cmp -s other.txt hook.tmp; then rm hook.tmp; exit 0; fi
+mv hook.tmp other.txt
+exit 1"
 push_to
-check_not_resolved "a hook that changes another file" "cannot commit the merge"
-check_no_retry "a hook that changes another file"
+check_resolved "a hook that reformats another file" "Merge branch 'main' into feature"
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != OTHER ]; then
+  fail "a hook that reformats another file: the merge lacks the hook's change: $(git -C "${remote}" show refs/heads/feature:other.txt)"
+fi
+case "${push_output}" in
+  *"the pre-commit hook changed other.txt, which the commit did not change; staging its changes, which you should review"*) ;;
+  *) fail "a hook that reformats another file: no diagnostic about the file: ${push_output}" ;;
+esac
 
 ## A hook that rejects the commit after reformatting the merged file and
 ## creating a file stops git-push-to.
