@@ -3067,6 +3067,26 @@ ${report_merge_note}
   fi
 }
 
+## Usage: stop_at_merge DIAGNOSTIC REASON [UPSTREAM]
+## Prints DIAGNOSTIC, which says why this script leaves the merge in progress
+## in the current directory, the top level of a working tree.  If UPSTREAM,
+## the name of the branch's upstream branch, such as "origin/feature", is
+## given and not empty, then the merge is redundant (see
+## `redundant_merge_upstream` in git-push-to):  DIAGNOSTIC does not say what
+## to do, and this function then prints a diagnostic that says that the
+## merge is probably redundant and should be aborted.  Otherwise DIAGNOSTIC
+## says what to do.  Notes the merge in AGENT-TODO.md, with REASON, such as
+## "No conflicted file remains.", and with UPSTREAM (see
+## `report_merge_in_progress`).  Returns 1.
+stop_at_merge() {
+  echo "$1" >&2
+  if [ -n "${3:-}" ]; then
+    echo "${SCRIPT_NAME}: the merge is probably redundant:  $3, the upstream branch, already contains both of its sides; unless its resolution has changes that $3 lacks, abort it with \`git merge --abort\`, and run \`${SCRIPT_NAME}\` again" >&2
+  fi
+  report_merge_in_progress "$2" "${3:-}"
+  return 1
+}
+
 ## Usage: record_conflicted_files
 ## Records, in the file manage-git-branches-conflicts in the git directory of
 ## the current directory, the top level of a working tree, MERGE_HEAD and the

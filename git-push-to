@@ -669,12 +669,16 @@ redundant_merge_upstream() {
 ## `changed_conflicted_files`); or if another file differs from AUTO_MERGE,
 ## git's automatic merge, in the working tree or in the index (see
 ## `resolve_other_changes`).  Without AUTO_MERGE, whether somebody has worked
-## on it is unknown, which the sentence says.  Prints nothing if nobody has
+## on it is unknown, which the sentence says, as it is if the conflicted
+## files cannot be listed.  Prints nothing if nobody has
 ## worked on it; then `git merge --abort` discards nothing but git's
 ## automatic merge and the resolutions that `git rerere` applied, which it
 ## can apply again.
 merge_work() {
-  work_files="$(conflicted_files)"
+  if ! work_files="$(conflicted_files)"; then
+    echo "Its conflicted files could not be listed."
+    return 0
+  fi
   if [ -z "${work_files}" ]; then
     echo "No conflicted file remains."
     return 0
@@ -683,7 +687,10 @@ merge_work() {
     echo "Git recorded no AUTO_MERGE for it, so whether anybody has worked on it is unknown."
     return 0
   fi
-  work_changed="$(changed_conflicted_files)"
+  if ! work_changed="$(changed_conflicted_files)"; then
+    echo "Its conflicted files could not be listed."
+    return 0
+  fi
   if [ -n "${work_changed}" ]; then
     echo "Its conflicted files changed after the merge stopped:  $(printf '%s\n' "${work_changed}" | paste -s -d ' ' -)."
     return 0
@@ -692,25 +699,6 @@ merge_work() {
   if [ -n "${work_other}" ]; then
     echo "Files that it did not leave conflicted changed after it stopped:  $(printf '%s\n' "${work_other}" | paste -s -d ' ' -)."
   fi
-}
-
-## Usage: stop_at_merge UPSTREAM DIAGNOSTIC REASON
-## Prints DIAGNOSTIC, which says why this script leaves the merge in progress
-## in the current directory, the top level of a working tree.  If UPSTREAM,
-## the name of the branch's upstream branch, such as "origin/feature", is not
-## empty, then the merge is redundant (see `redundant_merge_upstream`):
-## DIAGNOSTIC does not say what to do, and this function then prints a
-## diagnostic that says that the merge is probably redundant and should be
-## aborted.  Otherwise DIAGNOSTIC says what to do.  Notes the merge in
-## AGENT-TODO.md, with REASON, such as "No conflicted file remains.", and
-## with UPSTREAM (see `report_merge_in_progress`).  Returns 1.
-stop_at_merge() {
-  echo "$2" >&2
-  if [ -n "$1" ]; then
-    echo "${SCRIPT_NAME}: the merge is probably redundant:  $1, the upstream branch, already contains both of its sides; unless its resolution has changes that $1 lacks, abort it with \`git merge --abort\`, and run \`${SCRIPT_NAME}\` again" >&2
-  fi
-  report_merge_in_progress "$3" "$1"
-  return 1
 }
 
 ## Usage: settle_merge_in_progress DIRECTORY
@@ -757,7 +745,7 @@ settle_merge_in_progress() {
       ;;
   esac
   if [ -z "${settle_agents}" ] && [ "${settle_agents_status}" -eq 2 ]; then
-    stop_at_merge '' "${settle_in_progress}, and an AI agent whose current directory cannot be read might be working there; finish the merge, or abort it with \`git merge --abort\`" \
+    stop_at_merge "${settle_in_progress}, and an AI agent whose current directory cannot be read might be working there; finish the merge, or abort it with \`git merge --abort\`" \
       "The current directory of an AI agent's process could not be read, so the agent might have been working in the directory."
     return 1
   fi
@@ -765,7 +753,7 @@ settle_merge_in_progress() {
     printf '%s\n' "${settle_agents}" | while read -r settle_pid settle_command; do
       echo "${SCRIPT_NAME}: ${settle_command} (process ${settle_pid}) is working in $1" >&2
     done
-    stop_at_merge '' "${settle_in_progress}, and an AI agent is working there; finish the merge, or abort it with \`git merge --abort\`" \
+    stop_at_merge "${settle_in_progress}, and an AI agent is working there; finish the merge, or abort it with \`git merge --abort\`" \
       "An AI agent was working in the directory:  $(printf '%s\n' "${settle_agents}" \
         | sed -e 's/^\([0-9]*\) \(.*\)/\2 (process \1)/' | paste -s -d ' ' -)."
     return 1
@@ -774,7 +762,7 @@ settle_merge_in_progress() {
   case "$?" in
     0) ;;
     2)
-      stop_at_merge '' "${settle_in_progress}, and whether it is redundant is unknown; run \`${SCRIPT_NAME}\` again once its upstream branch can be fetched" \
+      stop_at_merge "${settle_in_progress}, and whether it is redundant is unknown; run \`${SCRIPT_NAME}\` again once its upstream branch can be fetched" \
         "Whether it is redundant is unknown, because its upstream branch could not be fetched."
       return 1
       ;;
@@ -782,13 +770,13 @@ settle_merge_in_progress() {
   esac
   settle_work="$(merge_work)"
   if [ -n "${settle_work}" ]; then
-    stop_at_merge "${settle_upstream}" "${settle_in_progress}.  ${settle_work}" "${settle_work}"
+    stop_at_merge "${settle_in_progress}.  ${settle_work}" "${settle_work}" "${settle_upstream}"
     return 1
   fi
   echo "${SCRIPT_NAME}: aborting the merge of commit $(git rev-parse --verify --quiet MERGE_HEAD) in $1, which is redundant:  ${settle_upstream}, the upstream branch, already contains both of its sides" >&2
   if ! git merge --abort; then
-    stop_at_merge "${settle_upstream}" "${settle_in_progress}, and cannot be aborted" \
-      "\`${SCRIPT_NAME}\` could not abort it."
+    stop_at_merge "${settle_in_progress}, and cannot be aborted" \
+      "\`${SCRIPT_NAME}\` could not abort it." "${settle_upstream}"
     return 1
   fi
   forget_conflicted_files
@@ -847,7 +835,7 @@ finish_merge_in_progress() {
   # or one whose message `git pull` could not compose; in each case, a person
   # should look at it.
   if [ -z "$(git ls-files --unmerged)" ]; then
-    stop_at_merge '' "${finish_in_progress}, and has no conflicted file; finish it with \`git commit\`, or abort it with \`git merge --abort\`" \
+    stop_at_merge "${finish_in_progress}, and has no conflicted file; finish it with \`git commit\`, or abort it with \`git merge --abort\`" \
       "No conflicted file remains."
     return 1
   fi
@@ -858,7 +846,7 @@ finish_merge_in_progress() {
     printf '%s\n' "${finish_changed}" | while IFS= read -r finish_file; do
       echo "${SCRIPT_NAME}: changed after the merge stopped: ${finish_file}" >&2
     done
-    stop_at_merge '' "${finish_in_progress}, and its conflicted files changed after the merge stopped, as when an AI agent's work was rejected; finish the merge, or abort it with \`git merge --abort\`" \
+    stop_at_merge "${finish_in_progress}, and its conflicted files changed after the merge stopped, as when an AI agent's work was rejected; finish the merge, or abort it with \`git merge --abort\`" \
       "Its conflicted files changed after the merge stopped:  $(printf '%s\n' "${finish_changed}" | paste -s -d ' ' -)."
     return 1
   fi
@@ -870,7 +858,7 @@ finish_merge_in_progress() {
     echo "${SCRIPT_NAME}: \`git rerere\` failed in $1" >&2
   fi
   if ! finish_message="$(in_progress_merge_message)"; then
-    stop_at_merge '' "${finish_in_progress}, and has no MERGE_MSG; finish it, or abort it with \`git merge --abort\`" \
+    stop_at_merge "${finish_in_progress}, and has no MERGE_MSG; finish it, or abort it with \`git merge --abort\`" \
       "It has no MERGE_MSG."
     return 1
   fi
