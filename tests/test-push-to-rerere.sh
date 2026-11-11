@@ -325,14 +325,12 @@ hook_runs() {
 
 ## A pre-commit hook that rejects the merge commit after reformatting the
 ## merged file does not stop git-push-to, which commits the file as the hook
-## left it.  The commit runs the commit-msg hook.
+## left it.
 setup_case hook-reformats
 record_resolution false
 install_git_hook "${feature_dir}" pre-commit "${lowercase_hook}"
-# shellcheck disable=SC2016 # The hook expands $1.
-install_git_hook "${feature_dir}" commit-msg 'echo "Checked: yes" >> "$1"'
 push_to
-check_resolved "a hook that reformats the merged file" "$(printf '%s\n' "Merge branch 'main' into feature" "Checked: yes")" \
+check_resolved "a hook that reformats the merged file" "Merge branch 'main' into feature" \
   one two three four five six same seven-feature seven-main same2 eight nine
 case "${push_output}" in
   *"the pre-commit hook changed file.txt"*) ;;
@@ -347,6 +345,17 @@ esac
 check_other_notice() {
   if ! grep -q -x -F -- "in ${feature_dir}: the pre-commit hook changed other.txt, which the commit does not otherwise change; review the hook's changes, which $2" "${summary}"; then
     fail "$1: no summary line about other.txt: $(cat "${summary}")"
+  fi
+}
+
+## Usage: check_unstaged_notice DESCRIPTION RESULT
+## Checks that the summary file ${summary} has a line that says that
+## other.txt changed after the pre-commit hook's changes were staged and asks
+## for a review of its changes, which RESULT, such as "are not staged".
+## DESCRIPTION names the test case; used for diagnostics.
+check_unstaged_notice() {
+  if ! grep -q -x -F -- "in ${feature_dir}: other.txt changed after the pre-commit hook's changes were staged; review its changes, which $2" "${summary}"; then
+    fail "$1: no summary line about the later change to other.txt: $(cat "${summary}")"
   fi
 }
 
@@ -382,16 +391,16 @@ install_git_hook "${feature_dir}" pre-commit 'echo hooked >> other.txt' 'exit 1'
 summary="${case_dir}/summary.txt"
 push_to --summary "${summary}"
 check_not_resolved "a hook that always fails after changing another file" "cannot commit the merge"
-check_no_retry "a hook that always fails after changing another file"
 if [ "$(git -C "${feature_dir}" show :other.txt)" != "$(printf '%s\n' other hooked)" ]; then
   fail "a hook that always fails after changing another file: the hook's change is not staged: $(git -C "${feature_dir}" show :other.txt)"
 fi
 case "${push_output}" in
-  *"the pre-commit hook, run again, failed or changed a file; the changes that the pre-commit hook made when it rejected the commit are staged; the working tree has later changes, which are not staged"*) ;;
+  *"because the commit failed; the changes that the pre-commit hook made when it rejected the commit are staged; the working tree has later changes, which are not staged"*) ;;
   *) fail "a hook that always fails after changing another file: no diagnostic about the staged changes: ${push_output}" ;;
 esac
 check_other_notice "a hook that always fails after changing another file" \
   "are staged, but not committed; the working tree has later changes, which are not staged"
+check_unstaged_notice "a hook that always fails after changing another file" "are not staged"
 
 ## A hook that rejects the commit after reformatting a file that the merge
 ## does not change and creating a file stops git-push-to, which lists the
@@ -407,8 +416,10 @@ check_no_retry "a hook that changes another file and creates a file"
 check_other_notice "a hook that changes another file and creates a file" "are not committed"
 
 ## A hook that rejects the commit after changing a file that the merge does
-## not change, and that changes it again when it runs again, although it
-## then accepts the commit, stops git-push-to.
+## not change, and that changes it again when the second commit runs it,
+## although it then accepts the commit, does not stop git-push-to, which
+## lists that file for review:  the commit includes the hook's first change
+## to it, but not its second.
 setup_case hook-changes-other-again
 record_resolution false
 # shellcheck disable=SC2016 # The hook expands ${marker}.
@@ -417,40 +428,15 @@ install_git_hook "${feature_dir}" pre-commit 'echo hooked >> other.txt' \
   'if [ -e "${marker}" ]; then exit 0; fi' \
   ': > "${marker}"' \
   'exit 1'
-push_to
-check_not_resolved "a hook that changes another file again" "cannot commit the merge"
-check_no_retry "a hook that changes another file again"
-
-## A hook that rejects the commit after reformatting the merged file, and
-## that changes it again when it runs again, although it then accepts the
-## commit, stops git-push-to.
-setup_case hook-changes-again
-record_resolution false
-# shellcheck disable=SC2016 # The hook expands ${marker}.
-install_git_hook "${feature_dir}" pre-commit 'echo hooked >> file.txt' \
-  'marker="$(git rev-parse --git-path hook-ran)"' \
-  'if [ -e "${marker}" ]; then exit 0; fi' \
-  ': > "${marker}"' \
-  'exit 1'
-push_to
-check_not_resolved "a hook that changes the merged file again" "cannot commit the merge"
-check_no_retry "a hook that changes the merged file again"
-
-## A hook that rejects the commit after reformatting the merged file, and
-## that stages a change when it runs again, although it then accepts the
-## commit, stops git-push-to.
-setup_case hook-stages-again
-record_resolution false
-# shellcheck disable=SC2016 # The hook expands ${marker}.
-install_git_hook "${feature_dir}" pre-commit \
-  'marker="$(git rev-parse --git-path hook-ran)"' \
-  'if [ -e "${marker}" ]; then echo again >> file.txt; git add file.txt; exit 0; fi' \
-  ': > "${marker}"' \
-  'echo hooked >> file.txt' \
-  'exit 1'
-push_to
-check_not_resolved "a hook that stages a change when it runs again" "cannot commit the merge"
-check_no_retry "a hook that stages a change when it runs again"
+summary="${case_dir}/summary.txt"
+push_to --summary "${summary}"
+check_resolved "a hook that changes another file again" "Merge branch 'main' into feature"
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "$(printf '%s\n' other hooked)" ]; then
+  fail "a hook that changes another file again: the merge lacks the hook's first change: $(git -C "${remote}" show refs/heads/feature:other.txt)"
+fi
+check_other_notice "a hook that changes another file again" \
+  "commit $(git -C "${feature_dir}" rev-parse --short HEAD) includes"
+check_unstaged_notice "a hook that changes another file again" "are not committed"
 
 ## A hook that rejects the commit after reformatting the merged file and
 ## creating a file stops git-push-to.
@@ -506,7 +492,7 @@ install_git_hook "${feature_dir}" pre-merge-commit 'echo hooked >> file.txt' 'ex
 push_to
 check_not_resolved "a pre-merge-commit hook that always fails" "cannot commit the merge"
 case "${push_output}" in
-  *"the pre-merge-commit hook, run again, failed or changed a file"*) ;;
+  *"the pre-merge-commit hook, run again, failed"*) ;;
   *) fail "a pre-merge-commit hook that always fails: the hook did not run again: ${push_output}" ;;
 esac
 

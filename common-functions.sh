@@ -3605,6 +3605,21 @@ review_hook_changes() {
   done
 }
 
+## Usage: review_unstaged_changes HOOK RESULT
+## Prints a notice for each file that has unstaged changes in the current
+## directory, the top level of a working tree, after this package's scripts
+## staged the changes of the hook HOOK, such as "pre-commit", as when the hook
+## changed the file again when it ran again, and appends the notice to the
+## summary (see `review_notice`).  The notice asks for a review of the
+## changes, which RESULT, such as "are not staged".
+review_unstaged_changes() {
+  print_nul_lines git diff --name-only --no-renames -z | while IFS= read -r review_unstaged_file; do
+    if [ -n "${review_unstaged_file}" ]; then
+      review_notice "${review_unstaged_file} changed after the $1 hook's changes were staged; review its changes, which $2"
+    fi
+  done
+}
+
 ## Usage: commit_staged_again HOOK MESSAGE TREE [COMMAND...]
 ## Commits again, with `git commit` and the message MESSAGE, in the current
 ## directory, the top level of a working tree, after the hook HOOK, such as
@@ -3625,15 +3640,17 @@ review_hook_changes() {
 ##    that the hook created and deleted none (a file that git ignores is not
 ##    checked); and
 ##  * the hook changed at least one file, and only modified files.
-## After staging them, it runs the hook again, on the files as the hook left
-## them, and then COMMAND, if it is given, as a check of those files.  It
-## commits only if the hook succeeds, and changes, stages, creates, and
-## deletes no file, and if COMMAND succeeds.  A commit after the pre-commit
-## hook rejected one does not run that hook a third time, but it runs the
-## commit-msg hook, as `git commit` does.  For each file that the hook
-## changed but the commit does not otherwise change, it prints a notice that
-## says whether the commit includes the hook's changes, and appends the
-## notice to the summary (see `review_hook_changes`).
+## Then, if HOOK is "pre-merge-commit", which `git commit` does not run, it
+## runs the hook again, with `GIT_EDITOR=:`, as `git merge` runs it, on the
+## files as the hook left them, and requires that it succeed without
+## changing a file.  Then it runs COMMAND, if it is given, as a check of
+## those files, and commits only if COMMAND succeeds.  `git commit` runs the
+## pre-commit hook again.  For each file that the hook changed but the
+## commit does not otherwise change, it prints a notice that says whether
+## the commit includes the hook's changes, and appends the notice to the
+## summary (see `review_hook_changes`).  It does the same for each file
+## that has unstaged changes afterward, as when the hook changed a file
+## again when it ran again (see `review_unstaged_changes`).
 ##
 ## Returns 0 if the commit succeeded, and a nonzero status otherwise.
 commit_staged_again() {
@@ -3676,7 +3693,7 @@ commit_staged_again() {
     commit_again_refusal="the ${commit_again_hook} hook created or deleted an untracked file"
   elif printf '%s\n' "${commit_again_status}" | sed -n -e 'p;n' | grep -v -x -q M; then
     commit_again_refusal="the ${commit_again_hook} hook did more than modify files"
-  elif ! git add -u || ! commit_again_staged="$(git write-tree)"; then
+  elif ! git add -u; then
     commit_again_refusal="the hook's changes cannot be staged"
   else
     commit_again_refusal=''
@@ -3690,29 +3707,23 @@ commit_staged_again() {
     echo "${SCRIPT_NAME}: the ${commit_again_hook} hook changed ${commit_again_file}; staged its changes" >&2
   done
 
-  if ! git hook run --ignore-missing "${commit_again_hook}" \
-    || ! git diff --quiet \
-    || [ "$(git write-tree 2> /dev/null)" != "${commit_again_staged}" ] \
-    || ! commit_again_untracked="$(untracked_files)" \
-    || [ "${commit_again_untracked}" != "${commit_staged_untracked}" ]; then
-    commit_again_failure="the ${commit_again_hook} hook, run again, failed or changed a file"
-  elif [ $# -gt 0 ] && ! "$@"; then
+  commit_again_failure=''
+  if [ "${commit_again_hook}" = pre-merge-commit ]; then
+    # `git merge` runs the hook with `GIT_EDITOR=:`, which a hook can
+    # require; `git hook run` does not set it.
+    if ! GIT_EDITOR=: git hook run --ignore-missing pre-merge-commit; then
+      commit_again_failure="the pre-merge-commit hook, run again, failed"
+    elif ! git diff --quiet; then
+      commit_again_failure="the pre-merge-commit hook, run again, changed a file"
+    fi
+  fi
+  if [ -z "${commit_again_failure}" ] && [ $# -gt 0 ] && ! "$@"; then
     commit_again_failure="\`$*\` failed"
-  else
+  fi
+  if [ -z "${commit_again_failure}" ]; then
     echo "${SCRIPT_NAME}: committing again in $(pwd)" >&2
-    commit_again_failure="the commit failed"
-    if [ "${commit_again_hook}" = pre-commit ]; then
-      # The pre-commit hook has just run.  `--no-verify` keeps `git commit`
-      # from running it again, and also from running the commit-msg hook,
-      # which is run here instead, on a file that holds the message.
-      commit_again_message_file="$(git rev-parse --git-path COMMIT_AGAIN_MSG)" \
-        && printf '%s\n' "${commit_again_message}" > "${commit_again_message_file}" \
-        && git hook run --ignore-missing commit-msg -- "${commit_again_message_file}" \
-        && git commit -q --no-verify --cleanup=whitespace -F "${commit_again_message_file}" \
-        && commit_again_failure=''
-      rm -f -- "${commit_again_message_file}"
-    elif printf '%s\n' "${commit_again_message}" | git commit -q --cleanup=whitespace -F -; then
-      commit_again_failure=''
+    if ! printf '%s\n' "${commit_again_message}" | git commit -q --cleanup=whitespace -F -; then
+      commit_again_failure="the commit failed"
     fi
   fi
   if [ -n "${commit_again_failure}" ]; then
@@ -3724,10 +3735,12 @@ commit_staged_again() {
     echo "${SCRIPT_NAME}: not committed in $(pwd), because ${commit_again_failure}; the changes that the ${commit_again_hook} hook made when it rejected the commit are staged${commit_again_later}" >&2
     review_hook_changes "${commit_again_hook}" "${commit_again_outside}" \
       "are staged, but not committed${commit_again_later}"
+    review_unstaged_changes "${commit_again_hook}" "are not staged"
     return 1
   fi
   review_hook_changes "${commit_again_hook}" "${commit_again_outside}" \
     "commit $(git rev-parse --short HEAD) includes"
+  review_unstaged_changes "${commit_again_hook}" "are not committed"
 }
 
 ## Usage: commit_rejected_merge MESSAGE
@@ -3736,9 +3749,9 @@ commit_staged_again() {
 ## a pre-merge-commit hook rejected the commit that `git merge` or `git pull`
 ## tried to make.  It commits as `commit_staged_again` describes, which
 ## requires that `commit_staged_before` recorded the state of the working
-## tree before the merge, and which runs the pre-merge-commit hook again, on
-## the files as the hook left them; `git commit` then runs the pre-commit
-## hook, as for a merge whose conflicts were resolved.
+## tree before the merge.  Before committing, it runs the pre-merge-commit
+## hook again, on the files as the hook left them; `git commit` then runs the
+## pre-commit hook, as for a merge whose conflicts were resolved.
 ##
 ## Returns 0 if the commit succeeded, and a nonzero status otherwise.
 commit_rejected_merge() {
