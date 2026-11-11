@@ -325,14 +325,22 @@ hook_runs() {
 
 ## A pre-commit hook that rejects the merge commit after reformatting the
 ## merged file does not stop git-push-to, which commits the file as the hook
-## left it.  The commit runs the commit-msg hook.
+## left it.  The hook runs again with `GIT_EDITOR=:`, as `git commit` runs
+## it.  The commit runs the prepare-commit-msg hook and then the commit-msg
+## hook, which checks the message that the prepare-commit-msg hook prepared.
 setup_case hook-reformats
 record_resolution false
-install_git_hook "${feature_dir}" pre-commit "${lowercase_hook}"
+# shellcheck disable=SC2016 # The hook expands ${GIT_EDITOR}.
+install_git_hook "${feature_dir}" pre-commit 'if [ "${GIT_EDITOR}" != : ]; then exit 1; fi' \
+  "${lowercase_hook}"
 # shellcheck disable=SC2016 # The hook expands $1.
-install_git_hook "${feature_dir}" commit-msg 'echo "Checked: yes" >> "$1"'
+install_git_hook "${feature_dir}" prepare-commit-msg 'echo "Prepared: yes" >> "$1"'
+# shellcheck disable=SC2016 # The hook expands $1.
+install_git_hook "${feature_dir}" commit-msg 'grep -q -x "Prepared: yes" "$1" || exit 1' \
+  'echo "Checked: yes" >> "$1"'
 push_to
-check_resolved "a hook that reformats the merged file" "$(printf '%s\n' "Merge branch 'main' into feature" "Checked: yes")" \
+check_resolved "a hook that reformats the merged file" \
+  "$(printf '%s\n' "Merge branch 'main' into feature" "Prepared: yes" "Checked: yes")" \
   one two three four five six same seven-feature seven-main same2 eight nine
 case "${push_output}" in
   *"the pre-commit hook changed file.txt"*) ;;
@@ -420,6 +428,36 @@ install_git_hook "${feature_dir}" pre-commit 'echo hooked >> other.txt' \
 push_to
 check_not_resolved "a hook that changes another file again" "cannot commit the merge"
 check_no_retry "a hook that changes another file again"
+
+## A hook that rejects the commit after reformatting the merged file, and
+## that, when it runs again, changes a file that the merge does not change,
+## and stages that change or not, although it then accepts the commit, stops
+## git-push-to, which lists that file for review.
+for rerun_stage in unstaged staged; do
+  setup_case "hook-changes-other-on-rerun-${rerun_stage}"
+  record_resolution false
+  if [ "${rerun_stage}" = staged ]; then
+    rerun_add='git add other.txt'
+    rerun_result="are staged, but not committed"
+  else
+    rerun_add=':'
+    rerun_result="are not staged"
+  fi
+  # shellcheck disable=SC2016 # The hook expands ${marker}.
+  install_git_hook "${feature_dir}" pre-commit \
+    'marker="$(git rev-parse --git-path hook-ran)"' \
+    "if [ -e \"\${marker}\" ]; then echo hooked >> other.txt; ${rerun_add}; exit 0; fi" \
+    ': > "${marker}"' \
+    'echo hooked >> file.txt' \
+    'exit 1'
+  summary="${case_dir}/summary.txt"
+  push_to --summary "${summary}"
+  check_not_resolved "a hook that changes another file when it runs again (${rerun_stage})" \
+    "the pre-commit hook, run again, failed or changed a file"
+  if ! grep -q -x -F -- "in ${feature_dir}: the pre-commit hook, run again, changed other.txt, which the commit does not otherwise change; review the hook's changes, which ${rerun_result}" "${summary}"; then
+    fail "a hook that changes another file when it runs again (${rerun_stage}): no summary line about other.txt: $(cat "${summary}")"
+  fi
+done
 
 ## A hook that rejects the commit after reformatting the merged file, and
 ## that changes it again when it runs again, although it then accepts the

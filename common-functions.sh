@@ -3595,6 +3595,51 @@ review_hook_changes() {
   done
 }
 
+## Usage: review_hook_rerun_changes HOOK COMMITTED STAGED UNSTAGED
+## Prints a notice for each file that the hook HOOK, such as "pre-commit",
+## changed when it ran again, but that is not among the files COMMITTED,
+## which the commit changes, and appends the notice to the summary (see
+## `review_notice`).  STAGED and UNSTAGED are the files whose changes by the
+## hook are staged and are not staged.  Each of COMMITTED, STAGED, and
+## UNSTAGED has pathnames, one per line.  The notice says whether the hook's
+## changes to the file are staged; none are committed.
+review_hook_rerun_changes() {
+  # awk reads each pathname with a prefix that says which list it is in, so
+  # that an empty list, which is an empty line, is no pathname, and prints
+  # each file that is not committed with a prefix that says which of STAGED
+  # and UNSTAGED it is in.
+  {
+    printf '%s\n' "$2" | sed -e 's/^/C /'
+    printf '%s\n' "$3" | sed -e 's/^/S /'
+    printf '%s\n' "$4" | sed -e 's/^/U /'
+  } | awk '
+    length($0) < 3 { next }
+    { kind = substr($0, 1, 1); path = substr($0, 3) }
+    kind == "C" { committed[path] = 1; next }
+    path in committed { next }
+    !(path in kinds) { order[++n] = path }
+    { kinds[path] = kinds[path] kind }
+    END { for (i = 1; i <= n; i++) print kinds[order[i]] " " order[i] }' \
+    | while IFS= read -r review_rerun_line; do
+      case "${review_rerun_line}" in
+        "SU "*)
+          review_rerun_file="${review_rerun_line#SU }"
+          review_rerun_result="are partly staged, but not committed"
+          ;;
+        "S "*)
+          review_rerun_file="${review_rerun_line#S }"
+          review_rerun_result="are staged, but not committed"
+          ;;
+        "U "*)
+          review_rerun_file="${review_rerun_line#U }"
+          review_rerun_result="are not staged"
+          ;;
+        *) continue ;;
+      esac
+      review_notice "the $1 hook, run again, changed ${review_rerun_file}, which the commit does not otherwise change; review the hook's changes, which ${review_rerun_result}"
+    done
+}
+
 ## Usage: commit_staged_again HOOK MESSAGE TREE [COMMAND...]
 ## Commits again, with `git commit` and the message MESSAGE, in the current
 ## directory, the top level of a working tree, after the hook HOOK, such as
@@ -3618,12 +3663,16 @@ review_hook_changes() {
 ## After staging them, it runs the hook again, on the files as the hook left
 ## them, and then COMMAND, if it is given, as a check of those files.  It
 ## commits only if the hook succeeds, and changes, stages, creates, and
-## deletes no file, and if COMMAND succeeds.  A commit after the pre-commit
+## deletes no file, and if COMMAND succeeds.  The hook runs again with
+## `GIT_EDITOR=:`, as `git commit` runs it.  A commit after the pre-commit
 ## hook rejected one does not run that hook a third time, but it runs the
-## commit-msg hook, as `git commit` does.  For each file that the hook
-## changed but the commit does not otherwise change, it prints a notice that
-## says whether the commit includes the hook's changes, and appends the
-## notice to the summary (see `review_hook_changes`).
+## prepare-commit-msg hook and then the commit-msg hook, as `git commit`
+## does.  For each file that the hook changed but the commit does not
+## otherwise change, it prints a notice that says whether the commit
+## includes the hook's changes, and appends the notice to the summary (see
+## `review_hook_changes`); it does the same, saying whether the changes are
+## staged, for each such file that the hook changed when it ran again (see
+## `review_hook_rerun_changes`).
 ##
 ## Returns 0 if the commit succeeded, and a nonzero status otherwise.
 commit_staged_again() {
@@ -3680,8 +3729,22 @@ commit_staged_again() {
     echo "${SCRIPT_NAME}: the ${commit_again_hook} hook changed ${commit_again_file}; staged its changes" >&2
   done
 
-  if ! git hook run --ignore-missing "${commit_again_hook}" \
-    || ! git diff --quiet \
+  # `git commit -F` runs its hooks with `GIT_EDITOR=:`, which a hook can
+  # require; `git hook run` does not set it.
+  # The files that the hook changes when it runs again are those that differ
+  # between the index and the working tree, and between the staged tree and
+  # the index.
+  if ! GIT_EDITOR=: git hook run --ignore-missing "${commit_again_hook}"; then
+    commit_again_rerun_ok=0
+  else
+    commit_again_rerun_ok=1
+  fi
+  commit_again_unstaged="$(print_nul_lines git diff --name-only --no-renames -z)" \
+    || commit_again_rerun_ok=0
+  commit_again_restaged="$(print_nul_lines git diff --cached --name-only --no-renames -z "${commit_again_staged}")" \
+    || commit_again_rerun_ok=0
+  if [ "${commit_again_rerun_ok}" != 1 ] \
+    || [ -n "${commit_again_unstaged}" ] || [ -n "${commit_again_restaged}" ] \
     || [ "$(git write-tree 2> /dev/null)" != "${commit_again_staged}" ] \
     || ! commit_again_untracked="$(untracked_files)" \
     || [ "${commit_again_untracked}" != "${commit_staged_untracked}" ]; then
@@ -3693,14 +3756,20 @@ commit_staged_again() {
     commit_again_failure="the commit failed"
     if [ "${commit_again_hook}" = pre-commit ]; then
       # The pre-commit hook has just run.  `--no-verify` keeps `git commit`
-      # from running it again, and also from running the commit-msg hook,
-      # which is run here instead, on a file that holds the message.
-      commit_again_message_file="$(git rev-parse --git-path COMMIT_AGAIN_MSG)" \
-        && printf '%s\n' "${commit_again_message}" > "${commit_again_message_file}" \
-        && git hook run --ignore-missing commit-msg -- "${commit_again_message_file}" \
-        && git commit -q --no-verify --cleanup=whitespace -F "${commit_again_message_file}" \
-        && commit_again_failure=''
-      rm -f -- "${commit_again_message_file}"
+      # from running it again, but also from running the commit-msg hook,
+      # though not the prepare-commit-msg hook.  git runs the editor after
+      # the prepare-commit-msg hook and before it would run the commit-msg
+      # hook, on the same file, so an "editor" that runs the commit-msg hook
+      # checks the message that the prepare-commit-msg hook prepared, which
+      # is the one committed; if that hook fails, so does the commit.
+      # `--no-status` keeps git from adding instructions to the message,
+      # which `--cleanup=whitespace` would keep.
+      if printf '%s\n' "${commit_again_message}" \
+        | GIT_EDITOR='GIT_EDITOR=: git hook run --ignore-missing commit-msg --' \
+          git -c advice.waitingForEditor=false commit -q --no-verify --edit --no-status \
+          --cleanup=whitespace -F -; then
+        commit_again_failure=''
+      fi
     elif printf '%s\n' "${commit_again_message}" | git commit -q --cleanup=whitespace -F -; then
       commit_again_failure=''
     fi
@@ -3714,6 +3783,9 @@ commit_staged_again() {
     echo "${SCRIPT_NAME}: not committed in $(pwd), because ${commit_again_failure}; the changes that the ${commit_again_hook} hook made when it rejected the commit are staged${commit_again_later}" >&2
     review_hook_changes "${commit_again_hook}" "${commit_again_outside}" \
       "are staged, but not committed${commit_again_later}"
+    review_hook_rerun_changes "${commit_again_hook}" \
+      "$(printf '%s\n' "${commit_again_committed}" "${commit_again_changed}")" \
+      "${commit_again_restaged}" "${commit_again_unstaged}"
     return 1
   fi
   review_hook_changes "${commit_again_hook}" "${commit_again_outside}" \
