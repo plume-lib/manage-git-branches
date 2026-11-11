@@ -309,14 +309,30 @@ check_no_retry() {
   esac
 }
 
+## Usage: hook_runs
+## Prints the number of times that a hook that begins with ${count_hook_run}
+## ran in ${feature_dir}.
+# shellcheck disable=SC2016 # The hook expands the command substitution.
+count_hook_run='echo ran >> "$(git rev-parse --git-path hook-runs)"'
+hook_runs() {
+  hook_runs_file="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path hook-runs)"
+  if [ -e "${hook_runs_file}" ]; then
+    wc -l < "${hook_runs_file}" | tr -d ' '
+  else
+    echo 0
+  fi
+}
+
 ## A pre-commit hook that rejects the merge commit after reformatting the
 ## merged file does not stop git-push-to, which commits the file as the hook
-## left it.
+## left it.  The commit runs the commit-msg hook.
 setup_case hook-reformats
 record_resolution false
 install_git_hook "${feature_dir}" pre-commit "${lowercase_hook}"
+# shellcheck disable=SC2016 # The hook expands $1.
+install_git_hook "${feature_dir}" commit-msg 'echo "Checked: yes" >> "$1"'
 push_to
-check_resolved "a hook that reformats the merged file" "Merge branch 'main' into feature" \
+check_resolved "a hook that reformats the merged file" "$(printf '%s\n' "Merge branch 'main' into feature" "Checked: yes")" \
   one two three four five six same seven-feature seven-main same2 eight nine
 case "${push_output}" in
   *"the pre-commit hook changed file.txt"*) ;;
@@ -325,10 +341,11 @@ esac
 
 ## Usage: check_other_notice DESCRIPTION RESULT
 ## Checks that the summary file ${summary} has a line that says that the
-## pre-commit hook changed other.txt, which ends with RESULT, such as
-## "its changes are staged, but not committed; review them".
+## pre-commit hook changed other.txt and asks for a review of the hook's
+## changes, which RESULT, such as "are staged, but not committed".
+## DESCRIPTION names the test case; used for diagnostics.
 check_other_notice() {
-  if ! grep -q -x -F -- "in ${feature_dir}: the pre-commit hook changed other.txt, which the commit does not otherwise change; $2" "${summary}"; then
+  if ! grep -q -x -F -- "in ${feature_dir}: the pre-commit hook changed other.txt, which the commit does not otherwise change; review the hook's changes, which $2" "${summary}"; then
     fail "$1: no summary line about other.txt: $(cat "${summary}")"
   fi
 }
@@ -336,10 +353,11 @@ check_other_notice() {
 ## A hook that, like one that formats the whole project, rejects the commit
 ## after reformatting a file that the merge does not change, does not stop
 ## git-push-to, which commits that file too, as the hook left it, and lists
-## it for review.
+## it for review.  The hook runs only twice.
 setup_case hook-changes-other
 record_resolution false
-install_git_hook "${feature_dir}" pre-commit "tr 'a-z' 'A-Z' < other.txt > hook.tmp
+install_git_hook "${feature_dir}" pre-commit "${count_hook_run}
+tr 'a-z' 'A-Z' < other.txt > hook.tmp
 if cmp -s other.txt hook.tmp; then rm hook.tmp; exit 0; fi
 mv hook.tmp other.txt
 exit 1"
@@ -349,16 +367,15 @@ check_resolved "a hook that reformats another file" "Merge branch 'main' into fe
 if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != OTHER ]; then
   fail "a hook that reformats another file: the merge lacks the hook's change: $(git -C "${remote}" show refs/heads/feature:other.txt)"
 fi
-case "${push_output}" in
-  *"the pre-commit hook changed other.txt, which the commit does not otherwise change; staging its changes"*) ;;
-  *) fail "a hook that reformats another file: no diagnostic about the file: ${push_output}" ;;
-esac
 check_other_notice "a hook that reformats another file" \
-  "commit $(git -C "${feature_dir}" rev-parse --short HEAD) includes its changes; review them"
+  "commit $(git -C "${feature_dir}" rev-parse --short HEAD) includes"
+if [ "$(hook_runs)" -ne 2 ]; then
+  fail "a hook that reformats another file: the hook ran $(hook_runs) times"
+fi
 
 ## A hook that rejects every commit, changing a file that the merge does not
 ## change each time, stops git-push-to, with its first change to that file
-## staged, and lists that file for review.
+## staged and its second not staged, and lists that file for review.
 setup_case hook-changes-other-fails
 record_resolution false
 install_git_hook "${feature_dir}" pre-commit 'echo hooked >> other.txt' 'exit 1'
@@ -370,11 +387,24 @@ if [ "$(git -C "${feature_dir}" show :other.txt)" != "$(printf '%s\n' other hook
   fail "a hook that always fails after changing another file: the hook's change is not staged: $(git -C "${feature_dir}" show :other.txt)"
 fi
 case "${push_output}" in
-  *"the pre-commit hook, run again, failed or changed a file; the changes of the pre-commit hook are staged"*) ;;
+  *"the pre-commit hook, run again, failed or changed a file; the changes that the pre-commit hook made when it rejected the commit are staged; the working tree has later changes, which are not staged"*) ;;
   *) fail "a hook that always fails after changing another file: no diagnostic about the staged changes: ${push_output}" ;;
 esac
 check_other_notice "a hook that always fails after changing another file" \
-  "its changes are staged, but not committed; review them"
+  "are staged, but not committed; the working tree has later changes, which are not staged"
+
+## A hook that rejects the commit after reformatting a file that the merge
+## does not change and creating a file stops git-push-to, which lists the
+## file that the hook reformatted for review.
+setup_case hook-changes-other-creates-file
+record_resolution false
+install_git_hook "${feature_dir}" pre-commit 'echo generated > generated.txt' 'echo hooked >> other.txt' 'exit 1'
+summary="${case_dir}/summary.txt"
+push_to --summary "${summary}"
+check_not_resolved "a hook that changes another file and creates a file" \
+  "the pre-commit hook created or deleted an untracked file"
+check_no_retry "a hook that changes another file and creates a file"
+check_other_notice "a hook that changes another file and creates a file" "are not committed"
 
 ## A hook that rejects the commit after changing a file that the merge does
 ## not change, and that changes it again when it runs again, although it
@@ -390,6 +420,37 @@ install_git_hook "${feature_dir}" pre-commit 'echo hooked >> other.txt' \
 push_to
 check_not_resolved "a hook that changes another file again" "cannot commit the merge"
 check_no_retry "a hook that changes another file again"
+
+## A hook that rejects the commit after reformatting the merged file, and
+## that changes it again when it runs again, although it then accepts the
+## commit, stops git-push-to.
+setup_case hook-changes-again
+record_resolution false
+# shellcheck disable=SC2016 # The hook expands ${marker}.
+install_git_hook "${feature_dir}" pre-commit 'echo hooked >> file.txt' \
+  'marker="$(git rev-parse --git-path hook-ran)"' \
+  'if [ -e "${marker}" ]; then exit 0; fi' \
+  ': > "${marker}"' \
+  'exit 1'
+push_to
+check_not_resolved "a hook that changes the merged file again" "cannot commit the merge"
+check_no_retry "a hook that changes the merged file again"
+
+## A hook that rejects the commit after reformatting the merged file, and
+## that stages a change when it runs again, although it then accepts the
+## commit, stops git-push-to.
+setup_case hook-stages-again
+record_resolution false
+# shellcheck disable=SC2016 # The hook expands ${marker}.
+install_git_hook "${feature_dir}" pre-commit \
+  'marker="$(git rev-parse --git-path hook-ran)"' \
+  'if [ -e "${marker}" ]; then echo again >> file.txt; git add file.txt; exit 0; fi' \
+  ': > "${marker}"' \
+  'echo hooked >> file.txt' \
+  'exit 1'
+push_to
+check_not_resolved "a hook that stages a change when it runs again" "cannot commit the merge"
+check_no_retry "a hook that stages a change when it runs again"
 
 ## A hook that rejects the commit after reformatting the merged file and
 ## creating a file stops git-push-to.
