@@ -30,12 +30,16 @@
 #    (this replaces a `REMOTE/HEAD` that was set by hand with
 #    `git remote set-head`), and fetch it; for the parent's URL, fetch the
 #    parent's HEAD into `refs/fork-upstream/ORG/PROJ`,
+#  * delete the entries of the file AGENT-TODO.md at the top level of the
+#    working tree that are about a merge that is no longer in progress (see
+#    `git-push-to`, under "Asking an AI agent"),
 #  * pull the current branch from its upstream branch,
 #  * merge the upstream repository's default branch into the current branch,
 #    first merging the final version of each pull request that landed in it
 #    and of which the current branch merged an earlier version, if that
 #    avoids conflicts (see `git-push-to`, under "Conflicts"),
-#  * build using `compile-project` (see its documentation),
+#  * build using `compile-project` (see its documentation), and, if the build
+#    succeeds, delete the entries of AGENT-TODO.md about a failed build,
 #  * push the current branch if the build succeeds.
 # If the build fails, this script asks the AI agent to fix it only if a merge
 # on the current branch might have broken it:  the branch has a merge commit
@@ -382,6 +386,11 @@ dependence=''
 if [ "${allow_dependent}" -eq 0 ] && ! git merge-base --is-ancestor "${upstream_ref}" HEAD; then
   find_dependence "${checked_out_branch}"
 fi
+
+# Remove the entries of AGENT-TODO.md that no longer apply, such as one about
+# a merge that a person finished or aborted (see `prune_agent_todo`), even if
+# this run stops below because there is nothing to merge and nothing to push.
+prune_agent_todo 0
 
 # `--no-rebase` because a rebase would drop a merge from `upstream` that an
 # earlier run of this command made but did not push, as when its build
