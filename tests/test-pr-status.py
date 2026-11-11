@@ -1,5 +1,6 @@
 """Tests for the pr-status script that do not access GitHub or local repositories."""
 
+import io
 import json
 import os
 import subprocess
@@ -2318,6 +2319,101 @@ class LoadConfigTest(unittest.TestCase):
         ):
             pr_status.load_config("pr-status")
         self.assertIn('repos.a has no "clone"', str(cm.exception.code))
+
+
+class DefaultConfigTest(unittest.TestCase):
+    """Tests for default_config."""
+
+    def reported(self, prs):
+        """Return the repositories that default_config reports on, given git/git's PRS.
+
+        The clones are of a fork me/git of git/git, on branches "master" and "x", and of
+        o/tools.
+
+        Args:
+            prs: git/git's open PRs, as dicts parsed from the JSON of "gh pr list", with keys
+                "author", "headRefName", and "headRepositoryOwner".
+
+        Returns:
+            The GitHub slugs, such as "o/tools", of the repositories in the config.
+        """
+        entries = {
+            "git-fork-me": pr_status.GitEntry("me", "git", "master"),
+            "git-fork-me-branch-x": pr_status.GitEntry("me", "git", "x"),
+            "tools": pr_status.GitEntry("o", "tools", "main"),
+            "tools-branch-y": pr_status.GitEntry("o", "tools", "y"),
+        }
+        views = {
+            "me/git": {
+                "nameWithOwner": "me/git",
+                "parent": {"owner": {"login": "git"}, "name": "git"},
+                "defaultBranchRef": {"name": "master"},
+            },
+            "git/git": {
+                "nameWithOwner": "git/git",
+                "parent": None,
+                "defaultBranchRef": {"name": "master"},
+            },
+            "o/tools": {
+                "nameWithOwner": "o/tools",
+                "parent": None,
+                "defaultBranchRef": {"name": "main"},
+            },
+        }
+
+        def fake_run(cmd):
+            """Return what gh prints for the given command.
+
+            Args:
+                cmd: a "gh repo view", "gh api user", or "gh pr list" command, as a list.
+
+            Returns:
+                What gh prints, such as the JSON of a repository.
+            """
+            if cmd[1:3] == ["api", "user"]:
+                return "Me\n"
+            if cmd[1:3] == ["pr", "list"]:
+                return json.dumps(prs)
+            return json.dumps(views[cmd[3]])
+
+        with (
+            mock.patch.object(pr_status, "git_entries", return_value=entries),
+            mock.patch.object(pr_status, "run", side_effect=fake_run),
+            mock.patch.object(pr_status, "fork_source", return_value="git/git"),
+            mock.patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            cfg = pr_status.default_config("/base")
+        return sorted(r["gh"] for r in cfg["repos"].values())
+
+    @staticmethod
+    def pr(author, owner, branch):
+        """Return a PR of git/git by the given author from a branch of owner's repository.
+
+        Args:
+            author: the login of the PR's author, such as "me".
+            owner: the owner of the PR's head repository, such as "me".
+            branch: the PR's head branch, such as "x".
+
+        Returns:
+            The PR, as a dict like those parsed from the JSON of "gh pr list".
+        """
+        return {
+            "author": {"login": author},
+            "headRefName": branch,
+            "headRepositoryOwner": {"login": owner},
+        }
+
+    def test_no_own_pr(self):
+        """git/git, none of whose open PRs is the user's, is not reported on."""
+        self.assertEqual(self.reported([self.pr("other", "other", "x")]), ["o/tools"])
+
+    def test_own_pr(self):
+        """git/git is reported on if the user wrote one of its open PRs."""
+        self.assertEqual(self.reported([self.pr("me", "me", "z")]), ["git/git", "o/tools"])
+
+    def test_pr_with_working_copy(self):
+        """git/git is reported on if one of its open PRs has a working copy."""
+        self.assertEqual(self.reported([self.pr("bot", "me", "x")]), ["git/git", "o/tools"])
 
 
 # Clones of the repositories o/a and o/b, of a fork of o/a, of an unrelated repository

@@ -4012,13 +4012,68 @@ def find_clone(base: str, owner: str, name: str, default_branch: Callable[[], st
     return str(pathlib.Path(base) / clones[0])
 
 
+# The GitHub slugs, such as "ORG/REPO", in lowercase, of the repositories that
+# default_config reports on only if one of their open PRs is the user's (see has_own_pr).
+# git/git has hundreds of open PRs, which take pr-merge-analysis a long time, and it takes
+# patches by email, so usually none of them is the user's.
+REPORTED_ONLY_FOR_OWN_PRS = frozenset({"git/git"})
+
+
+def has_own_pr(gh: str, clones: dict[str, GitEntry]) -> bool:
+    """Return True if the given repository has an open PR that is the user's.
+
+    Args:
+        gh: a repository's GitHub slug, such as "ORG/REPO".
+        clones: the git clones in the directory that holds the working copy directories, as
+            git_entries returns them.
+
+    Returns:
+        True if gh has an open PR whose author is the user that gh is logged in as, or whose
+        head branch is the current branch of one of clones, a clone of the PR's head
+        repository.  False otherwise, and if gh cannot list the PRs.
+    """
+    try:
+        login = run(["gh", "api", "user", "--jq", ".login"]).strip().lower()
+        fields = "author,headRefName,headRepositoryOwner"
+        prs = json.loads(
+            run(
+                [
+                    "gh",
+                    "pr",
+                    "list",
+                    "-R",
+                    gh,
+                    "--state",
+                    "open",
+                    "--limit",
+                    str(PR_LIMIT),
+                    "--json",
+                    fields,
+                ]
+            )
+        )
+    except subprocess.CalledProcessError as error:
+        print(f"pr-status: cannot list the PRs of {gh}: {error.stderr.strip()}", file=sys.stderr)
+        return False
+    name = gh.split("/")[1].lower()
+    branches = {(info.owner, info.branch) for info in clones.values() if info.repo_name == name}
+    return any(
+        pr["author"]["login"].lower() == login
+        or ((pr.get("headRepositoryOwner") or {}).get("login", "").lower(), pr["headRefName"])
+        in branches
+        for pr in prs
+    )
+
+
 def default_config(base: str) -> dict[str, Any]:
     """Construct the config to use when there is no config file.
 
     The config describes each GitHub repository that at least 2 of the git clones in base
     are clones of (or, if there is none, the one that the most clones are clones of), or its
-    upstream if that repository is a fork with the same name.  Clones are grouped by
-    repository name, so the clones of a repository and of its forks are counted together.
+    upstream if that repository is a fork with the same name.  A repository in
+    REPORTED_ONLY_FOR_OWN_PRS is described only if one of its open PRs is the user's (see
+    has_own_pr).  Clones are grouped by repository name, so the clones of a repository and
+    of its forks are counted together.
     The config has no notes or decisions, and its only document is pr-status.md.
     (Its "Unblocked PRs" sections serve in place of an unblocked document.)
 
@@ -4062,6 +4117,9 @@ def default_config(base: str) -> dict[str, Any]:
             )
             continue
         gh = j["nameWithOwner"]
+        if gh.lower() in REPORTED_ONLY_FOR_OWN_PRS and not has_own_pr(gh, clones):
+            print(f"pr-status: skipping {gh}, which has no open PR of yours", file=sys.stderr)
+            continue
         if any(r["gh"] == gh for r in repos.values()):
             continue
         default_branch = j["defaultBranchRef"]["name"]
