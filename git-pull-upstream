@@ -65,6 +65,15 @@
 # It fails after pulling, but without merging, if `git push --dry-run` shows
 # that the current branch cannot be pushed.
 #
+# It fails, without pulling, if a merge is in progress, as `git pull` would.
+# But if the current branch's upstream branch, once fetched, already contains
+# both sides of the merge, as when another clone made the same merge and
+# pushed it, then the merge is redundant, and this script aborts it if
+# nobody has worked on it since git, `git rerere`, and this package's scripts
+# left it, and no AI agent is working in the directory; the pull then
+# fast-forwards the branch.  For a redundant merge that somebody has worked
+# on, the diagnostic says that the merge is probably redundant.
+#
 # Unlike `git-pull-from`, this command needs no working tree for the upstream
 # repository's default branch, and it does not build that branch.
 

@@ -1900,6 +1900,41 @@ if ! grep -F -x -q 'It is probably redundant:  origin/main, the upstream branch,
   fail "touched redundant merge in the first directory: AGENT-TODO.md does not say that the merge is redundant: $(cat "${main_dir}/AGENT-TODO.md" 2>&1)"
 fi
 
+## Without the pull of the first directory, a redundant merge in progress
+## there that nobody has worked on is still aborted.
+setup_case redundant-merge-first-no-pull
+start_redundant_merge_in_main
+push_to good --no-llm --no-pull-first
+case "${push_output}" in
+  *"aborting the merge of commit "*"myrepo-branch-main, which is redundant:  origin/main, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge in the first directory, --no-pull-first: wrong diagnostic: ${push_output}" ;;
+esac
+if git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "redundant merge in the first directory, --no-pull-first: the merge is still in progress"
+fi
+
+## `git-pull-upstream` aborts a redundant merge in progress that nobody has
+## worked on, and its pull fast-forwards the branch.
+setup_case pull-upstream-redundant-merge
+git -C "${feature_dir}" remote set-head origin main
+git -C "${feature_dir}" fetch -q
+git -C "${feature_dir}" merge -q --no-edit origin/main > /dev/null 2>&1 || true
+if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "git-pull-upstream, redundant merge: no merge is in progress"
+fi
+push_same_merge
+if ! pull_upstream_output="$(cd "${feature_dir}" && PATH="${WORK_DIR}/test-bin:${PATH}" \
+  "${COMMANDS_DIR}/git-pull-upstream" --no-llm 2>&1)"; then
+  fail "git-pull-upstream, redundant merge: failed: ${pull_upstream_output}"
+fi
+case "${pull_upstream_output}" in
+  *"aborting the merge of commit "*", which is redundant:  origin/feature, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "git-pull-upstream, redundant merge: wrong diagnostic: ${pull_upstream_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "$(git -C "${case_dir}/other-clone" rev-parse HEAD)" ]; then
+  fail "git-pull-upstream, redundant merge: the branch was not fast-forwarded to the other clone's merge"
+fi
+
 setup_case todo-agent
 push_to none --llm
 check_not_resolved "AGENT-TODO.md with an agent"
