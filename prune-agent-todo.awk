@@ -1,13 +1,12 @@
 # Removes, from a file AGENT-TODO.md, the entries that no longer apply, as
 # `prune_agent_todo` in common-functions.sh describes.  Reads the file on
-# standard input, and writes the file without those entries to the file
-# ${PRUNE_OUTPUT}.  Prints one line, "R K", in which R is the number of
-# entries removed and K is the number of entries kept, such as "2 1".  If no
-# entry is kept, the output is the preamble without its final blank lines.
+# standard input.  Writes to standard output one line, "R K", in which R is
+# the number of entries removed and K is the number of entries kept, such as
+# "2 1", and then the file without those entries.  If no entry is kept, the
+# file is the preamble without its final blank lines.
 #
 # The environment variables, which awk does not process the way it processes
 # the backslashes of an assignment given with `-v`:
-#   PRUNE_OUTPUT      the pathname of the file to which the result is written
 #   PRUNE_DIRS        the pathnames by which entries can name the working tree,
 #                     one per line, such as "/home/me/myrepo-branch-feature"
 #   PRUNE_CD_PREFIXES the start of the command that continues an AI agent's
@@ -27,7 +26,6 @@
 # compared without the carriage return, and is written unchanged.
 
 BEGIN {
-  output_file = ENVIRON["PRUNE_OUTPUT"]
   merge_head = ENVIRON["PRUNE_MERGE_HEAD"]
   built = ENVIRON["PRUNE_BUILT"]
   dir_count = split(ENVIRON["PRUNE_DIRS"], dirs, "\n")
@@ -198,13 +196,11 @@ END {
       last--
     }
   }
-  # An empty output file is created even if there is no line to write.
-  printf "" > output_file
+  print entries_removed, entries_kept
   for (i = 1; i <= last; i++) {
-    print preamble_raw[i] > output_file
+    print preamble_raw[i]
   }
   for (i = 1; i <= output_count; i++) {
-    print output_raw[i] > output_file
+    print output_raw[i]
   }
-  print entries_removed, entries_kept
 }

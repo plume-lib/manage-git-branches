@@ -2923,10 +2923,12 @@ prune_agent_todo() {
     rm -f "${prune_old}"
     return 0
   fi
-  if ! prune_counts="$(PRUNE_OUTPUT="${prune_output}" PRUNE_DIRS="${prune_dirs}" \
-    PRUNE_CD_PREFIXES="${prune_prefixes}" PRUNE_MERGE_HEAD="${prune_merge_head}" \
-    PRUNE_BUILT="${prune_built}" awk -f "${SCRIPT_DIR}/prune-agent-todo.awk" \
-    < "${prune_old}")" || [ -z "${prune_counts}" ]; then
+  # The first line of the output is the counts, and the rest is the new
+  # content of the file.
+  if ! PRUNE_DIRS="${prune_dirs}" PRUNE_CD_PREFIXES="${prune_prefixes}" \
+    PRUNE_MERGE_HEAD="${prune_merge_head}" PRUNE_BUILT="${prune_built}" \
+    awk -f "${SCRIPT_DIR}/prune-agent-todo.awk" < "${prune_old}" > "${prune_output}" \
+    || ! prune_counts="$(head -n 1 "${prune_output}")" || [ -z "${prune_counts}" ]; then
     echo "${SCRIPT_NAME}: cannot write ${prune_output}, so ${prune_todo} was not pruned" >&2
     rm -f "${prune_old}" "${prune_output}"
     return 0
@@ -2937,7 +2939,7 @@ prune_agent_todo() {
   # substitution removes the final newline.
   prune_delete=0
   if [ "${prune_kept}" -eq 0 ]; then
-    prune_rest="$(tr -d '\r' < "${prune_output}")"
+    prune_rest="$(sed 1d "${prune_output}" | tr -d '\r')"
     if [ "${prune_rest}" = "${agent_todo_preamble}" ] \
       || [ "${prune_rest}" = "${agent_todo_preamble_without_merge}" ]; then
       prune_delete=1
@@ -2968,7 +2970,7 @@ prune_agent_todo() {
     if ! prune_new="$(mktemp "${prune_top}/.${agent_todo_file}.XXXXXX")"; then
       echo "${SCRIPT_NAME}: cannot create a temporary file in ${prune_top}, so ${prune_todo} was not pruned" >&2
     elif ! cp -p "${prune_todo}" "${prune_new}" \
-      || ! cat "${prune_output}" > "${prune_new}"; then
+      || ! sed 1d "${prune_output}" > "${prune_new}"; then
       echo "${SCRIPT_NAME}: cannot write ${prune_new}, so ${prune_todo} was not pruned" >&2
       rm -f "${prune_new}"
     elif ! cmp -s "${prune_old}" "${prune_todo}"; then
