@@ -75,7 +75,11 @@ before="$(git -C "${fork}" rev-parse HEAD)"
 # The backquotes are Markdown, not command substitutions.
 # shellcheck disable=SC2016
 printf '%s\n' '# AI agent sessions to continue' '' \
-  'A script of manage-git-branches, such as `git-push-to`, appends an entry here.' '' \
+  'A script of manage-git-branches, such as `git-push-to`, appends an entry' \
+  'here when an AI agent fails, when the script rejects its work, or when' \
+  "the script leaves a merge in progress.  An entry's command continues the" \
+  "agent's session interactively.  Delete the entry once you have dealt with" \
+  'it.' '' \
   '## Finish the merge in progress (git-pull-upstream, 2026-11-09 08:23:59)' '' \
   "The merge of commit ${before} is in progress in ${fork}." \
   'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.' \

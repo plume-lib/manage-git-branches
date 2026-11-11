@@ -1609,6 +1609,38 @@ case "${pat_output}" in
   *"deleted ${pat_todo}, which has no entry") ;;
   *) fail "prune_agent_todo, no entry: wrong diagnostic: ${pat_output}" ;;
 esac
+# A file whose explanation a person extended, without a blank line, is kept.
+pat_extended_preamble="${pat_preamble}
+Do nothing about the entries below until the release."
+write_todo "${pat_extended_preamble}" "${pat_build}"
+prune_todo 1
+check_todo "a person's line in the explanation" "${pat_extended_preamble}"
+# A file with the explanation that does not mention a merge is deleted.
+# The backquotes are Markdown, not command substitutions.
+# shellcheck disable=SC2016
+write_todo '# AI agent sessions to continue
+
+A script of manage-git-branches, such as `git-push-to`, appends an entry
+here when an AI agent fails or when the script rejects its work.  The
+entry'"'"'s command continues the agent'"'"'s session interactively.  Delete the
+entry once you have dealt with it.' "${pat_build}"
+prune_todo 1
+[ ! -e "${pat_todo}" ] || fail "prune_agent_todo, explanation without a merge: the file was not deleted: $(cat "${pat_todo}")"
+# Run in a subdirectory of the working tree, reached through a symbolic link,
+# the function removes the entries that name the top level as `pwd` prints
+# it there, through the link.
+pat_link="${WORK_DIR}/prune link"
+ln -s "${pat_dir}" "${pat_link}"
+mkdir -p "${pat_dir}/sub"
+write_todo "${pat_preamble}" "${pat_person}" "## Fix the build after merges (git-pull-upstream, 2026-11-10 07:51:59)
+
+\`\`\`sh
+cd '${pat_link}' && claude --resume 0d91d672-a3b0-46a7-851a-62477e166fdc
+\`\`\`"
+pat_output="$(cd "${pat_link}/sub" && prune_agent_todo 1 2>&1)" \
+  || fail "prune_agent_todo, subdirectory: returned a nonzero status: ${pat_output}"
+check_todo "subdirectory" "${pat_preamble}" "${pat_person}"
+rmdir "${pat_dir}/sub"
 # An entry to which a person added text is kept:  a line after its command,
 # a line after its merge paragraph, or a paragraph at the end of the file,
 # which belongs to the last entry.

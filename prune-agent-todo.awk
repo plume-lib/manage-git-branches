@@ -1,13 +1,13 @@
 # Removes, from a file AGENT-TODO.md, the entries that no longer apply, as
 # `prune_agent_todo` in common-functions.sh describes.  Reads the file on
-# standard input, and writes the file without those entries to standard
-# output.  Writes to the file ${PRUNE_STATUS} one line, "N keep" or
-# "N delete", in which N is the number of entries removed, and "delete" says
-# that the file should be deleted rather than rewritten.
+# standard input, and writes the file without those entries to the file
+# ${PRUNE_OUTPUT}.  Prints one line, "R K", in which R is the number of
+# entries removed and K is the number of entries kept, such as "2 1".  If no
+# entry is kept, the output is the preamble without its final blank lines.
 #
 # The environment variables, which awk does not process the way it processes
 # the backslashes of an assignment given with `-v`:
-#   PRUNE_STATUS      the pathname of the file to which the status is written
+#   PRUNE_OUTPUT      the pathname of the file to which the result is written
 #   PRUNE_DIRS        the pathnames by which entries can name the working tree,
 #                     one per line, such as "/home/me/myrepo-branch-feature"
 #   PRUNE_CD_PREFIXES the start of the command that continues an AI agent's
@@ -27,7 +27,7 @@
 # compared without the carriage return, and is written unchanged.
 
 BEGIN {
-  status_file = ENVIRON["PRUNE_STATUS"]
+  output_file = ENVIRON["PRUNE_OUTPUT"]
   merge_head = ENVIRON["PRUNE_MERGE_HEAD"]
   built = ENVIRON["PRUNE_BUILT"]
   dir_count = split(ENVIRON["PRUNE_DIRS"], dirs, "\n")
@@ -162,28 +162,6 @@ function finish_entry(i) {
   entry_count = 0
 }
 
-# Returns 1 if the preamble is the title and the explanation that
-# `append_agent_todo` writes, followed by blank lines, and 0 otherwise.  The
-# explanation is one paragraph, whose wording differs in files that other
-# versions of `append_agent_todo` wrote, so only its start is compared.
-function is_standard_preamble(i, last) {
-  last = preamble_count
-  while (last > 0 && preamble_lines[last] == "") {
-    last--
-  }
-  if (last < 3 || preamble_lines[1] != "# AI agent sessions to continue" \
-    || preamble_lines[2] != "" \
-    || !starts_with(preamble_lines[3], "A script of manage-git-branches")) {
-    return 0
-  }
-  for (i = 4; i <= last; i++) {
-    if (preamble_lines[i] == "") {
-      return 0
-    }
-  }
-  return 1
-}
-
 {
   line = $0
   sub(/\r$/, "", line)
@@ -209,11 +187,6 @@ line ~ /^## / {
 
 END {
   finish_entry()
-  if (entries_kept == 0 && is_standard_preamble()) {
-    printf "%d delete\n", entries_removed > status_file
-    exit 0
-  }
-  printf "%d keep\n", entries_removed > status_file
   # The removed entries' blank lines are gone, but a removed last entry
   # leaves the blank line that preceded it.
   while (output_count > 0 && output_lines[output_count] == "") {
@@ -225,10 +198,13 @@ END {
       last--
     }
   }
+  # An empty output file is created even if there is no line to write.
+  printf "" > output_file
   for (i = 1; i <= last; i++) {
-    print preamble_raw[i]
+    print preamble_raw[i] > output_file
   }
   for (i = 1; i <= output_count; i++) {
-    print output_raw[i]
+    print output_raw[i] > output_file
   }
+  print entries_removed, entries_kept
 }
