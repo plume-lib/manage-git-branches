@@ -193,15 +193,16 @@
 #  * the working tree had no unstaged changes before the commit or the merge;
 #  * the hook staged nothing, and created or deleted no untracked file; and
 #  * the hook only modified files, and deleted none.
-# Then it runs the hook again, builds a fix to the build again, and commits
-# once more, with `git commit`, if the hook succeeds and changes no file and
-# the build succeeds.  That commit does not run the pre-commit hook a third
-# time.  The commit includes the hook's changes to the files that it would
-# not otherwise change; this script lists those files, whether or not it
-# commits, so that you can review the hook's changes to them.  If a
-# condition does not hold, or if the hook, the build, or the second commit
-# fails, this script stops, with the merge still in progress or the fix
-# staged.
+# Then it runs a pre-merge-commit hook again, which must change no file,
+# builds a fix to the build again, and commits once more, with `git commit`,
+# which runs the pre-commit hook again.  The commit includes the hook's
+# changes to the files that it would not otherwise change; this script lists
+# those files, whether or not it commits, so that you can review the hook's
+# changes to them.  It also lists each file that changed after it staged the
+# hook's changes, as when the hook changed the file again when it ran again.
+# If a condition does not hold, or if the hook, the build, or the second
+# commit fails, this script stops, with the merge still in progress or the
+# fix staged.
 
 # Asking an AI agent
 #
