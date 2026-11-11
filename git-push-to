@@ -223,13 +223,6 @@
 # that rebases, as `pull.rebase` can make it do, is not resolved.  If the
 # agent fails, this script stops with the merge still in progress.
 #
-# An agent that fails, other than by running out of time, without changing
-# HEAD, the index, or any file, did nothing that anyone must review, and it
-# might succeed if it runs again, as when its service was briefly
-# unavailable.  This script runs it again, up to 2 more times, each after a
-# pause of $MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE seconds, 60 by default.  That
-# applies to resolving conflicts and to fixing a build.
-#
 # The agent's instructions consist of the file merge-conflict-instructions.md,
 # which also suits a merge that you resolve yourself or with an agent
 # interactively, followed by rules specific to this script.  The agent is
@@ -307,8 +300,7 @@
 # `prune_agent_todo` in common-functions.sh says which entries are deleted.
 # When the agent could not resolve the conflicts, the entry also tells an AI
 # agent that reads it to ask a person for help with them.  But when the
-# agent was not ready to run, or failed each time without changing anything
-# and then was not ready to run, the entry instead says that running this
+# agent was not ready to run, the entry instead says that running this
 # script again, once the agent can run, asks the agent to do its task again;
 # for a merge in progress in the first directory, whose pull such a merge
 # makes this script refuse, the entry says to abort the merge first.  A later
