@@ -3042,21 +3042,55 @@ ${report_command}
   fi
 }
 
+## Usage: is_unsafe_to_write FILE
+## Returns 0 if FILE exists but is not a regular file with one link:  if it
+## is a symbolic link or has another hard link, either of which could make it
+## another file outside the working tree, or if it is anything else but a
+## regular file.  Returns 1 if FILE does not exist or is a regular file with
+## one link.
+is_unsafe_to_write() {
+  # `find -links +1` prints the file if it has more than one hard link.
+  [ -L "$1" ] \
+    || { [ -e "$1" ] && [ ! -f "$1" ]; } \
+    || [ -n "$(find "$1" -prune -links +1 2> /dev/null)" ]
+}
+
+# The title and the explanation with which `append_agent_todo` starts a file
+# AGENT-TODO.md.
+# The backquotes are Markdown, not command substitutions.
+# shellcheck disable=SC2016
+agent_todo_preamble='# AI agent sessions to continue
+
+A script of manage-git-branches, such as `git-push-to`, appends an entry
+here when an AI agent fails, when the script rejects its work, or when
+the script leaves a merge in progress.  An entry'"'"'s command continues the
+agent'"'"'s session interactively.  Delete the entry once you have dealt with
+it.'
+# Another title and explanation that a file AGENT-TODO.md can start with,
+# which do not mention a merge in progress.  `prune_agent_todo` treats them
+# as it treats ${agent_todo_preamble}.
+# shellcheck disable=SC2016
+agent_todo_preamble_without_merge='# AI agent sessions to continue
+
+A script of manage-git-branches, such as `git-push-to`, appends an entry
+here when an AI agent fails or when the script rejects its work.  The
+entry'"'"'s command continues the agent'"'"'s session interactively.  Delete the
+entry once you have dealt with it.'
+
 ## Usage: append_agent_todo FILE ENTRY
 ## Appends ENTRY, Markdown text that begins with a blank line and a heading,
 ## to FILE, the pathname of a file AGENT-TODO.md, which this function creates,
-## with a title and an explanation, if it does not exist.  Returns 1, after
+## starting with ${agent_todo_preamble}, if it does not exist.  Returns 1, after
 ## printing a diagnostic, if it did not write FILE:  because FILE is empty, as
-## `agent_todo_path` leaves it if the file must not be written; or because
-## FILE is a symbolic link or has another hard link, either of which could
-## make the file another one outside the working tree, or is anything else
-## but a regular file; or because writing failed.  Runs no git command.
+## `agent_todo_path` leaves it if the file must not be written; because FILE
+## is unsafe to write (see `is_unsafe_to_write`); or because writing failed.
+## Runs no git command.
 append_agent_todo() {
   if [ -z "$1" ]; then
     echo "${SCRIPT_NAME}: did not write ${agent_todo_file}, which git tracks or whose working tree is unknown" >&2
     return 1
   fi
-  if [ -L "$1" ] || { [ -e "$1" ] && ! is_single_link_file "$1"; }; then
+  if is_unsafe_to_write "$1"; then
     echo "${SCRIPT_NAME}: did not write $1, which is not a regular file with one link" >&2
     return 1
   fi
@@ -3066,16 +3100,7 @@ append_agent_todo() {
   fi
   if ! {
     if [ "${append_todo_new}" = yes ]; then
-      # The backquotes are Markdown, not command substitutions.
-      # shellcheck disable=SC2016
-      printf '%s\n' \
-        '# AI agent sessions to continue' \
-        '' \
-        'A script of manage-git-branches, such as `git-push-to`, appends an entry' \
-        'here when an AI agent fails, when the script rejects its work, or when' \
-        "the script leaves a merge in progress.  An entry's command continues the" \
-        "agent's session interactively.  Delete the entry once you have dealt with" \
-        'it.'
+      printf '%s\n' "${agent_todo_preamble}"
     fi
     printf '%s' "$2"
   } >> "$1"; then
@@ -3146,6 +3171,149 @@ agent_todo_path() {
     return 1
   fi
   printf '%s\n' "${agent_todo_top}/${agent_todo_file}"
+}
+
+## Usage: prune_agent_todo BUILT
+## Removes, from the file AGENT-TODO.md at the top level of the working tree
+## that contains the current directory (see `agent_todo_path`), each entry
+## that a script of this package wrote about that working tree and that no
+## longer applies.  The heading of such an entry ends with the script's name
+## and a time, as in "## Fix the build after merges (git-push-to,
+## 2026-11-10 07:51:59)".  An entry no longer applies if
+##  * it says that the merge of a commit is in progress in the working tree,
+##    as `merge_in_progress_note` writes, and no merge of that commit is in
+##    progress there, because someone finished or aborted it; or
+##  * BUILT is 1, which says that the working tree's HEAD was just built
+##    successfully, and the entry gives the command that continues an AI
+##    agent's attempt to fix the build of the working tree, as
+##    `report_agent_session` writes it for a task such as "Fix the build after
+##    merging branch 'main'".
+## An entry is about the working tree if it names the working tree's top
+## level.  Each other entry is kept:  one with a heading of another form, such
+## as one that a person wrote; one of another kind, such as an entry of
+## `fix-renovate-prs`; one about another working tree, as in the copy of
+## AGENT-TODO.md that `git-new-branch` makes along with the rest of a working
+## tree; and one to which a person added text, such as a note after its
+## command.  Lines that follow the last entry belong to it.
+##
+## Deletes the file if no entry remains and the file holds nothing else but
+## ${agent_todo_preamble} or ${agent_todo_preamble_without_merge}, even if no
+## entry was removed.  Says what it removed.  Does nothing if the file does
+## not exist or is unsafe to write (see `is_unsafe_to_write`).  Replaces the
+## file atomically, keeping its permissions.  Just before it replaces or
+## deletes the file, checks that the file has not changed since this function
+## read it, as when another script appended an entry, and leaves a changed
+## file unchanged; this narrows, but does not close, the window in which such
+## an append is lost.  A failure to read or to rewrite the file leaves the
+## entries for a person to delete, and is reported but is not an error, so
+## this function always returns 0.
+prune_agent_todo() {
+  prune_built="$1"
+  prune_todo="$(agent_todo_path)" || return 0
+  if [ ! -e "${prune_todo}" ] || is_unsafe_to_write "${prune_todo}"; then
+    return 0
+  fi
+  # The top level of the working tree, as an entry can name it:  as git
+  # prints it, with symbolic links resolved, and as `pwd` prints it, which
+  # can contain symbolic links.  `merge_in_progress_note` and `run_agent`
+  # name the current directory, which is the top level, as `pwd` prints it.
+  prune_top="${prune_todo%/*}"
+  prune_pwd_top="$(pwd)"
+  if prune_prefix="$(git rev-parse --show-prefix)" && [ -n "${prune_prefix}" ]; then
+    prune_pwd_top="${prune_pwd_top%/"${prune_prefix%/}"}"
+  fi
+  set -- "${prune_top}"
+  if [ "${prune_pwd_top}" != "${prune_top}" ]; then
+    set -- "$@" "${prune_pwd_top}"
+  fi
+  prune_dirs=''
+  prune_prefixes=''
+  for prune_dir in "$@"; do
+    prune_dirs="${prune_dirs}${prune_dir}
+"
+    prune_prefixes="${prune_prefixes}$(printf 'cd %s && ' "$(shell_word "${prune_dir}")")
+"
+  done
+  prune_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)" || prune_merge_head=''
+  # A copy of the file, which awk reads, and awk's output are written in the
+  # git directory, which is outside the working tree.  The copy also shows
+  # whether the file changed while awk read the copy.
+  if ! prune_base="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-todo)"; then
+    echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd), so ${prune_todo} was not pruned" >&2
+    return 0
+  fi
+  if ! prune_old="$(mktemp "${prune_base}.XXXXXX")"; then
+    echo "${SCRIPT_NAME}: cannot create a temporary file in the git directory of $(pwd), so ${prune_todo} was not pruned" >&2
+    return 0
+  fi
+  prune_output="${prune_old}.new"
+  if ! cp "${prune_todo}" "${prune_old}"; then
+    echo "${SCRIPT_NAME}: cannot read ${prune_todo}, so it was not pruned" >&2
+    rm -f "${prune_old}"
+    return 0
+  fi
+  # The first line of the output is the counts, and the rest is the new
+  # content of the file.
+  if ! PRUNE_DIRS="${prune_dirs}" PRUNE_CD_PREFIXES="${prune_prefixes}" \
+    PRUNE_MERGE_HEAD="${prune_merge_head}" PRUNE_BUILT="${prune_built}" \
+    awk -f "${SCRIPT_DIR}/prune-agent-todo.awk" < "${prune_old}" > "${prune_output}" \
+    || ! prune_counts="$(head -n 1 "${prune_output}")" || [ -z "${prune_counts}" ]; then
+    echo "${SCRIPT_NAME}: cannot write ${prune_output}, so ${prune_todo} was not pruned" >&2
+    rm -f "${prune_old}" "${prune_output}"
+    return 0
+  fi
+  prune_removed="${prune_counts% *}"
+  prune_kept="${prune_counts#* }"
+  # `tr` removes the carriage returns of CRLF line endings, and the command
+  # substitution removes the final newline.
+  prune_delete=0
+  if [ "${prune_kept}" -eq 0 ]; then
+    prune_rest="$(sed 1d "${prune_output}" | tr -d '\r')"
+    if [ "${prune_rest}" = "${agent_todo_preamble}" ] \
+      || [ "${prune_rest}" = "${agent_todo_preamble_without_merge}" ]; then
+      prune_delete=1
+    fi
+  fi
+  if [ "${prune_removed}" -eq 1 ]; then
+    prune_what='1 entry that no longer applies'
+  else
+    prune_what="${prune_removed} entries that no longer apply"
+  fi
+  if [ "${prune_delete}" -eq 1 ]; then
+    if [ "${prune_removed}" -eq 0 ]; then
+      prune_why='which has no entry'
+    else
+      prune_why='whose entries no longer apply'
+    fi
+    if ! cmp -s "${prune_old}" "${prune_todo}"; then
+      echo "${SCRIPT_NAME}: ${prune_todo} changed while it was being pruned, so it was not deleted" >&2
+    elif rm -f "${prune_todo}"; then
+      echo "${SCRIPT_NAME}: deleted ${prune_todo}, ${prune_why}" >&2
+    else
+      echo "${SCRIPT_NAME}: cannot delete ${prune_todo}, ${prune_why}" >&2
+    fi
+  elif [ "${prune_removed}" -gt 0 ]; then
+    # The new file is a copy of the file, so that it keeps the file's
+    # permissions, in the same directory, so that `mv` replaces the file
+    # atomically.
+    if ! prune_new="$(mktemp "${prune_top}/.${agent_todo_file}.XXXXXX")"; then
+      echo "${SCRIPT_NAME}: cannot create a temporary file in ${prune_top}, so ${prune_todo} was not pruned" >&2
+    elif ! cp -p "${prune_todo}" "${prune_new}" \
+      || ! sed 1d "${prune_output}" > "${prune_new}"; then
+      echo "${SCRIPT_NAME}: cannot write ${prune_new}, so ${prune_todo} was not pruned" >&2
+      rm -f "${prune_new}"
+    elif ! cmp -s "${prune_old}" "${prune_todo}"; then
+      echo "${SCRIPT_NAME}: ${prune_todo} changed while it was being pruned, so it was not pruned" >&2
+      rm -f "${prune_new}"
+    elif mv -f "${prune_new}" "${prune_todo}"; then
+      echo "${SCRIPT_NAME}: removed from ${prune_todo} ${prune_what}" >&2
+    else
+      echo "${SCRIPT_NAME}: cannot rewrite ${prune_todo} to remove ${prune_what}" >&2
+      rm -f "${prune_new}"
+    fi
+  fi
+  rm -f "${prune_old}" "${prune_output}"
+  return 0
 }
 
 ## Usage: merge_in_progress_note [REASON]
@@ -5120,6 +5288,8 @@ version of it.  This merge brings the rest of it, from commit ${mlph_short_p}." 
 ## comes from, if DIRECTORY is given and not empty.  The merge commit can be
 ## the one that this call made, one that a pull made, or one that an earlier
 ## call made but did not push, as when its build failed.
+## After a successful build, removes the entries of AGENT-TODO.md that no
+## longer apply, such as one about a failed build (see `prune_agent_todo`).
 ## Returns 1, after printing a diagnostic, on failure.  Sets
 ## ${merge_build_push_step} to the step that it reached:  "merging",
 ## "building", or "pushing".
@@ -5142,10 +5312,16 @@ merge_build_push() {
   # `--no-log` prevents a second copy of the commit summaries:  `git merge`
   # appends them to a message given with `-m` when `merge.log` is set, and
   # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
+  # 1 if this call builds the merge, and 0 otherwise.
+  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+    merge_builds=1
+  else
+    merge_builds=0
+  fi
   # A build of uncommitted changes, such as those that a failed attempt to
   # fix the build left staged, says nothing about the commit that is pushed.
   # Check before merging, so that a refusal leaves no merge commit behind.
-  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ] \
+  if [ "${merge_builds}" -eq 1 ] \
     && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     echo "${SCRIPT_NAME}: the working tree of $(pwd) has uncommitted changes; commit or discard them" >&2
     return 1
@@ -5202,7 +5378,7 @@ merge_build_push() {
     fi
   fi
 
-  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+  if [ "${merge_builds}" -eq 1 ]; then
     merge_build_push_step='building'
     if ! merge_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-build.log)"; then
       echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
@@ -5245,13 +5421,26 @@ merge_build_push() {
       if [ -n "${merged_landed_prs}" ]; then
         merge_did="Before merging commit $1, the script merged into branch ${merge_fix_branch} the final version of each of the pull requests ${merged_landed_prs}, each followed by the commit that landed it; either kind of merge might have broken the build.  ${merge_did}"
       fi
+      # `fix_failed_build` runs at the top level of the working tree, where
+      # the agent's session, and the command that continues it, start.
+      merge_dir="$(pwd)"
+      if ! cd -- "${merge_top}"; then
+        echo "${SCRIPT_NAME}: cannot cd to ${merge_top}" >&2
+        return 1
+      fi
       fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"
       merge_fix_status=$?
       if [ "${merge_fix_status}" -eq 3 ]; then
         merge_build_note "${merge_fix_message}" "$(agent_unchanged_reason "$5")  $(agent_rerun_advice "$5" 'fix the build')"
+        cd -- "${merge_dir}" || true
         return 1
       elif [ "${merge_fix_status}" -ne 0 ]; then
         report_agent_session "${merge_fix_message}"
+        cd -- "${merge_dir}" || true
+        return 1
+      fi
+      if ! cd -- "${merge_dir}"; then
+        echo "${SCRIPT_NAME}: cannot cd back to ${merge_dir}" >&2
         return 1
       fi
     fi
@@ -5260,6 +5449,8 @@ merge_build_push() {
     if merge_build_todo="$(agent_todo_path)"; then
       remove_agent_todo_entries "${merge_build_todo}" rerun "${build_entry_heading}"
     fi
+    # No merge is in progress, and the build succeeded.
+    prune_agent_todo 1
   fi
 
   merge_build_push_step='pushing'

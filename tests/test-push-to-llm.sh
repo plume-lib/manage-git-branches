@@ -1928,6 +1928,18 @@ check_todo_merge "AGENT-TODO.md without an agent"
 push_to good --no-llm
 check_not_resolved "AGENT-TODO.md without an agent, rerun"
 check_todo_merge "AGENT-TODO.md without an agent, rerun"
+# Once a person finishes the merge, a rerun that pushes deletes the entry,
+# and with it the file, which holds nothing else.
+git -C "${feature_dir}" diff --name-only --diff-filter=U -z \
+  | xargs -0 git -C "${feature_dir}" checkout --ours --
+git -C "${feature_dir}" commit -q -a --no-edit
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "AGENT-TODO.md without an agent, merge finished: git-push-to failed: ${push_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "AGENT-TODO.md without an agent, merge finished: the file was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
 setup_case todo-agent
 push_to none --llm
 check_not_resolved "AGENT-TODO.md with an agent"
@@ -2485,6 +2497,21 @@ fi
 if [ "$(wc -l < "${STUB_LOG}")" -ne 2 ]; then
   fail "build not fixed: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
 fi
+# Once a person fixes the build, a rerun that builds and pushes deletes the
+# entry, and with it the file, which holds nothing else.
+echo "fine" > "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Fix the build by hand"
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "build fixed by hand: git-push-to failed: ${push_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "build fixed by hand: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+case "${push_output}" in
+  *"deleted ${feature_dir}/AGENT-TODO.md, whose entries no longer apply"*) ;;
+  *) fail "build fixed by hand: wrong diagnostic: ${push_output}" ;;
+esac
 
 ## An agent whose changes do not fix the build gets three attempts.
 setup_case build-bad build
