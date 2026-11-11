@@ -3633,7 +3633,7 @@ review_unstaged_changes() {
 ## Then, if HOOK is "pre-merge-commit", which `git commit` does not run, it
 ## runs the hook again, with `GIT_EDITOR=:`, as `git merge` runs it, on the
 ## files as the hook left them, and requires that it succeed without
-## changing a file.  Then it runs COMMAND, if it is given, as a check of
+## changing a file or creating or deleting an untracked file.  Then it runs COMMAND, if it is given, as a check of
 ## those files, and commits only if COMMAND succeeds.  `git commit` runs the
 ## pre-commit hook again.  For each file that the hook changed but the
 ## commit does not otherwise change, it prints a notice that says whether
@@ -3705,6 +3705,9 @@ commit_staged_again() {
       commit_again_failure="the pre-merge-commit hook, run again, failed"
     elif ! git diff --quiet; then
       commit_again_failure="the pre-merge-commit hook, run again, changed a file"
+    elif ! commit_again_untracked="$(untracked_files)" \
+      || [ "${commit_again_untracked}" != "${commit_staged_untracked}" ]; then
+      commit_again_failure="the pre-merge-commit hook, run again, created or deleted an untracked file"
     fi
   fi
   if [ -z "${commit_again_failure}" ] && [ $# -gt 0 ] && ! "$@"; then
