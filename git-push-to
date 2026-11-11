@@ -301,21 +301,20 @@
 # it; delete the entry once you have dealt with it.  A later run deletes an
 # entry that no longer applies, unless you added text to it:  one about a
 # merge that is no longer in progress, because you finished or aborted it,
-# before it pulls or merges into the working tree, and one about a failed
-# build, once the build succeeds.  It deletes the file if it has no entry left and you added
-# nothing to it.  `prune_agent_todo` in common-functions.sh says which
-# entries are deleted.  When the agent could not
-# resolve the conflicts, the entry also tells an AI agent that reads it to
-# ask a person for help with them.  But when the agent was not ready to run,
-# or failed each time without changing anything and then was not ready to
-# run, the entry instead says that running this script again, once the agent
-# can run, asks the agent to do its task again; for a merge in progress in the
-# first directory, whose pull such a merge makes this script refuse, the entry
-# says to abort the merge first.  A later run removes such an entry once it
-# writes a newer one, and once it finishes the merge or the build passes; it
-# also removes an entry that notes a merge in progress once it commits that
-# merge.  It keeps each entry that asks a person for help while the merge is
-# in progress, and each entry that gives a command.  The resumed
+# before it pulls or merges into the working tree, or because it committed
+# the merge, and one about a failed build, once the build succeeds.  It
+# deletes the file if it has no entry left and you added nothing to it.
+# `prune_agent_todo` in common-functions.sh says which entries are deleted.
+# When the agent could not resolve the conflicts, the entry also tells an AI
+# agent that reads it to ask a person for help with them.  But when the
+# agent was not ready to run, or failed each time without changing anything
+# and then was not ready to run, the entry instead says that running this
+# script again, once the agent can run, asks the agent to do its task again;
+# for a merge in progress in the first directory, whose pull such a merge
+# makes this script refuse, the entry says to abort the merge first.  A later
+# run also deletes such an entry when it runs the agent again for the same
+# merge or build, or writes a newer entry about it.  An entry that asks a
+# person for help stays while the merge is in progress.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
 # contains the text of the merged changes, which can include instructions
 # from other people.
