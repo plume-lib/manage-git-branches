@@ -1597,12 +1597,12 @@ resolve_with_agent() {
   resolve_paths="$(working_tree_paths)"
   # The files that git tracks, which the agent can change or delete.  `-z`
   # keeps git from quoting a pathname, as it quotes one that contains a
-  # quotation mark.  A pathname that contains a newline matches no file,
-  # because of the byte 001 that `print_nul_lines` puts in place of the
-  # newline, so a change to that file is rejected.  The index holds a
-  # conflicted file at several stages, so `uniq` removes the repetitions from
-  # the sorted list.
-  resolve_tracked="$(print_nul_lines git ls-files -z | uniq)"
+  # quotation mark.  `tr` turns each NUL that ends a pathname into a newline,
+  # and each newline within a pathname into the byte 001, so that such a
+  # pathname matches no file, and a change to that file is rejected.  The
+  # index holds a conflicted file at several stages, so `uniq` removes the
+  # repetitions from the sorted list.
+  resolve_tracked="$(git ls-files -z | tr '\n\000' '\001\n' | uniq)"
   # Git runs a hook when the script commits, outside the agent's sandbox.
   resolve_hooks="$(working_tree_hooks)"
   resolve_branch="$(current_branch)" || resolve_branch="HEAD"
