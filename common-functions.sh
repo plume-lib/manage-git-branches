@@ -2595,15 +2595,20 @@ agent_ready_record() {
 
 ## Usage: agent_rerun_advice AGENT TASK [STEP]
 ## Prints a sentence for an entry of AGENT-TODO.md that says that running
-## this script again, once the AI agent AGENT can run, asks it to do TASK,
-## such as "resolve the conflicts", so that no person needs to.  If STEP is
-## given, such as "abort the merge with `git merge --abort`", the sentence
-## says to do STEP before running this script again.
+## the same command again, once the AI agent AGENT can run, asks it to do
+## TASK, such as "resolve the conflicts", so that no person needs to.  If
+## STEP is given, such as "abort the merge with `git merge --abort`", the
+## sentence says to do STEP before running the command again.  The sentence
+## does not name the command:  `git-pull-from` and `git-rebase-to` run
+## `git-push-to`, whose name ${SCRIPT_NAME} would then give.
+## The end of the sentence that `agent_rerun_advice` prints, by which
+## `remove_agent_todo_entries` recognizes an entry that gives such advice.
+agent_rerun_advice_end=', so no person needs to.'
 agent_rerun_advice() {
   if [ -n "${3:-}" ]; then
-    printf 'Once %s can run, %s; then running %s again asks %s to %s, so no person needs to.\n' "$1" "$3" "${SCRIPT_NAME}" "$1" "$2"
+    printf 'Once %s can run, %s; then running the same command again asks %s to %s%s\n' "$1" "$3" "$1" "$2" "${agent_rerun_advice_end}"
   else
-    printf 'Once %s can run, running %s again asks it to %s, so no person needs to.\n' "$1" "${SCRIPT_NAME}" "$2"
+    printf 'Once %s can run, running the same command again asks it to %s%s\n' "$1" "$2" "${agent_rerun_advice_end}"
   fi
 }
 
@@ -2692,10 +2697,11 @@ index_digest() {
 ## is not ready to run (see below).  Otherwise returns 1, after printing a
 ## diagnostic, if the agent fails.
 ##
-## An agent that fails, other than by running out of time, without changing
-## HEAD, the index, or any file of the working tree, even one that git
-## ignores, did no work that anyone must review, and it might succeed if it
-## is run again, as when its service was briefly unavailable.  It is run
+## An agent that fails, other than by running out of time or by a signal, as
+## when the user interrupts it, without changing HEAD, the index, or any file
+## of the working tree, even one that git ignores, did no work that anyone
+## must review, and it might succeed if it is run again, as when its service
+## was briefly unavailable.  It is run
 ## again, up to ${agent_retries} more times, each after a pause of
 ## ${MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE} seconds, 60 by default.  If its last
 ## attempt fails so, and the agent is then not ready to run (see
@@ -2818,7 +2824,7 @@ run_agent() {
   # user's "Write(*)", would otherwise permit edits anywhere; a project's
   # settings file could come from the merged branch.  `--strict-mcp-config`
   # leaves out MCP servers, whose tools could act elsewhere.  Of the git
-  # commands that Claude may run, which read the repository, `git diff`,
+  # commands that Claude can run, which read the repository, `git diff`,
   # `git log`, and `git show` can write a file named by `--output`.  Claude
   # refuses a shell redirection of their output to a file outside the
   # working tree or in `.git`.  `git diff` can also read any file, as in
@@ -2908,6 +2914,13 @@ run_agent() {
       return 1
     fi
     echo "${SCRIPT_NAME}: $1 failed with status ${run_agent_status}" >&2
+    # A status above 128 means that a signal ended the agent, as when the
+    # user interrupted it.
+    if [ "${run_agent_status}" -gt 128 ]; then
+      run_agent_remove_marker
+      echo "${SCRIPT_NAME}: $1 was ended by signal $((run_agent_status - 128)), so it is not run again" >&2
+      return 1
+    fi
     if [ "${run_agent_watched}" -eq 0 ] \
       || [ "$(git rev-parse --verify --quiet HEAD)" != "${run_agent_head}" ] \
       || [ "$(index_digest)" != "${run_agent_index}" ] \
@@ -3013,9 +3026,11 @@ ${report_command}
 \`\`\`
 "
   done
-  # The entry replaces any earlier one about the same merge.
+  # The entry replaces any earlier one that said that running the script
+  # again would suffice for the same merge.
   if [ -n "${report_note}" ] && [ -n "${agent_session_todo:-}" ]; then
-    remove_merge_entries "${agent_session_todo}" "$(printf '%s\n' "${report_note}" | head -n 1)"
+    remove_agent_todo_entries "${agent_session_todo}" rerun "${merge_entry_heading}" \
+      "$(printf '%s\n' "${report_note}" | head -n 1)"
   fi
   if ! append_agent_todo "${agent_session_todo:-}" "${report_entry}"; then
     return 0
@@ -3079,30 +3094,35 @@ is_single_link_file() {
     && [ -z "$(find "$1" -prune -links +1 2> /dev/null)" ]
 }
 
-## Usage: remove_merge_entries FILE LINE
-## Removes from FILE, a file AGENT-TODO.md, each entry under the heading
-## "Finish the merge in progress", as `report_merge_in_progress` writes it,
-## that contains LINE, the first line of a note of `merge_in_progress_note`,
-## such as "The merge of commit 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b is
-## in progress in /home/me/myrepo-branch-feature.".  The caller is about to
-## append a newer entry about the same merge, whose advice replaces the
-## older entry's, such as that no person needs to help.  An entry that gives
-## a command to continue an agent's session is kept.  Does nothing if FILE
-## is not a regular file with one link (see `append_agent_todo`).  Runs no git
+## Usage: remove_agent_todo_entries FILE KIND HEADING [LINE]
+## Removes from FILE, a file AGENT-TODO.md, each entry whose heading begins
+## with HEADING, such as "Finish the merge in progress (", and that contains
+## the line LINE, if it is given and not empty, such as the first line of a
+## note of `merge_in_progress_note`.  If KIND is "rerun", removes only an
+## entry that says that running the script again suffices (see
+## `agent_rerun_advice`):  its advice is out of date once the script runs
+## again.  If KIND is "all", removes each such entry.  Does nothing if FILE is
+## not a regular file with one link (see `append_agent_todo`).  Runs no git
 ## command.
-remove_merge_entries() {
+remove_agent_todo_entries() {
   if ! is_single_link_file "$1"; then
     return 0
   fi
   # An entry runs from its heading to the next heading.  The text before the
   # first heading, the title and explanation, is kept.
-  if ! remove_kept="$(TODO_LINE="$2" awk '
+  if ! remove_kept="$(TODO_KIND="$2" TODO_HEADING="## $3" TODO_LINE="${4:-}" \
+    TODO_RERUN="${agent_rerun_advice_end}" awk '
     function flush() {
-      if (!(finish && found)) printf "%s", entry
-      entry = ""; finish = 0; found = 0
+      if (!(matched && (ENVIRON["TODO_LINE"] == "" || found) \
+        && (ENVIRON["TODO_KIND"] == "all" || rerun))) printf "%s", entry
+      entry = ""; matched = 0; found = 0; rerun = 0
     }
-    /^## / { flush(); finish = index($0, "## Finish the merge in progress (") == 1 }
-    { if ($0 == ENVIRON["TODO_LINE"]) found = 1; entry = entry $0 "\n" }
+    /^## / { flush(); matched = index($0, ENVIRON["TODO_HEADING"]) == 1 }
+    {
+      if ($0 == ENVIRON["TODO_LINE"]) found = 1
+      if (index($0, ENVIRON["TODO_RERUN"])) rerun = 1
+      entry = entry $0 "\n"
+    }
     END { flush() }' "$1")"; then
     return 0
   fi
@@ -3149,17 +3169,22 @@ merge_in_progress_note() {
   printf '%s\n' 'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.'
 }
 
+## The beginning of the heading of each entry that `report_merge_in_progress`
+## writes.
+merge_entry_heading='Finish the merge in progress ('
+
 ## Usage: report_merge_in_progress [REASON]
 ## Appends to AGENT-TODO.md an entry that says that a merge is in progress in
 ## the current directory, the top level of a working tree, as
 ## `merge_in_progress_note` writes it, given REASON (see
-## `report_agent_note`), which replaces an earlier entry about the same merge
-## whose advice can be out of date.  Does nothing if no merge is in progress;
-## if the file already contains the same note, as after an earlier run
-## stopped at the same merge for the same reason; or if REASON is empty or
-## not given and the file already says that this merge is in progress in
-## this directory, because such a note adds nothing.  Appends the note to
-## the summary (see `append_merge_note_summary`) in each case.  Runs git commands, so it must
+## `append_agent_note`).  First removes each earlier entry about the same
+## merge that says that running the script again suffices, whose advice is
+## out of date (see `remove_agent_todo_entries`).  Then does nothing if the
+## file still says that this merge is in progress in this directory, as after
+## an earlier run stopped at the same merge:  the earlier entry, such as one
+## that asks a person for help, stays.  Does nothing if no merge is in
+## progress.  Appends the note to the summary (see
+## `append_merge_note_summary`) in each case.  Runs git commands, so it must
 ## not be called after an AI agent ran without its work being checked; see
 ## `report_agent_session`.
 report_merge_in_progress() {
@@ -3168,40 +3193,45 @@ report_merge_in_progress() {
     return 0
   fi
   append_merge_note_summary "${report_merge_note}"
-  if [ -z "${1:-}" ] \
-    && report_merge_todo="$(agent_todo_path)" && [ -f "${report_merge_todo}" ] \
-    && grep -F -x -q -- "$(printf '%s\n' "${report_merge_note}" | head -n 1)" "${report_merge_todo}"; then
-    return 0
+  report_merge_first="$(printf '%s\n' "${report_merge_note}" | head -n 1)"
+  report_merge_todo="$(agent_todo_path)" || report_merge_todo=''
+  if [ -n "${report_merge_todo}" ] && [ -f "${report_merge_todo}" ]; then
+    remove_agent_todo_entries "${report_merge_todo}" rerun "${merge_entry_heading}" "${report_merge_first}"
+    if grep -F -x -q -- "${report_merge_first}" "${report_merge_todo}"; then
+      return 0
+    fi
   fi
-  if report_agent_note 'Finish the merge in progress' "${report_merge_note}"; then
-    echo "${SCRIPT_NAME}: noted the merge in progress in ${report_note_todo}" >&2
+  if append_agent_note "${report_merge_todo}" 'Finish the merge in progress' "${report_merge_note}"; then
+    echo "${SCRIPT_NAME}: noted the merge in progress in ${report_merge_todo}" >&2
   fi
 }
 
-## Usage: report_agent_note TASK NOTE
-## Appends to AGENT-TODO.md (see `agent_todo_path` and `append_agent_todo`)
-## an entry under a heading that gives TASK, such as "Finish the merge in
-## progress", and the time, whose text is NOTE, a paragraph such as
-## `merge_in_progress_note` prints.  First removes each entry about the same
-## merge, whose advice NOTE replaces (see `remove_merge_entries`).  Sets
-## ${report_note_todo} to the pathname of the file, or to the empty string if
-## the file must not be written.  Returns 0 if it appended the entry, and
-## returns 1 without changing the file if the file already contains NOTE, as
-## after an earlier run stopped for the same reason, or if it cannot write
-## the file.  Runs git commands, so it must not be called after an AI agent
-## ran without its work being checked; see `report_agent_session`.
-report_agent_note() {
-  report_note_todo="$(agent_todo_path)" || report_note_todo=''
-  if [ -n "${report_note_todo}" ] && [ -f "${report_note_todo}" ]; then
-    case "$(cat -- "${report_note_todo}")" in
-      *"$2"*) return 1 ;;
-    esac
-    remove_merge_entries "${report_note_todo}" "$(printf '%s\n' "$2" | head -n 1)"
+## Usage: forget_merge_in_progress
+## Removes from AGENT-TODO.md each entry that `report_merge_in_progress` wrote
+## about the merge in progress in the current directory, the top level of a
+## working tree (see `remove_agent_todo_entries`).  The caller is about to
+## commit the merge, after which the entries are out of date.  An entry that
+## gives a command to continue an agent's session stays.
+forget_merge_in_progress() {
+  forget_merge_first="$(merge_in_progress_note | head -n 1)"
+  if [ -n "${forget_merge_first}" ] \
+    && forget_merge_todo="$(agent_todo_path)"; then
+    remove_agent_todo_entries "${forget_merge_todo}" all "${merge_entry_heading}" "${forget_merge_first}"
   fi
-  append_agent_todo "${report_note_todo}" "
-## $1 (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
+}
 
-$2
+## Usage: append_agent_note FILE TASK NOTE
+## Appends to FILE, a file AGENT-TODO.md (see `append_agent_todo`), an entry
+## under a heading that gives the first line of TASK, such as "Finish the
+## merge in progress", and the time, whose text is NOTE, a paragraph such as
+## `merge_in_progress_note` prints.  Returns 1, after printing a diagnostic,
+## if it does not write FILE.  Runs no git command.
+append_agent_note() {
+  append_agent_note_task="$(printf '%s\n' "$2" | head -n 1)"
+  append_agent_todo "$1" "
+## ${append_agent_note_task} (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
+
+$3
 "
 }
 
@@ -4018,6 +4048,9 @@ commit_resolved_merge() {
   else
     commit_resolved_with=commit_staged
   fi
+  # The entries are removed before the commit, which ends the merge that
+  # identifies them.  If the commit fails, a new entry says why.
+  forget_merge_in_progress
   # The message is MESSAGE, rather than MERGE_MSG, to which `git merge`
   # appended a list of the conflicts.
   if ! "${commit_resolved_with}" "$4"; then
@@ -5222,6 +5255,11 @@ merge_build_push() {
         return 1
       fi
     fi
+    # The build passes, so advice to run the script again to fix it is out
+    # of date.
+    if merge_build_todo="$(agent_todo_path)"; then
+      remove_agent_todo_entries "${merge_build_todo}" rerun "${build_entry_heading}"
+    fi
   fi
 
   merge_build_push_step='pushing'
@@ -5231,15 +5269,27 @@ merge_build_push() {
   fi
 }
 
+## The beginning of the heading of each entry that `merge_build_note` writes,
+## whose TASK is the message of a commit that fixes the build, such as "Fix
+## the build after merging branch 'main'" or "Fix the build after merges".
+build_entry_heading='Fix the build after merg'
+
 ## Usage: merge_build_note TASK NOTE
 ## For `merge_build_push`, when no AI agent tried to fix the build, or none
-## did anything:  appends NOTE, one line, to AGENT-TODO.md, under a heading
-## that gives TASK (see `report_agent_note`), and to the summary (see
-## `append_summary`).
+## did anything:  appends NOTE, one line that ends with the advice of
+## `agent_rerun_advice`, to AGENT-TODO.md, under a heading that gives TASK,
+## such as "Fix the build after merging branch 'main'" (see
+## `append_agent_note`), and to the summary (see `append_summary`).  First
+## removes each earlier entry with such advice, which NOTE replaces (see
+## `remove_agent_todo_entries`).
 merge_build_note() {
   append_summary "$2"
-  if report_agent_note "$1" "$2"; then
-    echo "${SCRIPT_NAME}: noted that in ${report_note_todo}" >&2
+  merge_build_todo="$(agent_todo_path)" || merge_build_todo=''
+  if [ -n "${merge_build_todo}" ]; then
+    remove_agent_todo_entries "${merge_build_todo}" rerun "${build_entry_heading}"
+  fi
+  if append_agent_note "${merge_build_todo}" "$1" "$2"; then
+    echo "${SCRIPT_NAME}: noted that in ${merge_build_todo}" >&2
   fi
 }
 

@@ -305,7 +305,11 @@
 # run, the entry instead says that running this script again, once the agent
 # can run, asks the agent to do its task again; for a merge in progress in the
 # first directory, whose pull such a merge makes this script refuse, the entry
-# says to abort the merge first.  The resumed
+# says to abort the merge first.  A later run removes such an entry once it
+# writes a newer one, and once it finishes the merge or the build passes; it
+# also removes an entry that notes a merge in progress once it commits that
+# merge.  It keeps each entry that asks a person for help while the merge is
+# in progress, and each entry that gives a command.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
 # contains the text of the merged changes, which can include instructions
 # from other people.

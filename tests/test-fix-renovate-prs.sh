@@ -286,11 +286,13 @@ EOF
 # "untracked", it commits a fix but not the new file that the fix needs, and
 # reports FIXED.  It reports with Markdown
 # emphasis, blank lines, and a carriage return, as Claude might.  It answers
-# the check of `agent_ready` that it can run, which it does not log.
+# the check of `agent_ready` that it can run, which it logs in
+# ${work}/claude-ready.log instead.
 cat > "${work}/bin/claude" << EOF
 #!/bin/sh
 case "\$*" in
   *--no-session-persistence*)
+    echo ready >> "${work}/claude-ready.log"
     echo OK
     exit 0
     ;;
@@ -343,6 +345,10 @@ if [ "${actual}" != "${expected}" ]; then
 ${actual}
 not:
 ${expected}"
+fi
+# Whether claude is ready to run is checked once, for all of them.
+if [ "$(cat "${work}/claude-ready.log")" != ready ]; then
+  fail "expected one check that claude is ready to run, but got: $(cat "${work}/claude-ready.log" 2> /dev/null)"
 fi
 case "$(cat "${work}/prompt.proj-branch-renovate-fixable")" in
   *"https://github.com/someone/proj/pull/1"*"  build: https://example.com/build
