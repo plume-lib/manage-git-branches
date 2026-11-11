@@ -204,10 +204,10 @@
 # "--llm" turns on the agent that the last "--claude" or "--codex" chose.
 # If the agent cannot be run because its command is not on the PATH, this
 # script acts as it does with "--no-llm".  So it does if the agent is not
-# ready to run, as when it is not logged in:  before it asks the agent to
-# resolve a merge's conflicts or to fix a build, this script checks with
-# `codex login status`, or by asking Claude for a one-word reply, which also
-# fails if Claude has reached a usage limit or cannot reach its service.
+# ready to run:  before it first asks the agent to resolve a merge's
+# conflicts or to fix a build, this script asks the agent for a one-word
+# reply, which fails if the agent is not logged in, has reached a usage
+# limit, or cannot reach its service.
 # The agent runs in a sandbox, which requires a recent version of it:
 # Claude Code with the `--restricted` option and the setting
 # `permissions.blockReadsOutsideWorkingDirectories`, or Codex with permission
@@ -224,12 +224,11 @@
 # agent fails, this script stops with the merge still in progress.
 #
 # An agent that fails, other than by running out of time, without changing
-# HEAD, the index, or any file, did nothing that anyone must review.  If the
-# agent is then not ready to run, as when its service is unavailable, this
-# script runs it again, up to 2 more times, each after a pause of
-# $MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE seconds, 60 by default.  An agent that
-# is ready to run although it failed so is not run again, because it would
-# fail again.  That applies to resolving conflicts and to fixing a build.
+# HEAD, the index, or any file, did nothing that anyone must review, and it
+# might succeed if it runs again, as when its service was briefly
+# unavailable.  This script runs it again, up to 2 more times, each after a
+# pause of $MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE seconds, 60 by default.  That
+# applies to resolving conflicts and to fixing a build.
 #
 # The agent's instructions consist of the file merge-conflict-instructions.md,
 # which also suits a merge that you resolve yourself or with an agent
@@ -302,11 +301,11 @@
 # it; delete the entry once you have dealt with it.  When the agent could not
 # resolve the conflicts, the entry also tells an AI agent that reads it to
 # ask a person for help with them.  But when the agent was not ready to run,
-# or failed without changing anything and then was not ready to run, the
-# entry instead says that running this script again, once the agent can run,
-# asks the agent to do its task again; for a merge in progress in the first
-# directory, whose pull such a merge makes this script refuse, the entry says
-# to abort the merge first.  The resumed
+# or failed each time without changing anything and then was not ready to
+# run, the entry instead says that running this script again, once the agent
+# can run, asks the agent to do its task again; for a merge in progress in the
+# first directory, whose pull such a merge makes this script refuse, the entry
+# says to abort the merge first.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
 # contains the text of the merged changes, which can include instructions
 # from other people.
@@ -714,9 +713,10 @@ finish_merge_in_progress() {
   commit_resolved_merge "${llm_agent}" MERGE_HEAD "${finish_source}" "${finish_message}"
 }
 
-## Usage: git_push_to FROM_DIR TO_DIR PULL_FROM
+## Usage: git_push_to FROM_DIR TO_DIR PULL_FROM FIRST
 ## A helper function that works on exactly two repositories.  Pulls FROM_DIR
-## first if PULL_FROM is 1, and not if it is 0.  Sets ${push_step} to the
+## first if PULL_FROM is 1, and not if it is 0.  FIRST is 1 if FROM_DIR is
+## the first directory of the chain, and 0 otherwise.  Sets ${push_step} to the
 ## step that it reached, such as "pulling DIR" or "building"; `push_chain`
 ## reports it when this function fails.  Sets ${from_pulled} to 1 once it
 ## has pulled FROM_DIR, and to 0 before then.
@@ -726,8 +726,10 @@ git_push_to() {
   to="$2"
   push_step='checking the directories'
   from_pulled=0
-  # A rerun refuses to pull FROM_DIR while a merge is in progress there.
-  rerun_finishes_merge=0
+  # A rerun refuses to pull the first directory while a merge is in progress
+  # there.  Any other FROM_DIR is the TO_DIR of the step before, where a
+  # rerun finishes the merge.
+  rerun_finishes_merge=$((1 - $4))
 
   # A failure here is not yet an error, and it leaves the variable empty:  a
   # nonexistent directory fails here, and the tests just below diagnose that
@@ -1153,9 +1155,11 @@ push_chain() {
   pull_from=$((1 - no_pull_first))
   # 1 until the first directory has been pulled, if it is to be pulled.
   first_unpulled="${pull_from}"
+  # 1 for the step whose FROM_DIR is the first directory.
+  first_step=1
   for arg; do
     if [ -n "$prev" ]; then
-      if ! git_push_to "$prev" "$arg" "${pull_from}"; then
+      if ! git_push_to "$prev" "$arg" "${pull_from}" "${first_step}"; then
         chain_failed "failed to push ${prev} into ${arg}, while ${push_step}"
         if [ "${first_unpulled}" -eq 1 ] && [ "${from_pulled}" -eq 0 ]; then
           return 2
@@ -1164,6 +1168,7 @@ push_chain() {
       fi
       pull_from=1
       first_unpulled=0
+      first_step=0
     fi
     prev="$arg"
   done
