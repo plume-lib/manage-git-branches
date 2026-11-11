@@ -28,6 +28,8 @@
 # lines into its own summary.  They are each change by an AI agent to review
 # (see "Asking an AI agent" below), as in
 #   in /home/me/myrepo-branch-feature: claude also changed: README.md
+# each change by a hook to a file that a commit by this script would not
+# otherwise change (see "Conflicts" below),
 # each merge left in progress and each agent session that can be continued,
 # which are also noted in AGENT-TODO.md, and, if a push or rebase fails, the
 # step that failed, as in
@@ -186,18 +188,23 @@
 # without conflicts.  Usually the hook changes files that the commit changes,
 # but a hook that formats the whole project, such as one that runs
 # `./gradlew spotlessApply`, also changes any other file that was not
-# formatted at HEAD.  Then this script stages the hook's changes and commits
-# once more, with `git commit`, provided that
+# formatted at HEAD.  In either case, this script stages the hook's changes
+# and commits once more, with `git commit`, provided that
 #  * the working tree had no unstaged changes before the commit or the merge;
-#  * the hook staged nothing, and created or deleted no untracked file; and
-#  * the hook only modified files, and deleted none.
+#  * the hook staged nothing, and created or deleted no untracked file;
+#  * the hook only modified files, and deleted none; and
+#  * if the hook is the pre-merge-commit hook, or if it changed a file that
+#    the commit would not otherwise change, the hook, run again, succeeds and
+#    changes no file.
 # The commit includes the hook's changes to the files that it would not
 # otherwise change; this script lists them, so that you can review them.
-# Before committing once more, this script builds a fix to the build again,
-# and it runs a pre-merge-commit hook again; `git commit` runs the pre-commit
-# hook.  If a condition does not hold, or if the build, the hook, or the
-# second commit fails, this script stops, with the merge still in progress or
-# the fix staged.
+# Before committing once more, this script builds a fix to the build again;
+# `git commit` runs the pre-commit hook.  If a condition does not hold, or if
+# the build, the hook, or the second commit fails, this script stops, with
+# the merge still in progress or the fix staged.  If the build, the hook run
+# again, or the second commit fails, the hook's changes are staged too, and
+# this script lists the files that the hook changed but the commit would not
+# otherwise change, so that you can review the hook's changes to them.
 
 # Asking an AI agent
 #
