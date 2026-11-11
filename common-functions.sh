@@ -2761,24 +2761,33 @@ ${report_command}
   fi
 }
 
+## Usage: is_unsafe_to_write FILE
+## Returns 0 if FILE exists but is not a regular file with one link:  if it
+## is a symbolic link or has another hard link, either of which could make it
+## another file outside the working tree, or if it is anything else but a
+## regular file.  Returns 1 if FILE does not exist or is a regular file with
+## one link.
+is_unsafe_to_write() {
+  # `find -links +1` prints the file if it has more than one hard link.
+  [ -L "$1" ] \
+    || { [ -e "$1" ] && [ ! -f "$1" ]; } \
+    || [ -n "$(find "$1" -prune -links +1 2> /dev/null)" ]
+}
+
 ## Usage: append_agent_todo FILE ENTRY
 ## Appends ENTRY, Markdown text that begins with a blank line and a heading,
 ## to FILE, the pathname of a file AGENT-TODO.md, which this function creates,
 ## with a title and an explanation, if it does not exist.  Returns 1, after
 ## printing a diagnostic, if it did not write FILE:  because FILE is empty, as
-## `agent_todo_path` leaves it if the file must not be written; or because
-## FILE is a symbolic link or has another hard link, either of which could
-## make the file another one outside the working tree, or is anything else
-## but a regular file; or because writing failed.  Runs no git command.
+## `agent_todo_path` leaves it if the file must not be written; because FILE
+## is unsafe to write (see `is_unsafe_to_write`); or because writing failed.
+## Runs no git command.
 append_agent_todo() {
   if [ -z "$1" ]; then
     echo "${SCRIPT_NAME}: did not write ${agent_todo_file}, which git tracks or whose working tree is unknown" >&2
     return 1
   fi
-  # `find -links +1` prints the file if it has more than one hard link.
-  if [ -L "$1" ] \
-    || { [ -e "$1" ] && [ ! -f "$1" ]; } \
-    || [ -n "$(find "$1" -prune -links +1 2> /dev/null)" ]; then
+  if is_unsafe_to_write "$1"; then
     echo "${SCRIPT_NAME}: did not write $1, which is not a regular file with one link" >&2
     return 1
   fi
@@ -2839,20 +2848,23 @@ agent_todo_path() {
 ##    merging branch 'main'".
 ## Each other entry is kept:  one with a heading of another form, such as one
 ## that a person wrote; one of another kind, such as an entry of
-## `fix-renovate-prs`; and one about another working tree, as in the copy of
+## `fix-renovate-prs`; one about another working tree, as in the copy of
 ## AGENT-TODO.md that `git-new-branch` makes along with the rest of a working
-## tree.  Text that a person added to a removed entry is removed with it.
+## tree; and one to which a person added text, such as a note after its
+## command.  Lines that follow the last entry belong to it.
 ##
 ## Deletes the file if no entry remains and the file holds nothing else but
-## the title and the explanation that `append_agent_todo` writes.  Says what
-## it removed.  Does nothing if the file does not exist or is not a regular
-## file with one link (see `append_agent_todo`).  A failure to read or to
-## rewrite the file leaves the entries for a person to delete, and is
-## reported but is not an error, so this function always returns 0.
+## the title and the explanation that `append_agent_todo` writes, even if no
+## entry was removed.  Says what it removed.  Does nothing if the file does
+## not exist or is unsafe to write (see `is_unsafe_to_write`).  Replaces the
+## file atomically, keeping its permissions, and leaves it unchanged if it
+## changed while this function read it, as when another script appended an
+## entry.  A failure to read or to rewrite the file leaves the entries for a
+## person to delete, and is reported but is not an error, so this function
+## always returns 0.
 prune_agent_todo() {
   prune_todo="$(agent_todo_path)" || return 0
-  if [ ! -f "${prune_todo}" ] || [ -L "${prune_todo}" ] \
-    || [ -n "$(find "${prune_todo}" -prune -links +1 2> /dev/null)" ]; then
+  if [ ! -e "${prune_todo}" ] || is_unsafe_to_write "${prune_todo}"; then
     return 0
   fi
   # The working tree as a note can name it:  `merge_in_progress_note` and
@@ -2860,23 +2872,45 @@ prune_agent_todo() {
   # working tree, as `pwd` prints it, and `agent_todo_path` names the top
   # level as git prints it, with symbolic links resolved.
   prune_top="${prune_todo%/*}"
-  prune_dirs="$(printf '%s\n%s\n' "${prune_top}" "$(pwd)")"
-  prune_prefixes="$(printf 'cd %s && \ncd %s && \n' "$(shell_word "${prune_top}")" "$(shell_word "$(pwd)")")"
+  prune_dirs=''
+  prune_prefixes=''
+  for prune_dir in "${prune_top}" "$(pwd)"; do
+    prune_dirs="${prune_dirs}${prune_dir}
+"
+    prune_prefixes="${prune_prefixes}$(printf 'cd %s && ' "$(shell_word "${prune_dir}")")
+"
+  done
   prune_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)" || prune_merge_head=''
-  # The new content is written in the git directory, which is outside the
-  # working tree, so that an interruption leaves no file in the working tree.
-  if ! prune_new="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-todo)"; then
+  # A copy of the file, which awk reads, awk's output, and its status are
+  # written in the git directory, which is outside the working tree, so that
+  # an interruption leaves no file in the working tree.  The copy also shows
+  # whether the file changed while awk read the copy.
+  if ! prune_base="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-todo)"; then
     echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd), so ${prune_todo} was not pruned" >&2
     return 0
   fi
-  prune_status="${prune_new}.status"
+  if ! prune_old="$(mktemp "${prune_base}.XXXXXX")"; then
+    echo "${SCRIPT_NAME}: cannot create a temporary file in the git directory of $(pwd), so ${prune_todo} was not pruned" >&2
+    return 0
+  fi
+  prune_output="${prune_old}.new"
+  prune_status="${prune_old}.status"
+  if ! cp "${prune_todo}" "${prune_old}"; then
+    echo "${SCRIPT_NAME}: cannot read ${prune_todo}, so it was not pruned" >&2
+    rm -f "${prune_old}"
+    return 0
+  fi
   if ! PRUNE_STATUS="${prune_status}" PRUNE_DIRS="${prune_dirs}" \
     PRUNE_CD_PREFIXES="${prune_prefixes}" PRUNE_MERGE_HEAD="${prune_merge_head}" \
     PRUNE_BUILT="$1" awk -f "${SCRIPT_DIR}/prune-agent-todo.awk" \
-    < "${prune_todo}" > "${prune_new}" \
-    || ! prune_result="$(cat "${prune_status}")"; then
-    echo "${SCRIPT_NAME}: cannot read ${prune_todo}, so it was not pruned" >&2
-    rm -f "${prune_new}" "${prune_status}"
+    < "${prune_old}" > "${prune_output}"; then
+    echo "${SCRIPT_NAME}: cannot write ${prune_output} or ${prune_status}, so ${prune_todo} was not pruned" >&2
+    rm -f "${prune_old}" "${prune_output}" "${prune_status}"
+    return 0
+  fi
+  if ! prune_result="$(cat "${prune_status}")"; then
+    echo "${SCRIPT_NAME}: cannot read ${prune_status}, so ${prune_todo} was not pruned" >&2
+    rm -f "${prune_old}" "${prune_output}" "${prune_status}"
     return 0
   fi
   prune_removed="${prune_result%% *}"
@@ -2886,24 +2920,43 @@ prune_agent_todo() {
     prune_removed="${prune_removed} entries that no longer apply"
   fi
   case "${prune_result}" in
-    0\ *) ;;
     *\ delete)
-      if rm -f "${prune_todo}"; then
-        echo "${SCRIPT_NAME}: deleted ${prune_todo}, whose entries no longer apply" >&2
+      if [ "${prune_result}" = '0 delete' ]; then
+        prune_why='which has no entry'
       else
-        echo "${SCRIPT_NAME}: cannot delete ${prune_todo}, whose entries no longer apply" >&2
+        prune_why='whose entries no longer apply'
+      fi
+      if ! cmp -s "${prune_old}" "${prune_todo}"; then
+        echo "${SCRIPT_NAME}: ${prune_todo} changed while it was being pruned, so it was not deleted" >&2
+      elif rm -f "${prune_todo}"; then
+        echo "${SCRIPT_NAME}: deleted ${prune_todo}, ${prune_why}" >&2
+      else
+        echo "${SCRIPT_NAME}: cannot delete ${prune_todo}, ${prune_why}" >&2
       fi
       ;;
+    0\ *) ;;
     *)
-      # `cat` rewrites the file in place, so that it keeps its permissions.
-      if cat "${prune_new}" > "${prune_todo}"; then
+      # The new file is a copy of the file, so that it keeps the file's
+      # permissions, in the same directory, so that `mv` replaces the file
+      # atomically.
+      if ! prune_new="$(mktemp "${prune_top}/.${agent_todo_file}.XXXXXX")"; then
+        echo "${SCRIPT_NAME}: cannot create a temporary file in ${prune_top}, so ${prune_todo} was not pruned" >&2
+      elif ! cp -p "${prune_todo}" "${prune_new}" \
+        || ! cat "${prune_output}" > "${prune_new}"; then
+        echo "${SCRIPT_NAME}: cannot write ${prune_new}, so ${prune_todo} was not pruned" >&2
+        rm -f "${prune_new}"
+      elif ! cmp -s "${prune_old}" "${prune_todo}"; then
+        echo "${SCRIPT_NAME}: ${prune_todo} changed while it was being pruned, so it was not pruned" >&2
+        rm -f "${prune_new}"
+      elif mv -f "${prune_new}" "${prune_todo}"; then
         echo "${SCRIPT_NAME}: removed from ${prune_todo} ${prune_removed}" >&2
       else
         echo "${SCRIPT_NAME}: cannot rewrite ${prune_todo} to remove ${prune_removed}" >&2
+        rm -f "${prune_new}"
       fi
       ;;
   esac
-  rm -f "${prune_new}" "${prune_status}"
+  rm -f "${prune_old}" "${prune_output}" "${prune_status}"
   return 0
 }
 
@@ -3424,11 +3477,15 @@ parse_llm_option() {
 ## composed, or if the merge's conflicts are not resolved or the merge cannot
 ## be committed.  A merge without conflicts whose commit a pre-merge-commit
 ## hook rejected is committed as `commit_rejected_merge` describes.
+## First removes the entries of the file AGENT-TODO.md in DIRECTORY that no
+## longer apply, such as one about a merge that a person finished (see
+## `prune_agent_todo`).
 pull_resolving() {
   pull_resolver="$1"
   pull_dir="$2"
   shift 2
   pull_fetched=''
+  (cd -- "${pull_dir}" && prune_agent_todo 0)
   # Otherwise, `git pull` would refuse to run, and the merge in progress would
   # seem to be the pull's.
   if ! refuse_merge_in_progress "${pull_dir}" "It was in progress when \`${SCRIPT_NAME}\` tried to pull."; then
@@ -4827,9 +4884,8 @@ version of it.  This merge brings the rest of it, from commit ${mlph_short_p}." 
 ## comes from, if DIRECTORY is given and not empty.  The merge commit can be
 ## the one that this call made, one that a pull made, or one that an earlier
 ## call made but did not push, as when its build failed.
-## After pushing, removes the entries of AGENT-TODO.md that no longer apply,
-## such as one about a failed build when the build has now succeeded (see
-## `prune_agent_todo`).
+## After a successful build, removes the entries of AGENT-TODO.md that no
+## longer apply, such as one about a failed build (see `prune_agent_todo`).
 ## Returns 1, after printing a diagnostic, on failure.  Sets
 ## ${merge_build_push_step} to the step that it reached:  "merging",
 ## "building", or "pushing".
@@ -4852,10 +4908,16 @@ merge_build_push() {
   # `--no-log` prevents a second copy of the commit summaries:  `git merge`
   # appends them to a message given with `-m` when `merge.log` is set, and
   # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
+  # 1 if this call builds the merge, and 0 otherwise.
+  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+    merge_builds=1
+  else
+    merge_builds=0
+  fi
   # A build of uncommitted changes, such as those that a failed attempt to
   # fix the build left staged, says nothing about the commit that is pushed.
   # Check before merging, so that a refusal leaves no merge commit behind.
-  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ] \
+  if [ "${merge_builds}" -eq 1 ] \
     && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     echo "${SCRIPT_NAME}: the working tree of $(pwd) has uncommitted changes; commit or discard them" >&2
     return 1
@@ -4912,7 +4974,7 @@ merge_build_push() {
     fi
   fi
 
-  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+  if [ "${merge_builds}" -eq 1 ]; then
     merge_build_push_step='building'
     if ! merge_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-build.log)"; then
       echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
@@ -4953,18 +5015,14 @@ merge_build_push() {
         return 1
       fi
     fi
+    # No merge is in progress, and the build succeeded.
+    prune_agent_todo 1
   fi
 
   merge_build_push_step='pushing'
   if ! git push --quiet; then
     echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
     return 1
-  fi
-  # No merge is in progress, and the build, if it ran, succeeded.
-  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
-    prune_agent_todo 1
-  else
-    prune_agent_todo 0
   fi
 }
 

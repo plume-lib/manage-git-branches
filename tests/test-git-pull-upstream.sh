@@ -68,13 +68,26 @@ mkdir "${fork}/subdir"
 commit_file "${fork}" subdir/b.txt 'b1'
 git -C "${fork}" push -q -u origin feature
 
-# The fork's branch already contains the default branch of `upstream`.
+# The fork's branch already contains the default branch of `upstream`.  The
+# run, which has nothing to merge or push, still deletes AGENT-TODO.md, whose
+# only entry is about a merge that is no longer in progress.
 before="$(git -C "${fork}" rev-parse HEAD)"
+# The backquotes are Markdown, not command substitutions.
+# shellcheck disable=SC2016
+printf '%s\n' '# AI agent sessions to continue' '' \
+  'A script of manage-git-branches, such as `git-push-to`, appends an entry here.' '' \
+  '## Finish the merge in progress (git-pull-upstream, 2026-11-09 08:23:59)' '' \
+  "The merge of commit ${before} is in progress in ${fork}." \
+  'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.' \
+  > "${fork}/AGENT-TODO.md"
 if ! pull_upstream "${fork}"; then
   fail "up to date: failed: $(cat "${testdir}/errors")"
 elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
   fail "up to date: changed HEAD"
+elif [ -e "${fork}/AGENT-TODO.md" ]; then
+  fail "up to date: did not delete AGENT-TODO.md: $(cat "${testdir}/errors")"
 fi
+rm -f "${fork}/AGENT-TODO.md"
 
 # A new commit in `upstream` is merged and pushed, even when this command is
 # run in a subdirectory.
