@@ -287,7 +287,12 @@
 # Then commit the merge or the fix yourself, and run this script again.
 # This script also appends the command to the file AGENT-TODO.md at
 # the top level of the working tree, where you are less likely to overlook
-# it; delete the entry once you have dealt with it.  When the agent could not
+# it; delete the entry once you have dealt with it.  A later run that builds
+# and pushes the branch deletes an entry that no longer applies:  one about a
+# merge that is no longer in progress, because you finished or aborted it, and
+# one about a failed build.  It deletes the file if it has no entry left and
+# you added nothing to it.  `prune_agent_todo` in common-functions.sh says
+# which entries are deleted.  When the agent could not
 # resolve the conflicts, the entry also tells an AI agent that reads it to
 # ask a person for help with them.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it

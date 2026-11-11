@@ -2822,6 +2822,91 @@ agent_todo_path() {
   printf '%s\n' "${agent_todo_top}/${agent_todo_file}"
 }
 
+## Usage: prune_agent_todo BUILT
+## Removes, from the file AGENT-TODO.md at the top level of the working tree
+## that contains the current directory (see `agent_todo_path`), each entry
+## that a script of this package wrote about that working tree and that no
+## longer applies.  The heading of such an entry ends with the script's name
+## and a time, as in "## Fix the build after merges (git-push-to,
+## 2026-11-10 07:51:59)".  An entry no longer applies if
+##  * it says that the merge of a commit is in progress in the working tree,
+##    as `merge_in_progress_note` writes, and no merge of that commit is in
+##    progress there, because someone finished or aborted it; or
+##  * BUILT is 1, which says that the working tree's HEAD was just built
+##    successfully, and the entry gives the command that continues an AI
+##    agent's attempt to fix the build of the working tree, as
+##    `report_agent_session` writes it for a task such as "Fix the build after
+##    merging branch 'main'".
+## Each other entry is kept:  one with a heading of another form, such as one
+## that a person wrote; one of another kind, such as an entry of
+## `fix-renovate-prs`; and one about another working tree, as in the copy of
+## AGENT-TODO.md that `git-new-branch` makes along with the rest of a working
+## tree.  Text that a person added to a removed entry is removed with it.
+##
+## Deletes the file if no entry remains and the file holds nothing else but
+## the title and the explanation that `append_agent_todo` writes.  Says what
+## it removed.  Does nothing if the file does not exist or is not a regular
+## file with one link (see `append_agent_todo`).  A failure to read or to
+## rewrite the file leaves the entries for a person to delete, and is
+## reported but is not an error, so this function always returns 0.
+prune_agent_todo() {
+  prune_todo="$(agent_todo_path)" || return 0
+  if [ ! -f "${prune_todo}" ] || [ -L "${prune_todo}" ] \
+    || [ -n "$(find "${prune_todo}" -prune -links +1 2> /dev/null)" ]; then
+    return 0
+  fi
+  # The working tree as a note can name it:  `merge_in_progress_note` and
+  # `run_agent` name the current directory, which is the top level of the
+  # working tree, as `pwd` prints it, and `agent_todo_path` names the top
+  # level as git prints it, with symbolic links resolved.
+  prune_top="${prune_todo%/*}"
+  prune_dirs="$(printf '%s\n%s\n' "${prune_top}" "$(pwd)")"
+  prune_prefixes="$(printf 'cd %s && \ncd %s && \n' "$(shell_word "${prune_top}")" "$(shell_word "$(pwd)")")"
+  prune_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)" || prune_merge_head=''
+  # The new content is written in the git directory, which is outside the
+  # working tree, so that an interruption leaves no file in the working tree.
+  if ! prune_new="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-todo)"; then
+    echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd), so ${prune_todo} was not pruned" >&2
+    return 0
+  fi
+  prune_status="${prune_new}.status"
+  if ! PRUNE_STATUS="${prune_status}" PRUNE_DIRS="${prune_dirs}" \
+    PRUNE_CD_PREFIXES="${prune_prefixes}" PRUNE_MERGE_HEAD="${prune_merge_head}" \
+    PRUNE_BUILT="$1" awk -f "${SCRIPT_DIR}/prune-agent-todo.awk" \
+    < "${prune_todo}" > "${prune_new}" \
+    || ! prune_result="$(cat "${prune_status}")"; then
+    echo "${SCRIPT_NAME}: cannot read ${prune_todo}, so it was not pruned" >&2
+    rm -f "${prune_new}" "${prune_status}"
+    return 0
+  fi
+  prune_removed="${prune_result%% *}"
+  if [ "${prune_removed}" = 1 ]; then
+    prune_removed='1 entry that no longer applies'
+  else
+    prune_removed="${prune_removed} entries that no longer apply"
+  fi
+  case "${prune_result}" in
+    0\ *) ;;
+    *\ delete)
+      if rm -f "${prune_todo}"; then
+        echo "${SCRIPT_NAME}: deleted ${prune_todo}, whose entries no longer apply" >&2
+      else
+        echo "${SCRIPT_NAME}: cannot delete ${prune_todo}, whose entries no longer apply" >&2
+      fi
+      ;;
+    *)
+      # `cat` rewrites the file in place, so that it keeps its permissions.
+      if cat "${prune_new}" > "${prune_todo}"; then
+        echo "${SCRIPT_NAME}: removed from ${prune_todo} ${prune_removed}" >&2
+      else
+        echo "${SCRIPT_NAME}: cannot rewrite ${prune_todo} to remove ${prune_removed}" >&2
+      fi
+      ;;
+  esac
+  rm -f "${prune_new}" "${prune_status}"
+  return 0
+}
+
 ## Usage: merge_in_progress_note [REASON]
 ## Prints a paragraph for an entry of AGENT-TODO.md that says that a merge is
 ## in progress in the current directory, the top level of a working tree.
@@ -4742,6 +4827,9 @@ version of it.  This merge brings the rest of it, from commit ${mlph_short_p}." 
 ## comes from, if DIRECTORY is given and not empty.  The merge commit can be
 ## the one that this call made, one that a pull made, or one that an earlier
 ## call made but did not push, as when its build failed.
+## After pushing, removes the entries of AGENT-TODO.md that no longer apply,
+## such as one about a failed build when the build has now succeeded (see
+## `prune_agent_todo`).
 ## Returns 1, after printing a diagnostic, on failure.  Sets
 ## ${merge_build_push_step} to the step that it reached:  "merging",
 ## "building", or "pushing".
@@ -4871,6 +4959,12 @@ merge_build_push() {
   if ! git push --quiet; then
     echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
     return 1
+  fi
+  # No merge is in progress, and the build, if it ran, succeeded.
+  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+    prune_agent_todo 1
+  else
+    prune_agent_todo 0
   fi
 }
 
