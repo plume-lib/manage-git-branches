@@ -163,8 +163,13 @@
 # resolves the remaining conflicts in the same way as above, asking the AI
 # agent about those that `git rerere` does not resolve; and it commits the
 # merge with the merge's own message.  The merge commit is pushed along with
-# the rest of the directory's branch, once the build succeeds.  This script
-# does not touch the merge, but stops, in these cases:
+# the rest of the directory's branch, once the build succeeds.  But if the
+# branch's upstream branch, once fetched, already contains both sides of the
+# merge, as when another clone made the same merge and pushed it, then the
+# merge is redundant:  if nobody has worked on it since git, `git rerere`, and
+# this script left it, this script aborts it, and the pull then
+# fast-forwards the branch.  This script does not touch the merge, but
+# stops, in these cases:
 #  * A process of Claude Code or of Codex (a process whose command name is
 #    "claude" or "codex") is working in the directory, as when you are
 #    resolving the conflicts in a session that this script printed a command
@@ -178,6 +183,7 @@
 #  * A conflicted file changed after git, `git rerere`, and this script left
 #    it, as when this script rejected an AI agent's work, whose edits remain,
 #    or when you have begun to resolve the conflicts.
+# In the last two cases, if the merge is redundant, this script says so.
 # A merge in progress in the first directory makes this script stop.
 #
 # A hook, such as one that runs a formatter, can reject a commit that this
@@ -601,6 +607,48 @@ agent_processes_in() {
   )
 }
 
+## Usage: redundant_merge_upstream
+## Fetches the upstream branch of the branch checked out in the current
+## directory, the top level of a working tree, and prints that upstream
+## branch, such as "origin/feature", if it contains both sides of the merge in
+## progress, HEAD and MERGE_HEAD, as when another clone made the same merge
+## and pushed it.  Returns 1, printing nothing, if it does not contain both,
+## if the branch has no upstream branch that is a remote-tracking branch or a
+## local branch, or if the fetch fails; then the pull that follows reports
+## the problem, if there is one.
+redundant_merge_upstream() {
+  if ! redundant_upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2> /dev/null)" \
+    || [ -z "${redundant_upstream}" ] \
+    || ! git_batch_ssh . fetch --quiet > /dev/null 2>&1 \
+    || ! git merge-base --is-ancestor HEAD '@{upstream}' 2> /dev/null \
+    || ! git merge-base --is-ancestor MERGE_HEAD '@{upstream}' 2> /dev/null; then
+    return 1
+  fi
+  printf '%s\n' "${redundant_upstream}"
+}
+
+## Usage: merge_untouched
+## Succeeds if nobody has worked on the merge in progress in the current
+## directory, the top level of a working tree, since git, `git rerere`, and
+## this package's scripts left it:  it has conflicted files, none of which
+## changed after then (see `changed_conflicted_files`), and no other file
+## differs from AUTO_MERGE, git's automatic merge, in the working tree or in
+## the index.  Then `git merge --abort` discards nothing but git's automatic
+## merge and the resolutions that `git rerere` applied, which it can apply
+## again.  Sets ${resolve_files}, which `resolve_other_changes` reads, to the
+## conflicted files.
+merge_untouched() {
+  if ! git rev-parse --verify --quiet AUTO_MERGE > /dev/null; then
+    return 1
+  fi
+  # As in `resolve_merge_conflicts`, `tr` keeps a newline within a pathname
+  # from splitting it.
+  resolve_files="$(git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n')"
+  [ -n "${resolve_files}" ] \
+    && [ -z "$(changed_conflicted_files)" ] \
+    && [ -z "$(resolve_other_changes)" ]
+}
+
 ## Usage: finish_merge_in_progress DIRECTORY
 ## If a merge is in progress in DIRECTORY, the top level of a working tree and
 ## the current directory, resolves its conflicts and commits it, as when a
@@ -609,7 +657,13 @@ agent_processes_in() {
 ## the merge stopped, and then asks the AI agent ${llm_agent}, if it is not
 ## empty, about the conflicts that remain.  The commit's message is the
 ## merge's own (see `in_progress_merge_message`).  Does nothing if no merge
-## is in progress.
+## is in progress.  Instead aborts the merge, and removes the entries of
+## AGENT-TODO.md about it (see `prune_agent_todo`), if the branch's upstream
+## branch already contains both sides of the merge (see
+## `redundant_merge_upstream`) and nobody has worked on the merge (see
+## `merge_untouched`); if somebody has, the diagnostic says that the merge
+## is probably redundant, as does the note in AGENT-TODO.md, unless the file
+## already notes the merge.
 ##
 ## Returns 1, after printing a diagnostic, and leaves the merge in progress,
 ## which it notes in AGENT-TODO.md (see `report_merge_in_progress`), if an AI
@@ -653,6 +707,25 @@ finish_merge_in_progress() {
       | sed -e 's/^\([0-9]*\) \(.*\)/\2 (process \1)/' | paste -s -d ' ' -)."
     return 1
   fi
+  # A merge whose two sides the upstream branch already contains is
+  # redundant, as when another clone of the repository made the same merge
+  # and pushed it.  If nobody has worked on it, aborting it loses nothing, and
+  # the pull below then fast-forwards the branch.
+  finish_redundant=''
+  if finish_upstream="$(redundant_merge_upstream)"; then
+    if merge_untouched; then
+      echo "${SCRIPT_NAME}: aborting the merge of commit $(git rev-parse --verify --quiet MERGE_HEAD) in $1, which is redundant:  ${finish_upstream}, the upstream branch, already contains both of its sides" >&2
+      if ! git merge --abort; then
+        echo "${finish_in_progress}, and cannot be aborted; abort it with \`git merge --abort\`" >&2
+        report_merge_in_progress "It is redundant, because ${finish_upstream}, the upstream branch, already contains both of its sides, but \`${SCRIPT_NAME}\` could not abort it."
+        return 1
+      fi
+      forget_conflicted_files
+      prune_agent_todo 0
+      return 0
+    fi
+    finish_redundant="${finish_upstream}, the upstream branch, already contains both of its sides, so it is probably redundant:  unless its resolution has changes that ${finish_upstream} lacks, abort it, and run \`${SCRIPT_NAME}\` again."
+  fi
   # `resolve_merge_conflicts` would say only that it cannot list the
   # conflicted files.  A merge in progress without conflicts is one whose
   # conflicts someone resolved and staged, one whose commit a hook rejected,
@@ -660,7 +733,10 @@ finish_merge_in_progress() {
   # should look at it.
   if [ -z "$(git ls-files --unmerged)" ]; then
     echo "${finish_in_progress}, and has no conflicted file; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
-    report_merge_in_progress "No conflicted file remains."
+    if [ -n "${finish_redundant}" ]; then
+      echo "${SCRIPT_NAME}: ${finish_redundant}" >&2
+    fi
+    report_merge_in_progress "No conflicted file remains.${finish_redundant:+  ${finish_redundant}}"
     return 1
   fi
   # `resolve_merge_conflicts` would take such a file, which has no conflict
@@ -671,7 +747,10 @@ finish_merge_in_progress() {
       echo "${SCRIPT_NAME}: changed after the merge stopped: ${finish_file}" >&2
     done
     echo "${finish_in_progress}, and its conflicted files changed after the merge stopped, as when an AI agent's work was rejected; finish the merge, or abort it with \`git merge --abort\`" >&2
-    report_merge_in_progress "Its conflicted files changed after the merge stopped:  $(printf '%s\n' "${finish_changed}" | paste -s -d ' ' -)."
+    if [ -n "${finish_redundant}" ]; then
+      echo "${SCRIPT_NAME}: ${finish_redundant}" >&2
+    fi
+    report_merge_in_progress "Its conflicted files changed after the merge stopped:  $(printf '%s\n' "${finish_changed}" | paste -s -d ' ' -).${finish_redundant:+  ${finish_redundant}}"
     return 1
   fi
   # Every conflicted file is as git and `git rerere` left it, so `git rerere`
