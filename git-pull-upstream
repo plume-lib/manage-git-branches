@@ -164,6 +164,10 @@ if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
 fi
 # shellcheck source=common-functions.sh
 . "${SCRIPT_DIR}/common-functions.sh"
+# Through `agent_processes_in`, this script runs git in the current
+# directories of other processes, where an inherited $GIT_DIR would override
+# `git -C`.
+unset_git_location_variables
 
 # Usage: run_pr_status ARGUMENT...
 # Runs `pr-status` with the ARGUMENTs and with a Python that is new enough

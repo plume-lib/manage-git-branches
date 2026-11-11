@@ -1913,6 +1913,30 @@ if git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
   fail "redundant merge in the first directory, --no-pull-first: the merge is still in progress"
 fi
 
+## Without the pull of the first directory, a merge in progress there whose
+## upstream branch cannot be fetched, so that whether it is redundant is
+## unknown, is refused with the usual diagnostic, which says what to do, and
+## with the reason of `git-push-to`.  A directory in place of FETCH_HEAD makes
+## the fetch fail.
+setup_case redundant-merge-first-no-pull-unknown
+start_redundant_merge_in_main
+rm -f "${main_dir}/.git/FETCH_HEAD"
+mkdir "${main_dir}/.git/FETCH_HEAD"
+push_to good --no-llm --no-pull-first
+if [ "${push_status}" -eq 0 ]; then
+  fail "unfetchable merge in the first directory, --no-pull-first: git-push-to succeeded"
+fi
+if ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "unfetchable merge in the first directory, --no-pull-first: the merge was aborted or committed"
+fi
+case "${push_output}" in
+  *"cannot fetch origin/main, so whether the merge in progress in "*" is redundant is unknown"*"a merge is in progress in "*"; finish it, or abort it with \`git merge --abort\`"*) ;;
+  *) fail "unfetchable merge in the first directory, --no-pull-first: wrong diagnostic: ${push_output}" ;;
+esac
+if ! grep -F -q "It was in progress when \`git-push-to\` was about to merge from it." "${main_dir}/AGENT-TODO.md"; then
+  fail "unfetchable merge in the first directory, --no-pull-first: AGENT-TODO.md lacks the reason: $(cat "${main_dir}/AGENT-TODO.md" 2>&1)"
+fi
+
 ## `git-pull-upstream` aborts a redundant merge in progress that nobody has
 ## worked on, and its pull fast-forwards the branch.
 setup_case pull-upstream-redundant-merge

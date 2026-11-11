@@ -559,7 +559,7 @@ fetch_branch() {
 ## when this script rejected an AI agent's work, whose edits remain; or if
 ## the conflicts are not resolved or the merge cannot be committed.
 finish_merge_in_progress() {
-  settle_merge_in_progress "$1"
+  settle_merge_in_progress "$1" 1
   case "$?" in
     0) return 0 ;;
     2) ;;
