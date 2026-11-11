@@ -1360,11 +1360,10 @@ resolve_merge_conflicts() {
   fi
 
   # The conflicted files, one per line.  `-z` keeps git from quoting a
-  # pathname.  `tr` turns each NUL that ends a pathname into a newline, and
-  # each newline within a pathname into the byte 001, by which such a
-  # pathname is refused.
-  resolve_files="$(git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n')"
-  if [ -z "${resolve_files}" ]; then
+  # pathname.  `print_nul_lines` turns each newline within a pathname into
+  # the byte 001, by which such a pathname is refused.
+  if ! resolve_files="$(print_nul_lines git diff --name-only --diff-filter=U -z)" \
+    || [ -z "${resolve_files}" ]; then
     echo "${SCRIPT_NAME}: cannot list the conflicted files in $(pwd)" >&2
     resolve_stopped
     return 1
@@ -1597,12 +1596,16 @@ resolve_with_agent() {
   resolve_paths="$(working_tree_paths)"
   # The files that git tracks, which the agent can change or delete.  `-z`
   # keeps git from quoting a pathname, as it quotes one that contains a
-  # quotation mark.  `tr` turns each NUL that ends a pathname into a newline,
-  # and each newline within a pathname into the byte 001, so that such a
-  # pathname matches no file, and a change to that file is rejected.  The
-  # index holds a conflicted file at several stages, so `uniq` removes the
-  # repetitions from the sorted list.
-  resolve_tracked="$(git ls-files -z | tr '\n\000' '\001\n' | uniq)"
+  # quotation mark.  `print_nul_lines` turns each newline within a pathname
+  # into the byte 001, so that such a pathname matches no file, and a change
+  # to that file is rejected.  The index holds a conflicted file at several
+  # stages, so `uniq` removes the repetitions from the sorted list.
+  if ! resolve_tracked="$(print_nul_lines git ls-files -z)"; then
+    echo "${SCRIPT_NAME}: cannot list the files that git tracks in $(pwd)" >&2
+    rm -f -- "${resolve_marker}"
+    return 1
+  fi
+  resolve_tracked="$(printf '%s\n' "${resolve_tracked}" | uniq)"
   # Git runs a hook when the script commits, outside the agent's sandbox.
   resolve_hooks="$(working_tree_hooks)"
   resolve_branch="$(current_branch)" || resolve_branch="HEAD"
@@ -2916,7 +2919,8 @@ forget_conflicted_files() {
 ## `record_conflicted_files` recorded for this merge.  Such a file was changed
 ## after git, `git rerere`, and this package's scripts last left it:  for
 ## example, by an AI agent whose work a script rejected, or by a person.  A
-## file that was deleted is printed too.
+## file that was deleted is printed too.  Returns 1, without printing
+## anything, if the conflicted files cannot be listed.
 changed_conflicted_files() {
   changed_record=''
   if changed_conflicts="$(git rev-parse --git-path manage-git-branches-conflicts)" \
@@ -2927,7 +2931,13 @@ changed_conflicted_files() {
   fi
   # As for ${resolve_files} in `resolve_merge_conflicts`, a pathname that
   # contains a newline is not split.
-  git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n' | while IFS= read -r changed_file; do
+  if ! changed_files="$(print_nul_lines git diff --name-only --diff-filter=U -z)"; then
+    return 1
+  fi
+  printf '%s\n' "${changed_files}" | while IFS= read -r changed_file; do
+    if [ -z "${changed_file}" ]; then
+      continue
+    fi
     # `--filters` converts AUTO_MERGE's file as a checkout would.
     if [ -f "${changed_file}" ] \
       && git cat-file --filters "AUTO_MERGE:${changed_file}" 2> /dev/null | cmp -s - "${changed_file}"; then

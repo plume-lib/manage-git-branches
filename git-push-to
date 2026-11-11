@@ -668,7 +668,11 @@ finish_merge_in_progress() {
   fi
   # `resolve_merge_conflicts` would take such a file, which has no conflict
   # markers, for one that `git rerere` resolved.
-  finish_changed="$(changed_conflicted_files)"
+  if ! finish_changed="$(changed_conflicted_files)"; then
+    echo "${finish_in_progress}, and its conflicted files cannot be listed; finish the merge, or abort it with \`git merge --abort\`" >&2
+    report_merge_in_progress "Its conflicted files could not be listed."
+    return 1
+  fi
   if [ -n "${finish_changed}" ]; then
     printf '%s\n' "${finish_changed}" | while IFS= read -r finish_file; do
       echo "${SCRIPT_NAME}: changed after the merge stopped: ${finish_file}" >&2

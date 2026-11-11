@@ -1440,4 +1440,47 @@ if rbwt_out="$(report_broken_working_tree / 2>&1)" || [ -n "${rbwt_out}" ]; then
   fail "report_broken_working_tree reported the root directory: ${rbwt_out}"
 fi
 
+## `print_nul_lines` prints the items that a command ends with NULs, one per
+## line, turns a newline within an item into the byte 001, and returns the
+## command's exit status.
+# shellcheck disable=SC2016 # sh expands the format.
+if pnl_out="$(print_nul_lines sh -c 'printf "a\000b\nc\000"; exit 3')"; then
+  fail "print_nul_lines returned 0 for a command that failed"
+fi
+[ "${pnl_out}" = "$(printf 'a\nb\001c')" ] \
+  || fail "unexpected print_nul_lines output: ${pnl_out}"
+
+## `changed_conflicted_files` returns 1 if git cannot list the conflicted
+## files of the merge in progress.
+ccf_dir="${WORK_DIR}/ccf"
+git init -q -b main "${ccf_dir}"
+printf '%s\n' base > "${ccf_dir}/f.txt"
+git -C "${ccf_dir}" add f.txt
+git -C "${ccf_dir}" commit -q -m base
+git -C "${ccf_dir}" branch side
+printf '%s\n' main > "${ccf_dir}/f.txt"
+git -C "${ccf_dir}" commit -q -a -m main
+git -C "${ccf_dir}" switch -q side
+printf '%s\n' side > "${ccf_dir}/f.txt"
+git -C "${ccf_dir}" commit -q -a -m side
+git -C "${ccf_dir}" switch -q main
+if git -C "${ccf_dir}" merge -q side > /dev/null 2>&1; then
+  fail "the merge has no conflicts"
+fi
+(cd "${ccf_dir}" && changed_conflicted_files > /dev/null) \
+  || fail "changed_conflicted_files returned 1 for a merge whose conflicted files can be listed"
+if (
+  cd "${ccf_dir}" || exit 0
+  # A git that cannot list the conflicted files.
+  git() {
+    case "$*" in
+      "diff --name-only --diff-filter=U -z") return 128 ;;
+      *) command git "$@" ;;
+    esac
+  }
+  changed_conflicted_files > /dev/null
+); then
+  fail "changed_conflicted_files returned 0 although git could not list the conflicted files"
+fi
+
 echo "${SCRIPT_NAME}: OK"
