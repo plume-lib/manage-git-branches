@@ -299,12 +299,13 @@
 # Then commit the merge or the fix yourself, and run this script again.
 # This script also appends the command to the file AGENT-TODO.md at
 # the top level of the working tree, where you are less likely to overlook
-# it; delete the entry once you have dealt with it.  A later run that builds
-# and pushes the branch deletes an entry that no longer applies:  one about a
-# merge that is no longer in progress, because you finished or aborted it, and
-# one about a failed build.  It deletes the file if it has no entry left and
-# you added nothing to it.  `prune_agent_todo` in common-functions.sh says
-# which entries are deleted.  When the agent could not
+# it; delete the entry once you have dealt with it.  A later run deletes an
+# entry that no longer applies, unless you added text to it:  one about a
+# merge that is no longer in progress, because you finished or aborted it,
+# before it pulls or merges into the working tree, and one about a failed
+# build, once the build succeeds.  It deletes the file if it has no entry left and you added
+# nothing to it.  `prune_agent_todo` in common-functions.sh says which
+# entries are deleted.  When the agent could not
 # resolve the conflicts, the entry also tells an AI agent that reads it to
 # ask a person for help with them.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
@@ -953,6 +954,10 @@ git_push_to() {
     return 1
   fi
 
+  # Remove the entries of AGENT-TODO.md that no longer apply, such as one
+  # about a merge that a person finished or aborted (see `prune_agent_todo`).
+  (cd -- "${from_absolute}" && prune_agent_todo 0)
+
   if [ "$3" -eq 1 ]; then
     push_step="pulling ${from}"
     # `pull_resolving` refuses a merge in progress, which need not stop this
@@ -1001,6 +1006,7 @@ git_push_to() {
   if ! finish_merge_in_progress "${to_absolute}"; then
     return 1
   fi
+  prune_agent_todo 0
 
   # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
   # that an earlier run of this command made but did not push, as when its
