@@ -2501,11 +2501,12 @@ separator_permitted() {
 
 ## Usage: conflicted_files
 ## Prints, one per line, each conflicted file of the merge in progress in the
-## current directory, the top level of a working tree, as in "src/main.c"
-## (see `print_nul_lines`).  Returns the exit status of `git diff`.
+## current directory, the top level of a working tree, as in "src/main.c".
+## `-z` keeps git from quoting a pathname.  `tr` turns each NUL that ends a
+## pathname into a newline, and each newline within a pathname into the byte
+## 001, so that such a pathname is not split.
 conflicted_files() {
-  # `-z` keeps git from quoting a pathname.
-  print_nul_lines git diff --name-only --diff-filter=U -z
+  git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n'
 }
 
 ## Usage: resolve_other_changes FILES
@@ -3305,32 +3306,22 @@ working_tree_hooks() {
   done
 }
 
-## Usage: print_nul_lines COMMAND...
-## Runs COMMAND, which writes items that each end with a NUL, as
-## `git ls-files -z` writes pathnames, and prints the items one per line.  A
-## newline within an item becomes the byte 001, so that an item such as a
-## pathname that contains a newline is not split.  Returns the exit status of
-## COMMAND.
-print_nul_lines() {
-  # A pipeline's status is that of its last command, so fd 3 carries the
-  # status of COMMAND out of the command substitution, and fd 4 is the
-  # function's standard output.
-  {
-    print_nul_lines_status="$({ {
-      "$@" 3>&- 4>&-
-      echo "$?" >&3
-    } | tr '\n\000' '\001\n' >&4 3>&-; } 3>&1)"
-  } 4>&1
-  [ "${print_nul_lines_status}" = 0 ]
-}
-
 ## Usage: untracked_files
 ## Prints, one per line, the files of the working tree that git does not track
 ## and does not ignore.  Returns the exit status of `git ls-files`.
 untracked_files() {
   # As for `resolve_tracked` in `resolve_with_agent`, `-z` keeps git from
-  # quoting a pathname.
-  print_nul_lines git ls-files -z --others --exclude-standard
+  # quoting a pathname, and a newline within a pathname becomes the byte 001.
+  # A pipeline's status is that of its last command, so fd 3 carries the
+  # status of git out of the command substitution, and fd 4 is the function's
+  # standard output.
+  {
+    untracked_files_status="$({ {
+      git ls-files -z --others --exclude-standard 3>&- 4>&-
+      echo "$?" >&3
+    } | tr '\n\000' '\001\n' >&4 3>&-; } 3>&1)"
+  } 4>&1
+  [ "${untracked_files_status}" = 0 ]
 }
 
 ## Usage: ignored_files
