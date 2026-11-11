@@ -1718,8 +1718,7 @@ if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
 fi
 
 ## A redundant merge that somebody has worked on is left in progress, but the
-## diagnostic says that it is probably redundant.  (AGENT-TODO.md already
-## notes the merge, so it gets no second entry.)
+## diagnostic says that it is probably redundant.
 setup_case redundant-merge-touched
 push_to good --no-llm
 check_not_resolved "touched redundant merge"
@@ -1734,7 +1733,7 @@ if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "${feature_head}" ]; then
   fail "touched redundant merge: HEAD changed"
 fi
 case "${push_output}" in
-  *"origin/feature, the upstream branch, already contains both of its sides, so it is probably redundant"*) ;;
+  *"the merge is probably redundant:  origin/feature, the upstream branch, already contains both of its sides"*) ;;
   *) fail "touched redundant merge: wrong diagnostic: ${push_output}" ;;
 esac
 if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
@@ -1742,6 +1741,120 @@ if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; 
 fi
 if [ "$(cat "${feature_dir}/file.txt")" != "$(printf '%s\n' ONE two three four five six SEVEN-feature eight nine)" ]; then
   fail "touched redundant merge: file.txt was changed: $(cat "${feature_dir}/file.txt")"
+fi
+# The first run noted the merge in AGENT-TODO.md before it was redundant, so
+# this run appended a second entry, which says that it is redundant.
+if [ "$(grep -c -x 'It is probably redundant:  origin/feature, the upstream branch, already contains both of its sides.' "${feature_dir}/AGENT-TODO.md")" -ne 1 ]; then
+  fail "touched redundant merge: AGENT-TODO.md does not say once that the merge is redundant: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+# The backquotes are Markdown, not command substitutions.
+# shellcheck disable=SC2016
+if ! grep -F -x -q 'Unless its resolution has changes that origin/feature lacks, abort it with `git merge --abort`, and run `git-push-to` again; then delete this entry.' "${feature_dir}/AGENT-TODO.md"; then
+  fail "touched redundant merge: AGENT-TODO.md does not say to abort the merge: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+# Another run appends no third entry.
+push_to good --no-llm
+if [ "$(grep -c '^## ' "${feature_dir}/AGENT-TODO.md")" -ne 2 ]; then
+  fail "touched redundant merge, run again: AGENT-TODO.md does not have exactly 2 entries: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+
+## Usage: check_redundant_stopped DESCRIPTION DIAGNOSTIC
+## Checks that git-push-to failed, left the merge in progress in
+## ${feature_dir}, printed DIAGNOSTIC, and said that the merge is probably
+## redundant.
+check_redundant_stopped() {
+  if [ "${push_status}" -eq 0 ]; then
+    fail "$1: git-push-to succeeded: ${push_output}"
+  fi
+  if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    fail "$1: the merge was aborted or committed"
+  fi
+  case "${push_output}" in
+    *"$2"*) ;;
+    *) fail "$1: no diagnostic \"$2\": ${push_output}" ;;
+  esac
+  case "${push_output}" in
+    *"the merge is probably redundant:  origin/feature, the upstream branch, already contains both of its sides"*) ;;
+    *) fail "$1: no diagnostic that the merge is redundant: ${push_output}" ;;
+  esac
+}
+
+## A redundant merge in which a file that the merge did not leave conflicted
+## changed is neither aborted nor finished.
+setup_case redundant-merge-other build
+push_to good --no-llm
+check_not_resolved "redundant merge, other file changed"
+push_same_merge
+echo changed >> "${feature_dir}/other.txt"
+push_to good --no-llm
+check_redundant_stopped "redundant merge, other file changed" \
+  "changed, but not conflicted: other.txt"
+if [ "$(tail -n 1 "${feature_dir}/other.txt")" != changed ]; then
+  fail "redundant merge, other file changed: other.txt was changed: $(cat "${feature_dir}/other.txt")"
+fi
+
+## A redundant merge whose resolution is staged is neither aborted nor
+## finished.
+setup_case redundant-merge-staged
+push_to good --no-llm
+check_not_resolved "redundant merge, resolution staged"
+push_same_merge
+write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-feature SEVEN-main eight nine
+git -C "${feature_dir}" add file.txt
+push_to good --no-llm
+check_redundant_stopped "redundant merge, resolution staged" "and has no conflicted file"
+
+## Usage: start_redundant_merge_in_main
+## Starts, in ${main_dir}, a merge of feature into main, which has conflicts,
+## and makes the same merge in another clone of ${remote}, resolves its
+## conflicts by keeping both sides' changes, and pushes it to main.
+start_redundant_merge_in_main() {
+  git -C "${main_dir}" fetch -q
+  git -C "${main_dir}" merge -q --no-edit origin/feature > /dev/null 2>&1 || true
+  if ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    fail "start_redundant_merge_in_main: no merge is in progress in ${main_dir}"
+  fi
+  git clone -q -b main "${remote}" "${case_dir}/other-main"
+  git -C "${case_dir}/other-main" merge -q --no-edit origin/feature > /dev/null 2>&1 || true
+  write_file "${case_dir}/other-main/file.txt" ONE two three four five six SEVEN-feature SEVEN-main eight nine
+  git -C "${case_dir}/other-main" commit -q -a --no-edit
+  git -C "${case_dir}/other-main" push -q
+}
+
+## A redundant merge in progress in the first directory that nobody has
+## worked on is aborted, and the pull fast-forwards the branch.
+setup_case redundant-merge-first
+start_redundant_merge_in_main
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "redundant merge in the first directory: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"aborting the merge of commit "*"myrepo-branch-main, which is redundant:  origin/main, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge in the first directory: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${main_dir}" rev-parse HEAD)" != "$(git -C "${case_dir}/other-main" rev-parse HEAD)" ]; then
+  fail "redundant merge in the first directory: main was not fast-forwarded to the other clone's merge"
+fi
+
+## A redundant merge in progress in the first directory that somebody has
+## worked on makes git-push-to stop, saying that it is probably redundant.
+setup_case redundant-merge-first-touched
+start_redundant_merge_in_main
+write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
+push_to good --no-llm
+if [ "${push_status}" -eq 0 ]; then
+  fail "touched redundant merge in the first directory: git-push-to succeeded"
+fi
+if ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "touched redundant merge in the first directory: the merge was aborted or committed"
+fi
+case "${push_output}" in
+  *"the merge is probably redundant:  origin/main, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "touched redundant merge in the first directory: wrong diagnostic: ${push_output}" ;;
+esac
+if ! grep -F -x -q 'It is probably redundant:  origin/main, the upstream branch, already contains both of its sides.' "${main_dir}/AGENT-TODO.md"; then
+  fail "touched redundant merge in the first directory: AGENT-TODO.md does not say that the merge is redundant: $(cat "${main_dir}/AGENT-TODO.md" 2>&1)"
 fi
 
 setup_case todo-agent

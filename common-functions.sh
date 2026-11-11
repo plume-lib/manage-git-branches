@@ -1358,11 +1358,9 @@ resolve_merge_conflicts() {
     return 1
   fi
 
-  # The conflicted files, one per line.  `-z` keeps git from quoting a
-  # pathname.  `tr` turns each NUL that ends a pathname into a newline, and
-  # each newline within a pathname into the byte 001, by which such a
-  # pathname is refused.
-  resolve_files="$(git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n')"
+  # The conflicted files, one per line.  A pathname that contains a newline
+  # is refused by the byte 001 that `conflicted_files` puts in its place.
+  resolve_files="$(conflicted_files)"
   if [ -z "${resolve_files}" ]; then
     echo "${SCRIPT_NAME}: cannot list the conflicted files in $(pwd)" >&2
     resolve_stopped
@@ -1376,7 +1374,7 @@ resolve_merge_conflicts() {
       ;;
   esac
   # Any other change would be blamed on the agent below, or committed.
-  resolve_other="$(resolve_other_changes)"
+  resolve_other="$(resolve_other_changes "${resolve_files}")"
   if [ -n "${resolve_other}" ]; then
     printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: changed, but not conflicted: /" >&2
     echo "${SCRIPT_NAME}: the working tree has changes that are not part of the merge; resolve the conflicts by hand" >&2
@@ -1714,7 +1712,7 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # agent changed or deleted, one per line.
   resolve_rerere_changed=''
   if [ "${resolve_refs_ok}" -eq 1 ]; then
-    resolve_agent_other="$(resolve_other_changes)"
+    resolve_agent_other="$(resolve_other_changes "${resolve_files}")"
     printf '%s\n' "${resolve_agent_other}" | while IFS= read -r resolve_file; do
       if [ -n "${resolve_file}" ]; then
         review_notice "${resolve_with} also changed: ${resolve_file}"
@@ -2501,14 +2499,25 @@ separator_permitted() {
   fi
 }
 
-## Usage: resolve_other_changes
+## Usage: conflicted_files
+## Prints, one per line, each conflicted file of the merge in progress in the
+## current directory, the top level of a working tree, as in "src/main.c".
+## `-z` keeps git from quoting a pathname.  `tr` turns each NUL that ends a
+## pathname into a newline, and each newline within a pathname into the byte
+## 001, so that such a pathname is not split.
+conflicted_files() {
+  git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n'
+}
+
+## Usage: resolve_other_changes FILES
 ## Prints, one per line, each file that differs from AUTO_MERGE in the working
-## tree or in the index and is not in ${resolve_files}, the conflicted files.
+## tree or in the index and is not in FILES, the conflicted files, one per
+## line, as `conflicted_files` prints them.
 resolve_other_changes() {
   {
     git diff --no-renames --name-only -z AUTO_MERGE
     git diff --cached --no-renames --name-only -z AUTO_MERGE
-  } | tr '\000' '\n' | sort -u | grep -F -x -v -- "${resolve_files}"
+  } | tr '\000' '\n' | sort -u | grep -F -x -v -- "$1"
 }
 
 ## Usage: agent_available AGENT
@@ -2907,14 +2916,18 @@ prune_agent_todo() {
   return 0
 }
 
-## Usage: merge_in_progress_note [REASON]
+## Usage: merge_in_progress_note [REASON [UPSTREAM]]
 ## Prints a paragraph for an entry of AGENT-TODO.md that says that a merge is
 ## in progress in the current directory, the top level of a working tree.
 ## Its first line identifies the merge, as in "The merge of commit
 ## 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b is in progress in
 ## /home/me/myrepo-branch-feature."; then come REASON, such as "No conflicted
-## file remains.", if it is given and not empty, and what to do.  Prints
-## nothing if no merge is in progress.
+## file remains.", if it is given and not empty; then, if UPSTREAM is given
+## and not empty, a line that says that the merge is probably redundant,
+## because UPSTREAM, the name of the branch's upstream branch, such as
+## "origin/feature", already contains both of its sides; and last, a line
+## that says what to do, which is to abort the merge if it is redundant.
+## Prints nothing if no merge is in progress.
 merge_in_progress_note() {
   if ! note_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)"; then
     return 0
@@ -2924,30 +2937,45 @@ merge_in_progress_note() {
     printf '%s\n' "$1"
   fi
   # The backquotes are Markdown, not command substitutions.
-  # shellcheck disable=SC2016
-  printf '%s\n' 'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.'
+  if [ -n "${2:-}" ]; then
+    printf 'It is probably redundant:  %s, the upstream branch, already contains both of its sides.\n' "$2"
+    # shellcheck disable=SC2016
+    printf 'Unless its resolution has changes that %s lacks, abort it with `git merge --abort`, and run `%s` again; then delete this entry.\n' "$2" "${SCRIPT_NAME}"
+  else
+    # shellcheck disable=SC2016
+    printf '%s\n' 'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.'
+  fi
 }
 
-## Usage: report_merge_in_progress [REASON]
+## Usage: report_merge_in_progress [REASON [UPSTREAM]]
 ## Appends to AGENT-TODO.md (see `agent_todo_path` and `append_agent_todo`)
 ## an entry that says that a merge is in progress in the current directory,
 ## the top level of a working tree, as `merge_in_progress_note` writes it,
-## given REASON.  Does nothing if no merge is in progress, or if the file
-## already says that this merge is in progress in this directory, as after
-## an earlier run stopped at the same merge.  Appends the note to the summary
-## (see `append_merge_note_summary`) in either case.  Runs git commands, so it must
-## not be called after an AI agent ran without its work being checked; see
-## `report_agent_session`.
+## given REASON and UPSTREAM.  Does nothing if no merge is in progress, or if
+## an entry of the file already has the note's first line, which identifies
+## the merge, and its last line, which says what to do, as after an earlier
+## run stopped at the same merge.  So an entry that says that a merge is
+## redundant is appended even if an earlier entry, written before the merge
+## was redundant, notes the same merge.
+## Appends the note to the summary (see `append_merge_note_summary`) in
+## either case.  Runs git commands, so it must not be called after an AI
+## agent ran without its work being checked; see `report_agent_session`.
 report_merge_in_progress() {
-  report_merge_note="$(merge_in_progress_note "${1:-}")"
+  report_merge_note="$(merge_in_progress_note "${1:-}" "${2:-}")"
   if [ -z "${report_merge_note}" ]; then
     return 0
   fi
   append_merge_note_summary "${report_merge_note}"
-  report_merge_first="$(printf '%s\n' "${report_merge_note}" | head -n 1)"
   report_merge_todo="$(agent_todo_path)" || report_merge_todo=''
+  # The awk program succeeds if an entry, which starts with a line "## ...",
+  # has the line ${REPORT_FIRST} and then the line ${REPORT_LAST}.
   if [ -n "${report_merge_todo}" ] && [ -f "${report_merge_todo}" ] \
-    && grep -F -x -q -- "${report_merge_first}" "${report_merge_todo}"; then
+    && REPORT_FIRST="$(printf '%s\n' "${report_merge_note}" | head -n 1)" \
+      REPORT_LAST="$(printf '%s\n' "${report_merge_note}" | tail -n 1)" \
+      awk '/^## / { first = 0 }
+        first && $0 == ENVIRON["REPORT_LAST"] { found = 1 }
+        $0 == ENVIRON["REPORT_FIRST"] { first = 1 }
+        END { exit !found }' "${report_merge_todo}"; then
     return 0
   fi
   if append_agent_todo "${report_merge_todo}" "
@@ -3009,9 +3037,7 @@ changed_conflicted_files() {
     && [ "$(head -n 1 "${changed_conflicts}")" = "merge ${changed_merge_head}" ]; then
     changed_record="$(sed -e 1d "${changed_conflicts}")"
   fi
-  # As for ${resolve_files} in `resolve_merge_conflicts`, a pathname that
-  # contains a newline is not split.
-  git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n' | while IFS= read -r changed_file; do
+  conflicted_files | while IFS= read -r changed_file; do
     # `--filters` converts AUTO_MERGE's file as a checkout would.
     if [ -f "${changed_file}" ] \
       && git cat-file --filters "AUTO_MERGE:${changed_file}" 2> /dev/null | cmp -s - "${changed_file}"; then
