@@ -1761,7 +1761,7 @@ fi
 ## Usage: check_redundant_stopped DESCRIPTION DIAGNOSTIC
 ## Checks that git-push-to failed, left the merge in progress in
 ## ${feature_dir}, printed DIAGNOSTIC, and said that the merge is probably
-## redundant.
+## redundant, and not that it should be finished.
 check_redundant_stopped() {
   if [ "${push_status}" -eq 0 ]; then
     fail "$1: git-push-to succeeded: ${push_output}"
@@ -1777,6 +1777,9 @@ check_redundant_stopped() {
     *"the merge is probably redundant:  origin/feature, the upstream branch, already contains both of its sides"*) ;;
     *) fail "$1: no diagnostic that the merge is redundant: ${push_output}" ;;
   esac
+  case "${push_output}" in
+    *"; finish "*) fail "$1: a diagnostic says to finish the redundant merge: ${push_output}" ;;
+  esac
 }
 
 ## A redundant merge in which a file that the merge did not leave conflicted
@@ -1788,7 +1791,7 @@ push_same_merge
 echo changed >> "${feature_dir}/other.txt"
 push_to good --no-llm
 check_redundant_stopped "redundant merge, other file changed" \
-  "changed, but not conflicted: other.txt"
+  "Files that it did not leave conflicted changed after it stopped:  other.txt."
 if [ "$(tail -n 1 "${feature_dir}/other.txt")" != changed ]; then
   fail "redundant merge, other file changed: other.txt was changed: $(cat "${feature_dir}/other.txt")"
 fi
@@ -1802,7 +1805,47 @@ push_same_merge
 write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-feature SEVEN-main eight nine
 git -C "${feature_dir}" add file.txt
 push_to good --no-llm
-check_redundant_stopped "redundant merge, resolution staged" "and has no conflicted file"
+check_redundant_stopped "redundant merge, resolution staged" "No conflicted file remains."
+
+## A merge whose upstream branch cannot be fetched, so that whether it is
+## redundant is unknown, is not finished, although the agent could resolve
+## it.  A directory in place of FETCH_HEAD makes the fetch fail.
+setup_case redundant-merge-unknown
+push_to good --no-llm
+check_not_resolved "merge, upstream branch not fetched"
+rm -f "${feature_dir}/.git/FETCH_HEAD"
+mkdir "${feature_dir}/.git/FETCH_HEAD"
+: > "${STUB_LOG}"
+push_to good
+check_not_resolved "merge, upstream branch not fetched"
+if [ -s "${STUB_LOG}" ]; then
+  fail "merge, upstream branch not fetched: an agent ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"cannot fetch origin/feature, so whether the merge in progress in "*" is redundant is unknown"*) ;;
+  *) fail "merge, upstream branch not fetched: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An octopus merge is redundant only if the upstream branch contains every
+## commit that it merges.  A second line of MERGE_HEAD, for a commit that the
+## upstream branch lacks, makes the merge an octopus merge.
+setup_case redundant-merge-octopus
+push_to good --no-llm
+check_not_resolved "octopus merge"
+push_same_merge
+git -C "${feature_dir}" commit-tree -p HEAD -m "Not pushed" "HEAD^{tree}" \
+  >> "${feature_dir}/.git/MERGE_HEAD"
+push_to good --no-llm
+# The other clone pushed, so `check_not_resolved` does not apply.
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "${feature_head}" ]; then
+  fail "octopus merge: HEAD changed"
+fi
+if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "octopus merge: the merge was aborted or committed"
+fi
+case "${push_output}" in
+  *"aborting the merge"* | *"probably redundant"*) fail "octopus merge: the merge was taken for a redundant one: ${push_output}" ;;
+esac
 
 ## Usage: start_redundant_merge_in_main
 ## Starts, in ${main_dir}, a merge of feature into main, which has conflicts,
