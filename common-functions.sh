@@ -1359,11 +1359,9 @@ resolve_merge_conflicts() {
     return 1
   fi
 
-  # The conflicted files, one per line.  `-z` keeps git from quoting a
-  # pathname.  `print_nul_lines` turns each newline within a pathname into
-  # the byte 001, by which such a pathname is refused.
-  if ! resolve_files="$(print_nul_lines git diff --name-only --diff-filter=U -z)" \
-    || [ -z "${resolve_files}" ]; then
+  # The conflicted files, one per line.  A pathname that contains a newline
+  # is refused by the byte 001 that `conflicted_files` puts in its place.
+  if ! resolve_files="$(conflicted_files)" || [ -z "${resolve_files}" ]; then
     echo "${SCRIPT_NAME}: cannot list the conflicted files in $(pwd)" >&2
     resolve_stopped
     return 1
@@ -1376,7 +1374,7 @@ resolve_merge_conflicts() {
       ;;
   esac
   # Any other change would be blamed on the agent below, or committed.
-  resolve_other="$(resolve_other_changes)"
+  resolve_other="$(resolve_other_changes "${resolve_files}")"
   if [ -n "${resolve_other}" ]; then
     printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: changed, but not conflicted: /" >&2
     echo "${SCRIPT_NAME}: the working tree has changes that are not part of the merge; resolve the conflicts by hand" >&2
@@ -1718,7 +1716,7 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # agent changed or deleted, one per line.
   resolve_rerere_changed=''
   if [ "${resolve_refs_ok}" -eq 1 ]; then
-    resolve_agent_other="$(resolve_other_changes)"
+    resolve_agent_other="$(resolve_other_changes "${resolve_files}")"
     printf '%s\n' "${resolve_agent_other}" | while IFS= read -r resolve_file; do
       if [ -n "${resolve_file}" ]; then
         review_notice "${resolve_with} also changed: ${resolve_file}"
@@ -2505,14 +2503,25 @@ separator_permitted() {
   fi
 }
 
-## Usage: resolve_other_changes
+## Usage: conflicted_files
+## Prints, one per line, each conflicted file of the merge in progress in the
+## current directory, the top level of a working tree, as in "src/main.c".
+## `-z` keeps git from quoting a pathname, and `print_nul_lines` keeps a
+## pathname that contains a newline from being split.  Returns the exit
+## status of git.
+conflicted_files() {
+  print_nul_lines git diff --name-only --diff-filter=U -z
+}
+
+## Usage: resolve_other_changes FILES
 ## Prints, one per line, each file that differs from AUTO_MERGE in the working
-## tree or in the index and is not in ${resolve_files}, the conflicted files.
+## tree or in the index and is not in FILES, the conflicted files, one per
+## line, as `conflicted_files` prints them.
 resolve_other_changes() {
   {
     git diff --no-renames --name-only -z AUTO_MERGE
     git diff --cached --no-renames --name-only -z AUTO_MERGE
-  } | tr '\000' '\n' | sort -u | grep -F -x -v -- "${resolve_files}"
+  } | tr '\000' '\n' | sort -u | grep -F -x -v -- "$1"
 }
 
 ## Usage: agent_available AGENT
@@ -2878,6 +2887,17 @@ ${report_merge_note}
   fi
 }
 
+## Usage: stop_at_merge DIAGNOSTIC REASON
+## Prints DIAGNOSTIC, which says why this script leaves the merge in progress
+## in the current directory, the top level of a working tree, and what to do,
+## and notes the merge in AGENT-TODO.md, with REASON, such as "No conflicted
+## file remains." (see `report_merge_in_progress`).  Returns 1.
+stop_at_merge() {
+  echo "$1" >&2
+  report_merge_in_progress "$2"
+  return 1
+}
+
 ## Usage: record_conflicted_files
 ## Records, in the file manage-git-branches-conflicts in the git directory of
 ## the current directory, the top level of a working tree, MERGE_HEAD and the
@@ -2929,9 +2949,7 @@ changed_conflicted_files() {
     && [ "$(head -n 1 "${changed_conflicts}")" = "merge ${changed_merge_head}" ]; then
     changed_record="$(sed -e 1d "${changed_conflicts}")"
   fi
-  # As for ${resolve_files} in `resolve_merge_conflicts`, a pathname that
-  # contains a newline is not split.
-  if ! changed_files="$(print_nul_lines git diff --name-only --diff-filter=U -z)"; then
+  if ! changed_files="$(conflicted_files)"; then
     return 1
   fi
   printf '%s\n' "${changed_files}" | while IFS= read -r changed_file; do
