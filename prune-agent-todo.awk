@@ -42,9 +42,9 @@ BEGIN {
   prefix_count = split(ENVIRON["PRUNE_CD_PREFIXES"], prefixes, "\n")
   merge_start = "The merge of commit "
   merge_middle = " is in progress in "
-  # The start of the last line of the paragraph that `merge_in_progress_note`
-  # prints.
-  merge_end = "Finish it ("
+  # The end of the last line of the paragraph that `merge_in_progress_note`
+  # prints, in each of its forms.
+  merge_end = "; then delete this entry."
   # The start of the line that `merge_build_note` writes to name the working
   # tree whose build failed:  "The build failed in DIRECTORY."
   build_start = "The build failed in "
@@ -74,8 +74,8 @@ function starts_with(string, prefix) {
 
 # Returns 1 if STRING ends with SUFFIX, and 0 otherwise.
 function ends_with(string, suffix) {
-  return length(string) >= length(suffix) \
-    && substr(string, length(string) - length(suffix) + 1) == suffix
+  return length(string) >= length(suffix) &&
+    substr(string, length(string) - length(suffix) + 1) == suffix
 }
 
 # Returns 1 if LINE says that running the script again suffices, as the
@@ -128,7 +128,7 @@ function has_added_text(i, line, in_note, in_code) {
     } else if (line == "") {
       in_note = 0
     } else if (in_note) {
-      if (starts_with(line, merge_end)) {
+      if (ends_with(line, merge_end)) {
         in_note = 0
       }
     } else if (starts_with(line, merge_start)) {

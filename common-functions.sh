@@ -3141,14 +3141,18 @@ prune_agent_todo() {
   return 0
 }
 
-## Usage: merge_in_progress_note [REASON]
+## Usage: merge_in_progress_note [REASON [UPSTREAM]]
 ## Prints a paragraph for an entry of AGENT-TODO.md that says that a merge is
 ## in progress in the current directory, the top level of a working tree.
 ## Its first line identifies the merge, as in "The merge of commit
 ## 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b is in progress in
 ## /home/me/myrepo-branch-feature."; then come REASON, such as "No conflicted
-## file remains.", if it is given and not empty, and what to do.  Prints
-## nothing if no merge is in progress.
+## file remains.", if it is given and not empty; then, if UPSTREAM is given
+## and not empty, a line that says that the merge is probably redundant,
+## because UPSTREAM, the name of the branch's upstream branch, such as
+## "origin/feature", already contains both of its sides; and last, a line
+## that says what to do, which is to abort the merge if it is redundant.
+## Prints nothing if no merge is in progress.
 merge_in_progress_note() {
   if ! note_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)"; then
     return 0
@@ -3157,43 +3161,60 @@ merge_in_progress_note() {
   if [ -n "${1:-}" ]; then
     printf '%s\n' "$1"
   fi
-  # The backquotes are Markdown, not command substitutions.
-  # shellcheck disable=SC2016
-  printf '%s\n' 'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.'
+  # The last line ends with "; then delete this entry.", by which
+  # prune-agent-todo.awk recognizes the end of the paragraph.  The backquotes
+  # are Markdown, not command substitutions.
+  if [ -n "${2:-}" ]; then
+    printf 'It is probably redundant:  %s, the upstream branch, already contains both of its sides.\n' "$2"
+    # shellcheck disable=SC2016
+    printf 'Unless its resolution has changes that %s lacks, abort it with `git merge --abort`, and run `%s` again; then delete this entry.\n' "$2" "${SCRIPT_NAME}"
+  else
+    # shellcheck disable=SC2016
+    printf '%s\n' 'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.'
+  fi
 }
 
-## Usage: report_merge_in_progress [REASON [ADVICE]]
+## Usage: report_merge_in_progress [REASON [UPSTREAM [ADVICE]]]
 ## Appends to AGENT-TODO.md an entry that says that a merge is in progress in
 ## the current directory, the top level of a working tree, as
-## `merge_in_progress_note` writes it, given REASON (see
+## `merge_in_progress_note` writes it, given REASON and UPSTREAM (see
 ## `append_agent_note`).  First removes each entry about a merge that is no
 ## longer in progress, and, unless ADVICE is "keep", each earlier entry about
 ## the same merge that says that running the script again suffices, whose
 ## advice is out of date (see `prune_agent_todo`).  ADVICE is "keep" when
 ## that advice still holds, as when the script refuses to start while the
 ## merge is in progress (see `refuse_merge_in_progress`).  Then does nothing
-## if the file still says that this merge is in progress in this directory,
-## as after an earlier run stopped at the same merge:  the earlier entry, such
-## as one that asks a person for help, stays.  Does nothing if no merge is in
+## if an entry of the file still has the note's first line, which identifies
+## the merge, and its last line, which says what to do, as after an earlier
+## run stopped at the same merge:  the earlier entry, such as one that asks a
+## person for help, stays.  So an entry that says that a merge is redundant
+## is appended even if an earlier entry, written before the merge was
+## redundant, notes the same merge.  Does nothing if no merge is in
 ## progress.  Appends the note to the summary (see
 ## `append_merge_note_summary`) in each case.  Runs git commands, so it must
 ## not be called after an AI agent ran without its work being checked; see
 ## `report_agent_session`.
 report_merge_in_progress() {
-  report_merge_note="$(merge_in_progress_note "${1:-}")"
+  report_merge_note="$(merge_in_progress_note "${1:-}" "${2:-}")"
   if [ -z "${report_merge_note}" ]; then
     return 0
   fi
   append_merge_note_summary "${report_merge_note}"
-  report_merge_first="$(printf '%s\n' "${report_merge_note}" | head -n 1)"
   report_merge_todo="$(agent_todo_path)" || report_merge_todo=''
-  if [ "${2:-}" = keep ]; then
+  if [ "${3:-}" = keep ]; then
     prune_agent_todo 0
   else
     prune_agent_todo 0 merge
   fi
+  # The awk program succeeds if an entry, which starts with a line "## ...",
+  # has the line ${REPORT_FIRST} and then the line ${REPORT_LAST}.
   if [ -n "${report_merge_todo}" ] && [ -f "${report_merge_todo}" ] \
-    && grep -F -x -q -- "${report_merge_first}" "${report_merge_todo}"; then
+    && REPORT_FIRST="$(printf '%s\n' "${report_merge_note}" | head -n 1)" \
+      REPORT_LAST="$(printf '%s\n' "${report_merge_note}" | tail -n 1)" \
+      awk '/^## / { first = 0 }
+        first && $0 == ENVIRON["REPORT_LAST"] { found = 1 }
+        $0 == ENVIRON["REPORT_FIRST"] { first = 1 }
+        END { exit !found }' "${report_merge_todo}"; then
     return 0
   fi
   if append_agent_note "${report_merge_todo}" 'Finish the merge in progress' "${report_merge_note}"; then
@@ -3216,14 +3237,23 @@ $3
 "
 }
 
-## Usage: stop_at_merge DIAGNOSTIC REASON
-## Prints DIAGNOSTIC, which says why this script leaves the merge in progress
-## in the current directory, the top level of a working tree, and what to do,
-## and notes the merge in AGENT-TODO.md, with REASON, such as "No conflicted
-## file remains." (see `report_merge_in_progress`).
+## Usage: stop_at_merge DIAGNOSTIC REASON [UPSTREAM]
+## Prints DIAGNOSTIC, which says why the caller leaves the merge in progress
+## in the current directory, the top level of a working tree.  If UPSTREAM,
+## the name of the branch's upstream branch, such as "origin/feature", is
+## given and not empty, then the merge is redundant (see
+## `redundant_merge_upstream`):  DIAGNOSTIC does not say what
+## to do, and this function then prints a diagnostic that says that the
+## merge is probably redundant and should be aborted.  Otherwise DIAGNOSTIC
+## says what to do.  Notes the merge in AGENT-TODO.md, with REASON, such as
+## "No conflicted file remains.", and with UPSTREAM (see
+## `report_merge_in_progress`).
 stop_at_merge() {
   echo "$1" >&2
-  report_merge_in_progress "$2"
+  if [ -n "${3:-}" ]; then
+    echo "${SCRIPT_NAME}: the merge is probably redundant:  $3, the upstream branch, already contains both of its sides; unless its resolution has changes that $3 lacks, abort it with \`git merge --abort\`, and run \`${SCRIPT_NAME}\` again" >&2
+  fi
+  report_merge_in_progress "$2" "${3:-}"
 }
 
 ## Usage: record_conflicted_files
@@ -3699,8 +3729,12 @@ parse_llm_option() {
 ## string instead if the branches of the upstream branch's repository need
 ## not have been built (see `is_built_remote`), or if the pull did not record
 ## the head in FETCH_HEAD.
-## Returns 1, after printing a diagnostic, if a merge is already in progress
-## in DIRECTORY, if the pull fails without a merge in progress, as when the
+## Before it pulls, runs `refuse_merge_in_progress`, which aborts a merge
+## already in progress in DIRECTORY if it is redundant and nobody has worked
+## on it, and which refuses any other.
+## Returns 1, after printing a diagnostic, if `refuse_merge_in_progress`
+## refuses, as when another merge is already in progress in DIRECTORY, if
+## the pull fails without a merge in progress, as when the
 ## fetch fails or a rebase has conflicts, if the merge's message cannot be
 ## composed, or if the merge's conflicts are not resolved or the merge cannot
 ## be committed.  A merge without conflicts whose commit a pre-merge-commit
@@ -3780,22 +3814,349 @@ pull_resolving() {
   )
 }
 
+## Usage: agent_processes_in DIRECTORY
+## Prints, one per line, the process id and command name, such as
+## "4242 claude", of each process of the current user that runs an AI agent
+## and whose current directory is in the working tree whose top level is
+## DIRECTORY, an absolute pathname with symbolic links resolved.  A process
+## runs an AI agent if its command name is "claude" or "codex", as for Claude
+## Code and Codex installed as native executables.  A process whose current
+## directory is in another working tree nested in DIRECTORY, such as one in
+## DIRECTORY/.claude/worktrees/NAME, is not printed.  Neither is a process
+## that is the running script or an ancestor of it, such as a Claude Code
+## session that ran the script.  Returns 1, after printing a diagnostic, if
+## the system has neither /proc nor `lsof`, so that the current directories
+## of processes cannot be read.  Returns 2, after printing a diagnostic for
+## each, if the current directory of some such process that is still running
+## cannot be read, so that whether it works in DIRECTORY is unknown; it still
+## prints the processes that it found in DIRECTORY.
+## It runs git in the current directories of those processes, so the script
+## must first run `unset_git_location_variables`.
+agent_processes_in() {
+  if [ -d /proc/self ]; then
+    agent_processes_via=proc
+  elif command -v lsof > /dev/null 2>&1; then
+    agent_processes_via=lsof
+  else
+    echo "${SCRIPT_NAME}: cannot tell whether an AI agent is working in $1, because this system has neither /proc nor lsof" >&2
+    return 1
+  fi
+  # The process ids of this shell and its ancestors, each followed by a blank.
+  agent_processes_ancestors=' '
+  agent_processes_pid=$$
+  while [ -n "${agent_processes_pid}" ] && [ "${agent_processes_pid}" -gt 1 ]; do
+    agent_processes_ancestors="${agent_processes_ancestors}${agent_processes_pid} "
+    agent_processes_pid="$(ps -o ppid= -p "${agent_processes_pid}" 2> /dev/null | tr -d ' ')"
+  done
+  # On macOS, `ps` prints a command name as the executable's full pathname,
+  # which can contain blanks.
+  # The loop runs in an explicit subshell, so that its exit status is the
+  # pipeline's even in a shell that runs a pipeline's last command in the
+  # current shell.
+  ps -U "$(id -u)" -o pid= -o comm= | (
+    agent_processes_status=0
+    while read -r agent_processes_pid agent_processes_command; do
+      case "${agent_processes_command##*/}" in
+        claude | codex) ;;
+        *) continue ;;
+      esac
+      case "${agent_processes_ancestors}" in
+        *" ${agent_processes_pid} "*) continue ;;
+      esac
+      if [ "${agent_processes_via}" = proc ]; then
+        agent_processes_cwd="$(readlink "/proc/${agent_processes_pid}/cwd" 2> /dev/null)"
+      else
+        agent_processes_cwd="$(lsof -a -p "${agent_processes_pid}" -d cwd -Fn 2> /dev/null | sed -n -e 's/^n//p')"
+      fi
+      if [ -z "${agent_processes_cwd}" ]; then
+        # A process that has exited since `ps` listed it, or a zombie, has no
+        # current directory and works nowhere.  For any other process, the
+        # lookup failed, and the process might be working in the directory.
+        case "$(ps -o stat= -p "${agent_processes_pid}" 2> /dev/null | tr -d ' ')" in
+          '' | Z*) continue ;;
+        esac
+        echo "${SCRIPT_NAME}: cannot read the current directory of ${agent_processes_command##*/} (process ${agent_processes_pid})" >&2
+        agent_processes_status=2
+        continue
+      fi
+      case "${agent_processes_cwd}" in
+        "$1" | "$1"/*) ;;
+        *) continue ;;
+      esac
+      # The test above is cheap; this one excludes a nested working tree.
+      if agent_processes_top="$(git -C "${agent_processes_cwd}" rev-parse --show-toplevel 2> /dev/null)" \
+        && [ "$(physical_path "${agent_processes_top}" 2> /dev/null)" = "$1" ]; then
+        printf '%s %s\n' "${agent_processes_pid}" "${agent_processes_command##*/}"
+      fi
+    done
+    exit "${agent_processes_status}"
+  )
+}
+
+## Usage: merge_sides_in COMMIT MERGE-HEADS
+## Returns 0 if COMMIT, a commit or a ref such as "refs/heads/feature",
+## contains both sides of the merge in progress in the current directory:
+## HEAD, and each of MERGE-HEADS, the full hashes, one per line, that
+## MERGE_HEAD holds.  Returns 1 otherwise, as when COMMIT does not exist.
+merge_sides_in() {
+  # Each line of MERGE-HEADS is a full hash, which field splitting does not
+  # change.
+  # shellcheck disable=SC2086
+  for sides_commit in HEAD $2; do
+    if ! git merge-base --is-ancestor "${sides_commit}" "$1" 2> /dev/null; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+## Usage: redundant_merge_upstream
+## Prints the name of the upstream branch of the branch checked out in the
+## current directory, the top level of a working tree, such as
+## "origin/feature", if that upstream branch contains both sides of the merge
+## in progress:  HEAD, and each commit in MERGE_HEAD, which holds several for
+## an octopus merge.  That happens when another clone made the same merge and
+## pushed it.  The test first uses the upstream branch itself, if it is a
+## local branch, or else its remote-tracking branch, if it has one, which
+## records its head as of the last fetch.  If that does not contain both
+## sides, and the upstream branch is not a local branch, this function then
+## fetches the upstream branch, and only it, and tests the head that the
+## fetch recorded in FETCH_HEAD.  So the result does not depend on a
+## remote-tracking branch, which the fetch does not update if the remote's
+## fetch refspec does not cover the upstream branch; then the name is like
+## "branch 'feature' of origin".  The fetch can prompt, as for a
+## passphrase, as a pull can.  Returns 1, printing nothing, if the upstream
+## branch does not contain both sides of the merge, or if the branch has no
+## upstream branch.  Returns 2, after printing a diagnostic, if the fetch
+## fails, so that whether the merge is redundant is unknown.
+redundant_merge_upstream() {
+  if ! redundant_branch="$(current_branch)" \
+    || ! redundant_remote="$(git config --get "branch.${redundant_branch}.remote")" \
+    || ! redundant_merge="$(git config --get "branch.${redundant_branch}.merge")" \
+    || ! redundant_merge_heads="$(cat -- "$(git rev-parse --git-path MERGE_HEAD)")"; then
+    return 1
+  fi
+  if ! redundant_name="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2> /dev/null)" \
+    || [ -z "${redundant_name}" ]; then
+    redundant_name="branch '${redundant_merge#refs/heads/}' of ${redundant_remote}"
+  fi
+  if merge_sides_in '@{upstream}' "${redundant_merge_heads}"; then
+    printf '%s\n' "${redundant_name}"
+    return 0
+  fi
+  if [ "${redundant_remote}" = . ]; then
+    return 1
+  fi
+  if ! git fetch --quiet "${redundant_remote}" "${redundant_merge}" \
+    || ! redundant_head="$(git rev-parse --verify --quiet 'FETCH_HEAD^{commit}')"; then
+    echo "${SCRIPT_NAME}: cannot fetch ${redundant_name}, so whether the merge in progress in $(pwd) is redundant is unknown" >&2
+    return 2
+  fi
+  if ! merge_sides_in "${redundant_head}" "${redundant_merge_heads}"; then
+    return 1
+  fi
+  printf '%s\n' "${redundant_name}"
+}
+
+## Usage: merge_work
+## Prints a sentence that says how somebody has worked on the merge in
+## progress in the current directory, the top level of a working tree, since
+## git, `git rerere`, and this package's scripts left it, such as "No
+## conflicted file remains." or "Its conflicted files changed after the merge
+## stopped:  file.txt."  Somebody has worked on it if no conflicted file
+## remains (see `conflicted_files`), as when the conflicts were resolved and
+## staged; if a conflicted file changed after then (see
+## `changed_conflicted_files`); or if another file differs from AUTO_MERGE,
+## git's automatic merge, in the working tree or in the index (see
+## `resolve_other_changes`).  Without AUTO_MERGE, whether somebody has worked
+## on it is unknown, which the sentence says, as it is if the conflicted
+## files cannot be listed.  Prints nothing if nobody has
+## worked on it; then `git merge --abort` discards nothing but git's
+## automatic merge and the resolutions that `git rerere` applied, which it
+## can apply again.
+merge_work() {
+  if ! work_files="$(conflicted_files)"; then
+    echo "Its conflicted files could not be listed."
+    return 0
+  fi
+  if [ -z "${work_files}" ]; then
+    echo "No conflicted file remains."
+    return 0
+  fi
+  if ! git rev-parse --verify --quiet AUTO_MERGE > /dev/null; then
+    echo "Git recorded no AUTO_MERGE for it, so whether anybody has worked on it is unknown."
+    return 0
+  fi
+  if ! work_changed="$(changed_conflicted_files)"; then
+    echo "Its conflicted files could not be listed."
+    return 0
+  fi
+  if [ -n "${work_changed}" ]; then
+    echo "Its conflicted files changed after the merge stopped:  $(printf '%s\n' "${work_changed}" | paste -s -d ' ' -)."
+    return 0
+  fi
+  work_other="$(resolve_other_changes "${work_files}")"
+  if [ -n "${work_other}" ]; then
+    echo "Files that it did not leave conflicted changed after it stopped:  $(printf '%s\n' "${work_other}" | paste -s -d ' ' -)."
+  fi
+}
+
+## Usage: stop_for_agents DIRECTORY UPSTREAM REASON
+## Returns 1, after printing a diagnostic, if an AI agent is working in
+## DIRECTORY, the top level of a working tree and the current directory (see
+## `agent_processes_in`), as when the user is resolving the conflicts of the
+## merge in progress there in a session that a script of this package
+## printed a command to resume, or if the current directory of a running AI
+## agent cannot be read, so that it might be working in DIRECTORY; it then
+## leaves the merge in progress, and notes it in AGENT-TODO.md with REASON,
+## which is empty or ends with a sentence, and with UPSTREAM (see
+## `stop_at_merge`).  Returns 0 otherwise.  If `agent_processes_in` cannot
+## tell at all whether an AI agent is working in DIRECTORY, because the
+## system has neither /proc nor `lsof`, this function returns 0, after
+## printing a diagnostic that says that it proceeds as if none is.
+stop_for_agents() {
+  # `agent_processes_in` has said why it cannot tell.
+  agents_found="$(agent_processes_in "$1")"
+  agents_status=$?
+  case "${agents_status}" in
+    0 | 2) ;;
+    *)
+      echo "${SCRIPT_NAME}: proceeding as if no AI agent is working in $1" >&2
+      return 0
+      ;;
+  esac
+  # What to do, unless `stop_at_merge` says to abort a redundant merge.
+  agents_todo=''
+  if [ -z "$2" ]; then
+    agents_todo="; finish the merge, or abort it with \`git merge --abort\`"
+  fi
+  if [ -n "${agents_found}" ]; then
+    printf '%s\n' "${agents_found}" | while read -r agents_pid agents_command; do
+      echo "${SCRIPT_NAME}: ${agents_command} (process ${agents_pid}) is working in $1" >&2
+    done
+    stop_at_merge "${SCRIPT_NAME}: a merge is in progress in $1, and an AI agent is working there${agents_todo}" \
+      "${3:+$3  }An AI agent was working in the directory:  $(printf '%s\n' "${agents_found}" \
+        | sed -e 's/^\([0-9]*\) \(.*\)/\2 (process \1)/' | paste -s -d ' ' -)." "$2"
+    return 1
+  fi
+  if [ "${agents_status}" -eq 2 ]; then
+    stop_at_merge "${SCRIPT_NAME}: a merge is in progress in $1, and an AI agent whose current directory cannot be read might be working there${agents_todo}" \
+      "${3:+$3  }The current directory of an AI agent's process could not be read, so the agent might have been working in the directory." "$2"
+    return 1
+  fi
+  return 0
+}
+
+## Usage: settle_merge_in_progress DIRECTORY FINISH [REASON]
+## Prepares the merge in progress, if any, in DIRECTORY, the top level of a
+## working tree and the current directory, for the caller to finish it, if
+## FINISH is 1, or to refuse it and not pull DIRECTORY, if FINISH is 0.  If
+## the merge is redundant, because the branch's upstream branch already
+## contains both of its sides (see `redundant_merge_upstream`), as when
+## another clone of the repository made the same merge and pushed it, and
+## nobody has worked on it (see `merge_work`), aborts it, and removes the
+## entries of AGENT-TODO.md about it (see `prune_agent_todo`).  Aborting it
+## loses nothing, and a pull of DIRECTORY then fast-forwards the branch.
+##
+## Returns 0 if no merge is in progress in DIRECTORY when this function
+## returns, and 2 if a merge remains in progress for the caller to finish or
+## to refuse:  one that is not redundant, or, if FINISH is 0, one whose
+## upstream branch cannot be fetched, so that whether it is redundant is
+## unknown.  Returns 1, after printing a diagnostic, and leaves the merge in
+## progress, which it notes in AGENT-TODO.md with REASON, such as "It was in
+## progress when `git-push-to` tried to pull.", followed by a sentence that
+## says why (see `stop_at_merge`), in these cases:
+##  * An AI agent is working in DIRECTORY, or might be (see
+##    `stop_for_agents`).  If FINISH is 0, this matters only for a merge
+##    that would be aborted.
+##  * FINISH is 1, and the upstream branch cannot be fetched, so that whether
+##    the merge is redundant is unknown.  Finishing a redundant merge would
+##    duplicate the merge that the upstream branch already contains.
+##  * The merge is redundant, but somebody has worked on it, which the
+##    diagnostic says, or it cannot be aborted.
+settle_merge_in_progress() {
+  if ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    return 0
+  fi
+  settle_in_progress="${SCRIPT_NAME}: a merge is in progress in $1"
+  settle_reason="${3:+$3  }"
+  # A caller that finishes the merge must not do so while an agent works on
+  # it, whether or not it is redundant.
+  if [ "$2" -eq 1 ] && ! stop_for_agents "$1" '' "${3:-}"; then
+    return 1
+  fi
+  settle_upstream="$(redundant_merge_upstream)"
+  case "$?" in
+    0) ;;
+    2)
+      if [ "$2" -eq 0 ]; then
+        return 2
+      fi
+      stop_at_merge "${settle_in_progress}, and whether it is redundant is unknown; run \`${SCRIPT_NAME}\` again once its upstream branch can be fetched" \
+        "${settle_reason}Whether it is redundant is unknown, because its upstream branch could not be fetched."
+      return 1
+      ;;
+    *) return 2 ;;
+  esac
+  settle_work="$(merge_work)"
+  if [ -n "${settle_work}" ]; then
+    stop_at_merge "${settle_in_progress}.  ${settle_work}" "${settle_reason}${settle_work}" "${settle_upstream}"
+    return 1
+  fi
+  if [ "$2" -eq 0 ] && ! stop_for_agents "$1" "${settle_upstream}" "${3:-}"; then
+    return 1
+  fi
+  echo "${SCRIPT_NAME}: aborting the merge of commit $(git rev-parse --verify --quiet MERGE_HEAD) in $1, which is redundant:  ${settle_upstream}, the upstream branch, already contains both of its sides" >&2
+  if ! git merge --abort; then
+    stop_at_merge "${settle_in_progress}, and cannot be aborted" \
+      "${settle_reason}\`${SCRIPT_NAME}\` could not abort it." "${settle_upstream}"
+    return 1
+  fi
+  forget_conflicted_files
+  prune_agent_todo 0
+  return 0
+}
+
 ## Usage: refuse_merge_in_progress DIRECTORY REASON
-## Returns 1, after printing a diagnostic, if a merge is in progress in
-## DIRECTORY, which it also reports with `report_merge_in_progress_in` and
-## REASON, such as "It was in progress when `git-push-to` tried to pull.",
-## keeping an entry of AGENT-TODO.md that says that running the script again
-## suffices (see `agent_rerun_advice`), or if the index of DIRECTORY has
-## unmerged files, as after a cherry-pick, a revert, or a `git stash apply`
-## that stopped at conflicts.  `git pull` refuses to run in either case.
-## Returns 0 otherwise.
+## Runs `settle_merge_in_progress` at the top level of the working tree that
+## contains DIRECTORY, so that a merge in progress there that is redundant
+## and that nobody has worked on is aborted:  the function might fetch the
+## branch's upstream branch, and might abort the merge.  Then returns 1,
+## after printing a diagnostic, if a merge remains in progress in DIRECTORY,
+## or if the index of DIRECTORY has unmerged files, as after a cherry-pick, a
+## revert, or a `git stash apply` that stopped at conflicts.  `git pull`
+## refuses to run in either case.  Returns 0 otherwise.  A merge that remains
+## in progress is noted in AGENT-TODO.md with REASON, such as "It was in
+## progress when `git-push-to` tried to pull.":  by
+## `settle_merge_in_progress`, followed by a sentence that says why, if it
+## stopped at the merge, as when an AI agent is working there or when the
+## merge is redundant but somebody has worked on it; and otherwise by
+## `report_merge_in_progress_in`, as when the merge is not redundant or the
+## upstream branch cannot be fetched, keeping an entry of AGENT-TODO.md that
+## says that running the script again suffices (see `agent_rerun_advice`).
 refuse_merge_in_progress() {
   if git -C "$1" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
-    echo "${SCRIPT_NAME}: a merge is in progress in $1; finish it, or abort it with \`git merge --abort\`" >&2
-    # An entry that says to abort the merge and then to run the script again
-    # still holds.
-    report_merge_in_progress_in "$1" "$2" keep
-    return 1
+    # A subshell leaves the current directory unchanged.
+    (
+      if ! refuse_top="$(git -C "$1" rev-parse --show-toplevel)" \
+        || ! refuse_top="$(physical_path "${refuse_top}")" \
+        || ! cd -- "${refuse_top}"; then
+        echo "${SCRIPT_NAME}: cannot cd to the top level of $1" >&2
+        exit 2
+      fi
+      settle_merge_in_progress "${refuse_top}" 0 "$2"
+    )
+    case "$?" in
+      0) ;;
+      1) return 1 ;;
+      *)
+        echo "${SCRIPT_NAME}: a merge is in progress in $1; finish it, or abort it with \`git merge --abort\`" >&2
+        # An entry that says to abort the merge and then to run the script
+        # again still holds.
+        report_merge_in_progress_in "$1" "$2" keep
+        return 1
+        ;;
+    esac
   fi
   if [ -n "$(git -C "$1" ls-files --unmerged)" ]; then
     echo "${SCRIPT_NAME}: $1 has unmerged files; resolve them, or abort the operation that left them, such as a cherry-pick" >&2
@@ -3892,13 +4253,13 @@ add_pulled_first_dir() {
 }
 
 ## Usage: report_merge_in_progress_in DIRECTORY [REASON [ADVICE]]
-## Runs `report_merge_in_progress` with REASON and ADVICE at the top level of
-## the working tree that contains DIRECTORY, in a subshell that leaves the
-## current directory unchanged.
+## Runs `report_merge_in_progress` with REASON, no upstream branch, and
+## ADVICE at the top level of the working tree that contains DIRECTORY, in a
+## subshell that leaves the current directory unchanged.
 report_merge_in_progress_in() {
   (
     if report_in_top="$(git -C "$1" rev-parse --show-toplevel)" && cd -- "${report_in_top}"; then
-      report_merge_in_progress "${2:-}" "${3:-}"
+      report_merge_in_progress "${2:-}" '' "${3:-}"
     fi
   )
 }
