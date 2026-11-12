@@ -2705,10 +2705,14 @@ index_digest() {
 ## when the user interrupts it, without changing HEAD, the index, or any file
 ## of the working tree, even one that git ignores, did no work that anyone
 ## must review, and it might succeed if it is run again, as when its service
-## was briefly unavailable.  It is run
-## again, up to ${agent_retries} more times, each after a pause of
-## ${MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE} seconds, 60 by default.  If its last
-## attempt fails so, and the agent is then not ready to run (see
+## was briefly unavailable.  It is run again, up to ${agent_retries} more
+## times, each after a pause of ${MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE}
+## seconds, 60 by default.  All of the attempts, with the pauses between
+## them, take at most ${MANAGE_GIT_BRANCHES_LLM_TIMEOUT} seconds together,
+## 1800 by default, or 0 for no limit:  at that time, a running attempt is
+## stopped, and no further attempt starts.  So an agent that runs long and
+## then fails is run again only for the time that remains, if any.  If its
+## last attempt fails so, and the agent is then not ready to run (see
 ## `agent_ready`), this function returns 3:  running the agent again once it
 ## is ready, as by running the script again, can succeed, and no person need
 ## finish its task.  An agent that fails so but is ready to run, as when it
@@ -2841,9 +2845,23 @@ run_agent() {
   # working tree, other than `.git`, and read only the working tree, the
   # repository, the system's programs and libraries (":minimal"), and Codex's
   # own installation, which its sandbox runs.
+  #
+  # All attempts share one deadline, so that an attempt that runs long and
+  # then fails leaves little or no time for another attempt.
+  run_agent_deadline=$(($(date +%s) + run_agent_limit))
   while :; do
     agent_session_ids="${run_agent_earlier_ids}"
-    run_agent_start="$(date +%s)"
+    # ${run_agent_attempt_limit} is the number of seconds that this attempt
+    # can run, or 0 for no limit.
+    run_agent_attempt_limit=0
+    if [ "${run_agent_limit}" -ne 0 ]; then
+      run_agent_attempt_limit=$((run_agent_deadline - $(date +%s)))
+      # The pause before this attempt can end a moment after the deadline;
+      # the check after this attempt then reports that time ran out.
+      if [ "${run_agent_attempt_limit}" -lt 1 ]; then
+        run_agent_attempt_limit=1
+      fi
+    fi
     case "$1" in
       claude)
         run_agent_session="$(new_uuid)"
@@ -2853,7 +2871,7 @@ run_agent() {
         # The UUID contains no character that field splitting or globbing
         # would change, so the unquoted expansion is one option and its value.
         # shellcheck disable=SC2086
-        printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" claude -p --restricted --strict-mcp-config \
+        printf '%s\n' "$2" | run_with_time_limit "${run_agent_attempt_limit}" claude -p --restricted --strict-mcp-config \
           ${run_agent_session:+--session-id ${run_agent_session}} \
           --settings '{"permissions": {"blockReadsOutsideWorkingDirectories": true}}' \
           --tools 'Read,Edit,Write,Grep,Glob,Bash' --permission-mode acceptEdits \
@@ -2874,7 +2892,7 @@ run_agent() {
         rm -f -- "${run_agent_status_file}"
         {
           {
-            printf '%s\n' "$2" | run_with_time_limit "${run_agent_limit}" codex exec -c 'default_permissions="resolve_conflicts"' \
+            printf '%s\n' "$2" | run_with_time_limit "${run_agent_attempt_limit}" codex exec -c 'default_permissions="resolve_conflicts"' \
               -c "permissions.resolve_conflicts.filesystem={\":minimal\" = \"read\", \":project_roots\" = {\".\" = \"write\"}, $(toml_string "${run_agent_repository}") = \"read\", $(toml_string "${run_agent_codex}") = \"read\"}" \
               - 2>&1 1>&3 3>&-
             echo "$?" > "${run_agent_status_file}"
@@ -2911,8 +2929,7 @@ run_agent() {
       run_agent_remove_marker
       return 0
     fi
-    if [ "${run_agent_limit}" -ne 0 ] \
-      && [ "$(($(date +%s) - run_agent_start))" -ge "${run_agent_limit}" ]; then
+    if [ "${run_agent_limit}" -ne 0 ] && [ "$(date +%s)" -ge "${run_agent_deadline}" ]; then
       run_agent_remove_marker
       echo "${SCRIPT_NAME}: $1 did not finish within ${run_agent_limit} seconds; set MANAGE_GIT_BRANCHES_LLM_TIMEOUT to change the limit" >&2
       return 1
@@ -2944,6 +2961,11 @@ run_agent() {
         break
         ;;
     esac
+    if [ "${run_agent_limit}" -ne 0 ] \
+      && [ "$(($(date +%s) + run_agent_pause))" -ge "${run_agent_deadline}" ]; then
+      echo "${SCRIPT_NAME}: $1 changed nothing, and too little of the ${run_agent_limit} seconds that MANAGE_GIT_BRANCHES_LLM_TIMEOUT allows remains to run it again" >&2
+      break
+    fi
     run_agent_retries_left=$((run_agent_retries_left - 1))
     echo "${SCRIPT_NAME}: $1 changed nothing; running it again in ${run_agent_pause} seconds" >&2
     sleep "${run_agent_pause}"

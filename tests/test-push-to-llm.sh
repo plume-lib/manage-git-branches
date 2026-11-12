@@ -69,9 +69,14 @@ fail() {
 ##   fail:   exits with status 3, as if its service were unavailable (see
 ##           `stub_outage`)
 ##   fail-once: as "fail" the first time, and as "good" afterward
+##   fail-slow: as "fail", but after running for 3 seconds
 ##   interrupted: exits with status 130, as when SIGINT ends it
 ##   fail-untracked: changes the untracked file notes.txt, then exits with
 ##           status 3
+##   fail-index: stages file.txt with its conflict markers, changing no file,
+##           then exits with status 3
+##   fail-head: makes HEAD name a new commit, changing no file, then exits
+##           with status 3
 ##   commit: as "good", but also commits the merge
 ##   create: as "good", but also creates a file
 ##   change-tracked: as "good", but also changes other.txt, which git tracks
@@ -118,6 +123,7 @@ fail() {
 ##   fix:    removes the lines of other.txt that break the build
 ##   bad:    creates or changes notes.txt, which does not fix the build
 ##   once:   as "bad" the first time, and as "none" afterward
+##   once-fail: as "bad" the first time, and as "fail" afterward
 ##   ignored: creates fix.local, a file that git ignores
 ##   fail:   exits with status 3, changing nothing, as "fail" above does
 ##   none:   changes nothing (the default)
@@ -168,6 +174,10 @@ if ! grep -q '^<<<<<<< ' file.txt; then
     once)
       if [ ! -e notes.txt ]; then echo "an attempt" > notes.txt; fi
       ;;
+    once-fail)
+      if [ -e notes.txt ]; then stub_outage; fi
+      echo "an attempt" > notes.txt
+      ;;
     ignored) echo "a fix" > fix.local ;;
     fail) stub_outage ;;
   esac
@@ -176,8 +186,20 @@ fi
 if [ "${STUB_MODE}" = fail ]; then stub_outage; fi
 if [ "${STUB_MODE}" = interrupted ]; then exit 130; fi
 if [ "${STUB_MODE}" = fail-once ] && [ "$(grep -c . "${STUB_LOG}")" -eq 1 ]; then stub_outage; fi
+if [ "${STUB_MODE}" = fail-slow ]; then
+  sleep 3
+  stub_outage
+fi
 if [ "${STUB_MODE}" = fail-untracked ]; then
   echo "changed" >> notes.txt
+  exit 3
+fi
+if [ "${STUB_MODE}" = fail-index ]; then
+  git add file.txt
+  exit 3
+fi
+if [ "${STUB_MODE}" = fail-head ]; then
+  git update-ref HEAD "$(git commit-tree -p HEAD -m "An agent's commit" 'HEAD^{tree}')"
   exit 3
 fi
 if [ "${STUB_MODE}" = ours ] || [ "${STUB_MODE}" = ours-other ] \
@@ -1004,6 +1026,32 @@ if ! grep -q -x -F "claude, an AI agent, could not resolve the merge's conflicts
   fail "failing agent that changes an untracked file: AGENT-TODO.md does not ask for help: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
 fi
 
+## A failing agent that changes the index or HEAD, but no file, is not run
+## again either.
+setup_case fail-index
+push_to fail-index --llm
+check_not_resolved "failing agent that changes the index"
+case "${push_output}" in
+  *"claude failed with status 3"*"claude changed the index"*) ;;
+  *) fail "failing agent that changes the index: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "failing agent that changes the index: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+setup_case fail-head
+push_to fail-head --llm
+check_not_pushed "failing agent that changes HEAD"
+if [ "$(git -C "${feature_dir}" log -1 --format=%s HEAD)" != "An agent's commit" ]; then
+  fail "failing agent that changes HEAD: HEAD is not the agent's commit"
+fi
+case "${push_output}" in
+  *"claude failed with status 3"*"claude changed HEAD, MERGE_HEAD, or AUTO_MERGE"*) ;;
+  *) fail "failing agent that changes HEAD: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "failing agent that changes HEAD: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+
 ## An agent that fails without changing any file, as when its service is
 ## unavailable, is run again, twice.  It is then not ready to run, so
 ## AGENT-TODO.md gives no command to continue a session, which did nothing,
@@ -1069,6 +1117,42 @@ esac
 if [ "$(cat "${STUB_LOG}")" != claude ]; then
   fail "agent that fails, with a malformed pause: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
 fi
+
+## MANAGE_GIT_BRANCHES_LLM_TIMEOUT limits all of an agent's attempts
+## together.  An agent that fails without changing any file after 3 of its 5
+## seconds is run again for the time that remains, which is too little.
+## Each attempt takes less than 5 seconds, so a limit on each attempt alone
+## would let all 3 attempts finish.
+setup_case fail-slow
+MANAGE_GIT_BRANCHES_LLM_TIMEOUT=5
+export MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+push_to fail-slow --llm
+unset MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+check_not_resolved "agent that fails slowly"
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "agent that fails slowly: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude did not finish within 5 seconds"*) ;;
+  *) fail "agent that fails slowly: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent is not run again if the pause would reach the time limit.
+setup_case pause-past-limit
+MANAGE_GIT_BRANCHES_LLM_TIMEOUT=30
+MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE=40
+export MANAGE_GIT_BRANCHES_LLM_TIMEOUT MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE
+push_to fail --llm
+unset MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE=0
+check_not_resolved "agent whose pause would reach the time limit"
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "agent whose pause would reach the time limit: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude changed nothing, and too little of the 30 seconds that MANAGE_GIT_BRANCHES_LLM_TIMEOUT allows remains to run it again"*"claude failed before changing anything in "*) ;;
+  *) fail "agent whose pause would reach the time limit: wrong diagnostic: ${push_output}" ;;
+esac
 
 ## An agent that fails without changing any file each time, but that is
 ## then ready to run, as when it rejects an option that the script passes,
@@ -2547,6 +2631,30 @@ case "${push_output}" in
 esac
 if [ -s "${STUB_LOG}" ]; then
   fail "rerun after a bad build fix: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## An agent that fails to fix the build without changing any file, after an
+## earlier attempt changed files, is run again, twice, and is then not ready
+## to run.  Because the earlier attempt's changes remain staged, a person
+## must deal with them:  the earlier attempt's session can be continued, and
+## AGENT-TODO.md does not say that running git-push-to again suffices.
+setup_case build-fail-later build
+STUB_BUILD=once-fail push_to good --llm
+check_not_pushed "build-fixing agent that fails on its second attempt"
+if [ "$(wc -l < "${STUB_LOG}")" -ne 5 ]; then
+  fail "build-fixing agent that fails on its second attempt: expected claude to run 5 times, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"attempt 2 of 3"*"claude failed before changing anything in "*"to continue the session of claude:  cd "*) ;;
+  *) fail "build-fixing agent that fails on its second attempt: wrong diagnostic: ${push_output}" ;;
+esac
+todo="${feature_dir}/AGENT-TODO.md"
+if [ "$(grep -c '^cd .* && claude --resume ' "${todo}")" -ne 1 ] \
+  || grep -q 'no person needs to' "${todo}"; then
+  fail "build-fixing agent that fails on its second attempt: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+if ! git -C "${feature_dir}" diff --cached --name-only | grep -q -x notes.txt; then
+  fail "build-fixing agent that fails on its second attempt: the first attempt's changes are not staged"
 fi
 
 ## An agent that fails to fix the build without changing any file is run
