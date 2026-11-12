@@ -448,7 +448,7 @@ case "${require_git_output}" in
   *) fail "unexpected message from require_git 31 for git 2.30.9: [${require_git_output}]" ;;
 esac
 make_fake_git "${WORK_DIR}/oddgit" version 0 'git version unknown'
-# shellcheck disable=SC2031
+# shellcheck disable=SC2030,SC2031
 if require_git_output="$( (PATH="${WORK_DIR}/oddgit:${PATH}" && require_git 31) 2>&1)"; then
   fail "require_git 31 accepted an unparsable version"
 fi
@@ -1530,5 +1530,307 @@ case "${roc_out}" in
   *"cannot list the changed files"*"the merge of side is still in progress"*) ;;
   *) fail "unexpected resolve_merge_conflicts diagnostic: ${roc_out}" ;;
 esac
+
+# `prune_agent_todo` removes the entries of AGENT-TODO.md that no longer apply.
+# The name of the working tree contains a space, so that `run_agent` writes
+# its pathname quoted in a command.
+pat_dir="${WORK_DIR}/prune tree"
+git init -q -b main "${pat_dir}"
+git -C "${pat_dir}" commit -q --allow-empty -m "First commit"
+pat_first="$(git -C "${pat_dir}" rev-parse HEAD)"
+git -C "${pat_dir}" commit -q --allow-empty -m "Second commit"
+pat_second="$(git -C "${pat_dir}" rev-parse HEAD)"
+pat_todo="${pat_dir}/AGENT-TODO.md"
+pat_cd="cd '${pat_dir}' && claude --resume"
+# The backquotes are Markdown, not command substitutions.
+# shellcheck disable=SC2016
+pat_preamble='# AI agent sessions to continue
+
+A script of manage-git-branches, such as `git-push-to`, appends an entry
+here when an AI agent fails, when the script rejects its work, or when
+the script leaves a merge in progress.  An entry'"'"'s command continues the
+agent'"'"'s session interactively.  Delete the entry once you have dealt with
+it.'
+# An entry about a merge of ${pat_first} in the working tree.
+pat_merge_first="## Finish the merge in progress (git-push-to, 2026-11-09 08:23:59)
+
+The merge of commit ${pat_first} is in progress in ${pat_dir}.
+Finish it (resolve its conflicts and commit it), or abort it with \`git merge --abort\`; then delete this entry."
+# An entry about an agent's failure to resolve a merge of ${pat_second}.
+pat_merge_second="## Resolve the conflicts in the merge of branch 'main' (git-push-to, 2026-11-09 08:24:00)
+
+The merge of commit ${pat_second} is in progress in ${pat_dir}.
+Finish it (resolve its conflicts and commit it), or abort it with \`git merge --abort\`; then delete this entry.
+
+\`\`\`sh
+${pat_cd} 5e495947-c99d-4688-804f-00834cce9aaa
+\`\`\`"
+pat_build="## Fix the build after merging branch 'main' (git-pull-upstream, 2026-11-10 07:47:29)
+
+\`\`\`sh
+${pat_cd} a10375ce-87e0-4104-a154-335948d32056
+\`\`\`"
+# An entry about a build that the agent attempted to fix in several
+# sessions.
+pat_build_sessions="## Fix the build after merges (git-push-to, 2026-11-10 07:49:02)
+
+Session 1 of 2:
+
+\`\`\`sh
+${pat_cd} 3b8c0a2e-5f1d-4c7a-9e64-2d0f8b1a7c35
+\`\`\`
+
+Session 2 of 2:
+
+\`\`\`sh
+${pat_cd} 9e1f4d6b-08a3-4b52-b7c9-61e2a5f3d084
+\`\`\`"
+# Entries to keep:  one about another working tree, as in a copy of the file;
+# one that a person wrote; and one of another kind.
+pat_other_tree="## Fix the build after merges (git-push-to, 2026-11-10 07:51:59)
+
+\`\`\`sh
+cd /elsewhere && claude --resume 0d91d672-a3b0-46a7-851a-62477e166fdc
+\`\`\`"
+pat_person='## Check the merge of pull request #12
+
+The merge of commit 0123 is in progress in elsewhere.'
+pat_ci="## Make the CI of https://github.com/org/proj/pull/7 pass (fix-renovate-prs, 2026-11-10 07:00:00)
+
+\`\`\`sh
+${pat_cd} 77c927f1-09fa-48e5-9ceb-faca2c95627e
+\`\`\`"
+
+## Usage: write_todo PART...
+## Writes ${pat_todo}, which consists of the PARTs, each followed by a blank
+## line, except for the last.
+write_todo() {
+  {
+    printf '%s\n' "$1"
+    shift
+    for wt_part in "$@"; do
+      printf '\n%s\n' "${wt_part}"
+    done
+  } > "${pat_todo}"
+}
+
+## Usage: check_todo DESCRIPTION PART...
+## Checks that ${pat_todo} consists of the PARTs, as `write_todo` writes
+## them.
+check_todo() {
+  ct_description="$1"
+  shift
+  ct_expected="${WORK_DIR}/expected-todo"
+  pat_todo_saved="${pat_todo}"
+  pat_todo="${ct_expected}"
+  write_todo "$@"
+  pat_todo="${pat_todo_saved}"
+  if ! cmp -s "${ct_expected}" "${pat_todo}"; then
+    fail "prune_agent_todo, ${ct_description}: wrong AGENT-TODO.md:
+$(diff "${ct_expected}" "${pat_todo}" || true)"
+  fi
+}
+
+## Usage: prune_todo BUILT
+## Runs `prune_agent_todo BUILT` in ${pat_dir}, and sets ${pat_output} to
+## what it printed.
+prune_todo() {
+  pat_output="$(cd "${pat_dir}" && prune_agent_todo "$1" 2>&1)" \
+    || fail "prune_agent_todo returned a nonzero status: ${pat_output}"
+}
+
+# While the merge of ${pat_second} is in progress, the entry about the merge
+# of ${pat_first} no longer applies, and the entry about the build applies
+# until the build succeeds.
+pat_merge_head="$(git -C "${pat_dir}" rev-parse --git-path MERGE_HEAD)"
+case "${pat_merge_head}" in
+  /*) ;;
+  *) pat_merge_head="${pat_dir}/${pat_merge_head}" ;;
+esac
+printf '%s\n' "${pat_second}" > "${pat_merge_head}"
+write_todo "${pat_preamble}" "${pat_merge_first}" "${pat_merge_second}" "${pat_build}" \
+  "${pat_build_sessions}" "${pat_other_tree}" "${pat_person}" "${pat_ci}"
+prune_todo 0
+check_todo "merge in progress" "${pat_preamble}" "${pat_merge_second}" "${pat_build}" \
+  "${pat_build_sessions}" "${pat_other_tree}" "${pat_person}" "${pat_ci}"
+case "${pat_output}" in
+  *"removed from ${pat_todo} 1 entry that no longer applies") ;;
+  *) fail "prune_agent_todo, merge in progress: wrong diagnostic: ${pat_output}" ;;
+esac
+# Nothing more is removed while the build has not succeeded.
+prune_todo 0
+check_todo "merge in progress, again" "${pat_preamble}" "${pat_merge_second}" "${pat_build}" \
+  "${pat_build_sessions}" "${pat_other_tree}" "${pat_person}" "${pat_ci}"
+[ -z "${pat_output}" ] || fail "prune_agent_todo, merge in progress, again: unexpected diagnostic: ${pat_output}"
+# Once the merge is finished and the build succeeds, only the entries about
+# the working tree's merges and builds are removed.
+rm -f "${pat_merge_head}"
+prune_todo 1
+check_todo "build succeeded" "${pat_preamble}" "${pat_other_tree}" "${pat_person}" "${pat_ci}"
+case "${pat_output}" in
+  *"removed from ${pat_todo} 3 entries that no longer apply") ;;
+  *) fail "prune_agent_todo, build succeeded: wrong diagnostic: ${pat_output}" ;;
+esac
+
+# A file whose last entry is removed ends with that entry's predecessor, with
+# no blank line after it.
+write_todo "${pat_preamble}" "${pat_person}" "${pat_build}"
+prune_todo 1
+check_todo "last entry" "${pat_preamble}" "${pat_person}"
+
+# A file with no entry left, and nothing but the title and the explanation,
+# is deleted.
+write_todo "${pat_preamble}" "${pat_merge_first}" "${pat_build}"
+prune_todo 1
+[ ! -e "${pat_todo}" ] || fail "prune_agent_todo, no entry left: the file was not deleted: $(cat "${pat_todo}")"
+case "${pat_output}" in
+  *"deleted ${pat_todo}, whose entries no longer apply") ;;
+  *) fail "prune_agent_todo, no entry left: wrong diagnostic: ${pat_output}" ;;
+esac
+# But a file to which a person added a paragraph is kept.
+pat_note='**Note:**  Do nothing about the entries below until the release.'
+pat_noted_preamble="# AI agent sessions to continue
+
+${pat_note}
+
+A script of manage-git-branches appends an entry here."
+write_todo "${pat_noted_preamble}" "${pat_build}"
+prune_todo 1
+check_todo "a person's note" "${pat_noted_preamble}"
+# So is a file whose explanation a person changed.
+write_todo "# AI agent sessions to continue
+
+My own list." "${pat_build}"
+prune_todo 1
+check_todo "a person's explanation" "# AI agent sessions to continue
+
+My own list."
+# A file with no entry, and nothing but the title and the explanation, is
+# deleted, as after a person deleted its last entry, even though no entry is
+# removed.
+write_todo "${pat_preamble}"
+prune_todo 0
+[ ! -e "${pat_todo}" ] || fail "prune_agent_todo, no entry: the file was not deleted: $(cat "${pat_todo}")"
+case "${pat_output}" in
+  *"deleted ${pat_todo}, which has no entry") ;;
+  *) fail "prune_agent_todo, no entry: wrong diagnostic: ${pat_output}" ;;
+esac
+# A file whose explanation a person extended, without a blank line, is kept.
+pat_extended_preamble="${pat_preamble}
+Do nothing about the entries below until the release."
+write_todo "${pat_extended_preamble}" "${pat_build}"
+prune_todo 1
+check_todo "a person's line in the explanation" "${pat_extended_preamble}"
+# A file with the explanation that does not mention a merge is deleted.
+# The backquotes are Markdown, not command substitutions.
+# shellcheck disable=SC2016
+write_todo '# AI agent sessions to continue
+
+A script of manage-git-branches, such as `git-push-to`, appends an entry
+here when an AI agent fails or when the script rejects its work.  The
+entry'"'"'s command continues the agent'"'"'s session interactively.  Delete the
+entry once you have dealt with it.' "${pat_build}"
+prune_todo 1
+[ ! -e "${pat_todo}" ] || fail "prune_agent_todo, explanation without a merge: the file was not deleted: $(cat "${pat_todo}")"
+# Run in a subdirectory of the working tree, reached through a symbolic link,
+# the function removes the entries that name the top level as `pwd` prints
+# it there, through the link.
+pat_link="${WORK_DIR}/prune link"
+ln -s "${pat_dir}" "${pat_link}"
+mkdir -p "${pat_dir}/sub"
+write_todo "${pat_preamble}" "${pat_person}" "## Fix the build after merges (git-pull-upstream, 2026-11-10 07:51:59)
+
+\`\`\`sh
+cd '${pat_link}' && claude --resume 0d91d672-a3b0-46a7-851a-62477e166fdc
+\`\`\`"
+pat_output="$(cd "${pat_link}/sub" && prune_agent_todo 1 2>&1)" \
+  || fail "prune_agent_todo, subdirectory: returned a nonzero status: ${pat_output}"
+check_todo "subdirectory" "${pat_preamble}" "${pat_person}"
+rmdir "${pat_dir}/sub"
+# An entry to which a person added text is kept:  a line after its command,
+# a line after its merge paragraph, or a paragraph at the end of the file,
+# which belongs to the last entry.
+pat_build_noted="${pat_build}
+My note:  wait for the upstream fix."
+pat_merge_noted="${pat_merge_first}
+Ask the release manager first."
+write_todo "${pat_preamble}" "${pat_build_noted}" "${pat_merge_noted}" "${pat_merge_first}" \
+  "${pat_build}" "My note at the end."
+prune_todo 1
+check_todo "a person's note in an entry" "${pat_preamble}" "${pat_build_noted}" "${pat_merge_noted}" \
+  "${pat_build}" "My note at the end."
+# A file with CRLF line endings is pruned, and keeps its line endings.
+# ${pat_crlf} is the expected file.
+pat_crlf="${WORK_DIR}/crlf-todo"
+write_todo "${pat_preamble}" "${pat_person}" "${pat_ci}"
+awk '{ printf "%s\r\n", $0 }' "${pat_todo}" > "${pat_crlf}"
+write_todo "${pat_preamble}" "${pat_person}" "${pat_build}" "${pat_ci}"
+awk '{ printf "%s\r\n", $0 }' "${pat_todo}" > "${WORK_DIR}/crlf-input"
+cat "${WORK_DIR}/crlf-input" > "${pat_todo}"
+prune_todo 1
+cmp -s "${pat_crlf}" "${pat_todo}" \
+  || fail "prune_agent_todo, CRLF: wrong AGENT-TODO.md: $(od -c "${pat_todo}" | head -n 20)"
+# A rewritten file keeps its permissions, and no temporary file remains, in
+# the working tree or in the git directory.
+write_todo "${pat_preamble}" "${pat_person}" "${pat_build}"
+chmod 640 "${pat_todo}"
+prune_todo 1
+check_todo "permissions" "${pat_preamble}" "${pat_person}"
+[ -n "$(find "${pat_todo}" -perm 640)" ] \
+  || fail "prune_agent_todo did not keep the permissions: $(ls -l "${pat_todo}")"
+chmod 644 "${pat_todo}"
+for pat_leftover in "${pat_dir}"/.AGENT-TODO.md.* "${pat_dir}"/.git/manage-git-branches-agent-todo*; do
+  [ ! -e "${pat_leftover}" ] || fail "prune_agent_todo left a temporary file: ${pat_leftover}"
+done
+# A file that changes while it is pruned, as when another script appends an
+# entry, is left unchanged.  The `awk` that `prune_agent_todo` runs appends an
+# entry before it runs the real awk.
+pat_bin="${WORK_DIR}/prune-bin"
+mkdir -p "${pat_bin}"
+pat_awk="$(command -v awk)"
+cat > "${pat_bin}/awk" << EOF
+#!/bin/sh
+printf '\n%s\n' '${pat_other_tree}' >> '${pat_todo}'
+exec '${pat_awk}' "\$@"
+EOF
+chmod +x "${pat_bin}/awk"
+write_todo "${pat_preamble}" "${pat_person}" "${pat_build}"
+# shellcheck disable=SC2031
+pat_output="$(cd "${pat_dir}" && PATH="${pat_bin}:${PATH}" && prune_agent_todo 1 2>&1)" \
+  || fail "prune_agent_todo, concurrent append: returned a nonzero status: ${pat_output}"
+check_todo "concurrent append" "${pat_preamble}" "${pat_person}" "${pat_build}" "${pat_other_tree}"
+case "${pat_output}" in
+  *"${pat_todo} changed while it was being pruned, so it was not pruned") ;;
+  *) fail "prune_agent_todo, concurrent append: wrong diagnostic: ${pat_output}" ;;
+esac
+# A file that is not a regular file with one link is not changed.
+write_todo "${pat_preamble}" "${pat_build}"
+mv "${pat_todo}" "${WORK_DIR}/linked-todo"
+ln -s "${WORK_DIR}/linked-todo" "${pat_todo}"
+prune_todo 1
+if [ ! -L "${pat_todo}" ] \
+  || ! grep -q -F -x -- "${pat_cd} a10375ce-87e0-4104-a154-335948d32056" "${WORK_DIR}/linked-todo"; then
+  fail "prune_agent_todo changed a symbolic link"
+fi
+rm -f "${pat_todo}"
+ln "${WORK_DIR}/linked-todo" "${pat_todo}"
+prune_todo 1
+grep -q -F -x -- "${pat_cd} a10375ce-87e0-4104-a154-335948d32056" "${pat_todo}" \
+  || fail "prune_agent_todo changed a file with two links"
+rm -f "${pat_todo}"
+# A missing file is no error.
+prune_todo 1
+[ -z "${pat_output}" ] || fail "prune_agent_todo, no file: unexpected diagnostic: ${pat_output}"
+# A file that the awk script cannot process, here because the script is
+# missing, is left unchanged, and the diagnostic names the script.
+write_todo "${pat_preamble}" "${pat_build}"
+pat_output="$(cd "${pat_dir}" && SCRIPT_DIR="${WORK_DIR}/no-such-dir" && prune_agent_todo 1 2>&1)" \
+  || fail "prune_agent_todo, missing awk script: returned a nonzero status: ${pat_output}"
+check_todo "missing awk script" "${pat_preamble}" "${pat_build}"
+case "${pat_output}" in
+  *"cannot process ${pat_todo} with ${WORK_DIR}/no-such-dir/prune-agent-todo.awk, so it was not pruned") ;;
+  *) fail "prune_agent_todo, missing awk script: wrong diagnostic: ${pat_output}" ;;
+esac
+rm -f "${pat_todo}"
 
 echo "${SCRIPT_NAME}: OK"
