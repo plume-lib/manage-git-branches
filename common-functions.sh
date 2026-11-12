@@ -2904,11 +2904,10 @@ ${report_merge_note}
 ## Prints DIAGNOSTIC, which says why this script leaves the merge in progress
 ## in the current directory, the top level of a working tree, and what to do,
 ## and notes the merge in AGENT-TODO.md, with REASON, such as "No conflicted
-## file remains." (see `report_merge_in_progress`).  Returns 1.
+## file remains." (see `report_merge_in_progress`).
 stop_at_merge() {
   echo "$1" >&2
   report_merge_in_progress "$2"
-  return 1
 }
 
 ## Usage: record_conflicted_files
@@ -3828,8 +3827,8 @@ commit_resolved_merge() {
   # The message is MESSAGE, rather than MERGE_MSG, to which `git merge`
   # appended a list of the conflicts.
   if ! "${commit_resolved_with}" "$4"; then
-    echo "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
-    report_merge_in_progress "\`${SCRIPT_NAME}\` could not commit it."
+    stop_at_merge "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" \
+      "\`${SCRIPT_NAME}\` could not commit it."
     return 1
   fi
   forget_conflicted_files
