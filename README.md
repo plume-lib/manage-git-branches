@@ -143,9 +143,16 @@ The commands are:
   to 3 times, and commits the fix.  `--no-llm` turns off the agent;
   `--llm`, `--claude` (the default), and `--codex` turn it on.
 
+  If the agent fails without changing anything, as when its service is
+  briefly unavailable, `git-push-to` runs it again, up to 2 more times (see
+  `MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE` and `MANAGE_GIT_BRANCHES_LLM_TIMEOUT`).
+
   If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
   prints a command that continues
-  the agent's session interactively.
+  the agent's session interactively, unless the agent failed each time
+  without changing anything and was then not ready to run.  In that case,
+  the session did nothing worth continuing, and running `git-push-to` again,
+  once the agent can run, asks the agent to do its task again.
 
   With `--summary FILE`, it appends to FILE each change by the agent to
   review, each change by a hook to a file that a commit would not otherwise
@@ -423,9 +430,16 @@ takes effect when it is set to a non-empty value.
   compilation step, and push whenever the merge succeeds.
 * `MANAGE_GIT_BRANCHES_LLM_TIMEOUT`: the number of seconds that `git-push-to`,
   `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` let an AI agent
-  run when it resolves merge conflicts.  An agent that runs longer is stopped,
-  and the merge is left in progress.  The default is 1800 (30 minutes); 0
-  means no limit.
+  run when it resolves merge conflicts or fixes a build.  The time covers the
+  agent's attempts after it failed without changing anything, and the pauses
+  before them (see `MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE`).  An agent that runs
+  longer is stopped and is not run again; if it was resolving merge
+  conflicts, the merge is left in progress.  The default is 1800
+  (30 minutes); 0 means no limit.
+* `MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE`: the number of seconds that
+  `git-push-to`, `git-pull-from`, `git-pull-upstream`, and `git-rebase-to`
+  wait before running an AI agent again after it failed without changing any
+  file, as when its service was briefly unavailable.  The default is 60.
 * `MANAGE_GIT_BRANCHES_RENOVATE_TIMEOUT`: the number of seconds that
   `fix-renovate-prs` lets Claude Code run on one pull request.  A session
   that runs longer is stopped, and nothing is pushed.  The default is 7200
