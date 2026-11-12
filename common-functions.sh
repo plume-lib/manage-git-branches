@@ -2924,12 +2924,14 @@ prune_agent_todo() {
     return 0
   fi
   # The first line of the output is the counts, and the rest is the new
-  # content of the file.
+  # content of the file.  The step fails if awk cannot run the script, as
+  # when the script is missing, or if the output cannot be written; either
+  # way, awk or the shell prints the cause.
   if ! PRUNE_DIRS="${prune_dirs}" PRUNE_CD_PREFIXES="${prune_prefixes}" \
     PRUNE_MERGE_HEAD="${prune_merge_head}" PRUNE_BUILT="${prune_built}" \
     awk -f "${SCRIPT_DIR}/prune-agent-todo.awk" < "${prune_old}" > "${prune_output}" \
     || ! prune_counts="$(head -n 1 "${prune_output}")" || [ -z "${prune_counts}" ]; then
-    echo "${SCRIPT_NAME}: cannot write ${prune_output}, so ${prune_todo} was not pruned" >&2
+    echo "${SCRIPT_NAME}: cannot process ${prune_todo} with ${SCRIPT_DIR}/prune-agent-todo.awk, so it was not pruned" >&2
     rm -f "${prune_old}" "${prune_output}"
     return 0
   fi
