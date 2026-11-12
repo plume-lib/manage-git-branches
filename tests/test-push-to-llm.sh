@@ -1246,7 +1246,7 @@ if ! grep -q -x -F "claude, an AI agent, did not run, because it was not ready t
 fi
 push_to good --llm
 check_resolved claude "rerun after an agent that was not ready"
-if grep -q 'The merge of commit' "${todo}"; then
+if grep -q 'The merge of commit' "${todo}" 2> /dev/null; then
   fail "rerun after an agent that was not ready: AGENT-TODO.md still notes the merge: $(cat "${todo}")"
 fi
 
@@ -3067,7 +3067,7 @@ fi
 if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
   fail "rerun after a build-fixing agent that failed without changing any file: the build was not fixed"
 fi
-if grep -q '^## Fix the build' "${todo}"; then
+if grep -q '^## Fix the build' "${todo}" 2> /dev/null; then
   fail "rerun after a build-fixing agent that failed without changing any file: AGENT-TODO.md still has the advice: $(cat "${todo}")"
 fi
 
