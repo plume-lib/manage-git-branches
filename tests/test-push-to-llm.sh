@@ -2192,6 +2192,28 @@ READLINK_EOF
     push_status=$?
   fi
   check_resolved claude "rerun from an agent in the directory"
+
+  ## A redundant merge in progress in the first directory that nobody has
+  ## worked on is not aborted while an agent works there, although
+  ## git-push-to does not finish a merge in that directory.
+  setup_case redundant-merge-first-agent
+  start_redundant_merge_in_main
+  start_agent "${main_dir}" || fail "the stand-in agent did not start"
+  push_to good --no-llm
+  stop_agent
+  if [ "${push_status}" -eq 0 ]; then
+    fail "redundant merge in the first directory with an agent: git-push-to succeeded"
+  fi
+  if ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    fail "redundant merge in the first directory with an agent: the merge was aborted or committed"
+  fi
+  case "${push_output}" in
+    *"claude (process ${agent_pid}) is working in"*"an AI agent is working there"*"the merge is probably redundant:  origin/main, the upstream branch, already contains both of its sides"*) ;;
+    *) fail "redundant merge in the first directory with an agent: wrong diagnostic: ${push_output}" ;;
+  esac
+  case "${push_output}" in
+    *"aborting the merge"*) fail "redundant merge in the first directory with an agent: the merge was aborted: ${push_output}" ;;
+  esac
 fi
 
 ## An agent that stages a file is rejected, even if the working tree holds an

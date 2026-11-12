@@ -180,11 +180,11 @@
 #  * A conflicted file changed after git, `git rerere`, and this script left
 #    it, as when this script rejected an AI agent's work, whose edits remain,
 #    or when you have begun to resolve the conflicts.
-# But if the branch's upstream branch, once fetched, already contains both
-# sides of the merge, as when another clone made the same merge and pushed
-# it, then the merge is redundant, and this script never finishes it, which
-# would duplicate the upstream branch's merge.  Unless an AI agent is
-# working in the directory, as above, this script aborts the merge if nobody
+# But if the branch's upstream branch, as it is or once fetched, already
+# contains both sides of the merge, as when another clone made the same merge
+# and pushed it, then the merge is redundant, and this script never finishes
+# it, which would duplicate the upstream branch's merge.  Unless an AI agent
+# is working in the directory, as above, this script aborts the merge if nobody
 # has worked on it since git, `git rerere`, and this script left it; the pull
 # then fast-forwards the branch.  If somebody has worked on it, this script
 # does not touch it, but stops and says that the merge is probably

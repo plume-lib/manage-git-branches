@@ -3734,11 +3734,12 @@ merge_sides_in() {
 ## pushed it.  The test first uses the upstream branch itself, if it is a
 ## local branch, or else its remote-tracking branch, if it has one, which
 ## records its head as of the last fetch.  If that does not contain both
-## sides, this function then fetches the upstream branch, and only it, and
-## tests the head that the fetch recorded in FETCH_HEAD.  So the result does
-## not depend on a remote-tracking branch, which the fetch does not update if
-## the remote's fetch refspec does not cover the upstream branch; then the
-## name is like "branch 'feature' of origin".  The fetch can prompt, as for a
+## sides, and the upstream branch is not a local branch, this function then
+## fetches the upstream branch, and only it, and tests the head that the
+## fetch recorded in FETCH_HEAD.  So the result does not depend on a
+## remote-tracking branch, which the fetch does not update if the remote's
+## fetch refspec does not cover the upstream branch; then the name is like
+## "branch 'feature' of origin".  The fetch can prompt, as for a
 ## passphrase, as a pull can.  Returns 1, printing nothing, if the upstream
 ## branch does not contain both sides of the merge, or if the branch has no
 ## upstream branch.  Returns 2, after printing a diagnostic, if the fetch
