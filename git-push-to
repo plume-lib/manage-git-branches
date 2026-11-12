@@ -213,7 +213,11 @@
 # "--no-llm", and "--no-llm" overrides any of them that precedes it.
 # "--llm" turns on the agent that the last "--claude" or "--codex" chose.
 # If the agent cannot be run because its command is not on the PATH, this
-# script acts as it does with "--no-llm".
+# script acts as it does with "--no-llm".  So it does if the agent is not
+# ready to run:  before it first asks the agent to resolve a merge's
+# conflicts or to fix a build, this script asks the agent for a one-word
+# reply, which fails if the agent is not logged in, has reached a usage
+# limit, or cannot reach its service.
 # The agent runs in a sandbox, which requires a recent version of it:
 # Claude Code with the `--restricted` option and the setting
 # `permissions.blockReadsOutsideWorkingDirectories`, or Codex with permission
@@ -300,12 +304,19 @@
 # it; delete the entry once you have dealt with it.  A later run deletes an
 # entry that no longer applies, unless you added text to it:  one about a
 # merge that is no longer in progress, because you finished or aborted it,
-# before it pulls or merges into the working tree, and one about a failed
-# build, once the build succeeds.  It deletes the file if it has no entry left and you added
-# nothing to it.  `prune_agent_todo` in common-functions.sh says which
-# entries are deleted.  When the agent could not
-# resolve the conflicts, the entry also tells an AI agent that reads it to
-# ask a person for help with them.  The resumed
+# before it pulls or merges into the working tree, or because it committed
+# the merge, and one about a failed build, once the build succeeds.  It
+# deletes the file if it has no entry left and you added nothing to it.
+# `prune_agent_todo` in common-functions.sh says which entries are deleted.
+# When the agent could not resolve the conflicts, the entry also tells an AI
+# agent that reads it to ask a person for help with them.  But when the
+# agent was not ready to run, the entry instead says that running this
+# script again, once the agent can run, asks the agent to do its task again;
+# for a merge in progress in the first directory, whose pull such a merge
+# makes this script refuse, the entry says to abort the merge first.  A later
+# run also deletes such an entry when it runs the agent again for the same
+# merge or build, or writes a newer entry about it.  An entry that asks a
+# person for help stays while the merge is in progress.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
 # contains the text of the merged changes, which can include instructions
 # from other people.
@@ -713,9 +724,10 @@ finish_merge_in_progress() {
   commit_resolved_merge "${llm_agent}" MERGE_HEAD "${finish_source}" "${finish_message}"
 }
 
-## Usage: git_push_to FROM_DIR TO_DIR PULL_FROM
+## Usage: git_push_to FROM_DIR TO_DIR PULL_FROM FIRST
 ## A helper function that works on exactly two repositories.  Pulls FROM_DIR
-## first if PULL_FROM is 1, and not if it is 0.  Sets ${push_step} to the
+## first if PULL_FROM is 1, and not if it is 0.  FIRST is 1 if FROM_DIR is
+## the first directory of the chain, and 0 otherwise.  Sets ${push_step} to the
 ## step that it reached, such as "pulling DIR" or "building"; `push_chain`
 ## reports it when this function fails.  Sets ${from_pulled} to 1 once it
 ## has pulled FROM_DIR, and to 0 before then.
@@ -725,6 +737,10 @@ git_push_to() {
   to="$2"
   push_step='checking the directories'
   from_pulled=0
+  # A rerun refuses to pull the first directory while a merge is in progress
+  # there.  Any other FROM_DIR is the TO_DIR of the step before, where a
+  # rerun finishes the merge.
+  rerun_finishes_merge=$((1 - $4))
 
   # A failure here is not yet an error, and it leaves the variable empty:  a
   # nonexistent directory fails here, and the tests just below diagnose that
@@ -820,6 +836,9 @@ git_push_to() {
   # the first directory makes `refuse_merge_in_progress` above, which
   # `pull_resolving` calls, fail.
   # Note: pwd=to_absolute
+  # From here on, a merge that this function leaves in progress is in
+  # TO_DIR, where a rerun finishes it.
+  rerun_finishes_merge=1
   push_step="finishing the merge in progress in ${to}"
   if ! finish_merge_in_progress "${to_absolute}"; then
     return 1
@@ -1152,9 +1171,11 @@ push_chain() {
   pull_from=$((1 - no_pull_first))
   # 1 until the first directory has been pulled, if it is to be pulled.
   first_unpulled="${pull_from}"
+  # 1 for the step whose FROM_DIR is the first directory.
+  first_step=1
   for arg; do
     if [ -n "$prev" ]; then
-      if ! git_push_to "$prev" "$arg" "${pull_from}"; then
+      if ! git_push_to "$prev" "$arg" "${pull_from}" "${first_step}"; then
         chain_failed "failed to push ${prev} into ${arg}, while ${push_step}"
         if [ "${first_unpulled}" -eq 1 ] && [ "${from_pulled}" -eq 0 ]; then
           return 2
@@ -1163,6 +1184,7 @@ push_chain() {
       fi
       pull_from=1
       first_unpulled=0
+      first_step=0
     fi
     prev="$arg"
   done

@@ -9,8 +9,10 @@
 #   tests/test-push-to-llm.sh
 #
 # Stub `claude` and `codex` commands stand in for the agents.  Environment
-# variables STUB_MODE and STUB_BUILD say what the stubs do, and the `codex`
-# stub prints no session id if STUB_NO_SESSION is set.
+# variables STUB_MODE and STUB_BUILD say what the stubs do, the `codex`
+# stub prints no session id if STUB_NO_SESSION is set, and the check that an
+# agent is ready to run fails if STUB_READY is "fail".  Each check that an
+# agent is ready to run appends a line to ${STUB_LOG}.ready.
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -113,6 +115,19 @@ fail() {
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
+# `agent_ready` checks that the agent can run; ${STUB_READY} "fail" makes
+# the check fail.
+case "$(basename -- "$0") $*" in
+  "codex exec --skip-git-repo-check "* | "claude "*--no-session-persistence*)
+    basename -- "$0" >> "${STUB_LOG}.ready"
+    if [ "${STUB_READY:-}" = fail ]; then
+      echo "Not logged in"
+      exit 1
+    fi
+    echo OK
+    exit 0
+    ;;
+esac
 basename -- "$0" >> "${STUB_LOG}"
 printf '%s\n' "$@" > "${STUB_ARGS}"
 if [ "$(basename -- "$0")" = codex ] && [ -z "${STUB_NO_SESSION:-}" ]; then
@@ -283,6 +298,7 @@ setup_case() {
   done
   read -r feature_head < "${case_dir}/feature-head"
   : > "${STUB_LOG}"
+  rm -f -- "${STUB_LOG}.ready"
 }
 
 ## Usage: create_case_repositories DIR KIND
@@ -937,6 +953,116 @@ case "${push_output}" in
   *"claude failed with status 3"*"changed a file: notes.txt"*) ;;
   *) fail "failing agent that changes an untracked file: wrong diagnostic: ${push_output}" ;;
 esac
+## A run stops at a merge in progress in the first directory, whose pull
+## then refuses to start, so if the agent was not ready to resolve that
+## merge's conflicts, AGENT-TODO.md says to abort the merge before running
+## git-push-to again.  A rerun without the abort refuses to start and keeps
+## that advice.  A run after the abort removes the entry and does resolve
+## the conflicts.
+setup_case from-pull-not-ready
+git clone -q -b main "${remote}" "${case_dir}/other-clone"
+write_file "${case_dir}/other-clone/file.txt" ONE two-remote three four five six SEVEN-main eight nine
+git -C "${case_dir}/other-clone" commit -q -a -m "Change main remotely"
+git -C "${case_dir}/other-clone" push -q
+write_file "${main_dir}/file.txt" ONE two-local three four five six SEVEN-main eight nine
+git -C "${main_dir}" commit -q -a -m "Change main locally"
+STUB_READY=fail
+export STUB_READY
+push_to good --llm
+unset STUB_READY
+if [ "${push_status}" -eq 0 ] \
+  || ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "agent that is not ready for the first directory's pull: no merge in progress there: ${push_output}"
+fi
+todo="${main_dir}/AGENT-TODO.md"
+abort_line="claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, abort the merge with \`git merge --abort\`; then running the same command again asks claude to resolve the conflicts, so no person needs to."
+if ! grep -q -x -F "${abort_line}" "${todo}"; then
+  fail "agent that is not ready for the first directory's pull: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+push_to good --llm
+if [ "${push_status}" -eq 0 ] \
+  || ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "rerun without aborting the first directory's pull: no merge in progress there: ${push_output}"
+fi
+if ! grep -q -x -F "${abort_line}" "${todo}" \
+  || [ "$(grep -c '^The merge of commit ' "${todo}")" -ne 1 ]; then
+  fail "rerun without aborting the first directory's pull: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+git -C "${main_dir}" merge --abort
+push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "rerun after aborting the first directory's pull: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "rerun after aborting the first directory's pull: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+if [ -e "${todo}" ]; then
+  fail "rerun after aborting the first directory's pull: AGENT-TODO.md remains: $(cat "${todo}")"
+fi
+
+## An agent that is not ready to run, as when it is not logged in, is not
+## asked to resolve the conflicts.  AGENT-TODO.md says that running
+## git-push-to again suffices; a rerun, once the agent is ready, does
+## resolve the conflicts.
+setup_case not-ready
+STUB_READY=fail
+export STUB_READY
+push_to good --llm
+unset STUB_READY
+check_not_resolved "agent that is not ready"
+if [ -s "${STUB_LOG}" ]; then
+  fail "agent that is not ready: an agent ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude is not ready to run (status 1)"*"It said: Not logged in"*) ;;
+  *) fail "agent that is not ready: wrong diagnostic: ${push_output}" ;;
+esac
+todo="${feature_dir}/AGENT-TODO.md"
+if ! grep -q -x -F "claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, running the same command again asks it to resolve the conflicts, so no person needs to." "${todo}" \
+  || grep -q 'Ask a person' "${todo}"; then
+  fail "agent that is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+push_to good --llm
+check_resolved claude "rerun after an agent that was not ready"
+if grep -q 'The merge of commit' "${todo}"; then
+  fail "rerun after an agent that was not ready: AGENT-TODO.md still notes the merge: $(cat "${todo}")"
+fi
+
+## An entry about a merge replaces an earlier one about the same merge, whose
+## advice is out of date:  here, that no person needs to help, after an agent
+## then failed after changing a file, and printed no session id.
+setup_case not-ready-then-fail
+echo "notes" > "${feature_dir}/notes.txt"
+STUB_READY=fail
+export STUB_READY
+push_to good --codex
+unset STUB_READY
+todo="${feature_dir}/AGENT-TODO.md"
+if ! grep -q 'no person needs to' "${todo}"; then
+  fail "agent that is not ready, then fails: the first run's AGENT-TODO.md is wrong: $(cat "${todo}" 2> /dev/null)"
+fi
+STUB_NO_SESSION=1
+export STUB_NO_SESSION
+push_to fail-untracked --codex
+unset STUB_NO_SESSION
+check_not_resolved "agent that is not ready, then fails"
+if grep -q 'no person needs to' "${todo}" \
+  || ! grep -q -x -F "codex, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${todo}" \
+  || [ "$(grep -c -x 'The merge of commit .* is in progress in .*' "${todo}")" -ne 1 ]; then
+  fail "agent that is not ready, then fails: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+## A later entry about the same merge does not replace one that asks a
+## person for help.
+STUB_READY=fail
+export STUB_READY
+push_to good --codex
+unset STUB_READY
+check_not_resolved "agent that fails, then is not ready"
+if grep -q 'no person needs to' "${todo}" \
+  || ! grep -q -x -F "codex, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${todo}"; then
+  fail "agent that fails, then is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+
 
 ## The cases from here to the matching "fi" are disabled; set
 ## ${run_history_cases} to 1 to run them.  Each is a merge in which one
@@ -2135,6 +2261,11 @@ fi
 if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
   fail "build fix: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
 fi
+# The check that claude is ready to run, before it resolves the conflicts,
+# also serves for the build fix.
+if [ "$(cat "${STUB_LOG}.ready")" != claude ]; then
+  fail "build fix: expected one check that claude is ready, but got: $(cat "${STUB_LOG}.ready" 2> /dev/null)"
+fi
 if ! grep -q 'other.txt is broken' "${STUB_PROMPT}"; then
   fail "build fix: the instructions do not contain the build output"
 fi
@@ -2282,6 +2413,51 @@ case "${push_output}" in
 esac
 if [ -s "${STUB_LOG}" ]; then
   fail "rerun after a bad build fix: an agent ran: $(cat "${STUB_LOG}")"
+fi
+
+## An agent that is not ready to run is not asked to fix the build.
+## AGENT-TODO.md says that running git-push-to again suffices; a rerun while
+## the agent is still not ready replaces that entry, and a rerun once it is
+## ready fixes the build and removes the entry.  The merge has no conflicts.
+setup_case build-not-ready build
+write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
+echo "feature" > "${feature_dir}/feature.txt"
+git -C "${feature_dir}" add feature.txt
+git -C "${feature_dir}" commit -q -a -m "Change feature as main does"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+todo="${feature_dir}/AGENT-TODO.md"
+not_ready_line="claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, running the same command again asks it to fix the build, so no person needs to."
+## The directory is a physical path, as on macOS, where the temporary
+## directory is under a symbolic link.
+build_failed_line="The build failed in $(cd "${feature_dir}" && pwd -P)."
+STUB_READY=fail
+export STUB_READY
+STUB_BUILD=fix push_to good --llm
+check_not_pushed "build fix while the agent is not ready"
+if [ -s "${STUB_LOG}" ]; then
+  fail "build fix while the agent is not ready: an agent ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q -x -F "${not_ready_line}" "${todo}" \
+  || ! grep -q -x -F "${build_failed_line}" "${todo}"; then
+  fail "build fix while the agent is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+STUB_BUILD=fix push_to good --llm
+unset STUB_READY
+check_not_pushed "build fix while the agent is still not ready"
+if [ "$(grep -c '^## Fix the build' "${todo}")" -ne 1 ]; then
+  fail "build fix while the agent is still not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+: > "${STUB_LOG}"
+STUB_BUILD=fix push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "rerun once the agent is ready to fix the build: git-push-to failed: ${push_output}"
+fi
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+  fail "rerun once the agent is ready to fix the build: the build was not fixed"
+fi
+if [ -e "${todo}" ]; then
+  fail "rerun once the agent is ready to fix the build: AGENT-TODO.md remains: $(cat "${todo}")"
 fi
 
 ## Uncommitted changes are refused before the merge, which leaves no merge

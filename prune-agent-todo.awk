@@ -17,6 +17,14 @@
 #                     tree, as a full hash, or empty if none is
 #   PRUNE_BUILT       1 if the working tree's HEAD was just built
 #                     successfully, and 0 otherwise
+#   PRUNE_RERUN       "merge" to remove also each entry about the merge in
+#                     progress in the working tree, and "build" to remove
+#                     also each entry about a failed build of the working
+#                     tree, that says that running the script again
+#                     suffices; empty otherwise
+#   PRUNE_RERUN_END   the end of a line that says that running the script
+#                     again suffices, as `agent_rerun_advice` writes it, such
+#                     as ", so no person needs to."
 #
 # A file AGENT-TODO.md consists of a preamble (its title and explanation) and
 # then entries.  Each entry starts with a line that starts with "## ".  The
@@ -28,6 +36,8 @@
 BEGIN {
   merge_head = ENVIRON["PRUNE_MERGE_HEAD"]
   built = ENVIRON["PRUNE_BUILT"]
+  rerun = ENVIRON["PRUNE_RERUN"]
+  rerun_end = ENVIRON["PRUNE_RERUN_END"]
   dir_count = split(ENVIRON["PRUNE_DIRS"], dirs, "\n")
   prefix_count = split(ENVIRON["PRUNE_CD_PREFIXES"], prefixes, "\n")
   merge_start = "The merge of commit "
@@ -35,6 +45,9 @@ BEGIN {
   # The start of the last line of the paragraph that `merge_in_progress_note`
   # prints.
   merge_end = "Finish it ("
+  # The start of the line that `merge_build_note` writes to name the working
+  # tree whose build failed:  "The build failed in DIRECTORY."
+  build_start = "The build failed in "
   # Matches the heading of an entry that a script of manage-git-branches
   # wrote, which ends with the script's name and a time, as in
   # "## Fix the build after merges (git-push-to, 2026-11-10 07:51:59)".
@@ -59,6 +72,29 @@ function starts_with(string, prefix) {
   return substr(string, 1, length(prefix)) == prefix
 }
 
+# Returns 1 if STRING ends with SUFFIX, and 0 otherwise.
+function ends_with(string, suffix) {
+  return length(string) >= length(suffix) \
+    && substr(string, length(string) - length(suffix) + 1) == suffix
+}
+
+# Returns 1 if LINE says that running the script again suffices, as the
+# advice of `agent_rerun_advice` does, and 0 otherwise.
+function is_rerun_advice(line) {
+  return rerun_end != "" && ends_with(line, rerun_end)
+}
+
+# Returns 1 if the entry in entry_lines says that running the script again
+# suffices, and 0 otherwise.
+function has_rerun_advice(i) {
+  for (i = 2; i <= entry_count; i++) {
+    if (is_rerun_advice(entry_lines[i])) {
+      return 1
+    }
+  }
+  return 0
+}
+
 # Returns 1 if DIRECTORY is one of the pathnames in ${PRUNE_DIRS}, and 0
 # otherwise.
 function is_working_tree(directory, i) {
@@ -74,6 +110,8 @@ function is_working_tree(directory, i) {
 # manage-git-branches writes, as when a person added a note after its
 # command, and 0 otherwise.  A script writes, after the heading, blank lines,
 # paragraphs that start as `merge_in_progress_note` starts its paragraph,
+# lines that name the working tree whose build failed and lines that say
+# that running the script again suffices, as `merge_build_note` writes them,
 # lines that introduce the command of one of several sessions, and code
 # blocks that start with "```sh".  A line that a person added to the
 # paragraph of `merge_in_progress_note`, before its last line, is not
@@ -97,6 +135,8 @@ function has_added_text(i, line, in_note, in_code) {
       in_note = 1
     } else if (line == "```sh") {
       in_code = 1
+    } else if (starts_with(line, build_start) || is_rerun_advice(line)) {
+      continue
     } else if (line !~ session_re) {
       return 1
     }
@@ -126,7 +166,22 @@ function is_obsolete(i, j, line, rest, middle, commit, directory) {
     directory = substr(rest, middle + length(merge_middle))
     directory = substr(directory, 1, length(directory) - 1)
     if (is_working_tree(directory)) {
-      return commit != merge_head
+      return commit != merge_head || (rerun == "merge" && has_rerun_advice())
+    }
+  }
+  # An entry that says that running the script again suffices to fix the
+  # build of the working tree, as `merge_build_note` writes:  "The build
+  # failed in DIRECTORY."
+  if ((built == 1 || rerun == "build") && starts_with(entry_lines[1], "## Fix the build ") \
+    && has_rerun_advice()) {
+    for (i = 2; i <= entry_count; i++) {
+      line = entry_lines[i]
+      if (starts_with(line, build_start) && substr(line, length(line)) == ".") {
+        directory = substr(line, length(build_start) + 1)
+        if (is_working_tree(substr(directory, 1, length(directory) - 1))) {
+          return 1
+        }
+      }
     }
   }
   # An entry that gives the command that continues an AI agent's attempt to
