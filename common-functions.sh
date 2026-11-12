@@ -1366,8 +1366,7 @@ resolve_merge_conflicts() {
   # The conflicted files, one per line.  `conflicted_files` replaces each
   # newline within a pathname by the byte 001, so the `case` below detects
   # and refuses any conflicted file whose name contains a newline.
-  rmc_conflicted="$(conflicted_files)"
-  if [ -z "${rmc_conflicted}" ]; then
+  if ! rmc_conflicted="$(conflicted_files)" || [ -z "${rmc_conflicted}" ]; then
     echo "${SCRIPT_NAME}: cannot list the conflicted files in $(pwd)" >&2
     resolve_stopped
     return 1
@@ -1380,7 +1379,11 @@ resolve_merge_conflicts() {
       ;;
   esac
   # Any other change would be blamed on the agent below, or committed.
-  rmc_other="$(resolve_other_changes "${rmc_conflicted}")"
+  if ! rmc_other="$(resolve_other_changes "${rmc_conflicted}")"; then
+    echo "${SCRIPT_NAME}: cannot list the changed files in $(pwd)" >&2
+    resolve_stopped
+    return 1
+  fi
   if [ -n "${rmc_other}" ]; then
     printf '%s\n' "${rmc_other}" | sed -e "s/^/${SCRIPT_NAME}: changed, but not conflicted: /" >&2
     echo "${SCRIPT_NAME}: the working tree has changes that are not part of the merge; resolve the conflicts by hand" >&2
@@ -1626,12 +1629,15 @@ resolve_with_agent() {
   rwa_paths="$(working_tree_paths)"
   # The files that git tracks, which the agent can change or delete.  `-z`
   # keeps git from quoting a pathname, as it quotes one that contains a
-  # quotation mark.  `tr` turns each NUL that ends a pathname into a newline,
-  # and each newline within a pathname into the byte 001, so that such a
-  # pathname matches no file, and a change to that file is rejected.  The
-  # index holds a conflicted file at several stages, so `uniq` removes the
-  # repetitions from the sorted list.
-  rwa_tracked="$(git ls-files -z | tr '\n\000' '\001\n' | uniq)"
+  # quotation mark.  `print_nul_lines` turns each newline within a pathname
+  # into the byte 001, so that such a pathname matches no file, and a change
+  # to that file is rejected.  The index holds a conflicted file at several
+  # stages, and `--deduplicate`, which needs git 2.31, lists it once.
+  if ! rwa_tracked="$(print_nul_lines git ls-files -z --deduplicate)"; then
+    echo "${SCRIPT_NAME}: cannot list the files that git tracks in $(pwd)" >&2
+    rm -f -- "${rwa_marker}"
+    return 1
+  fi
   # Git runs a hook when the script commits, outside the agent's sandbox.
   rwa_hooks="$(working_tree_hooks)"
   rwa_branch="$(current_branch)" || rwa_branch="HEAD"
@@ -1744,7 +1750,12 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # agent changed or deleted, one per line.
   rwa_rerere_changed=''
   if [ "${rwa_refs_ok}" -eq 1 ]; then
-    rwa_agent_other="$(resolve_other_changes "${rmc_conflicted}")"
+    # The agent's work is rejected if the files that it changed cannot be
+    # listed, and so cannot be checked.
+    if ! rwa_agent_other="$(resolve_other_changes "${rmc_conflicted}")"; then
+      echo "${SCRIPT_NAME}: cannot list the files that ${rmc_with} changed in $(pwd)" >&2
+      rwa_ok=0
+    fi
     printf '%s\n' "${rwa_agent_other}" | while IFS= read -r rwa_other_file; do
       if [ -n "${rwa_other_file}" ]; then
         review_notice "${rmc_with} also changed: ${rwa_other_file}"
@@ -2534,22 +2545,26 @@ separator_permitted() {
 ## Usage: conflicted_files
 ## Prints, one per line, each conflicted file of the merge in progress in the
 ## current directory, the top level of a working tree, as in "src/main.c".
-## `-z` keeps git from quoting a pathname.  `tr` turns each NUL that ends a
-## pathname into a newline, and each newline within a pathname into the byte
-## 001, so that such a pathname is not split.
+## `-z` keeps git from quoting a pathname, and `print_nul_lines` keeps a
+## pathname that contains a newline from being split.  Returns the exit
+## status of git.
 conflicted_files() {
-  git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n'
+  print_nul_lines git diff --name-only --diff-filter=U -z
 }
 
 ## Usage: resolve_other_changes FILES
 ## Prints, one per line, each file that differs from AUTO_MERGE in the working
 ## tree or in the index and is not in FILES, the conflicted files, one per
-## line, as `conflicted_files` prints them.
+## line.  Both FILES and the output give each pathname as `conflicted_files`
+## prints it, with each newline in it replaced by the byte 001.  Returns 1 if
+## git cannot list the files that differ from AUTO_MERGE.
 resolve_other_changes() {
-  {
-    git diff --no-renames --name-only -z AUTO_MERGE
-    git diff --cached --no-renames --name-only -z AUTO_MERGE
-  } | tr '\000' '\n' | sort -u | grep -F -x -v -- "$1"
+  roc_worktree="$(print_nul_lines git diff --no-renames --name-only -z AUTO_MERGE)" || return 1
+  roc_index="$(print_nul_lines git diff --cached --no-renames --name-only -z AUTO_MERGE)" || return 1
+  # `printf` prints an empty listing as an empty line, which `sed` removes.
+  # `grep` returns 1 when it prints nothing.
+  printf '%s\n%s\n' "${roc_worktree}" "${roc_index}" \
+    | sed -e '/^$/d' | sort -u | grep -F -x -v -- "$1" || true
 }
 
 ## Usage: agent_available AGENT
@@ -3298,7 +3313,8 @@ forget_conflicted_files() {
 ## `record_conflicted_files` recorded for this merge.  Such a file was changed
 ## after git, `git rerere`, and this package's scripts last left it:  for
 ## example, by an AI agent whose work a script rejected, or by a person.  A
-## file that was deleted is printed too.
+## file that was deleted is printed too.  Returns 1, without printing
+## anything, if the conflicted files cannot be listed.
 changed_conflicted_files() {
   changed_record=''
   if changed_conflicts="$(git rev-parse --git-path manage-git-branches-conflicts)" \
@@ -3307,7 +3323,13 @@ changed_conflicted_files() {
     && [ "$(head -n 1 "${changed_conflicts}")" = "merge ${changed_merge_head}" ]; then
     changed_record="$(sed -e 1d "${changed_conflicts}")"
   fi
-  conflicted_files | while IFS= read -r changed_file; do
+  if ! changed_files="$(conflicted_files)"; then
+    return 1
+  fi
+  printf '%s\n' "${changed_files}" | while IFS= read -r changed_file; do
+    if [ -z "${changed_file}" ]; then
+      continue
+    fi
     # `--filters` converts AUTO_MERGE's file as a checkout would.
     if [ -f "${changed_file}" ] \
       && git cat-file --filters "AUTO_MERGE:${changed_file}" 2> /dev/null | cmp -s - "${changed_file}"; then

@@ -1440,6 +1440,97 @@ if rbwt_out="$(report_broken_working_tree / 2>&1)" || [ -n "${rbwt_out}" ]; then
   fail "report_broken_working_tree reported the root directory: ${rbwt_out}"
 fi
 
+## `print_nul_lines` prints the items that a command ends with NULs, one per
+## line, turns a newline within an item into the byte 001, and returns the
+## command's exit status.
+# shellcheck disable=SC2016 # sh expands the format.
+if pnl_out="$(print_nul_lines sh -c 'printf "a\000b\nc\000"; exit 3')"; then
+  fail "print_nul_lines returned 0 for a command that failed"
+fi
+[ "${pnl_out}" = "$(printf 'a\nb\001c')" ] \
+  || fail "unexpected print_nul_lines output: ${pnl_out}"
+
+## `changed_conflicted_files` returns 1 if git cannot list the conflicted
+## files of the merge in progress.
+ccf_dir="${WORK_DIR}/ccf"
+git init -q -b main "${ccf_dir}"
+printf '%s\n' base > "${ccf_dir}/f.txt"
+git -C "${ccf_dir}" add f.txt
+git -C "${ccf_dir}" commit -q -m base
+git -C "${ccf_dir}" branch side
+printf '%s\n' main > "${ccf_dir}/f.txt"
+git -C "${ccf_dir}" commit -q -a -m main
+git -C "${ccf_dir}" switch -q side
+printf '%s\n' side > "${ccf_dir}/f.txt"
+git -C "${ccf_dir}" commit -q -a -m side
+git -C "${ccf_dir}" switch -q main
+if git -C "${ccf_dir}" merge -q side > /dev/null 2>&1; then
+  fail "the merge has no conflicts"
+fi
+(cd "${ccf_dir}" && changed_conflicted_files > /dev/null) \
+  || fail "changed_conflicted_files returned 1 for a merge whose conflicted files can be listed"
+if (
+  cd "${ccf_dir}" || exit 0
+  # A git that cannot list the conflicted files.
+  git() {
+    case "$*" in
+      "diff --name-only --diff-filter=U -z") return 128 ;;
+      *) command git "$@" ;;
+    esac
+  }
+  changed_conflicted_files > /dev/null
+); then
+  fail "changed_conflicted_files returned 0 although git could not list the conflicted files"
+fi
+
+## `resolve_other_changes` prints each file other than the conflicted ones
+## that differs from AUTO_MERGE, as `conflicted_files` prints it, and returns
+## 1 if git cannot list those files.  `resolve_merge_conflicts` then leaves
+## the merge in progress.
+roc_out="$(cd "${ccf_dir}" && resolve_other_changes f.txt)" \
+  || fail "resolve_other_changes returned 1 for a merge with no other changes"
+[ -z "${roc_out}" ] || fail "unexpected resolve_other_changes output: ${roc_out}"
+# A file whose name contains a newline, in the index and in the working tree.
+roc_name="$(printf 'a\nb')"
+printf '%s\n' new > "${ccf_dir}/${roc_name}"
+git -C "${ccf_dir}" add -- "${roc_name}"
+roc_out="$(cd "${ccf_dir}" && resolve_other_changes f.txt)" \
+  || fail "resolve_other_changes returned 1 for a merge with another change"
+[ "${roc_out}" = "$(printf 'a\001b')" ] \
+  || fail "unexpected resolve_other_changes output: ${roc_out}"
+if (
+  cd "${ccf_dir}" || exit 0
+  # A git that cannot list the files that differ in the working tree.
+  # shellcheck disable=SC2329 # Is called through print_nul_lines.
+  git() {
+    case "$*" in
+      ("diff --no-renames --name-only -z AUTO_MERGE") return 128 ;;
+      (*) command git "$@" ;;
+    esac
+  }
+  resolve_other_changes f.txt > /dev/null
+); then
+  fail "resolve_other_changes returned 0 although git could not list the changed files"
+fi
+if roc_out="$(
+  cd "${ccf_dir}" || exit 0
+  git() {
+    case "$*" in
+      ("diff --no-renames --name-only -z AUTO_MERGE") return 128 ;;
+      (*) command git "$@" ;;
+    esac
+  }
+  # The scripts that call it do not use `set -e`.
+  set +e
+  resolve_merge_conflicts '' side side 2>&1
+)"; then
+  fail "resolve_merge_conflicts returned 0 although git could not list the changed files"
+fi
+case "${roc_out}" in
+  *"cannot list the changed files"*"the merge of side is still in progress"*) ;;
+  *) fail "unexpected resolve_merge_conflicts diagnostic: ${roc_out}" ;;
+esac
+
 # `prune_agent_todo` removes the entries of AGENT-TODO.md that no longer apply.
 # The name of the working tree contains a space, so that `run_agent` writes
 # its pathname quoted in a command.

@@ -579,10 +579,11 @@ fetch_branch() {
 ## which it notes in AGENT-TODO.md (see `report_merge_in_progress`), if
 ## `settle_merge_in_progress` fails, as when an AI agent is working in
 ## DIRECTORY or the merge is redundant but somebody has worked on it; if no
-## conflicted file remains; if a conflicted file changed after git,
-## `git rerere`, and this script left it (see `changed_conflicted_files`), as
-## when this script rejected an AI agent's work, whose edits remain; or if
-## the conflicts are not resolved or the merge cannot be committed.
+## conflicted file remains; if its conflicted files cannot be listed; if a
+## conflicted file changed after git, `git rerere`, and this script left it
+## (see `changed_conflicted_files`), as when this script rejected an AI
+## agent's work, whose edits remain; or if the conflicts are not resolved or
+## the merge cannot be committed.
 finish_merge_in_progress() {
   settle_merge_in_progress "$1" 1
   case "$?" in
@@ -603,7 +604,11 @@ finish_merge_in_progress() {
   fi
   # `resolve_merge_conflicts` would take such a file, which has no conflict
   # markers, for one that `git rerere` resolved.
-  finish_changed="$(changed_conflicted_files)"
+  if ! finish_changed="$(changed_conflicted_files)"; then
+    stop_at_merge "${finish_in_progress}, and its conflicted files cannot be listed; finish the merge, or abort it with \`git merge --abort\`" \
+      "Its conflicted files could not be listed."
+    return 1
+  fi
   if [ -n "${finish_changed}" ]; then
     printf '%s\n' "${finish_changed}" | while IFS= read -r finish_file; do
       echo "${SCRIPT_NAME}: changed after the merge stopped: ${finish_file}" >&2
