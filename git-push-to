@@ -29,7 +29,8 @@
 # (see "Asking an AI agent" below), as in
 #   in /home/me/myrepo-branch-feature: claude also changed: README.md
 # each change by a hook to a file that a commit by this script would not
-# otherwise change (see "Conflicts" below),
+# otherwise change, and each file that changed after this script staged the
+# hook's changes (see "Conflicts" below),
 # each merge left in progress and each agent session that can be continued,
 # which are also noted in AGENT-TODO.md, and, if a push or rebase fails, the
 # step that failed, as in
