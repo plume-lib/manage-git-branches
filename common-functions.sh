@@ -1495,11 +1495,7 @@ resolve_merge_conflicts() {
     return 1
   elif ! agent_available "${resolve_with}"; then
     report_unresolved "${resolve_unresolved}"
-    if [ -n "${agent_unavailable_reason}" ]; then
-      resolve_stopped "${agent_unavailable_reason}  $(resolve_rerun_advice)"
-    else
-      resolve_stopped
-    fi
+    resolve_stopped "${agent_unavailable_reason:+${agent_unavailable_reason}  $(resolve_rerun_advice)}"
     return 1
   else
     # The notes are composed before the agent runs, because no git command
@@ -3232,13 +3228,15 @@ prune_agent_todo() {
     return 0
   fi
   # The first line of the output is the counts, and the rest is the new
-  # content of the file.
+  # content of the file.  The step fails if awk cannot run the script, as
+  # when the script is missing, or if the output cannot be written; either
+  # way, awk or the shell prints the cause.
   if ! PRUNE_DIRS="${prune_dirs}" PRUNE_CD_PREFIXES="${prune_prefixes}" \
     PRUNE_MERGE_HEAD="${prune_merge_head}" PRUNE_BUILT="${prune_built}" \
     PRUNE_RERUN="${prune_rerun}" PRUNE_RERUN_END="${agent_rerun_advice_end}" \
     awk -f "${SCRIPT_DIR}/prune-agent-todo.awk" < "${prune_old}" > "${prune_output}" \
     || ! prune_counts="$(head -n 1 "${prune_output}")" || [ -z "${prune_counts}" ]; then
-    echo "${SCRIPT_NAME}: cannot write ${prune_output}, so ${prune_todo} was not pruned" >&2
+    echo "${SCRIPT_NAME}: cannot process ${prune_todo} with ${SCRIPT_DIR}/prune-agent-todo.awk, so it was not pruned" >&2
     rm -f "${prune_old}" "${prune_output}"
     return 0
   fi
@@ -3317,17 +3315,19 @@ merge_in_progress_note() {
   printf '%s\n' 'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.'
 }
 
-## Usage: report_merge_in_progress [REASON]
+## Usage: report_merge_in_progress [REASON [ADVICE]]
 ## Appends to AGENT-TODO.md an entry that says that a merge is in progress in
 ## the current directory, the top level of a working tree, as
 ## `merge_in_progress_note` writes it, given REASON (see
-## `append_agent_note`).  First removes each earlier entry about the same
-## merge that says that running the script again suffices, whose advice is
-## out of date, and each entry about a merge that is no longer in progress
-## (see `prune_agent_todo`).  Then does nothing if the
-## file still says that this merge is in progress in this directory, as after
-## an earlier run stopped at the same merge:  the earlier entry, such as one
-## that asks a person for help, stays.  Does nothing if no merge is in
+## `append_agent_note`).  First removes each entry about a merge that is no
+## longer in progress, and, unless ADVICE is "keep", each earlier entry about
+## the same merge that says that running the script again suffices, whose
+## advice is out of date (see `prune_agent_todo`).  ADVICE is "keep" when
+## that advice still holds, as when the script refuses to start while the
+## merge is in progress (see `refuse_merge_in_progress`).  Then does nothing
+## if the file still says that this merge is in progress in this directory,
+## as after an earlier run stopped at the same merge:  the earlier entry, such
+## as one that asks a person for help, stays.  Does nothing if no merge is in
 ## progress.  Appends the note to the summary (see
 ## `append_merge_note_summary`) in each case.  Runs git commands, so it must
 ## not be called after an AI agent ran without its work being checked; see
@@ -3340,7 +3340,11 @@ report_merge_in_progress() {
   append_merge_note_summary "${report_merge_note}"
   report_merge_first="$(printf '%s\n' "${report_merge_note}" | head -n 1)"
   report_merge_todo="$(agent_todo_path)" || report_merge_todo=''
-  prune_agent_todo 0 merge
+  if [ "${2:-}" = keep ]; then
+    prune_agent_todo 0
+  else
+    prune_agent_todo 0 merge
+  fi
   if [ -n "${report_merge_todo}" ] && [ -f "${report_merge_todo}" ] \
     && grep -F -x -q -- "${report_merge_first}" "${report_merge_todo}"; then
     return 0
@@ -3922,14 +3926,18 @@ pull_resolving() {
 ## Usage: refuse_merge_in_progress DIRECTORY REASON
 ## Returns 1, after printing a diagnostic, if a merge is in progress in
 ## DIRECTORY, which it also reports with `report_merge_in_progress_in` and
-## REASON, such as "It was in progress when `git-push-to` tried to pull.", or
-## if the index of DIRECTORY has unmerged files, as after a cherry-pick, a
-## revert, or a `git stash apply` that stopped at conflicts.  `git pull`
-## refuses to run in either case.  Returns 0 otherwise.
+## REASON, such as "It was in progress when `git-push-to` tried to pull.",
+## keeping an entry of AGENT-TODO.md that says that running the script again
+## suffices (see `agent_rerun_advice`), or if the index of DIRECTORY has
+## unmerged files, as after a cherry-pick, a revert, or a `git stash apply`
+## that stopped at conflicts.  `git pull` refuses to run in either case.
+## Returns 0 otherwise.
 refuse_merge_in_progress() {
   if git -C "$1" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
     echo "${SCRIPT_NAME}: a merge is in progress in $1; finish it, or abort it with \`git merge --abort\`" >&2
-    report_merge_in_progress_in "$1" "$2"
+    # An entry that says to abort the merge and then to run the script again
+    # still holds.
+    report_merge_in_progress_in "$1" "$2" keep
     return 1
   fi
   if [ -n "$(git -C "$1" ls-files --unmerged)" ]; then
@@ -4026,14 +4034,14 @@ add_pulled_first_dir() {
   fi
 }
 
-## Usage: report_merge_in_progress_in DIRECTORY [REASON]
-## Runs `report_merge_in_progress` with REASON at the top level of the
-## working tree that contains DIRECTORY, in a subshell that leaves the
+## Usage: report_merge_in_progress_in DIRECTORY [REASON [ADVICE]]
+## Runs `report_merge_in_progress` with REASON and ADVICE at the top level of
+## the working tree that contains DIRECTORY, in a subshell that leaves the
 ## current directory unchanged.
 report_merge_in_progress_in() {
   (
     if report_in_top="$(git -C "$1" rev-parse --show-toplevel)" && cd -- "${report_in_top}"; then
-      report_merge_in_progress "${2:-}"
+      report_merge_in_progress "${2:-}" "${3:-}"
     fi
   )
 }
@@ -5362,9 +5370,8 @@ merge_build_push() {
         return 1
       fi
       if ! agent_available "$5"; then
-        if [ -n "${agent_unavailable_reason}" ]; then
-          merge_build_note "${merge_fix_message}" "${agent_unavailable_reason}  $(agent_rerun_advice "$5" 'fix the build')"
-        fi
+        [ -z "${agent_unavailable_reason}" ] \
+          || merge_build_note "${merge_fix_message}" "${agent_unavailable_reason}  $(agent_rerun_advice "$5" 'fix the build')"
         return 1
       fi
       # What this call's merge did, for the agent.
