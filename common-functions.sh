@@ -1329,6 +1329,9 @@ ends_with_newline() {
 ## the command that continues the agent's session if one ran (see
 ## `report_merge_in_progress` and `report_agent_session`).  Before any agent
 ## runs, it records the conflicted files (see `record_conflicted_files`).
+## If the agent is not ready to run (see `agent_available`), the note says
+## how to have it try again instead of asking for a person's help (see
+## `resolve_rerun_advice`).
 ## The merge must have been made with
 ## `rerere.autoUpdate` false, so that the index lists every conflicted file as
 ## unmerged, including each one that rerere resolved.
@@ -1486,9 +1489,13 @@ resolve_merge_conflicts() {
 
   if [ -z "${rmc_unresolved}" ]; then
     echo "${SCRIPT_NAME}: \`git rerere\` resolved the conflicts in $(pwd)" >&2
-  elif [ -z "${rmc_with}" ] || ! agent_available "${rmc_with}"; then
+  elif [ -z "${rmc_with}" ]; then
     report_unresolved "${rmc_unresolved}"
     resolve_stopped
+    return 1
+  elif ! agent_available "${rmc_with}"; then
+    report_unresolved "${rmc_unresolved}"
+    resolve_stopped "${agent_unavailable_reason:+${agent_unavailable_reason}  $(resolve_rerun_advice)}"
     return 1
   else
     # The note is composed before the agent runs, because no git command
@@ -1498,6 +1505,10 @@ resolve_merge_conflicts() {
     # which should not try alone what this agent could not do.
     rmc_agent_reason="${rmc_with}, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge."
     rmc_note="$(merge_in_progress_note "${rmc_agent_reason}")"
+    # An earlier entry that says that running the script again suffices is
+    # out of date once the agent runs:  its outcome writes a new entry, or
+    # the merge is committed.
+    prune_agent_todo 0 merge
     rwa_agent_status=0
     # 1 once `resolve_with_agent` has started the agent.  If it failed
     # before then, a rerun can succeed, so the note asks for no help.
@@ -1528,6 +1539,24 @@ resolve_merge_conflicts() {
     return 1
   fi
   return 0
+}
+
+## Usage: resolve_rerun_advice
+## For `resolve_merge_conflicts`:  prints a sentence for an entry of
+## AGENT-TODO.md that says how to have the AI agent ${rmc_with} resolve
+## the conflicts of the merge in progress once it can run (see
+## `agent_rerun_advice`).  If ${rerun_finishes_merge} is 1, running this
+## script again finishes the merge in progress in the current directory;
+## otherwise, running it again refuses to start while the merge is in
+## progress, so the sentence says to abort the merge first.
+resolve_rerun_advice() {
+  if [ "${rerun_finishes_merge}" -eq 1 ]; then
+    agent_rerun_advice "${rmc_with}" 'resolve the conflicts'
+  else
+    # The backquotes are Markdown, not a command substitution.
+    # shellcheck disable=SC2016
+    agent_rerun_advice "${rmc_with}" 'resolve the conflicts' 'abort the merge with `git merge --abort`'
+  fi
 }
 
 ## Usage: resolve_stopped [REASON]
@@ -2524,13 +2553,116 @@ resolve_other_changes() {
 }
 
 ## Usage: agent_available AGENT
-## Succeeds if the command AGENT, "claude" or "codex", can be found.
-## Otherwise prints a diagnostic and returns 1.
+## Succeeds if the command AGENT, "claude" or "codex", can be found and is
+## ready to run (see `agent_ready`).  Otherwise prints a diagnostic and
+## returns 1, after setting ${agent_unavailable_reason} to a sentence for an
+## entry of AGENT-TODO.md that says why, such as "claude, an AI agent, did
+## not run, because it was not ready to run, as when it is not logged in.",
+## or to the empty string if AGENT is not on the PATH, as when the user does
+## not use it.  Skips the check of `agent_ready` if an earlier check in the
+## same run of the script succeeded (see `agent_ready_record`), because each
+## check costs a request to the agent's service.
 agent_available() {
-  if command -v "$1" > /dev/null 2>&1; then
+  agent_unavailable_reason=''
+  if ! command -v "$1" > /dev/null 2>&1; then
+    echo "${SCRIPT_NAME}: cannot run $1, which is not on the PATH" >&2
+    return 1
+  fi
+  if agent_available_record="$(agent_ready_record)" \
+    && [ "$(cat -- "${agent_available_record}" 2> /dev/null)" = "$$ $1" ]; then
     return 0
   fi
-  echo "${SCRIPT_NAME}: cannot run $1, which is not on the PATH" >&2
+  if ! agent_ready "$1"; then
+    agent_unavailable_reason="$1, an AI agent, did not run, because it was not ready to run, as when it is not logged in."
+    return 1
+  fi
+  return 0
+}
+
+## Usage: agent_ready_record
+## Prints the pathname of the file in which `agent_ready` records that an AI
+## agent was ready to run:  manage-git-branches-agent-ready in the common git
+## directory of the current directory, such as
+## "/home/me/myrepo/.git/manage-git-branches-agent-ready".  The file holds
+## the process id of the script, which every subshell shares as `$$`, and the
+## agent, as in "12345 claude", so that a later run of the script, which has
+## another process id, checks again.  Neither agent can write the git
+## directory.  Prints nothing, and returns 1, if the current directory is not
+## in a working tree.
+agent_ready_record() {
+  agent_ready_dir="$(git rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" \
+    && [ -n "${agent_ready_dir}" ] \
+    && printf '%s\n' "${agent_ready_dir}/manage-git-branches-agent-ready"
+}
+
+## Usage: agent_rerun_advice AGENT TASK [STEP]
+## Prints a sentence for an entry of AGENT-TODO.md that says that running
+## the same command again, once the AI agent AGENT can run, asks it to do
+## TASK, such as "resolve the conflicts", so that no person needs to.  If
+## STEP is given, such as "abort the merge with `git merge --abort`", the
+## sentence says to do STEP before running the command again.  The sentence
+## does not name the command:  `git-pull-from` and `git-rebase-to` run
+## `git-push-to`, whose name ${SCRIPT_NAME} would then give.
+## The end of the sentence that `agent_rerun_advice` prints, by which
+## `prune_agent_todo` recognizes an entry that gives such advice.
+agent_rerun_advice_end=', so no person needs to.'
+agent_rerun_advice() {
+  if [ -n "${3:-}" ]; then
+    printf 'Once %s can run, %s; then running the same command again asks %s to %s%s\n' "$1" "$3" "$1" "$2" "${agent_rerun_advice_end}"
+  else
+    printf 'Once %s can run, running the same command again asks it to %s%s\n' "$1" "$2" "${agent_rerun_advice_end}"
+  fi
+}
+
+## Usage: agent_ready AGENT
+## Succeeds if the AI agent AGENT, "claude" or "codex", is ready to run:  if
+## it answers a request for a one-word reply.  The request fails if the agent
+## is not logged in, if it has reached a usage limit, or if it cannot reach
+## its service; it costs a fraction of a cent.  (`codex login status` would
+## succeed in the last two cases, and Claude can report that a user is
+## logged in although the login has expired.)  The request runs in the root
+## directory, so that no file of a working tree configures the agent, with
+## no tools for Claude and a read-only sandbox for Codex, and without
+## keeping a session.  Otherwise prints a diagnostic, which includes the
+## agent's own message, and returns 1.  Writes the file that
+## `agent_ready_record` names after a success, and removes it after a
+## failure.
+agent_ready_prompt='Reply with the single word OK.'
+agent_ready() {
+  case "$1" in
+    claude)
+      agent_ready_login='claude auth login'
+      agent_ready_output="$(cd / && printf '%s\n' "${agent_ready_prompt}" \
+        | run_with_time_limit 120 claude -p --restricted --strict-mcp-config \
+          --no-session-persistence --tools '' 2>&1)"
+      ;;
+    codex)
+      agent_ready_login='codex login'
+      agent_ready_output="$(cd / && printf '%s\n' "${agent_ready_prompt}" \
+        | run_with_time_limit 120 codex exec --skip-git-repo-check --ephemeral \
+          --sandbox read-only - 2>&1)"
+      ;;
+    *)
+      echo "${SCRIPT_NAME}: unknown AI agent: $1" >&2
+      return 1
+      ;;
+  esac
+  agent_ready_status=$?
+  agent_ready_file="$(agent_ready_record)" || agent_ready_file=''
+  if [ "${agent_ready_status}" -eq 0 ]; then
+    # A failure to write the record costs only another check.
+    if [ -n "${agent_ready_file}" ]; then
+      printf '%s %s\n' "$$" "$1" > "${agent_ready_file}" 2> /dev/null || true
+    fi
+    return 0
+  fi
+  if [ -n "${agent_ready_file}" ]; then
+    rm -f -- "${agent_ready_file}"
+  fi
+  # The message gives the login command last:  checkbashisms takes a closing
+  # backquote followed by text such as ".  It said" for a `.` command with
+  # arguments.
+  echo "${SCRIPT_NAME}: $1 is not ready to run (status ${agent_ready_status}).  It said: ${agent_ready_output}  If it is not logged in, log in with \`${agent_ready_login}\`" >&2
   return 1
 }
 
@@ -2856,7 +2988,7 @@ agent_todo_path() {
   printf '%s\n' "${agent_todo_top}/${agent_todo_file}"
 }
 
-## Usage: prune_agent_todo BUILT
+## Usage: prune_agent_todo BUILT [RERUN]
 ## Removes, from the file AGENT-TODO.md at the top level of the working tree
 ## that contains the current directory (see `agent_todo_path`), each entry
 ## that a script of this package wrote about that working tree and that no
@@ -2870,7 +3002,13 @@ agent_todo_path() {
 ##    successfully, and the entry gives the command that continues an AI
 ##    agent's attempt to fix the build of the working tree, as
 ##    `report_agent_session` writes it for a task such as "Fix the build after
-##    merging branch 'main'".
+##    merging branch 'main'", or says that running the script again suffices
+##    to fix the build of the working tree, as `merge_build_note` writes; or
+##  * it says that running the script again suffices (see
+##    `agent_rerun_advice`), and RERUN is "merge" and the entry is about the
+##    merge in progress in the working tree, or RERUN is "build" and the
+##    entry is about a failed build of the working tree, as when the script
+##    is about to write a newer entry or to run the agent again.
 ## An entry is about the working tree if it names the working tree's top
 ## level.  Each other entry is kept:  one with a heading of another form, such
 ## as one that a person wrote; one of another kind, such as an entry of
@@ -2892,6 +3030,7 @@ agent_todo_path() {
 ## this function always returns 0.
 prune_agent_todo() {
   prune_built="$1"
+  prune_rerun="${2:-}"
   prune_todo="$(agent_todo_path)" || return 0
   if [ ! -e "${prune_todo}" ] || is_unsafe_to_write "${prune_todo}"; then
     return 0
@@ -2941,6 +3080,7 @@ prune_agent_todo() {
   # way, awk or the shell prints the cause.
   if ! PRUNE_DIRS="${prune_dirs}" PRUNE_CD_PREFIXES="${prune_prefixes}" \
     PRUNE_MERGE_HEAD="${prune_merge_head}" PRUNE_BUILT="${prune_built}" \
+    PRUNE_RERUN="${prune_rerun}" PRUNE_RERUN_END="${agent_rerun_advice_end}" \
     awk -f "${SCRIPT_DIR}/prune-agent-todo.awk" < "${prune_old}" > "${prune_output}" \
     || ! prune_counts="$(head -n 1 "${prune_output}")" || [ -z "${prune_counts}" ]; then
     echo "${SCRIPT_NAME}: cannot process ${prune_todo} with ${SCRIPT_DIR}/prune-agent-todo.awk, so it was not pruned" >&2
@@ -3034,19 +3174,26 @@ merge_in_progress_note() {
   fi
 }
 
-## Usage: report_merge_in_progress [REASON [UPSTREAM]]
-## Appends to AGENT-TODO.md (see `agent_todo_path` and `append_agent_todo`)
-## an entry that says that a merge is in progress in the current directory,
-## the top level of a working tree, as `merge_in_progress_note` writes it,
-## given REASON and UPSTREAM.  Does nothing if no merge is in progress, or if
-## an entry of the file already has the note's first line, which identifies
+## Usage: report_merge_in_progress [REASON [UPSTREAM [ADVICE]]]
+## Appends to AGENT-TODO.md an entry that says that a merge is in progress in
+## the current directory, the top level of a working tree, as
+## `merge_in_progress_note` writes it, given REASON and UPSTREAM (see
+## `append_agent_note`).  First removes each entry about a merge that is no
+## longer in progress, and, unless ADVICE is "keep", each earlier entry about
+## the same merge that says that running the script again suffices, whose
+## advice is out of date (see `prune_agent_todo`).  ADVICE is "keep" when
+## that advice still holds, as when the script refuses to start while the
+## merge is in progress (see `refuse_merge_in_progress`).  Then does nothing
+## if an entry of the file still has the note's first line, which identifies
 ## the merge, and its last line, which says what to do, as after an earlier
-## run stopped at the same merge.  So an entry that says that a merge is
-## redundant is appended even if an earlier entry, written before the merge
-## was redundant, notes the same merge.
-## Appends the note to the summary (see `append_merge_note_summary`) in
-## either case.  Runs git commands, so it must not be called after an AI
-## agent ran without its work being checked; see `report_agent_session`.
+## run stopped at the same merge:  the earlier entry, such as one that asks a
+## person for help, stays.  So an entry that says that a merge is redundant
+## is appended even if an earlier entry, written before the merge was
+## redundant, notes the same merge.  Does nothing if no merge is in
+## progress.  Appends the note to the summary (see
+## `append_merge_note_summary`) in each case.  Runs git commands, so it must
+## not be called after an AI agent ran without its work being checked; see
+## `report_agent_session`.
 report_merge_in_progress() {
   report_merge_note="$(merge_in_progress_note "${1:-}" "${2:-}")"
   if [ -z "${report_merge_note}" ]; then
@@ -3054,6 +3201,11 @@ report_merge_in_progress() {
   fi
   append_merge_note_summary "${report_merge_note}"
   report_merge_todo="$(agent_todo_path)" || report_merge_todo=''
+  if [ "${3:-}" = keep ]; then
+    prune_agent_todo 0
+  else
+    prune_agent_todo 0 merge
+  fi
   # The awk program succeeds if an entry, which starts with a line "## ...",
   # has the line ${REPORT_FIRST} and then the line ${REPORT_LAST}.
   if [ -n "${report_merge_todo}" ] && [ -f "${report_merge_todo}" ] \
@@ -3065,13 +3217,24 @@ report_merge_in_progress() {
         END { exit !found }' "${report_merge_todo}"; then
     return 0
   fi
-  if append_agent_todo "${report_merge_todo}" "
-## Finish the merge in progress (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
-
-${report_merge_note}
-"; then
+  if append_agent_note "${report_merge_todo}" 'Finish the merge in progress' "${report_merge_note}"; then
     echo "${SCRIPT_NAME}: noted the merge in progress in ${report_merge_todo}" >&2
   fi
+}
+
+## Usage: append_agent_note FILE TASK NOTE
+## Appends to FILE, a file AGENT-TODO.md (see `append_agent_todo`), an entry
+## under a heading that gives the first line of TASK, such as "Finish the
+## merge in progress", and the time, whose text is NOTE, a paragraph such as
+## `merge_in_progress_note` prints.  Returns 1, after printing a diagnostic,
+## if it does not write FILE.  Runs no git command.
+append_agent_note() {
+  append_agent_note_task="$(printf '%s\n' "$2" | head -n 1)"
+  append_agent_todo "$1" "
+## ${append_agent_note_task} (${SCRIPT_NAME}, $(date '+%Y-%m-%d %H:%M:%S'))
+
+$3
+"
 }
 
 ## Usage: stop_at_merge DIAGNOSTIC REASON [UPSTREAM]
@@ -3509,6 +3672,11 @@ $(tail -n 100 "${fix_log}")"
   review_notice "${fix_with} fixed the build in commit $(git rev-parse --short HEAD); review it"
   return 0
 }
+
+## 1 if running the command again finishes a merge that it leaves in progress
+## in the current directory, as `git-push-to` does for its TO_DIR, and 0 if
+## running it again refuses to start while the merge is in progress.
+rerun_finishes_merge=0
 
 ## The AI agent that the commands ask to resolve merge conflicts and to fix a
 ## failed build:  "claude", "codex", or empty for none.  `parse_llm_option`
@@ -3964,7 +4132,8 @@ settle_merge_in_progress() {
 ## stopped at the merge, as when an AI agent is working there or when the
 ## merge is redundant but somebody has worked on it; and otherwise by
 ## `report_merge_in_progress_in`, as when the merge is not redundant or the
-## upstream branch cannot be fetched.
+## upstream branch cannot be fetched, keeping an entry of AGENT-TODO.md that
+## says that running the script again suffices (see `agent_rerun_advice`).
 refuse_merge_in_progress() {
   if git -C "$1" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
     # A subshell leaves the current directory unchanged.
@@ -3982,7 +4151,9 @@ refuse_merge_in_progress() {
       1) return 1 ;;
       *)
         echo "${SCRIPT_NAME}: a merge is in progress in $1; finish it, or abort it with \`git merge --abort\`" >&2
-        report_merge_in_progress_in "$1" "$2"
+        # An entry that says to abort the merge and then to run the script
+        # again still holds.
+        report_merge_in_progress_in "$1" "$2" keep
         return 1
         ;;
     esac
@@ -4081,14 +4252,14 @@ add_pulled_first_dir() {
   fi
 }
 
-## Usage: report_merge_in_progress_in DIRECTORY [REASON]
-## Runs `report_merge_in_progress` with REASON at the top level of the
-## working tree that contains DIRECTORY, in a subshell that leaves the
-## current directory unchanged.
+## Usage: report_merge_in_progress_in DIRECTORY [REASON [ADVICE]]
+## Runs `report_merge_in_progress` with REASON, no upstream branch, and
+## ADVICE at the top level of the working tree that contains DIRECTORY, in a
+## subshell that leaves the current directory unchanged.
 report_merge_in_progress_in() {
   (
     if report_in_top="$(git -C "$1" rev-parse --show-toplevel)" && cd -- "${report_in_top}"; then
-      report_merge_in_progress "${2:-}"
+      report_merge_in_progress "${2:-}" '' "${3:-}"
     fi
   )
 }
@@ -4341,6 +4512,8 @@ commit_resolved_merge() {
     return 1
   fi
   forget_conflicted_files
+  # The entries of AGENT-TODO.md about the merge are out of date.
+  prune_agent_todo 0
   return 0
 }
 
@@ -5502,8 +5675,9 @@ merge_build_push() {
       echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
       # Without the agent, stop as with "--no-llm".  Whether a merge might
       # have broken the build is decided only now, because deciding can
-      # fetch.
-      if [ -z "${5:-}" ] || ! agent_available "$5"; then
+      # fetch.  Whether the agent is ready to run is checked only once the
+      # agent is needed, because checking can cost a request to its service.
+      if [ -z "${5:-}" ]; then
         return 1
       fi
       merge_built="${6:-}"
@@ -5511,6 +5685,11 @@ merge_build_push() {
         merge_built="${merge_built}${merge_built:+ }$(built_commits "$7")"
       fi
       if ! has_unbuilt_merge "${merge_built}"; then
+        return 1
+      fi
+      if ! agent_available "$5"; then
+        [ -z "${agent_unavailable_reason}" ] \
+          || merge_build_note "${merge_fix_message}" "${agent_unavailable_reason}  $(agent_rerun_advice "$5" 'fix the build')"
         return 1
       fi
       # What this call's merge did, for the agent.
@@ -5535,6 +5714,9 @@ merge_build_push() {
         echo "${SCRIPT_NAME}: cannot cd to ${merge_top}" >&2
         return 1
       fi
+      # An earlier entry that says that running the script again suffices is
+      # out of date once the agent runs.
+      prune_agent_todo 0 build
       if ! fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
         report_agent_session "${merge_fix_message}"
         cd -- "${merge_dir}" || true
@@ -5553,6 +5735,27 @@ merge_build_push() {
   if ! git push --quiet; then
     echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
     return 1
+  fi
+}
+
+## Usage: merge_build_note TASK NOTE
+## For `merge_build_push`, when no AI agent tried to fix the build, because
+## the agent was not ready to run:  appends NOTE, one line that ends with the advice of
+## `agent_rerun_advice`, to the summary (see `append_summary`), and to
+## AGENT-TODO.md, under a heading that gives TASK, such as "Fix the build
+## after merging branch 'main'", after a line that names the working tree,
+## as in "The build failed in /home/me/myrepo-branch-feature." (see
+## `append_agent_note`).  First removes each earlier entry about the build
+## of the working tree with such advice, which NOTE replaces (see
+## `prune_agent_todo`).
+merge_build_note() {
+  append_summary "$2"
+  prune_agent_todo 0 build
+  merge_build_todo="$(agent_todo_path)" || merge_build_todo=''
+  # `prune_agent_todo` recognizes the line that names the working tree.
+  if append_agent_note "${merge_build_todo}" "$1" "The build failed in ${merge_build_todo%/*}.
+$2"; then
+    echo "${SCRIPT_NAME}: noted that in ${merge_build_todo}" >&2
   fi
 }
 
