@@ -1374,7 +1374,11 @@ resolve_merge_conflicts() {
       ;;
   esac
   # Any other change would be blamed on the agent below, or committed.
-  resolve_other="$(resolve_other_changes "${resolve_files}")"
+  if ! resolve_other="$(resolve_other_changes "${resolve_files}")"; then
+    echo "${SCRIPT_NAME}: cannot list the changed files in $(pwd)" >&2
+    resolve_stopped
+    return 1
+  fi
   if [ -n "${resolve_other}" ]; then
     printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: changed, but not conflicted: /" >&2
     echo "${SCRIPT_NAME}: the working tree has changes that are not part of the merge; resolve the conflicts by hand" >&2
@@ -1597,13 +1601,12 @@ resolve_with_agent() {
   # quotation mark.  `print_nul_lines` turns each newline within a pathname
   # into the byte 001, so that such a pathname matches no file, and a change
   # to that file is rejected.  The index holds a conflicted file at several
-  # stages, so `uniq` removes the repetitions from the sorted list.
-  if ! resolve_tracked="$(print_nul_lines git ls-files -z)"; then
+  # stages, and `--deduplicate`, which needs git 2.31, lists it once.
+  if ! resolve_tracked="$(print_nul_lines git ls-files -z --deduplicate)"; then
     echo "${SCRIPT_NAME}: cannot list the files that git tracks in $(pwd)" >&2
     rm -f -- "${resolve_marker}"
     return 1
   fi
-  resolve_tracked="$(printf '%s\n' "${resolve_tracked}" | uniq)"
   # Git runs a hook when the script commits, outside the agent's sandbox.
   resolve_hooks="$(working_tree_hooks)"
   resolve_branch="$(current_branch)" || resolve_branch="HEAD"
@@ -1716,7 +1719,12 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # agent changed or deleted, one per line.
   resolve_rerere_changed=''
   if [ "${resolve_refs_ok}" -eq 1 ]; then
-    resolve_agent_other="$(resolve_other_changes "${resolve_files}")"
+    # The agent's work is rejected if the files that it changed cannot be
+    # listed, and so cannot be checked.
+    if ! resolve_agent_other="$(resolve_other_changes "${resolve_files}")"; then
+      echo "${SCRIPT_NAME}: cannot list the files that ${resolve_with} changed in $(pwd)" >&2
+      resolve_ok=0
+    fi
     printf '%s\n' "${resolve_agent_other}" | while IFS= read -r resolve_file; do
       if [ -n "${resolve_file}" ]; then
         review_notice "${resolve_with} also changed: ${resolve_file}"
@@ -2516,12 +2524,16 @@ conflicted_files() {
 ## Usage: resolve_other_changes FILES
 ## Prints, one per line, each file that differs from AUTO_MERGE in the working
 ## tree or in the index and is not in FILES, the conflicted files, one per
-## line, as `conflicted_files` prints them.
+## line.  Both FILES and the output give each pathname as `conflicted_files`
+## prints it, with each newline in it replaced by the byte 001.  Returns 1 if
+## git cannot list the files that differ from AUTO_MERGE.
 resolve_other_changes() {
-  {
-    git diff --no-renames --name-only -z AUTO_MERGE
-    git diff --cached --no-renames --name-only -z AUTO_MERGE
-  } | tr '\000' '\n' | sort -u | grep -F -x -v -- "$1"
+  roc_worktree="$(print_nul_lines git diff --no-renames --name-only -z AUTO_MERGE)" || return 1
+  roc_index="$(print_nul_lines git diff --cached --no-renames --name-only -z AUTO_MERGE)" || return 1
+  # `printf` prints an empty listing as an empty line, which `sed` removes.
+  # `grep` returns 1 when it prints nothing.
+  printf '%s\n%s\n' "${roc_worktree}" "${roc_index}" \
+    | sed -e '/^$/d' | sort -u | grep -F -x -v -- "$1" || true
 }
 
 ## Usage: agent_available AGENT

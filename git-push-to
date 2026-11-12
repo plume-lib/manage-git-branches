@@ -619,11 +619,11 @@ agent_processes_in() {
 ## which it notes in AGENT-TODO.md (see `report_merge_in_progress`), if an AI
 ## agent is working in DIRECTORY (see `agent_processes_in`), as when the user
 ## is resolving the conflicts in a session that this script printed a command
-## to resume; if no conflicted file remains; if a conflicted file changed
-## after git, `git rerere`, and this script left it (see
-## `changed_conflicted_files`), as when this script rejected an AI agent's
-## work, whose edits remain; or if the conflicts are not resolved or the
-## merge cannot be committed.  The same holds if the current directory of a
+## to resume; if no conflicted file remains; if its conflicted files cannot be
+## listed; if a conflicted file changed after git, `git rerere`, and this
+## script left it (see `changed_conflicted_files`), as when this script
+## rejected an AI agent's work, whose edits remain; or if the conflicts are
+## not resolved or the merge cannot be committed.  The same holds if the current directory of a
 ## running AI agent cannot be read, so that it might be working in DIRECTORY.
 ## If `agent_processes_in` cannot tell at all whether an AI agent is working
 ## in DIRECTORY, because the system has neither /proc nor `lsof`, this

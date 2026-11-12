@@ -1483,4 +1483,52 @@ if (
   fail "changed_conflicted_files returned 0 although git could not list the conflicted files"
 fi
 
+## `resolve_other_changes` prints each file other than the conflicted ones
+## that differs from AUTO_MERGE, as `conflicted_files` prints it, and returns
+## 1 if git cannot list those files.  `resolve_merge_conflicts` then leaves
+## the merge in progress.
+roc_out="$(cd "${ccf_dir}" && resolve_other_changes f.txt)" \
+  || fail "resolve_other_changes returned 1 for a merge with no other changes"
+[ -z "${roc_out}" ] || fail "unexpected resolve_other_changes output: ${roc_out}"
+# A file whose name contains a newline, in the index and in the working tree.
+roc_name="$(printf 'a\nb')"
+printf '%s\n' new > "${ccf_dir}/${roc_name}"
+git -C "${ccf_dir}" add -- "${roc_name}"
+roc_out="$(cd "${ccf_dir}" && resolve_other_changes f.txt)" \
+  || fail "resolve_other_changes returned 1 for a merge with another change"
+[ "${roc_out}" = "$(printf 'a\001b')" ] \
+  || fail "unexpected resolve_other_changes output: ${roc_out}"
+if (
+  cd "${ccf_dir}" || exit 0
+  # A git that cannot list the files that differ in the working tree.
+  # shellcheck disable=SC2329 # Is called through print_nul_lines.
+  git() {
+    case "$*" in
+      "diff --no-renames --name-only -z AUTO_MERGE") return 128 ;;
+      *) command git "$@" ;;
+    esac
+  }
+  resolve_other_changes f.txt > /dev/null
+); then
+  fail "resolve_other_changes returned 0 although git could not list the changed files"
+fi
+if roc_out="$(
+  cd "${ccf_dir}" || exit 0
+  git() {
+    case "$*" in
+      "diff --no-renames --name-only -z AUTO_MERGE") return 128 ;;
+      *) command git "$@" ;;
+    esac
+  }
+  # The scripts that call it do not use `set -e`.
+  set +e
+  resolve_merge_conflicts '' side side 2>&1
+)"; then
+  fail "resolve_merge_conflicts returned 0 although git could not list the changed files"
+fi
+case "${roc_out}" in
+  *"cannot list the changed files"*"the merge of side is still in progress"*) ;;
+  *) fail "unexpected resolve_merge_conflicts diagnostic: ${roc_out}" ;;
+esac
+
 echo "${SCRIPT_NAME}: OK"
