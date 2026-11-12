@@ -27,6 +27,9 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 trap 'rm -rf "${WORK_DIR}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
+# The summary names each working tree by its path without symbolic links,
+# such as /var, which is a symbolic link on macOS.
+WORK_DIR="$(CDPATH='' cd -- "${WORK_DIR}" && pwd -P)"
 
 # shellcheck source=lib-git-test-env.sh
 . "${TESTS_DIR}/lib-git-test-env.sh"
@@ -495,6 +498,92 @@ case "${push_output}" in
   *"the pre-merge-commit hook, run again, failed"*) ;;
   *) fail "a pre-merge-commit hook that always fails: the hook did not run again: ${push_output}" ;;
 esac
+
+## A pre-merge-commit hook that rejects the commit of a merge without
+## conflicts after reformatting the merged file, and that, like lint-staged,
+## changes and stages another file when it runs again, although it then
+## accepts the commit, stops git-push-to.
+setup_clean_case pre-merge-commit-stages-again
+# shellcheck disable=SC2016 # The hook expands ${marker}.
+install_git_hook "${feature_dir}" pre-merge-commit \
+  'marker="$(git rev-parse --git-path hook-ran)"' \
+  'if [ -e "${marker}" ]; then echo hooked >> sub/keep.txt; git add sub/keep.txt; exit 0; fi' \
+  ': > "${marker}"' \
+  "${lowercase_hook}"
+push_to
+check_not_resolved "a pre-merge-commit hook that stages a change when run again" \
+  "the pre-merge-commit hook, run again, staged a change; the changes that the pre-merge-commit hook made when it rejected the commit are staged; later changes are staged too"
+
+## A pre-merge-commit hook that rejects the commit of a merge without
+## conflicts after reformatting the merged file, and that changes another
+## file when it runs again, although it then accepts the commit, stops
+## git-push-to.
+setup_clean_case pre-merge-commit-changes-again
+# shellcheck disable=SC2016 # The hook expands ${marker}.
+install_git_hook "${feature_dir}" pre-merge-commit \
+  'marker="$(git rev-parse --git-path hook-ran)"' \
+  'if [ -e "${marker}" ]; then echo hooked >> sub/keep.txt; exit 0; fi' \
+  ': > "${marker}"' \
+  "${lowercase_hook}"
+push_to
+check_not_resolved "a pre-merge-commit hook that changes a file when run again" \
+  "the pre-merge-commit hook, run again, changed a file; the changes that the pre-merge-commit hook made when it rejected the commit are staged; the working tree has later changes, which are not staged"
+
+## A pre-merge-commit hook that rejects the commit of a merge without
+## conflicts after reformatting the merged file, and that creates a file when
+## it runs again, although it then accepts the commit, stops git-push-to.
+setup_clean_case pre-merge-commit-creates-again
+# shellcheck disable=SC2016 # The hook expands ${marker}.
+install_git_hook "${feature_dir}" pre-merge-commit \
+  'marker="$(git rev-parse --git-path hook-ran)"' \
+  'if [ -e "${marker}" ]; then echo generated > generated.txt; exit 0; fi' \
+  ': > "${marker}"' \
+  "${lowercase_hook}"
+push_to
+check_not_resolved "a pre-merge-commit hook that creates a file when run again" \
+  "the pre-merge-commit hook, run again, created or deleted an untracked file; the changes that the pre-merge-commit hook made when it rejected the commit are staged; the working tree has later changes, which are not staged"
+
+## A pre-merge-commit hook that, like one that formats the whole project,
+## rejects the commit of a merge without conflicts after reformatting a file
+## that the merge does not change, does not stop git-push-to, which commits
+## that file too, as the hook left it, and lists it for review.
+setup_clean_case pre-merge-commit-changes-other
+install_git_hook "${feature_dir}" pre-merge-commit \
+  "tr 'a-z' 'A-Z' < sub/keep.txt > hook.tmp
+if cmp -s sub/keep.txt hook.tmp; then rm hook.tmp; exit 0; fi
+mv hook.tmp sub/keep.txt
+exit 1"
+summary="${case_dir}/summary.txt"
+push_to --summary "${summary}"
+check_resolved "a pre-merge-commit hook that reformats another file" \
+  "Merge branch 'main' into feature" \
+  ONE two three four five six SAME SEVEN-main SAME2 eight nine
+if [ "$(git -C "${remote}" show refs/heads/feature:sub/keep.txt)" != KEEP ]; then
+  fail "a pre-merge-commit hook that reformats another file: the merge lacks the hook's change: $(git -C "${remote}" show refs/heads/feature:sub/keep.txt)"
+fi
+if ! grep -q -x -F -- "in ${feature_dir}: the pre-merge-commit hook changed sub/keep.txt, which the commit does not otherwise change; review the hook's changes, which commit $(git -C "${feature_dir}" rev-parse --short HEAD) includes" "${summary}"; then
+  fail "a pre-merge-commit hook that reformats another file: no summary line about sub/keep.txt: $(cat "${summary}")"
+fi
+
+## A pre-merge-commit hook that rejects the commit of a merge without
+## conflicts after changing and staging a file stops git-push-to, which does
+## not commit again.
+setup_clean_case pre-merge-commit-stages
+install_git_hook "${feature_dir}" pre-merge-commit 'echo hooked >> sub/keep.txt' 'git add sub/keep.txt' 'exit 1'
+push_to
+check_not_resolved "a pre-merge-commit hook that stages a change" \
+  "not committing again in ${feature_dir}, because the pre-merge-commit hook staged a change"
+check_no_retry "a pre-merge-commit hook that stages a change"
+
+## A pre-merge-commit hook that rejects the commit of a merge without
+## conflicts after deleting a file stops git-push-to, which does not commit
+## again.
+setup_clean_case pre-merge-commit-deletes
+install_git_hook "${feature_dir}" pre-merge-commit 'rm sub/keep.txt' 'exit 1'
+push_to
+check_not_resolved "a pre-merge-commit hook that deletes a file" \
+  "not committing again in ${feature_dir}, because the pre-merge-commit hook did more than modify files"
+check_no_retry "a pre-merge-commit hook that deletes a file"
 
 ## A pre-merge-commit hook that rejects the commit of the merge that a pull
 ## makes, after reformatting the merged file, does not stop the pull, which

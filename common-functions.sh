@@ -223,12 +223,13 @@ append_merge_note_summary() {
 ## Appends LINE, followed by a newline, to the file named by ${summary_file}, if
 ## that variable is set and not empty.  The summary lists what a person should
 ## look at after a run:  each change by an AI agent to review, each change by a
-## hook to a file that a commit would not otherwise change, each merge left
-## in progress and each agent session that can be continued (which
-## `report_merge_in_progress` and `report_agent_session` also note in
+## hook to a file that a commit would not otherwise change, each file that
+## changed after a hook's changes were staged (see `commit_staged_again`),
+## each merge left in progress and each agent session that can be continued
+## (which `report_merge_in_progress` and `report_agent_session` also note in
 ## AGENT-TODO.md), and the step that failed.  `git-push-to --summary` sets
-## ${summary_file}.  A failure to write the summary goes unreported, because the
-## same information is printed as a diagnostic.
+## ${summary_file}.  A failure to write the summary goes unreported, because
+## the same information is printed as a diagnostic.
 append_summary() {
   if [ -n "${summary_file:-}" ]; then
     printf '%s\n' "$1" >> "${summary_file}" 2> /dev/null || true
@@ -3599,6 +3600,16 @@ commit_staged_before() {
   fi
 }
 
+## Usage: untracked_files_changed
+## Returns 0 if the files of the working tree in the current directory that
+## git does not track and does not ignore differ from those in
+## ${commit_staged_untracked} (see `commit_staged_before`), or if they cannot
+## be listed, and 1 otherwise.
+untracked_files_changed() {
+  ! untracked_files_changed_list="$(untracked_files)" \
+    || [ "${untracked_files_changed_list}" != "${commit_staged_untracked}" ]
+}
+
 ## Usage: commit_staged MESSAGE [COMMAND...]
 ## Commits the changes that are staged in the current directory, the top
 ## level of a working tree, with the message MESSAGE; the commit is a merge
@@ -3673,14 +3684,15 @@ review_unstaged_changes() {
 ## Then, if HOOK is "pre-merge-commit", which `git commit` does not run, it
 ## runs the hook again, with `GIT_EDITOR=:`, as `git merge` runs it, on the
 ## files as the hook left them, and requires that it succeed without
-## changing a file.  Then it runs COMMAND, if it is given, as a check of
-## those files, and commits only if COMMAND succeeds.  `git commit` runs the
-## pre-commit hook again.  For each file that the hook changed but the
-## commit does not otherwise change, it prints a notice that says whether
-## the commit includes the hook's changes, and appends the notice to the
-## summary (see `review_hook_changes`).  It does the same for each file
-## that has unstaged changes afterward, as when the hook changed a file
-## again when it ran again (see `review_unstaged_changes`).
+## changing or staging a file or creating or deleting an untracked file.
+## Then it runs COMMAND, if it is given, as a check of those files, and
+## commits only if COMMAND succeeds.  `git commit` runs the pre-commit hook
+## again.  For each file that the hook changed but the commit does not
+## otherwise change, it prints a notice that says whether the commit
+## includes the hook's changes, and appends the notice to the summary (see
+## `review_hook_changes`).  It does the same for each file that has unstaged
+## changes afterward, as when the hook changed a file again when it ran
+## again (see `review_unstaged_changes`).
 ##
 ## Returns 0 if the commit succeeded, and a nonzero status otherwise.
 commit_staged_again() {
@@ -3718,12 +3730,11 @@ commit_staged_again() {
     { committed[$0] = 1 }')"
   if [ "$(git write-tree 2> /dev/null)" != "${commit_again_tree}" ]; then
     commit_again_refusal="the ${commit_again_hook} hook staged a change"
-  elif ! commit_again_untracked="$(untracked_files)" \
-    || [ "${commit_again_untracked}" != "${commit_staged_untracked}" ]; then
+  elif untracked_files_changed; then
     commit_again_refusal="the ${commit_again_hook} hook created or deleted an untracked file"
   elif printf '%s\n' "${commit_again_status}" | sed -n -e 'p;n' | grep -v -x -q M; then
     commit_again_refusal="the ${commit_again_hook} hook did more than modify files"
-  elif ! git add -u; then
+  elif ! git add -u || ! commit_again_staged="$(git write-tree)"; then
     commit_again_refusal="the hook's changes cannot be staged"
   else
     commit_again_refusal=''
@@ -3745,6 +3756,10 @@ commit_staged_again() {
       commit_again_failure="the pre-merge-commit hook, run again, failed"
     elif ! git diff --quiet; then
       commit_again_failure="the pre-merge-commit hook, run again, changed a file"
+    elif [ "$(git write-tree 2> /dev/null)" != "${commit_again_staged}" ]; then
+      commit_again_failure="the pre-merge-commit hook, run again, staged a change"
+    elif untracked_files_changed; then
+      commit_again_failure="the pre-merge-commit hook, run again, created or deleted an untracked file"
     fi
   fi
   if [ -z "${commit_again_failure}" ] && [ $# -gt 0 ] && ! "$@"; then
@@ -3758,9 +3773,11 @@ commit_staged_again() {
   fi
   if [ -n "${commit_again_failure}" ]; then
     commit_again_later=''
-    if ! git diff --quiet || ! commit_again_untracked="$(untracked_files)" \
-      || [ "${commit_again_untracked}" != "${commit_staged_untracked}" ]; then
-      commit_again_later="; the working tree has later changes, which are not staged"
+    if [ "$(git write-tree 2> /dev/null)" != "${commit_again_staged}" ]; then
+      commit_again_later="; later changes are staged too"
+    fi
+    if ! git diff --quiet || untracked_files_changed; then
+      commit_again_later="${commit_again_later}; the working tree has later changes, which are not staged"
     fi
     echo "${SCRIPT_NAME}: not committed in $(pwd), because ${commit_again_failure}; the changes that the ${commit_again_hook} hook made when it rejected the commit are staged${commit_again_later}" >&2
     review_hook_changes "${commit_again_hook}" "${commit_again_outside}" \
