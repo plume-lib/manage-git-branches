@@ -1631,11 +1631,11 @@ $(diff "${ct_expected}" "${pat_todo}" || true)"
   fi
 }
 
-## Usage: prune_todo BUILT
-## Runs `prune_agent_todo BUILT` in ${pat_dir}, and sets ${pat_output} to
-## what it printed.
+## Usage: prune_todo BUILT [RERUN]
+## Runs `prune_agent_todo BUILT RERUN` in ${pat_dir}, and sets ${pat_output}
+## to what it printed.
 prune_todo() {
-  pat_output="$(cd "${pat_dir}" && prune_agent_todo "$1" 2>&1)" \
+  pat_output="$(cd "${pat_dir}" && prune_agent_todo "$1" "${2:-}" 2>&1)" \
     || fail "prune_agent_todo returned a nonzero status: ${pat_output}"
 }
 
@@ -1671,6 +1671,43 @@ case "${pat_output}" in
   *"removed from ${pat_todo} 3 entries that no longer apply") ;;
   *) fail "prune_agent_todo, build succeeded: wrong diagnostic: ${pat_output}" ;;
 esac
+
+# An entry that says that running the script again suffices is removed when
+# RERUN names its kind, and, for a build, once the build succeeds.
+pat_merge_rerun="## Finish the merge in progress (git-push-to, 2026-11-11 09:00:00)
+
+The merge of commit ${pat_second} is in progress in ${pat_dir}.
+claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, running the same command again asks it to resolve the conflicts, so no person needs to.
+Finish it (resolve its conflicts and commit it), or abort it with \`git merge --abort\`; then delete this entry."
+pat_merge_help="## Finish the merge in progress (git-push-to, 2026-11-11 09:01:00)
+
+The merge of commit ${pat_second} is in progress in ${pat_dir}.
+claude, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge.
+Finish it (resolve its conflicts and commit it), or abort it with \`git merge --abort\`; then delete this entry."
+pat_build_rerun="## Fix the build after merging branch 'main' (git-push-to, 2026-11-11 09:02:00)
+
+The build failed in ${pat_dir}.
+claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, running the same command again asks it to fix the build, so no person needs to."
+pat_build_rerun_other="## Fix the build after merging branch 'main' (git-push-to, 2026-11-11 09:03:00)
+
+The build failed in /elsewhere.
+claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, running the same command again asks it to fix the build, so no person needs to."
+printf '%s\n' "${pat_second}" > "${pat_merge_head}"
+write_todo "${pat_preamble}" "${pat_merge_rerun}" "${pat_merge_help}" "${pat_build_rerun}" "${pat_build_rerun_other}"
+prune_todo 0
+check_todo "rerun advice, no RERUN" "${pat_preamble}" "${pat_merge_rerun}" "${pat_merge_help}" \
+  "${pat_build_rerun}" "${pat_build_rerun_other}"
+prune_todo 0 build
+check_todo "rerun advice, build" "${pat_preamble}" "${pat_merge_rerun}" "${pat_merge_help}" \
+  "${pat_build_rerun_other}"
+write_todo "${pat_preamble}" "${pat_merge_rerun}" "${pat_merge_help}" "${pat_build_rerun}" "${pat_build_rerun_other}"
+prune_todo 0 merge
+check_todo "rerun advice, merge" "${pat_preamble}" "${pat_merge_help}" "${pat_build_rerun}" \
+  "${pat_build_rerun_other}"
+write_todo "${pat_preamble}" "${pat_merge_rerun}" "${pat_merge_help}" "${pat_build_rerun}" "${pat_build_rerun_other}"
+rm -f "${pat_merge_head}"
+prune_todo 1
+check_todo "rerun advice, build succeeded" "${pat_preamble}" "${pat_build_rerun_other}"
 
 # A file whose last entry is removed ends with that entry's predecessor, with
 # no blank line after it.
@@ -1748,17 +1785,27 @@ pat_output="$(cd "${pat_link}/sub" && prune_agent_todo 1 2>&1)" \
 check_todo "subdirectory" "${pat_preamble}" "${pat_person}"
 rmdir "${pat_dir}/sub"
 # An entry to which a person added text is kept:  a line after its command,
-# a line after its merge paragraph, or a paragraph at the end of the file,
+# a line after its merge paragraph, in either of the forms that
+# `merge_in_progress_note` writes, or a paragraph at the end of the file,
 # which belongs to the last entry.
 pat_build_noted="${pat_build}
 My note:  wait for the upstream fix."
 pat_merge_noted="${pat_merge_first}
 Ask the release manager first."
+# An entry about a merge of ${pat_first} that is redundant.
+pat_merge_redundant="## Finish the merge in progress (git-push-to, 2026-11-09 08:25:00)
+
+The merge of commit ${pat_first} is in progress in ${pat_dir}.
+No conflicted file remains.
+It is probably redundant:  origin/main, the upstream branch, already contains both of its sides.
+Unless its resolution has changes that origin/main lacks, abort it with \`git merge --abort\`, and run \`git-push-to\` again; then delete this entry."
+pat_merge_redundant_noted="${pat_merge_redundant}
+Keep the merge:  its resolution fixes a typo."
 write_todo "${pat_preamble}" "${pat_build_noted}" "${pat_merge_noted}" "${pat_merge_first}" \
-  "${pat_build}" "My note at the end."
+  "${pat_merge_redundant_noted}" "${pat_merge_redundant}" "${pat_build}" "My note at the end."
 prune_todo 1
 check_todo "a person's note in an entry" "${pat_preamble}" "${pat_build_noted}" "${pat_merge_noted}" \
-  "${pat_build}" "My note at the end."
+  "${pat_merge_redundant_noted}" "${pat_build}" "My note at the end."
 # A file with CRLF line endings is pruned, and keeps its line endings.
 # ${pat_crlf} is the expected file.
 pat_crlf="${WORK_DIR}/crlf-todo"

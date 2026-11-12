@@ -104,7 +104,9 @@
 # `resolve-conflicts` can tell whether the chain pulled it.
 #
 # Without the pull, this script still stops if a merge is in progress in the
-# first directory, or if it has unmerged files, as `git pull` would.
+# first directory, or if it has unmerged files, as `git pull` would.  But it
+# first aborts a merge in progress there that is redundant and that nobody
+# has worked on, as described under "Conflicts".
 
 # Rebasing
 #
@@ -156,7 +158,10 @@
 # the user to finish or to abort with `git merge --abort`.  Whenever this
 # script stops with a merge in progress, it appends an entry that says so to
 # the file AGENT-TODO.md at the top level of the working tree (see "Asking an
-# AI agent" below), unless the file already has one for that merge.
+# AI agent" below), unless the file already has one that notes that merge
+# and says what to do about it in the same way.  So a merge that an entry
+# notes gets a second entry once it becomes redundant (see below), which
+# says that it is probably redundant.
 #
 # A merge can already be in progress when this script starts, as one is
 # after this script stopped as just described.  In each directory except the
@@ -181,7 +186,20 @@
 #  * A conflicted file changed after git, `git rerere`, and this script left
 #    it, as when this script rejected an AI agent's work, whose edits remain,
 #    or when you have begun to resolve the conflicts.
-# A merge in progress in the first directory makes this script stop.
+# But if the branch's upstream branch, as it is or once fetched, already
+# contains both sides of the merge, as when another clone made the same merge
+# and pushed it, then the merge is redundant, and this script never finishes
+# it, which would duplicate the upstream branch's merge.  Unless an AI agent
+# is working in the directory, as above, this script aborts the merge if nobody
+# has worked on it since git, `git rerere`, and this script left it; the pull
+# then fast-forwards the branch.  If somebody has worked on it, this script
+# does not touch it, but stops and says that the merge is probably
+# redundant, as does the entry in AGENT-TODO.md.  If the upstream branch
+# cannot be fetched, so that whether the merge is redundant is unknown, this
+# script also stops.  The same holds for a merge in progress in the first
+# directory, whether or not this script pulls it; any other merge in
+# progress in the first directory makes this script stop.  `git-pull-upstream`
+# treats a redundant merge in progress in the same way.
 #
 # A hook, such as one that runs a formatter, can reject a commit that this
 # script makes, of a merge or of a fix to the build, after changing files.
@@ -213,7 +231,11 @@
 # "--no-llm", and "--no-llm" overrides any of them that precedes it.
 # "--llm" turns on the agent that the last "--claude" or "--codex" chose.
 # If the agent cannot be run because its command is not on the PATH, this
-# script acts as it does with "--no-llm".
+# script acts as it does with "--no-llm".  So it does if the agent is not
+# ready to run:  before it first asks the agent to resolve a merge's
+# conflicts or to fix a build, this script asks the agent for a one-word
+# reply, which fails if the agent is not logged in, has reached a usage
+# limit, or cannot reach its service.
 # The agent runs in a sandbox, which requires a recent version of it:
 # Claude Code with the `--restricted` option and the setting
 # `permissions.blockReadsOutsideWorkingDirectories`, or Codex with permission
@@ -300,12 +322,19 @@
 # it; delete the entry once you have dealt with it.  A later run deletes an
 # entry that no longer applies, unless you added text to it:  one about a
 # merge that is no longer in progress, because you finished or aborted it,
-# before it pulls or merges into the working tree, and one about a failed
-# build, once the build succeeds.  It deletes the file if it has no entry left and you added
-# nothing to it.  `prune_agent_todo` in common-functions.sh says which
-# entries are deleted.  When the agent could not
-# resolve the conflicts, the entry also tells an AI agent that reads it to
-# ask a person for help with them.  The resumed
+# before it pulls or merges into the working tree, or because it committed
+# the merge, and one about a failed build, once the build succeeds.  It
+# deletes the file if it has no entry left and you added nothing to it.
+# `prune_agent_todo` in common-functions.sh says which entries are deleted.
+# When the agent could not resolve the conflicts, the entry also tells an AI
+# agent that reads it to ask a person for help with them.  But when the
+# agent was not ready to run, the entry instead says that running this
+# script again, once the agent can run, asks the agent to do its task again;
+# for a merge in progress in the first directory, whose pull such a merge
+# makes this script refuse, the entry says to abort the merge first.  A later
+# run also deletes such an entry when it runs the agent again for the same
+# merge or build, or writes a newer entry about it.  An entry that asks a
+# person for help stays while the merge is in progress.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
 # contains the text of the merged changes, which can include instructions
 # from other people.
@@ -420,8 +449,8 @@ if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
 fi
 # shellcheck source=common-functions.sh
 . "${SCRIPT_DIR}/common-functions.sh"
-# This script runs git in directories other than the current one, such as in
-# `agent_processes_in`, where an inherited $GIT_DIR would override `git -C`.
+# This script runs git in directories other than the current one, where an
+# inherited $GIT_DIR would override `git -C`.
 unset_git_location_variables
 
 ## Returns 0 if the given directory is the top level of a working tree whose
@@ -535,83 +564,6 @@ fetch_branch() {
   return 0
 }
 
-## Usage: agent_processes_in DIRECTORY
-## Prints, one per line, the process id and command name, such as
-## "4242 claude", of each process of the current user that runs an AI agent
-## and whose current directory is in the working tree whose top level is
-## DIRECTORY, an absolute pathname with symbolic links resolved.  A process
-## runs an AI agent if its command name is "claude" or "codex", as for Claude
-## Code and Codex installed as native executables.  A process whose current
-## directory is in another working tree nested in DIRECTORY, such as one in
-## DIRECTORY/.claude/worktrees/NAME, is not printed.  Neither is a process
-## that is this script or an ancestor of it, such as a Claude Code session
-## that ran this script.  Returns 1, after printing a diagnostic, if the
-## system has neither /proc nor `lsof`, so that the current directories of
-## processes cannot be read.  Returns 2, after printing a diagnostic for each,
-## if the current directory of some such process that is still running cannot
-## be read, so that whether it works in DIRECTORY is unknown; it still prints
-## the processes that it found in DIRECTORY.
-agent_processes_in() {
-  if [ -d /proc/self ]; then
-    agent_processes_via=proc
-  elif command -v lsof > /dev/null 2>&1; then
-    agent_processes_via=lsof
-  else
-    echo "${SCRIPT_NAME}: cannot tell whether an AI agent is working in $1, because this system has neither /proc nor lsof" >&2
-    return 1
-  fi
-  # The process ids of this shell and its ancestors, each followed by a blank.
-  agent_processes_ancestors=' '
-  agent_processes_pid=$$
-  while [ -n "${agent_processes_pid}" ] && [ "${agent_processes_pid}" -gt 1 ]; do
-    agent_processes_ancestors="${agent_processes_ancestors}${agent_processes_pid} "
-    agent_processes_pid="$(ps -o ppid= -p "${agent_processes_pid}" 2> /dev/null | tr -d ' ')"
-  done
-  # On macOS, `ps` prints a command name as the executable's full pathname,
-  # which can contain blanks.
-  # The loop runs in an explicit subshell, so that its exit status is the
-  # pipeline's even in a shell that runs a pipeline's last command in the
-  # current shell.
-  ps -U "$(id -u)" -o pid= -o comm= | (
-    agent_processes_status=0
-    while read -r agent_processes_pid agent_processes_command; do
-      case "${agent_processes_command##*/}" in
-        claude | codex) ;;
-        *) continue ;;
-      esac
-      case "${agent_processes_ancestors}" in
-        *" ${agent_processes_pid} "*) continue ;;
-      esac
-      if [ "${agent_processes_via}" = proc ]; then
-        agent_processes_cwd="$(readlink "/proc/${agent_processes_pid}/cwd" 2> /dev/null)"
-      else
-        agent_processes_cwd="$(lsof -a -p "${agent_processes_pid}" -d cwd -Fn 2> /dev/null | sed -n -e 's/^n//p')"
-      fi
-      if [ -z "${agent_processes_cwd}" ]; then
-        # A process that has exited since `ps` listed it, or a zombie, has no
-        # current directory and works nowhere.  For any other process, the
-        # lookup failed, and the process might be working in the directory.
-        case "$(ps -o stat= -p "${agent_processes_pid}" 2> /dev/null | tr -d ' ')" in
-          '' | Z*) continue ;;
-        esac
-        echo "${SCRIPT_NAME}: cannot read the current directory of ${agent_processes_command##*/} (process ${agent_processes_pid})" >&2
-        agent_processes_status=2
-        continue
-      fi
-      case "${agent_processes_cwd}" in
-        "$1" | "$1"/*) ;;
-        *) continue ;;
-      esac
-      # The test above is cheap; this one excludes a nested working tree.
-      if agent_processes_top="$(git -C "${agent_processes_cwd}" rev-parse --show-toplevel 2> /dev/null)" \
-        && [ "$(physical_path "${agent_processes_top}" 2> /dev/null)" = "$1" ]; then
-        printf '%s %s\n' "${agent_processes_pid}" "${agent_processes_command##*/}"
-      fi
-    done
-    exit "${agent_processes_status}"
-  )
-}
-
 ## Usage: finish_merge_in_progress DIRECTORY
 ## If a merge is in progress in DIRECTORY, the top level of a working tree and
 ## the current directory, resolves its conflicts and commits it, as when a
@@ -620,50 +572,26 @@ agent_processes_in() {
 ## the merge stopped, and then asks the AI agent ${llm_agent}, if it is not
 ## empty, about the conflicts that remain.  The commit's message is the
 ## merge's own (see `in_progress_merge_message`).  Does nothing if no merge
-## is in progress.
+## is in progress.  First runs `settle_merge_in_progress`, which aborts the
+## merge if it is redundant and nobody has worked on it.
 ##
 ## Returns 1, after printing a diagnostic, and leaves the merge in progress,
-## which it notes in AGENT-TODO.md (see `report_merge_in_progress`), if an AI
-## agent is working in DIRECTORY (see `agent_processes_in`), as when the user
-## is resolving the conflicts in a session that this script printed a command
-## to resume; if no conflicted file remains; if its conflicted files cannot be
-## listed; if a conflicted file changed after git, `git rerere`, and this
-## script left it (see `changed_conflicted_files`), as when this script
-## rejected an AI agent's work, whose edits remain; or if the conflicts are
-## not resolved or the merge cannot be committed.  The same holds if the current directory of a
-## running AI agent cannot be read, so that it might be working in DIRECTORY.
-## If `agent_processes_in` cannot tell at all whether an AI agent is working
-## in DIRECTORY, because the system has neither /proc nor `lsof`, this
-## function proceeds as if none is.
+## which it notes in AGENT-TODO.md (see `report_merge_in_progress`), if
+## `settle_merge_in_progress` fails, as when an AI agent is working in
+## DIRECTORY or the merge is redundant but somebody has worked on it; if no
+## conflicted file remains; if its conflicted files cannot be listed; if a
+## conflicted file changed after git, `git rerere`, and this script left it
+## (see `changed_conflicted_files`), as when this script rejected an AI
+## agent's work, whose edits remain; or if the conflicts are not resolved or
+## the merge cannot be committed.
 finish_merge_in_progress() {
-  if ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
-    return 0
-  fi
-  finish_in_progress="${SCRIPT_NAME}: a merge is in progress in $1"
-  # `agent_processes_in` has said why it cannot tell.
-  finish_agents="$(agent_processes_in "$1")"
-  finish_agents_status=$?
-  case "${finish_agents_status}" in
-    0 | 2) ;;
-    *)
-      echo "${SCRIPT_NAME}: finishing the merge in $1 anyway" >&2
-      finish_agents=''
-      ;;
+  settle_merge_in_progress "$1" 1
+  case "$?" in
+    0) return 0 ;;
+    2) ;;
+    *) return 1 ;;
   esac
-  if [ -z "${finish_agents}" ] && [ "${finish_agents_status}" -eq 2 ]; then
-    stop_at_merge "${finish_in_progress}, and an AI agent whose current directory cannot be read might be working there; finish the merge, or abort it with \`git merge --abort\`" \
-      "The current directory of an AI agent's process could not be read, so the agent might have been working in the directory."
-    return 1
-  fi
-  if [ -n "${finish_agents}" ]; then
-    printf '%s\n' "${finish_agents}" | while read -r finish_pid finish_command; do
-      echo "${SCRIPT_NAME}: ${finish_command} (process ${finish_pid}) is working in $1" >&2
-    done
-    stop_at_merge "${finish_in_progress}, and an AI agent is working there; finish the merge, or abort it with \`git merge --abort\`" \
-      "An AI agent was working in the directory:  $(printf '%s\n' "${finish_agents}" \
-        | sed -e 's/^\([0-9]*\) \(.*\)/\2 (process \1)/' | paste -s -d ' ' -)."
-    return 1
-  fi
+  finish_in_progress="${SCRIPT_NAME}: a merge is in progress in $1"
   # `resolve_merge_conflicts` would say only that it cannot list the
   # conflicted files.  A merge in progress without conflicts is one whose
   # conflicts someone resolved and staged, one whose commit a hook rejected,
@@ -717,9 +645,10 @@ finish_merge_in_progress() {
   commit_resolved_merge "${llm_agent}" MERGE_HEAD "${finish_source}" "${finish_message}"
 }
 
-## Usage: git_push_to FROM_DIR TO_DIR PULL_FROM
+## Usage: git_push_to FROM_DIR TO_DIR PULL_FROM FIRST
 ## A helper function that works on exactly two repositories.  Pulls FROM_DIR
-## first if PULL_FROM is 1, and not if it is 0.  Sets ${push_step} to the
+## first if PULL_FROM is 1, and not if it is 0.  FIRST is 1 if FROM_DIR is
+## the first directory of the chain, and 0 otherwise.  Sets ${push_step} to the
 ## step that it reached, such as "pulling DIR" or "building"; `push_chain`
 ## reports it when this function fails.  Sets ${from_pulled} to 1 once it
 ## has pulled FROM_DIR, and to 0 before then.
@@ -729,6 +658,10 @@ git_push_to() {
   to="$2"
   push_step='checking the directories'
   from_pulled=0
+  # A rerun refuses to pull the first directory while a merge is in progress
+  # there.  Any other FROM_DIR is the TO_DIR of the step before, where a
+  # rerun finishes the merge.
+  rerun_finishes_merge=$((1 - $4))
 
   # A failure here is not yet an error, and it leaves the variable empty:  a
   # nonexistent directory fails here, and the tests just below diagnose that
@@ -822,8 +755,12 @@ git_push_to() {
 
   # TO_DIR is never the first directory of the chain.  A merge in progress in
   # the first directory makes `refuse_merge_in_progress` above, which
-  # `pull_resolving` calls, fail.
+  # `pull_resolving` calls, fail, unless `settle_merge_in_progress` aborted
+  # it.
   # Note: pwd=to_absolute
+  # From here on, a merge that this function leaves in progress is in
+  # TO_DIR, where a rerun finishes it.
+  rerun_finishes_merge=1
   push_step="finishing the merge in progress in ${to}"
   if ! finish_merge_in_progress "${to_absolute}"; then
     return 1
@@ -1156,9 +1093,11 @@ push_chain() {
   pull_from=$((1 - no_pull_first))
   # 1 until the first directory has been pulled, if it is to be pulled.
   first_unpulled="${pull_from}"
+  # 1 for the step whose FROM_DIR is the first directory.
+  first_step=1
   for arg; do
     if [ -n "$prev" ]; then
-      if ! git_push_to "$prev" "$arg" "${pull_from}"; then
+      if ! git_push_to "$prev" "$arg" "${pull_from}" "${first_step}"; then
         chain_failed "failed to push ${prev} into ${arg}, while ${push_step}"
         if [ "${first_unpulled}" -eq 1 ] && [ "${from_pulled}" -eq 0 ]; then
           return 2
@@ -1167,6 +1106,7 @@ push_chain() {
       fi
       pull_from=1
       first_unpulled=0
+      first_step=0
     fi
     prev="$arg"
   done

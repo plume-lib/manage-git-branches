@@ -50,6 +50,13 @@ export STUB_LOG
 ## upstream changes during a run.
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
+# `agent_ready` checks that the agent can run.
+case "$*" in
+  *--no-session-persistence*)
+    echo OK
+    exit 0
+    ;;
+esac
 echo claude >> "${STUB_LOG}"
 cat > /dev/null
 if [ -n "${STUB_ADVANCE}" ] && ! grep -q -x advanced "${STUB_LOG}"; then
