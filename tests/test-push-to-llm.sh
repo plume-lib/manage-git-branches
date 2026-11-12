@@ -1666,6 +1666,18 @@ check_todo_merge "AGENT-TODO.md without an agent"
 push_to good --no-llm
 check_not_resolved "AGENT-TODO.md without an agent, rerun"
 check_todo_merge "AGENT-TODO.md without an agent, rerun"
+# Once a person finishes the merge, a rerun that pushes deletes the entry,
+# and with it the file, which holds nothing else.
+git -C "${feature_dir}" diff --name-only --diff-filter=U -z \
+  | xargs -0 git -C "${feature_dir}" checkout --ours --
+git -C "${feature_dir}" commit -q -a --no-edit
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "AGENT-TODO.md without an agent, merge finished: git-push-to failed: ${push_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "AGENT-TODO.md without an agent, merge finished: the file was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
 setup_case todo-agent
 push_to none --llm
 check_not_resolved "AGENT-TODO.md with an agent"
@@ -2177,7 +2189,7 @@ install_git_hook "${feature_dir}" pre-commit \
 STUB_BUILD=fix push_to good --llm
 check_not_pushed "build fix with a hook that breaks the build"
 case "${push_output}" in
-  *"not committing again"*"cannot commit the changes of claude"*) ;;
+  *"not committed in "*"compile-project\` failed"*"cannot commit the changes of claude"*) ;;
   *) fail "build fix with a hook that breaks the build: wrong diagnostic: ${push_output}" ;;
 esac
 if [ "$(git -C "${feature_dir}" log -1 --format=%s HEAD)" != "Merge branch 'main' into feature" ]; then
@@ -2218,6 +2230,23 @@ fi
 if [ "$(wc -l < "${STUB_LOG}")" -ne 2 ]; then
   fail "build not fixed: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
 fi
+# Once a person fixes the build, a rerun that builds and pushes deletes the
+# entry, and with it the file, which holds nothing else.
+echo "fine" > "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Fix the build by hand"
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "build fixed by hand: git-push-to failed: ${push_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "build fixed by hand: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+# The diagnostic names the file by a physical path, as on macOS, where the
+# temporary directory is under a symbolic link.
+case "${push_output}" in
+  *"deleted $(cd "${feature_dir}" && pwd -P)/AGENT-TODO.md, whose entries no longer apply"*) ;;
+  *) fail "build fixed by hand: wrong diagnostic: ${push_output}" ;;
+esac
 
 ## An agent whose changes do not fix the build gets three attempts.
 setup_case build-bad build
@@ -2899,6 +2928,32 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
 fi
 check_pull_fixed "git-pull-upstream after a pull that breaks the build" \
   "Fix the build after merging ${pull_description}"
+
+## Run in a subdirectory, `git-pull-upstream` runs the agent that fails to fix
+## the build at the top level of the working tree, so that AGENT-TODO.md
+## gives a command that starts there.  Once a person fixes the build, a rerun
+## in the subdirectory deletes the entry, and with it the file.
+setup_pull_breaks pull-upstream-build-subdir
+git -C "${feature_dir}" remote set-head origin main
+mkdir "${feature_dir}/sub"
+if pull_upstream_output="$(cd "${feature_dir}/sub" && STUB_BUILD=none PATH="${WORK_DIR}/test-bin:${PATH}" \
+  MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT='' "${COMMANDS_DIR}/git-pull-upstream" --llm 2>&1)"; then
+  fail "git-pull-upstream in a subdirectory, build not fixed: succeeded: ${pull_upstream_output}"
+fi
+session_id="$(sed -n -e '/^--session-id$/{n;p;}' "${STUB_ARGS}")"
+session_dir="$(cd "${feature_dir}" && pwd -P)"
+if ! grep -q -x -F "cd ${session_dir} && claude --resume ${session_id}" "${feature_dir}/AGENT-TODO.md"; then
+  fail "git-pull-upstream in a subdirectory, build not fixed: AGENT-TODO.md lacks the command that starts at the top level: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
+echo "fine" > "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Fix the build by hand"
+if ! pull_upstream_output="$(cd "${feature_dir}/sub" && MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT='' \
+  "${COMMANDS_DIR}/git-pull-upstream" --no-llm 2>&1)"; then
+  fail "git-pull-upstream in a subdirectory, build fixed by hand: failed: ${pull_upstream_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "git-pull-upstream in a subdirectory, build fixed by hand: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
 build=0
 
 ## An agent that is not installed is not asked to fix the build.  The merge

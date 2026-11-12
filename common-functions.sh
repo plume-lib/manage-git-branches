@@ -197,8 +197,8 @@ make_temp_dir() {
 }
 
 ## Usage: review_notice MESSAGE
-## Prints MESSAGE, which names something that an AI agent did that a person
-## should review, as a diagnostic, and appends it to the summary (see
+## Prints MESSAGE, which names something that an AI agent or a hook did that a
+## person should review, as a diagnostic, and appends it to the summary (see
 ## `append_summary`), prefixed by the current directory, as in
 ## "in /home/me/myrepo-branch-feature: claude also changed: README.md".
 review_notice() {
@@ -222,12 +222,14 @@ append_merge_note_summary() {
 ## Usage: append_summary LINE
 ## Appends LINE, followed by a newline, to the file named by ${summary_file}, if
 ## that variable is set and not empty.  The summary lists what a person should
-## look at after a run:  each change by an AI agent to review, each merge left
-## in progress and each agent session that can be continued (which
-## `report_merge_in_progress` and `report_agent_session` also note in
+## look at after a run:  each change by an AI agent to review, each change by a
+## hook to a file that a commit would not otherwise change, each file that
+## changed after a hook's changes were staged (see `commit_staged_again`),
+## each merge left in progress and each agent session that can be continued
+## (which `report_merge_in_progress` and `report_agent_session` also note in
 ## AGENT-TODO.md), and the step that failed.  `git-push-to --summary` sets
-## ${summary_file}.  A failure to write the summary goes unreported, because the
-## same information is printed as a diagnostic.
+## ${summary_file}.  A failure to write the summary goes unreported, because
+## the same information is printed as a diagnostic.
 append_summary() {
   if [ -n "${summary_file:-}" ]; then
     printf '%s\n' "$1" >> "${summary_file}" 2> /dev/null || true
@@ -2771,24 +2773,55 @@ ${report_command}
   fi
 }
 
+## Usage: is_unsafe_to_write FILE
+## Returns 0 if FILE exists but is not a regular file with one link:  if it
+## is a symbolic link or has another hard link, either of which could make it
+## another file outside the working tree, or if it is anything else but a
+## regular file.  Returns 1 if FILE does not exist or is a regular file with
+## one link.
+is_unsafe_to_write() {
+  # `find -links +1` prints the file if it has more than one hard link.
+  [ -L "$1" ] \
+    || { [ -e "$1" ] && [ ! -f "$1" ]; } \
+    || [ -n "$(find "$1" -prune -links +1 2> /dev/null)" ]
+}
+
+# The title and the explanation with which `append_agent_todo` starts a file
+# AGENT-TODO.md.
+# The backquotes are Markdown, not command substitutions.
+# shellcheck disable=SC2016
+agent_todo_preamble='# AI agent sessions to continue
+
+A script of manage-git-branches, such as `git-push-to`, appends an entry
+here when an AI agent fails, when the script rejects its work, or when
+the script leaves a merge in progress.  An entry'"'"'s command continues the
+agent'"'"'s session interactively.  Delete the entry once you have dealt with
+it.'
+# Another title and explanation that a file AGENT-TODO.md can start with,
+# which do not mention a merge in progress.  `prune_agent_todo` treats them
+# as it treats ${agent_todo_preamble}.
+# shellcheck disable=SC2016
+agent_todo_preamble_without_merge='# AI agent sessions to continue
+
+A script of manage-git-branches, such as `git-push-to`, appends an entry
+here when an AI agent fails or when the script rejects its work.  The
+entry'"'"'s command continues the agent'"'"'s session interactively.  Delete the
+entry once you have dealt with it.'
+
 ## Usage: append_agent_todo FILE ENTRY
 ## Appends ENTRY, Markdown text that begins with a blank line and a heading,
 ## to FILE, the pathname of a file AGENT-TODO.md, which this function creates,
-## with a title and an explanation, if it does not exist.  Returns 1, after
+## starting with ${agent_todo_preamble}, if it does not exist.  Returns 1, after
 ## printing a diagnostic, if it did not write FILE:  because FILE is empty, as
-## `agent_todo_path` leaves it if the file must not be written; or because
-## FILE is a symbolic link or has another hard link, either of which could
-## make the file another one outside the working tree, or is anything else
-## but a regular file; or because writing failed.  Runs no git command.
+## `agent_todo_path` leaves it if the file must not be written; because FILE
+## is unsafe to write (see `is_unsafe_to_write`); or because writing failed.
+## Runs no git command.
 append_agent_todo() {
   if [ -z "$1" ]; then
     echo "${SCRIPT_NAME}: did not write ${agent_todo_file}, which git tracks or whose working tree is unknown" >&2
     return 1
   fi
-  # `find -links +1` prints the file if it has more than one hard link.
-  if [ -L "$1" ] \
-    || { [ -e "$1" ] && [ ! -f "$1" ]; } \
-    || [ -n "$(find "$1" -prune -links +1 2> /dev/null)" ]; then
+  if is_unsafe_to_write "$1"; then
     echo "${SCRIPT_NAME}: did not write $1, which is not a regular file with one link" >&2
     return 1
   fi
@@ -2798,16 +2831,7 @@ append_agent_todo() {
   fi
   if ! {
     if [ "${append_todo_new}" = yes ]; then
-      # The backquotes are Markdown, not command substitutions.
-      # shellcheck disable=SC2016
-      printf '%s\n' \
-        '# AI agent sessions to continue' \
-        '' \
-        'A script of manage-git-branches, such as `git-push-to`, appends an entry' \
-        'here when an AI agent fails, when the script rejects its work, or when' \
-        "the script leaves a merge in progress.  An entry's command continues the" \
-        "agent's session interactively.  Delete the entry once you have dealt with" \
-        'it.'
+      printf '%s\n' "${agent_todo_preamble}"
     fi
     printf '%s' "$2"
   } >> "$1"; then
@@ -2830,6 +2854,151 @@ agent_todo_path() {
     return 1
   fi
   printf '%s\n' "${agent_todo_top}/${agent_todo_file}"
+}
+
+## Usage: prune_agent_todo BUILT
+## Removes, from the file AGENT-TODO.md at the top level of the working tree
+## that contains the current directory (see `agent_todo_path`), each entry
+## that a script of this package wrote about that working tree and that no
+## longer applies.  The heading of such an entry ends with the script's name
+## and a time, as in "## Fix the build after merges (git-push-to,
+## 2026-11-10 07:51:59)".  An entry no longer applies if
+##  * it says that the merge of a commit is in progress in the working tree,
+##    as `merge_in_progress_note` writes, and no merge of that commit is in
+##    progress there, because someone finished or aborted it; or
+##  * BUILT is 1, which says that the working tree's HEAD was just built
+##    successfully, and the entry gives the command that continues an AI
+##    agent's attempt to fix the build of the working tree, as
+##    `report_agent_session` writes it for a task such as "Fix the build after
+##    merging branch 'main'".
+## An entry is about the working tree if it names the working tree's top
+## level.  Each other entry is kept:  one with a heading of another form, such
+## as one that a person wrote; one of another kind, such as an entry of
+## `fix-renovate-prs`; one about another working tree, as in the copy of
+## AGENT-TODO.md that `git-new-branch` makes along with the rest of a working
+## tree; and one to which a person added text, such as a note after its
+## command.  Lines that follow the last entry belong to it.
+##
+## Deletes the file if no entry remains and the file holds nothing else but
+## ${agent_todo_preamble} or ${agent_todo_preamble_without_merge}, even if no
+## entry was removed.  Says what it removed.  Does nothing if the file does
+## not exist or is unsafe to write (see `is_unsafe_to_write`).  Replaces the
+## file atomically, keeping its permissions.  Just before it replaces or
+## deletes the file, checks that the file has not changed since this function
+## read it, as when another script appended an entry, and leaves a changed
+## file unchanged; this narrows, but does not close, the window in which such
+## an append is lost.  A failure to read or to rewrite the file leaves the
+## entries for a person to delete, and is reported but is not an error, so
+## this function always returns 0.
+prune_agent_todo() {
+  prune_built="$1"
+  prune_todo="$(agent_todo_path)" || return 0
+  if [ ! -e "${prune_todo}" ] || is_unsafe_to_write "${prune_todo}"; then
+    return 0
+  fi
+  # The top level of the working tree, as an entry can name it:  as git
+  # prints it, with symbolic links resolved, and as `pwd` prints it, which
+  # can contain symbolic links.  `merge_in_progress_note` and `run_agent`
+  # name the current directory, which is the top level, as `pwd` prints it.
+  prune_top="${prune_todo%/*}"
+  prune_pwd_top="$(pwd)"
+  if prune_prefix="$(git rev-parse --show-prefix)" && [ -n "${prune_prefix}" ]; then
+    prune_pwd_top="${prune_pwd_top%/"${prune_prefix%/}"}"
+  fi
+  set -- "${prune_top}"
+  if [ "${prune_pwd_top}" != "${prune_top}" ]; then
+    set -- "$@" "${prune_pwd_top}"
+  fi
+  prune_dirs=''
+  prune_prefixes=''
+  for prune_dir in "$@"; do
+    prune_dirs="${prune_dirs}${prune_dir}
+"
+    prune_prefixes="${prune_prefixes}$(printf 'cd %s && ' "$(shell_word "${prune_dir}")")
+"
+  done
+  prune_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)" || prune_merge_head=''
+  # A copy of the file, which awk reads, and awk's output are written in the
+  # git directory, which is outside the working tree.  The copy also shows
+  # whether the file changed while awk read the copy.
+  if ! prune_base="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-todo)"; then
+    echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd), so ${prune_todo} was not pruned" >&2
+    return 0
+  fi
+  if ! prune_old="$(mktemp "${prune_base}.XXXXXX")"; then
+    echo "${SCRIPT_NAME}: cannot create a temporary file in the git directory of $(pwd), so ${prune_todo} was not pruned" >&2
+    return 0
+  fi
+  prune_output="${prune_old}.new"
+  if ! cp "${prune_todo}" "${prune_old}"; then
+    echo "${SCRIPT_NAME}: cannot read ${prune_todo}, so it was not pruned" >&2
+    rm -f "${prune_old}"
+    return 0
+  fi
+  # The first line of the output is the counts, and the rest is the new
+  # content of the file.  The step fails if awk cannot run the script, as
+  # when the script is missing, or if the output cannot be written; either
+  # way, awk or the shell prints the cause.
+  if ! PRUNE_DIRS="${prune_dirs}" PRUNE_CD_PREFIXES="${prune_prefixes}" \
+    PRUNE_MERGE_HEAD="${prune_merge_head}" PRUNE_BUILT="${prune_built}" \
+    awk -f "${SCRIPT_DIR}/prune-agent-todo.awk" < "${prune_old}" > "${prune_output}" \
+    || ! prune_counts="$(head -n 1 "${prune_output}")" || [ -z "${prune_counts}" ]; then
+    echo "${SCRIPT_NAME}: cannot process ${prune_todo} with ${SCRIPT_DIR}/prune-agent-todo.awk, so it was not pruned" >&2
+    rm -f "${prune_old}" "${prune_output}"
+    return 0
+  fi
+  prune_removed="${prune_counts% *}"
+  prune_kept="${prune_counts#* }"
+  # `tr` removes the carriage returns of CRLF line endings, and the command
+  # substitution removes the final newline.
+  prune_delete=0
+  if [ "${prune_kept}" -eq 0 ]; then
+    prune_rest="$(sed 1d "${prune_output}" | tr -d '\r')"
+    if [ "${prune_rest}" = "${agent_todo_preamble}" ] \
+      || [ "${prune_rest}" = "${agent_todo_preamble_without_merge}" ]; then
+      prune_delete=1
+    fi
+  fi
+  if [ "${prune_removed}" -eq 1 ]; then
+    prune_what='1 entry that no longer applies'
+  else
+    prune_what="${prune_removed} entries that no longer apply"
+  fi
+  if [ "${prune_delete}" -eq 1 ]; then
+    if [ "${prune_removed}" -eq 0 ]; then
+      prune_why='which has no entry'
+    else
+      prune_why='whose entries no longer apply'
+    fi
+    if ! cmp -s "${prune_old}" "${prune_todo}"; then
+      echo "${SCRIPT_NAME}: ${prune_todo} changed while it was being pruned, so it was not deleted" >&2
+    elif rm -f "${prune_todo}"; then
+      echo "${SCRIPT_NAME}: deleted ${prune_todo}, ${prune_why}" >&2
+    else
+      echo "${SCRIPT_NAME}: cannot delete ${prune_todo}, ${prune_why}" >&2
+    fi
+  elif [ "${prune_removed}" -gt 0 ]; then
+    # The new file is a copy of the file, so that it keeps the file's
+    # permissions, in the same directory, so that `mv` replaces the file
+    # atomically.
+    if ! prune_new="$(mktemp "${prune_top}/.${agent_todo_file}.XXXXXX")"; then
+      echo "${SCRIPT_NAME}: cannot create a temporary file in ${prune_top}, so ${prune_todo} was not pruned" >&2
+    elif ! cp -p "${prune_todo}" "${prune_new}" \
+      || ! sed 1d "${prune_output}" > "${prune_new}"; then
+      echo "${SCRIPT_NAME}: cannot write ${prune_new}, so ${prune_todo} was not pruned" >&2
+      rm -f "${prune_new}"
+    elif ! cmp -s "${prune_old}" "${prune_todo}"; then
+      echo "${SCRIPT_NAME}: ${prune_todo} changed while it was being pruned, so it was not pruned" >&2
+      rm -f "${prune_new}"
+    elif mv -f "${prune_new}" "${prune_todo}"; then
+      echo "${SCRIPT_NAME}: removed from ${prune_todo} ${prune_what}" >&2
+    else
+      echo "${SCRIPT_NAME}: cannot rewrite ${prune_todo} to remove ${prune_what}" >&2
+      rm -f "${prune_new}"
+    fi
+  fi
+  rm -f "${prune_old}" "${prune_output}"
+  return 0
 }
 
 ## Usage: merge_in_progress_note [REASON]
@@ -3134,22 +3303,32 @@ working_tree_hooks() {
   done
 }
 
+## Usage: print_nul_lines COMMAND...
+## Runs COMMAND, which writes items that each end with a NUL, as
+## `git ls-files -z` writes pathnames, and prints the items one per line.  A
+## newline within an item becomes the byte 001, so that an item such as a
+## pathname that contains a newline is not split.  Returns the exit status of
+## COMMAND.
+print_nul_lines() {
+  # A pipeline's status is that of its last command, so fd 3 carries the
+  # status of COMMAND out of the command substitution, and fd 4 is the
+  # function's standard output.
+  {
+    print_nul_lines_status="$({ {
+      "$@" 3>&- 4>&-
+      echo "$?" >&3
+    } | tr '\n\000' '\001\n' >&4 3>&-; } 3>&1)"
+  } 4>&1
+  [ "${print_nul_lines_status}" = 0 ]
+}
+
 ## Usage: untracked_files
 ## Prints, one per line, the files of the working tree that git does not track
 ## and does not ignore.  Returns the exit status of `git ls-files`.
 untracked_files() {
   # As for `rwa_tracked` in `resolve_with_agent`, `-z` keeps git from
-  # quoting a pathname, and a newline within a pathname becomes the byte 001.
-  # A pipeline's status is that of its last command, so fd 3 carries the
-  # status of git out of the command substitution, and fd 4 is the function's
-  # standard output.
-  {
-    untracked_files_status="$({ {
-      git ls-files -z --others --exclude-standard 3>&- 4>&-
-      echo "$?" >&3
-    } | tr '\n\000' '\001\n' >&4 3>&-; } 3>&1)"
-  } 4>&1
-  [ "${untracked_files_status}" = 0 ]
+  # quoting a pathname.
+  print_nul_lines git ls-files -z --others --exclude-standard
 }
 
 ## Usage: ignored_files
@@ -3567,6 +3746,16 @@ commit_staged_before() {
   fi
 }
 
+## Usage: untracked_files_changed
+## Returns 0 if the files of the working tree in the current directory that
+## git does not track and does not ignore differ from those in
+## ${commit_staged_untracked} (see `commit_staged_before`), or if they cannot
+## be listed, and 1 otherwise.
+untracked_files_changed() {
+  ! untracked_files_changed_list="$(untracked_files)" \
+    || [ "${untracked_files_changed_list}" != "${commit_staged_untracked}" ]
+}
+
 ## Usage: commit_staged MESSAGE [COMMAND...]
 ## Commits the changes that are staged in the current directory, the top
 ## level of a working tree, with the message MESSAGE; the commit is a merge
@@ -3589,26 +3778,67 @@ commit_staged() {
   commit_staged_again pre-commit "${commit_staged_message}" "${commit_staged_tree}" "$@"
 }
 
+## Usage: review_hook_changes HOOK FILES RESULT
+## Prints a notice for each of the FILES, which are pathnames, one per line,
+## that the hook HOOK, such as "pre-commit", changed although the commit that
+## the hook checked does not otherwise change them, and appends the notice to
+## the summary (see `review_notice`).  The notice asks for a review of the
+## hook's changes, which RESULT, such as "are staged, but not committed".
+review_hook_changes() {
+  printf '%s\n' "$2" | while IFS= read -r review_hook_file; do
+    if [ -n "${review_hook_file}" ]; then
+      review_notice "the $1 hook changed ${review_hook_file}, which the commit does not otherwise change; review the hook's changes, which $3"
+    fi
+  done
+}
+
+## Usage: review_unstaged_changes HOOK RESULT
+## Prints a notice for each file that has unstaged changes in the current
+## directory, the top level of a working tree, after this package's scripts
+## staged the changes of the hook HOOK, such as "pre-commit", as when the hook
+## changed the file again when it ran again, and appends the notice to the
+## summary (see `review_notice`).  The notice asks for a review of the
+## changes, which RESULT, such as "are not staged".
+review_unstaged_changes() {
+  print_nul_lines git diff --name-only --no-renames -z | while IFS= read -r review_unstaged_file; do
+    if [ -n "${review_unstaged_file}" ]; then
+      review_notice "${review_unstaged_file} changed after the $1 hook's changes were staged; review its changes, which $2"
+    fi
+  done
+}
+
 ## Usage: commit_staged_again HOOK MESSAGE TREE [COMMAND...]
 ## Commits again, with `git commit` and the message MESSAGE, in the current
 ## directory, the top level of a working tree, after the hook HOOK, such as
 ## "pre-commit", rejected a commit there.  A hook, such as one that runs a
 ## formatter, can reject a commit after changing the files that the commit
-## changes, so that a commit of the files as the hook left them succeeds.
+## changes, so that a commit of the files as the hook left them succeeds.  A
+## hook that formats the whole project, such as one that runs
+## `./gradlew spotlessApply`, can also change a file that the commit does not
+## change, relative to HEAD, if that file was not formatted at HEAD; the
+## commit then includes the hook's changes to that file too.
 ## TREE is the tree that the rejected commit would have had, as a hash such
 ## as "4b825dc642cb6eb9a060e54bf8d69288fbee4904", or empty if it is not
-## known.  This function commits again only if
+## known.  This function stages the hook's changes only if
 ##  * the working tree matched the index before the commit, as
 ##    ${commit_staged_clean} says (see `commit_staged_before`);
 ##  * the index still has the tree TREE, so that the hook staged nothing;
 ##  * the untracked files are still those in ${commit_staged_untracked}, so
 ##    that the hook created and deleted none (a file that git ignores is not
 ##    checked); and
-##  * the hook changed at least one file, deleted none, and only modified
-##    files that the commit changes, relative to HEAD.
-## Then it prints the names of those files and stages them.  If COMMAND is
-## given, it runs COMMAND, as a check of the files as the hook left them, and
-## commits only if COMMAND succeeds.
+##  * the hook changed at least one file, and only modified files.
+## Then, if HOOK is "pre-merge-commit", which `git commit` does not run, it
+## runs the hook again, with `GIT_EDITOR=:`, as `git merge` runs it, on the
+## files as the hook left them, and requires that it succeed without
+## changing or staging a file or creating or deleting an untracked file.
+## Then it runs COMMAND, if it is given, as a check of those files, and
+## commits only if COMMAND succeeds.  `git commit` runs the pre-commit hook
+## again.  For each file that the hook changed but the commit does not
+## otherwise change, it prints a notice that says whether the commit
+## includes the hook's changes, and appends the notice to the summary (see
+## `review_hook_changes`).  It does the same for each file that has unstaged
+## changes afterward, as when the hook changed a file again when it ran
+## again (see `review_unstaged_changes`).
 ##
 ## Returns 0 if the commit succeeded, and a nonzero status otherwise.
 commit_staged_again() {
@@ -3619,41 +3849,91 @@ commit_staged_again() {
   # The record is of the state before one commit, so it is not used again.
   commit_again_clean="${commit_staged_clean:-0}"
   commit_staged_clean=0
+  # Without a working tree that matched the index before the commit, or
+  # without TREE, the hook's changes cannot be told from others.
+  # `git diff --name-status -z TREE` writes, for each file that differs
+  # between TREE and the working tree, a status, such as "M" for a modified
+  # file, and then a pathname, so the lines alternate between the two.
+  # `--no-renames` keeps git from pairing a deleted file with an added one.
+  # An empty status means that the hook changed nothing.
   if [ "${commit_again_clean}" != 1 ] || [ -z "${commit_again_tree}" ] \
-    || [ "$(git write-tree 2> /dev/null)" != "${commit_again_tree}" ] \
-    || ! commit_again_untracked="$(untracked_files)" \
-    || [ "${commit_again_untracked}" != "${commit_staged_untracked}" ]; then
+    || ! commit_again_status="$(print_nul_lines git diff --name-status --no-renames -z "${commit_again_tree}")" \
+    || [ -z "${commit_again_status}" ] \
+    || ! commit_again_committed="$(print_nul_lines git diff --name-only --no-renames -z HEAD "${commit_again_tree}")"; then
     return 1
   fi
-  # As in `conflicted_files`, `tr` turns each NUL into a newline and each
-  # newline within a pathname into the byte 001, so that a pathname that
-  # contains a newline is not split.
-  # `git diff --name-status -z` writes a status, such as "M" for a modified
-  # file, and then a pathname, for each file, so the lines alternate between
-  # the two.  `--no-renames` keeps git from pairing a deleted file with an
-  # added one.  The output of a git command that fails is empty, which makes
-  # this function return 1:  the hook seems to have changed nothing, or to
-  # have changed a file that the commit does not change.
-  commit_again_status="$(git diff --name-status --no-renames -z | tr '\n\000' '\001\n')"
   commit_again_changed="$(printf '%s\n' "${commit_again_status}" | sed -n -e 'n;p')"
-  commit_again_committed="$(git diff --cached --name-only -z HEAD | tr '\n\000' '\001\n')"
-  if [ -z "${commit_again_status}" ] \
-    || printf '%s\n' "${commit_again_status}" | sed -n -e 'p;n' | grep -v -x -q M \
-    || printf '%s\n' "${commit_again_changed}" | grep -F -x -v -q -- "${commit_again_committed}"; then
+  # The files that the hook changed but the commit does not otherwise change.
+  # awk reads the files that the commit changes, then an empty line, which is
+  # no pathname, then the files that the hook changed.  Unlike an argument,
+  # its standard input has no limit on its size.
+  commit_again_outside="$({
+    printf '%s\n' "${commit_again_committed}" ''
+    printf '%s\n' "${commit_again_changed}"
+  } | awk '
+    hook_changed { if ($0 != "" && !($0 in committed)) print; next }
+    $0 == "" { hook_changed = 1; next }
+    { committed[$0] = 1 }')"
+  if [ "$(git write-tree 2> /dev/null)" != "${commit_again_tree}" ]; then
+    commit_again_refusal="the ${commit_again_hook} hook staged a change"
+  elif untracked_files_changed; then
+    commit_again_refusal="the ${commit_again_hook} hook created or deleted an untracked file"
+  elif printf '%s\n' "${commit_again_status}" | sed -n -e 'p;n' | grep -v -x -q M; then
+    commit_again_refusal="the ${commit_again_hook} hook did more than modify files"
+  elif ! git add -u || ! commit_again_staged="$(git write-tree)"; then
+    commit_again_refusal="the hook's changes cannot be staged"
+  else
+    commit_again_refusal=''
+  fi
+  if [ -n "${commit_again_refusal}" ]; then
+    echo "${SCRIPT_NAME}: not committing again in $(pwd), because ${commit_again_refusal}" >&2
+    review_hook_changes "${commit_again_hook}" "${commit_again_outside}" "are not committed"
     return 1
   fi
   printf '%s\n' "${commit_again_changed}" | while IFS= read -r commit_again_file; do
-    echo "${SCRIPT_NAME}: the ${commit_again_hook} hook changed ${commit_again_file}; staging its changes" >&2
+    echo "${SCRIPT_NAME}: the ${commit_again_hook} hook changed ${commit_again_file}; staged its changes" >&2
   done
-  if ! git add -u; then
+
+  commit_again_failure=''
+  if [ "${commit_again_hook}" = pre-merge-commit ]; then
+    # `git merge` runs the hook with `GIT_EDITOR=:`, which a hook can
+    # require; `git hook run` does not set it.
+    if ! GIT_EDITOR=: git hook run --ignore-missing pre-merge-commit; then
+      commit_again_failure="the pre-merge-commit hook, run again, failed"
+    elif ! git diff --quiet; then
+      commit_again_failure="the pre-merge-commit hook, run again, changed a file"
+    elif [ "$(git write-tree 2> /dev/null)" != "${commit_again_staged}" ]; then
+      commit_again_failure="the pre-merge-commit hook, run again, staged a change"
+    elif untracked_files_changed; then
+      commit_again_failure="the pre-merge-commit hook, run again, created or deleted an untracked file"
+    fi
+  fi
+  if [ -z "${commit_again_failure}" ] && [ $# -gt 0 ] && ! "$@"; then
+    commit_again_failure="\`$*\` failed"
+  fi
+  if [ -z "${commit_again_failure}" ]; then
+    echo "${SCRIPT_NAME}: committing again in $(pwd)" >&2
+    if ! printf '%s\n' "${commit_again_message}" | git commit -q --cleanup=whitespace -F -; then
+      commit_again_failure="the commit failed"
+    fi
+  fi
+  if [ -n "${commit_again_failure}" ]; then
+    commit_again_later=''
+    if [ "$(git write-tree 2> /dev/null)" != "${commit_again_staged}" ]; then
+      commit_again_later="; later changes are staged too"
+    fi
+    if ! git diff --quiet || untracked_files_changed; then
+      commit_again_later="${commit_again_later}; the working tree has later changes, which are not staged"
+    fi
+    echo "${SCRIPT_NAME}: not committed in $(pwd), because ${commit_again_failure}; the changes that the ${commit_again_hook} hook made when it rejected the commit are staged${commit_again_later}" >&2
+    review_hook_changes "${commit_again_hook}" "${commit_again_outside}" \
+      "are staged, but not committed${commit_again_later}"
+    review_unstaged_changes "${commit_again_hook}" "are not staged"
     return 1
   fi
-  if [ $# -gt 0 ] && ! "$@"; then
-    echo "${SCRIPT_NAME}: not committing again in $(pwd), because \`$*\` failed; the changes of the ${commit_again_hook} hook are staged" >&2
-    return 1
-  fi
-  echo "${SCRIPT_NAME}: committing again in $(pwd)" >&2
-  printf '%s\n' "${commit_again_message}" | git commit -q --cleanup=whitespace -F -
+  review_hook_changes "${commit_again_hook}" "${commit_again_outside}" \
+    "commit $(git rev-parse --short HEAD) includes"
+  review_unstaged_changes "${commit_again_hook}" "are not committed"
 }
 
 ## Usage: commit_rejected_merge MESSAGE
@@ -3671,8 +3951,7 @@ commit_rejected_merge() {
   # The tree of the merge, which the index held when the hook ran.
   commit_rejected_tree="$(git merge-tree --write-tree --no-messages HEAD MERGE_HEAD 2> /dev/null)" \
     || commit_rejected_tree=''
-  commit_staged_again pre-merge-commit "$1" "${commit_rejected_tree}" \
-    git hook run --ignore-missing pre-merge-commit
+  commit_staged_again pre-merge-commit "$1" "${commit_rejected_tree}"
 }
 
 ## Usage: commit_resolved_merge RESOLVER COMMIT SOURCE MESSAGE
@@ -4761,6 +5040,8 @@ version of it.  This merge brings the rest of it, from commit ${mlph_short_p}." 
 ## comes from, if DIRECTORY is given and not empty.  The merge commit can be
 ## the one that this call made, one that a pull made, or one that an earlier
 ## call made but did not push, as when its build failed.
+## After a successful build, removes the entries of AGENT-TODO.md that no
+## longer apply, such as one about a failed build (see `prune_agent_todo`).
 ## Returns 1, after printing a diagnostic, on failure.  Sets
 ## ${merge_build_push_step} to the step that it reached:  "merging",
 ## "building", or "pushing".
@@ -4783,10 +5064,16 @@ merge_build_push() {
   # `--no-log` prevents a second copy of the commit summaries:  `git merge`
   # appends them to a message given with `-m` when `merge.log` is set, and
   # ${merge_message} already contains the ones that `fmt-merge-msg` wrote.
+  # 1 if this call builds the merge, and 0 otherwise.
+  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+    merge_builds=1
+  else
+    merge_builds=0
+  fi
   # A build of uncommitted changes, such as those that a failed attempt to
   # fix the build left staged, says nothing about the commit that is pushed.
   # Check before merging, so that a refusal leaves no merge commit behind.
-  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ] \
+  if [ "${merge_builds}" -eq 1 ] \
     && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     echo "${SCRIPT_NAME}: the working tree of $(pwd) has uncommitted changes; commit or discard them" >&2
     return 1
@@ -4843,7 +5130,7 @@ merge_build_push() {
     fi
   fi
 
-  if [ "$4" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ]; then
+  if [ "${merge_builds}" -eq 1 ]; then
     merge_build_push_step='building'
     if ! merge_log="$(git rev-parse --path-format=absolute --git-path manage-git-branches-build.log)"; then
       echo "${SCRIPT_NAME}: cannot find the git directory of $(pwd)" >&2
@@ -4879,11 +5166,25 @@ merge_build_push() {
       if [ -n "${merged_landed_prs}" ]; then
         merge_did="Before merging commit $1, the script merged into branch ${merge_fix_branch} the final version of each of the pull requests ${merged_landed_prs}, each followed by the commit that landed it; either kind of merge might have broken the build.  ${merge_did}"
       fi
+      # `fix_failed_build` runs at the top level of the working tree, where
+      # the agent's session, and the command that continues it, start.
+      merge_dir="$(pwd)"
+      if ! cd -- "${merge_top}"; then
+        echo "${SCRIPT_NAME}: cannot cd to ${merge_top}" >&2
+        return 1
+      fi
       if ! fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"; then
         report_agent_session "${merge_fix_message}"
+        cd -- "${merge_dir}" || true
+        return 1
+      fi
+      if ! cd -- "${merge_dir}"; then
+        echo "${SCRIPT_NAME}: cannot cd back to ${merge_dir}" >&2
         return 1
       fi
     fi
+    # No merge is in progress, and the build succeeded.
+    prune_agent_todo 1
   fi
 
   merge_build_push_step='pushing'
