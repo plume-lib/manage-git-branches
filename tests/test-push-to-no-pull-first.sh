@@ -109,9 +109,27 @@ if ! has_commit proj-fork-me-branch-part1 "${first}"; then
   fail "git-push-to did not merge the remote's main"
 fi
 advance_main "third line"
+# The first directory, which is not pulled, has AGENT-TODO.md, whose only
+# entry is about a merge that is no longer in progress there.  The run
+# deletes the file.
+# The backquotes are Markdown, not command substitutions.
+# shellcheck disable=SC2016
+printf '%s\n' '# AI agent sessions to continue' '' \
+  'A script of manage-git-branches, such as `git-push-to`, appends an entry' \
+  'here when an AI agent fails, when the script rejects its work, or when' \
+  "the script leaves a merge in progress.  An entry's command continues the" \
+  "agent's session interactively.  Delete the entry once you have dealt with" \
+  'it.' '' \
+  '## Finish the merge in progress (git-push-to, 2026-11-09 08:23:59)' '' \
+  "The merge of commit ${first} is in progress in ${WORK_DIR}/${MAIN}." \
+  'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.' \
+  > "${WORK_DIR}/${MAIN}/AGENT-TODO.md"
 if ! "${COMMANDS_DIR}/git-push-to" --no-pull-first \
   "${WORK_DIR}/${MAIN}" "${WORK_DIR}/proj-branch-part2"; then
   fail "git-push-to --no-pull-first failed"
+fi
+if [ -e "${WORK_DIR}/${MAIN}/AGENT-TODO.md" ]; then
+  fail "git-push-to --no-pull-first did not delete AGENT-TODO.md in the first directory"
 fi
 if ! has_commit proj-branch-part2 "${first}"; then
   fail "git-push-to --no-pull-first did not merge the first directory's commit"

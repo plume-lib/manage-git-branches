@@ -28,6 +28,9 @@
 # lines into its own summary.  They are each change by an AI agent to review
 # (see "Asking an AI agent" below), as in
 #   in /home/me/myrepo-branch-feature: claude also changed: README.md
+# each change by a hook to a file that a commit by this script would not
+# otherwise change, and each file that changed after this script staged the
+# hook's changes (see "Conflicts" below),
 # each merge left in progress and each agent session that can be continued,
 # which are also noted in AGENT-TODO.md, and, if a push or rebase fails, the
 # step that failed, as in
@@ -181,19 +184,26 @@
 # A merge in progress in the first directory makes this script stop.
 #
 # A hook, such as one that runs a formatter, can reject a commit that this
-# script makes, of a merge or of a fix to the build, after changing files
-# that the commit changes.  The hook is the pre-commit hook, or the
-# pre-merge-commit hook for a merge without conflicts.  Then this script
-# stages the hook's changes and commits once more, with `git commit`,
+# script makes, of a merge or of a fix to the build, after changing files.
+# The hook is the pre-commit hook, or the pre-merge-commit hook for a merge
+# without conflicts.  Usually the hook changes files that the commit changes,
+# but a hook that formats the whole project, such as one that runs
+# `./gradlew spotlessApply`, also changes any other file that was not
+# formatted at HEAD.  In either case, this script stages the hook's changes,
 # provided that
 #  * the working tree had no unstaged changes before the commit or the merge;
 #  * the hook staged nothing, and created or deleted no untracked file; and
-#  * the hook only modified files that the commit changes.
-# Before committing once more, this script builds a fix to the build again,
-# and it runs a pre-merge-commit hook again; `git commit` runs the pre-commit
-# hook.  If a condition does not hold, or if the build, the hook, or the
-# second commit fails, this script stops, with the merge still in progress or
-# the fix staged.
+#  * the hook only modified files, and deleted none.
+# Then it runs a pre-merge-commit hook again, which must change no file,
+# builds a fix to the build again, and commits once more, with `git commit`,
+# which runs the pre-commit hook again.  The commit includes the hook's
+# changes to the files that it would not otherwise change; this script lists
+# those files, whether or not it commits, so that you can review the hook's
+# changes to them.  It also lists each file that changed after it staged the
+# hook's changes, as when the hook changed the file again when it ran again.
+# If a condition does not hold, or if the hook, the build, or the second
+# commit fails, this script stops, with the merge still in progress or the
+# fix staged.
 
 # Asking an AI agent
 #
@@ -287,7 +297,13 @@
 # Then commit the merge or the fix yourself, and run this script again.
 # This script also appends the command to the file AGENT-TODO.md at
 # the top level of the working tree, where you are less likely to overlook
-# it; delete the entry once you have dealt with it.  When the agent could not
+# it; delete the entry once you have dealt with it.  A later run deletes an
+# entry that no longer applies, unless you added text to it:  one about a
+# merge that is no longer in progress, because you finished or aborted it,
+# before it pulls or merges into the working tree, and one about a failed
+# build, once the build succeeds.  It deletes the file if it has no entry left and you added
+# nothing to it.  `prune_agent_todo` in common-functions.sh says which
+# entries are deleted.  When the agent could not
 # resolve the conflicts, the entry also tells an AI agent that reads it to
 # ask a person for help with them.  The resumed
 # session runs with your usual permissions, not in the sandbox, and it
@@ -761,6 +777,10 @@ git_push_to() {
     return 1
   fi
 
+  # Remove the entries of AGENT-TODO.md that no longer apply, such as one
+  # about a merge that a person finished or aborted (see `prune_agent_todo`).
+  (cd -- "${from_absolute}" && prune_agent_todo 0)
+
   if [ "$3" -eq 1 ]; then
     push_step="pulling ${from}"
     if ! pull_resolving "${llm_agent}" "${from_absolute}"; then
@@ -804,6 +824,7 @@ git_push_to() {
   if ! finish_merge_in_progress "${to_absolute}"; then
     return 1
   fi
+  prune_agent_todo 0
 
   # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
   # that an earlier run of this command made but did not push, as when its
