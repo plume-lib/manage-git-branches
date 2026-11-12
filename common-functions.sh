@@ -2887,11 +2887,10 @@ ${report_merge_note}
 ## Prints DIAGNOSTIC, which says why this script leaves the merge in progress
 ## in the current directory, the top level of a working tree, and what to do,
 ## and notes the merge in AGENT-TODO.md, with REASON, such as "No conflicted
-## file remains." (see `report_merge_in_progress`).  Returns 1.
+## file remains." (see `report_merge_in_progress`).
 stop_at_merge() {
   echo "$1" >&2
   report_merge_in_progress "$2"
-  return 1
 }
 
 ## Usage: record_conflicted_files
@@ -3624,9 +3623,9 @@ commit_staged_again() {
     || [ "${commit_again_untracked}" != "${commit_staged_untracked}" ]; then
     return 1
   fi
-  # As for ${resolve_files} in `resolve_merge_conflicts`, `tr` turns each NUL
-  # into a newline and each newline within a pathname into the byte 001, so
-  # that a pathname that contains a newline is not split.
+  # As in `conflicted_files`, `tr` turns each NUL into a newline and each
+  # newline within a pathname into the byte 001, so that a pathname that
+  # contains a newline is not split.
   # `git diff --name-status -z` writes a status, such as "M" for a modified
   # file, and then a pathname, for each file, so the lines alternate between
   # the two.  `--no-renames` keeps git from pairing a deleted file with an
@@ -3694,8 +3693,8 @@ commit_resolved_merge() {
   # The message is MESSAGE, rather than MERGE_MSG, to which `git merge`
   # appended a list of the conflicts.
   if ! "${commit_resolved_with}" "$4"; then
-    echo "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
-    report_merge_in_progress "\`${SCRIPT_NAME}\` could not commit it."
+    stop_at_merge "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" \
+      "\`${SCRIPT_NAME}\` could not commit it."
     return 1
   fi
   forget_conflicted_files
