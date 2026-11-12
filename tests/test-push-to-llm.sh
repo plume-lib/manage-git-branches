@@ -1757,6 +1757,16 @@ push_to good --no-llm
 if [ "$(grep -c '^## ' "${feature_dir}/AGENT-TODO.md")" -ne 2 ]; then
   fail "touched redundant merge, run again: AGENT-TODO.md does not have exactly 2 entries: $(cat "${feature_dir}/AGENT-TODO.md")"
 fi
+# Once the person aborts the merge, a run removes both entries, and with them
+# the file, which holds nothing else.
+git -C "${feature_dir}" merge --abort
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "touched redundant merge, aborted: git-push-to failed: ${push_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "touched redundant merge, aborted: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
 
 ## Usage: check_redundant_stopped DESCRIPTION DIAGNOSTIC
 ## Checks that git-push-to failed, left the merge in progress in
@@ -1846,6 +1856,50 @@ fi
 case "${push_output}" in
   *"aborting the merge"* | *"probably redundant"*) fail "octopus merge: the merge was taken for a redundant one: ${push_output}" ;;
 esac
+
+## A redundant merge is recognized, and aborted, even if the remote's fetch
+## refspec does not cover the upstream branch, so that fetching it updates no
+## remote-tracking branch, and origin/feature is stale.
+setup_case redundant-merge-refspec
+push_to good --no-llm
+check_not_resolved "redundant merge, refspec without the branch"
+push_same_merge
+git -C "${feature_dir}" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "redundant merge, refspec without the branch: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"aborting the merge of commit "*", which is redundant:  branch 'feature' of origin, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge, refspec without the branch: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "$(git -C "${case_dir}/other-clone" rev-parse HEAD)" ]; then
+  fail "redundant merge, refspec without the branch: the branch was not fast-forwarded to the other clone's merge"
+fi
+
+## A redundant merge is recognized, and aborted, if the upstream branch is a
+## local branch, "base", which the fetch of no remote changes.  Base holds a
+## merge of both sides that origin lacks.
+setup_case redundant-merge-local-upstream
+push_to good --no-llm
+check_not_resolved "redundant merge, local upstream branch"
+git -C "${feature_dir}" branch base "$(git -C "${feature_dir}" commit-tree -p HEAD -p MERGE_HEAD \
+  -m "Merge main into base" "HEAD^{tree}")"
+git -C "${feature_dir}" config branch.feature.remote .
+git -C "${feature_dir}" config branch.feature.merge refs/heads/base
+git -C "${feature_dir}" config branch.feature.pushRemote origin
+git -C "${feature_dir}" config push.default current
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "redundant merge, local upstream branch: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"aborting the merge of commit "*", which is redundant:  base, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge, local upstream branch: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "$(git -C "${feature_dir}" rev-parse base)" ]; then
+  fail "redundant merge, local upstream branch: the branch was not fast-forwarded to base"
+fi
 
 ## Usage: start_redundant_merge_in_main
 ## Starts, in ${main_dir}, a merge of feature into main, which has conflicts,

@@ -153,7 +153,10 @@
 # the user to finish or to abort with `git merge --abort`.  Whenever this
 # script stops with a merge in progress, it appends an entry that says so to
 # the file AGENT-TODO.md at the top level of the working tree (see "Asking an
-# AI agent" below), unless the file already has one for that merge.
+# AI agent" below), unless the file already has one that notes that merge
+# and says what to do about it in the same way.  So a merge that an entry
+# notes gets a second entry once it becomes redundant (see below), which
+# says that it is probably redundant.
 #
 # A merge can already be in progress when this script starts, as one is
 # after this script stopped as just described.  In each directory except the

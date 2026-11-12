@@ -3016,7 +3016,9 @@ merge_in_progress_note() {
   if [ -n "${1:-}" ]; then
     printf '%s\n' "$1"
   fi
-  # The backquotes are Markdown, not command substitutions.
+  # The last line ends with "; then delete this entry.", by which
+  # prune-agent-todo.awk recognizes the end of the paragraph.  The backquotes
+  # are Markdown, not command substitutions.
   if [ -n "${2:-}" ]; then
     printf 'It is probably redundant:  %s, the upstream branch, already contains both of its sides.\n' "$2"
     # shellcheck disable=SC2016
