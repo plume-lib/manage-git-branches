@@ -1246,8 +1246,8 @@ if ! grep -q -x -F "claude, an AI agent, did not run, because it was not ready t
 fi
 push_to good --llm
 check_resolved claude "rerun after an agent that was not ready"
-if grep -q 'The merge of commit' "${todo}"; then
-  fail "rerun after an agent that was not ready: AGENT-TODO.md still notes the merge: $(cat "${todo}")"
+if [ -e "${todo}" ]; then
+  fail "rerun after an agent that was not ready: AGENT-TODO.md remains: $(cat "${todo}")"
 fi
 
 ## An entry about a merge replaces an earlier one about the same merge, whose
@@ -3022,7 +3022,7 @@ case "${push_output}" in
   *) fail "build-fixing agent that fails on its second attempt: wrong diagnostic: ${push_output}" ;;
 esac
 todo="${feature_dir}/AGENT-TODO.md"
-if [ "$(grep -c '^cd .* && claude --resume ' "${todo}")" -ne 1 ] \
+if [ "$(grep -c '^cd .* && claude --resume ' "${todo}")" != 1 ] \
   || grep -q 'no person needs to' "${todo}"; then
   fail "build-fixing agent that fails on its second attempt: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
 fi
@@ -3067,8 +3067,8 @@ fi
 if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
   fail "rerun after a build-fixing agent that failed without changing any file: the build was not fixed"
 fi
-if grep -q '^## Fix the build' "${todo}"; then
-  fail "rerun after a build-fixing agent that failed without changing any file: AGENT-TODO.md still has the advice: $(cat "${todo}")"
+if [ -e "${todo}" ]; then
+  fail "rerun after a build-fixing agent that failed without changing any file: AGENT-TODO.md remains: $(cat "${todo}")"
 fi
 
 ## An agent that is not ready to run is not asked to fix the build.
@@ -3101,7 +3101,7 @@ fi
 STUB_BUILD=fix push_to good --llm
 unset STUB_READY
 check_not_pushed "build fix while the agent is still not ready"
-if [ "$(grep -c '^## Fix the build' "${todo}")" -ne 1 ]; then
+if [ "$(grep -c '^## Fix the build' "${todo}")" != 1 ]; then
   fail "build fix while the agent is still not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
 fi
 : > "${STUB_LOG}"
