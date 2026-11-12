@@ -27,7 +27,7 @@
 #  * if every chain succeeded, start over, until no chain has conflicts.
 # It fails if a chain fails, or if chains with conflicts remain after
 # ${max_rounds} rounds.  It ends with a summary of the chains that failed or
-# that have changes by an AI agent to review, each with what
+# that have changes by an AI agent or by a hook to review, each with what
 # `git-push-to --summary` wrote for it, as in
 #   * myrepo-branch-main myrepo-branch-feature myrepo-branch-part2 (failed)
 #       in /home/me/myrepo-branch-feature: claude also changed: README.md

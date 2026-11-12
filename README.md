@@ -148,8 +148,10 @@ The commands are:
   the agent's session interactively.
 
   With `--summary FILE`, it appends to FILE each change by the agent to
-  review, each merge that it left in progress, each agent session that can
-  be continued, and, if a push or rebase fails, the step that failed.
+  review, each change by a hook to a file that a commit would not otherwise
+  change, each file that changed after it staged a hook's changes, each
+  merge that it left in progress, each agent session that can be continued,
+  and, if a push or rebase fails, the step that failed.
 
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--no-pull-first] [--squash] [--llm | --no-llm]
@@ -251,8 +253,8 @@ The commands are:
   `--no-pull-first` for each chain whose first directory an earlier chain
   since `pr-status` ran pulled.
   It ends with a summary of the chains that failed or that have changes by
-  the agent to review, each with what `git-push-to --summary` wrote for it,
-  which names the step that failed.
+  the agent or by a hook to review, each with what `git-push-to --summary`
+  wrote for it, which names the step that failed.
 * [`crreview-resolve-all`](crreview-resolve-all)
   `[--dry-run] [--agent claude|codex] [-C DIR]`:
   Runs
