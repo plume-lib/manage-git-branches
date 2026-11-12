@@ -2321,48 +2321,74 @@ class LoadConfigTest(unittest.TestCase):
         self.assertIn('repos.a has no "clone"', str(cm.exception.code))
 
 
+# Clones of a fork me/git of git/git, on branches "master" and "x".
+GIT_CLONES = {
+    "git-fork-me": pr_status.GitEntry("me", "git", "master"),
+    "git-fork-me-branch-x": pr_status.GitEntry("me", "git", "x"),
+}
+
+# Clones of o/tools, on branches "main" and "y".
+TOOLS_CLONES = {
+    "tools": pr_status.GitEntry("o", "tools", "main"),
+    "tools-branch-y": pr_status.GitEntry("o", "tools", "y"),
+}
+
+# The repositories that "gh repo view" describes, as dicts parsed from its JSON, with keys
+# "nameWithOwner", "parent", and "defaultBranchRef", by GitHub slug, such as "o/tools".
+REPO_VIEWS = {
+    "me/git": {
+        "nameWithOwner": "me/git",
+        "parent": {"owner": {"login": "git"}, "name": "git"},
+        "defaultBranchRef": {"name": "master"},
+    },
+    "git/git": {
+        "nameWithOwner": "git/git",
+        "parent": None,
+        "defaultBranchRef": {"name": "master"},
+    },
+    "gitgitgadget/git": {
+        "nameWithOwner": "gitgitgadget/git",
+        "parent": {"owner": {"login": "git"}, "name": "git"},
+        "defaultBranchRef": {"name": "master"},
+    },
+    "u/git": {
+        "nameWithOwner": "u/git",
+        "parent": {"owner": {"login": "gitgitgadget"}, "name": "git"},
+        "defaultBranchRef": {"name": "master"},
+    },
+    "o/tools": {
+        "nameWithOwner": "o/tools",
+        "parent": None,
+        "defaultBranchRef": {"name": "main"},
+    },
+}
+
+
 class DefaultConfigTest(unittest.TestCase):
     """Tests for default_config."""
 
-    def reported(self, prs):
-        """Return the repositories that default_config reports on, given git/git's PRS.
+    def default_config(self, prs, entries=None, identity_error=False):
+        """Return the config that default_config constructs, given the prs of git/git.
 
-        The clones are of a fork me/git of git/git, on branches "master" and "x", and of
-        o/tools.
+        What default_config writes to standard error is in self.stderr afterward.
 
         Args:
-            prs: git/git's open PRs, as dicts parsed from the JSON of "gh pr list", with keys
-                "author", "headRefName", and "headRepositoryOwner".
+            prs: the open PRs of each repository, as dicts parsed from the JSON of "gh pr
+                list", with keys "author", "headRefName", and "headRepositoryOwner".
+            entries: the git clones, as git_entries returns them; by default, GIT_CLONES and
+                TOOLS_CLONES.
+            identity_error: True if GitHub does not tell who the user is, as for the token of
+                a GitHub App; then each `gh` command that needs to know, such as `gh api user`
+                or `gh pr list --author @me`, fails.
 
         Returns:
-            The GitHub slugs, such as "o/tools", of the repositories in the config.
+            The config, as default_config returns it.
         """
-        entries = {
-            "git-fork-me": pr_status.GitEntry("me", "git", "master"),
-            "git-fork-me-branch-x": pr_status.GitEntry("me", "git", "x"),
-            "tools": pr_status.GitEntry("o", "tools", "main"),
-            "tools-branch-y": pr_status.GitEntry("o", "tools", "y"),
-        }
-        views = {
-            "me/git": {
-                "nameWithOwner": "me/git",
-                "parent": {"owner": {"login": "git"}, "name": "git"},
-                "defaultBranchRef": {"name": "master"},
-            },
-            "git/git": {
-                "nameWithOwner": "git/git",
-                "parent": None,
-                "defaultBranchRef": {"name": "master"},
-            },
-            "o/tools": {
-                "nameWithOwner": "o/tools",
-                "parent": None,
-                "defaultBranchRef": {"name": "main"},
-            },
-        }
+        if entries is None:
+            entries = {**GIT_CLONES, **TOOLS_CLONES}
 
         def fake_run(cmd):
-            """Return what gh prints for the given command.
+            """Return what gh prints for the given command, whose user is "me".
 
             Args:
                 cmd: a "gh repo view", "gh api user", or "gh pr list" command, as a list.
@@ -2370,19 +2396,53 @@ class DefaultConfigTest(unittest.TestCase):
             Returns:
                 What gh prints, such as the JSON of a repository.
             """
-            if cmd[1:3] == ["api", "user"]:
-                return "Me\n"
+            if cmd[1:3] == ["api", "user"] or "@me" in cmd:
+                if identity_error:
+                    stderr = "HTTP 403: Resource not accessible by integration"
+                    raise pr_status.CommandError(1, cmd, "", stderr)
+                if cmd[1:3] == ["api", "user"]:
+                    return "me\n"
             if cmd[1:3] == ["pr", "list"]:
+                if "--author" in cmd:
+                    return json.dumps([pr for pr in prs if pr["author"]["login"] == "me"])
                 return json.dumps(prs)
-            return json.dumps(views[cmd[3]])
+            return json.dumps(REPO_VIEWS[cmd[3]])
 
+        def fake_fork_source(owner, name):
+            """Return the GitHub slug of the parent of the given repository.
+
+            Args:
+                owner: the owner of a repository in REPO_VIEWS, such as "me".
+                name: the repository's name, such as "git".
+
+            Returns:
+                The parent's GitHub slug, such as "git/git", or None if the repository is
+                not a fork.
+            """
+            parent = REPO_VIEWS[f"{owner}/{name}"]["parent"]
+            return parent and f"{parent['owner']['login']}/{parent['name']}"
+
+        self.stderr = io.StringIO()
         with (
             mock.patch.object(pr_status, "git_entries", return_value=entries),
             mock.patch.object(pr_status, "run", side_effect=fake_run),
-            mock.patch.object(pr_status, "fork_source", return_value="git/git"),
-            mock.patch("sys.stderr", new_callable=io.StringIO),
+            mock.patch.object(pr_status, "fork_source", side_effect=fake_fork_source),
+            mock.patch("sys.stderr", self.stderr),
         ):
-            cfg = pr_status.default_config("/base")
+            return pr_status.default_config("/base")
+
+    def reported(self, prs, identity_error=False):
+        """Return the repositories that default_config reports on, given git/git's prs.
+
+        Args:
+            prs: git/git's open PRs, as default_config takes them.
+            identity_error: True if GitHub does not tell who the user is, as default_config
+                takes it.
+
+        Returns:
+            The GitHub slugs, such as "o/tools", of the repositories in the config.
+        """
+        cfg = self.default_config(prs, identity_error=identity_error)
         return sorted(r["gh"] for r in cfg["repos"].values())
 
     @staticmethod
@@ -2391,7 +2451,8 @@ class DefaultConfigTest(unittest.TestCase):
 
         Args:
             author: the login of the PR's author, such as "me".
-            owner: the owner of the PR's head repository, such as "me".
+            owner: the owner of the PR's head repository, such as "me", or None if GitHub
+                does not know the head repository, as when it has been deleted.
             branch: the PR's head branch, such as "x".
 
         Returns:
@@ -2400,12 +2461,13 @@ class DefaultConfigTest(unittest.TestCase):
         return {
             "author": {"login": author},
             "headRefName": branch,
-            "headRepositoryOwner": {"login": owner},
+            "headRepositoryOwner": None if owner is None else {"login": owner},
         }
 
     def test_no_own_pr(self):
         """git/git, none of whose open PRs is the user's, is not reported on."""
         self.assertEqual(self.reported([self.pr("other", "other", "x")]), ["o/tools"])
+        self.assertIn("skipping git/git, which has no open PR of yours", self.stderr.getvalue())
 
     def test_own_pr(self):
         """git/git is reported on if the user wrote one of its open PRs."""
@@ -2414,6 +2476,43 @@ class DefaultConfigTest(unittest.TestCase):
     def test_pr_with_working_copy(self):
         """git/git is reported on if one of its open PRs has a working copy."""
         self.assertEqual(self.reported([self.pr("bot", "me", "x")]), ["git/git", "o/tools"])
+
+    def test_pr_with_working_copy_owner_in_uppercase(self):
+        """A PR's head repository owner matches a clone's owner regardless of case."""
+        self.assertEqual(self.reported([self.pr("bot", "Me", "x")]), ["git/git", "o/tools"])
+
+    def test_pr_without_head_repository(self):
+        """A PR whose head repository GitHub does not know has no working copy."""
+        self.assertEqual(self.reported([self.pr("bot", None, "x")]), ["o/tools"])
+
+    def test_pr_with_working_copy_unknown_user(self):
+        """A PR with a working copy counts even if GitHub does not tell who the user is."""
+        prs = [self.pr("bot", "me", "x")]
+        self.assertEqual(self.reported(prs, identity_error=True), ["git/git", "o/tools"])
+        # The warning names the command that failed.
+        self.assertIn("--author @me", self.stderr.getvalue())
+
+    def test_fork_of_gitgitgadget_without_own_pr(self):
+        """gitgitgadget/git, none of whose open PRs is the user's, is not reported on."""
+        entries = {
+            "git-fork-u": pr_status.GitEntry("u", "git", "master"),
+            "git-fork-u-branch-x": pr_status.GitEntry("u", "git", "x"),
+            **TOOLS_CLONES,
+        }
+        cfg = self.default_config([self.pr("other", "other", "x")], entries=entries)
+        self.assertEqual([r["gh"] for r in cfg["repos"].values()], ["o/tools"])
+        self.assertIn(
+            "skipping gitgitgadget/git, which has no open PR of yours", self.stderr.getvalue()
+        )
+
+    def test_only_git_git_without_own_pr(self):
+        """With only clones of git/git, none of whose open PRs is the user's, says so."""
+        with self.assertRaises(pr_status.ConfigError) as cm:
+            self.default_config([self.pr("other", "other", "x")], entries=GIT_CLONES)
+        self.assertEqual(
+            str(cm.exception), "no pr-status-config.json and no GitHub repository to report on"
+        )
+        self.assertIn("skipping git/git, which has no open PR of yours", self.stderr.getvalue())
 
 
 # Clones of the repositories o/a and o/b, of a fork of o/a, of an unrelated repository
