@@ -956,7 +956,9 @@ esac
 ## A run stops at a merge in progress in the first directory, whose pull
 ## then refuses to start, so if the agent was not ready to resolve that
 ## merge's conflicts, AGENT-TODO.md says to abort the merge before running
-## git-push-to again.  A run after the abort does resolve the conflicts.
+## git-push-to again.  A rerun without the abort refuses to start and keeps
+## that advice.  A run after the abort removes the entry and does resolve
+## the conflicts.
 setup_case from-pull-not-ready
 git clone -q -b main "${remote}" "${case_dir}/other-clone"
 write_file "${case_dir}/other-clone/file.txt" ONE two-remote three four five six SEVEN-main eight nine
@@ -973,17 +975,29 @@ if [ "${push_status}" -eq 0 ] \
   fail "agent that is not ready for the first directory's pull: no merge in progress there: ${push_output}"
 fi
 todo="${main_dir}/AGENT-TODO.md"
-if ! grep -q -x -F "claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, abort the merge with \`git merge --abort\`; then running the same command again asks claude to resolve the conflicts, so no person needs to." "${todo}"; then
+abort_line="claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, abort the merge with \`git merge --abort\`; then running the same command again asks claude to resolve the conflicts, so no person needs to."
+if ! grep -q -x -F "${abort_line}" "${todo}"; then
   fail "agent that is not ready for the first directory's pull: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
 fi
+push_to good --llm
+if [ "${push_status}" -eq 0 ] \
+  || ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "rerun without aborting the first directory's pull: no merge in progress there: ${push_output}"
+fi
+if ! grep -q -x -F "${abort_line}" "${todo}" \
+  || [ "$(grep -c '^The merge of commit ' "${todo}")" -ne 1 ]; then
+  fail "rerun without aborting the first directory's pull: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
 git -C "${main_dir}" merge --abort
-rm -f -- "${todo}"
 push_to good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "rerun after aborting the first directory's pull: git-push-to failed: ${push_output}"
 fi
 if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
   fail "rerun after aborting the first directory's pull: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+if [ -e "${todo}" ]; then
+  fail "rerun after aborting the first directory's pull: AGENT-TODO.md remains: $(cat "${todo}")"
 fi
 
 ## An agent that is not ready to run, as when it is not logged in, is not
@@ -2412,6 +2426,9 @@ git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
 todo="${feature_dir}/AGENT-TODO.md"
 not_ready_line="claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, running the same command again asks it to fix the build, so no person needs to."
+## The directory is a physical path, as on macOS, where the temporary
+## directory is under a symbolic link.
+build_failed_line="The build failed in $(cd "${feature_dir}" && pwd -P)."
 STUB_READY=fail
 export STUB_READY
 STUB_BUILD=fix push_to good --llm
@@ -2420,7 +2437,7 @@ if [ -s "${STUB_LOG}" ]; then
   fail "build fix while the agent is not ready: an agent ran: $(cat "${STUB_LOG}")"
 fi
 if ! grep -q -x -F "${not_ready_line}" "${todo}" \
-  || ! grep -q -x -F "The build failed in ${feature_dir}." "${todo}"; then
+  || ! grep -q -x -F "${build_failed_line}" "${todo}"; then
   fail "build fix while the agent is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
 fi
 STUB_BUILD=fix push_to good --llm
