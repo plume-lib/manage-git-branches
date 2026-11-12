@@ -1364,11 +1364,10 @@ resolve_merge_conflicts() {
     return 1
   fi
 
-  # The conflicted files, one per line.  `-z` keeps git from quoting a
-  # pathname.  `tr` turns each NUL that ends a pathname into a newline, and
-  # each newline within a pathname into the byte 001, by which such a
-  # pathname is refused.
-  rmc_conflicted="$(git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n')"
+  # The conflicted files, one per line.  `conflicted_files` replaces each
+  # newline within a pathname by the byte 001, so the `case` below detects
+  # and refuses any conflicted file whose name contains a newline.
+  rmc_conflicted="$(conflicted_files)"
   if [ -z "${rmc_conflicted}" ]; then
     echo "${SCRIPT_NAME}: cannot list the conflicted files in $(pwd)" >&2
     resolve_stopped
@@ -1382,7 +1381,7 @@ resolve_merge_conflicts() {
       ;;
   esac
   # Any other change would be blamed on the agent below, or committed.
-  rmc_other="$(resolve_other_changes)"
+  rmc_other="$(resolve_other_changes "${rmc_conflicted}")"
   if [ -n "${rmc_other}" ]; then
     printf '%s\n' "${rmc_other}" | sed -e "s/^/${SCRIPT_NAME}: changed, but not conflicted: /" >&2
     echo "${SCRIPT_NAME}: the working tree has changes that are not part of the merge; resolve the conflicts by hand" >&2
@@ -1755,7 +1754,7 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # agent changed or deleted, one per line.
   rwa_rerere_changed=''
   if [ "${rwa_refs_ok}" -eq 1 ]; then
-    rwa_agent_other="$(resolve_other_changes)"
+    rwa_agent_other="$(resolve_other_changes "${rmc_conflicted}")"
     printf '%s\n' "${rwa_agent_other}" | while IFS= read -r rwa_other_file; do
       if [ -n "${rwa_other_file}" ]; then
         review_notice "${rmc_with} also changed: ${rwa_other_file}"
@@ -2542,14 +2541,25 @@ separator_permitted() {
   fi
 }
 
-## Usage: resolve_other_changes
+## Usage: conflicted_files
+## Prints, one per line, each conflicted file of the merge in progress in the
+## current directory, the top level of a working tree, as in "src/main.c".
+## `-z` keeps git from quoting a pathname.  `tr` turns each NUL that ends a
+## pathname into a newline, and each newline within a pathname into the byte
+## 001, so that such a pathname is not split.
+conflicted_files() {
+  git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n'
+}
+
+## Usage: resolve_other_changes FILES
 ## Prints, one per line, each file that differs from AUTO_MERGE in the working
-## tree or in the index and is not in ${rmc_conflicted}, the conflicted files.
+## tree or in the index and is not in FILES, the conflicted files, one per
+## line, as `conflicted_files` prints them.
 resolve_other_changes() {
   {
     git diff --no-renames --name-only -z AUTO_MERGE
     git diff --cached --no-renames --name-only -z AUTO_MERGE
-  } | tr '\000' '\n' | sort -u | grep -F -x -v -- "${rmc_conflicted}"
+  } | tr '\000' '\n' | sort -u | grep -F -x -v -- "$1"
 }
 
 ## Usage: agent_available AGENT
@@ -3371,6 +3381,16 @@ $3
 "
 }
 
+## Usage: stop_at_merge DIAGNOSTIC REASON
+## Prints DIAGNOSTIC, which says why this script leaves the merge in progress
+## in the current directory, the top level of a working tree, and what to do,
+## and notes the merge in AGENT-TODO.md, with REASON, such as "No conflicted
+## file remains." (see `report_merge_in_progress`).
+stop_at_merge() {
+  echo "$1" >&2
+  report_merge_in_progress "$2"
+}
+
 ## Usage: record_conflicted_files
 ## Records, in the file manage-git-branches-conflicts in the git directory of
 ## the current directory, the top level of a working tree, MERGE_HEAD and the
@@ -3422,9 +3442,7 @@ changed_conflicted_files() {
     && [ "$(head -n 1 "${changed_conflicts}")" = "merge ${changed_merge_head}" ]; then
     changed_record="$(sed -e 1d "${changed_conflicts}")"
   fi
-  # As for ${rmc_conflicted} in `resolve_merge_conflicts`, a pathname that
-  # contains a newline is not split.
-  git diff --name-only --diff-filter=U -z | tr '\n\000' '\001\n' | while IFS= read -r changed_file; do
+  conflicted_files | while IFS= read -r changed_file; do
     # `--filters` converts AUTO_MERGE's file as a checkout would.
     if [ -f "${changed_file}" ] \
       && git cat-file --filters "AUTO_MERGE:${changed_file}" 2> /dev/null | cmp -s - "${changed_file}"; then
@@ -4302,8 +4320,8 @@ commit_resolved_merge() {
   # The message is MESSAGE, rather than MERGE_MSG, to which `git merge`
   # appended a list of the conflicts.
   if ! "${commit_resolved_with}" "$4"; then
-    echo "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" >&2
-    report_merge_in_progress "\`${SCRIPT_NAME}\` could not commit it."
+    stop_at_merge "${SCRIPT_NAME}: cannot commit the merge of $3 in $(pwd); the merge is in progress; finish it with \`git commit\`, or abort it with \`git merge --abort\`" \
+      "\`${SCRIPT_NAME}\` could not commit it."
     return 1
   fi
   forget_conflicted_files
