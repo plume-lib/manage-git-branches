@@ -22,7 +22,7 @@
 #
 # A working copy directory holds a pull request if the pull request's head is
 # the branch that `git push` in the directory pushes the directory's branch
-# to, as `pr_repositories` in common-functions.sh determines it.  A branch of
+# to, as `pr_repositories` in clone-functions.sh determines it.  A branch of
 # the same name in another repository, even the upstream repository of a
 # fork, does not count.  A directory is skipped if it holds no open pull
 # request, for example because its clone has no GitHub remote or because its

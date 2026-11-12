@@ -544,7 +544,7 @@ check_documented() {
 
 # An awk program in this package runs only when a script of the package runs
 # it, so a variable that a script passes to a command in an environment
-# prefix, as `common-functions.sh` passes `CCR_FILE` to
+# prefix, as `merge-conflict-functions.sh` passes `CCR_FILE` to
 # `check-conflict-resolution.awk`, is internal to the package.
 for script in ${SCRIPTS}; do
   file="${TOPLEVEL}/${script}"

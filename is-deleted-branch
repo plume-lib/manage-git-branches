@@ -138,8 +138,9 @@ if [ "$#" -ne 1 ]; then
   exit 64
 fi
 
-# The body of this command is `is_deleted_branch` in common-functions.sh, so
-# that the other commands of this package can ask the same question without
-# running a subprocess for each directory they ask about.  This command is a
-# wrapper around that function, and its exit status is the function's.
+# The body of this command is `is_deleted_branch` in
+# deleted-branch-functions.sh, so that the other commands of this package can
+# ask the same question without running a subprocess for each directory they
+# ask about.  This command is a wrapper around that function, and its exit
+# status is the function's.
 is_deleted_branch "$1"

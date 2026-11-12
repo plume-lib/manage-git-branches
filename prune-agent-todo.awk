@@ -1,5 +1,5 @@
 # Removes, from a file AGENT-TODO.md, the entries that no longer apply, as
-# `prune_agent_todo` in common-functions.sh describes.  Reads the file on
+# `prune_agent_todo` in agent-functions.sh describes.  Reads the file on
 # standard input.  Writes to standard output one line, "R K", in which R is
 # the number of entries removed and K is the number of entries kept, such as
 # "2 1", and then the file without those entries.  If no entry is kept, the

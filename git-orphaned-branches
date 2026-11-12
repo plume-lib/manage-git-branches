@@ -690,7 +690,7 @@ check_directory() {
   # would mean that it could not answer at all, which must not be silently
   # reported as "there is nothing to delete".
   #
-  # Call the function of common-functions.sh rather than running the
+  # Call the function of deleted-branch-functions.sh rather than running the
   # `is-deleted-branch` command, which is a wrapper around it.  One process
   # for the whole scan is what lets one `git ls-remote` answer for every
   # directory that asks the same remote the same way:  what the function

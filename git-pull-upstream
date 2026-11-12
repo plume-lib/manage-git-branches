@@ -108,7 +108,7 @@
 # "--allow-dependent" merges anyway.
 #
 # The pull requests from the current branch are the ones that
-# `pr_repositories` in common-functions.sh describes, except that their base
+# `pr_repositories` in clone-functions.sh describes, except that their base
 # repository is the upstream repository, whose default branch this script
 # merges.  A "Land after" line is one that `pr-status --print-land-after`
 # reports.  `pr-status` needs Python 3.10 or later; if `python3` is older,

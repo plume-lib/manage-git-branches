@@ -148,19 +148,19 @@
 # `refs/pull/N/head`, and then the squash commit, if neither merge has
 # conflicts, if they change the merge of FROM_DIR's branch only in files that
 # the pull request changes or that conflict either way, and if they leave
-# that merge fewer conflicts; `merge_landed_pr_heads` in common-functions.sh
-# says how.
+# that merge fewer conflicts; `merge_landed_pr_heads` in
+# merge-build-push-functions.sh says how.
 #
 # When the merge of FROM_DIR's branch into TO_DIR has conflicts that
 # `git rerere` or an AI agent (see below) resolves, this script checks the
-# resolution; `resolve_merge_conflicts` in common-functions.sh describes the
-# check.  Otherwise, this script stops with the merge still in progress, for
-# the user to finish or to abort with `git merge --abort`.  Whenever this
-# script stops with a merge in progress, it appends an entry that says so to
-# the file AGENT-TODO.md at the top level of the working tree (see "Asking an
-# AI agent" below), unless the file already has one that notes that merge
-# and says what to do about it in the same way.  So a merge that an entry
-# notes gets a second entry once it becomes redundant (see below), which
+# resolution; `resolve_merge_conflicts` in merge-conflict-functions.sh
+# describes the check.  Otherwise, this script stops with the merge still in
+# progress, for the user to finish or to abort with `git merge --abort`.
+# Whenever this script stops with a merge in progress, it appends an entry
+# that says so to the file AGENT-TODO.md at the top level of the working tree
+# (see "Asking an AI agent" below), unless the file already has one that notes
+# that merge and says what to do about it in the same way.  So a merge that an
+# entry notes gets a second entry once it becomes redundant (see below), which
 # says that it is probably redundant.
 #
 # A merge can already be in progress when this script starts, as one is
@@ -341,7 +341,7 @@
 # before it pulls or merges into the working tree, or because it committed
 # the merge, and one about a failed build, once the build succeeds.  It
 # deletes the file if it has no entry left and you added nothing to it.
-# `prune_agent_todo` in common-functions.sh says which entries are deleted.
+# `prune_agent_todo` in agent-functions.sh says which entries are deleted.
 # When the agent could not resolve the conflicts, the entry also tells an AI
 # agent that reads it to ask a person for help with them.  But when the
 # agent was not ready to run, or failed each time without changing anything
@@ -476,7 +476,7 @@ unset_git_location_variables
 ## exists"; any other status is a reason not to proceed, because treating it
 ## as success would silently disable this check.
 ##
-## Call the function of common-functions.sh rather than running the
+## Call the function of deleted-branch-functions.sh rather than running the
 ## `is-deleted-branch` command, which is a wrapper around it.  One process for
 ## the whole run is what keeps this check from asking a remote the same
 ## question twice.  In a chain of directories, each middle directory is the
@@ -1174,7 +1174,7 @@ is_slug() {
 ## PROJECT in the current directory, as ORG "-" does, because there is no
 ## clone PROJECT-fork-ORG and ORG owns the upstream repository of the clone
 ## PROJECT, as typetools owns typetools/checker-framework.  `enter_slug_clone`
-## in common-functions.sh applies the same rule.
+## in clone-functions.sh applies the same rule.
 names_project() {
   [ -n "${slug_org}" ] && [ "${slug_org}" != '-' ] \
     && [ ! -d "$1-fork-${slug_org}" ] && [ -e "$1/.git" ] \

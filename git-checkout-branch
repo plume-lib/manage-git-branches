@@ -43,14 +43,14 @@
 # objects of PROJECT while it is made, so that only the others are
 # downloaded, but it does not depend on PROJECT afterward.  Its remote
 # "origin" is ORG's fork, and its remote "upstream" is the upstream
-# repository; `clone_fork` in common-functions.sh gives the details.
+# repository; `clone_fork` in clone-functions.sh gives the details.
 # `git-new-branch` makes such a clone too.
 #
 # The new directory is a linked worktree of the current repository, made by
 # `git worktree add`, so that it shares the repository's object store.  (If
 # the current repository is a branch directory's, REPONAME-branch-OTHER/, and
 # a sibling REPONAME/ is a clone that would push a new branch to the same
-# repositories, as `main_clone_for` in common-functions.sh judges them, the new
+# repositories, as `main_clone_for` in clone-functions.sh judges them, the new
 # worktree is registered in REPONAME/ instead when REPONAME/ can check out
 # the same branch, so that it does not prevent the removal of
 # REPONAME-branch-OTHER/; see `choose_worktree_host` below.)  It holds a fresh

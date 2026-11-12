@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Tests the functions in common-functions.sh.
+# Tests the functions that common-functions.sh defines or sources.
 #
 # Usage:
 #   tests/test-common-functions.sh
@@ -32,9 +32,7 @@ trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
 sanitize_git_env "${WORK_DIR}"
 
 # `common-functions.sh` expects ${SCRIPT_DIR} to be the directory that holds
-# this package's files.  The functions that this test calls do not use it, but
-# set it anyway, so that the file is sourced the way its comment requires.
-# shellcheck disable=SC2034
+# this package's files, and it sources the other files of functions from it.
 SCRIPT_DIR="${COMMANDS_DIR}"
 # shellcheck source=../common-functions.sh
 . "${COMMANDS_DIR}/common-functions.sh"

@@ -86,10 +86,11 @@
 #   CCR_SCAN                        "yes" to scan a side of the merge, as
 #                                   described above; else unset or "no"
 #
-# `check_conflict_resolution`, in common-functions.sh, runs this program.  It
-# passes the file in AUTO_MERGE, git's automatic merge, as MERGED; and it passes
-# the file in the working tree as RESOLVED.  `check_conflict_markers` and
-# `check_added_markers` run it with CCR_MARKERS_ONLY "yes".
+# `check_conflict_resolution`, in merge-conflict-functions.sh, runs this
+# program.  It passes the file in AUTO_MERGE, git's automatic merge, as MERGED;
+# and it passes the file in the working tree as RESOLVED.
+# `check_conflict_markers` and `check_added_markers` run it with
+# CCR_MARKERS_ONLY "yes".
 # `conflict_marker_size` runs it with CCR_PRINT_MARKER_SIZE "yes", and
 # `resolve_merge_conflicts` runs it with CCR_SCAN "yes".
 
