@@ -1479,6 +1479,21 @@ pat_build="## Fix the build after merging branch 'main' (git-pull-upstream, 2026
 \`\`\`sh
 ${pat_cd} a10375ce-87e0-4104-a154-335948d32056
 \`\`\`"
+# An entry about a build that the agent attempted to fix in several
+# sessions.
+pat_build_sessions="## Fix the build after merges (git-push-to, 2026-11-10 07:49:02)
+
+Session 1 of 2:
+
+\`\`\`sh
+${pat_cd} 3b8c0a2e-5f1d-4c7a-9e64-2d0f8b1a7c35
+\`\`\`
+
+Session 2 of 2:
+
+\`\`\`sh
+${pat_cd} 9e1f4d6b-08a3-4b52-b7c9-61e2a5f3d084
+\`\`\`"
 # Entries to keep:  one about another working tree, as in a copy of the file;
 # one that a person wrote; and one of another kind.
 pat_other_tree="## Fix the build after merges (git-push-to, 2026-11-10 07:51:59)
@@ -1543,10 +1558,10 @@ case "${pat_merge_head}" in
 esac
 printf '%s\n' "${pat_second}" > "${pat_merge_head}"
 write_todo "${pat_preamble}" "${pat_merge_first}" "${pat_merge_second}" "${pat_build}" \
-  "${pat_other_tree}" "${pat_person}" "${pat_ci}"
+  "${pat_build_sessions}" "${pat_other_tree}" "${pat_person}" "${pat_ci}"
 prune_todo 0
 check_todo "merge in progress" "${pat_preamble}" "${pat_merge_second}" "${pat_build}" \
-  "${pat_other_tree}" "${pat_person}" "${pat_ci}"
+  "${pat_build_sessions}" "${pat_other_tree}" "${pat_person}" "${pat_ci}"
 case "${pat_output}" in
   *"removed from ${pat_todo} 1 entry that no longer applies") ;;
   *) fail "prune_agent_todo, merge in progress: wrong diagnostic: ${pat_output}" ;;
@@ -1554,7 +1569,7 @@ esac
 # Nothing more is removed while the build has not succeeded.
 prune_todo 0
 check_todo "merge in progress, again" "${pat_preamble}" "${pat_merge_second}" "${pat_build}" \
-  "${pat_other_tree}" "${pat_person}" "${pat_ci}"
+  "${pat_build_sessions}" "${pat_other_tree}" "${pat_person}" "${pat_ci}"
 [ -z "${pat_output}" ] || fail "prune_agent_todo, merge in progress, again: unexpected diagnostic: ${pat_output}"
 # Once the merge is finished and the build succeeds, only the entries about
 # the working tree's merges and builds are removed.
@@ -1562,7 +1577,7 @@ rm -f "${pat_merge_head}"
 prune_todo 1
 check_todo "build succeeded" "${pat_preamble}" "${pat_other_tree}" "${pat_person}" "${pat_ci}"
 case "${pat_output}" in
-  *"removed from ${pat_todo} 2 entries that no longer apply") ;;
+  *"removed from ${pat_todo} 3 entries that no longer apply") ;;
   *) fail "prune_agent_todo, build succeeded: wrong diagnostic: ${pat_output}" ;;
 esac
 
@@ -1642,17 +1657,27 @@ pat_output="$(cd "${pat_link}/sub" && prune_agent_todo 1 2>&1)" \
 check_todo "subdirectory" "${pat_preamble}" "${pat_person}"
 rmdir "${pat_dir}/sub"
 # An entry to which a person added text is kept:  a line after its command,
-# a line after its merge paragraph, or a paragraph at the end of the file,
+# a line after its merge paragraph, in either of the forms that
+# `merge_in_progress_note` writes, or a paragraph at the end of the file,
 # which belongs to the last entry.
 pat_build_noted="${pat_build}
 My note:  wait for the upstream fix."
 pat_merge_noted="${pat_merge_first}
 Ask the release manager first."
+# An entry about a merge of ${pat_first} that is redundant.
+pat_merge_redundant="## Finish the merge in progress (git-push-to, 2026-11-09 08:25:00)
+
+The merge of commit ${pat_first} is in progress in ${pat_dir}.
+No conflicted file remains.
+It is probably redundant:  origin/main, the upstream branch, already contains both of its sides.
+Unless its resolution has changes that origin/main lacks, abort it with \`git merge --abort\`, and run \`git-push-to\` again; then delete this entry."
+pat_merge_redundant_noted="${pat_merge_redundant}
+Keep the merge:  its resolution fixes a typo."
 write_todo "${pat_preamble}" "${pat_build_noted}" "${pat_merge_noted}" "${pat_merge_first}" \
-  "${pat_build}" "My note at the end."
+  "${pat_merge_redundant_noted}" "${pat_merge_redundant}" "${pat_build}" "My note at the end."
 prune_todo 1
 check_todo "a person's note in an entry" "${pat_preamble}" "${pat_build_noted}" "${pat_merge_noted}" \
-  "${pat_build}" "My note at the end."
+  "${pat_merge_redundant_noted}" "${pat_build}" "My note at the end."
 # A file with CRLF line endings is pruned, and keeps its line endings.
 # ${pat_crlf} is the expected file.
 pat_crlf="${WORK_DIR}/crlf-todo"
@@ -1715,5 +1740,16 @@ rm -f "${pat_todo}"
 # A missing file is no error.
 prune_todo 1
 [ -z "${pat_output}" ] || fail "prune_agent_todo, no file: unexpected diagnostic: ${pat_output}"
+# A file that the awk script cannot process, here because the script is
+# missing, is left unchanged, and the diagnostic names the script.
+write_todo "${pat_preamble}" "${pat_build}"
+pat_output="$(cd "${pat_dir}" && SCRIPT_DIR="${WORK_DIR}/no-such-dir" && prune_agent_todo 1 2>&1)" \
+  || fail "prune_agent_todo, missing awk script: returned a nonzero status: ${pat_output}"
+check_todo "missing awk script" "${pat_preamble}" "${pat_build}"
+case "${pat_output}" in
+  *"cannot process ${pat_todo} with ${WORK_DIR}/no-such-dir/prune-agent-todo.awk, so it was not pruned") ;;
+  *) fail "prune_agent_todo, missing awk script: wrong diagnostic: ${pat_output}" ;;
+esac
+rm -f "${pat_todo}"
 
 echo "${SCRIPT_NAME}: OK"

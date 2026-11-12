@@ -32,9 +32,9 @@ BEGIN {
   prefix_count = split(ENVIRON["PRUNE_CD_PREFIXES"], prefixes, "\n")
   merge_start = "The merge of commit "
   merge_middle = " is in progress in "
-  # The start of the last line of the paragraph that `merge_in_progress_note`
-  # prints.
-  merge_end = "Finish it ("
+  # The end of the last line of the paragraph that `merge_in_progress_note`
+  # prints, in each of its forms.
+  merge_end = "; then delete this entry."
   # Matches the heading of an entry that a script of manage-git-branches
   # wrote, which ends with the script's name and a time, as in
   # "## Fix the build after merges (git-push-to, 2026-11-10 07:51:59)".
@@ -57,6 +57,12 @@ BEGIN {
 # Returns 1 if STRING starts with PREFIX, and 0 otherwise.
 function starts_with(string, prefix) {
   return substr(string, 1, length(prefix)) == prefix
+}
+
+# Returns 1 if STRING ends with SUFFIX, and 0 otherwise.
+function ends_with(string, suffix) {
+  return length(string) >= length(suffix) &&
+    substr(string, length(string) - length(suffix) + 1) == suffix
 }
 
 # Returns 1 if DIRECTORY is one of the pathnames in ${PRUNE_DIRS}, and 0
@@ -90,7 +96,7 @@ function has_added_text(i, line, in_note, in_code) {
     } else if (line == "") {
       in_note = 0
     } else if (in_note) {
-      if (starts_with(line, merge_end)) {
+      if (ends_with(line, merge_end)) {
         in_note = 0
       }
     } else if (starts_with(line, merge_start)) {

@@ -1757,6 +1757,16 @@ push_to good --no-llm
 if [ "$(grep -c '^## ' "${feature_dir}/AGENT-TODO.md")" -ne 2 ]; then
   fail "touched redundant merge, run again: AGENT-TODO.md does not have exactly 2 entries: $(cat "${feature_dir}/AGENT-TODO.md")"
 fi
+# Once the person aborts the merge, a run removes both entries, and with them
+# the file, which holds nothing else.
+git -C "${feature_dir}" merge --abort
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "touched redundant merge, aborted: git-push-to failed: ${push_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "touched redundant merge, aborted: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
 
 ## Usage: check_redundant_stopped DESCRIPTION DIAGNOSTIC
 ## Checks that git-push-to failed, left the merge in progress in
@@ -1846,6 +1856,50 @@ fi
 case "${push_output}" in
   *"aborting the merge"* | *"probably redundant"*) fail "octopus merge: the merge was taken for a redundant one: ${push_output}" ;;
 esac
+
+## A redundant merge is recognized, and aborted, even if the remote's fetch
+## refspec does not cover the upstream branch, so that fetching it updates no
+## remote-tracking branch, and origin/feature is stale.
+setup_case redundant-merge-refspec
+push_to good --no-llm
+check_not_resolved "redundant merge, refspec without the branch"
+push_same_merge
+git -C "${feature_dir}" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "redundant merge, refspec without the branch: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"aborting the merge of commit "*", which is redundant:  branch 'feature' of origin, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge, refspec without the branch: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "$(git -C "${case_dir}/other-clone" rev-parse HEAD)" ]; then
+  fail "redundant merge, refspec without the branch: the branch was not fast-forwarded to the other clone's merge"
+fi
+
+## A redundant merge is recognized, and aborted, if the upstream branch is a
+## local branch, "base", which the fetch of no remote changes.  Base holds a
+## merge of both sides that origin lacks.
+setup_case redundant-merge-local-upstream
+push_to good --no-llm
+check_not_resolved "redundant merge, local upstream branch"
+git -C "${feature_dir}" branch base "$(git -C "${feature_dir}" commit-tree -p HEAD -p MERGE_HEAD \
+  -m "Merge main into base" "HEAD^{tree}")"
+git -C "${feature_dir}" config branch.feature.remote .
+git -C "${feature_dir}" config branch.feature.merge refs/heads/base
+git -C "${feature_dir}" config branch.feature.pushRemote origin
+git -C "${feature_dir}" config push.default current
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "redundant merge, local upstream branch: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"aborting the merge of commit "*", which is redundant:  base, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge, local upstream branch: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "$(git -C "${feature_dir}" rev-parse base)" ]; then
+  fail "redundant merge, local upstream branch: the branch was not fast-forwarded to base"
+fi
 
 ## Usage: start_redundant_merge_in_main
 ## Starts, in ${main_dir}, a merge of feature into main, which has conflicts,
@@ -2544,8 +2598,10 @@ fi
 if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
   fail "build fixed by hand: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
 fi
+# The diagnostic names the file by a physical path, as on macOS, where the
+# temporary directory is under a symbolic link.
 case "${push_output}" in
-  *"deleted ${feature_dir}/AGENT-TODO.md, whose entries no longer apply"*) ;;
+  *"deleted $(cd "${feature_dir}" && pwd -P)/AGENT-TODO.md, whose entries no longer apply"*) ;;
   *) fail "build fixed by hand: wrong diagnostic: ${push_output}" ;;
 esac
 
@@ -3229,6 +3285,32 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
 fi
 check_pull_fixed "git-pull-upstream after a pull that breaks the build" \
   "Fix the build after merging ${pull_description}"
+
+## Run in a subdirectory, `git-pull-upstream` runs the agent that fails to fix
+## the build at the top level of the working tree, so that AGENT-TODO.md
+## gives a command that starts there.  Once a person fixes the build, a rerun
+## in the subdirectory deletes the entry, and with it the file.
+setup_pull_breaks pull-upstream-build-subdir
+git -C "${feature_dir}" remote set-head origin main
+mkdir "${feature_dir}/sub"
+if pull_upstream_output="$(cd "${feature_dir}/sub" && STUB_BUILD=none PATH="${WORK_DIR}/test-bin:${PATH}" \
+  MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT='' "${COMMANDS_DIR}/git-pull-upstream" --llm 2>&1)"; then
+  fail "git-pull-upstream in a subdirectory, build not fixed: succeeded: ${pull_upstream_output}"
+fi
+session_id="$(sed -n -e '/^--session-id$/{n;p;}' "${STUB_ARGS}")"
+session_dir="$(cd "${feature_dir}" && pwd -P)"
+if ! grep -q -x -F "cd ${session_dir} && claude --resume ${session_id}" "${feature_dir}/AGENT-TODO.md"; then
+  fail "git-pull-upstream in a subdirectory, build not fixed: AGENT-TODO.md lacks the command that starts at the top level: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
+echo "fine" > "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Fix the build by hand"
+if ! pull_upstream_output="$(cd "${feature_dir}/sub" && MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT='' \
+  "${COMMANDS_DIR}/git-pull-upstream" --no-llm 2>&1)"; then
+  fail "git-pull-upstream in a subdirectory, build fixed by hand: failed: ${pull_upstream_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "git-pull-upstream in a subdirectory, build fixed by hand: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
 build=0
 
 ## An agent that is not installed is not asked to fix the build.  The merge
