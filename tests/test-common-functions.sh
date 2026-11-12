@@ -1504,8 +1504,8 @@ if (
   # shellcheck disable=SC2329 # Is called through print_nul_lines.
   git() {
     case "$*" in
-      "diff --no-renames --name-only -z AUTO_MERGE") return 128 ;;
-      *) command git "$@" ;;
+      ("diff --no-renames --name-only -z AUTO_MERGE") return 128 ;;
+      (*) command git "$@" ;;
     esac
   }
   resolve_other_changes f.txt > /dev/null
@@ -1516,8 +1516,8 @@ if roc_out="$(
   cd "${ccf_dir}" || exit 0
   git() {
     case "$*" in
-      "diff --no-renames --name-only -z AUTO_MERGE") return 128 ;;
-      *) command git "$@" ;;
+      ("diff --no-renames --name-only -z AUTO_MERGE") return 128 ;;
+      (*) command git "$@" ;;
     esac
   }
   # The scripts that call it do not use `set -e`.
