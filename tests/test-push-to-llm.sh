@@ -1954,6 +1954,65 @@ if ! grep -F -x -q 'It is probably redundant:  origin/main, the upstream branch,
   fail "touched redundant merge in the first directory: AGENT-TODO.md does not say that the merge is redundant: $(cat "${main_dir}/AGENT-TODO.md" 2>&1)"
 fi
 
+## Without the pull of the first directory, a redundant merge in progress
+## there that nobody has worked on is still aborted.
+setup_case redundant-merge-first-no-pull
+start_redundant_merge_in_main
+push_to good --no-llm --no-pull-first
+case "${push_output}" in
+  *"aborting the merge of commit "*"myrepo-branch-main, which is redundant:  origin/main, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge in the first directory, --no-pull-first: wrong diagnostic: ${push_output}" ;;
+esac
+if git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "redundant merge in the first directory, --no-pull-first: the merge is still in progress"
+fi
+
+## Without the pull of the first directory, a merge in progress there whose
+## upstream branch cannot be fetched, so that whether it is redundant is
+## unknown, is refused with the usual diagnostic, which says what to do, and
+## with the reason of `git-push-to`.  A directory in place of FETCH_HEAD makes
+## the fetch fail.
+setup_case redundant-merge-first-no-pull-unknown
+start_redundant_merge_in_main
+rm -f "${main_dir}/.git/FETCH_HEAD"
+mkdir "${main_dir}/.git/FETCH_HEAD"
+push_to good --no-llm --no-pull-first
+if [ "${push_status}" -eq 0 ]; then
+  fail "unfetchable merge in the first directory, --no-pull-first: git-push-to succeeded"
+fi
+if ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "unfetchable merge in the first directory, --no-pull-first: the merge was aborted or committed"
+fi
+case "${push_output}" in
+  *"cannot fetch origin/main, so whether the merge in progress in "*" is redundant is unknown"*"a merge is in progress in "*"; finish it, or abort it with \`git merge --abort\`"*) ;;
+  *) fail "unfetchable merge in the first directory, --no-pull-first: wrong diagnostic: ${push_output}" ;;
+esac
+if ! grep -F -q "It was in progress when \`git-push-to\` was about to merge from it." "${main_dir}/AGENT-TODO.md"; then
+  fail "unfetchable merge in the first directory, --no-pull-first: AGENT-TODO.md lacks the reason: $(cat "${main_dir}/AGENT-TODO.md" 2>&1)"
+fi
+
+## `git-pull-upstream` aborts a redundant merge in progress that nobody has
+## worked on, and its pull fast-forwards the branch.
+setup_case pull-upstream-redundant-merge
+git -C "${feature_dir}" remote set-head origin main
+git -C "${feature_dir}" fetch -q
+git -C "${feature_dir}" merge -q --no-edit origin/main > /dev/null 2>&1 || true
+if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "git-pull-upstream, redundant merge: no merge is in progress"
+fi
+push_same_merge
+if ! pull_upstream_output="$(cd "${feature_dir}" && PATH="${WORK_DIR}/test-bin:${PATH}" \
+  "${COMMANDS_DIR}/git-pull-upstream" --no-llm 2>&1)"; then
+  fail "git-pull-upstream, redundant merge: failed: ${pull_upstream_output}"
+fi
+case "${pull_upstream_output}" in
+  *"aborting the merge of commit "*", which is redundant:  origin/feature, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "git-pull-upstream, redundant merge: wrong diagnostic: ${pull_upstream_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "$(git -C "${case_dir}/other-clone" rev-parse HEAD)" ]; then
+  fail "git-pull-upstream, redundant merge: the branch was not fast-forwarded to the other clone's merge"
+fi
+
 setup_case todo-agent
 push_to none --llm
 check_not_resolved "AGENT-TODO.md with an agent"
@@ -2187,6 +2246,28 @@ READLINK_EOF
     push_status=$?
   fi
   check_resolved claude "rerun from an agent in the directory"
+
+  ## A redundant merge in progress in the first directory that nobody has
+  ## worked on is not aborted while an agent works there, although
+  ## git-push-to does not finish a merge in that directory.
+  setup_case redundant-merge-first-agent
+  start_redundant_merge_in_main
+  start_agent "${main_dir}" || fail "the stand-in agent did not start"
+  push_to good --no-llm
+  stop_agent
+  if [ "${push_status}" -eq 0 ]; then
+    fail "redundant merge in the first directory with an agent: git-push-to succeeded"
+  fi
+  if ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    fail "redundant merge in the first directory with an agent: the merge was aborted or committed"
+  fi
+  case "${push_output}" in
+    *"claude (process ${agent_pid}) is working in"*"an AI agent is working there"*"the merge is probably redundant:  origin/main, the upstream branch, already contains both of its sides"*) ;;
+    *) fail "redundant merge in the first directory with an agent: wrong diagnostic: ${push_output}" ;;
+  esac
+  case "${push_output}" in
+    *"aborting the merge"*) fail "redundant merge in the first directory with an agent: the merge was aborted: ${push_output}" ;;
+  esac
 fi
 
 ## An agent that stages a file is rejected, even if the working tree holds an
