@@ -197,8 +197,8 @@ make_temp_dir() {
 }
 
 ## Usage: review_notice MESSAGE
-## Prints MESSAGE, which names something that an AI agent did that a person
-## should review, as a diagnostic, and appends it to the summary (see
+## Prints MESSAGE, which names something that an AI agent or a hook did that a
+## person should review, as a diagnostic, and appends it to the summary (see
 ## `append_summary`), prefixed by the current directory, as in
 ## "in /home/me/myrepo-branch-feature: claude also changed: README.md".
 review_notice() {
@@ -222,12 +222,14 @@ append_merge_note_summary() {
 ## Usage: append_summary LINE
 ## Appends LINE, followed by a newline, to the file named by ${summary_file}, if
 ## that variable is set and not empty.  The summary lists what a person should
-## look at after a run:  each change by an AI agent to review, each merge left
-## in progress and each agent session that can be continued (which
-## `report_merge_in_progress` and `report_agent_session` also note in
+## look at after a run:  each change by an AI agent to review, each change by a
+## hook to a file that a commit would not otherwise change, each file that
+## changed after a hook's changes were staged (see `commit_staged_again`),
+## each merge left in progress and each agent session that can be continued
+## (which `report_merge_in_progress` and `report_agent_session` also note in
 ## AGENT-TODO.md), and the step that failed.  `git-push-to --summary` sets
-## ${summary_file}.  A failure to write the summary goes unreported, because the
-## same information is printed as a diagnostic.
+## ${summary_file}.  A failure to write the summary goes unreported, because
+## the same information is printed as a diagnostic.
 append_summary() {
   if [ -n "${summary_file:-}" ]; then
     printf '%s\n' "$1" >> "${summary_file}" 2> /dev/null || true
@@ -1339,34 +1341,35 @@ ends_with_newline() {
 ## merge of several merge bases, and a working tree with changes other than
 ## the conflicted files, which would be committed with them.
 resolve_merge_conflicts() {
-  resolve_with="$1"
-  resolve_commit="$2"
-  resolve_source="$3"
-  resolve_failed="${SCRIPT_NAME}: the merge of ${resolve_source} is still in progress in $(pwd)"
+  rmc_with="$1"
+  rmc_commit="$2"
+  rmc_source="$3"
+  rmc_failed="${SCRIPT_NAME}: the merge of ${rmc_source} is still in progress in $(pwd)"
 
   # The checks compare the working tree with AUTO_MERGE, so an agent that
   # changed it would defeat them; `resolve_with_agent` checks that it did not.
-  if ! resolve_auto_merge="$(git rev-parse --verify --quiet AUTO_MERGE)"; then
+  if ! rmc_auto_merge="$(git rev-parse --verify --quiet AUTO_MERGE)"; then
     echo "${SCRIPT_NAME}: no AUTO_MERGE, which git 2.42 and later write, in $(pwd)" >&2
     resolve_stopped
     return 1
   fi
-  if ! resolve_head="$(git rev-parse --verify HEAD)" \
-    || ! resolve_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)" \
-    || [ "${resolve_merge_head}" != "$(git rev-parse --verify --quiet "${resolve_commit}^{commit}")" ]; then
-    echo "${SCRIPT_NAME}: no merge of ${resolve_source} is in progress in $(pwd)" >&2
+  if ! rmc_head="$(git rev-parse --verify HEAD)" \
+    || ! rmc_merge_head="$(git rev-parse --verify --quiet MERGE_HEAD)" \
+    || [ "${rmc_merge_head}" != "$(git rev-parse --verify --quiet "${rmc_commit}^{commit}")" ]; then
+    echo "${SCRIPT_NAME}: no merge of ${rmc_source} is in progress in $(pwd)" >&2
     return 1
   fi
 
-  # The conflicted files, one per line.  A pathname that contains a newline
-  # is refused by the byte 001 that `conflicted_files` puts in its place.
-  resolve_files="$(conflicted_files)"
-  if [ -z "${resolve_files}" ]; then
+  # The conflicted files, one per line.  `conflicted_files` replaces each
+  # newline within a pathname by the byte 001, so the `case` below detects
+  # and refuses any conflicted file whose name contains a newline.
+  rmc_conflicted="$(conflicted_files)"
+  if [ -z "${rmc_conflicted}" ]; then
     echo "${SCRIPT_NAME}: cannot list the conflicted files in $(pwd)" >&2
     resolve_stopped
     return 1
   fi
-  case "${resolve_files}" in
+  case "${rmc_conflicted}" in
     *"$(printf '\001')"*)
       echo "${SCRIPT_NAME}: a conflicted file has a newline in its name; resolve the conflicts by hand" >&2
       resolve_stopped
@@ -1374,9 +1377,9 @@ resolve_merge_conflicts() {
       ;;
   esac
   # Any other change would be blamed on the agent below, or committed.
-  resolve_other="$(resolve_other_changes "${resolve_files}")"
-  if [ -n "${resolve_other}" ]; then
-    printf '%s\n' "${resolve_other}" | sed -e "s/^/${SCRIPT_NAME}: changed, but not conflicted: /" >&2
+  rmc_other="$(resolve_other_changes "${rmc_conflicted}")"
+  if [ -n "${rmc_other}" ]; then
+    printf '%s\n' "${rmc_other}" | sed -e "s/^/${SCRIPT_NAME}: changed, but not conflicted: /" >&2
     echo "${SCRIPT_NAME}: the working tree has changes that are not part of the merge; resolve the conflicts by hand" >&2
     resolve_stopped
     return 1
@@ -1414,101 +1417,101 @@ resolve_merge_conflicts() {
   # more "=".  For stages 2 and 3, the definition of a conflict marker is
   # looser than that of the check of a resolution, so that it refuses every
   # file that contains a line that might be taken for one.
-  # ${resolve_checks} has a line "separator FILE" for each conflicted file
+  # ${rmc_checks} has a line "separator FILE" for each conflicted file
   # in which a line of 7 or more "=" is permitted, and a line
   # "unresolved FILE" for each one that `git rerere` did not resolve
   # acceptably.
-  if ! resolve_checks="$(printf '%s\n' "${resolve_files}" | {
-    resolve_status=0
-    while IFS= read -r resolve_file; do
-      resolve_size="$(conflict_marker_size "${resolve_file}")"
-      if [ "${resolve_size}" -eq 0 ]; then
-        echo "${SCRIPT_NAME}: ${resolve_file} has a conflict other than a content conflict; resolve it by hand" >&2
-        resolve_status=1
+  if ! rmc_checks="$(printf '%s\n' "${rmc_conflicted}" | {
+    rmc_status=0
+    while IFS= read -r rmc_conflicted_file; do
+      rmc_size="$(conflict_marker_size "${rmc_conflicted_file}")"
+      if [ "${rmc_size}" -eq 0 ]; then
+        echo "${SCRIPT_NAME}: ${rmc_conflicted_file} has a conflict other than a content conflict; resolve it by hand" >&2
+        rmc_status=1
         continue
       fi
-      resolve_contains_separator=no
-      for resolve_stage in 1 2 3; do
-        # Only stage 1 is scanned for markers of length ${resolve_size}.
-        resolve_scan_size=''
-        if [ "${resolve_stage}" -eq 1 ]; then
-          resolve_scan_size="${resolve_size}"
+      rmc_contains_separator=no
+      for rmc_stage in 1 2 3; do
+        # Only stage 1 is scanned for markers of length ${rmc_size}.
+        rmc_scan_size=''
+        if [ "${rmc_stage}" -eq 1 ]; then
+          rmc_scan_size="${rmc_size}"
         fi
         # The "(" before each pattern lets bash 3.2, which is /bin/sh on
         # macOS, parse a case statement inside a command substitution.
-        case "$(scan_conflict_markers ":${resolve_stage}:${resolve_file}" "${resolve_scan_size}")" in
+        case "$(scan_conflict_markers ":${rmc_stage}:${rmc_conflicted_file}" "${rmc_scan_size}")" in
           (marker)
-            echo "${SCRIPT_NAME}: ${resolve_file} contains lines that look like conflict markers; resolve its conflicts by hand" >&2
-            resolve_status=1
+            echo "${SCRIPT_NAME}: ${rmc_conflicted_file} contains lines that look like conflict markers; resolve its conflicts by hand" >&2
+            rmc_status=1
             continue 2
             ;;
           (separator)
-            if [ "${resolve_stage}" -ne 1 ]; then
-              resolve_contains_separator=yes
+            if [ "${rmc_stage}" -ne 1 ]; then
+              rmc_contains_separator=yes
             fi
             ;;
         esac
       done
-      if [ "${resolve_contains_separator}" = yes ]; then
-        printf 'separator %s\n' "${resolve_file}"
+      if [ "${rmc_contains_separator}" = yes ]; then
+        printf 'separator %s\n' "${rmc_conflicted_file}"
       fi
-      if check_conflict_resolution "${resolve_file}" "${resolve_contains_separator}" "${resolve_size}" 2> /dev/null; then
+      if check_conflict_resolution "${rmc_conflicted_file}" "${rmc_contains_separator}" "${rmc_size}" 2> /dev/null; then
         continue
       fi
       # A file without a conflict region was resolved by `git rerere`, but
       # not acceptably, as when the recorded resolution changed text outside
       # the conflict regions.  An agent would see no conflict to resolve, and
       # the check of its work would not find what is wrong.
-      if [ -f "${resolve_file}" ] && ! grep -q '^<<<<<<<' "${resolve_file}"; then
-        check_conflict_resolution "${resolve_file}" "${resolve_contains_separator}" "${resolve_size}" || true
-        echo "${SCRIPT_NAME}: \`git rerere\` did not resolve ${resolve_file} acceptably; resolve its conflicts by hand" >&2
-        resolve_status=1
+      if [ -f "${rmc_conflicted_file}" ] && ! grep -q '^<<<<<<<' "${rmc_conflicted_file}"; then
+        check_conflict_resolution "${rmc_conflicted_file}" "${rmc_contains_separator}" "${rmc_size}" || true
+        echo "${SCRIPT_NAME}: \`git rerere\` did not resolve ${rmc_conflicted_file} acceptably; resolve its conflicts by hand" >&2
+        rmc_status=1
         continue
       fi
-      printf 'unresolved %s\n' "${resolve_file}"
+      printf 'unresolved %s\n' "${rmc_conflicted_file}"
     done
-    exit "${resolve_status}"
+    exit "${rmc_status}"
   })"; then
     resolve_stopped
     return 1
   fi
   # The files in which a line of 7 or more "=" is permitted, one per line;
   # `separator_permitted` reads it.
-  resolve_separators="$(printf '%s\n' "${resolve_checks}" | sed -n -e 's/^separator //p')"
+  rmc_separators="$(printf '%s\n' "${rmc_checks}" | sed -n -e 's/^separator //p')"
   # The files that `git rerere` did not resolve, one per line.
-  resolve_unresolved="$(printf '%s\n' "${resolve_checks}" | sed -n -e 's/^unresolved //p')"
+  rmc_unresolved="$(printf '%s\n' "${rmc_checks}" | sed -n -e 's/^unresolved //p')"
   # Before an agent edits them, so that a later run can tell whether anyone
   # changed them after this one stopped.
   record_conflicted_files
 
-  if [ -z "${resolve_unresolved}" ]; then
+  if [ -z "${rmc_unresolved}" ]; then
     echo "${SCRIPT_NAME}: \`git rerere\` resolved the conflicts in $(pwd)" >&2
-  elif [ -z "${resolve_with}" ] || ! agent_available "${resolve_with}"; then
-    report_unresolved "${resolve_unresolved}"
+  elif [ -z "${rmc_with}" ] || ! agent_available "${rmc_with}"; then
+    report_unresolved "${rmc_unresolved}"
     resolve_stopped
     return 1
   else
     # The note is composed before the agent runs, because no git command
     # should run after an agent has changed git's configuration, which
-    # `resolve_with_agent` reports as ${resolve_agent_status} 2.
+    # `resolve_with_agent` reports as ${rwa_agent_status} 2.
     # The entry in AGENT-TODO.md is read by a person or by a later agent,
     # which should not try alone what this agent could not do.
-    resolve_agent_reason="${resolve_with}, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge."
-    resolve_note="$(merge_in_progress_note "${resolve_agent_reason}")"
-    resolve_agent_status=0
+    rmc_agent_reason="${rmc_with}, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge."
+    rmc_note="$(merge_in_progress_note "${rmc_agent_reason}")"
+    rwa_agent_status=0
     # 1 once `resolve_with_agent` has started the agent.  If it failed
     # before then, a rerun can succeed, so the note asks for no help.
-    resolve_agent_ran=0
+    rwa_agent_ran=0
     if ! resolve_with_agent; then
       if [ -n "${agent_session_ids:-}" ]; then
-        report_agent_session "Resolve the conflicts in the merge of ${resolve_source}" "${resolve_note}"
-        echo "${resolve_failed}" >&2
-      elif [ "${resolve_agent_status}" -ne 2 ] && [ "${resolve_agent_ran}" -eq 1 ]; then
-        resolve_stopped "${resolve_agent_reason}"
-      elif [ "${resolve_agent_status}" -ne 2 ]; then
+        report_agent_session "Resolve the conflicts in the merge of ${rmc_source}" "${rmc_note}"
+        echo "${rmc_failed}" >&2
+      elif [ "${rwa_agent_status}" -ne 2 ] && [ "${rwa_agent_ran}" -eq 1 ]; then
+        resolve_stopped "${rmc_agent_reason}"
+      elif [ "${rwa_agent_status}" -ne 2 ]; then
         resolve_stopped
       else
-        echo "${resolve_failed}" >&2
+        echo "${rmc_failed}" >&2
       fi
       return 1
     fi
@@ -1532,13 +1535,13 @@ resolve_merge_conflicts() {
 ## says so, and notes the merge in AGENT-TODO.md, given REASON (see
 ## `report_merge_in_progress`).
 resolve_stopped() {
-  echo "${resolve_failed}" >&2
+  echo "${rmc_failed}" >&2
   report_merge_in_progress "${1:-}"
 }
 
 ## Usage: resolve_with_agent
-## Asks the AI agent ${resolve_with} to resolve the conflicts in the files
-## ${resolve_unresolved}, and checks its work.  Returns 1, after printing a
+## Asks the AI agent ${rmc_with} to resolve the conflicts in the files
+## ${rmc_unresolved}, and checks its work.  Returns 1, after printing a
 ## diagnostic, if the agent fails or if its work is not acceptable.  Only
 ## `resolve_merge_conflicts` calls this function, which reads that function's
 ## variables.
@@ -1581,17 +1584,17 @@ resolve_with_agent() {
   # be on different file systems.  The working tree's pathnames are listed
   # after the wait, which creates a directory in the working tree and then
   # removes it.
-  resolve_index="$(git ls-files --stage -z | cksum)"
-  if ! resolve_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-start)" \
-    || ! : > "${resolve_marker}"; then
+  rwa_index="$(git ls-files --stage -z | cksum)"
+  if ! rwa_marker="$(git rev-parse --path-format=absolute --git-path manage-git-branches-agent-start)" \
+    || ! : > "${rwa_marker}"; then
     echo "${SCRIPT_NAME}: cannot write a file in the git directory of $(pwd)" >&2
     return 1
   fi
-  if ! wait_for_later_time "${resolve_marker}" "$(pwd)"; then
-    rm -f -- "${resolve_marker}"
+  if ! wait_for_later_time "${rwa_marker}" "$(pwd)"; then
+    rm -f -- "${rwa_marker}"
     return 1
   fi
-  resolve_paths="$(working_tree_paths)"
+  rwa_paths="$(working_tree_paths)"
   # The files that git tracks, which the agent can change or delete.  `-z`
   # keeps git from quoting a pathname, as it quotes one that contains a
   # quotation mark.  `tr` turns each NUL that ends a pathname into a newline,
@@ -1599,45 +1602,45 @@ resolve_with_agent() {
   # pathname matches no file, and a change to that file is rejected.  The
   # index holds a conflicted file at several stages, so `uniq` removes the
   # repetitions from the sorted list.
-  resolve_tracked="$(git ls-files -z | tr '\n\000' '\001\n' | uniq)"
+  rwa_tracked="$(git ls-files -z | tr '\n\000' '\001\n' | uniq)"
   # Git runs a hook when the script commits, outside the agent's sandbox.
-  resolve_hooks="$(working_tree_hooks)"
-  resolve_branch="$(current_branch)" || resolve_branch="HEAD"
+  rwa_hooks="$(working_tree_hooks)"
+  rwa_branch="$(current_branch)" || rwa_branch="HEAD"
   # The conflicted files that `git rerere` resolved, one per line.
-  resolve_rerere="$(printf '%s\n' "${resolve_files}" | grep -F -x -v -- "${resolve_unresolved}")"
+  rwa_rerere="$(printf '%s\n' "${rmc_conflicted}" | grep -F -x -v -- "${rmc_unresolved}")"
   # A line "HASH FILE" for each of them, where HASH is the hash of the
   # resolution, as `git hash-object` computes it, such as
   # "3b18e512dba79e4c8300dd08aeb37f8e728b8dad".  `rerere_resolution_unchanged`
   # reads it to tell whether the agent changed the resolution.
-  resolve_rerere_hashes="$(printf '%s\n' "${resolve_rerere}" | while IFS= read -r resolve_file; do
-    if [ -n "${resolve_file}" ]; then
-      printf '%s %s\n' "$(git hash-object -- "${resolve_file}")" "${resolve_file}"
+  rwa_rerere_hashes="$(printf '%s\n' "${rwa_rerere}" | while IFS= read -r rwa_conflicted_file; do
+    if [ -n "${rwa_conflicted_file}" ]; then
+      printf '%s %s\n' "$(git hash-object -- "${rwa_conflicted_file}")" "${rwa_conflicted_file}"
     fi
   done)"
-  resolve_rerere_text=''
-  if [ -n "${resolve_rerere}" ]; then
-    resolve_rerere_text="
+  rwa_rerere_text=''
+  if [ -n "${rwa_rerere}" ]; then
+    rwa_rerere_text="
 \`git rerere\` resolved the conflicts in these files, by replaying resolutions that were recorded earlier.  Review them as part of the merge too:
 
-$(printf '%s\n' "${resolve_rerere}" | sed -e 's/^/  /')
+$(printf '%s\n' "${rwa_rerere}" | sed -e 's/^/  /')
 "
   fi
   # The general procedure is in a file that a person can use too, such as by
   # naming it in an agent's instructions.  The rules that follow it are
   # specific to this script.
-  if ! resolve_instructions="$(cat -- "${SCRIPT_DIR}/merge-conflict-instructions.md")"; then
+  if ! rwa_instructions="$(cat -- "${SCRIPT_DIR}/merge-conflict-instructions.md")"; then
     echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/merge-conflict-instructions.md" >&2
-    rm -f -- "${resolve_marker}"
+    rm -f -- "${rwa_marker}"
     return 1
   fi
-  resolve_prompt="You are resolving merge conflicts in the git working tree $(pwd).
-\`git merge\` of ${resolve_source} into branch ${resolve_branch} stopped with conflicts.  HEAD is ${resolve_branch}, and MERGE_HEAD is ${resolve_source}.  These files contain conflict markers:
+  rwa_prompt="You are resolving merge conflicts in the git working tree $(pwd).
+\`git merge\` of ${rmc_source} into branch ${rwa_branch} stopped with conflicts.  HEAD is ${rwa_branch}, and MERGE_HEAD is ${rmc_source}.  These files contain conflict markers:
 
-$(printf '%s\n' "${resolve_unresolved}" | sed -e 's/^/  /')
-${resolve_rerere_text}
+$(printf '%s\n' "${rmc_unresolved}" | sed -e 's/^/  /')
+${rwa_rerere_text}
 Follow the instructions below, which are the contents of the file merge-conflict-instructions.md; you need not read that file, or use a skill, to resolve these conflicts.  They override any other instructions that you have about resolving merge conflicts, such as a rule to change only the conflict regions.  After them come rules for this session, which nobody is watching.
 
-${resolve_instructions}
+${rwa_instructions}
 
 # Rules for this session
 
@@ -1650,47 +1653,47 @@ ${resolve_instructions}
 
 Finish with a summary that says, for each conflict, what each side changed and how your resolution combines the changes; and that lists each change that you made outside the conflict regions, and why."
 
-  echo "${SCRIPT_NAME}: asking ${resolve_with} to resolve the conflicts in $(pwd)" >&2
-  resolve_agent_ran=1
-  run_agent "${resolve_with}" "${resolve_prompt}"
-  resolve_agent_status=$?
+  echo "${SCRIPT_NAME}: asking ${rmc_with} to resolve the conflicts in $(pwd)" >&2
+  rwa_agent_ran=1
+  run_agent "${rmc_with}" "${rwa_prompt}"
+  rwa_agent_status=$?
   # The files that the agent can change or delete:  the tracked files, except
   # a hook in the working tree, unless it is conflicted.  A file that existed before, but
   # that git ignored until the agent changed .gitignore, is neither a change
   # nor committed.
-  resolve_changes="$( {
-    printf '%s\n' "${resolve_tracked}" | RESOLVE_HOOKS="${resolve_hooks}" awk '
+  rwa_changes="$( {
+    printf '%s\n' "${rwa_tracked}" | RESOLVE_HOOKS="${rwa_hooks}" awk '
       ENVIRON["RESOLVE_HOOKS"] == "" { print; next }
       ENVIRON["RESOLVE_HOOKS"] != "." && index($0, ENVIRON["RESOLVE_HOOKS"] "/") != 1'
-    printf '%s\n' "${resolve_files}"
-  } | working_tree_changes "${resolve_paths}" "${resolve_marker}")"
-  rm -f -- "${resolve_marker}"
+    printf '%s\n' "${rmc_conflicted}"
+  } | working_tree_changes "${rwa_paths}" "${rwa_marker}")"
+  rm -f -- "${rwa_marker}"
 
   # Check the agent's work even if the agent failed, so that the user learns
   # of every change that it made.
-  resolve_ok=1
-  if [ -n "${resolve_changes}" ]; then
-    printf '%s\n' "${resolve_changes}" | while IFS= read -r resolve_change; do
-      review_notice "${resolve_with} ${resolve_change}"
+  rwa_ok=1
+  if [ -n "${rwa_changes}" ]; then
+    printf '%s\n' "${rwa_changes}" | while IFS= read -r rwa_change; do
+      review_notice "${rmc_with} ${rwa_change}"
     done
-    resolve_ok=0
+    rwa_ok=0
   fi
-  if [ "${resolve_agent_status}" -eq 2 ]; then
+  if [ "${rwa_agent_status}" -eq 2 ]; then
     # The agent changed what names the commands that git runs, so no git
     # command runs until someone has checked it.
     return 1
   fi
-  resolve_refs_ok=1
-  if [ "$(git rev-parse --verify HEAD)" != "${resolve_head}" ] \
-    || [ "$(git rev-parse --verify --quiet MERGE_HEAD)" != "${resolve_merge_head}" ] \
-    || [ "$(git rev-parse --verify --quiet AUTO_MERGE)" != "${resolve_auto_merge}" ]; then
-    review_notice "${resolve_with} changed HEAD, MERGE_HEAD, or AUTO_MERGE"
-    resolve_refs_ok=0
-    resolve_ok=0
+  rwa_refs_ok=1
+  if [ "$(git rev-parse --verify HEAD)" != "${rmc_head}" ] \
+    || [ "$(git rev-parse --verify --quiet MERGE_HEAD)" != "${rmc_merge_head}" ] \
+    || [ "$(git rev-parse --verify --quiet AUTO_MERGE)" != "${rmc_auto_merge}" ]; then
+    review_notice "${rmc_with} changed HEAD, MERGE_HEAD, or AUTO_MERGE"
+    rwa_refs_ok=0
+    rwa_ok=0
   fi
-  if [ "$(git ls-files --stage -z | cksum)" != "${resolve_index}" ]; then
-    review_notice "${resolve_with} changed the index"
-    resolve_ok=0
+  if [ "$(git ls-files --stage -z | cksum)" != "${rwa_index}" ]; then
+    review_notice "${rmc_with} changed the index"
+    rwa_ok=0
   fi
   # The agent's changes outside the conflict regions deserve the user's
   # review, as the resolutions do.  They are reported whether or not the
@@ -1707,116 +1710,116 @@ Finish with a summary that says, for each conflict, what each side changed and h
   # The conflicted files that the agent resolved as one side's version of
   # the file, one per line.  No conflicted pathname contains a newline,
   # which `resolve_merge_conflicts` refuses.
-  resolve_one_sided_files=''
+  rwa_one_sided_files=''
   # The conflicted files that `git rerere` resolved and whose resolution the
   # agent changed or deleted, one per line.
-  resolve_rerere_changed=''
-  if [ "${resolve_refs_ok}" -eq 1 ]; then
-    resolve_agent_other="$(resolve_other_changes "${resolve_files}")"
-    printf '%s\n' "${resolve_agent_other}" | while IFS= read -r resolve_file; do
-      if [ -n "${resolve_file}" ]; then
-        review_notice "${resolve_with} also changed: ${resolve_file}"
+  rwa_rerere_changed=''
+  if [ "${rwa_refs_ok}" -eq 1 ]; then
+    rwa_agent_other="$(resolve_other_changes "${rmc_conflicted}")"
+    printf '%s\n' "${rwa_agent_other}" | while IFS= read -r rwa_other_file; do
+      if [ -n "${rwa_other_file}" ]; then
+        review_notice "${rmc_with} also changed: ${rwa_other_file}"
       fi
     done
     # The loop runs in this shell, not in a pipe's subshell, so that its
-    # assignments last.  The shell splits ${resolve_files} on newlines, with
-    # globbing off so that no pathname is expanded; the body restores both.
-    # It hashes each file once.
-    resolve_saved_ifs="${IFS}"
+    # assignments last.  The shell splits ${rmc_conflicted} on newlines,
+    # with globbing off so that no pathname is expanded; the body restores
+    # both.  It hashes each file once.
+    rwa_saved_ifs="${IFS}"
     IFS='
 '
     set -f
-    for resolve_file in ${resolve_files}; do
+    for rwa_conflicted_file in ${rmc_conflicted}; do
       set +f
-      IFS="${resolve_saved_ifs}"
+      IFS="${rwa_saved_ifs}"
       # `git hash-object` fails for a file that the agent deleted.
-      resolve_hash="$(git hash-object -- "${resolve_file}" 2> /dev/null)" || resolve_hash=''
-      if [ -n "${resolve_hash}" ] \
-        && rerere_resolution_unchanged "${resolve_file}" "${resolve_hash}"; then
+      rwa_hash="$(git hash-object -- "${rwa_conflicted_file}" 2> /dev/null)" || rwa_hash=''
+      if [ -n "${rwa_hash}" ] \
+        && rerere_resolution_unchanged "${rwa_conflicted_file}" "${rwa_hash}"; then
         continue
       fi
-      if printf '%s\n' "${resolve_rerere}" | grep -F -x -q -- "${resolve_file}"; then
-        resolve_rerere_changed="${resolve_rerere_changed}${resolve_file}
+      if printf '%s\n' "${rwa_rerere}" | grep -F -x -q -- "${rwa_conflicted_file}"; then
+        rwa_rerere_changed="${rwa_rerere_changed}${rwa_conflicted_file}
 "
       fi
-      if [ -n "${resolve_hash}" ]; then
+      if [ -n "${rwa_hash}" ]; then
         # `one_sided_description` runs in this shell, not in a command
         # substitution's subshell, so that the merge bases that
         # `changes_present_merge_base` caches last from one file to the next.
-        if one_sided_description "${resolve_file}" "${resolve_hash}"; then
-          resolve_one_sided_status=0
+        if one_sided_description "${rwa_conflicted_file}" "${rwa_hash}"; then
+          rwa_one_sided_status=0
         else
-          resolve_one_sided_status="$?"
+          rwa_one_sided_status="$?"
         fi
-        if [ "${resolve_one_sided_status}" -ne 1 ]; then
-          resolve_one_sided_files="${resolve_one_sided_files}${resolve_file}
+        if [ "${rwa_one_sided_status}" -ne 1 ]; then
+          rwa_one_sided_files="${rwa_one_sided_files}${rwa_conflicted_file}
 "
         fi
         # A resolution whose side already contains the other side's changes
         # needs no review, so it is reported only as a diagnostic.
-        case "${resolve_one_sided_status}" in
+        case "${rwa_one_sided_status}" in
           0) review_notice "${osd_description}; review it" ;;
           2) printf '%s\n' "${SCRIPT_NAME}: ${osd_description}" >&2 ;;
         esac
       fi
     done
     set +f
-    IFS="${resolve_saved_ifs}"
+    IFS="${rwa_saved_ifs}"
     # `git rerere` does not record a resolution that is one side's version
     # (see `rerere_skip_files`), whether or not the agent's work is
     # accepted:  after a rejection, a person who finishes the merge might
     # keep it.
-    rerere_skip_files "${resolve_one_sided_files}"
-    printf '%s\n' "${resolve_unresolved}" | while IFS= read -r resolve_file; do
-      resolve_file_separator="$(separator_permitted "${resolve_file}")"
+    rerere_skip_files "${rwa_one_sided_files}"
+    printf '%s\n' "${rmc_unresolved}" | while IFS= read -r rwa_conflicted_file; do
+      rwa_file_separator="$(separator_permitted "${rwa_conflicted_file}")"
       # A resolution that is one side's version drops the other side's
       # changes outside the conflict regions too; it is reported once.
-      if [ -f "${resolve_file}" ] \
-        && check_conflict_markers "${resolve_file}" "${resolve_file_separator}" 2> /dev/null \
-        && ! printf '%s\n' "${resolve_one_sided_files}" | grep -F -x -q -- "${resolve_file}" \
-        && ! check_conflict_resolution "${resolve_file}" "${resolve_file_separator}" 2> /dev/null; then
-        review_notice "${resolve_with} changed text outside the conflict regions of ${resolve_file}"
+      if [ -f "${rwa_conflicted_file}" ] \
+        && check_conflict_markers "${rwa_conflicted_file}" "${rwa_file_separator}" 2> /dev/null \
+        && ! printf '%s\n' "${rwa_one_sided_files}" | grep -F -x -q -- "${rwa_conflicted_file}" \
+        && ! check_conflict_resolution "${rwa_conflicted_file}" "${rwa_file_separator}" 2> /dev/null; then
+        review_notice "${rmc_with} changed text outside the conflict regions of ${rwa_conflicted_file}"
       fi
     done
-    printf '%s' "${resolve_rerere_changed}" | while IFS= read -r resolve_file; do
-      review_notice "${resolve_with} changed the resolution that \`git rerere\` made of ${resolve_file}"
+    printf '%s' "${rwa_rerere_changed}" | while IFS= read -r rwa_conflicted_file; do
+      review_notice "${rmc_with} changed the resolution that \`git rerere\` made of ${rwa_conflicted_file}"
     done
-    if ! printf '%s\n' "${resolve_agent_other}" | {
-      resolve_loop_ok=1
-      while IFS= read -r resolve_file; do
-        if [ -n "${resolve_file}" ] && ! check_added_markers "${resolve_file}"; then
-          resolve_loop_ok=0
+    if ! printf '%s\n' "${rwa_agent_other}" | {
+      rwa_loop_ok=1
+      while IFS= read -r rwa_other_file; do
+        if [ -n "${rwa_other_file}" ] && ! check_added_markers "${rwa_other_file}"; then
+          rwa_loop_ok=0
         fi
       done
-      [ "${resolve_loop_ok}" -eq 1 ]
+      [ "${rwa_loop_ok}" -eq 1 ]
     }; then
-      resolve_ok=0
+      rwa_ok=0
     fi
   fi
   # Every conflicted file is checked, unless HEAD, MERGE_HEAD, or AUTO_MERGE
   # changed, including one that the agent did not change, whose conflict
   # markers remain.  After the agent failed, each file that is not
   # acceptably resolved is reported briefly, as when no agent runs.
-  if [ "${resolve_refs_ok}" -eq 0 ]; then
+  if [ "${rwa_refs_ok}" -eq 0 ]; then
     :
-  elif [ "${resolve_agent_status}" -ne 0 ]; then
-    report_unresolved "${resolve_files}" check_agent_resolution
-  elif ! printf '%s\n' "${resolve_files}" | {
-    resolve_loop_ok=1
-    while IFS= read -r resolve_file; do
-      if ! check_agent_resolution "${resolve_file}"; then
-        resolve_loop_ok=0
+  elif [ "${rwa_agent_status}" -ne 0 ]; then
+    report_unresolved "${rmc_conflicted}" check_agent_resolution
+  elif ! printf '%s\n' "${rmc_conflicted}" | {
+    rwa_loop_ok=1
+    while IFS= read -r rwa_conflicted_file; do
+      if ! check_agent_resolution "${rwa_conflicted_file}"; then
+        rwa_loop_ok=0
       fi
     done
-    [ "${resolve_loop_ok}" -eq 1 ]
+    [ "${rwa_loop_ok}" -eq 1 ]
   }; then
-    resolve_ok=0
+    rwa_ok=0
   fi
-  if [ "${resolve_agent_status}" -ne 0 ]; then
+  if [ "${rwa_agent_status}" -ne 0 ]; then
     return 1
   fi
-  if [ "${resolve_ok}" -eq 0 ]; then
-    echo "${SCRIPT_NAME}: ${resolve_with} did not resolve the conflicts acceptably" >&2
+  if [ "${rwa_ok}" -eq 0 ]; then
+    echo "${SCRIPT_NAME}: ${rmc_with} did not resolve the conflicts acceptably" >&2
     return 1
   fi
   return 0
@@ -1847,9 +1850,9 @@ check_agent_resolution() {
 ## Succeeds if FILE is one of the conflicted files that `git rerere`
 ## resolved, and HASH, FILE's hash as `git hash-object -- FILE` prints it,
 ## is the same as when `resolve_with_agent` asked the agent to resolve the
-## conflicts, as recorded in ${resolve_rerere_hashes}.
+## conflicts, as recorded in ${rwa_rerere_hashes}.
 rerere_resolution_unchanged() {
-  printf '%s\n' "${resolve_rerere_hashes}" | grep -F -x -q -- "$2 $1"
+  printf '%s\n' "${rwa_rerere_hashes}" | grep -F -x -q -- "$2 $1"
 }
 
 ## Usage: one_sided_description FILE HASH
@@ -1915,17 +1918,17 @@ one_sided_description() {
     osd_how=', apart from whitespace and blank lines'
   fi
   if [ "${osd_stage}" -eq 2 ]; then
-    osd_description="${resolve_with} resolved $1 as the version on ${resolve_branch}${osd_how}, which keeps none of the changes of ${resolve_source} to the file"
+    osd_description="${rmc_with} resolved $1 as the version on ${rwa_branch}${osd_how}, which keeps none of the changes of ${rmc_source} to the file"
     osd_kept='HEAD'
-    osd_kept_name="${resolve_branch}"
+    osd_kept_name="${rwa_branch}"
     osd_other_rev='MERGE_HEAD'
-    osd_other_name="${resolve_source}"
+    osd_other_name="${rmc_source}"
   else
-    osd_description="${resolve_with} resolved $1 as the version in ${resolve_source}${osd_how}, which keeps none of the changes of ${resolve_branch} to the file"
+    osd_description="${rmc_with} resolved $1 as the version in ${rmc_source}${osd_how}, which keeps none of the changes of ${rwa_branch} to the file"
     osd_kept='MERGE_HEAD'
-    osd_kept_name="${resolve_source}"
+    osd_kept_name="${rmc_source}"
     osd_other_rev='HEAD'
-    osd_other_name="${resolve_branch}"
+    osd_other_name="${rwa_branch}"
   fi
   if [ -n "${osd_how}" ] || ! changes_already_present "$1" "${osd_kept}" "${osd_other_rev}"; then
     return 0
@@ -2490,9 +2493,9 @@ report_unresolved() {
 
 ## Usage: separator_permitted FILE
 ## Prints "yes" if a line of 7 or more "=" is permitted in the resolution of
-## FILE, because FILE is in ${resolve_separators}, and "no" otherwise.
+## FILE, because FILE is in ${rmc_separators}, and "no" otherwise.
 separator_permitted() {
-  if printf '%s\n' "${resolve_separators}" | grep -F -x -q -- "$1"; then
+  if printf '%s\n' "${rmc_separators}" | grep -F -x -q -- "$1"; then
     echo yes
   else
     echo no
@@ -3093,20 +3096,21 @@ stop_at_merge() {
 ## Usage: record_conflicted_files
 ## Records, in the file manage-git-branches-conflicts in the git directory of
 ## the current directory, the top level of a working tree, MERGE_HEAD and the
-## content of each of ${resolve_files}, the files that the merge in progress
-## left conflicted, as they are in the working tree:  as git and `git rerere`
-## left them, before any AI agent edits them.  `changed_conflicted_files`
-## reads the record.  Neither agent can write the git directory.  Only
-## `resolve_merge_conflicts` calls this function, which reads that function's
-## variables.  A failure to write the record goes unreported, because
-## without it `changed_conflicted_files` reports more files, not fewer.
+## content of each of ${rmc_conflicted}, the files that the merge in
+## progress left conflicted, as they are in the working tree:  as git and
+## `git rerere` left them, before any AI agent edits them.
+## `changed_conflicted_files` reads the record.  Neither agent can write the
+## git directory.  Only `resolve_merge_conflicts` calls this function, which
+## reads that function's variables.  A failure to write the record goes
+## unreported, because without it `changed_conflicted_files` reports more
+## files, not fewer.
 record_conflicted_files() {
   if ! record_conflicts="$(git rev-parse --path-format=absolute --git-path manage-git-branches-conflicts)"; then
     return 0
   fi
   {
-    printf 'merge %s\n' "${resolve_merge_head}"
-    printf '%s\n' "${resolve_files}" | while IFS= read -r record_file; do
+    printf 'merge %s\n' "${rmc_merge_head}"
+    printf '%s\n' "${rmc_conflicted}" | while IFS= read -r record_file; do
       if record_hash="$(git hash-object --no-filters -- "${record_file}" 2> /dev/null)"; then
         printf '%s\t%s\n' "${record_hash}" "${record_file}"
       fi
@@ -3329,22 +3333,32 @@ working_tree_hooks() {
   done
 }
 
+## Usage: print_nul_lines COMMAND...
+## Runs COMMAND, which writes items that each end with a NUL, as
+## `git ls-files -z` writes pathnames, and prints the items one per line.  A
+## newline within an item becomes the byte 001, so that an item such as a
+## pathname that contains a newline is not split.  Returns the exit status of
+## COMMAND.
+print_nul_lines() {
+  # A pipeline's status is that of its last command, so fd 3 carries the
+  # status of COMMAND out of the command substitution, and fd 4 is the
+  # function's standard output.
+  {
+    print_nul_lines_status="$({ {
+      "$@" 3>&- 4>&-
+      echo "$?" >&3
+    } | tr '\n\000' '\001\n' >&4 3>&-; } 3>&1)"
+  } 4>&1
+  [ "${print_nul_lines_status}" = 0 ]
+}
+
 ## Usage: untracked_files
 ## Prints, one per line, the files of the working tree that git does not track
 ## and does not ignore.  Returns the exit status of `git ls-files`.
 untracked_files() {
-  # As for `resolve_tracked` in `resolve_with_agent`, `-z` keeps git from
-  # quoting a pathname, and a newline within a pathname becomes the byte 001.
-  # A pipeline's status is that of its last command, so fd 3 carries the
-  # status of git out of the command substitution, and fd 4 is the function's
-  # standard output.
-  {
-    untracked_files_status="$({ {
-      git ls-files -z --others --exclude-standard 3>&- 4>&-
-      echo "$?" >&3
-    } | tr '\n\000' '\001\n' >&4 3>&-; } 3>&1)"
-  } 4>&1
-  [ "${untracked_files_status}" = 0 ]
+  # As for `rwa_tracked` in `resolve_with_agent`, `-z` keeps git from
+  # quoting a pathname.
+  print_nul_lines git ls-files -z --others --exclude-standard
 }
 
 ## Usage: ignored_files
@@ -4094,6 +4108,16 @@ commit_staged_before() {
   fi
 }
 
+## Usage: untracked_files_changed
+## Returns 0 if the files of the working tree in the current directory that
+## git does not track and does not ignore differ from those in
+## ${commit_staged_untracked} (see `commit_staged_before`), or if they cannot
+## be listed, and 1 otherwise.
+untracked_files_changed() {
+  ! untracked_files_changed_list="$(untracked_files)" \
+    || [ "${untracked_files_changed_list}" != "${commit_staged_untracked}" ]
+}
+
 ## Usage: commit_staged MESSAGE [COMMAND...]
 ## Commits the changes that are staged in the current directory, the top
 ## level of a working tree, with the message MESSAGE; the commit is a merge
@@ -4116,26 +4140,67 @@ commit_staged() {
   commit_staged_again pre-commit "${commit_staged_message}" "${commit_staged_tree}" "$@"
 }
 
+## Usage: review_hook_changes HOOK FILES RESULT
+## Prints a notice for each of the FILES, which are pathnames, one per line,
+## that the hook HOOK, such as "pre-commit", changed although the commit that
+## the hook checked does not otherwise change them, and appends the notice to
+## the summary (see `review_notice`).  The notice asks for a review of the
+## hook's changes, which RESULT, such as "are staged, but not committed".
+review_hook_changes() {
+  printf '%s\n' "$2" | while IFS= read -r review_hook_file; do
+    if [ -n "${review_hook_file}" ]; then
+      review_notice "the $1 hook changed ${review_hook_file}, which the commit does not otherwise change; review the hook's changes, which $3"
+    fi
+  done
+}
+
+## Usage: review_unstaged_changes HOOK RESULT
+## Prints a notice for each file that has unstaged changes in the current
+## directory, the top level of a working tree, after this package's scripts
+## staged the changes of the hook HOOK, such as "pre-commit", as when the hook
+## changed the file again when it ran again, and appends the notice to the
+## summary (see `review_notice`).  The notice asks for a review of the
+## changes, which RESULT, such as "are not staged".
+review_unstaged_changes() {
+  print_nul_lines git diff --name-only --no-renames -z | while IFS= read -r review_unstaged_file; do
+    if [ -n "${review_unstaged_file}" ]; then
+      review_notice "${review_unstaged_file} changed after the $1 hook's changes were staged; review its changes, which $2"
+    fi
+  done
+}
+
 ## Usage: commit_staged_again HOOK MESSAGE TREE [COMMAND...]
 ## Commits again, with `git commit` and the message MESSAGE, in the current
 ## directory, the top level of a working tree, after the hook HOOK, such as
 ## "pre-commit", rejected a commit there.  A hook, such as one that runs a
 ## formatter, can reject a commit after changing the files that the commit
-## changes, so that a commit of the files as the hook left them succeeds.
+## changes, so that a commit of the files as the hook left them succeeds.  A
+## hook that formats the whole project, such as one that runs
+## `./gradlew spotlessApply`, can also change a file that the commit does not
+## change, relative to HEAD, if that file was not formatted at HEAD; the
+## commit then includes the hook's changes to that file too.
 ## TREE is the tree that the rejected commit would have had, as a hash such
 ## as "4b825dc642cb6eb9a060e54bf8d69288fbee4904", or empty if it is not
-## known.  This function commits again only if
+## known.  This function stages the hook's changes only if
 ##  * the working tree matched the index before the commit, as
 ##    ${commit_staged_clean} says (see `commit_staged_before`);
 ##  * the index still has the tree TREE, so that the hook staged nothing;
 ##  * the untracked files are still those in ${commit_staged_untracked}, so
 ##    that the hook created and deleted none (a file that git ignores is not
 ##    checked); and
-##  * the hook changed at least one file, deleted none, and only modified
-##    files that the commit changes, relative to HEAD.
-## Then it prints the names of those files and stages them.  If COMMAND is
-## given, it runs COMMAND, as a check of the files as the hook left them, and
-## commits only if COMMAND succeeds.
+##  * the hook changed at least one file, and only modified files.
+## Then, if HOOK is "pre-merge-commit", which `git commit` does not run, it
+## runs the hook again, with `GIT_EDITOR=:`, as `git merge` runs it, on the
+## files as the hook left them, and requires that it succeed without
+## changing or staging a file or creating or deleting an untracked file.
+## Then it runs COMMAND, if it is given, as a check of those files, and
+## commits only if COMMAND succeeds.  `git commit` runs the pre-commit hook
+## again.  For each file that the hook changed but the commit does not
+## otherwise change, it prints a notice that says whether the commit
+## includes the hook's changes, and appends the notice to the summary (see
+## `review_hook_changes`).  It does the same for each file that has unstaged
+## changes afterward, as when the hook changed a file again when it ran
+## again (see `review_unstaged_changes`).
 ##
 ## Returns 0 if the commit succeeded, and a nonzero status otherwise.
 commit_staged_again() {
@@ -4146,41 +4211,91 @@ commit_staged_again() {
   # The record is of the state before one commit, so it is not used again.
   commit_again_clean="${commit_staged_clean:-0}"
   commit_staged_clean=0
+  # Without a working tree that matched the index before the commit, or
+  # without TREE, the hook's changes cannot be told from others.
+  # `git diff --name-status -z TREE` writes, for each file that differs
+  # between TREE and the working tree, a status, such as "M" for a modified
+  # file, and then a pathname, so the lines alternate between the two.
+  # `--no-renames` keeps git from pairing a deleted file with an added one.
+  # An empty status means that the hook changed nothing.
   if [ "${commit_again_clean}" != 1 ] || [ -z "${commit_again_tree}" ] \
-    || [ "$(git write-tree 2> /dev/null)" != "${commit_again_tree}" ] \
-    || ! commit_again_untracked="$(untracked_files)" \
-    || [ "${commit_again_untracked}" != "${commit_staged_untracked}" ]; then
+    || ! commit_again_status="$(print_nul_lines git diff --name-status --no-renames -z "${commit_again_tree}")" \
+    || [ -z "${commit_again_status}" ] \
+    || ! commit_again_committed="$(print_nul_lines git diff --name-only --no-renames -z HEAD "${commit_again_tree}")"; then
     return 1
   fi
-  # As in `conflicted_files`, `tr` turns each NUL into a newline and each
-  # newline within a pathname into the byte 001, so that a pathname that
-  # contains a newline is not split.
-  # `git diff --name-status -z` writes a status, such as "M" for a modified
-  # file, and then a pathname, for each file, so the lines alternate between
-  # the two.  `--no-renames` keeps git from pairing a deleted file with an
-  # added one.  The output of a git command that fails is empty, which makes
-  # this function return 1:  the hook seems to have changed nothing, or to
-  # have changed a file that the commit does not change.
-  commit_again_status="$(git diff --name-status --no-renames -z | tr '\n\000' '\001\n')"
   commit_again_changed="$(printf '%s\n' "${commit_again_status}" | sed -n -e 'n;p')"
-  commit_again_committed="$(git diff --cached --name-only -z HEAD | tr '\n\000' '\001\n')"
-  if [ -z "${commit_again_status}" ] \
-    || printf '%s\n' "${commit_again_status}" | sed -n -e 'p;n' | grep -v -x -q M \
-    || printf '%s\n' "${commit_again_changed}" | grep -F -x -v -q -- "${commit_again_committed}"; then
+  # The files that the hook changed but the commit does not otherwise change.
+  # awk reads the files that the commit changes, then an empty line, which is
+  # no pathname, then the files that the hook changed.  Unlike an argument,
+  # its standard input has no limit on its size.
+  commit_again_outside="$({
+    printf '%s\n' "${commit_again_committed}" ''
+    printf '%s\n' "${commit_again_changed}"
+  } | awk '
+    hook_changed { if ($0 != "" && !($0 in committed)) print; next }
+    $0 == "" { hook_changed = 1; next }
+    { committed[$0] = 1 }')"
+  if [ "$(git write-tree 2> /dev/null)" != "${commit_again_tree}" ]; then
+    commit_again_refusal="the ${commit_again_hook} hook staged a change"
+  elif untracked_files_changed; then
+    commit_again_refusal="the ${commit_again_hook} hook created or deleted an untracked file"
+  elif printf '%s\n' "${commit_again_status}" | sed -n -e 'p;n' | grep -v -x -q M; then
+    commit_again_refusal="the ${commit_again_hook} hook did more than modify files"
+  elif ! git add -u || ! commit_again_staged="$(git write-tree)"; then
+    commit_again_refusal="the hook's changes cannot be staged"
+  else
+    commit_again_refusal=''
+  fi
+  if [ -n "${commit_again_refusal}" ]; then
+    echo "${SCRIPT_NAME}: not committing again in $(pwd), because ${commit_again_refusal}" >&2
+    review_hook_changes "${commit_again_hook}" "${commit_again_outside}" "are not committed"
     return 1
   fi
   printf '%s\n' "${commit_again_changed}" | while IFS= read -r commit_again_file; do
-    echo "${SCRIPT_NAME}: the ${commit_again_hook} hook changed ${commit_again_file}; staging its changes" >&2
+    echo "${SCRIPT_NAME}: the ${commit_again_hook} hook changed ${commit_again_file}; staged its changes" >&2
   done
-  if ! git add -u; then
+
+  commit_again_failure=''
+  if [ "${commit_again_hook}" = pre-merge-commit ]; then
+    # `git merge` runs the hook with `GIT_EDITOR=:`, which a hook can
+    # require; `git hook run` does not set it.
+    if ! GIT_EDITOR=: git hook run --ignore-missing pre-merge-commit; then
+      commit_again_failure="the pre-merge-commit hook, run again, failed"
+    elif ! git diff --quiet; then
+      commit_again_failure="the pre-merge-commit hook, run again, changed a file"
+    elif [ "$(git write-tree 2> /dev/null)" != "${commit_again_staged}" ]; then
+      commit_again_failure="the pre-merge-commit hook, run again, staged a change"
+    elif untracked_files_changed; then
+      commit_again_failure="the pre-merge-commit hook, run again, created or deleted an untracked file"
+    fi
+  fi
+  if [ -z "${commit_again_failure}" ] && [ $# -gt 0 ] && ! "$@"; then
+    commit_again_failure="\`$*\` failed"
+  fi
+  if [ -z "${commit_again_failure}" ]; then
+    echo "${SCRIPT_NAME}: committing again in $(pwd)" >&2
+    if ! printf '%s\n' "${commit_again_message}" | git commit -q --cleanup=whitespace -F -; then
+      commit_again_failure="the commit failed"
+    fi
+  fi
+  if [ -n "${commit_again_failure}" ]; then
+    commit_again_later=''
+    if [ "$(git write-tree 2> /dev/null)" != "${commit_again_staged}" ]; then
+      commit_again_later="; later changes are staged too"
+    fi
+    if ! git diff --quiet || untracked_files_changed; then
+      commit_again_later="${commit_again_later}; the working tree has later changes, which are not staged"
+    fi
+    echo "${SCRIPT_NAME}: not committed in $(pwd), because ${commit_again_failure}; the changes that the ${commit_again_hook} hook made when it rejected the commit are staged${commit_again_later}" >&2
+    review_hook_changes "${commit_again_hook}" "${commit_again_outside}" \
+      "are staged, but not committed${commit_again_later}"
+    review_unstaged_changes "${commit_again_hook}" "are not staged"
     return 1
   fi
-  if [ $# -gt 0 ] && ! "$@"; then
-    echo "${SCRIPT_NAME}: not committing again in $(pwd), because \`$*\` failed; the changes of the ${commit_again_hook} hook are staged" >&2
-    return 1
-  fi
-  echo "${SCRIPT_NAME}: committing again in $(pwd)" >&2
-  printf '%s\n' "${commit_again_message}" | git commit -q --cleanup=whitespace -F -
+  review_hook_changes "${commit_again_hook}" "${commit_again_outside}" \
+    "commit $(git rev-parse --short HEAD) includes"
+  review_unstaged_changes "${commit_again_hook}" "are not committed"
 }
 
 ## Usage: commit_rejected_merge MESSAGE
@@ -4198,8 +4313,7 @@ commit_rejected_merge() {
   # The tree of the merge, which the index held when the hook ran.
   commit_rejected_tree="$(git merge-tree --write-tree --no-messages HEAD MERGE_HEAD 2> /dev/null)" \
     || commit_rejected_tree=''
-  commit_staged_again pre-merge-commit "$1" "${commit_rejected_tree}" \
-    git hook run --ignore-missing pre-merge-commit
+  commit_staged_again pre-merge-commit "$1" "${commit_rejected_tree}"
 }
 
 ## Usage: commit_resolved_merge RESOLVER COMMIT SOURCE MESSAGE
