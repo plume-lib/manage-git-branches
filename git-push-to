@@ -71,7 +71,10 @@
 # reported as a missing directory.
 #
 # This script does the following:
-#  * pull FROM_DIR and TO_DIR from their remotes,
+#  * pull FROM_DIR from its remote,
+#  * stop, leaving TO_DIR unchanged, if the merge is to be built and TO_DIR
+#    has uncommitted changes to tracked files, as when someone is editing it,
+#  * pull TO_DIR from its remote,
 #  * merge FROM_DIR's branch into TO_DIR,
 #  * build TO_DIR using `compile-project` (see its documentation),
 #    (Skips the compilation step if environment variable
@@ -783,6 +786,14 @@ git_push_to() {
     return 1
   fi
   prune_agent_todo 0
+
+  # `merge_build_push` refuses to merge into a working tree that has
+  # uncommitted changes.  Refuse before the pull too, which would change the
+  # files of whoever is editing it, such as an AI agent in another session.
+  push_step="checking ${to} for uncommitted changes"
+  if ! refuse_uncommitted_changes "${nocompile}"; then
+    return 1
+  fi
 
   # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
   # that an earlier run of this command made but did not push, as when its
