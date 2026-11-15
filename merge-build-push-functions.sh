@@ -1037,17 +1037,16 @@ version of it.  This merge brings the rest of it, from commit ${mlph_short_p}." 
   printf '%s' "${mlph_notes}" >&2
 }
 
-## Usage: refuse_uncommitted_changes NOCOMPILE
-## Returns 1, after printing a diagnostic, if `merge_build_push` with
-## NOCOMPILE would build the merge and the working tree of the current
-## directory has uncommitted changes to tracked files.  Returns 0 otherwise.
-## A build of uncommitted changes, such as those that a failed attempt to fix
-## the build left staged, or those of a person or an AI agent who is editing
-## the working tree, says nothing about the commit that is pushed.
+## Usage: refuse_uncommitted_changes DIRECTORY
+## Returns 1, after printing a diagnostic, if the working tree of DIRECTORY,
+## an absolute pathname such as /home/me/myrepo-branch-feature, has
+## uncommitted changes to tracked files.  Returns 0 otherwise.
+## Uncommitted changes are those of a person or an AI agent who is editing the
+## working tree, or those that a failed attempt to fix the build left staged
+## (see `fix_failed_build`).
 refuse_uncommitted_changes() {
-  if [ "$1" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT}" ] \
-    && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-    echo "${SCRIPT_NAME}: the working tree of $(pwd) has uncommitted changes, as when someone is editing it; rerun once they are committed or discarded" >&2
+  if [ -n "$(git -C "$1" status --porcelain --untracked-files=no)" ]; then
+    echo "${SCRIPT_NAME}: the working tree of $1 has uncommitted changes to tracked files, such as a person's or an AI agent's edits, or a failed fix of the build; commit or discard them, or wait until whoever is editing them is done" >&2
     return 1
   fi
   return 0
@@ -1114,8 +1113,10 @@ merge_build_push() {
   else
     merge_builds=0
   fi
-  # Check before merging, so that a refusal leaves no merge commit behind.
-  if ! refuse_uncommitted_changes "$4"; then
+  # A build of uncommitted changes says nothing about the commit that is
+  # pushed.  Check before merging, so that a refusal leaves no merge commit
+  # behind.
+  if [ "${merge_builds}" -eq 1 ] && ! refuse_uncommitted_changes "$(pwd)"; then
     return 1
   fi
   # HEAD before the merges, so that a merge that cannot start can be undone.

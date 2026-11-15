@@ -1,8 +1,8 @@
 #!/bin/sh
 
-# Tests that `git-push-to` leaves TO_DIR unchanged, without pulling it, when
-# the merge is to be built and TO_DIR has uncommitted changes, as when someone
-# is editing it; and that with "--nocompile" it merges into such a TO_DIR.
+# Tests that `git-push-to` changes no directory of a chain, without pulling
+# any, when a directory other than the first has uncommitted changes, as when
+# someone is editing it, whether or not the merge is to be built.
 #
 # Usage:
 #   tests/test-push-to-uncommitted.sh
@@ -52,7 +52,8 @@ commit_to_remote() {
   git -C "${WORK_DIR}/seed" push -q origin "$1"
 }
 
-## Create a remote with "main" and "feature", each checked out in a directory.
+## Create a remote with "main", "feature", and "dependent", each checked out in
+## a directory.
 REMOTE="${WORK_DIR}/proj.git"
 git init -q --bare -b main "${REMOTE}"
 git init -q -b main "${WORK_DIR}/seed"
@@ -64,12 +65,14 @@ git -C "${WORK_DIR}/seed" commit -q -m "Initial commit"
 git -C "${WORK_DIR}/seed" remote add origin "${REMOTE}"
 git -C "${WORK_DIR}/seed" push -q --set-upstream origin main
 git -C "${WORK_DIR}/seed" push -q --set-upstream origin main:feature
+git -C "${WORK_DIR}/seed" push -q --set-upstream origin main:dependent
 git -C "${WORK_DIR}/seed" branch -q --set-upstream-to=origin/main main
 git -C "${WORK_DIR}/seed" fetch -q
 git -C "${WORK_DIR}/seed" branch -q --track feature origin/feature
 MAIN="${WORK_DIR}/proj-branch-main"
 FEATURE="${WORK_DIR}/proj-branch-feature"
-for dir in "${MAIN}" "${FEATURE}"; do
+DEPENDENT="${WORK_DIR}/proj-branch-dependent"
+for dir in "${MAIN}" "${FEATURE}" "${DEPENDENT}"; do
   git clone -q -b "$(basename -- "${dir}" | sed 's/^proj-branch-//')" "${REMOTE}" "${dir}"
   # `sanitize_git_env` leaves `pull.rebase` unset, and git refuses
   # to pull divergent branches unless something says how to reconcile them.
@@ -104,19 +107,53 @@ if ! grep -q "while checking ${FEATURE} for uncommitted changes" "${WORK_DIR}/su
   fail "wrong summary for uncommitted changes: $(cat "${WORK_DIR}/summary")"
 fi
 
-## With "--nocompile", the merge is not built, so the uncommitted change does
-## not stop it, and remains.
-if ! "${COMMANDS_DIR}/git-push-to" --no-llm --nocompile "${MAIN}" "${FEATURE}" \
+## With "--nocompile", the merge is not built, but the pull would still change
+## the files under whoever is editing them.
+if "${COMMANDS_DIR}/git-push-to" --no-llm --nocompile "${MAIN}" "${FEATURE}" \
   2> "${WORK_DIR}/stderr"; then
-  fail "git-push-to --nocompile failed: $(cat "${WORK_DIR}/stderr")"
+  fail "git-push-to --nocompile merged into a directory with uncommitted changes: $(cat "${WORK_DIR}/stderr")"
+fi
+if [ "$(git -C "${FEATURE}" rev-parse HEAD)" != "${feature_before}" ] \
+  || [ "$(git -C "${FEATURE}" status --porcelain)" != "${status_before}" ]; then
+  fail "git-push-to --nocompile changed a directory with uncommitted changes"
+fi
+
+## In a chain, the last directory's uncommitted changes stop the chain before
+## it pulls the first directory or pushes the second.  The chain fails before
+## it pulls the first directory, so the status is 2.
+git -C "${FEATURE}" checkout -q -- edited.txt
+echo "an uncommitted line" >> "${DEPENDENT}/edited.txt"
+main_before="$(git -C "${MAIN}" rev-parse HEAD)"
+feature_remote_before="$(git -C "${REMOTE}" rev-parse feature)"
+set +e
+"${COMMANDS_DIR}/git-push-to" --no-llm "${MAIN}" "${FEATURE}" "${DEPENDENT}" \
+  2> "${WORK_DIR}/stderr"
+status=$?
+set -e
+if [ "${status}" -ne 2 ]; then
+  fail "git-push-to of a chain exited with status ${status}, expected 2: $(cat "${WORK_DIR}/stderr")"
+fi
+if [ "$(git -C "${MAIN}" rev-parse HEAD)" != "${main_before}" ]; then
+  fail "git-push-to of a chain pulled the first directory"
+fi
+if [ "$(git -C "${FEATURE}" rev-parse HEAD)" != "${feature_before}" ] \
+  || [ "$(git -C "${REMOTE}" rev-parse feature)" != "${feature_remote_before}" ]; then
+  fail "git-push-to of a chain changed the second directory or pushed it"
+fi
+if ! grep -q "the working tree of ${DEPENDENT} has uncommitted changes" "${WORK_DIR}/stderr"; then
+  fail "wrong diagnostic for uncommitted changes in a chain: $(cat "${WORK_DIR}/stderr")"
+fi
+
+## Once the edit is committed, the chain succeeds.
+git -C "${DEPENDENT}" commit -q -a -m "Commit the edit"
+if ! "${COMMANDS_DIR}/git-push-to" --no-llm "${MAIN}" "${FEATURE}" "${DEPENDENT}" \
+  2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to of a clean chain failed: $(cat "${WORK_DIR}/stderr")"
 fi
 for commit in "${main_commit}" "${feature_commit}"; do
-  if ! git -C "${FEATURE}" merge-base --is-ancestor "${commit}" HEAD; then
-    fail "git-push-to --nocompile did not merge ${commit}"
+  if ! git -C "${DEPENDENT}" merge-base --is-ancestor "${commit}" HEAD; then
+    fail "git-push-to of a clean chain did not merge ${commit}"
   fi
 done
-if [ "$(git -C "${FEATURE}" status --porcelain)" != "${status_before}" ]; then
-  fail "git-push-to --nocompile changed the uncommitted changes: [$(git -C "${FEATURE}" status --porcelain)], expected [${status_before}]"
-fi
 
 echo "${SCRIPT_NAME}: OK"

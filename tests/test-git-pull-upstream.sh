@@ -155,6 +155,26 @@ elif [ ! -e "${fork}/c.txt" ] || [ "$(cat "${fork}/a.txt")" != 'a3' ]; then
   fail "pull first: did not pull and merge"
 fi
 
+# While someone is editing the working tree, this command neither pulls nor
+# merges, even if the merge is not built.
+commit_file "${other}" c.txt 'c1 again'
+git -C "${other}" push -q origin feature
+commit_file "${canonical_work}" a.txt 'a3 again'
+git -C "${canonical_work}" push -q origin trunk
+before="$(git -C "${fork}" rev-parse HEAD)"
+echo 'an uncommitted line' >> "${fork}/subdir/b.txt"
+status_before="$(git -C "${fork}" status --porcelain)"
+if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  fail "uncommitted changes: succeeded"
+elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
+  fail "uncommitted changes: changed HEAD"
+elif [ "$(git -C "${fork}" status --porcelain)" != "${status_before}" ]; then
+  fail "uncommitted changes: changed them: $(git -C "${fork}" status --porcelain)"
+elif ! grep -q "the working tree of ${fork} has uncommitted changes" "${testdir}/errors"; then
+  fail "uncommitted changes: wrong diagnostic: $(cat "${testdir}/errors")"
+fi
+git -C "${fork}" checkout -q -- subdir/b.txt
+
 # A merge that does not build is not pushed, unless `--nocompile` is given.
 pushed_before="$(pushed_head)"
 commit_file "${canonical_work}" broken 'x'
