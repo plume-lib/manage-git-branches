@@ -1,4 +1,4 @@
-# Usage: awk -f shell-set-variables.awk FILE
+# Usage: awk [-v skip_heredocs=1] -f shell-set-variables.awk FILE
 #
 # Prints, one per line, each variable that FILE, a shell script, sets,
 # preceded by how it sets it:
@@ -8,13 +8,19 @@
 #    or reads input into it, as in "read VAR" or "mapfile ARRAY".
 #  * "prefix", as in "prefix VAR", if FILE sets it in an environment prefix of
 #    a command, as in "VAR=value some-command".
-# A variable can appear more than once.
+# A variable can appear more than once.  After the variables of an
+# environment prefix, it prints the first word of the command that the prefix
+# precedes, preceded by "prefixed-command", as in
+# "prefixed-command some-command".
 #
 # Instead of a variable, it prints "<here-document>" if FILE contains a
-# here-document, whose lines are data rather than code; this program does not
-# skip them, so it would read them as code.  It prints "<unclosed>" if FILE
-# ends within a quotation, a command substitution, a parameter expansion, an
-# array literal, or a "case" statement.
+# here-document, whose lines are data rather than code; by default, this
+# program does not skip them, so it would read them as code.  If the variable
+# skip_heredocs is 1, it skips the lines of each here-document whose operator
+# is outside a command substitution in the older form, "`...`", and prints
+# "<here-document>" only for one within such a substitution.  It prints
+# "<unclosed>" if FILE ends within a quotation, a command substitution, a
+# parameter expansion, an array literal, or a "case" statement.
 #
 # It parses FILE as a Bash script if FILE's first line is a "#!" line that
 # names bash, as in "#!/usr/bin/env bash", and as a POSIX shell script
@@ -111,9 +117,23 @@ function at_command_in_subst(w) {
   return w ~ /(\(|;|&|\||\n)$/ \
     || w ~ /(^|[^A-Za-z0-9_])(!|do|elif|else|if|then|until|while)$/
 }
-# Reports that the current logical line contains a here-document.  This
-# awk program does not skip the lines of a here-document, so it would read
-# them as code.  No script in this package uses one; the caller turns this
+# Notes the here-document whose operator, "<<" or "<<-", begins S, so that
+# the main loop skips its lines, which begin on the next line of the file.
+# The delimiter is the word after the operator, without its quotation marks
+# or backslashes, as "EOF" is for "<< 'EOF'" and for "<<\EOF".
+function queue_heredoc(s,   strip_tabs, delimiter) {
+  strip_tabs = (substr(s, 3, 1) == "-")
+  s = substr(s, strip_tabs ? 4 : 3)
+  sub(/^[ \t]+/, "", s)
+  match(s, /^([^ \t;&|()<>'"]|'[^']*'|"[^"]*")+/)
+  delimiter = substr(s, 1, RLENGTH)
+  gsub(/['"\\]/, "", delimiter)
+  heredoc_delimiter[++heredoc_count] = delimiter
+  heredoc_strip_tabs[heredoc_count] = strip_tabs
+}
+# Reports that the current logical line contains a here-document.  Unless
+# "skip_heredocs" is 1, this awk program does not skip the lines of a
+# here-document, so it would read them as code.  The caller turns this
 # marker into an error rather than reporting the variables that a
 # here-document happens to mention.
 function report_heredoc() {
@@ -135,7 +155,7 @@ function report_line(  i, j, k, r, at_command, array, inert, w, named, \
   # word rather than a token of its own, so the tokenizer notes it as it
   # goes rather than "is_heredoc" finding it here.
   if (heredoc_in_substitution) { report_heredoc(); return }
-  for (i = 1; i <= nwords; i++) {
+  for (i = 1; i <= nwords && !skip_heredocs; i++) {
     if (is_heredoc(words[i])) { report_heredoc(); return }
   }
   at_command = 1
@@ -191,6 +211,7 @@ function report_line(  i, j, k, r, at_command, array, inert, w, named, \
       } else {
         # An environment prefix.  The command that it precedes is at "r".
         for (k = i; k < j; k++) { print_name("prefix", words[k]) }
+        print "prefixed-command " words[r]
         i = r
         at_command = 1
       }
@@ -266,6 +287,15 @@ function report_line(  i, j, k, r, at_command, array, inert, w, named, \
     i++
   }
   nwords = 0
+}
+# A line of a here-document that "queue_heredoc" noted, which is data rather
+# than code.  The line that consists of the delimiter ends the here-document;
+# after the operator "<<-", leading tabs do not prevent a match.
+heredoc_ended < heredoc_count {
+  heredoc_line = $0
+  if (heredoc_strip_tabs[heredoc_ended + 1]) { sub(/^\t+/, "", heredoc_line) }
+  if (heredoc_line == heredoc_delimiter[heredoc_ended + 1]) { heredoc_ended++ }
+  next
 }
 FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
 {
@@ -422,11 +452,15 @@ FNR == 1 && /^#!.*[\/ ]bash([ \t]|$)/ { bash = 1 }
     # Within a parameter expansion, every other character is part of the
     # word.
     if (context() == "param") { add_word(c); pos++; continue }
+    if (skip_heredocs && (context() == "" || context() == "subst") \
+        && heredoc_operator_at(pos)) {
+      queue_heredoc(substr(line, pos))
+    }
     if (context() == "subst") {
       # A command substitution becomes part of a word, so a here-document
       # operator within one is not a token that "is_heredoc" can find.
       # Note it here instead.
-      if (heredoc_operator_at(pos)) { heredoc_in_substitution = 1 }
+      if (heredoc_operator_at(pos) && !skip_heredocs) { heredoc_in_substitution = 1 }
       # A comment extends to the end of the line.
       if (comment_at(pos)) { break }
       # A "case" statement within a command substitution ends each of its
