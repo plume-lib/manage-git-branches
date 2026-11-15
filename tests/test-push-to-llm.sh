@@ -928,10 +928,7 @@ esac
 ## gets no second title.
 setup_case fail
 printf '%s\n' '# AI agent sessions to continue' '' 'An earlier entry.' > "${feature_dir}/AGENT-TODO.md"
-STUB_READY=ok
-export STUB_READY
-push_to fail --llm
-unset STUB_READY
+push_to STUB_READY=ok fail --llm
 check_not_resolved "failing agent"
 case "${push_output}" in
   *"claude failed with status 3"*"conflicted: file.txt"*"claude --resume "*) ;;
@@ -949,10 +946,7 @@ fi
 setup_case todo-link
 echo "outside" > "${case_dir}/outside.txt"
 ln -s ../outside.txt "${feature_dir}/AGENT-TODO.md"
-STUB_READY=ok
-export STUB_READY
-push_to fail --llm
-unset STUB_READY
+push_to STUB_READY=ok fail --llm
 check_not_resolved "AGENT-TODO.md link"
 case "${push_output}" in
   *"claude --resume "*"did not write "*"AGENT-TODO.md, which is not a regular file with one link"*) ;;
@@ -966,10 +960,7 @@ fi
 setup_case todo-hard-link
 echo "outside" > "${case_dir}/outside.txt"
 ln "${case_dir}/outside.txt" "${feature_dir}/AGENT-TODO.md"
-STUB_READY=ok
-export STUB_READY
-push_to fail --llm
-unset STUB_READY
+push_to STUB_READY=ok fail --llm
 check_not_resolved "AGENT-TODO.md hard link"
 case "${push_output}" in
   *"claude --resume "*"did not write "*"AGENT-TODO.md, which is not a regular file with one link"*) ;;
@@ -986,10 +977,7 @@ git -C "${feature_dir}" add AGENT-TODO.md
 git -C "${feature_dir}" commit -q -m "Add AGENT-TODO.md"
 git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
-STUB_READY=ok
-export STUB_READY
-push_to fail --llm
-unset STUB_READY
+push_to STUB_READY=ok fail --llm
 check_not_resolved "tracked AGENT-TODO.md"
 case "${push_output}" in
   *"claude --resume "*"did not write AGENT-TODO.md, which git tracks"*) ;;
@@ -1002,10 +990,7 @@ fi
 ## The command that continues Codex's session names the session that Codex
 ## printed.  Codex is ready to run, so its session is reported.
 setup_case fail-codex
-STUB_READY=ok
-export STUB_READY
-push_to fail --codex
-unset STUB_READY
+push_to STUB_READY=ok fail --codex
 check_not_resolved "failing codex"
 case "${push_output}" in
   *"codex failed with status 3"*"to continue the session of codex:  cd "*" && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093"*) ;;
@@ -1109,10 +1094,7 @@ setup_case fail-once
 push_to fail-once --llm
 check_resolved "$(printf '%s\n' claude claude)" "agent that fails once"
 setup_case fail-once-ready
-STUB_READY=ok
-export STUB_READY
-push_to fail-once --llm
-unset STUB_READY
+push_to STUB_READY=ok fail-once --llm
 check_resolved "$(printf '%s\n' claude claude)" "agent that fails once and is ready at once"
 setup_case fail-once-codex
 push_to fail-once --codex
@@ -1182,10 +1164,7 @@ esac
 ## then ready to run, as when it rejects an option that the script passes,
 ## makes AGENT-TODO.md ask a person for help.
 setup_case fail-ready
-STUB_READY=ok
-export STUB_READY
-push_to fail --llm
-unset STUB_READY
+push_to STUB_READY=ok fail --llm
 check_not_resolved "agent that fails but is ready"
 if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude claude)" ]; then
   fail "agent that fails but is ready: expected claude to run 3 times, but ran: $(cat "${STUB_LOG}")"
@@ -1212,10 +1191,7 @@ git -C "${case_dir}/other-clone" commit -q -a -m "Change main remotely"
 git -C "${case_dir}/other-clone" push -q
 write_file "${main_dir}/file.txt" ONE two-local three four five six SEVEN-main eight nine
 git -C "${main_dir}" commit -q -a -m "Change main locally"
-STUB_READY=fail
-export STUB_READY
-push_to good --llm
-unset STUB_READY
+push_to STUB_READY=fail good --llm
 if [ "${push_status}" -eq 0 ] \
   || ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
   fail "agent that is not ready for the first directory's pull: no merge in progress there: ${push_output}"
@@ -1251,10 +1227,7 @@ fi
 ## git-push-to again suffices; a rerun, once the agent is ready, does
 ## resolve the conflicts.
 setup_case not-ready
-STUB_READY=fail
-export STUB_READY
-push_to good --llm
-unset STUB_READY
+push_to STUB_READY=fail good --llm
 check_not_resolved "agent that is not ready"
 if [ -s "${STUB_LOG}" ]; then
   fail "agent that is not ready: an agent ran: $(cat "${STUB_LOG}")"
@@ -1279,18 +1252,12 @@ fi
 ## then failed after changing a file, and printed no session id.
 setup_case not-ready-then-fail
 echo "notes" > "${feature_dir}/notes.txt"
-STUB_READY=fail
-export STUB_READY
-push_to good --codex
-unset STUB_READY
+push_to STUB_READY=fail good --codex
 todo="${feature_dir}/AGENT-TODO.md"
 if ! grep -q 'no person needs to' "${todo}"; then
   fail "agent that is not ready, then fails: the first run's AGENT-TODO.md is wrong: $(cat "${todo}" 2> /dev/null)"
 fi
-STUB_NO_SESSION=1
-export STUB_NO_SESSION
-push_to fail-untracked --codex
-unset STUB_NO_SESSION
+push_to STUB_NO_SESSION=1 fail-untracked --codex
 check_not_resolved "agent that is not ready, then fails"
 if grep -q 'no person needs to' "${todo}" \
   || ! grep -q -x -F "codex, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${todo}" \
@@ -1299,10 +1266,7 @@ if grep -q 'no person needs to' "${todo}" \
 fi
 ## A later entry about the same merge does not replace one that asks a
 ## person for help.
-STUB_READY=fail
-export STUB_READY
-push_to good --codex
-unset STUB_READY
+push_to STUB_READY=fail good --codex
 check_not_resolved "agent that fails, then is not ready"
 if grep -q 'no person needs to' "${todo}" \
   || ! grep -q -x -F "codex, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${todo}"; then
@@ -3070,10 +3034,7 @@ if ! grep -q -x -F "claude, an AI agent, failed before changing anything, and it
 fi
 ## A rerun while the agent is not ready to run notes that in AGENT-TODO.md.
 : > "${STUB_LOG}"
-STUB_READY=fail
-export STUB_READY
-push_to STUB_BUILD=fix good --llm
-unset STUB_READY
+push_to STUB_READY=fail STUB_BUILD=fix good --llm
 check_not_pushed "build fix while the agent is not ready"
 if [ -s "${STUB_LOG}" ]; then
   fail "build fix while the agent is not ready: an agent ran: $(cat "${STUB_LOG}")"
@@ -3111,9 +3072,7 @@ not_ready_line="claude, an AI agent, did not run, because it was not ready to ru
 ## The directory is a physical path, as on macOS, where the temporary
 ## directory is under a symbolic link.
 build_failed_line="The build failed in $(cd "${feature_dir}" && pwd -P)."
-STUB_READY=fail
-export STUB_READY
-push_to STUB_BUILD=fix good --llm
+push_to STUB_READY=fail STUB_BUILD=fix good --llm
 check_not_pushed "build fix while the agent is not ready"
 if [ -s "${STUB_LOG}" ]; then
   fail "build fix while the agent is not ready: an agent ran: $(cat "${STUB_LOG}")"
@@ -3122,8 +3081,7 @@ if ! grep -q -x -F "${not_ready_line}" "${todo}" \
   || ! grep -q -x -F "${build_failed_line}" "${todo}"; then
   fail "build fix while the agent is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
 fi
-push_to STUB_BUILD=fix good --llm
-unset STUB_READY
+push_to STUB_READY=fail STUB_BUILD=fix good --llm
 check_not_pushed "build fix while the agent is still not ready"
 if [ "$(grep -c '^## Fix the build' "${todo}")" != 1 ]; then
   fail "build fix while the agent is still not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
