@@ -25,6 +25,10 @@
 # rather than into a remote-tracking branch.
 #
 # This script does the following:
+#  * stop if the working tree has uncommitted changes to tracked files, as
+#    when someone is editing it, unless a merge is in progress (see below):
+#    the pull would change the files under that person or AI agent, and a
+#    build would build the uncommitted changes,
 #  * fetch the upstream repository's default branch:  for a remote, update
 #    `REMOTE/HEAD` to name that branch, in case the remote has renamed it
 #    (this replaces a `REMOTE/HEAD` that was set by hand with
@@ -317,6 +321,14 @@ if ! check_upstream "$(pwd)"; then
 fi
 if [ -z "${checked_out_branch}" ]; then
   echo "${SCRIPT_NAME}: HEAD is detached; check out a branch first" >&2
+  exit 1
+fi
+# A merge in progress, whose files are uncommitted until the merge is
+# finished, is skipped here.  The pull refuses it, unless it is redundant and
+# nobody has worked on it, which means that no other file has changed (see
+# `merge_work`); then the pull aborts it.
+if ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null \
+  && ! refuse_uncommitted_changes "$(pwd)"; then
   exit 1
 fi
 # The fetch can prompt, as the push below can, so that a user who must type a

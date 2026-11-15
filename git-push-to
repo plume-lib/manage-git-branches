@@ -70,8 +70,17 @@
 # some directory in the current directory matches it; otherwise it is
 # reported as a missing directory.
 #
+# Before it pulls any directory of a chain, this script stops if a directory
+# that it pulls (every directory, except the first with "--no-pull-first")
+# has uncommitted changes to tracked files, as when someone is editing it:  a
+# pull would change the files under that person or AI agent, and a build
+# would build the uncommitted changes.  A directory in which a merge is in
+# progress, whose files are uncommitted until the merge is finished, is
+# checked once this script finishes the merge (see "Conflicts").
+#
 # This script does the following:
-#  * pull FROM_DIR and TO_DIR from their remotes,
+#  * pull FROM_DIR from its remote,
+#  * pull TO_DIR from its remote,
 #  * merge FROM_DIR's branch into TO_DIR,
 #  * build TO_DIR using `compile-project` (see its documentation),
 #    (Skips the compilation step if environment variable
@@ -784,6 +793,14 @@ git_push_to() {
   fi
   prune_agent_todo 0
 
+  # `push_chain` checked TO_DIR for uncommitted changes before any pull,
+  # unless a merge was in progress there.  Check it now that the merge is
+  # finished, before the pull.
+  push_step="checking ${to} for uncommitted changes"
+  if ! refuse_uncommitted_changes "${to_absolute}"; then
+    return 1
+  fi
+
   # `--no-rebase` because a rebase would drop a merge of FROM_DIR's branch
   # that an earlier run of this command made but did not push, as when its
   # build failed, and would copy that merge's commits onto TO_DIR's branch.
@@ -1098,7 +1115,9 @@ chain_failed() {
 }
 
 ## Pushes each given directory into the next one, without pulling the first
-## directory if ${no_pull_first} is 1.  Then, if ${rebase} is 1,
+## directory if ${no_pull_first} is 1.  First, before pulling any directory,
+## refuses if a directory that it pulls has uncommitted changes to tracked
+## files and no merge in progress.  Then, if ${rebase} is 1,
 ## rebases each directory's branch, except the first, onto the previous one.
 ## Returns 1 at the first failure, after printing a diagnostic that names the
 ## step that failed, such as "git-push-to: failed to push myrepo-branch-main
@@ -1112,6 +1131,30 @@ push_chain() {
   first_unpulled="${pull_from}"
   # 1 for the step whose FROM_DIR is the first directory.
   first_step=1
+  for arg; do
+    # `git_push_to` diagnoses a directory that does not exist or that is not
+    # in a working tree.
+    if { [ -z "$prev" ] && [ "${pull_from}" -eq 0 ]; } \
+      || ! arg_absolute="$(absolute_path "$arg")" \
+      || ! git -C "${arg_absolute}" rev-parse --is-inside-work-tree > /dev/null 2>&1 \
+      || git -C "${arg_absolute}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+      prev="$arg"
+      continue
+    fi
+    if ! refuse_uncommitted_changes "${arg_absolute}"; then
+      if [ -z "$prev" ]; then
+        chain_failed "failed to push ${arg} into $2, while checking ${arg} for uncommitted changes"
+      else
+        chain_failed "failed to push ${prev} into ${arg}, while checking ${arg} for uncommitted changes"
+      fi
+      if [ "${first_unpulled}" -eq 1 ]; then
+        return 2
+      fi
+      return 1
+    fi
+    prev="$arg"
+  done
+  prev=''
   for arg; do
     if [ -n "$prev" ]; then
       if ! git_push_to "$prev" "$arg" "${pull_from}" "${first_step}"; then
