@@ -367,7 +367,7 @@ The commands are:
   Fetches the remote `upstream` (or `origin`, if there is no `upstream`, or
   the only remote, if there is neither), then shows the differences between
   its default branch and the working tree, ignoring changes in the amount of
-  whitespace and using the patience diff algorithm.
+  whitespace and using the histogram diff algorithm.
   If there is no `upstream`, it uses instead the repository that `gh` uses
   by default, if `gh repo set-default` has named one, or else, if the remote
   is a GitHub fork that a user (not an organization) owns, the fork's parent,
