@@ -54,10 +54,10 @@
 #
 # So, unless `--no-fetch` is given, this command replaces a `REMOTE/HEAD` that
 # was set by hand with `git remote set-head REMOTE BRANCH`.  To compare with
-# such a BRANCH, run `git diff -b --patience --merge-base REMOTE/BRANCH`
+# such a BRANCH, run `git diff -b --histogram --merge-base REMOTE/BRANCH`
 # instead.
 #
-# It runs `git diff -b --patience --merge-base UPSTREAM GIT-DIFF-ARGS`, where
+# It runs `git diff -b --histogram --merge-base UPSTREAM GIT-DIFF-ARGS`, where
 # UPSTREAM is `REMOTE/HEAD` or, for a URL, `refs/fork-upstream/org/proj`.
 # Without `--merge-base`, the diff would be from the tip of UPSTREAM, and
 # would show every upstream change that HEAD lacks as its reversal.
@@ -123,4 +123,4 @@ if ! find_upstream_ref "${fetch}"; then
   exit 1
 fi
 
-exec git diff -b --patience --merge-base "${upstream_ref}" "$@"
+exec git diff -b --histogram --merge-base "${upstream_ref}" "$@"
