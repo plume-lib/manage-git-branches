@@ -157,6 +157,7 @@ fi
 
 # While someone is editing the working tree, this command neither pulls nor
 # merges, even if the merge is not built.
+git -C "${other}" pull -q --no-rebase
 commit_file "${other}" c.txt 'c1 again'
 git -C "${other}" push -q origin feature
 commit_file "${canonical_work}" a.txt 'a3 again'

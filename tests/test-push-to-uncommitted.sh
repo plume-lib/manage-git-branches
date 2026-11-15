@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Tests that `git-push-to` changes no directory of a chain, without pulling
-# any, when a directory other than the first has uncommitted changes, as when
+# any, when a directory that it pulls has uncommitted changes, as when
 # someone is editing it, whether or not the merge is to be built.
 #
 # Usage:
@@ -155,5 +155,35 @@ for commit in "${main_commit}" "${feature_commit}"; do
     fail "git-push-to of a clean chain did not merge ${commit}"
   fi
 done
+
+## The first directory is checked too, because it is pulled, unless
+## "--no-pull-first" is given.
+commit_to_remote main main.txt "third line"
+main_before="$(git -C "${MAIN}" rev-parse HEAD)"
+echo "an uncommitted line" >> "${MAIN}/edited.txt"
+set +e
+"${COMMANDS_DIR}/git-push-to" --no-llm --summary "${WORK_DIR}/summary-first" \
+  "${MAIN}" "${FEATURE}" 2> "${WORK_DIR}/stderr"
+status=$?
+set -e
+if [ "${status}" -ne 2 ]; then
+  fail "git-push-to from a first directory with uncommitted changes exited with status ${status}, expected 2: $(cat "${WORK_DIR}/stderr")"
+fi
+if [ "$(git -C "${MAIN}" rev-parse HEAD)" != "${main_before}" ]; then
+  fail "git-push-to pulled a first directory with uncommitted changes"
+fi
+if ! grep -q "while checking ${MAIN} for uncommitted changes" "${WORK_DIR}/summary-first"; then
+  fail "wrong summary for uncommitted changes in the first directory: $(cat "${WORK_DIR}/summary-first")"
+fi
+if ! "${COMMANDS_DIR}/git-push-to" --no-llm --no-pull-first "${MAIN}" "${FEATURE}" \
+  2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to --no-pull-first from a first directory with uncommitted changes failed: $(cat "${WORK_DIR}/stderr")"
+fi
+if [ "$(git -C "${MAIN}" rev-parse HEAD)" != "${main_before}" ]; then
+  fail "git-push-to --no-pull-first pulled the first directory"
+fi
+if ! git -C "${FEATURE}" merge-base --is-ancestor "${main_before}" HEAD; then
+  fail "git-push-to --no-pull-first did not merge the first directory"
+fi
 
 echo "${SCRIPT_NAME}: OK"

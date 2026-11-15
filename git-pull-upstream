@@ -25,6 +25,10 @@
 # rather than into a remote-tracking branch.
 #
 # This script does the following:
+#  * stop if the working tree has uncommitted changes to tracked files, as
+#    when someone is editing it, unless a merge is in progress (see below):
+#    the pull would change the files under that person or AI agent, and a
+#    build would build the uncommitted changes,
 #  * fetch the upstream repository's default branch:  for a remote, update
 #    `REMOTE/HEAD` to name that branch, in case the remote has renamed it
 #    (this replaces a `REMOTE/HEAD` that was set by hand with
@@ -33,10 +37,6 @@
 #  * delete the entries of the file AGENT-TODO.md at the top level of the
 #    working tree that are about a merge that is no longer in progress (see
 #    `git-push-to`, under "Asking an AI agent"),
-#  * stop if the working tree has uncommitted changes to tracked files, as
-#    when someone is editing it, unless a merge is in progress (see below):
-#    the pull would change the files under that person or AI agent, and a
-#    build would build the uncommitted changes,
 #  * pull the current branch from its upstream branch,
 #  * merge the upstream repository's default branch into the current branch,
 #    first merging the final version of each pull request that landed in it
@@ -323,6 +323,14 @@ if [ -z "${checked_out_branch}" ]; then
   echo "${SCRIPT_NAME}: HEAD is detached; check out a branch first" >&2
   exit 1
 fi
+# A merge in progress, whose files are uncommitted until the merge is
+# finished, is skipped here.  The pull refuses it, unless it is redundant and
+# nobody has worked on it, which means that no other file has changed (see
+# `merge_work`); then the pull aborts it.
+if ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null \
+  && ! refuse_uncommitted_changes "$(pwd)"; then
+  exit 1
+fi
 # The fetch can prompt, as the push below can, so that a user who must type a
 # passphrase can do so for every one of them.
 if ! find_upstream_ref 1; then
@@ -395,13 +403,6 @@ fi
 # a merge that a person finished or aborted (see `prune_agent_todo`), even if
 # this run stops below because there is nothing to merge and nothing to push.
 prune_agent_todo 0
-
-# The pull refuses, or aborts, a merge in progress, whose files are
-# uncommitted until the merge is finished.
-if ! git rev-parse --verify --quiet MERGE_HEAD > /dev/null \
-  && ! refuse_uncommitted_changes "$(pwd)"; then
-  exit 1
-fi
 
 # `--no-rebase` because a rebase would drop a merge from `upstream` that an
 # earlier run of this command made but did not push, as when its build
