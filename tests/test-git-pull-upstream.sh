@@ -214,7 +214,13 @@ fork_hooks="$(git -C "${fork}" rev-parse --path-format=absolute --git-path hooks
 mkdir -p "${fork_hooks}"
 printf '#!/bin/sh\nexit 1\n' > "${fork_hooks}/pre-commit"
 chmod +x "${fork_hooks}/pre-commit"
-if ! GIT_MERGE_AUTOEDIT=yes GIT_EDITOR=false pull_upstream "${fork}" --nocompile; then
+# The subshell confines the variables to this pull.  An assignment prefixed
+# to the call of `pull_upstream`, a function, would not confine them on macOS,
+# as `tests/test-function-call-prefix.sh` explains.
+if ! (
+  export GIT_MERGE_AUTOEDIT=yes GIT_EDITOR=false
+  pull_upstream "${fork}" --nocompile
+); then
   fail "--nocompile: failed: $(cat "${testdir}/errors")"
 elif [ "$(pushed_head)" != "$(git -C "${fork}" rev-parse HEAD)" ]; then
   fail "--nocompile: did not push"
