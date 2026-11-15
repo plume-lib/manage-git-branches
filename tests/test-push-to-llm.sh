@@ -413,22 +413,46 @@ write_file() {
   fi
 }
 
-## Usage: push_to MODE OPTION...
+## Usage: push_to [NAME=VALUE...] MODE OPTION...
 ## Runs `git-push-to OPTION... ${main_dir} ${feature_dir}` with the stubs
-## acting according to MODE.  Sets ${push_status} to its exit status and
+## acting according to MODE, and with each environment variable NAME, such as
+## STUB_BUILD, set to VALUE.  Sets ${push_status} to its exit status and
 ## ${push_output} to its output.  It builds the project only if ${build} is 1.
+## A NAME=VALUE argument sets NAME for this call alone, as an assignment
+## prefixed to a command does.  Such an assignment must not be prefixed to a
+## call of this function:  bash 3.2, which is /bin/sh on macOS, keeps an
+## assignment that is prefixed to a function call after the function returns,
+## so it would apply to every later call too.
 build=0
 push_to() {
-  push_mode="$1"
-  shift
   if [ "${build}" -eq 1 ]; then push_skip=''; else push_skip=1; fi
-  if push_output="$(STUB_MODE="${push_mode}" PATH="${WORK_DIR}/test-bin:${PATH}" \
-    MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT="${push_skip}" \
-    "${COMMANDS_DIR}/git-push-to" "$@" "${main_dir}" "${feature_dir}" 2>&1)"; then
+  # The command substitution is a subshell, so the variables that
+  # `push_to_run` exports do not outlive it.
+  if push_output="$(push_to_run "$@" 2>&1)"; then
     push_status=0
   else
     push_status=$?
   fi
+}
+
+## Usage: push_to_run [NAME=VALUE...] MODE OPTION...
+## Exports each NAME as VALUE, and then runs
+## `git-push-to OPTION... ${main_dir} ${feature_dir}` as `push_to` describes.
+## Run it in a subshell, so that the exported variables do not outlive it.
+push_to_run() {
+  while [ "$#" -gt 0 ]; do
+    # shellcheck disable=SC2163 # $1 is NAME=VALUE, which exports NAME.
+    case "$1" in
+      *=*) export "$1" ;;
+      *) break ;;
+    esac
+    shift
+  done
+  push_mode="$1"
+  shift
+  STUB_MODE="${push_mode}" PATH="${WORK_DIR}/test-bin:${PATH}" \
+    MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT="${push_skip}" \
+    "${COMMANDS_DIR}/git-push-to" "$@" "${main_dir}" "${feature_dir}"
 }
 
 ## Usage: check_resolved AGENT DESCRIPTION [LINE...]
@@ -995,7 +1019,7 @@ fi
 ## continued, and AGENT-TODO.md notes the merge in progress but gives no
 ## command.
 setup_case codex-no-session
-STUB_NO_SESSION=1 push_to fail --codex
+push_to STUB_NO_SESSION=1 fail --codex
 check_not_resolved "codex without a session id"
 case "${push_output}" in
   *'codex printed no line "session id: UUID", so no command will be able to continue its session'*) ;;
@@ -2845,7 +2869,7 @@ fi
 ## A failed build is fixed, and the fix is committed on top of the merge.
 build=1
 setup_case build-fix build
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "build fix: git-push-to failed: ${push_output}"
 fi
@@ -2880,7 +2904,7 @@ install_git_hook "${feature_dir}" pre-commit \
   'if cmp -s other.txt hook.tmp; then rm hook.tmp; exit 0; fi' \
   'mv hook.tmp other.txt' \
   'exit 1'
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "build fix with a reformatting hook: git-push-to failed: ${push_output}"
 fi
@@ -2908,7 +2932,7 @@ install_git_hook "${feature_dir}" pre-commit \
   'if grep -q HOOKED other.txt; then exit 0; fi' \
   'echo "BROKEN HOOKED" >> other.txt' \
   'exit 1'
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 check_not_pushed "build fix with a hook that breaks the build"
 case "${push_output}" in
   *"not committed in "*"compile-project\` failed"*"cannot commit the changes of claude"*) ;;
@@ -2929,7 +2953,7 @@ git -C "${main_dir}" commit -q -m "Change side"
 git -C "${main_dir}" switch -q main
 git -C "${main_dir}" merge -q --no-ff --no-edit side
 git -C "${main_dir}" push -q
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "build fix after a main with a merge: git-push-to failed: ${push_output}"
 fi
@@ -2940,7 +2964,7 @@ fi
 
 ## An agent that changes nothing gets one attempt.
 setup_case build-none build
-STUB_BUILD=none push_to good --llm
+push_to STUB_BUILD=none good --llm
 check_not_pushed "build not fixed"
 case "${push_output}" in
   *"claude did not fix the build"*"claude --resume "*) ;;
@@ -2972,7 +2996,7 @@ esac
 
 ## An agent whose changes do not fix the build gets three attempts.
 setup_case build-bad build
-STUB_BUILD=bad push_to good --llm
+push_to STUB_BUILD=bad good --llm
 check_not_pushed "bad build fix"
 case "${push_output}" in
   *"in 3 attempts"*) ;;
@@ -2996,7 +3020,7 @@ if ! git -C "${feature_dir}" diff --cached --name-only | grep -q -x notes.txt; t
 fi
 # A rerun does not build the staged changes, which would not be pushed.
 : > "${STUB_LOG}"
-STUB_BUILD=bad push_to good --llm
+push_to STUB_BUILD=bad good --llm
 check_not_pushed "rerun after a bad build fix"
 case "${push_output}" in
   *"has uncommitted changes"*) ;;
@@ -3012,7 +3036,7 @@ fi
 ## must deal with them:  the earlier attempt's session can be continued, and
 ## AGENT-TODO.md does not say that running git-push-to again suffices.
 setup_case build-fail-later build
-STUB_BUILD=once-fail push_to good --llm
+push_to STUB_BUILD=once-fail good --llm
 check_not_pushed "build-fixing agent that fails on its second attempt"
 if [ "$(wc -l < "${STUB_LOG}")" -ne 5 ]; then
   fail "build-fixing agent that fails on its second attempt: expected claude to run 5 times, but ran: $(cat "${STUB_LOG}")"
@@ -3034,7 +3058,7 @@ fi
 ## again, twice.  AGENT-TODO.md then says that running git-push-to again
 ## suffices; a rerun does fix the build.
 setup_case build-fail-unchanged build
-STUB_BUILD=fail push_to good --llm
+push_to STUB_BUILD=fail good --llm
 check_not_pushed "build-fixing agent that fails without changing any file"
 if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude claude claude)" ]; then
   fail "build-fixing agent that fails without changing any file: expected claude to run 4 times, but ran: $(cat "${STUB_LOG}")"
@@ -3048,7 +3072,7 @@ fi
 : > "${STUB_LOG}"
 STUB_READY=fail
 export STUB_READY
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 unset STUB_READY
 check_not_pushed "build fix while the agent is not ready"
 if [ -s "${STUB_LOG}" ]; then
@@ -3060,7 +3084,7 @@ if ! grep -q -x -F "claude, an AI agent, did not run, because it was not ready t
   fail "build fix while the agent is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
 fi
 : > "${STUB_LOG}"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "rerun after a build-fixing agent that failed without changing any file: git-push-to failed: ${push_output}"
 fi
@@ -3089,7 +3113,7 @@ not_ready_line="claude, an AI agent, did not run, because it was not ready to ru
 build_failed_line="The build failed in $(cd "${feature_dir}" && pwd -P)."
 STUB_READY=fail
 export STUB_READY
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 check_not_pushed "build fix while the agent is not ready"
 if [ -s "${STUB_LOG}" ]; then
   fail "build fix while the agent is not ready: an agent ran: $(cat "${STUB_LOG}")"
@@ -3098,14 +3122,14 @@ if ! grep -q -x -F "${not_ready_line}" "${todo}" \
   || ! grep -q -x -F "${build_failed_line}" "${todo}"; then
   fail "build fix while the agent is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
 fi
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 unset STUB_READY
 check_not_pushed "build fix while the agent is still not ready"
 if [ "$(grep -c '^## Fix the build' "${todo}")" != 1 ]; then
   fail "build fix while the agent is still not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
 fi
 : > "${STUB_LOG}"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "rerun once the agent is ready to fix the build: git-push-to failed: ${push_output}"
 fi
@@ -3120,7 +3144,7 @@ fi
 ## commit behind.
 setup_case build-dirty build
 echo "an edit" >> "${feature_dir}/other.txt"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -eq 0 ]; then
   fail "uncommitted changes: git-push-to succeeded"
 fi
@@ -3140,7 +3164,7 @@ fi
 
 ## An agent that creates a file that git ignores is rejected.
 setup_case build-ignored build
-STUB_BUILD=ignored push_to good --llm
+push_to STUB_BUILD=ignored good --llm
 check_not_pushed "build fix in an ignored file"
 case "${push_output}" in
   *"created a file that git ignores: fix.local"*) ;;
@@ -3150,7 +3174,7 @@ esac
 ## An attempt that changes nothing ends the attempts, even after an earlier
 ## attempt changed files; the later attempt learns of the earlier one.
 setup_case build-once build
-STUB_BUILD=once push_to good --llm
+push_to STUB_BUILD=once good --llm
 check_not_pushed "build fix that gives up"
 case "${push_output}" in
   *"it changed nothing"*) ;;
@@ -3166,7 +3190,7 @@ fi
 ## A build that changes tracked files ends the attempts, so that its changes
 ## are not committed as the agent's.
 setup_case build-modifies build-modifies
-STUB_BUILD=bad push_to good --llm
+push_to STUB_BUILD=bad good --llm
 check_not_pushed "build that changes tracked files"
 case "${push_output}" in
   *"the build changed tracked files"*) ;;
@@ -3187,7 +3211,7 @@ git -C "${feature_dir}" add feature.txt
 git -C "${feature_dir}" commit -q -a -m "Change feature as main does"
 git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
-STUB_BUILD=fix push_to good --no-llm
+push_to STUB_BUILD=fix good --no-llm
 check_not_pushed "build with --no-llm"
 case "${push_output}" in
   *"unable to build"*) ;;
@@ -3202,7 +3226,7 @@ fi
 # The merge is now committed but not pushed.  A rerun merges nothing, but the
 # unpushed merge might have caused the failure, so the agent is asked to fix
 # it.
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "rerun after a failed build: git-push-to failed: ${push_output}"
 fi
@@ -3226,7 +3250,7 @@ git -C "${main_dir}" reset -q --hard HEAD^
 git -C "${main_dir}" push -q --force
 echo "BROKEN" >> "${feature_dir}/other.txt"
 git -C "${feature_dir}" commit -q -a -m "Break the build locally"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 check_not_pushed "build failure without a merge"
 case "${push_output}" in
   *"unable to build"*) ;;
@@ -3254,7 +3278,7 @@ git -C "${main_dir}" switch -q main
 write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
 git -C "${main_dir}" commit -q -a -m "Change main locally"
 git -C "${main_dir}" merge -q --no-ff --no-edit side
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "fast-forward to an unpushed merge: git-push-to failed: ${push_output}"
 fi
@@ -3293,13 +3317,13 @@ git -C "${feature_dir}" config branch.feature.pushRemote fork
 # branch.
 git -C "${feature_dir}" config push.default current
 fork_head="$(git -C "${fork}" rev-parse refs/heads/feature)"
-STUB_BUILD=fix push_to good --no-llm
+push_to STUB_BUILD=fix good --no-llm
 if [ "${push_status}" -eq 0 ] || [ "$(git -C "${fork}" rev-parse refs/heads/feature)" != "${fork_head}" ]; then
   fail "build with a push remote: the first run pushed: ${push_output}"
 fi
 git -C "${feature_dir}" push -q fork feature
 git -C "${feature_dir}" update-ref refs/remotes/fork/feature "${fork_head}"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -eq 0 ]; then
   fail "build with an out-of-date push remote: git-push-to succeeded"
 fi
@@ -3316,7 +3340,7 @@ fi
 ## still counts as one that might have broken the build.
 setup_case build-url-remote build
 git -C "${feature_dir}" config branch.feature.remote "${remote}"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "build fix with a URL remote: git-push-to failed: ${push_output}"
 fi
@@ -3358,7 +3382,7 @@ for llm_option in --llm --no-llm; do
   write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
   git -C "${feature_dir}" commit -q -a -m "Change feature as main does"
   git -C "${feature_dir}" push -q
-  STUB_BUILD=fix push_to good "${llm_option}"
+  push_to STUB_BUILD=fix good "${llm_option}"
   if [ "${push_status}" -ne 0 ]; then
     fail "successful build with ${llm_option}: git-push-to failed: ${push_output}"
   fi
@@ -3392,7 +3416,7 @@ git -C "${feature_dir}" config branch.feature.remote .
 git -C "${feature_dir}" config branch.feature.merge refs/heads/base
 git -C "${feature_dir}" config branch.feature.pushRemote origin
 git -C "${feature_dir}" config push.default current
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "build fix after a pull from a local branch: git-push-to failed: ${push_output}"
 fi
@@ -3479,7 +3503,7 @@ check_pull_fixed() {
 ## A pull that breaks the build, followed by a merge that changes nothing, is
 ## fixed too.
 setup_pull_breaks pull-build
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "pull that breaks the build: git-push-to failed: ${push_output}"
 fi
@@ -3496,7 +3520,7 @@ fi
 ## When both the pull and the merge change the branch, the fix's message
 ## lists both merges.
 setup_pull_breaks pull-build-merge main
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "pull and merge that break the build: git-push-to failed: ${push_output}"
 fi
@@ -3514,7 +3538,7 @@ for ff in true false; do
   setup_pull_breaks "pull-build-fast-forward-${ff}"
   git -C "${feature_dir}" reset -q --hard HEAD^
   git -C "${feature_dir}" config pull.ff "${ff}"
-  STUB_BUILD=fix push_to good --llm
+  push_to STUB_BUILD=fix good --llm
   check_not_pushed "pull with pull.ff=${ff} to a broken build"
   case "${push_output}" in
     *"unable to build"*) ;;
@@ -3554,7 +3578,7 @@ setup_broken_clone_merge pull-build-fast-forward-url
 git -C "${case_dir}/other-clone" push -q
 feature_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
 git -C "${feature_dir}" config branch.feature.remote "${remote}"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 check_not_pushed "pull with a URL remote to a broken build"
 case "${push_output}" in
   *"unable to build"*) ;;
@@ -3571,7 +3595,7 @@ fi
 ## it stopped before committing.
 setup_pull_breaks pull-build-url-merge
 git -C "${feature_dir}" config branch.feature.remote "${remote}"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "pull with a URL remote that breaks the build: git-push-to failed: ${push_output}"
 fi
@@ -3609,7 +3633,7 @@ for clone_remote in pathname name; do
   fi
   git -C "${feature_dir}" config branch.feature.pushRemote origin
   git -C "${feature_dir}" config push.default current
-  STUB_BUILD=fix push_to good --llm
+  push_to STUB_BUILD=fix good --llm
   if [ "${push_status}" -ne 0 ]; then
     fail "pull from a working clone, by ${clone_remote}, to a broken build: git-push-to failed: ${push_output}"
   fi
@@ -3627,7 +3651,7 @@ setup_pull_breaks pull-build-no-ff-merge main
 git -C "${feature_dir}" reset -q --hard HEAD^
 local_head="$(git -C "${feature_dir}" rev-parse HEAD)"
 git -C "${feature_dir}" config pull.ff false
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "pull with pull.ff=false and a merge that breaks the build: git-push-to failed: ${push_output}"
 fi
@@ -3641,7 +3665,7 @@ fi
 ## the merge.
 setup_pull_breaks pull-build-rebase
 git -C "${feature_dir}" config pull.rebase true
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "pull with pull.rebase that breaks the build: git-push-to failed: ${push_output}"
 fi
@@ -3657,7 +3681,7 @@ check_pull_fixed "pull with pull.rebase that breaks the build" \
 setup_case pull-build-rerun build
 set_pull_subject
 pull_excluded="refs/remotes/origin/feature $(git -C "${remote}" rev-parse refs/heads/main)"
-STUB_BUILD=none push_to good --llm
+push_to STUB_BUILD=none good --llm
 check_not_pushed "failed build before a rerun"
 : > "${STUB_LOG}"
 local_head="$(git -C "${feature_dir}" rev-parse HEAD)"
@@ -3667,7 +3691,7 @@ git -C "${case_dir}/other-clone" add third.txt
 git -C "${case_dir}/other-clone" commit -q -m "Change feature remotely"
 git -C "${case_dir}/other-clone" push -q
 feature_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "rerun whose pull merges: git-push-to failed: ${push_output}"
 fi
@@ -3694,7 +3718,7 @@ push_remote_commit() {
 ## message names only the merge of main, which broke the build.
 setup_case pull-ff-merge-build build
 push_remote_commit
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "fast-forward pull and a merge that breaks the build: git-push-to failed: ${push_output}"
 fi
@@ -3721,7 +3745,7 @@ git -C "${case_dir}/other-clone" push -q
 echo "local" > "${main_dir}/local.txt"
 git -C "${main_dir}" add local.txt
 git -C "${main_dir}" commit -q -m "Add local.txt"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "fast-forward to a merge of FROM_DIR's pull: git-push-to failed: ${push_output}"
 fi
@@ -3741,7 +3765,7 @@ fi
 
 ## With --no-llm, a pull that breaks the build is not given to an agent.
 setup_pull_breaks pull-build-no-llm
-STUB_BUILD=fix push_to good --no-llm
+push_to STUB_BUILD=fix good --no-llm
 check_not_pushed "pull that breaks the build, with --no-llm"
 if [ -s "${STUB_LOG}" ]; then
   fail "pull that breaks the build, with --no-llm: an agent ran: $(cat "${STUB_LOG}")"
