@@ -288,12 +288,36 @@ push_to
 check_resolved "a line that looks like a separator" "Merge branch 'main' into feature" \
   ONE two three four five six SAME SEVEN-feature '=======' SEVEN-main SAME2 eight nine
 
-## A change in the working tree other than the merge is refused.
+## A change in the working tree is refused before the merge starts.
 setup_case other-change
 record_resolution false
 printf '%s\n' changed > "${feature_dir}/sub/keep.txt"
 push_to
-check_not_resolved "another change in the working tree" \
+if [ "${push_status}" -eq 0 ]; then
+  fail "another change in the working tree: git-push-to succeeded"
+fi
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "${feature_head}" ] \
+  || git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "another change in the working tree: git-push-to started the merge"
+fi
+case "${push_output}" in
+  *"the working tree of ${feature_dir} has uncommitted changes"*) ;;
+  *) fail "another change in the working tree: wrong diagnostic: ${push_output}" ;;
+esac
+
+## A change in the working tree other than a merge in progress is refused
+## when the merge is finished.
+setup_case other-change-in-merge
+record_resolution false
+git -C "${feature_dir}" fetch -q
+# Without rerere, the merge leaves the conflicted file as git wrote it, so
+# that `git-push-to` does not take rerere's resolution for someone's edit.
+if git -C "${feature_dir}" -c rerere.enabled=false merge -q --no-edit origin/main > /dev/null 2>&1; then
+  fail "the merge has no conflicts"
+fi
+printf '%s\n' changed > "${feature_dir}/sub/keep.txt"
+push_to
+check_not_resolved "another change in the working tree during a merge" \
   "changed, but not conflicted: sub/keep.txt"
 
 ## The lines of a hook that, like a formatter's, rejects a commit after
