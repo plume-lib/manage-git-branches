@@ -126,8 +126,9 @@ newline='
 tab='	'
 
 # For each run of `git-push-to` that failed or that noted changes to
-# review, in every round, a line "* " followed by the chain, then each line
-# of the summary that it wrote, indented.
+# review, in every round, a line "* " followed by the chain, or by the
+# directory that it pulled, then each line of the summary that it wrote,
+# indented.
 summary=''
 
 ## Usage: run_git_push_to [--no-pull-first] DIRECTORY...
@@ -152,7 +153,7 @@ run_git_push_to() {
 ## Prints ${summary}, if it is not empty, as a diagnostic.
 print_summary() {
   if [ -n "${summary}" ]; then
-    echo "${SCRIPT_NAME}: the dependency chains that failed or that have changes to review:" >&2
+    echo "${SCRIPT_NAME}: the dependency chains and pulls that failed or that have changes to review:" >&2
     printf '%s' "${summary}" >&2
   fi
 }

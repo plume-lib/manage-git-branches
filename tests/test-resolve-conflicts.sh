@@ -184,7 +184,7 @@ if [ "$(printf '%s\n' "${resolve_output}" | grep -c 'git-push-to --claude  myrep
   fail "several: the first directory was not pulled exactly once, before the chains: ${resolve_output}"
 fi
 expected="$(printf '%s\n' \
-  'resolve-conflicts: the dependency chains that failed or that have changes to review:' \
+  'resolve-conflicts: the dependency chains and pulls that failed or that have changes to review:' \
   '* myrepo-branch-main no such dir (failed)' \
   '    failed to push myrepo-branch-main into no such dir, while checking the directories' \
   'resolve-conflicts: 1 of 2 dependency chains failed')"
@@ -208,7 +208,7 @@ if [ "$(printf '%s\n' "${resolve_output}" | grep -c 'no such directory: no such 
   fail "unpulled: the pull was not tried exactly once: ${resolve_output}"
 fi
 expected="$(printf '%s\n' \
-  'resolve-conflicts: the dependency chains that failed or that have changes to review:' \
+  'resolve-conflicts: the dependency chains and pulls that failed or that have changes to review:' \
   '* no such first (failed)' \
   '    failed to pull no such first, while checking no such first' \
   '* no such first myrepo-branch-feature (skipped)' \
@@ -232,7 +232,7 @@ if [ "${resolve_status}" -eq 0 ]; then
   fail "skipped: resolve-conflicts succeeded: ${resolve_output}"
 fi
 expected="$(printf '%s\n' \
-  'resolve-conflicts: the dependency chains that failed or that have changes to review:' \
+  'resolve-conflicts: the dependency chains and pulls that failed or that have changes to review:' \
   '* myrepo-branch-main no such dir (failed)' \
   '    failed to push myrepo-branch-main into no such dir, while checking the directories' \
   '* no such dir other dir (skipped)' \

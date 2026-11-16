@@ -3663,11 +3663,10 @@ def dormant_note(model: Model) -> str:
 def push_commands(models: list[Model], all_chains: list[PushChains], base: str) -> PushCommands:
     """Return the shell commands that run the given `git-push-to` chains.
 
-    Each chain whose first directory is the first directory of an earlier chain gets the
-    option `--no-pull-first`, so that every chain merges the commit of that directory, such
-    as a working copy of the upstream default branch, that the earliest one pulled.  The
-    commands stop at the first chain that fails, so each later chain runs only if the earlier
-    one pulled that directory.
+    Before the first chain that starts with a directory, such as a working copy of the
+    upstream default branch, a command pulls that directory, and every chain gets the option
+    `--no-pull-first`, so that every chain that starts with the directory merges the same
+    commit of it.  The commands stop at the first command that fails.
 
     Args:
         models: a list of the models of the repositories, one per repository
@@ -3680,16 +3679,17 @@ def push_commands(models: list[Model], all_chains: list[PushChains], base: str) 
     lines = [f"cd {base} && \\"]
     notes = []
     chain_count = 0
-    # The first directories of the chains so far.
+    # The first directories of the chains so far, which earlier commands pulled.
     first_dirs = set()
     for m, (chains, missing, has_upstream, _, dormant) in zip(models, all_chains, strict=True):
         r = m.repo
         chain_count += len(chains)
         for chain in chains:
-            option = " --no-pull-first" if chain[0] in first_dirs else ""
-            first_dirs.add(chain[0])
+            if chain[0] not in first_dirs:
+                first_dirs.add(chain[0])
+                lines.append(f"git-push-to {chain[0]} && \\")
             lines += [
-                f"git-push-to{option} \\",
+                "git-push-to --no-pull-first \\",
                 *(f"  {d} \\" for d in chain[:-1]),
                 f"  {chain[-1]}",
             ]
@@ -3792,10 +3792,10 @@ def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[s
         ),
         f"A chain may consist of {upstream} and a single PR that has no prerequisite or dependent.",
         (
-            "A command whose chain starts with the same directory as an earlier command's chain"
-            " passes `--no-pull-first`, so that every chain merges the same commit of that"
-            " directory.  It relies on the earlier command, which pulled that directory;"
-            " to run it alone, omit `--no-pull-first`."
+            "Before the first chain that starts with a directory, a command pulls that"
+            " directory, and every chain passes `--no-pull-first`, so that every chain that"
+            " starts with the directory merges the same commit of it.  To run a chain alone,"
+            " omit `--no-pull-first`."
         ),
         "`git-push-to` merges, compiles, and pushes; see its documentation.",
     ]

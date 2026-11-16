@@ -108,18 +108,18 @@
 # starts with a directory, it pulls that directory, as it does given that
 # single directory, and it runs every chain as with "--no-pull-first".  If
 # the pull fails, it skips the chains that start with that directory.
-# `resolve-conflicts` does the same, with a separate run of this script for
-# each pull and for each chain.  The commands that `pr-status` prints pass
-# "--no-pull-first" to each chain whose first directory an earlier chain
-# pulled; they stop at the first failure.
+# `resolve-conflicts`, and the commands that `pr-status` prints, do the same,
+# with a separate run of this script for each pull and for each chain; the
+# commands that `pr-status` prints stop at the first failure.
 #
 # Without the pull, this script still stops if a merge is in progress in the
 # first directory, or if it has unmerged files, as `git pull` would.  But it
 # first aborts a merge in progress there that is redundant and that nobody
 # has worked on, as described under "Conflicts".  As the head that the pull
 # of the first directory fetched (see "Asking an AI agent"), it uses the head
-# that the latest pull of that directory by this script, or by another
-# command of this package, fetched.
+# that the latest pull of that directory by this script or by
+# `git-pull-upstream` fetched.  A pull by any other command, such as
+# `git pull`, `git-new-branch`, or `git-checkout-branch`, does not count.
 
 # Rebasing
 #
@@ -676,10 +676,10 @@ finish_merge_in_progress() {
 }
 
 ## Usage: check_from_dir FROM_DIR
-## Returns 1, after printing a diagnostic, unless FROM_DIR is the top level
-## of a working tree whose branch has an upstream branch and still exists in
-## its remote.  Sets ${from_absolute} to the absolute pathname of FROM_DIR,
-## and ${from_branch} to the name of its branch, such as "main".
+## Returns 1, after printing a diagnostic, unless FROM_DIR is a directory
+## whose branch has an upstream branch.  Sets ${from_absolute} to the
+## absolute pathname of FROM_DIR, and ${from_branch} to the name of its
+## branch, such as "main".  Does not contact the remote.
 check_from_dir() {
   # A failure here is not yet an error, and it leaves the variable empty:  a
   # nonexistent directory fails here, and the test just below diagnoses that
@@ -697,9 +697,6 @@ check_from_dir() {
     echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
     return 1
   fi
-  # Check the upstream before asking whether the branch was deleted:
-  # `is_deleted_branch` cannot tell, and answers status 3, when the branch
-  # has no upstream, and its diagnostic is less specific than this one.
   if ! check_upstream "${from_absolute}"; then
     return 1
   fi
@@ -707,7 +704,6 @@ check_from_dir() {
   # `check_upstream` for TO_DIR overwrites ${checked_out_branch} with TO_DIR's
   # branch.
   from_branch="${checked_out_branch}"
-  check_branch_exists "${from_absolute}"
 }
 
 ## Usage: git_push_to FROM_DIR TO_DIR PULL_FROM FIRST
@@ -726,10 +722,6 @@ git_push_to() {
   # rerun finishes the merge.
   rerun_finishes_merge=$((1 - $4))
 
-  if ! check_from_dir "${from}"; then
-    return 1
-  fi
-
   # A failure here is not yet an error, and it leaves the variable empty:  a
   # nonexistent directory fails here, and the test just below diagnoses that
   # better.
@@ -747,8 +739,19 @@ git_push_to() {
     return 1
   fi
 
+  if ! check_from_dir "${from}"; then
+    return 1
+  fi
+
   if [ "${from_absolute}" = "${to_absolute}" ]; then
     echo "${SCRIPT_NAME}: FROM_DIR and TO_DIR are the same directory: ${from_absolute}" >&2
+    return 1
+  fi
+
+  # `check_from_dir` checked the upstream before this asks whether the branch
+  # was deleted:  `is_deleted_branch` cannot tell, and answers status 3, when
+  # the branch has no upstream, and its diagnostic is less specific.
+  if ! check_branch_exists "${from_absolute}"; then
     return 1
   fi
 
@@ -1128,6 +1131,13 @@ pull_only() {
   if ! check_from_dir "$1"; then
     return 1
   fi
+  # Unlike `git_push_to`, this does not ask the remote whether the branch was
+  # deleted (see `check_branch_exists`):  the pull of a deleted branch fails
+  # anyway, and asking costs a query of the remote.
+  if ! is_working_tree_top "${from_absolute}"; then
+    report_not_working_tree_top "$1"
+    return 1
+  fi
   # As in `git_push_to`.
   (cd -- "${from_absolute}" && prune_agent_todo 0)
   # As in `push_chain`, a directory with a merge in progress is not checked:
@@ -1155,7 +1165,7 @@ chain_failed() {
 
 ## Pushes each given directory into the next one, without pulling the first
 ## directory if ${no_pull_first} is 1.  Given a single directory, only pulls
-## it (see `pull_only`), unless ${no_pull_first} is 1.  First, before pulling
+## it (see `pull_only`); ${no_pull_first} must then be 0.  First, before pulling
 ## any directory, refuses if a directory that it pulls has uncommitted
 ## changes to tracked files and no merge in progress.  Then, if ${rebase} is 1,
 ## rebases each directory's branch, except the first, onto the previous one.
@@ -1165,7 +1175,7 @@ chain_failed() {
 ## summary.
 push_chain() {
   pull_from=$((1 - no_pull_first))
-  if [ "$#" -eq 1 ] && [ "${pull_from}" -eq 1 ]; then
+  if [ "$#" -eq 1 ]; then
     if ! pull_only "$1"; then
       chain_failed "failed to pull $1, while ${push_step}"
       return 1
@@ -1443,6 +1453,10 @@ if [ "$#" -lt 1 ]; then
   echo "OPTIONS: [--nocompile] [--no-pull-first] [--rebase | --squash] ${llm_options_usage} [--summary FILE]" >&2
   exit 1
 fi
+if [ "$#" -eq 1 ] && [ "${no_pull_first}" -eq 1 ]; then
+  echo "${SCRIPT_NAME}: given a single directory, which it only pulls, --no-pull-first leaves nothing to do: $1" >&2
+  exit 1
+fi
 
 num_slugs=0
 for arg; do
@@ -1563,7 +1577,8 @@ for key in ${keys}; do
     case "${pulled_dirs}${unpulled_dirs}" in
       *"${newline}${chain_first}${newline}"*) ;;
       *)
-        if push_chain "${chain_first}"; then
+        # A subshell, as for the chain below.
+        if (push_chain "${chain_first}"); then
           pulled_dirs="${pulled_dirs}${chain_first}${newline}"
         else
           unpulled_dirs="${unpulled_dirs}${chain_first}${newline}"

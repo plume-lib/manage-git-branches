@@ -2,8 +2,8 @@
 
 # Tests that `git-push-to --no-pull-first` merges the commit that the first
 # directory already has, without pulling it, that given a single directory it
-# only pulls it, and that a run of several chains of slugs that start with
-# the same directory pulls it only once.
+# only pulls it (and rejects "--no-pull-first"), and that a run of several
+# chains of slugs that start with the same directory pulls it only once.
 #
 # Usage:
 #   tests/test-push-to-no-pull-first.sh
@@ -183,6 +183,16 @@ if ! "${COMMANDS_DIR}/git-push-to" "${WORK_DIR}/${MAIN}"; then
 fi
 if [ "$(git -C "${WORK_DIR}/${MAIN}" rev-parse HEAD)" != "${advanced}" ]; then
   fail "git-push-to of a single directory did not pull it"
+fi
+
+## Given a single directory and "--no-pull-first", which leave nothing to do,
+## git-push-to fails and pulls nothing.
+advance_main "fifth line"
+if "${COMMANDS_DIR}/git-push-to" --no-pull-first "${WORK_DIR}/${MAIN}" 2> /dev/null; then
+  fail "git-push-to --no-pull-first of a single directory succeeded"
+fi
+if [ "$(git -C "${WORK_DIR}/${MAIN}" rev-parse HEAD)" = "${advanced}" ]; then
+  fail "git-push-to --no-pull-first of a single directory pulled it"
 fi
 
 ## In a run of chains of slugs, a first directory whose pull fails is pulled

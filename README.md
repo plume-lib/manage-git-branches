@@ -112,11 +112,10 @@ The commands are:
   commit of it, even if its remote changes during the run.  Otherwise, a
   branch could get a newer upstream commit than a branch that it builds on,
   and merging the latter into the former would later be a criss-cross merge,
-  which has several merge bases.  `git-push-to` itself and
-  `resolve-conflicts` pull each first directory before the first chain that
-  starts with it, and run every chain with `--no-pull-first`.  The commands
-  that `pr-status` prints pass `--no-pull-first` to each chain whose first
-  directory an earlier chain pulled.
+  which has several merge bases.  `git-push-to` itself,
+  `resolve-conflicts`, and the commands that `pr-status` prints pull each
+  first directory before the first chain that starts with it, and run every
+  chain with `--no-pull-first`.
 
   Suppose that a branch merged an earlier version of a pull request, whose
   branch then changed again before the pull request was squash-merged.

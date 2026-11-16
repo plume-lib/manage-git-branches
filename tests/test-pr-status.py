@@ -2110,8 +2110,8 @@ class PushCommandsTest(unittest.TestCase):
         """
         return types.SimpleNamespace(repo=types.SimpleNamespace(), update_cycle_affected=set())
 
-    def test_no_pull_first_for_repeated_first_directory(self):
-        """A chain that starts with an earlier chain's first directory does not pull it."""
+    def test_pull_each_first_directory_once(self):
+        """Each first directory is pulled once, before its first chain; no chain pulls it."""
         chains = [
             pr_status.PushChains([["up", "a", "b"], ["up", "c"], ["b", "d"]], [], True, [], []),
             pr_status.PushChains([["up2", "e"], ["up", "f"]], [], True, [], []),
@@ -2120,10 +2120,13 @@ class PushCommandsTest(unittest.TestCase):
         self.assertEqual(
             [line for line in commands.lines if line.startswith("git-push-to")],
             [
-                "git-push-to \\",
+                "git-push-to up && \\",
                 "git-push-to --no-pull-first \\",
-                "git-push-to \\",
-                "git-push-to \\",
+                "git-push-to --no-pull-first \\",
+                "git-push-to b && \\",
+                "git-push-to --no-pull-first \\",
+                "git-push-to up2 && \\",
+                "git-push-to --no-pull-first \\",
                 "git-push-to --no-pull-first \\",
             ],
         )
