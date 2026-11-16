@@ -40,6 +40,9 @@ Each run:
   * warns about each cycle of dependencies, and omits from the generated push commands
     the PRs whose branches are updated in a cycle and the PRs whose branches are updated
     from theirs,
+  * omits from the dependency chains with conflicts each PR whose head commit is older than
+    the repository's "dormant_after_days" (see pr-status-config.md) and on whose branch no
+    newer PR builds,
   * updates each modeled PR description's "Land after" and "Land before" lines, but keeps
     the lines about a PR in or after a cycle of dependencies,
   * prints what changed since the previous snapshot (input for the summary),
@@ -75,10 +78,12 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from collections import Counter, defaultdict
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pr_status_config
+import request_util
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -99,13 +104,106 @@ class ConfigError(Exception):
     """There is no config file, and no default config can be constructed."""
 
 
+class CommandError(subprocess.CalledProcessError):
+    """A failure of a command that run ran, whose message includes the command's standard error.
+
+    The message of a subprocess.CalledProcessError gives only the command and its exit
+    status, so a traceback would not say why the command failed.
+    """
+
+    def __str__(self) -> str:
+        """Return a description of the failure.
+
+        Returns:
+            One line:  the command, its standard error, and its exit status.
+        """
+        return f"{command_failure(self)} (exit status {self.returncode})"
+
+
+# Matches the standard error of a `gh` command that failed for a reason that might go away
+# by itself, such as "HTTP 502: Bad Gateway", "error connecting to api.github.com", "You
+# have exceeded a secondary rate limit", or GraphQL's "Something went wrong while executing
+# your query.  This may be the result of a timeout".
+TRANSIENT_GH_ERROR_RE = re.compile(
+    "|".join(
+        f"(?:{p})"
+        for p in [
+            *request_util.TRANSIENT_NETWORK_PATTERNS,
+            r"error connecting to",
+            r"timed? ?out",
+            r"Something went wrong while executing",
+            r"unexpected EOF",
+        ]
+    ),
+    re.IGNORECASE,
+)
+
+# Matches the standard error of a `gh` command that failed because GitHub limits the rate of
+# requests, such as "You have exceeded a secondary rate limit" or "HTTP 429: Too Many
+# Requests".
+GH_RATE_LIMIT_RE = re.compile(r"rate limit|Too Many Requests|HTTP 429", re.IGNORECASE)
+
+# The number of seconds to wait before each retry of a `gh` command that failed for a reason
+# that TRANSIENT_GH_ERROR_RE matches.
+GH_RETRY_DELAYS = (10, 60)
+# The fewest seconds to wait before a retry of a `gh` command that failed for a reason that
+# GH_RATE_LIMIT_RE matches.  A secondary rate limit lasts at least a minute, and a request
+# made while it is in force can extend it.
+GH_RATE_LIMIT_DELAY = 60
+
+# True if a `gh` command failed for a reason that TRANSIENT_GH_ERROR_RE matches, even after
+# every retry.  GitHub is then probably unavailable, so run_retrying does not retry later
+# `gh` commands:  each of them fails quickly, instead of after a wait.
+GH_RETRIES_EXHAUSTED = False
+
+
+def run_retrying(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run the given command, and retry it if it is a `gh` command that failed transiently.
+
+    A `gh` command fails transiently if its standard error matches TRANSIENT_GH_ERROR_RE.
+    Such a command is run again after each delay in GH_RETRY_DELAYS (but at least
+    GH_RATE_LIMIT_DELAY seconds after a rate limit), with a notice on standard error, unless
+    GH_RETRIES_EXHAUSTED is true.
+
+    Args:
+        cmd: a command and its arguments, such as ["gh", "pr", "view", "123"].
+
+    Returns:
+        The result of the command's last run, with its exit status and its output.
+    """
+    global GH_RETRIES_EXHAUSTED
+    is_gh = cmd[:1] == ["gh"]
+    delays = [] if GH_RETRIES_EXHAUSTED else list(GH_RETRY_DELAYS)
+    while True:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if result.returncode == 0 or not is_gh or not TRANSIENT_GH_ERROR_RE.search(result.stderr):
+            return result
+        if not delays:
+            GH_RETRIES_EXHAUSTED = True
+            return result
+        delay = delays.pop(0)
+        if GH_RATE_LIMIT_RE.search(result.stderr):
+            delay = max(delay, GH_RATE_LIMIT_DELAY)
+        failure = CommandError(result.returncode, cmd, result.stdout, result.stderr)
+        print(
+            f"pr-status: {command_failure(failure)}; retrying in {delay} seconds", file=sys.stderr
+        )
+        time.sleep(delay)
+
+
 def run(cmd: list[str]) -> str:
     """Run a command, which must succeed.
+
+    A `gh` command that fails transiently is retried, as run_retrying does.  If the command
+    fails, even after any retries, raises a CommandError.
 
     Returns:
         The command's standard output.
     """
-    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    result = run_retrying(cmd)
+    if result.returncode != 0:
+        raise CommandError(result.returncode, cmd, result.stdout, result.stderr)
+    return result.stdout
 
 
 def succeeds(cmd: list[str]) -> bool:
@@ -117,13 +215,40 @@ def succeeds(cmd: list[str]) -> bool:
     return subprocess.run(cmd, check=False, capture_output=True).returncode == 0
 
 
+# The most characters of an argument that brief_command shows.
+BRIEF_ARGUMENT_LENGTH = 40
+
+
+def brief_command(cmd: list[str]) -> str:
+    """Return cmd as a shell command on one line, with each long argument abbreviated.
+
+    An argument that spans lines or that is longer than BRIEF_ARGUMENT_LENGTH characters,
+    such as a GraphQL query or a PR's body, is replaced by the start of its first line,
+    followed by "...", as in "gh api graphql -f 'query={ repository(owner: ...'".
+
+    Args:
+        cmd: a command and its arguments, such as ["gh", "pr", "view", "123"].
+
+    Returns:
+        The command, quoted as a shell would need it.
+    """
+
+    def brief(arg: str) -> str:
+        if "\n" not in arg and len(arg) <= BRIEF_ARGUMENT_LENGTH:
+            return arg
+        return arg.split("\n", 1)[0][:BRIEF_ARGUMENT_LENGTH] + "..."
+
+    return shlex.join(brief(arg) for arg in cmd)
+
+
 def command_failure(error: subprocess.CalledProcessError) -> str:
     """Describe a command that run raised error for.
 
     Returns:
-        One line:  the command and its standard error.
+        One line:  the command, with each long argument abbreviated as brief_command does,
+        and its standard error.
     """
-    return f"{shlex.join(error.cmd)} failed: {' '.join(error.stderr.split())}"
+    return f"{brief_command(error.cmd)} failed: {' '.join(error.stderr.split())}"
 
 
 def and_list(items: Iterable[str]) -> str:
@@ -169,6 +294,14 @@ class Repo:
         self.default_branch = repo_default_branch(cfg)
         self.keywords = cfg.get("dependency_keywords", [])
         self.show_author = cfg.get("show_author", False)
+        # The number of days, such as 730:  a PR is dormant if its head commit's committer
+        # date is more than this many days ago.  None if no PR is dormant.
+        self.dormant_after_days: int | None = cfg.get(
+            "dormant_after_days", pr_status_config.DEFAULT_DORMANT_AFTER_DAYS
+        )
+        # The numbers of the open PRs whose head commit's committer date is more than
+        # dormant_after_days days ago.
+        self.dormant: set[int] = set()
         self.prs: dict[int, dict[str, Any]] = {}  # number -> gh JSON
         self.master_conflicts: dict[int, list[str]] = {}  # number -> list of files
         # (a, b): a contains all non-merge commits of b, and b's changes
@@ -213,8 +346,12 @@ class Repo:
         """Return the mark that a link to PR n carries if the PR's CI failed.
 
         Returns:
-            A space followed by FAILED_MARK if the PR's CI failed, or "" otherwise.
+            A space followed by FAILED_MARK if the PR's CI failed; a space followed by "?"
+            if the PR is open and GitHub could not say whether its CI failed; or ""
+            otherwise.
         """
+        if not self.reviews_and_ci.known:
+            return " ?" if n in self.prs else ""
         return " " + FAILED_MARK if n in self.reviews_and_ci.ci_failed else ""
 
     def refs(self, ns: Iterable[int]) -> str:
@@ -309,6 +446,45 @@ def load_repo(repo: Repo, pairwise: bool = True) -> None:
             m = re.match(r"(\d+) vs (\d+):(.*)", line)
             assert m, line
             repo.pair_conflicts[int(m[1]), int(m[2])] = m[3].split()
+    repo.dormant = dormant_prs(repo)
+
+
+def dormant_prs(repo: Repo) -> set[int]:
+    """Return the open PRs of the given repository that are dormant.
+
+    A PR is dormant if the committer date of its head commit is more than
+    repo.dormant_after_days days ago.  The head commits are those that pr-merge-analysis
+    fetched into repo's clone; a PR whose head commit the clone lacks is not dormant.
+
+    Args:
+        repo: a Repo, which load_repo has read.
+
+    Returns:
+        The numbers, such as 147, of the dormant PRs; the empty set if
+        repo.dormant_after_days is None.
+    """
+    if repo.dormant_after_days is None or not repo.prs:
+        return set()
+    by_oid = {pr["headRefOid"]: n for n, pr in repo.prs.items()}
+    out = run(
+        [
+            "git",
+            "-C",
+            repo.clone,
+            "log",
+            "--no-walk=unsorted",
+            "--ignore-missing",
+            "--format=%H %ct",
+            *sorted(by_oid),
+        ]
+    )
+    cutoff = dt.datetime.now(dt.UTC).timestamp() - repo.dormant_after_days * 86400
+    result = set()
+    for line in out.splitlines():
+        oid, committed = line.split()
+        if oid in by_oid and int(committed) < cutoff:
+            result.add(by_oid[oid])
+    return result
 
 
 def branches_conflict(repo: Repo, a: int, b: int) -> bool:
@@ -423,11 +599,14 @@ class ReviewsAndCi(NamedTuple):
             is outdated.
         ci_failed: the numbers of the PRs whose CI failed.
         ci_passed: the numbers of the PRs whose CI completed and passed.
+        known: True if they were read from GitHub; False if GitHub could not be asked, and
+            the other attributes are empty.
     """
 
     review_threads: dict[int, list[bool]]
     ci_failed: set[int]
     ci_passed: set[int]
+    known: bool = True
 
 
 def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
@@ -437,7 +616,30 @@ def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
         repo: a Repo.
 
     Returns:
-        The unresolved review threads and the CI results, read from GitHub.
+        The unresolved review threads and the CI results, read from GitHub; or, after a
+        warning on standard error, an empty ReviewsAndCi whose known is False if GitHub
+        cannot be asked, even after the retries that run makes.
+    """
+    try:
+        return read_reviews_and_ci(repo)
+    except subprocess.CalledProcessError as error:
+        print(
+            f"pr-status: cannot read the review threads and CI results of {repo.gh}, so the"
+            f" documents show them as unknown (?): {' '.join(error.stderr.split())}",
+            file=sys.stderr,
+        )
+        return ReviewsAndCi({}, set(), set(), known=False)
+
+
+def read_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
+    """Return the unresolved review threads and the CI results of the open PRs of repo.
+
+    Args:
+        repo: a Repo.
+
+    Returns:
+        The unresolved review threads and the CI results, read from GitHub.  If GitHub
+        cannot be asked, raises a subprocess.CalledProcessError.
     """
     result = ReviewsAndCi({}, set(), set())
     for pr in review_thread_query(
@@ -632,8 +834,9 @@ def query_pr_states(refs: Iterable[str]) -> dict[str, str | None]:
     """Look up the states of the PRs "owner/repo#N" in refs, with one GraphQL query.
 
     Returns:
-        A map from each ref to "open", "landed", "closed", or None (not a PR),
-        or {} if the query fails.
+        A map from each ref to "open", "landed", "closed", or None (not a PR); or, after a
+        warning on standard error, {} if GitHub cannot be asked, even after the retries
+        that run_retrying makes.
     """
     refs = sorted(set(refs))
     if not refs:
@@ -647,17 +850,17 @@ def query_pr_states(refs: Iterable[str]) -> dict[str, str | None]:
             f"{{ pullRequest(number: {int(n)}) {{ state }} }}"
         )
     # A ref that is not a PR yields an error but no output; the other refs still yield data.
-    result = subprocess.run(
-        ["gh", "api", "graphql", "-f", "query={" + " ".join(query) + "}"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    result = run_retrying(["gh", "api", "graphql", "-f", "query={" + " ".join(query) + "}"])
     try:
         data = json.loads(result.stdout).get("data")
     except json.JSONDecodeError:
         data = None
     if not data:
+        print(
+            "pr-status: cannot read the states of the PRs that PR descriptions mention with one"
+            f" query, so it asks about each one: {' '.join(result.stderr.split())}",
+            file=sys.stderr,
+        )
         return {}
     states = {}
     for i, ref in enumerate(refs):
@@ -693,22 +896,24 @@ class PrRefs(NamedTuple):
     external: set[str]
 
 
-def pr_refs(text: str, repo: Repo) -> PrRefs:
+def pr_refs(text: str, repo_gh: str) -> PrRefs:
     """Return the PRs that the given text names.
 
     Args:
         text: a part of a PR description, such as "Land after #12 and other/repo#34".
-        repo: the repository whose PRs text can name by number alone, as in "#12".
+        repo_gh: the GitHub slug, such as "ORG/REPO", of a repository, whose PRs text can
+            name by number alone, as in "#12".
 
     Returns:
-        The PRs that text names, as a PrRefs whose numbers are of PRs in repo.
+        The PRs that text names, as a PrRefs whose numbers are of PRs in the repository.
     """
     numbers = {int(n) for n in re.findall(r"(?<![\w/])#(\d+)\b", text)}
     external = set()
+    # GitHub ignores the case of a repository's name.
     for gh, n in re.findall(r"\b([\w.-]+/[\w.-]+)#(\d+)\b", text) + re.findall(
         r"github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)", text
     ):
-        if gh == repo.gh:
+        if gh.lower() == repo_gh.lower():
             numbers.add(int(n))
         else:
             external.add(f"{gh}#{n}")
@@ -770,7 +975,7 @@ def stated_relations(body: str, repo: Repo) -> StatedRelations:
             if keyword not in ("land", "merge"):
                 if re.match(r"\s*(this|it)\b", rest, re.IGNORECASE):
                     continue  # "#N depends on this PR":  #N is a dependent
-                refs = pr_refs(rest, repo)
+                refs = pr_refs(rest, repo.gh)
                 numbers |= refs.numbers
                 external |= refs.external
                 continue
@@ -787,7 +992,7 @@ def stated_relations(body: str, repo: Repo) -> StatedRelations:
             # land-with partner, and #C is a dependent.
             parts = re.split(r"\b(after|before|with)\b", rest, flags=re.IGNORECASE)
             for i in range(0, len(parts), 2):
-                refs = pr_refs(parts[i], repo)
+                refs = pr_refs(parts[i], repo.gh)
                 preposition = parts[i - 1].lower() if i else None
                 # In "To land after it:  #A", this PR is the object, so #A is a dependent.
                 if preposition in ("after", "before") and re.match(
@@ -805,22 +1010,26 @@ def stated_relations(body: str, repo: Repo) -> StatedRelations:
     return StatedRelations(numbers, external, dependents, partners, external_partners)
 
 
-def landing_line(line: str, repo: Repo) -> tuple[str, str] | None:
-    """Parse a landing-order line of a description of a PR in repo.
+def landing_line(line: str, repo_gh: str) -> tuple[str, str] | None:
+    """Parse a landing-order line of a description of a PR.
 
     A landing-order line has the conventional format, such as "Land after #N.", except
-    that it may omit the final period and may continue with text that names no other PR.
-    It may name the PR as "owner/repo#N" or by its URL.
+    that it can omit the final period and can continue with text that names no other PR.
+    It can name the PR as "owner/repo#N" or by its URL.
+
+    Args:
+        line: a line of the description.
+        repo_gh: the GitHub slug, such as "ORG/REPO", of the PR's repository.
 
     Returns:
         The word "after", "with", or "before", and the PR that the line names, as "#N" if
-        it is in repo and as "owner/repo#N" otherwise; or None if line is not a
+        it is in the repository and as "owner/repo#N" otherwise; or None if line is not a
         landing-order line.
     """
     m = LANDING_START_RE.match(line)
     if not m:
         return None
-    refs = pr_refs(line, repo)
+    refs = pr_refs(line, repo_gh)
     if len(refs.numbers) + len(refs.external) != 1:
         return None
     return m[1], (f"#{refs.numbers.pop()}" if refs.numbers else refs.external.pop())
@@ -836,7 +1045,27 @@ def malformed_landing_lines(body: str, repo: Repo) -> list[str]:
     return [
         line
         for line in body.splitlines()
-        if re.match(r"Land (after|with|before)\b", line) and not landing_line(line, repo)
+        if re.match(r"Land (after|with|before)\b", line) and not landing_line(line, repo.gh)
+    ]
+
+
+def land_after_numbers(body: str, repo_gh: str) -> list[int]:
+    """Return the PRs that the given description's "Land after" lines name in its repository.
+
+    Args:
+        body: the description of a PR.
+        repo_gh: the GitHub slug, such as "ORG/REPO", of the PR's repository.
+
+    Returns:
+        The number, such as 123, of the PR that each "Land after" line, as defined by
+        landing_line, names in the repository, in the order of the lines.
+    """
+    return [
+        int(ref[1:])
+        for line in body.splitlines()
+        if (parsed := landing_line(line, repo_gh))
+        and parsed[0] == "after"
+        and (ref := parsed[1]).startswith("#")
     ]
 
 
@@ -868,7 +1097,7 @@ def updated_pr_description(
     """
     lines = body.splitlines()
     final_newline = body.endswith("\n")
-    landing = [(i, landing_line(line, repo)) for i, line in enumerate(lines)]
+    landing = [(i, landing_line(line, repo.gh)) for i, line in enumerate(lines)]
     landing = [(i, parsed) for i, parsed in landing if parsed]
     existing: dict[tuple[str, str], str] = {}
     for i, parsed in landing:
@@ -1258,12 +1487,13 @@ class Model:
             unresolved review threads and how many of them are outdated, if the PR has any;
             a red X if the PR's CI failed, or else a green checkmark if its CI completed and
             passed; and shuffle arrows (🔀) if merging the default branch, or a branch that
-            the PR's branch is updated from, into the PR would conflict, in any file.  The
-            result is "" if no part applies.
+            the PR's branch is updated from, into the PR would conflict, in any file.  If
+            GitHub could not say what the review threads and the CI results are, a "?"
+            replaces the first two parts.  The result is "" if no part applies.
         """
         reviews_and_ci = self.repo.reviews_and_ci
         threads = reviews_and_ci.review_threads.get(n, [])
-        cell = []
+        cell = [] if reviews_and_ci.known else ["?"]
         if threads:
             outdated = sum(threads)
             cell.append(str(len(threads)) + (f" ({outdated} outdated)" if outdated else ""))
@@ -1327,6 +1557,42 @@ class Model:
     def update_levels(self) -> dict[int, int]:
         """Each PR's level in the update graph (see graph_levels)."""
         return self.graph_levels(self.update_direct)
+
+    def chain_candidates(self) -> set[int]:
+        """Return the PRs that a `git-push-to` chain can contain.
+
+        Returns:
+            The numbers, such as 123, of the open PRs whose head repository exists and that
+            are not in or after a cycle of the update graph (see update_cycle_affected).
+        """
+        return {n for n in self.open - self.update_cycle_affected if self.repo.prs[n]["owner"]}
+
+    @functools.cached_property
+    def dormant_omitted(self) -> set[int]:
+        """The dormant PRs (see dormant_prs) that the dependency chains with conflicts omit.
+
+        The chains omit each dormant PR that chain_candidates returns and whose branch no
+        PR that is not dormant and that chain_candidates returns is updated from, directly
+        or transitively.  A PR that is not dormant and that builds on a dormant PR keeps the
+        dormant PR's branch in use, so the chains keep both.  Each dormant PR whose branch
+        is updated from an omitted PR's branch is also omitted, so no chain pushes from an
+        omitted branch.
+        """
+        candidates = self.chain_candidates()
+        dormant = self.repo.dormant & candidates
+        active = candidates - dormant
+        return {d for d in dormant if not any(d in self.update_all_deps[n] for n in active)}
+
+    @functools.cached_property
+    def dormant_conflicting(self) -> list[int]:
+        """The PRs of dormant_omitted that the dependency chains with conflicts would contain.
+
+        They are the PRs that the chains would contain if the chains omitted no dormant PR
+        and if every branch had a working copy, in order of PR number.
+        """
+        chains = update_chains(self, self.chain_candidates(), True)
+        in_chains = set().union(*(c.prs for c in conflicting_chains(self.repo, chains, True)))
+        return sorted(self.dormant_omitted & in_chains)
 
     def deepest_roots(self) -> set[int]:
         """Return the first PR of each longest path of prerequisites in the dependency graph.
@@ -1518,7 +1784,7 @@ def description_updates(models: list[Model]) -> list[DescriptionUpdate]:
                     file=sys.stderr,
                 )
             affected = model.cycle_affected
-            parsed = [p for line in body.splitlines() if (p := landing_line(line, model.repo))]
+            parsed = [p for line in body.splitlines() if (p := landing_line(line, model.repo.gh))]
             # The PRs in this repository that are open, including excluded ones, and that the
             # description's "Land after" lines and its "Land before" lines name.
             said = {
@@ -1606,8 +1872,8 @@ def external_failed_mark(model: Model, ref: str) -> str:
         ref: a PR in another repository, such as "owner/repo#5".
 
     Returns:
-        A space followed by FAILED_MARK if the PR's repository is one of the models that
-        unite_partners united with model and the PR's CI failed, or "" otherwise.
+        If the PR's repository is one of the models that unite_partners united with model,
+        the mark that Repo.failed_mark returns for the PR; or "" otherwise.
     """
     gh, n = ref.split("#")
     other = model.by_gh.get(gh.lower())
@@ -1617,7 +1883,8 @@ def external_failed_mark(model: Model, ref: str) -> str:
 def depends_on(model: Model, n: int, mark_failed: bool = False) -> str:
     """Return the "Depends on" cell of PR n.
 
-    If mark_failed is true, each prerequisite whose CI failed is followed by a red X.
+    If mark_failed is true, each prerequisite whose CI failed is followed by a red X, and
+    each open prerequisite whose CI results GitHub could not say is followed by a "?".
 
     Returns:
         The PR's direct prerequisites, followed by its transitive ones.  Shuffle arrows (🔀)
@@ -2334,8 +2601,9 @@ def gen_status(models: list[Model]) -> list[str]:
 
     Returns:
         The section's lines:  a "Status" heading and which PRs are in a cycle of dependencies,
-        which PRs conflict with the default branch, and which dependent branches lack their
-        prerequisites' current commits; or no lines if there is no such PR or branch.
+        which PRs conflict with the default branch, which dormant PRs the dependency chains
+        with conflicts omit (see Model.dormant_conflicting), and which dependent branches lack
+        their prerequisites' current commits; or no lines if there is no such PR or branch.
     """
     lines = []
     for m in models:
@@ -2347,6 +2615,8 @@ def gen_status(models: list[Model]) -> list[str]:
             lines.append(
                 f"* {r.label} PRs that conflict with `{r.default_branch}`: {r.links(conflicting)}."
             )
+        if m.dormant_conflicting:
+            lines.append(f"* {dormant_note(m)}.")
     behind = []
     for m in models:
         r = m.repo
@@ -3066,12 +3336,16 @@ class PushChains(NamedTuple):
         missing_branches: the branches that have no working copy, but without whose working
             copies some conflict cannot be resolved by a chain:  the upstream default branch
             first, if it is one, then the PRs' branches in order of PR number.
+        dormant: the numbers, such as 147, of the dormant PRs that the chains omit (see
+            Model.dormant_omitted), in order; empty unless the chains are those with
+            conflicts.
     """
 
     chains: list[list[str]]
     missing: list[int]
     has_upstream: bool
     missing_branches: list[MissingBranch]
+    dormant: list[int]
 
 
 def update_chains(model: Model, prs: set[int], has_upstream: bool) -> list[UpdateChain]:
@@ -3172,6 +3446,7 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     chain depends on it (see conflicting_chains).
     No chain contains a PR that is in a cycle of the update graph or whose branch is updated
     from the branch of a PR in one (see Model.update_cycle_affected).
+    If conflicts_only is true, no chain contains a PR of Model.dormant_omitted.
 
     The missing branches are those that the chains with conflicts would contain if every
     branch had a working copy, and that the conflicts involve (see chain_conflict_prs), but
@@ -3192,6 +3467,8 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
     dirs = {n: pr_directories(r, r.prs[n], base) for n in model.open}
     missing = sorted(n for n in model.open if not dirs[n])
     acyclic = model.open - model.update_cycle_affected
+    dormant = sorted(model.dormant_omitted) if conflicts_only else []
+    acyclic -= set(dormant)
     pushable = {n for n in acyclic if dirs[n]}
     updates = update_chains(model, pushable, bool(upstream))
     if conflicts_only:
@@ -3216,7 +3493,7 @@ def push_chains(model: Model, base: str, conflicts_only: bool = False) -> PushCh
         directory = checkout_directory(r, base, owner)
         if directory is not None:
             missing_branches.append(MissingBranch(directory, f"{owner}:{branch}"))
-    return PushChains(chains, missing, bool(upstream), missing_branches)
+    return PushChains(chains, missing, bool(upstream), missing_branches, dormant)
 
 
 def checkout_directory(repo: Repo, base: str, owner: str) -> str | None:
@@ -3366,6 +3643,23 @@ def format_missing_branches(snapshot: dict[str, Any]) -> list[str]:
     return lines
 
 
+def dormant_note(model: Model) -> str:
+    """Return the note that lists the given model's Model.dormant_conflicting PRs.
+
+    Args:
+        model: a Model whose dormant_conflicting is not empty.
+
+    Returns:
+        The note, without final punctuation, such as "Randoop PRs whose head commit is more
+        than 730 days old, which the dependency chains with conflicts omit: #147".
+    """
+    r = model.repo
+    return (
+        f"{r.label} PRs whose head commit is more than {r.dormant_after_days} days old,"
+        f" which the dependency chains with conflicts omit: {r.links(model.dormant_conflicting)}"
+    )
+
+
 def push_commands(models: list[Model], all_chains: list[PushChains], base: str) -> PushCommands:
     """Return the shell commands that run the given `git-push-to` chains.
 
@@ -3388,7 +3682,7 @@ def push_commands(models: list[Model], all_chains: list[PushChains], base: str) 
     chain_count = 0
     # The first directories of the chains so far.
     first_dirs = set()
-    for m, (chains, missing, has_upstream, _) in zip(models, all_chains, strict=True):
+    for m, (chains, missing, has_upstream, _, dormant) in zip(models, all_chains, strict=True):
         r = m.repo
         chain_count += len(chains)
         for chain in chains:
@@ -3400,10 +3694,14 @@ def push_commands(models: list[Model], all_chains: list[PushChains], base: str) 
                 f"  {chain[-1]}",
             ]
             lines[-1] += " && \\"
-        if missing:
+        shown_missing = [n for n in missing if n not in dormant]
+        if shown_missing:
             notes.append(
-                f"{r.label} PRs with no working copy, which these commands omit: {r.links(missing)}"
+                f"{r.label} PRs with no working copy, which these commands omit:"
+                f" {r.links(shown_missing)}"
             )
+        if dormant and m.dormant_conflicting:
+            notes.append(dormant_note(m))
         if m.update_cycle_affected:
             notes.append(
                 f"{r.label} PRs in or after a cycle of dependencies, which these commands omit:"
@@ -3715,13 +4013,67 @@ def find_clone(base: str, owner: str, name: str, default_branch: Callable[[], st
     return str(pathlib.Path(base) / clones[0])
 
 
+# The GitHub slugs, such as "ORG/REPO", in lowercase, of the repositories that
+# default_config reports on only if one of their open PRs is the user's (see has_own_pr).
+# Each has hundreds of open PRs, which take pr-merge-analysis a long time, and usually none
+# of them is the user's:  git/git takes patches by email, and each PR of gitgitgadget/git,
+# a fork of git/git, is a patch series that GitGitGadget emails to git/git.  default_config
+# describes a clone of gitgitgadget/git as one of git/git, but a clone of a fork of
+# gitgitgadget/git as one of gitgitgadget/git.  A rule based on the number of open PRs,
+# such as at least PR_LIMIT, would not cover gitgitgadget/git, which has fewer.
+REPORTED_ONLY_FOR_OWN_PRS = frozenset({"git/git", "gitgitgadget/git"})
+
+
+def has_own_pr(gh: str, clones: dict[str, GitEntry]) -> bool:
+    """Return True if the given repository has an open PR that is the user's.
+
+    A PR is the user's if its author is the user that the `gh` CLI is logged in as, or if
+    one of clones is a working copy of the PR's head branch:  the clone's current branch is
+    the PR's head branch, the clone's owner is the owner of the PR's head repository, and
+    the clone's repository name is the name of the given repository.
+
+    Args:
+        gh: a repository's GitHub slug, such as "ORG/REPO".
+        clones: the git clones in the directory that holds the working copy directories, as
+            git_entries returns them.
+
+    Returns:
+        True if gh has an open PR that is the user's, and False otherwise.  A list of PRs
+        that GitHub does not give is treated as empty, after a warning on standard error.
+    """
+
+    def open_prs(*args: str) -> list[dict[str, Any]]:
+        cmd = ["gh", "pr", "list", "-R", gh, "--state", "open", *args]
+        try:
+            return json.loads(run(cmd))
+        except subprocess.CalledProcessError as error:
+            print(
+                f"pr-status: cannot list the open PRs of {gh}: {command_failure(error)}",
+                file=sys.stderr,
+            )
+            return []
+
+    if open_prs("--author", "@me", "--limit", "1", "--json", "number"):
+        return True
+    name = gh.split("/")[1].lower()
+    branches = {(info.owner, info.branch) for info in clones.values() if info.repo_name == name}
+    prs = open_prs("--limit", str(PR_LIMIT), "--json", "headRefName,headRepositoryOwner")
+    return any(
+        ((pr.get("headRepositoryOwner") or {}).get("login", "").lower(), pr["headRefName"])
+        in branches
+        for pr in prs
+    )
+
+
 def default_config(base: str) -> dict[str, Any]:
     """Construct the config to use when there is no config file.
 
     The config describes each GitHub repository that at least 2 of the git clones in base
     are clones of (or, if there is none, the one that the most clones are clones of), or its
-    upstream if that repository is a fork with the same name.  Clones are grouped by
-    repository name, so the clones of a repository and of its forks are counted together.
+    upstream if that repository is a fork with the same name.  A repository in
+    REPORTED_ONLY_FOR_OWN_PRS is described only if one of its open PRs is the user's (see
+    has_own_pr).  Clones are grouped by repository name, so the clones of a repository and
+    of its forks are counted together.
     The config has no notes or decisions, and its only document is pr-status.md.
     (Its "Unblocked PRs" sections serve in place of an unblocked document.)
 
@@ -3729,7 +4081,8 @@ def default_config(base: str) -> dict[str, Any]:
         The default config, with each default that pr_status_config.with_defaults sets.
 
     Raises:
-        ConfigError: if base contains no clone of a GitHub repository that gh can view.
+        ConfigError: if the config would describe no repository, as when base contains no
+            clone of a GitHub repository that the `gh` CLI can view.
     """
     # The clones of repositories on GitHub.
     clones = {d: info for d, info in git_entries(base).items() if info.owner}
@@ -3765,6 +4118,9 @@ def default_config(base: str) -> dict[str, Any]:
             )
             continue
         gh = j["nameWithOwner"]
+        if gh.lower() in REPORTED_ONLY_FOR_OWN_PRS and not has_own_pr(gh, clones):
+            print(f"pr-status: skipping {gh}, which has no open PR of yours", file=sys.stderr)
+            continue
         if any(r["gh"] == gh for r in repos.values()):
             continue
         default_branch = j["defaultBranchRef"]["name"]
@@ -3773,10 +4129,15 @@ def default_config(base: str) -> dict[str, Any]:
         GITHUB_DEFAULT_BRANCHES[gh] = default_branch
         clone = find_clone(base, gh.split("/")[0], name, lambda b=default_branch: b)
         if clone is None:
+            print(
+                f"pr-status: skipping {gh}: {base} holds no clone of it or of a fork of it",
+                file=sys.stderr,
+            )
             continue
         repos[gh.split("/")[1]] = {"gh": gh, "clone": clone}
     if not repos:
-        msg = f"no {pr_status_config.CONFIG} and no GitHub repository that gh can view"
+        # A message on standard error says why each repository was skipped.
+        msg = f"no {pr_status_config.CONFIG} and no GitHub repository to report on"
         raise ConfigError(msg)
     print(
         "pr-status: reporting on " + and_list(r["gh"] for r in repos.values()),
@@ -3879,6 +4240,15 @@ def main() -> None:
         help="print the config as JSON, with its defaults filled in, and do nothing else",
     )
     mode.add_argument(
+        "--print-land-after",
+        metavar="ORG/REPO",
+        help=(
+            "read the description of a PR of the repository ORG/REPO on standard input, print"
+            ' the number of the PR that each of its "Land after" lines names in that'
+            " repository, one per line, and do nothing else"
+        ),
+    )
+    mode.add_argument(
         "--print-conflicting-push-chains",
         action="store_true",
         help=(
@@ -3937,7 +4307,11 @@ def main() -> None:
         """
         return getattr(args, option.removeprefix("--").replace("-", "_"))
 
-    printing = [o for o in ["--print-document", "--print-config", *snapshot_printers] if given(o)]
+    printing = [
+        o
+        for o in ["--print-document", "--print-config", "--print-land-after", *snapshot_printers]
+        if given(o)
+    ]
     if args.highlight and printing:
         parser.error(f"--highlight is not allowed with {printing[0]}")
     check_only = args.check
@@ -3955,6 +4329,10 @@ def main() -> None:
         return
     if args.print_config:
         print(json.dumps(load_config("pr-status"), indent=2))
+        return
+    if args.print_land_after is not None:
+        for number in land_after_numbers(sys.stdin.read(), args.print_land_after):
+            print(number)
         return
     for option, formatter in snapshot_printers.items():
         if not given(option):

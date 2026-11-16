@@ -405,9 +405,10 @@ fi
 # checks it too.  Neither the fork nor the upstream repository changes.
 fake_commands="${work}/fake-commands"
 mkdir -p "${fake_commands}/bin"
-for command in git-new-branch common-functions.sh git-ssh-batch-wrapper; do
+for command in git-new-branch git-ssh-batch-wrapper; do
   cp -p "${COMMANDS_DIR}/${command}" "${fake_commands}/${command}"
 done
+cp -p "${COMMANDS_DIR}"/*-functions.sh "${fake_commands}/"
 compile_log="${work}/compile-log"
 for fake_compile in "${fake_commands}/compile-project" "${fake_commands}/bin/compile-project"; do
   cat > "${fake_compile}" << FAKE_COMPILE_END

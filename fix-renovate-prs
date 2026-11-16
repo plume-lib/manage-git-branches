@@ -214,7 +214,11 @@ if ! command -v gh > /dev/null; then
   echo "${SCRIPT_NAME}: gh is not on the PATH" >&2
   exit 1
 fi
-if [ "${dry_run}" = false ] && ! agent_available claude; then
+# Whether claude is ready to run is checked only once a pull request needs
+# it (see `agent_available` below), because the check costs a request to
+# its service.
+if [ "${dry_run}" = false ] && ! command -v claude > /dev/null 2>&1; then
+  echo "${SCRIPT_NAME}: cannot run claude, which is not on the PATH" >&2
   exit 1
 fi
 
@@ -501,6 +505,9 @@ is impossible.
 }
 
 count=0
+# "yes" or "no" once `agent_available` has checked whether claude is ready to
+# run, and empty before then.
+claude_ready=''
 while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   count=$((count + 1))
   echo "===== ${url}"
@@ -594,6 +601,15 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
       ;;
     *) ;;
   esac
+
+  # Checked once, when the first pull request needs claude.
+  if [ -z "${claude_ready}" ]; then
+    if agent_available claude; then claude_ready=yes; else claude_ready=no; fi
+  fi
+  if [ "${claude_ready}" = no ]; then
+    problem "${url}" "claude is not ready to run"
+    continue
+  fi
 
   # Find or make the directory, and bring it to the pull request's head.
   if [ "${dir_state}" = blocked ]; then

@@ -118,6 +118,15 @@ The commands are:
   that `pr-status` prints pass `--no-pull-first` to each chain whose first
   directory an earlier chain pulled.
 
+  Suppose that a branch merged an earlier version of a pull request, whose
+  branch then changed again before the pull request was squash-merged.
+  Then the squash commit and the branch contain different versions of the
+  same changes, and merging the squash commit into the branch conflicts
+  wherever they differ, even in binary files.  When a merge would have
+  conflicts, `git-push-to` first merges the pull request's final version,
+  from the upstream repository's ref `refs/pull/N/head`, and then the squash
+  commit, if that leaves fewer conflicts.
+
   When a merge or a pull has conflicts, it uses the resolutions that
   `git rerere` recorded, and it asks an AI agent, Claude (or, with
   `--codex`, Codex), to resolve the conflicts that remain.  The agent
@@ -125,22 +134,33 @@ The commands are:
   can edit any part of any file, and it can delete files but not create
   them.  The script checks every resolution and lists, for your review, the
   changes that the agent made outside the conflict regions, and each
-  resolution by the agent that is one side's version of the file.  The agent's
-  instructions start with the file `merge-conflict-instructions.md`, which
-  also suits a merge that you resolve yourself.  If the build
-  fails, and TO_DIR's branch has a merge that neither its remote branches
-  nor those of FROM_DIR's branch contain, such as the one that it just
-  made, it asks the agent to fix the build, up to 3 times, and commits the
-  fix.  `--no-llm` turns off the agent; `--llm`, `--claude` (the default),
-  and `--codex` turn it on.
+  resolution by the agent that is one side's version of the file, unless
+  that side already contains the other side's changes to the file, as when
+  the other side squash-merged a pull request whose branch the first side
+  merged.  The agent's instructions start with the file
+  `merge-conflict-instructions.md`, which also suits a merge that you
+  resolve yourself.  If the build fails, and TO_DIR's branch has a merge
+  that neither its remote branches nor those of FROM_DIR's branch contain,
+  such as the one that it just made, it asks the agent to fix the build, up
+  to 3 times, and commits the fix.  `--no-llm` turns off the agent;
+  `--llm`, `--claude` (the default), and `--codex` turn it on.
+
+  If the agent fails without changing anything, as when its service is
+  briefly unavailable, `git-push-to` runs it again, up to 2 more times (see
+  `MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE` and `MANAGE_GIT_BRANCHES_LLM_TIMEOUT`).
 
   If the agent fails, or if `git-push-to` rejects its work, `git-push-to`
   prints a command that continues
-  the agent's session interactively.
+  the agent's session interactively, unless the agent failed each time
+  without changing anything and was then not ready to run.  In that case,
+  the session did nothing worth continuing, and running `git-push-to` again,
+  once the agent can run, asks the agent to do its task again.
 
   With `--summary FILE`, it appends to FILE each change by the agent to
-  review, each merge that it left in progress, each agent session that can
-  be continued, and, if a pull, push, or rebase fails, the step that failed.
+  review, each change by a hook to a file that a commit would not otherwise
+  change, each file that changed after it staged a hook's changes, each
+  merge that it left in progress, each agent session that can be continued,
+  and, if a pull, push, or rebase fails, the step that failed.
 
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--no-pull-first] [--squash] [--llm | --no-llm]
@@ -156,7 +176,7 @@ The commands are:
   Pulls from OTHER-REPO-DIR into the current directory, just as
   `git-push-to` does.
 * [`git-pull-upstream`](git-pull-upstream)
-  `[--nocompile] [--llm | --no-llm] [--claude | --codex]`:
+  `[--nocompile] [--allow-dependent] [--llm | --no-llm] [--claude | --codex]`:
   Merges the default branch of the remote `upstream` (or `origin`, if there
   is no `upstream`, or the only remote, if there is neither) into the current
   branch, compiles, then pushes the current branch if compilation succeeds.
@@ -166,10 +186,25 @@ The commands are:
   It does not push a branch whose push destination is the default branch of
   the upstream repository, nor, in a fork, any branch of the upstream
   repository.
+
+  It does not merge into a branch whose open pull request builds on another
+  pull request:  one whose base branch is the branch of another open pull
+  request, or whose description says "Land after #N" for an open pull
+  request N.  Such a branch receives the default branch through the branch
+  that it builds on, and receiving it directly as well would make a later
+  merge of that branch a criss-cross merge, which has several merge bases.
+  Update such a branch with `git-push-to`, as the chains that `pr-status`
+  prints do, or pass `--allow-dependent` to merge anyway.  It asks GitHub
+  with `gh`, and it skips this check if `gh` cannot be used.  It reads the
+  "Land after" lines with `pr-status --print-land-after`, which needs
+  Python 3.10 or later; if `python3` is older, it runs `pr-status` with
+  `uv`, if `uv` is installed (see [Python version](#python-version)), and
+  otherwise it ignores those lines.
+
   Unlike `git-pull-from`, it needs no working tree for the default branch.
   It handles conflicts and a failed build as `git-push-to` does.
 * [`pr-status`](pr-status)
-  `[--check | --print-document | --print-config |`
+  `[--check | --print-document | --print-config | --print-land-after ORG/REPO |`
   `--print-conflicting-push-chains | --print-missing-branches] [-C DIR]`
   `[--highlight PR|bottleneck...]`:
   Computes the dependencies among the open pull requests, updates the "Land
@@ -188,6 +223,10 @@ The commands are:
   prints the file name of the document that it regenerates and does nothing
   else.  With `--print-config`, it prints its config, with the defaults
   filled in, and does nothing else.
+  With `--print-land-after ORG/REPO`, it reads the description of a pull
+  request of `ORG/REPO` on standard input, prints the number of the pull
+  request that each of its "Land after" lines names in `ORG/REPO`, one per
+  line, and does nothing else.
   With `--print-missing-branches`, it prints the branches that resolving the
   conflicts needs, but that have no working copy (as of its previous run),
   and does nothing else:  one line per branch, holding a directory and the
@@ -223,8 +262,8 @@ The commands are:
   `--no-pull-first`.  Before the first chain that starts with a directory,
   it pulls that directory, with `git-push-to` given that single directory.
   It ends with a summary of the chains and pulls that failed or that have
-  changes by the agent to review, each with what `git-push-to --summary`
-  wrote for it, which names the step that failed.
+  changes by the agent or by a hook to review, each with what
+  `git-push-to --summary` wrote for it, which names the step that failed.
 * [`crreview-resolve-all`](crreview-resolve-all)
   `[--dry-run] [--agent claude|codex] [-C DIR]`:
   Runs
@@ -330,7 +369,7 @@ The commands are:
   Fetches the remote `upstream` (or `origin`, if there is no `upstream`, or
   the only remote, if there is neither), then shows the differences between
   its default branch and the working tree, ignoring changes in the amount of
-  whitespace and using the patience diff algorithm.
+  whitespace and using the histogram diff algorithm.
   If there is no `upstream`, it uses instead the repository that `gh` uses
   by default, if `gh repo set-default` has named one, or else, if the remote
   is a GitHub fork that a user (not an organization) owns, the fork's parent,
@@ -393,9 +432,16 @@ takes effect when it is set to a non-empty value.
   compilation step, and push whenever the merge succeeds.
 * `MANAGE_GIT_BRANCHES_LLM_TIMEOUT`: the number of seconds that `git-push-to`,
   `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` let an AI agent
-  run when it resolves merge conflicts.  An agent that runs longer is stopped,
-  and the merge is left in progress.  The default is 1800 (30 minutes); 0
-  means no limit.
+  run when it resolves merge conflicts or fixes a build.  The time covers the
+  agent's attempts after it failed without changing anything, and the pauses
+  before them (see `MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE`).  An agent that runs
+  longer is stopped and is not run again; if it was resolving merge
+  conflicts, the merge is left in progress.  The default is 1800
+  (30 minutes); 0 means no limit.
+* `MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE`: the number of seconds that
+  `git-push-to`, `git-pull-from`, `git-pull-upstream`, and `git-rebase-to`
+  wait before running an AI agent again after it failed without changing any
+  file, as when its service was briefly unavailable.  The default is 60.
 * `MANAGE_GIT_BRANCHES_RENOVATE_TIMEOUT`: the number of seconds that
   `fix-renovate-prs` lets Claude Code run on one pull request.  A session
   that runs longer is stopped, and nothing is pushed.  The default is 7200
@@ -468,6 +514,9 @@ options, both of which require
    ```sh
    alias pr-status='uv run --no-project --python 3.15 pr-status'
    ```
+
+   `git-pull-upstream`, which runs `pr-status`, does this itself if `uv` is
+   installed.
 
 ## Testing
 

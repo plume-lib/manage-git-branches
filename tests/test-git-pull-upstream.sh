@@ -33,6 +33,19 @@ pull_upstream() {
   (cd "$1" && shift && "${GIT_PULL_UPSTREAM}" "$@") > /dev/null 2> "${testdir}/errors"
 }
 
+# Usage: pull_upstream_nocompile DIRECTORY [ARGS]
+# Like `pull_upstream`, but `git-pull-upstream` does not build (see
+# $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT).  The variable is assigned here,
+# for the command alone, rather than prefixed to a call of `pull_upstream`:
+# bash 3.2, which is /bin/sh on macOS, keeps an assignment that is prefixed to
+# a function call after the function returns, so every later pull would skip
+# the build too.
+pull_upstream_nocompile() {
+  (cd "$1" && shift \
+    && MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 "${GIT_PULL_UPSTREAM}" "$@") \
+    > /dev/null 2> "${testdir}/errors"
+}
+
 # Usage: pushed_head
 # Prints the commit that branch "feature" has in the fork's remote repository.
 pushed_head() {
@@ -68,13 +81,30 @@ mkdir "${fork}/subdir"
 commit_file "${fork}" subdir/b.txt 'b1'
 git -C "${fork}" push -q -u origin feature
 
-# The fork's branch already contains the default branch of `upstream`.
+# The fork's branch already contains the default branch of `upstream`.  The
+# run, which has nothing to merge or push, still deletes AGENT-TODO.md, whose
+# only entry is about a merge that is no longer in progress.
 before="$(git -C "${fork}" rev-parse HEAD)"
+# The backquotes are Markdown, not command substitutions.
+# shellcheck disable=SC2016
+printf '%s\n' '# AI agent sessions to continue' '' \
+  'A script of manage-git-branches, such as `git-push-to`, appends an entry' \
+  'here when an AI agent fails, when the script rejects its work, or when' \
+  "the script leaves a merge in progress.  An entry's command continues the" \
+  "agent's session interactively.  Delete the entry once you have dealt with" \
+  'it.' '' \
+  '## Finish the merge in progress (git-pull-upstream, 2026-11-09 08:23:59)' '' \
+  "The merge of commit ${before} is in progress in ${fork}." \
+  'Finish it (resolve its conflicts and commit it), or abort it with `git merge --abort`; then delete this entry.' \
+  > "${fork}/AGENT-TODO.md"
 if ! pull_upstream "${fork}"; then
   fail "up to date: failed: $(cat "${testdir}/errors")"
 elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
   fail "up to date: changed HEAD"
+elif [ -e "${fork}/AGENT-TODO.md" ]; then
+  fail "up to date: did not delete AGENT-TODO.md: $(cat "${testdir}/errors")"
 fi
+rm -f "${fork}/AGENT-TODO.md"
 
 # A new commit in `upstream` is merged and pushed, even when this command is
 # run in a subdirectory.
@@ -138,6 +168,27 @@ elif [ ! -e "${fork}/c.txt" ] || [ "$(cat "${fork}/a.txt")" != 'a3' ]; then
   fail "pull first: did not pull and merge"
 fi
 
+# While someone is editing the working tree, this command neither pulls nor
+# merges, even if the merge is not built.
+git -C "${other}" pull -q --no-rebase
+commit_file "${other}" c.txt 'c1 again'
+git -C "${other}" push -q origin feature
+commit_file "${canonical_work}" a.txt 'a3 again'
+git -C "${canonical_work}" push -q origin trunk
+before="$(git -C "${fork}" rev-parse HEAD)"
+echo 'an uncommitted line' >> "${fork}/subdir/b.txt"
+status_before="$(git -C "${fork}" status --porcelain)"
+if pull_upstream_nocompile "${fork}"; then
+  fail "uncommitted changes: succeeded"
+elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
+  fail "uncommitted changes: changed HEAD"
+elif [ "$(git -C "${fork}" status --porcelain)" != "${status_before}" ]; then
+  fail "uncommitted changes: changed them: $(git -C "${fork}" status --porcelain)"
+elif ! grep -q "the working tree of ${fork} has uncommitted changes" "${testdir}/errors"; then
+  fail "uncommitted changes: wrong diagnostic: $(cat "${testdir}/errors")"
+fi
+git -C "${fork}" checkout -q -- subdir/b.txt
+
 # A merge that does not build is not pushed, unless `--nocompile` is given.
 pushed_before="$(pushed_head)"
 commit_file "${canonical_work}" broken 'x'
@@ -163,7 +214,13 @@ fork_hooks="$(git -C "${fork}" rev-parse --path-format=absolute --git-path hooks
 mkdir -p "${fork_hooks}"
 printf '#!/bin/sh\nexit 1\n' > "${fork_hooks}/pre-commit"
 chmod +x "${fork_hooks}/pre-commit"
-if ! GIT_MERGE_AUTOEDIT=yes GIT_EDITOR=false pull_upstream "${fork}" --nocompile; then
+# The subshell confines the variables to this pull.  An assignment prefixed
+# to the call of `pull_upstream`, a function, would not confine them on macOS,
+# as `tests/test-function-call-prefix.sh` explains.
+if ! (
+  export GIT_MERGE_AUTOEDIT=yes GIT_EDITOR=false
+  pull_upstream "${fork}" --nocompile
+); then
   fail "--nocompile: failed: $(cat "${testdir}/errors")"
 elif [ "$(pushed_head)" != "$(git -C "${fork}" rev-parse HEAD)" ]; then
   fail "--nocompile: did not push"
@@ -181,7 +238,7 @@ git -C "${fork}" push -q
 pushed_before="$(pushed_head)"
 commit_file "${canonical_work}" a.txt 'canonical'
 git -C "${canonical_work}" push -q origin trunk
-if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+if pull_upstream_nocompile "${fork}"; then
   fail "conflict: succeeded"
 elif [ "$(pushed_head)" != "${pushed_before}" ]; then
   fail "conflict: pushed"
@@ -197,7 +254,7 @@ expect_merge() {
   git -C "${other}" merge -q --ff-only origin/trunk
   commit_file "${other}" "$3" "$3"
   git -C "${other}" push -q origin trunk
-  if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  if ! pull_upstream_nocompile "${fork}"; then
     fail "$1: failed: $(cat "${testdir}/errors")"
     return
   fi
@@ -226,7 +283,7 @@ git -C "${fork}" switch -q trunk
 git -C "${fork}" merge -q --ff-only github/trunk
 commit_file "${fork}" f.txt 'f'
 trunk_before="$(git -C "${fork_remote}" rev-parse refs/heads/trunk)"
-if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+if pull_upstream_nocompile "${fork}"; then
   fail "push to upstream default branch: succeeded"
 elif [ "$(git -C "${fork_remote}" rev-parse refs/heads/trunk)" != "${trunk_before}" ]; then
   fail "push to upstream default branch: pushed"
@@ -260,7 +317,7 @@ git -C "${other}" push -q origin trunk
 git -C "${fork}" switch -q -c renamed --track github/feature
 git -C "${fork}" config push.default simple
 commit_file "${fork}" renamed.txt 'r'
-if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+if pull_upstream_nocompile "${fork}"; then
   fail "cannot push: succeeded"
 elif [ -e "${fork}/h.txt" ]; then
   fail "cannot push: merged"
@@ -280,7 +337,7 @@ commit_file "${fork}" topic.txt 't'
 commit_file "${canonical_work}" i.txt 'i'
 git -C "${canonical_work}" push -q origin trunk
 before="$(git -C "${fork}" rev-parse HEAD)"
-if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+if pull_upstream_nocompile "${fork}"; then
   fail "push to upstream: succeeded"
 elif git -C "${canonical}" rev-parse --verify --quiet refs/heads/topic > /dev/null; then
   fail "push to upstream: pushed"
@@ -301,7 +358,7 @@ commit_file "${other}" j.txt 'j'
 git -C "${other}" push -q origin feature
 before="$(git -C "${fork}" rev-parse HEAD)"
 git -C "${fork}" config push.default matching
-if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+if pull_upstream_nocompile "${fork}"; then
   fail "push.default=matching: succeeded"
 elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
   fail "push.default=matching: pulled"
@@ -310,7 +367,7 @@ elif ! grep -q 'push.default is "matching"' "${testdir}/errors"; then
 fi
 git -C "${fork}" config --unset push.default
 git -C "${fork}" config remote.github.mirror true
-if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+if pull_upstream_nocompile "${fork}"; then
   fail "remote.github.mirror: succeeded"
 elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
   fail "remote.github.mirror: pulled"
@@ -319,7 +376,7 @@ elif ! grep -q 'remote.github.mirror is set' "${testdir}/errors"; then
 fi
 git -C "${fork}" config --unset remote.github.mirror
 git -C "${fork}" config remote.github.push 'refs/heads/*:refs/heads/*'
-if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+if pull_upstream_nocompile "${fork}"; then
   fail "remote.github.push: succeeded"
 elif [ "$(git -C "${fork}" rev-parse HEAD)" != "${before}" ]; then
   fail "remote.github.push: pulled"
@@ -345,7 +402,7 @@ git -C "${fork}" fetch -q push
 commit_file "${fork}" k.txt 'k'
 git -C "${fork}" push -q github feature
 git -C "${fork}" fetch -q github
-if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+if ! pull_upstream_nocompile "${fork}"; then
   fail "triangular: failed: $(cat "${testdir}/errors")"
 elif [ "$(git -C "${push_remote}" rev-parse refs/heads/feature)" != "$(git -C "${fork}" rev-parse HEAD)" ]; then
   fail "triangular: did not push"
@@ -373,8 +430,13 @@ fi
 # that me/proj is a fork of someone/proj:  `gh repo view` prints the upstream
 # repository and the default branch, which for me/proj are its parent,
 # someone/proj, and for any other repository are the repository itself, and
-# `gh auth token` succeeds.  `url.BASE.insteadOf` maps their GitHub URLs to
-# local bare repositories.
+# `gh auth token` succeeds.  `gh api -X GET` appends its arguments to
+# ${testdir}/gh-api-log and prints what `--jq` would make of GitHub's answer:
+# for the pull requests from a branch of me/proj, the file ${testdir}/gh-pulls;
+# for those from a branch of someone/proj, the file ${testdir}/gh-base-pulls;
+# and for pull request N, the file ${testdir}/gh-pull-N.  It fails if the file
+# does not exist.
+# `url.BASE.insteadOf` maps their GitHub URLs to local bare repositories.
 mkdir "${testdir}/bin"
 cat > "${testdir}/bin/gh" << EOF
 #!/bin/sh
@@ -382,6 +444,15 @@ case "\$1 \$2 \$3" in
   'auth token '*) echo 'fake-token' ;;
   'repo view github.com/me/proj') echo 'someone/proj trunk' ;;
   'repo view github.com/'*) echo "\${3#github.com/} trunk" ;;
+  'api -X GET')
+    printf '%s\n' "\$*" >> "${testdir}/gh-api-log"
+    case "\$4 \$*" in
+      */pulls' '*' head=me:'*) cat "${testdir}/gh-pulls" 2> /dev/null ;;
+      */pulls' '*' head=someone:'*) cat "${testdir}/gh-base-pulls" 2> /dev/null ;;
+      */pulls/*) cat "${testdir}/gh-pull-\${4##*/}" 2> /dev/null ;;
+      *) exit 1 ;;
+    esac
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -428,7 +499,7 @@ gh_fork_pushed_head() {
 # Runs this command in ${fork}, and checks that it merges FILE with a merge
 # commit whose subject is SUBJECT and pushes to the fork.
 expect_gh_merge() {
-  if ! MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  if ! pull_upstream_nocompile "${fork}"; then
     fail "$1: failed: $(cat "${testdir}/errors")"
     return
   fi
@@ -446,7 +517,7 @@ expect_gh_merge() {
 # Runs this command in ${fork}, and checks that it fails, says that it does
 # not push, and leaves the parent without BRANCH.
 expect_gh_refused() {
-  if MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1 pull_upstream "${fork}"; then
+  if pull_upstream_nocompile "${fork}"; then
     fail "$1: succeeded"
   elif git -C "${gh_parent}" rev-parse --verify --quiet "refs/heads/$2" > /dev/null; then
     fail "$1: pushed to the parent"
@@ -495,6 +566,123 @@ git -C "${fork}" config branch.to-parent-remote.pushRemote canonical-ssh
 git -C "${fork}" config push.default current
 gh_parent_commit o.txt
 expect_gh_refused 'push to the parent through another remote' to-parent-remote
+
+# Usage: expect_dependent_refused DESCRIPTION FILE
+# Runs this command in ${fork}, and checks that it fails, says that the
+# current branch builds on another pull request, and neither merges FILE nor
+# pushes.
+expect_dependent_refused() {
+  expect_dependent_refused_pushed="$(gh_fork_pushed_head)"
+  if pull_upstream_nocompile "${fork}"; then
+    fail "$1: succeeded"
+  elif ! grep -q 'builds on another pull request' "${testdir}/errors" \
+    || ! grep -q -e '--allow-dependent' "${testdir}/errors"; then
+    fail "$1: wrong message: $(cat "${testdir}/errors")"
+  elif [ -e "${fork}/$2" ]; then
+    fail "$1: merged $2"
+  elif [ "$(gh_fork_pushed_head)" != "${expect_dependent_refused_pushed}" ]; then
+    fail "$1: pushed"
+  fi
+}
+
+# A branch whose pull request's base branch is another pull request's branch
+# is not merged into, unless "--allow-dependent" is passed.  A pull request
+# from a branch of the same name in another repository does not count.
+make_gh_fork_clone "${testdir}/gh-clone-dependent"
+printf 'pr 5 feature-b trunk trunk me/proj\nbody 5 Stacked on #4. me/proj\n' > "${testdir}/gh-pulls"
+printf '4 someone/proj\n' > "${testdir}/gh-base-pulls"
+gh_parent_commit p.txt
+expect_dependent_refused 'stacked pull request' p.txt
+if ! grep -q 'its base branch is feature-b, the head branch of someone/proj#4' "${testdir}/errors"; then
+  fail "stacked pull request: does not name the base branch: $(cat "${testdir}/errors")"
+elif ! grep -q 'repos/someone/proj/pulls -f head=someone:feature-b -f state=open' "${testdir}/gh-api-log"; then
+  fail "stacked pull request: does not ask about feature-b: $(cat "${testdir}/gh-api-log")"
+fi
+if ! pull_upstream_nocompile "${fork}" --allow-dependent; then
+  fail "--allow-dependent: failed: $(cat "${testdir}/errors")"
+elif [ ! -e "${fork}/p.txt" ]; then
+  fail "--allow-dependent: did not merge p.txt"
+fi
+printf 'pr 6 feature-b trunk trunk Someone/Proj\npr 7 trunk trunk trunk ME/PROJ\n' > "${testdir}/gh-pulls"
+gh_parent_commit q.txt
+expect_gh_merge 'pull request from another repository' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" q.txt
+
+# A base branch that is not the head branch of an open pull request of the
+# base repository, such as a release branch or the branch of a pull request
+# that has landed, does not count.
+printf 'pr 11 release-1 trunk trunk me/proj\n' > "${testdir}/gh-pulls"
+printf '12 someone/other\n' > "${testdir}/gh-base-pulls"
+gh_parent_commit q2.txt
+expect_gh_merge 'base branch without an open pull request' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" q2.txt
+
+# A "Land after" line that names no pull request, such as an issue, does not
+# hide a stacked base branch.
+printf 'pr 5 feature-b trunk trunk me/proj\nbody 5 Land after #20. me/proj\n' > "${testdir}/gh-pulls"
+printf '4 someone/proj\n' > "${testdir}/gh-base-pulls"
+gh_parent_commit q3.txt
+expect_dependent_refused 'stacked, and land after an issue' q3.txt
+
+# Nor is a branch whose pull request's description says to land after an
+# open pull request, even with a carriage return at the end of the line.
+# One that says to land after a closed pull request is merged into.
+printf 'pr 8 trunk trunk trunk me/proj\nbody 8 Land after #9.\r me/proj\nbody 8  me/proj\nbody 8 Text. me/proj\n' > "${testdir}/gh-pulls"
+printf 'open trunk\n' > "${testdir}/gh-pull-9"
+expect_dependent_refused 'land after an open pull request' q3.txt
+if ! grep -q 'its description says to land after someone/proj#9' "${testdir}/errors"; then
+  fail "land after an open pull request: does not name it: $(cat "${testdir}/errors")"
+fi
+# The line can name the pull request as "ORG/REPO#N", in any case, or by its
+# URL, and it can continue with text that names no other pull request.
+for line in 'Land after Someone/Proj#9 (it adds the helper).' \
+  'Land after https://github.com/someone/proj/pull/9'; do
+  printf 'pr 8 trunk trunk trunk me/proj\nbody 8 %s me/proj\n' "${line}" > "${testdir}/gh-pulls"
+  expect_dependent_refused "${line}" q3.txt
+done
+# A line that names several pull requests, or one in another repository, does
+# not count, so GitHub is not asked about the pull request.
+printf 'pr 8 trunk trunk trunk me/proj\nbody 8 Land after #9 and #10. me/proj\nbody 8 Land after other/proj#9. me/proj\n' > "${testdir}/gh-pulls"
+rm -f "${testdir}/gh-api-log"
+expect_gh_merge 'land after several or another repository' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" q3.txt
+if grep -q 'pulls/' "${testdir}/gh-api-log" || grep -q 'ignoring\|assuming' "${testdir}/errors"; then
+  fail "land after several or another repository: counted a line: $(cat "${testdir}/errors")"
+fi
+printf 'pr 8 trunk trunk trunk me/proj\nbody 8 Land after #9. me/proj\n' > "${testdir}/gh-pulls"
+printf 'closed trunk\n' > "${testdir}/gh-pull-9"
+gh_parent_commit r.txt
+expect_gh_merge 'land after a closed pull request' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" r.txt
+
+# A branch that already contains the default branch is built and pushed even
+# if its pull request builds on another one.
+printf 'pr 10 feature-b trunk trunk me/proj\n' > "${testdir}/gh-pulls"
+printf '4 someone/proj\n' > "${testdir}/gh-base-pulls"
+commit_file "${fork}" s.txt 's'
+if ! pull_upstream_nocompile "${fork}"; then
+  fail "dependent, nothing to merge: failed: $(cat "${testdir}/errors")"
+elif [ "$(gh_fork_pushed_head)" != "$(git -C "${fork}" rev-parse HEAD)" ]; then
+  fail "dependent, nothing to merge: did not push"
+fi
+
+# If GitHub cannot list the pull requests, this command says so and merges.
+rm -f "${testdir}/gh-pulls"
+gh_parent_commit t.txt
+expect_gh_merge 'GitHub cannot be asked' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" t.txt
+if ! grep -q 'assuming that it does not' "${testdir}/errors"; then
+  fail "GitHub cannot be asked: does not say so: $(cat "${testdir}/errors")"
+fi
+# Nor if GitHub cannot be asked about the base branch.
+printf 'pr 5 feature-b trunk trunk me/proj\n' > "${testdir}/gh-pulls"
+rm -f "${testdir}/gh-base-pulls"
+gh_parent_commit u.txt
+expect_gh_merge 'GitHub cannot be asked about the base branch' \
+  "Merge https://github.com/someone/proj into feature-gh-clone-dependent" u.txt
+if ! grep -q 'assuming that it is not' "${testdir}/errors"; then
+  fail "GitHub cannot be asked about the base branch: does not say so: $(cat "${testdir}/errors")"
+fi
 PATH="${saved_path}"
 
 if [ "${failures}" -ne 0 ]; then

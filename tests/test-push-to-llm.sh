@@ -9,8 +9,12 @@
 #   tests/test-push-to-llm.sh
 #
 # Stub `claude` and `codex` commands stand in for the agents.  Environment
-# variables STUB_MODE and STUB_BUILD say what the stubs do, and the `codex`
-# stub prints no session id if STUB_NO_SESSION is set.
+# variables STUB_MODE and STUB_BUILD say what the stubs do, the `codex`
+# stub prints no session id if STUB_NO_SESSION is set, and the check that an
+# agent is ready to run fails if STUB_READY is "fail".  A stub that fails
+# without changing anything acts as if its service were unavailable:  the
+# next check that it is ready to run fails, unless STUB_READY is "ok".  Each
+# check that an agent is ready to run appends a line to ${STUB_LOG}.ready.
 #
 # The test creates its repositories under a temporary directory, which it
 # removes when it exits.
@@ -36,6 +40,9 @@ sanitize_git_env "${WORK_DIR}"
 # The test repository contains no build file, so skip compilation.
 MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1
 export MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT
+# A stub agent that fails is run again at once.
+MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE=0
+export MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE
 
 fail() {
   echo "${SCRIPT_NAME}: FAILURE: $*" >&2
@@ -59,9 +66,17 @@ fail() {
 ##           line
 ##   delete-conflicted: deletes file.txt
 ##   none:   changes nothing
-##   fail:   exits with status 3
+##   fail:   exits with status 3, as if its service were unavailable (see
+##           `stub_outage`)
+##   fail-once: as "fail" the first time, and as "good" afterward
+##   fail-slow: as "fail", but after running for 3 seconds
+##   interrupted: exits with status 130, as when SIGINT ends it
 ##   fail-untracked: changes the untracked file notes.txt, then exits with
 ##           status 3
+##   fail-index: stages file.txt with its conflict markers, changing no file,
+##           then exits with status 3
+##   fail-head: makes HEAD name a new commit, changing no file, then exits
+##           with status 3
 ##   commit: as "good", but also commits the merge
 ##   create: as "good", but also creates a file
 ##   change-tracked: as "good", but also changes other.txt, which git tracks
@@ -108,11 +123,41 @@ fail() {
 ##   fix:    removes the lines of other.txt that break the build
 ##   bad:    creates or changes notes.txt, which does not fix the build
 ##   once:   as "bad" the first time, and as "none" afterward
+##   once-fail: as "bad" the first time, and as "fail" afterward
 ##   ignored: creates fix.local, a file that git ignores
+##   fail:   exits with status 3, changing nothing, as "fail" above does
 ##   none:   changes nothing (the default)
 mkdir "${WORK_DIR}/test-bin"
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
+# `agent_ready` checks that the agent can run; ${STUB_READY} "fail" makes
+# the check fail.  So does an outage that `stub_outage` recorded, once.
+case "$(basename -- "$0") $*" in
+  "codex exec --skip-git-repo-check "* | "claude "*--no-session-persistence*)
+    basename -- "$0" >> "${STUB_LOG}.ready"
+    if [ "${STUB_READY:-}" = fail ]; then
+      echo "Not logged in"
+      exit 1
+    fi
+    if [ -e "${STUB_LOG}.outage" ]; then
+      rm -f -- "${STUB_LOG}.outage"
+      echo "Service unavailable"
+      exit 1
+    fi
+    echo OK
+    exit 0
+    ;;
+esac
+## Usage: stub_outage
+## Exits with status 3, as an agent does when its service is unavailable,
+## which the next check that the agent is ready to run then finds, unless
+## ${STUB_READY} is "ok", as for an agent that rejects its options.
+stub_outage() {
+  if [ "${STUB_READY:-}" != ok ]; then
+    : > "${STUB_LOG}.outage"
+  fi
+  exit 3
+}
 basename -- "$0" >> "${STUB_LOG}"
 printf '%s\n' "$@" > "${STUB_ARGS}"
 if [ "$(basename -- "$0")" = codex ] && [ -z "${STUB_NO_SESSION:-}" ]; then
@@ -129,13 +174,32 @@ if ! grep -q '^<<<<<<< ' file.txt; then
     once)
       if [ ! -e notes.txt ]; then echo "an attempt" > notes.txt; fi
       ;;
+    once-fail)
+      if [ -e notes.txt ]; then stub_outage; fi
+      echo "an attempt" > notes.txt
+      ;;
     ignored) echo "a fix" > fix.local ;;
+    fail) stub_outage ;;
   esac
   exit 0
 fi
-if [ "${STUB_MODE}" = fail ]; then exit 3; fi
+if [ "${STUB_MODE}" = fail ]; then stub_outage; fi
+if [ "${STUB_MODE}" = interrupted ]; then exit 130; fi
+if [ "${STUB_MODE}" = fail-once ] && [ "$(grep -c . "${STUB_LOG}")" -eq 1 ]; then stub_outage; fi
+if [ "${STUB_MODE}" = fail-slow ]; then
+  sleep 3
+  stub_outage
+fi
 if [ "${STUB_MODE}" = fail-untracked ]; then
   echo "changed" >> notes.txt
+  exit 3
+fi
+if [ "${STUB_MODE}" = fail-index ]; then
+  git add file.txt
+  exit 3
+fi
+if [ "${STUB_MODE}" = fail-head ]; then
+  git update-ref HEAD "$(git commit-tree -p HEAD -m "An agent's commit" 'HEAD^{tree}')"
   exit 3
 fi
 if [ "${STUB_MODE}" = ours ] || [ "${STUB_MODE}" = ours-other ] \
@@ -283,6 +347,7 @@ setup_case() {
   done
   read -r feature_head < "${case_dir}/feature-head"
   : > "${STUB_LOG}"
+  rm -f -- "${STUB_LOG}.outage" "${STUB_LOG}.ready"
 }
 
 ## Usage: create_case_repositories DIR KIND
@@ -348,22 +413,46 @@ write_file() {
   fi
 }
 
-## Usage: push_to MODE OPTION...
+## Usage: push_to [NAME=VALUE...] MODE OPTION...
 ## Runs `git-push-to OPTION... ${main_dir} ${feature_dir}` with the stubs
-## acting according to MODE.  Sets ${push_status} to its exit status and
+## acting according to MODE, and with each environment variable NAME, such as
+## STUB_BUILD, set to VALUE.  Sets ${push_status} to its exit status and
 ## ${push_output} to its output.  It builds the project only if ${build} is 1.
+## A NAME=VALUE argument sets NAME for this call alone, as an assignment
+## prefixed to a command does.  Such an assignment must not be prefixed to a
+## call of this function:  bash 3.2, which is /bin/sh on macOS, keeps an
+## assignment that is prefixed to a function call after the function returns,
+## so it would apply to every later call too.
 build=0
 push_to() {
-  push_mode="$1"
-  shift
   if [ "${build}" -eq 1 ]; then push_skip=''; else push_skip=1; fi
-  if push_output="$(STUB_MODE="${push_mode}" PATH="${WORK_DIR}/test-bin:${PATH}" \
-    MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT="${push_skip}" \
-    "${COMMANDS_DIR}/git-push-to" "$@" "${main_dir}" "${feature_dir}" 2>&1)"; then
+  # The command substitution is a subshell, so the variables that
+  # `push_to_run` exports do not outlive it.
+  if push_output="$(push_to_run "$@" 2>&1)"; then
     push_status=0
   else
     push_status=$?
   fi
+}
+
+## Usage: push_to_run [NAME=VALUE...] MODE OPTION...
+## Exports each NAME as VALUE, and then runs
+## `git-push-to OPTION... ${main_dir} ${feature_dir}` as `push_to` describes.
+## Run it in a subshell, so that the exported variables do not outlive it.
+push_to_run() {
+  while [ "$#" -gt 0 ]; do
+    # shellcheck disable=SC2163 # $1 is NAME=VALUE, which exports NAME.
+    case "$1" in
+      *=*) export "$1" ;;
+      *) break ;;
+    esac
+    shift
+  done
+  push_mode="$1"
+  shift
+  STUB_MODE="${push_mode}" PATH="${WORK_DIR}/test-bin:${PATH}" \
+    MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT="${push_skip}" \
+    "${COMMANDS_DIR}/git-push-to" "$@" "${main_dir}" "${feature_dir}"
 }
 
 ## Usage: check_resolved AGENT DESCRIPTION [LINE...]
@@ -639,11 +728,12 @@ esac
 ## the first side's history after the merge base, an agent's resolution that
 ## is that side's version is correct, and it is accepted, as in the merge of
 ## a branch that merged a pull request's branch with a main branch that
-## landed the squashed pull request.  In contained-ours, feature first
-## reaches main's version of file.txt, as by merging a squashed copy of
-## main's change, and then changes it further, next to main's change but not
-## in it.  In contained-theirs, main reaches feature's version, and changes
-## it further.
+## landed the squashed pull request.  The user is not asked to review it,
+## but the output says which commits already made the other side's changes.
+## In contained-ours, feature first reaches main's version of file.txt, as
+## by merging a squashed copy of main's change, and then changes it further,
+## next to main's change but not in it.  In contained-theirs, main reaches
+## feature's version, and changes it further.
 for side_mode in ours theirs; do
   side_name="contained-${side_mode}"
   setup_case "${side_name}"
@@ -672,8 +762,11 @@ for side_mode in ours theirs; do
   push_to "${side_mode}" --llm
   check_side_resolved "${side_name}" "${side_expected}"
   case "${push_output}" in
-    *"claude resolved file.txt as the version ${side_taken}"*", which keeps none of the changes of "*"; review it"*) ;;
-    *) fail "${side_name}: the user is not asked to review: ${push_output}" ;;
+    *"claude resolved file.txt as the version ${side_taken}"*", which keeps none of the changes of "*" to the file, but "*" changed it only in commit "*", whose change"*" of commit "*) ;;
+    *) fail "${side_name}: the output does not say that the changes are present: ${push_output}" ;;
+  esac
+  case "${push_output}" in
+    *"review it"*) fail "${side_name}: the user is asked to review: ${push_output}" ;;
   esac
   # `git rerere` does not record the side's version as a resolution, which
   # would drop the other side's changes outside the conflict regions from a
@@ -682,6 +775,75 @@ for side_mode in ours theirs; do
   if [ -n "${recorded}" ] || [ "${recorded_conflicts}" -ne 0 ]; then
     fail "${side_name}: \`git rerere\` recorded the side's version as a resolution, or kept the conflict: ${recorded}"
   fi
+done
+
+## A squash-merge into main of a pull request whose branch feature merged
+## makes main's change to file.txt that of a commit that feature contains,
+## so a resolution that is exactly feature's version needs no review, even
+## though feature changed the pull request's line further.  The pull
+## request's branch, pr, starts at main and changes line 3; feature merges it
+## and then changes line 3 again; main lands a squashed copy of pr.  In
+## squash-whitespace, the resolution differs from feature's version in
+## whitespace, and the agent's changes to the whitespace need review.  In
+## squash-differs, main changes line 3 differently from pr, so that feature
+## has no commit whose change main's commit made, and the resolution, which
+## drops main's change, needs review.
+for squash_name in squash squash-whitespace squash-differs; do
+  case "${squash_name}" in
+    squash-differs) squash_main_line=THREE-main ;;
+    *) squash_main_line=THREE-pr ;;
+  esac
+  case "${squash_name}" in
+    squash-whitespace) squash_mode=ours-whitespace ;;
+    *) squash_mode=ours ;;
+  esac
+  setup_case "${squash_name}"
+  git -C "${feature_dir}" fetch -q origin
+  git -C "${feature_dir}" branch -q pr origin/main
+  git -C "${feature_dir}" checkout -q pr
+  write_file "${feature_dir}/file.txt" ONE two THREE-pr four five six SEVEN-main eight nine
+  git -C "${feature_dir}" commit -q -a -m "Change line 3"
+  squash_pr="$(git -C "${feature_dir}" rev-parse --short HEAD)"
+  git -C "${feature_dir}" checkout -q feature
+  git -C "${feature_dir}" merge -q pr > /dev/null 2>&1 || :
+  write_file "${feature_dir}/file.txt" ONE two THREE-pr four five six SEVEN-feature eight nine
+  git -C "${feature_dir}" add file.txt
+  git -C "${feature_dir}" commit -q --no-edit
+  write_file "${feature_dir}/file.txt" ONE two THREE-feature four five six SEVEN-feature eight nine
+  git -C "${feature_dir}" commit -q -a -m "Change line 3 further"
+  git -C "${feature_dir}" push -q
+  feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+  write_file "${main_dir}/file.txt" ONE two "${squash_main_line}" four five six SEVEN-main eight nine
+  git -C "${main_dir}" commit -q -a -m "Change line 3 (#1)"
+  git -C "${main_dir}" push -q
+  squash_commit="$(git -C "${main_dir}" rev-parse --short HEAD)"
+  push_to "${squash_mode}" --llm
+  case "${squash_name}" in
+    squash)
+      check_side_resolved "${squash_name}" "$(printf '%s\n' ONE two THREE-feature four five six SEVEN-feature eight nine)"
+      case "${push_output}" in
+        *"claude resolved file.txt as the version on feature, which keeps none of the changes of main"*" to the file, but main"*" changed it only in commit ${squash_commit}, whose change is that of commit ${squash_pr} on feature"*) ;;
+        *) fail "${squash_name}: the output does not name the squash-merge and the pull request's commit: ${push_output}" ;;
+      esac
+      case "${push_output}" in
+        *"review it"*) fail "${squash_name}: the user is asked to review: ${push_output}" ;;
+      esac
+      ;;
+    squash-whitespace)
+      check_side_resolved "${squash_name}" "$(printf '%s\n' ONE '  two' THREE-feature four '' five six SEVEN-feature eight nine)"
+      case "${push_output}" in
+        *"claude resolved file.txt as the version on feature, apart from whitespace and blank lines, which keeps none of the changes of main"*" to the file; review it"*) ;;
+        *) fail "${squash_name}: the user is not asked to review: ${push_output}" ;;
+      esac
+      ;;
+    *)
+      check_side_resolved "${squash_name}" "$(printf '%s\n' ONE two THREE-feature four five six SEVEN-feature eight nine)"
+      case "${push_output}" in
+        *"claude resolved file.txt as the version on feature, which keeps none of the changes of main"*" to the file; review it"*) ;;
+        *) fail "${squash_name}: the user is not asked to review: ${push_output}" ;;
+      esac
+      ;;
+  esac
 done
 
 ## The changes that a rejected agent made outside the conflicted files are
@@ -760,11 +922,13 @@ case "${push_output}" in
   *) fail "remaining conflict markers: wrong diagnostic: ${push_output}" ;;
 esac
 
-## A failing agent is reported.  The command that continues its session is
-## appended to an existing AGENT-TODO.md, which gets no second title.
+## A failing agent is reported.  (It is ready to run, so its failure is not
+## taken for an outage, after which no session is reported.)  The command
+## that continues its session is appended to an existing AGENT-TODO.md, which
+## gets no second title.
 setup_case fail
 printf '%s\n' '# AI agent sessions to continue' '' 'An earlier entry.' > "${feature_dir}/AGENT-TODO.md"
-push_to fail --llm
+push_to STUB_READY=ok fail --llm
 check_not_resolved "failing agent"
 case "${push_output}" in
   *"claude failed with status 3"*"conflicted: file.txt"*"claude --resume "*) ;;
@@ -782,7 +946,7 @@ fi
 setup_case todo-link
 echo "outside" > "${case_dir}/outside.txt"
 ln -s ../outside.txt "${feature_dir}/AGENT-TODO.md"
-push_to fail --llm
+push_to STUB_READY=ok fail --llm
 check_not_resolved "AGENT-TODO.md link"
 case "${push_output}" in
   *"claude --resume "*"did not write "*"AGENT-TODO.md, which is not a regular file with one link"*) ;;
@@ -796,7 +960,7 @@ fi
 setup_case todo-hard-link
 echo "outside" > "${case_dir}/outside.txt"
 ln "${case_dir}/outside.txt" "${feature_dir}/AGENT-TODO.md"
-push_to fail --llm
+push_to STUB_READY=ok fail --llm
 check_not_resolved "AGENT-TODO.md hard link"
 case "${push_output}" in
   *"claude --resume "*"did not write "*"AGENT-TODO.md, which is not a regular file with one link"*) ;;
@@ -813,7 +977,7 @@ git -C "${feature_dir}" add AGENT-TODO.md
 git -C "${feature_dir}" commit -q -m "Add AGENT-TODO.md"
 git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
-push_to fail --llm
+push_to STUB_READY=ok fail --llm
 check_not_resolved "tracked AGENT-TODO.md"
 case "${push_output}" in
   *"claude --resume "*"did not write AGENT-TODO.md, which git tracks"*) ;;
@@ -824,9 +988,9 @@ if [ "$(cat "${feature_dir}/AGENT-TODO.md")" != "# Tracked" ]; then
 fi
 
 ## The command that continues Codex's session names the session that Codex
-## printed.
+## printed.  Codex is ready to run, so its session is reported.
 setup_case fail-codex
-push_to fail --codex
+push_to STUB_READY=ok fail --codex
 check_not_resolved "failing codex"
 case "${push_output}" in
   *"codex failed with status 3"*"to continue the session of codex:  cd "*" && codex resume 01a19ac9-dab5-7570-93b6-6ba41bf65093"*) ;;
@@ -840,7 +1004,7 @@ fi
 ## continued, and AGENT-TODO.md notes the merge in progress but gives no
 ## command.
 setup_case codex-no-session
-STUB_NO_SESSION=1 push_to fail --codex
+push_to STUB_NO_SESSION=1 fail --codex
 check_not_resolved "codex without a session id"
 case "${push_output}" in
   *'codex printed no line "session id: UUID", so no command will be able to continue its session'*) ;;
@@ -851,7 +1015,7 @@ case "${push_output}" in
 esac
 if grep -q 'codex resume' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
   || ! grep -q -x 'The merge of commit .* is in progress in .*' "${feature_dir}/AGENT-TODO.md" 2> /dev/null \
-  || ! grep -q -x -F "codex, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${feature_dir}/AGENT-TODO.md"; then
+  || ! grep -q -x -F "codex, an AI agent, failed before changing anything, and it is not ready to run, as when it cannot reach its service.  Once codex can run, running the same command again asks it to resolve the conflicts, so no person needs to." "${feature_dir}/AGENT-TODO.md"; then
   fail "codex without a session id: wrong AGENT-TODO.md: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
 fi
 
@@ -863,6 +1027,263 @@ check_not_resolved "failing agent that changes an untracked file"
 case "${push_output}" in
   *"claude failed with status 3"*"changed a file: notes.txt"*) ;;
   *) fail "failing agent that changes an untracked file: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "failing agent that changes an untracked file: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q -x -F "claude, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${feature_dir}/AGENT-TODO.md"; then
+  fail "failing agent that changes an untracked file: AGENT-TODO.md does not ask for help: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
+
+## A failing agent that changes the index or HEAD, but no file, is not run
+## again either.
+setup_case fail-index
+push_to fail-index --llm
+check_not_resolved "failing agent that changes the index"
+case "${push_output}" in
+  *"claude failed with status 3"*"claude changed the index"*) ;;
+  *) fail "failing agent that changes the index: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "failing agent that changes the index: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+setup_case fail-head
+push_to fail-head --llm
+check_not_pushed "failing agent that changes HEAD"
+if [ "$(git -C "${feature_dir}" log -1 --format=%s HEAD)" != "An agent's commit" ]; then
+  fail "failing agent that changes HEAD: HEAD is not the agent's commit"
+fi
+case "${push_output}" in
+  *"claude failed with status 3"*"claude changed HEAD, MERGE_HEAD, or AUTO_MERGE"*) ;;
+  *) fail "failing agent that changes HEAD: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "failing agent that changes HEAD: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+
+## An agent that fails without changing any file, as when its service is
+## unavailable, is run again, twice.  It is then not ready to run, so
+## AGENT-TODO.md gives no command to continue a session, which did nothing,
+## and says that running git-push-to again suffices; a rerun does resolve the
+## conflicts.
+setup_case fail-unchanged
+push_to fail --llm
+check_not_resolved "agent that fails without changing any file"
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude claude)" ]; then
+  fail "agent that fails without changing any file: expected claude to run 3 times, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude changed nothing; running it again in 0 seconds"*"claude is not ready to run"*"It said: Service unavailable"*"claude failed before changing anything in "*) ;;
+  *) fail "agent that fails without changing any file: wrong diagnostic: ${push_output}" ;;
+esac
+todo="${feature_dir}/AGENT-TODO.md"
+if ! grep -q -x -F "claude, an AI agent, failed before changing anything, and it is not ready to run, as when it cannot reach its service.  Once claude can run, running the same command again asks it to resolve the conflicts, so no person needs to." "${todo}" \
+  || grep -q 'Ask a person' "${todo}" \
+  || grep -q 'claude --resume ' "${todo}"; then
+  fail "agent that fails without changing any file: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+: > "${STUB_LOG}"
+push_to good --llm
+check_resolved claude "rerun after an agent that failed without changing any file"
+
+## An agent that fails once without changing any file succeeds when it is
+## run again.  So does one that is ready to run again at once, as after a
+## brief outage, and Codex, whose login status is not the same as being
+## ready to run.
+setup_case fail-once
+push_to fail-once --llm
+check_resolved "$(printf '%s\n' claude claude)" "agent that fails once"
+setup_case fail-once-ready
+push_to STUB_READY=ok fail-once --llm
+check_resolved "$(printf '%s\n' claude claude)" "agent that fails once and is ready at once"
+setup_case fail-once-codex
+push_to fail-once --codex
+check_resolved "$(printf '%s\n' codex codex)" "codex that fails once"
+if [ "$(cat "${STUB_LOG}.ready")" != codex ]; then
+  fail "codex that fails once: expected one check that codex is ready, but got: $(cat "${STUB_LOG}.ready")"
+fi
+
+## A malformed pause matters only when an agent is to run again.
+setup_case bad-pause
+MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE=1m
+export MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE
+push_to good --llm
+MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE=0
+check_resolved claude "agent that succeeds, with a malformed pause"
+setup_case bad-pause-fail
+MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE=1m
+export MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE
+push_to fail --llm
+MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE=0
+check_not_resolved "agent that fails, with a malformed pause"
+case "${push_output}" in
+  *"MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE is not a number of seconds, so claude is not run again: 1m"*) ;;
+  *) fail "agent that fails, with a malformed pause: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "agent that fails, with a malformed pause: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+
+## MANAGE_GIT_BRANCHES_LLM_TIMEOUT limits all of an agent's attempts
+## together.  An agent that fails without changing any file after 3 of its 5
+## seconds is run again for the time that remains, which is too little.
+## Each attempt takes less than 5 seconds, so a limit on each attempt alone
+## would let all 3 attempts finish.
+setup_case fail-slow
+MANAGE_GIT_BRANCHES_LLM_TIMEOUT=5
+export MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+push_to fail-slow --llm
+unset MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+check_not_resolved "agent that fails slowly"
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "agent that fails slowly: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude did not finish within 5 seconds"*) ;;
+  *) fail "agent that fails slowly: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent is not run again if the pause would reach the time limit.
+setup_case pause-past-limit
+MANAGE_GIT_BRANCHES_LLM_TIMEOUT=30
+MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE=40
+export MANAGE_GIT_BRANCHES_LLM_TIMEOUT MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE
+push_to fail --llm
+unset MANAGE_GIT_BRANCHES_LLM_TIMEOUT
+MANAGE_GIT_BRANCHES_LLM_RETRY_PAUSE=0
+check_not_resolved "agent whose pause would reach the time limit"
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "agent whose pause would reach the time limit: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude changed nothing, and too little of the 30 seconds that MANAGE_GIT_BRANCHES_LLM_TIMEOUT allows remains to run it again"*"claude failed before changing anything in "*) ;;
+  *) fail "agent whose pause would reach the time limit: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that fails without changing any file each time, but that is
+## then ready to run, as when it rejects an option that the script passes,
+## makes AGENT-TODO.md ask a person for help.
+setup_case fail-ready
+push_to STUB_READY=ok fail --llm
+check_not_resolved "agent that fails but is ready"
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude claude)" ]; then
+  fail "agent that fails but is ready: expected claude to run 3 times, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude failed before changing anything in "*", although it is ready to run"*) ;;
+  *) fail "agent that fails but is ready: wrong diagnostic: ${push_output}" ;;
+esac
+if ! grep -q -x -F "claude, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${feature_dir}/AGENT-TODO.md" \
+  || grep -q 'no person needs to' "${feature_dir}/AGENT-TODO.md"; then
+  fail "agent that fails but is ready: wrong AGENT-TODO.md: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
+
+## A run stops at a merge in progress in the first directory, whose pull
+## then refuses to start, so if the agent was not ready to resolve that
+## merge's conflicts, AGENT-TODO.md says to abort the merge before running
+## git-push-to again.  A rerun without the abort refuses to start and keeps
+## that advice.  A run after the abort removes the entry and does resolve
+## the conflicts.
+setup_case from-pull-not-ready
+git clone -q -b main "${remote}" "${case_dir}/other-clone"
+write_file "${case_dir}/other-clone/file.txt" ONE two-remote three four five six SEVEN-main eight nine
+git -C "${case_dir}/other-clone" commit -q -a -m "Change main remotely"
+git -C "${case_dir}/other-clone" push -q
+write_file "${main_dir}/file.txt" ONE two-local three four five six SEVEN-main eight nine
+git -C "${main_dir}" commit -q -a -m "Change main locally"
+push_to STUB_READY=fail good --llm
+if [ "${push_status}" -eq 0 ] \
+  || ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "agent that is not ready for the first directory's pull: no merge in progress there: ${push_output}"
+fi
+todo="${main_dir}/AGENT-TODO.md"
+abort_line="claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, abort the merge with \`git merge --abort\`; then running the same command again asks claude to resolve the conflicts, so no person needs to."
+if ! grep -q -x -F "${abort_line}" "${todo}"; then
+  fail "agent that is not ready for the first directory's pull: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+push_to good --llm
+if [ "${push_status}" -eq 0 ] \
+  || ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "rerun without aborting the first directory's pull: no merge in progress there: ${push_output}"
+fi
+if ! grep -q -x -F "${abort_line}" "${todo}" \
+  || [ "$(grep -c '^The merge of commit ' "${todo}")" -ne 1 ]; then
+  fail "rerun without aborting the first directory's pull: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+git -C "${main_dir}" merge --abort
+push_to good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "rerun after aborting the first directory's pull: git-push-to failed: ${push_output}"
+fi
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
+  fail "rerun after aborting the first directory's pull: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+if [ -e "${todo}" ]; then
+  fail "rerun after aborting the first directory's pull: AGENT-TODO.md remains: $(cat "${todo}")"
+fi
+
+## An agent that is not ready to run, as when it is not logged in, is not
+## asked to resolve the conflicts.  AGENT-TODO.md says that running
+## git-push-to again suffices; a rerun, once the agent is ready, does
+## resolve the conflicts.
+setup_case not-ready
+push_to STUB_READY=fail good --llm
+check_not_resolved "agent that is not ready"
+if [ -s "${STUB_LOG}" ]; then
+  fail "agent that is not ready: an agent ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude is not ready to run (status 1)"*"It said: Not logged in"*) ;;
+  *) fail "agent that is not ready: wrong diagnostic: ${push_output}" ;;
+esac
+todo="${feature_dir}/AGENT-TODO.md"
+if ! grep -q -x -F "claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, running the same command again asks it to resolve the conflicts, so no person needs to." "${todo}" \
+  || grep -q 'Ask a person' "${todo}"; then
+  fail "agent that is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+push_to good --llm
+check_resolved claude "rerun after an agent that was not ready"
+if [ -e "${todo}" ]; then
+  fail "rerun after an agent that was not ready: AGENT-TODO.md remains: $(cat "${todo}")"
+fi
+
+## An entry about a merge replaces an earlier one about the same merge, whose
+## advice is out of date:  here, that no person needs to help, after an agent
+## then failed after changing a file, and printed no session id.
+setup_case not-ready-then-fail
+echo "notes" > "${feature_dir}/notes.txt"
+push_to STUB_READY=fail good --codex
+todo="${feature_dir}/AGENT-TODO.md"
+if ! grep -q 'no person needs to' "${todo}"; then
+  fail "agent that is not ready, then fails: the first run's AGENT-TODO.md is wrong: $(cat "${todo}" 2> /dev/null)"
+fi
+push_to STUB_NO_SESSION=1 fail-untracked --codex
+check_not_resolved "agent that is not ready, then fails"
+if grep -q 'no person needs to' "${todo}" \
+  || ! grep -q -x -F "codex, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${todo}" \
+  || [ "$(grep -c -x 'The merge of commit .* is in progress in .*' "${todo}")" -ne 1 ]; then
+  fail "agent that is not ready, then fails: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+## A later entry about the same merge does not replace one that asks a
+## person for help.
+push_to STUB_READY=fail good --codex
+check_not_resolved "agent that fails, then is not ready"
+if grep -q 'no person needs to' "${todo}" \
+  || ! grep -q -x -F "codex, an AI agent, could not resolve the merge's conflicts acceptably.  Ask a person for help with them before you finish the merge." "${todo}"; then
+  fail "agent that fails, then is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+
+## An agent that a signal ends, as when the user interrupts it, is not run
+## again.
+setup_case interrupted
+push_to interrupted --llm
+check_not_resolved "interrupted agent"
+if [ "$(cat "${STUB_LOG}")" != claude ]; then
+  fail "interrupted agent: expected claude to run once, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"claude was ended by signal 2, so it is not run again"*) ;;
+  *) fail "interrupted agent: wrong diagnostic: ${push_output}" ;;
 esac
 
 ## The cases from here to the matching "fi" are disabled; set
@@ -1593,6 +2014,353 @@ check_todo_merge "AGENT-TODO.md without an agent"
 push_to good --no-llm
 check_not_resolved "AGENT-TODO.md without an agent, rerun"
 check_todo_merge "AGENT-TODO.md without an agent, rerun"
+# Once a person finishes the merge, a rerun that pushes deletes the entry,
+# and with it the file, which holds nothing else.
+git -C "${feature_dir}" diff --name-only --diff-filter=U -z \
+  | xargs -0 git -C "${feature_dir}" checkout --ours --
+git -C "${feature_dir}" commit -q -a --no-edit
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "AGENT-TODO.md without an agent, merge finished: git-push-to failed: ${push_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "AGENT-TODO.md without an agent, merge finished: the file was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+
+## Usage: push_same_merge
+## Makes, in another clone of ${remote}, the merge of main into feature that
+## is in progress in ${feature_dir}, resolves its conflicts by keeping both
+## sides' changes, and pushes it.
+push_same_merge() {
+  git clone -q -b feature "${remote}" "${case_dir}/other-clone"
+  git -C "${case_dir}/other-clone" pull -q --no-rebase --no-edit origin main > /dev/null 2>&1 || true
+  write_file "${case_dir}/other-clone/file.txt" ONE two three four five six SEVEN-feature SEVEN-main eight nine
+  git -C "${case_dir}/other-clone" commit -q -a --no-edit
+  git -C "${case_dir}/other-clone" push -q
+}
+
+## A merge in progress whose sides the upstream branch already contains, as
+## when another clone made the same merge and pushed it, is redundant.  If
+## nobody has worked on it, a rerun aborts it, the pull fast-forwards the
+## branch, and the entry about the merge is removed.
+setup_case redundant-merge
+push_to good --no-llm
+check_not_resolved "redundant merge"
+push_same_merge
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "redundant merge: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"aborting the merge of commit "*", which is redundant:  origin/feature, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge: wrong diagnostic: ${push_output}" ;;
+esac
+if git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "redundant merge: the merge is still in progress"
+fi
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "$(git -C "${case_dir}/other-clone" rev-parse HEAD)" ]; then
+  fail "redundant merge: the branch was not fast-forwarded to the other clone's merge"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "redundant merge: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+
+## A redundant merge that somebody has worked on is left in progress, but the
+## diagnostic says that it is probably redundant.
+setup_case redundant-merge-touched
+push_to good --no-llm
+check_not_resolved "touched redundant merge"
+push_same_merge
+write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-feature eight nine
+push_to good --no-llm
+# The other clone pushed, so `check_not_resolved` does not apply.
+if [ "${push_status}" -eq 0 ]; then
+  fail "touched redundant merge: git-push-to succeeded"
+fi
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "${feature_head}" ]; then
+  fail "touched redundant merge: HEAD changed"
+fi
+case "${push_output}" in
+  *"the merge is probably redundant:  origin/feature, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "touched redundant merge: wrong diagnostic: ${push_output}" ;;
+esac
+if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "touched redundant merge: the merge was aborted"
+fi
+if [ "$(cat "${feature_dir}/file.txt")" != "$(printf '%s\n' ONE two three four five six SEVEN-feature eight nine)" ]; then
+  fail "touched redundant merge: file.txt was changed: $(cat "${feature_dir}/file.txt")"
+fi
+# The first run noted the merge in AGENT-TODO.md before it was redundant, so
+# this run appended a second entry, which says that it is redundant.
+if [ "$(grep -c -x 'It is probably redundant:  origin/feature, the upstream branch, already contains both of its sides.' "${feature_dir}/AGENT-TODO.md")" -ne 1 ]; then
+  fail "touched redundant merge: AGENT-TODO.md does not say once that the merge is redundant: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+# The backquotes are Markdown, not command substitutions.
+# shellcheck disable=SC2016
+if ! grep -F -x -q 'Unless its resolution has changes that origin/feature lacks, abort it with `git merge --abort`, and run `git-push-to` again; then delete this entry.' "${feature_dir}/AGENT-TODO.md"; then
+  fail "touched redundant merge: AGENT-TODO.md does not say to abort the merge: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+# Another run appends no third entry.
+push_to good --no-llm
+if [ "$(grep -c '^## ' "${feature_dir}/AGENT-TODO.md")" -ne 2 ]; then
+  fail "touched redundant merge, run again: AGENT-TODO.md does not have exactly 2 entries: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+# Once the person aborts the merge, a run removes both entries, and with them
+# the file, which holds nothing else.
+git -C "${feature_dir}" merge --abort
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "touched redundant merge, aborted: git-push-to failed: ${push_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "touched redundant merge, aborted: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+
+## Usage: check_redundant_stopped DESCRIPTION DIAGNOSTIC
+## Checks that git-push-to failed, left the merge in progress in
+## ${feature_dir}, printed DIAGNOSTIC, and said that the merge is probably
+## redundant, and not that it should be finished.
+check_redundant_stopped() {
+  if [ "${push_status}" -eq 0 ]; then
+    fail "$1: git-push-to succeeded: ${push_output}"
+  fi
+  if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    fail "$1: the merge was aborted or committed"
+  fi
+  case "${push_output}" in
+    *"$2"*) ;;
+    *) fail "$1: no diagnostic \"$2\": ${push_output}" ;;
+  esac
+  case "${push_output}" in
+    *"the merge is probably redundant:  origin/feature, the upstream branch, already contains both of its sides"*) ;;
+    *) fail "$1: no diagnostic that the merge is redundant: ${push_output}" ;;
+  esac
+  case "${push_output}" in
+    *"; finish "*) fail "$1: a diagnostic says to finish the redundant merge: ${push_output}" ;;
+  esac
+}
+
+## A redundant merge in which a file that the merge did not leave conflicted
+## changed is neither aborted nor finished.
+setup_case redundant-merge-other build
+push_to good --no-llm
+check_not_resolved "redundant merge, other file changed"
+push_same_merge
+echo changed >> "${feature_dir}/other.txt"
+push_to good --no-llm
+check_redundant_stopped "redundant merge, other file changed" \
+  "Files that it did not leave conflicted changed after it stopped:  other.txt."
+if [ "$(tail -n 1 "${feature_dir}/other.txt")" != changed ]; then
+  fail "redundant merge, other file changed: other.txt was changed: $(cat "${feature_dir}/other.txt")"
+fi
+
+## A redundant merge whose resolution is staged is neither aborted nor
+## finished.
+setup_case redundant-merge-staged
+push_to good --no-llm
+check_not_resolved "redundant merge, resolution staged"
+push_same_merge
+write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-feature SEVEN-main eight nine
+git -C "${feature_dir}" add file.txt
+push_to good --no-llm
+check_redundant_stopped "redundant merge, resolution staged" "No conflicted file remains."
+
+## A merge whose upstream branch cannot be fetched, so that whether it is
+## redundant is unknown, is not finished, although the agent could resolve
+## it.  A directory in place of FETCH_HEAD makes the fetch fail.
+setup_case redundant-merge-unknown
+push_to good --no-llm
+check_not_resolved "merge, upstream branch not fetched"
+rm -f "${feature_dir}/.git/FETCH_HEAD"
+mkdir "${feature_dir}/.git/FETCH_HEAD"
+: > "${STUB_LOG}"
+push_to good
+check_not_resolved "merge, upstream branch not fetched"
+if [ -s "${STUB_LOG}" ]; then
+  fail "merge, upstream branch not fetched: an agent ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"cannot fetch origin/feature, so whether the merge in progress in "*" is redundant is unknown"*) ;;
+  *) fail "merge, upstream branch not fetched: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An octopus merge is redundant only if the upstream branch contains every
+## commit that it merges.  A second line of MERGE_HEAD, for a commit that the
+## upstream branch lacks, makes the merge an octopus merge.
+setup_case redundant-merge-octopus
+push_to good --no-llm
+check_not_resolved "octopus merge"
+push_same_merge
+git -C "${feature_dir}" commit-tree -p HEAD -m "Not pushed" "HEAD^{tree}" \
+  >> "${feature_dir}/.git/MERGE_HEAD"
+push_to good --no-llm
+# The other clone pushed, so `check_not_resolved` does not apply.
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "${feature_head}" ]; then
+  fail "octopus merge: HEAD changed"
+fi
+if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "octopus merge: the merge was aborted or committed"
+fi
+case "${push_output}" in
+  *"aborting the merge"* | *"probably redundant"*) fail "octopus merge: the merge was taken for a redundant one: ${push_output}" ;;
+esac
+
+## A redundant merge is recognized, and aborted, even if the remote's fetch
+## refspec does not cover the upstream branch, so that fetching it updates no
+## remote-tracking branch, and origin/feature is stale.
+setup_case redundant-merge-refspec
+push_to good --no-llm
+check_not_resolved "redundant merge, refspec without the branch"
+push_same_merge
+git -C "${feature_dir}" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "redundant merge, refspec without the branch: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"aborting the merge of commit "*", which is redundant:  branch 'feature' of origin, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge, refspec without the branch: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "$(git -C "${case_dir}/other-clone" rev-parse HEAD)" ]; then
+  fail "redundant merge, refspec without the branch: the branch was not fast-forwarded to the other clone's merge"
+fi
+
+## A redundant merge is recognized, and aborted, if the upstream branch is a
+## local branch, "base", which the fetch of no remote changes.  Base holds a
+## merge of both sides that origin lacks.
+setup_case redundant-merge-local-upstream
+push_to good --no-llm
+check_not_resolved "redundant merge, local upstream branch"
+git -C "${feature_dir}" branch base "$(git -C "${feature_dir}" commit-tree -p HEAD -p MERGE_HEAD \
+  -m "Merge main into base" "HEAD^{tree}")"
+git -C "${feature_dir}" config branch.feature.remote .
+git -C "${feature_dir}" config branch.feature.merge refs/heads/base
+git -C "${feature_dir}" config branch.feature.pushRemote origin
+git -C "${feature_dir}" config push.default current
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "redundant merge, local upstream branch: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"aborting the merge of commit "*", which is redundant:  base, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge, local upstream branch: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "$(git -C "${feature_dir}" rev-parse base)" ]; then
+  fail "redundant merge, local upstream branch: the branch was not fast-forwarded to base"
+fi
+
+## Usage: start_redundant_merge_in_main
+## Starts, in ${main_dir}, a merge of feature into main, which has conflicts,
+## and makes the same merge in another clone of ${remote}, resolves its
+## conflicts by keeping both sides' changes, and pushes it to main.
+start_redundant_merge_in_main() {
+  git -C "${main_dir}" fetch -q
+  git -C "${main_dir}" merge -q --no-edit origin/feature > /dev/null 2>&1 || true
+  if ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    fail "start_redundant_merge_in_main: no merge is in progress in ${main_dir}"
+  fi
+  git clone -q -b main "${remote}" "${case_dir}/other-main"
+  git -C "${case_dir}/other-main" merge -q --no-edit origin/feature > /dev/null 2>&1 || true
+  write_file "${case_dir}/other-main/file.txt" ONE two three four five six SEVEN-feature SEVEN-main eight nine
+  git -C "${case_dir}/other-main" commit -q -a --no-edit
+  git -C "${case_dir}/other-main" push -q
+}
+
+## A redundant merge in progress in the first directory that nobody has
+## worked on is aborted, and the pull fast-forwards the branch.
+setup_case redundant-merge-first
+start_redundant_merge_in_main
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "redundant merge in the first directory: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"aborting the merge of commit "*"myrepo-branch-main, which is redundant:  origin/main, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge in the first directory: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${main_dir}" rev-parse HEAD)" != "$(git -C "${case_dir}/other-main" rev-parse HEAD)" ]; then
+  fail "redundant merge in the first directory: main was not fast-forwarded to the other clone's merge"
+fi
+
+## A redundant merge in progress in the first directory that somebody has
+## worked on makes git-push-to stop, saying that it is probably redundant.
+setup_case redundant-merge-first-touched
+start_redundant_merge_in_main
+write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
+push_to good --no-llm
+if [ "${push_status}" -eq 0 ]; then
+  fail "touched redundant merge in the first directory: git-push-to succeeded"
+fi
+if ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "touched redundant merge in the first directory: the merge was aborted or committed"
+fi
+case "${push_output}" in
+  *"the merge is probably redundant:  origin/main, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "touched redundant merge in the first directory: wrong diagnostic: ${push_output}" ;;
+esac
+if ! grep -F -x -q 'It is probably redundant:  origin/main, the upstream branch, already contains both of its sides.' "${main_dir}/AGENT-TODO.md"; then
+  fail "touched redundant merge in the first directory: AGENT-TODO.md does not say that the merge is redundant: $(cat "${main_dir}/AGENT-TODO.md" 2>&1)"
+fi
+
+## Without the pull of the first directory, a redundant merge in progress
+## there that nobody has worked on is still aborted.
+setup_case redundant-merge-first-no-pull
+start_redundant_merge_in_main
+push_to good --no-llm --no-pull-first
+case "${push_output}" in
+  *"aborting the merge of commit "*"myrepo-branch-main, which is redundant:  origin/main, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "redundant merge in the first directory, --no-pull-first: wrong diagnostic: ${push_output}" ;;
+esac
+if git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "redundant merge in the first directory, --no-pull-first: the merge is still in progress"
+fi
+
+## Without the pull of the first directory, a merge in progress there whose
+## upstream branch cannot be fetched, so that whether it is redundant is
+## unknown, is refused with the usual diagnostic, which says what to do, and
+## with the reason of `git-push-to`.  A directory in place of FETCH_HEAD makes
+## the fetch fail.
+setup_case redundant-merge-first-no-pull-unknown
+start_redundant_merge_in_main
+rm -f "${main_dir}/.git/FETCH_HEAD"
+mkdir "${main_dir}/.git/FETCH_HEAD"
+push_to good --no-llm --no-pull-first
+if [ "${push_status}" -eq 0 ]; then
+  fail "unfetchable merge in the first directory, --no-pull-first: git-push-to succeeded"
+fi
+if ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "unfetchable merge in the first directory, --no-pull-first: the merge was aborted or committed"
+fi
+case "${push_output}" in
+  *"cannot fetch origin/main, so whether the merge in progress in "*" is redundant is unknown"*"a merge is in progress in "*"; finish it, or abort it with \`git merge --abort\`"*) ;;
+  *) fail "unfetchable merge in the first directory, --no-pull-first: wrong diagnostic: ${push_output}" ;;
+esac
+if ! grep -F -q "It was in progress when \`git-push-to\` was about to merge from it." "${main_dir}/AGENT-TODO.md"; then
+  fail "unfetchable merge in the first directory, --no-pull-first: AGENT-TODO.md lacks the reason: $(cat "${main_dir}/AGENT-TODO.md" 2>&1)"
+fi
+
+## `git-pull-upstream` aborts a redundant merge in progress that nobody has
+## worked on, and its pull fast-forwards the branch.
+setup_case pull-upstream-redundant-merge
+git -C "${feature_dir}" remote set-head origin main
+git -C "${feature_dir}" fetch -q
+git -C "${feature_dir}" merge -q --no-edit origin/main > /dev/null 2>&1 || true
+if ! git -C "${feature_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+  fail "git-pull-upstream, redundant merge: no merge is in progress"
+fi
+push_same_merge
+if ! pull_upstream_output="$(cd "${feature_dir}" && PATH="${WORK_DIR}/test-bin:${PATH}" \
+  "${COMMANDS_DIR}/git-pull-upstream" --no-llm 2>&1)"; then
+  fail "git-pull-upstream, redundant merge: failed: ${pull_upstream_output}"
+fi
+case "${pull_upstream_output}" in
+  *"aborting the merge of commit "*", which is redundant:  origin/feature, the upstream branch, already contains both of its sides"*) ;;
+  *) fail "git-pull-upstream, redundant merge: wrong diagnostic: ${pull_upstream_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" rev-parse HEAD)" != "$(git -C "${case_dir}/other-clone" rev-parse HEAD)" ]; then
+  fail "git-pull-upstream, redundant merge: the branch was not fast-forwarded to the other clone's merge"
+fi
+
 setup_case todo-agent
 push_to none --llm
 check_not_resolved "AGENT-TODO.md with an agent"
@@ -1826,6 +2594,28 @@ READLINK_EOF
     push_status=$?
   fi
   check_resolved claude "rerun from an agent in the directory"
+
+  ## A redundant merge in progress in the first directory that nobody has
+  ## worked on is not aborted while an agent works there, although
+  ## git-push-to does not finish a merge in that directory.
+  setup_case redundant-merge-first-agent
+  start_redundant_merge_in_main
+  start_agent "${main_dir}" || fail "the stand-in agent did not start"
+  push_to good --no-llm
+  stop_agent
+  if [ "${push_status}" -eq 0 ]; then
+    fail "redundant merge in the first directory with an agent: git-push-to succeeded"
+  fi
+  if ! git -C "${main_dir}" rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    fail "redundant merge in the first directory with an agent: the merge was aborted or committed"
+  fi
+  case "${push_output}" in
+    *"claude (process ${agent_pid}) is working in"*"an AI agent is working there"*"the merge is probably redundant:  origin/main, the upstream branch, already contains both of its sides"*) ;;
+    *) fail "redundant merge in the first directory with an agent: wrong diagnostic: ${push_output}" ;;
+  esac
+  case "${push_output}" in
+    *"aborting the merge"*) fail "redundant merge in the first directory with an agent: the merge was aborted: ${push_output}" ;;
+  esac
 fi
 
 ## An agent that stages a file is rejected, even if the working tree holds an
@@ -2043,12 +2833,17 @@ fi
 ## A failed build is fixed, and the fix is committed on top of the merge.
 build=1
 setup_case build-fix build
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "build fix: git-push-to failed: ${push_output}"
 fi
 if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude)" ]; then
   fail "build fix: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
+fi
+# The check that claude is ready to run, before it resolves the conflicts,
+# also serves for the build fix.
+if [ "$(cat "${STUB_LOG}.ready")" != claude ]; then
+  fail "build fix: expected one check that claude is ready, but got: $(cat "${STUB_LOG}.ready" 2> /dev/null)"
 fi
 if ! grep -q 'other.txt is broken' "${STUB_PROMPT}"; then
   fail "build fix: the instructions do not contain the build output"
@@ -2062,6 +2857,55 @@ if [ "$(git -C "${remote}" rev-parse refs/heads/feature^1^2)" != "$(git -C "${ma
   fail "build fix: the fix is not on top of the merge"
 fi
 
+## A pre-commit hook that, like a formatter's, rejects the commit of the fix
+## after reformatting the fixed file does not stop git-push-to, which builds
+## the file as the hook left it and commits it.  The hook leaves a merge
+## commit alone.
+setup_case build-fix-hook build
+install_git_hook "${feature_dir}" pre-commit \
+  'if git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then exit 0; fi' \
+  "tr 'a-z' 'A-Z' < other.txt > hook.tmp" \
+  'if cmp -s other.txt hook.tmp; then rm hook.tmp; exit 0; fi' \
+  'mv hook.tmp other.txt' \
+  'exit 1'
+push_to STUB_BUILD=fix good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "build fix with a reformatting hook: git-push-to failed: ${push_output}"
+fi
+case "${push_output}" in
+  *"the pre-commit hook changed other.txt"*) ;;
+  *) fail "build fix with a reformatting hook: no diagnostic about the hook: ${push_output}" ;;
+esac
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build after merging branch 'main'" ]; then
+  fail "build fix with a reformatting hook: wrong message for the fix: ${message}"
+fi
+if [ "$(git -C "${remote}" rev-parse refs/heads/feature^1^2)" != "$(git -C "${main_dir}" rev-parse HEAD)" ]; then
+  fail "build fix with a reformatting hook: the fix is not on top of the merge"
+fi
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "FINE" ]; then
+  fail "build fix with a reformatting hook: wrong other.txt: $(git -C "${remote}" show refs/heads/feature:other.txt)"
+fi
+
+## A pre-commit hook that rejects the commit of the fix after breaking the
+## build stops git-push-to, which builds the files as the hook left them and
+## does not commit them.
+setup_case build-fix-hook-breaks build
+install_git_hook "${feature_dir}" pre-commit \
+  'if git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then exit 0; fi' \
+  'if grep -q HOOKED other.txt; then exit 0; fi' \
+  'echo "BROKEN HOOKED" >> other.txt' \
+  'exit 1'
+push_to STUB_BUILD=fix good --llm
+check_not_pushed "build fix with a hook that breaks the build"
+case "${push_output}" in
+  *"not committed in "*"compile-project\` failed"*"cannot commit the changes of claude"*) ;;
+  *) fail "build fix with a hook that breaks the build: wrong diagnostic: ${push_output}" ;;
+esac
+if [ "$(git -C "${feature_dir}" log -1 --format=%s HEAD)" != "Merge branch 'main' into feature" ]; then
+  fail "build fix with a hook that breaks the build: committed the fix"
+fi
+
 ## A merge in the history of the merged branch is not one that the fix
 ## follows:  it was built where that branch lives.  Main merges a side
 ## branch, so that its history has a merge commit.
@@ -2073,7 +2917,7 @@ git -C "${main_dir}" commit -q -m "Change side"
 git -C "${main_dir}" switch -q main
 git -C "${main_dir}" merge -q --no-ff --no-edit side
 git -C "${main_dir}" push -q
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "build fix after a main with a merge: git-push-to failed: ${push_output}"
 fi
@@ -2084,7 +2928,7 @@ fi
 
 ## An agent that changes nothing gets one attempt.
 setup_case build-none build
-STUB_BUILD=none push_to good --llm
+push_to STUB_BUILD=none good --llm
 check_not_pushed "build not fixed"
 case "${push_output}" in
   *"claude did not fix the build"*"claude --resume "*) ;;
@@ -2096,10 +2940,27 @@ fi
 if [ "$(wc -l < "${STUB_LOG}")" -ne 2 ]; then
   fail "build not fixed: expected claude to run twice, but ran: $(cat "${STUB_LOG}")"
 fi
+# Once a person fixes the build, a rerun that builds and pushes deletes the
+# entry, and with it the file, which holds nothing else.
+echo "fine" > "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Fix the build by hand"
+push_to good --no-llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "build fixed by hand: git-push-to failed: ${push_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "build fixed by hand: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
+# The diagnostic names the file by a physical path, as on macOS, where the
+# temporary directory is under a symbolic link.
+case "${push_output}" in
+  *"deleted $(cd "${feature_dir}" && pwd -P)/AGENT-TODO.md, whose entries no longer apply"*) ;;
+  *) fail "build fixed by hand: wrong diagnostic: ${push_output}" ;;
+esac
 
 ## An agent whose changes do not fix the build gets three attempts.
 setup_case build-bad build
-STUB_BUILD=bad push_to good --llm
+push_to STUB_BUILD=bad good --llm
 check_not_pushed "bad build fix"
 case "${push_output}" in
   *"in 3 attempts"*) ;;
@@ -2123,7 +2984,7 @@ if ! git -C "${feature_dir}" diff --cached --name-only | grep -q -x notes.txt; t
 fi
 # A rerun does not build the staged changes, which would not be pushed.
 : > "${STUB_LOG}"
-STUB_BUILD=bad push_to good --llm
+push_to STUB_BUILD=bad good --llm
 check_not_pushed "rerun after a bad build fix"
 case "${push_output}" in
   *"has uncommitted changes"*) ;;
@@ -2133,11 +2994,115 @@ if [ -s "${STUB_LOG}" ]; then
   fail "rerun after a bad build fix: an agent ran: $(cat "${STUB_LOG}")"
 fi
 
+## An agent that fails to fix the build without changing any file, after an
+## earlier attempt changed files, is run again, twice, and is then not ready
+## to run.  Because the earlier attempt's changes remain staged, a person
+## must deal with them:  the earlier attempt's session can be continued, and
+## AGENT-TODO.md does not say that running git-push-to again suffices.
+setup_case build-fail-later build
+push_to STUB_BUILD=once-fail good --llm
+check_not_pushed "build-fixing agent that fails on its second attempt"
+if [ "$(wc -l < "${STUB_LOG}")" -ne 5 ]; then
+  fail "build-fixing agent that fails on its second attempt: expected claude to run 5 times, but ran: $(cat "${STUB_LOG}")"
+fi
+case "${push_output}" in
+  *"attempt 2 of 3"*"claude failed before changing anything in "*"to continue the session of claude:  cd "*) ;;
+  *) fail "build-fixing agent that fails on its second attempt: wrong diagnostic: ${push_output}" ;;
+esac
+todo="${feature_dir}/AGENT-TODO.md"
+if [ "$(grep -c '^cd .* && claude --resume ' "${todo}")" != 1 ] \
+  || grep -q 'no person needs to' "${todo}"; then
+  fail "build-fixing agent that fails on its second attempt: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+if ! git -C "${feature_dir}" diff --cached --name-only | grep -q -x notes.txt; then
+  fail "build-fixing agent that fails on its second attempt: the first attempt's changes are not staged"
+fi
+
+## An agent that fails to fix the build without changing any file is run
+## again, twice.  AGENT-TODO.md then says that running git-push-to again
+## suffices; a rerun does fix the build.
+setup_case build-fail-unchanged build
+push_to STUB_BUILD=fail good --llm
+check_not_pushed "build-fixing agent that fails without changing any file"
+if [ "$(cat "${STUB_LOG}")" != "$(printf '%s\n' claude claude claude claude)" ]; then
+  fail "build-fixing agent that fails without changing any file: expected claude to run 4 times, but ran: $(cat "${STUB_LOG}")"
+fi
+todo="${feature_dir}/AGENT-TODO.md"
+if ! grep -q -x -F "claude, an AI agent, failed before changing anything, and it is not ready to run, as when it cannot reach its service.  Once claude can run, running the same command again asks it to fix the build, so no person needs to." "${todo}" \
+  || grep -q 'claude --resume ' "${todo}"; then
+  fail "build-fixing agent that fails without changing any file: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+## A rerun while the agent is not ready to run notes that in AGENT-TODO.md.
+: > "${STUB_LOG}"
+push_to STUB_READY=fail STUB_BUILD=fix good --llm
+check_not_pushed "build fix while the agent is not ready"
+if [ -s "${STUB_LOG}" ]; then
+  fail "build fix while the agent is not ready: an agent ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q -x -F "claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, running the same command again asks it to fix the build, so no person needs to." "${todo}" \
+  || grep -q 'failed before changing anything' "${todo}" \
+  || [ "$(grep -c '^## Fix the build' "${todo}")" -ne 1 ]; then
+  fail "build fix while the agent is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+: > "${STUB_LOG}"
+push_to STUB_BUILD=fix good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "rerun after a build-fixing agent that failed without changing any file: git-push-to failed: ${push_output}"
+fi
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+  fail "rerun after a build-fixing agent that failed without changing any file: the build was not fixed"
+fi
+if [ -e "${todo}" ]; then
+  fail "rerun after a build-fixing agent that failed without changing any file: AGENT-TODO.md remains: $(cat "${todo}")"
+fi
+
+## An agent that is not ready to run is not asked to fix the build.
+## AGENT-TODO.md says that running git-push-to again suffices; a rerun while
+## the agent is still not ready replaces that entry, and a rerun once it is
+## ready fixes the build and removes the entry.  The merge has no conflicts.
+setup_case build-not-ready build
+write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
+echo "feature" > "${feature_dir}/feature.txt"
+git -C "${feature_dir}" add feature.txt
+git -C "${feature_dir}" commit -q -a -m "Change feature as main does"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+todo="${feature_dir}/AGENT-TODO.md"
+not_ready_line="claude, an AI agent, did not run, because it was not ready to run, as when it is not logged in.  Once claude can run, running the same command again asks it to fix the build, so no person needs to."
+## The directory is a physical path, as on macOS, where the temporary
+## directory is under a symbolic link.
+build_failed_line="The build failed in $(cd "${feature_dir}" && pwd -P)."
+push_to STUB_READY=fail STUB_BUILD=fix good --llm
+check_not_pushed "build fix while the agent is not ready"
+if [ -s "${STUB_LOG}" ]; then
+  fail "build fix while the agent is not ready: an agent ran: $(cat "${STUB_LOG}")"
+fi
+if ! grep -q -x -F "${not_ready_line}" "${todo}" \
+  || ! grep -q -x -F "${build_failed_line}" "${todo}"; then
+  fail "build fix while the agent is not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+push_to STUB_READY=fail STUB_BUILD=fix good --llm
+check_not_pushed "build fix while the agent is still not ready"
+if [ "$(grep -c '^## Fix the build' "${todo}")" != 1 ]; then
+  fail "build fix while the agent is still not ready: wrong AGENT-TODO.md: $(cat "${todo}" 2> /dev/null)"
+fi
+: > "${STUB_LOG}"
+push_to STUB_BUILD=fix good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "rerun once the agent is ready to fix the build: git-push-to failed: ${push_output}"
+fi
+if [ "$(git -C "${remote}" show refs/heads/feature:other.txt)" != "fine" ]; then
+  fail "rerun once the agent is ready to fix the build: the build was not fixed"
+fi
+if [ -e "${todo}" ]; then
+  fail "rerun once the agent is ready to fix the build: AGENT-TODO.md remains: $(cat "${todo}")"
+fi
+
 ## Uncommitted changes are refused before the merge, which leaves no merge
 ## commit behind.
 setup_case build-dirty build
 echo "an edit" >> "${feature_dir}/other.txt"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -eq 0 ]; then
   fail "uncommitted changes: git-push-to succeeded"
 fi
@@ -2157,7 +3122,7 @@ fi
 
 ## An agent that creates a file that git ignores is rejected.
 setup_case build-ignored build
-STUB_BUILD=ignored push_to good --llm
+push_to STUB_BUILD=ignored good --llm
 check_not_pushed "build fix in an ignored file"
 case "${push_output}" in
   *"created a file that git ignores: fix.local"*) ;;
@@ -2167,7 +3132,7 @@ esac
 ## An attempt that changes nothing ends the attempts, even after an earlier
 ## attempt changed files; the later attempt learns of the earlier one.
 setup_case build-once build
-STUB_BUILD=once push_to good --llm
+push_to STUB_BUILD=once good --llm
 check_not_pushed "build fix that gives up"
 case "${push_output}" in
   *"it changed nothing"*) ;;
@@ -2183,7 +3148,7 @@ fi
 ## A build that changes tracked files ends the attempts, so that its changes
 ## are not committed as the agent's.
 setup_case build-modifies build-modifies
-STUB_BUILD=bad push_to good --llm
+push_to STUB_BUILD=bad good --llm
 check_not_pushed "build that changes tracked files"
 case "${push_output}" in
   *"the build changed tracked files"*) ;;
@@ -2204,7 +3169,7 @@ git -C "${feature_dir}" add feature.txt
 git -C "${feature_dir}" commit -q -a -m "Change feature as main does"
 git -C "${feature_dir}" push -q
 feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
-STUB_BUILD=fix push_to good --no-llm
+push_to STUB_BUILD=fix good --no-llm
 check_not_pushed "build with --no-llm"
 case "${push_output}" in
   *"unable to build"*) ;;
@@ -2219,7 +3184,7 @@ fi
 # The merge is now committed but not pushed.  A rerun merges nothing, but the
 # unpushed merge might have caused the failure, so the agent is asked to fix
 # it.
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "rerun after a failed build: git-push-to failed: ${push_output}"
 fi
@@ -2243,7 +3208,7 @@ git -C "${main_dir}" reset -q --hard HEAD^
 git -C "${main_dir}" push -q --force
 echo "BROKEN" >> "${feature_dir}/other.txt"
 git -C "${feature_dir}" commit -q -a -m "Break the build locally"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 check_not_pushed "build failure without a merge"
 case "${push_output}" in
   *"unable to build"*) ;;
@@ -2271,7 +3236,7 @@ git -C "${main_dir}" switch -q main
 write_file "${main_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
 git -C "${main_dir}" commit -q -a -m "Change main locally"
 git -C "${main_dir}" merge -q --no-ff --no-edit side
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "fast-forward to an unpushed merge: git-push-to failed: ${push_output}"
 fi
@@ -2310,13 +3275,13 @@ git -C "${feature_dir}" config branch.feature.pushRemote fork
 # branch.
 git -C "${feature_dir}" config push.default current
 fork_head="$(git -C "${fork}" rev-parse refs/heads/feature)"
-STUB_BUILD=fix push_to good --no-llm
+push_to STUB_BUILD=fix good --no-llm
 if [ "${push_status}" -eq 0 ] || [ "$(git -C "${fork}" rev-parse refs/heads/feature)" != "${fork_head}" ]; then
   fail "build with a push remote: the first run pushed: ${push_output}"
 fi
 git -C "${feature_dir}" push -q fork feature
 git -C "${feature_dir}" update-ref refs/remotes/fork/feature "${fork_head}"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -eq 0 ]; then
   fail "build with an out-of-date push remote: git-push-to succeeded"
 fi
@@ -2333,7 +3298,7 @@ fi
 ## still counts as one that might have broken the build.
 setup_case build-url-remote build
 git -C "${feature_dir}" config branch.feature.remote "${remote}"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "build fix with a URL remote: git-push-to failed: ${push_output}"
 fi
@@ -2375,7 +3340,7 @@ for llm_option in --llm --no-llm; do
   write_file "${feature_dir}/file.txt" ONE two three four five six SEVEN-main eight nine
   git -C "${feature_dir}" commit -q -a -m "Change feature as main does"
   git -C "${feature_dir}" push -q
-  STUB_BUILD=fix push_to good "${llm_option}"
+  push_to STUB_BUILD=fix good "${llm_option}"
   if [ "${push_status}" -ne 0 ]; then
     fail "successful build with ${llm_option}: git-push-to failed: ${push_output}"
   fi
@@ -2409,7 +3374,7 @@ git -C "${feature_dir}" config branch.feature.remote .
 git -C "${feature_dir}" config branch.feature.merge refs/heads/base
 git -C "${feature_dir}" config branch.feature.pushRemote origin
 git -C "${feature_dir}" config push.default current
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "build fix after a pull from a local branch: git-push-to failed: ${push_output}"
 fi
@@ -2496,7 +3461,7 @@ check_pull_fixed() {
 ## A pull that breaks the build, followed by a merge that changes nothing, is
 ## fixed too.
 setup_pull_breaks pull-build
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "pull that breaks the build: git-push-to failed: ${push_output}"
 fi
@@ -2513,7 +3478,7 @@ fi
 ## When both the pull and the merge change the branch, the fix's message
 ## lists both merges.
 setup_pull_breaks pull-build-merge main
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "pull and merge that break the build: git-push-to failed: ${push_output}"
 fi
@@ -2531,7 +3496,7 @@ for ff in true false; do
   setup_pull_breaks "pull-build-fast-forward-${ff}"
   git -C "${feature_dir}" reset -q --hard HEAD^
   git -C "${feature_dir}" config pull.ff "${ff}"
-  STUB_BUILD=fix push_to good --llm
+  push_to STUB_BUILD=fix good --llm
   check_not_pushed "pull with pull.ff=${ff} to a broken build"
   case "${push_output}" in
     *"unable to build"*) ;;
@@ -2571,7 +3536,7 @@ setup_broken_clone_merge pull-build-fast-forward-url
 git -C "${case_dir}/other-clone" push -q
 feature_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
 git -C "${feature_dir}" config branch.feature.remote "${remote}"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 check_not_pushed "pull with a URL remote to a broken build"
 case "${push_output}" in
   *"unable to build"*) ;;
@@ -2588,7 +3553,7 @@ fi
 ## it stopped before committing.
 setup_pull_breaks pull-build-url-merge
 git -C "${feature_dir}" config branch.feature.remote "${remote}"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "pull with a URL remote that breaks the build: git-push-to failed: ${push_output}"
 fi
@@ -2626,7 +3591,7 @@ for clone_remote in pathname name; do
   fi
   git -C "${feature_dir}" config branch.feature.pushRemote origin
   git -C "${feature_dir}" config push.default current
-  STUB_BUILD=fix push_to good --llm
+  push_to STUB_BUILD=fix good --llm
   if [ "${push_status}" -ne 0 ]; then
     fail "pull from a working clone, by ${clone_remote}, to a broken build: git-push-to failed: ${push_output}"
   fi
@@ -2644,7 +3609,7 @@ setup_pull_breaks pull-build-no-ff-merge main
 git -C "${feature_dir}" reset -q --hard HEAD^
 local_head="$(git -C "${feature_dir}" rev-parse HEAD)"
 git -C "${feature_dir}" config pull.ff false
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "pull with pull.ff=false and a merge that breaks the build: git-push-to failed: ${push_output}"
 fi
@@ -2658,7 +3623,7 @@ fi
 ## the merge.
 setup_pull_breaks pull-build-rebase
 git -C "${feature_dir}" config pull.rebase true
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "pull with pull.rebase that breaks the build: git-push-to failed: ${push_output}"
 fi
@@ -2674,7 +3639,7 @@ check_pull_fixed "pull with pull.rebase that breaks the build" \
 setup_case pull-build-rerun build
 set_pull_subject
 pull_excluded="refs/remotes/origin/feature $(git -C "${remote}" rev-parse refs/heads/main)"
-STUB_BUILD=none push_to good --llm
+push_to STUB_BUILD=none good --llm
 check_not_pushed "failed build before a rerun"
 : > "${STUB_LOG}"
 local_head="$(git -C "${feature_dir}" rev-parse HEAD)"
@@ -2684,7 +3649,7 @@ git -C "${case_dir}/other-clone" add third.txt
 git -C "${case_dir}/other-clone" commit -q -m "Change feature remotely"
 git -C "${case_dir}/other-clone" push -q
 feature_head="$(git -C "${remote}" rev-parse refs/heads/feature)"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "rerun whose pull merges: git-push-to failed: ${push_output}"
 fi
@@ -2711,7 +3676,7 @@ push_remote_commit() {
 ## message names only the merge of main, which broke the build.
 setup_case pull-ff-merge-build build
 push_remote_commit
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "fast-forward pull and a merge that breaks the build: git-push-to failed: ${push_output}"
 fi
@@ -2738,7 +3703,7 @@ git -C "${case_dir}/other-clone" push -q
 echo "local" > "${main_dir}/local.txt"
 git -C "${main_dir}" add local.txt
 git -C "${main_dir}" commit -q -m "Add local.txt"
-STUB_BUILD=fix push_to good --llm
+push_to STUB_BUILD=fix good --llm
 if [ "${push_status}" -ne 0 ]; then
   fail "fast-forward to a merge of FROM_DIR's pull: git-push-to failed: ${push_output}"
 fi
@@ -2758,7 +3723,7 @@ fi
 
 ## With --no-llm, a pull that breaks the build is not given to an agent.
 setup_pull_breaks pull-build-no-llm
-STUB_BUILD=fix push_to good --no-llm
+push_to STUB_BUILD=fix good --no-llm
 check_not_pushed "pull that breaks the build, with --no-llm"
 if [ -s "${STUB_LOG}" ]; then
   fail "pull that breaks the build, with --no-llm: an agent ran: $(cat "${STUB_LOG}")"
@@ -2777,6 +3742,32 @@ if [ "$(cat "${STUB_LOG}")" != claude ]; then
 fi
 check_pull_fixed "git-pull-upstream after a pull that breaks the build" \
   "Fix the build after merging ${pull_description}"
+
+## Run in a subdirectory, `git-pull-upstream` runs the agent that fails to fix
+## the build at the top level of the working tree, so that AGENT-TODO.md
+## gives a command that starts there.  Once a person fixes the build, a rerun
+## in the subdirectory deletes the entry, and with it the file.
+setup_pull_breaks pull-upstream-build-subdir
+git -C "${feature_dir}" remote set-head origin main
+mkdir "${feature_dir}/sub"
+if pull_upstream_output="$(cd "${feature_dir}/sub" && STUB_BUILD=none PATH="${WORK_DIR}/test-bin:${PATH}" \
+  MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT='' "${COMMANDS_DIR}/git-pull-upstream" --llm 2>&1)"; then
+  fail "git-pull-upstream in a subdirectory, build not fixed: succeeded: ${pull_upstream_output}"
+fi
+session_id="$(sed -n -e '/^--session-id$/{n;p;}' "${STUB_ARGS}")"
+session_dir="$(cd "${feature_dir}" && pwd -P)"
+if ! grep -q -x -F "cd ${session_dir} && claude --resume ${session_id}" "${feature_dir}/AGENT-TODO.md"; then
+  fail "git-pull-upstream in a subdirectory, build not fixed: AGENT-TODO.md lacks the command that starts at the top level: $(cat "${feature_dir}/AGENT-TODO.md" 2> /dev/null)"
+fi
+echo "fine" > "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Fix the build by hand"
+if ! pull_upstream_output="$(cd "${feature_dir}/sub" && MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT='' \
+  "${COMMANDS_DIR}/git-pull-upstream" --no-llm 2>&1)"; then
+  fail "git-pull-upstream in a subdirectory, build fixed by hand: failed: ${pull_upstream_output}"
+fi
+if [ -e "${feature_dir}/AGENT-TODO.md" ]; then
+  fail "git-pull-upstream in a subdirectory, build fixed by hand: AGENT-TODO.md was not deleted: $(cat "${feature_dir}/AGENT-TODO.md")"
+fi
 build=0
 
 ## An agent that is not installed is not asked to fix the build.  The merge

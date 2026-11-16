@@ -50,6 +50,13 @@ export STUB_LOG
 ## upstream changes during a run.
 cat > "${WORK_DIR}/test-bin/claude" << 'EOF'
 #!/bin/sh
+# `agent_ready` checks that the agent can run.
+case "$*" in
+  *--no-session-persistence*)
+    echo OK
+    exit 0
+    ;;
+esac
 echo claude >> "${STUB_LOG}"
 cat > /dev/null
 if [ -n "${STUB_ADVANCE}" ] && ! grep -q -x advanced "${STUB_LOG}"; then
@@ -203,7 +210,7 @@ fi
 expected="$(printf '%s\n' \
   'resolve-conflicts: the dependency chains that failed or that have changes to review:' \
   '* no such first (failed)' \
-  '    failed to pull no such first' \
+  '    failed to pull no such first, while checking no such first' \
   '* no such first myrepo-branch-feature (skipped)' \
   '* no such first myrepo-branch-main (skipped)' \
   'resolve-conflicts: 0 of 2 dependency chains failed, and 2 were skipped; first directories that could not be pulled: 1')"

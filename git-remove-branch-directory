@@ -530,20 +530,12 @@ ${count_pr_unlanded_ref}" "$@")"
     count_pr_unlanded_tip="$(git -C "${count_pr_unlanded_dir}" rev-parse \
       --verify --quiet "${count_pr_unlanded_ref}^{commit}")" || continue
     # Each line is "COMMIT HEAD" for one landed pull request, where COMMIT is
-    # its last commit and HEAD its head repository, or "-" if that was
-    # deleted.  The `head` parameter names only the head repository's owner,
-    # who might have both the base repository and a fork of it.
-    count_pr_unlanded_prs="$(with_timeout "${github_query_seconds}" \
-      gh api -X GET "repos/${pr_base_repo}/pulls" \
-      -f "head=${pr_head_repo%%/*}:${pr_head_branch}" -f state=closed -f per_page=100 \
-      --hostname github.com --paginate \
-      --jq '.[] | select(.merged_at) | "\(.head.sha) \(.head.repo.full_name // "-")"' \
-      < /dev/null 2> /dev/null)" || continue
+    # its last commit and HEAD its head repository.
+    count_pr_unlanded_prs="$(branch_pulls "${pr_base_repo}" "${pr_head_repo}" \
+      "${pr_head_branch}" closed 'select(.merged_at) | .head.sha' 2> /dev/null)" || continue
     count_pr_unlanded_held=0
-    # GitHub ignores the case of a repository's name, so a remote URL might
-    # spell it differently than GitHub's answer does.
     for count_pr_unlanded_commit in $(printf '%s\n' "${count_pr_unlanded_prs}" \
-      | awk -v head="${pr_head_repo}" 'tolower($2) == tolower(head) { print $1 }'); do
+      | awk '{ print $1 }'); do
       if [ "${count_pr_unlanded_commit}" = "${count_pr_unlanded_tip}" ]; then
         count_pr_unlanded_held=1
         break

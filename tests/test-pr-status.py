@@ -1,10 +1,12 @@
 """Tests for the pr-status script that do not access GitHub or local repositories."""
 
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -201,15 +203,50 @@ class LandingLineTest(unittest.TestCase):
 
     def test_normalizes_ref(self):
         """A PR in the same repository is "#N", and others are "owner/repo#N"."""
-        self.assertEqual(pr_status.landing_line("Land after #10.", REPO), ("after", "#10"))
+        self.assertEqual(pr_status.landing_line("Land after #10.", REPO.gh), ("after", "#10"))
         self.assertEqual(
-            pr_status.landing_line("Land before https://github.com/owner/repo/pull/20", REPO),
+            pr_status.landing_line("Land before https://github.com/owner/repo/pull/20", REPO.gh),
             ("before", "#20"),
         )
         self.assertEqual(
-            pr_status.landing_line("Land with https://github.com/other/repo/pull/30", REPO),
+            pr_status.landing_line("Land with https://github.com/other/repo/pull/30", REPO.gh),
             ("with", "other/repo#30"),
         )
+
+
+class LandAfterNumbersTest(unittest.TestCase):
+    """Tests for land_after_numbers and pr-status --print-land-after."""
+
+    BODY = (
+        "Land after #9.\r\n"
+        "Land after Owner/Repo#09 (it adds the helper).\n"
+        "Land after https://github.com/owner/repo/pull/11\n"
+        "Land after #12 and #13.\n"
+        "Land after other/repo#14.\n"
+        "Land before #15.\n"
+        "Text that says Land after #16.\n"
+    )
+
+    def test_numbers(self):
+        """Only "Land after" lines that name one PR of the repository, in any case, count."""
+        self.assertEqual(pr_status.land_after_numbers(self.BODY, "owner/repo"), [9, 9, 11])
+
+    def test_print_land_after(self):
+        """pr-status --print-land-after prints the numbers, one per line."""
+        result = subprocess.run(
+            [
+                sys.executable,
+                PrintConflictingPushChainsTest.PR_STATUS,
+                "--print-land-after",
+                "owner/repo",
+            ],
+            input=self.BODY,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "9\n9\n11\n")
 
 
 class StatedPrerequisitesTest(unittest.TestCase):
@@ -703,6 +740,27 @@ class ModelTest(unittest.TestCase):
             ["2 (1 outdated) ❌ 🔀", "❌ 🔀", "🔀", "1 ✅"],
         )
 
+    def test_unresolved_threads_shows_unknown_reviews_and_ci(self):
+        """The cell shows "?" for the threads and CI results if GitHub could not say them."""
+        model = self.conflicting_model()
+        model.repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), known=False)
+        self.assertEqual(
+            [model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["? 🔀", "? 🔀", "? 🔀", "?"]
+        )
+
+    def test_load_reviews_and_ci_survives_github_failure(self):
+        """A failure to ask GitHub yields unknown reviews and CI results, and a warning."""
+        error = pr_status.CommandError(1, ["gh"], "", "HTTP 502: Bad Gateway\n")
+        with (
+            mock.patch.object(pr_status, "review_thread_query", side_effect=error),
+            mock.patch("sys.stderr") as stderr,
+        ):
+            result = pr_status.load_reviews_and_ci(REPO)
+        self.assertEqual(result, pr_status.ReviewsAndCi({}, set(), set(), known=False))
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("cannot read the review threads and CI results of owner/repo", written)
+        self.assertIn("HTTP 502: Bad Gateway", written)
+
     def test_depends_on_marks_conflicting_direct_prerequisites(self):
         """The cell shows 🔀 after each conflicting direct prerequisite, or else after master."""
         model = self.conflicting_model()
@@ -864,8 +922,13 @@ class DependsOnTest(unittest.TestCase):
         repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(failed), set())
         return repo
 
-    def test_marks_failed_prerequisites(self):
-        """A direct, transitive, or external prerequisite whose CI failed has a red X."""
+    def prerequisites_model(self):
+        """Build a model in which #1 depends on #2, which depends on #3 and other/repo#5.
+
+        Returns:
+            The model of owner/repo, united with the model of other/repo, in which the CI of
+            #3 and of other/repo#5 failed.
+        """
         repo = self.repo("owner/repo", {3})
         repo.prs = {
             n: {"body": body, "baseRefName": "master", "owner": "owner", "headRefName": f"b{n}"}
@@ -883,12 +946,22 @@ class DependsOnTest(unittest.TestCase):
             model = pr_status.Model(repo, {"repos": {"owner/repo": {}}})
         other_model = pr_status.Model(other, {"repos": {"other/repo": {}}})
         pr_status.unite_partners([model, other_model])
+        return model
 
-        def link(gh, n):
-            return (
-                f"[{'#' if gh == 'owner/repo' else gh + '#'}{n}](https://github.com/{gh}/pull/{n})"
-            )
+    @staticmethod
+    def link(gh, n):
+        """Return the link that depends_on makes to a PR.
 
+        Returns:
+            A Markdown link to PR n of the repository whose GitHub slug is gh, such as
+            "owner/repo".
+        """
+        return f"[{'#' if gh == 'owner/repo' else gh + '#'}{n}](https://github.com/{gh}/pull/{n})"
+
+    def test_marks_failed_prerequisites(self):
+        """A direct, transitive, or external prerequisite whose CI failed has a red X."""
+        model = self.prerequisites_model()
+        link = self.link
         self.assertEqual(
             pr_status.depends_on(model, 2, mark_failed=True),
             f"{link('owner/repo', 3)} ❌ and {link('other/repo', 5)} ❌",
@@ -902,6 +975,21 @@ class DependsOnTest(unittest.TestCase):
             f"{link('owner/repo', 3)} and {link('other/repo', 5)}",
         )
 
+    def test_marks_prerequisites_whose_ci_is_unknown(self):
+        """An open prerequisite has a "?" if GitHub could not say what its CI results are."""
+        model = self.prerequisites_model()
+        for m in model.by_gh.values():
+            m.repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), known=False)
+        link = self.link
+        self.assertEqual(
+            pr_status.depends_on(model, 2, mark_failed=True),
+            f"{link('owner/repo', 3)} ? and {link('other/repo', 5)} ?",
+        )
+        self.assertEqual(
+            pr_status.depends_on(model, 1, mark_failed=True),
+            f"{link('owner/repo', 2)} ? (and transitively {link('owner/repo', 3)} ?)",
+        )
+
 
 class ShellWordTest(unittest.TestCase):
     """Tests for shell_word."""
@@ -911,6 +999,182 @@ class ShellWordTest(unittest.TestCase):
         self.assertEqual(pr_status.shell_word("repo#100"), "repo#100")
         self.assertEqual(pr_status.shell_word("#100"), "'#100'")
         self.assertEqual(pr_status.shell_word("a#1, b#2"), "'a#1, b#2'")
+
+
+def completed(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
+    """Return the result of a command, as subprocess.run would, for a mock of it.
+
+    Returns:
+        A CompletedProcess with the given exit status and output.
+    """
+    return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+
+class RunTest(unittest.TestCase):
+    """Tests for run."""
+
+    def run_with(self, cmd: list[str], *results: subprocess.CompletedProcess):
+        """Run cmd with run, with subprocess.run returning results in turn and no waiting.
+
+        Returns:
+            The output of run, or the CommandError that it raised; and the mock of
+            subprocess.run.
+        """
+        with (
+            mock.patch.object(pr_status.subprocess, "run", side_effect=results) as sub,
+            mock.patch.object(pr_status, "time") as clock,
+            mock.patch.object(pr_status, "GH_RETRIES_EXHAUSTED", self.exhausted),
+            mock.patch("sys.stderr") as self.stderr,
+        ):
+            self.sleep = clock.sleep
+            try:
+                outcome = pr_status.run(cmd)
+            except pr_status.CommandError as error:
+                outcome = error
+            self.exhausted = pr_status.GH_RETRIES_EXHAUSTED
+        return outcome, sub
+
+    def setUp(self):
+        """Start with no gh command that failed even after every retry."""
+        self.exhausted = False
+
+    def written(self):
+        """Return what the last run_with wrote to standard error.
+
+        Returns:
+            The text, concatenated.
+        """
+        return "".join(call.args[0] for call in self.stderr.write.call_args_list)
+
+    def test_error_message_includes_standard_error(self):
+        """The message of a failed command says why it failed."""
+        outcome, sub = self.run_with(
+            ["gh", "api"], completed(1, stderr="HTTP 401: Bad credentials\n")
+        )
+        self.assertIsInstance(outcome, subprocess.CalledProcessError)
+        self.assertIn("HTTP 401: Bad credentials", str(outcome))
+        self.assertEqual(sub.call_count, 1)
+
+    def test_transient_gh_failure_is_retried(self):
+        """A gh command that fails with a transient error is run again."""
+        outcome, sub = self.run_with(
+            ["gh", "api", "graphql"],
+            completed(1, stderr="gh: HTTP 502: Bad Gateway\n"),
+            completed(0, stdout="data\n"),
+        )
+        self.assertEqual(outcome, "data\n")
+        self.assertEqual(sub.call_count, 2)
+
+    def test_persistent_transient_gh_failure_fails(self):
+        """A gh command that keeps failing with a transient error fails after the retries."""
+        failure = completed(1, stderr="You have exceeded a secondary rate limit.\n")
+        outcome, sub = self.run_with(["gh", "api"], failure, failure, failure)
+        self.assertIsInstance(outcome, pr_status.CommandError)
+        self.assertEqual(sub.call_count, 3)
+
+    def test_gh_failures_that_are_retried(self):
+        """A gh command that fails with any of several transient errors is run again."""
+        for message in [
+            "error connecting to api.github.com\ncheck your internet connection",
+            "HTTP 500: Internal Server Error",
+            "dial tcp 140.82.112.6:443: connect: connection refused",
+            "Could not resolve host: api.github.com",
+            "Post https://api.github.com/graphql: net/http: TLS handshake timeout",
+            "GraphQL: Something went wrong while executing your query.",
+        ]:
+            with self.subTest(message=message):
+                outcome, sub = self.run_with(
+                    ["gh", "api"], completed(1, stderr=message + "\n"), completed(0, stdout="x")
+                )
+                self.assertEqual(outcome, "x")
+                self.assertEqual(sub.call_count, 2)
+
+    def test_retry_after_rate_limit_waits_a_minute(self):
+        """Each retry after a rate limit waits at least GH_RATE_LIMIT_DELAY seconds."""
+        failure = completed(1, stderr="You have exceeded a secondary rate limit.\n")
+        self.run_with(["gh", "api"], failure, failure, completed(0))
+        self.assertEqual(
+            [call.args[0] for call in self.sleep.call_args_list],
+            [pr_status.GH_RATE_LIMIT_DELAY, max(pr_status.GH_RETRY_DELAYS[1], 60)],
+        )
+
+    def test_retry_after_other_failure_waits_briefly(self):
+        """The first retry after a transient failure other than a rate limit waits briefly."""
+        failure = completed(1, stderr="HTTP 502: Bad Gateway\n")
+        self.run_with(["gh", "api"], failure, completed(0))
+        self.sleep.assert_called_once_with(pr_status.GH_RETRY_DELAYS[0])
+
+    def test_gh_is_not_retried_after_retries_are_exhausted(self):
+        """After a gh command fails even after every retry, later gh commands are not retried."""
+        failure = completed(1, stderr="HTTP 503: Service Unavailable\n")
+        self.run_with(["gh", "api"], failure, failure, failure)
+        self.assertTrue(self.exhausted)
+        outcome, sub = self.run_with(["gh", "pr", "view", "1"], failure)
+        self.assertIsInstance(outcome, pr_status.CommandError)
+        self.assertEqual(sub.call_count, 1)
+        self.sleep.assert_not_called()
+
+    def test_error_message_abbreviates_long_arguments(self):
+        """The message of a failed command is one line, even if an argument spans lines."""
+        query = "query={ viewer {\n" + "x" * 1000 + "\n} }"
+        outcome, _ = self.run_with(
+            ["gh", "api", "graphql", "-f", query], completed(1, stderr="HTTP 401: Bad\n")
+        )
+        message = str(outcome)
+        self.assertNotIn("\n", message)
+        self.assertNotIn("xxx", message)
+        self.assertIn("gh api graphql -f 'query={ viewer {...' failed: HTTP 401: Bad", message)
+
+    def test_retry_notice_abbreviates_long_arguments(self):
+        """The notice of a retry is one line, even if an argument spans lines."""
+        failure = completed(1, stderr="HTTP 502: Bad Gateway\n")
+        self.run_with(
+            ["gh", "api", "graphql", "-f", "query={\n" + "x" * 1000], failure, completed(0)
+        )
+        self.assertEqual(
+            self.written(),
+            "pr-status: gh api graphql -f 'query={...' failed: HTTP 502: Bad Gateway;"
+            f" retrying in {pr_status.GH_RETRY_DELAYS[0]} seconds\n",
+        )
+
+    def test_query_pr_states_retries_transient_failure(self):
+        """query_pr_states runs its query again after a transient failure."""
+        data = '{"data": {"r0": {"pullRequest": {"state": "MERGED"}}}}'
+        with (
+            mock.patch.object(
+                pr_status.subprocess,
+                "run",
+                side_effect=[completed(1, stderr="HTTP 502: Bad Gateway\n"), completed(0, data)],
+            ) as sub,
+            mock.patch.object(pr_status, "time"),
+            mock.patch.object(pr_status, "GH_RETRIES_EXHAUSTED", False),
+            mock.patch("sys.stderr"),
+        ):
+            states = pr_status.query_pr_states(["o/r#1"])
+        self.assertEqual(states, {"o/r#1": "landed"})
+        self.assertEqual(sub.call_count, 2)
+
+    def test_query_pr_states_warns_of_failure(self):
+        """query_pr_states warns if GitHub cannot be asked."""
+        failure = completed(1, stderr="HTTP 401: Bad credentials\n")
+        with (
+            mock.patch.object(pr_status.subprocess, "run", return_value=failure),
+            mock.patch.object(pr_status, "GH_RETRIES_EXHAUSTED", False),
+            mock.patch("sys.stderr") as stderr,
+        ):
+            states = pr_status.query_pr_states(["o/r#1"])
+        self.assertEqual(states, {})
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("cannot read the states of the PRs", written)
+        self.assertIn("HTTP 401: Bad credentials", written)
+
+    def test_other_command_is_not_retried(self):
+        """A command other than gh is not run again, whatever its error."""
+        outcome, sub = self.run_with(
+            ["git", "fetch"], completed(1, stderr="Connection timed out\n")
+        )
+        self.assertIsInstance(outcome, pr_status.CommandError)
+        self.assertEqual(sub.call_count, 1)
 
 
 class ApplyDescriptionUpdatesTest(unittest.TestCase):
@@ -981,34 +1245,88 @@ class ChainConflictPrsTest(unittest.TestCase):
         )
 
 
+def transitive_closure(direct):
+    """Return the transitive closure of the given graph.
+
+    Args:
+        direct: a graph, as a map from each PR's number to the numbers of the PRs that it
+            depends on directly.
+
+    Returns:
+        A map from each PR's number to the numbers of the PRs that it depends on, directly
+        or transitively.
+    """
+    result = {}
+    for n in direct:
+        reached = set()
+        pending = list(direct[n])
+        while pending:
+            d = pending.pop()
+            if d not in reached:
+                reached.add(d)
+                pending += direct[d]
+        result[n] = reached
+    return result
+
+
+def dormant_model(
+    direct, master_conflicts, dormant=(), cycle_affected=(), deleted_heads=(), all_deps=None
+):
+    """Return a stand-in for a Model, whose attributes about dormant PRs Model computes.
+
+    Args:
+        direct: the direct prerequisites of each PR in the update graph, as a map from its
+            number to theirs
+        master_conflicts: the files in which each PR conflicts with upstream, as a map from
+            its number to a list of files
+        dormant: the numbers of the dormant PRs
+        cycle_affected: the numbers of the PRs that are in or after a cycle of the update
+            graph
+        deleted_heads: the numbers of the PRs whose head repository has been deleted
+        all_deps: the transitive prerequisites of some PRs in the update graph, as a map from
+            each one's number to theirs, which replace those of the transitive closure of
+            direct
+
+    Returns:
+        The stand-in.
+    """
+    repo = types.SimpleNamespace(
+        gh="owner/repo",
+        default_branch="master",
+        prs={n: {"owner": "" if n in deleted_heads else "owner"} for n in direct},
+        master_conflicts=master_conflicts,
+        pair_conflicts={},
+        dormant=set(dormant),
+    )
+    model = types.SimpleNamespace(
+        repo=repo,
+        open=set(direct),
+        update_direct=direct,
+        update_all_deps=transitive_closure(direct) | (all_deps or {}),
+        update_levels=pr_status.Model.graph_levels(direct),
+        update_cycle_affected=set(cycle_affected),
+    )
+    model.chain_candidates = lambda: pr_status.Model.chain_candidates(model)
+    model.dormant_omitted = pr_status.Model.dormant_omitted.func(model)
+    model.dormant_conflicting = pr_status.Model.dormant_conflicting.func(model)
+    return model
+
+
 class PushChainsTest(unittest.TestCase):
     """Tests for push_chains."""
 
     @staticmethod
-    def chains(
-        direct, master_conflicts, has_upstream=True, conflicts_only=False, cycle_affected=()
-    ):
+    def chains(direct, master_conflicts, has_upstream=True, conflicts_only=False, **kwargs):
         """Run push_chains on PRs whose direct prerequisites in the update graph are direct.
 
-        Each PR n has the working copy "pr<n>".
+        Each PR n has the working copy "pr<n>".  The keyword arguments are those of
+        dormant_model.
 
         Returns:
             The chains.
         """
-        repo = types.SimpleNamespace(
-            gh="owner/repo",
-            default_branch="master",
-            prs={n: {"owner": "owner"} for n in direct},
-            master_conflicts=master_conflicts,
-            pair_conflicts={},
-        )
-        model = types.SimpleNamespace(
-            repo=repo,
-            open=set(direct),
-            update_direct=direct,
-            update_levels=pr_status.Model.graph_levels(direct),
-            update_cycle_affected=set(cycle_affected),
-        )
+        model = dormant_model(direct, master_conflicts, **kwargs)
+        repo = model.repo
         upstream = {"master": pr_status.GitEntry("owner", "repo", "master")} if has_upstream else {}
         # pr_directories receives the PR's data, so look up the PR's number by identity.
         ids = {id(repo.prs[n]): n for n in direct}
@@ -1070,6 +1388,52 @@ class PushChainsTest(unittest.TestCase):
         chains = self.chains({1: set(), 2: {1}, 3: {2}, 4: {2}}, {2: ["file"]}, conflicts_only=True)
         self.assertEqual(chains, [["master", "pr1", "pr2", "pr3"]])
 
+    def test_conflicts_only_omits_dormant_pr(self):
+        """The chains with conflicts omit a dormant PR; the other chains keep it."""
+        chains = self.chains({1: set(), 2: set()}, {1: ["file"], 2: ["file"]}, dormant={1})
+        self.assertEqual(chains, [["master", "pr1"], ["master", "pr2"]])
+        chains = self.chains(
+            {1: set(), 2: set()}, {1: ["file"], 2: ["file"]}, conflicts_only=True, dormant={1}
+        )
+        self.assertEqual(chains, [["master", "pr2"]])
+
+    def test_conflicts_only_omits_dormant_pr_and_dormant_dependents(self):
+        """A dormant PR whose dependents are all dormant is omitted with them."""
+        chains = self.chains(
+            {1: set(), 2: {1}, 3: set()},
+            {1: ["file"], 3: ["file"]},
+            conflicts_only=True,
+            dormant={1, 2},
+        )
+        self.assertEqual(chains, [["master", "pr3"]])
+
+    def test_conflicts_only_keeps_dormant_pr_with_newer_dependent(self):
+        """A dormant PR that a PR that is not dormant builds on stays in the chains."""
+        chains = self.chains({1: set(), 2: {1}}, {1: ["file"]}, conflicts_only=True, dormant={1})
+        self.assertEqual(chains, [["master", "pr1", "pr2"]])
+
+    def test_conflicts_only_omits_dormant_pr_whose_dependents_are_in_no_chain(self):
+        """A dependent in or after a cycle, or with a deleted head, keeps no dormant PR."""
+        for kwargs in ({"cycle_affected": {2}}, {"deleted_heads": {2}}):
+            with self.subTest(**kwargs):
+                chains = self.chains(
+                    {1: set(), 2: {1}}, {1: ["file"]}, conflicts_only=True, dormant={1}, **kwargs
+                )
+                self.assertEqual(chains, [])
+
+    def test_conflicts_only_keeps_dormant_pr_with_transitive_newer_dependent(self):
+        """A dormant PR that a PR that is not dormant builds on transitively stays."""
+        # PR 3's branch contains PR 1's commits through PR 2's, so the update graph lacks
+        # the edge from PR 2 to PR 1.
+        chains = self.chains(
+            {1: set(), 2: set(), 3: {2}},
+            {1: ["file"]},
+            conflicts_only=True,
+            dormant={1, 2},
+            all_deps={3: {1, 2}},
+        )
+        self.assertEqual(chains, [["master", "pr1"]])
+
     def test_no_chain_touches_cycle(self):
         """No chain pushes into or out of a PR in or after a cycle."""
         chains = self.chains(
@@ -1085,14 +1449,19 @@ class NewSnapshotTest(unittest.TestCase):
         """The chains with conflicts of every repository, in order, survive a JSON round trip."""
         conflicting = [
             pr_status.PushChains(
-                [["a", "a-branch-x"]], [], True, [pr_status.MissingBranch("a", "owner:master")]
+                [["a", "a-branch-x"]],
+                [],
+                True,
+                [pr_status.MissingBranch("a", "owner:master")],
+                [],
             ),
-            pr_status.PushChains([], [1], True, []),
+            pr_status.PushChains([], [1], True, [], []),
             pr_status.PushChains(
                 [["b", "b-branch y"], ["b", "b-branch-z"]],
                 [],
                 True,
                 [pr_status.MissingBranch("b dir", "mernst:fix")],
+                [],
             ),
         ]
         snapshot = json.loads(json.dumps(pr_status.new_snapshot("now", {"repo": {}}, conflicting)))
@@ -1339,7 +1708,11 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
         snapshot = pr_status.new_snapshot(
             "now",
             {},
-            [pr_status.PushChains([["a", "a-branch-x"], ["a", "a-branch y", "z"]], [], True, [])],
+            [
+                pr_status.PushChains(
+                    [["a", "a-branch-x"], ["a", "a-branch y", "z"]], [], True, [], []
+                )
+            ],
         )
         result = self.run_option(json.dumps(snapshot))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1355,7 +1728,9 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
     def test_prints_missing_branches(self):
         """`--print-missing-branches` prints only the branches, one per line."""
         snapshot = pr_status.new_snapshot(
-            "now", {}, [pr_status.PushChains([], [], False, [pr_status.MissingBranch("a", "o:m")])]
+            "now",
+            {},
+            [pr_status.PushChains([], [], False, [pr_status.MissingBranch("a", "o:m")], [])],
         )
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / pr_status_config.SNAPSHOT).write_text(json.dumps(snapshot))
@@ -1380,6 +1755,8 @@ class ExclusiveOptionsTest(unittest.TestCase):
             ["--check", "--print-conflicting-push-chains"],
             ["--print-document", "--print-conflicting-push-chains"],
             ["--print-config", "--print-document"],
+            ["--print-land-after", "o/r", "--check"],
+            ["--print-land-after", "o/r", "--highlight", "repo#1"],
             ["--print-conflicting-push-chains", "--highlight", "repo#1"],
             ["--print-conflicting-push-chains", "--print-missing-branches"],
             ["--print-missing-branches", "--highlight", "repo#1"],
@@ -1736,8 +2113,8 @@ class PushCommandsTest(unittest.TestCase):
     def test_no_pull_first_for_repeated_first_directory(self):
         """A chain that starts with an earlier chain's first directory does not pull it."""
         chains = [
-            pr_status.PushChains([["up", "a", "b"], ["up", "c"], ["b", "d"]], [], True, []),
-            pr_status.PushChains([["up2", "e"], ["up", "f"]], [], True, []),
+            pr_status.PushChains([["up", "a", "b"], ["up", "c"], ["b", "d"]], [], True, [], []),
+            pr_status.PushChains([["up2", "e"], ["up", "f"]], [], True, [], []),
         ]
         commands = pr_status.push_commands([self.model(), self.model()], chains, "/base")
         self.assertEqual(
@@ -1751,6 +2128,26 @@ class PushCommandsTest(unittest.TestCase):
             ],
         )
         self.assertEqual(commands.chain_count, 5)
+
+    def test_dormant_note(self):
+        """The notes list the omitted dormant PRs with conflicts, not as lacking a working copy."""
+        repo = types.SimpleNamespace(
+            label="repo", links=lambda ns: ", ".join(f"#{n}" for n in ns), dormant_after_days=730
+        )
+        model = types.SimpleNamespace(
+            repo=repo, update_cycle_affected=set(), open={1, 2, 3}, dormant_conflicting=[1]
+        )
+        chains = [pr_status.PushChains([], [1, 2, 3], True, [], [1, 3])]
+        self.assertEqual(
+            pr_status.push_commands([model], chains, "/base").notes,
+            [
+                "repo PRs with no working copy, which these commands omit: #2",
+                (
+                    "repo PRs whose head commit is more than 730 days old, which the dependency"
+                    " chains with conflicts omit: #1"
+                ),
+            ],
+        )
 
 
 class GenUpdatingBranchesTest(unittest.TestCase):
@@ -1826,10 +2223,34 @@ class SimpleSectionsTest(unittest.TestCase):
             default_branch="master",
             links=lambda ns: ", ".join(f"#{n}" for n in ns),
         )
-        model = types.SimpleNamespace(repo=repo, cyclic=[], open=set())
+        model = types.SimpleNamespace(repo=repo, cyclic=[], open=set(), dormant_conflicting=[])
         self.assertEqual(
             pr_status.gen_status([model]),
             ["", "## Status", "", "* repo PRs that conflict with `master`: #1.", ""],
+        )
+
+    def test_status_dormant(self):
+        """The section lists the dormant PRs that the chains with conflicts would contain."""
+        repo = types.SimpleNamespace(
+            label="repo",
+            master_conflicts={},
+            default_branch="master",
+            links=lambda ns: ", ".join(f"#{n}" for n in ns),
+            dormant_after_days=730,
+        )
+        model = types.SimpleNamespace(repo=repo, cyclic=[], open=set(), dormant_conflicting=[1, 2])
+        self.assertEqual(
+            pr_status.gen_status([model]),
+            [
+                "",
+                "## Status",
+                "",
+                (
+                    "* repo PRs whose head commit is more than 730 days old, which the"
+                    " dependency chains with conflicts omit: #1, #2."
+                ),
+                "",
+            ],
         )
 
 
@@ -1898,6 +2319,200 @@ class LoadConfigTest(unittest.TestCase):
         ):
             pr_status.load_config("pr-status")
         self.assertIn('repos.a has no "clone"', str(cm.exception.code))
+
+
+# Clones of a fork me/git of git/git, on branches "master" and "x".
+GIT_CLONES = {
+    "git-fork-me": pr_status.GitEntry("me", "git", "master"),
+    "git-fork-me-branch-x": pr_status.GitEntry("me", "git", "x"),
+}
+
+# Clones of o/tools, on branches "main" and "y".
+TOOLS_CLONES = {
+    "tools": pr_status.GitEntry("o", "tools", "main"),
+    "tools-branch-y": pr_status.GitEntry("o", "tools", "y"),
+}
+
+# The repositories that "gh repo view" describes, as dicts parsed from its JSON, with keys
+# "nameWithOwner", "parent", and "defaultBranchRef", by GitHub slug, such as "o/tools".
+REPO_VIEWS = {
+    "me/git": {
+        "nameWithOwner": "me/git",
+        "parent": {"owner": {"login": "git"}, "name": "git"},
+        "defaultBranchRef": {"name": "master"},
+    },
+    "git/git": {
+        "nameWithOwner": "git/git",
+        "parent": None,
+        "defaultBranchRef": {"name": "master"},
+    },
+    "gitgitgadget/git": {
+        "nameWithOwner": "gitgitgadget/git",
+        "parent": {"owner": {"login": "git"}, "name": "git"},
+        "defaultBranchRef": {"name": "master"},
+    },
+    "u/git": {
+        "nameWithOwner": "u/git",
+        "parent": {"owner": {"login": "gitgitgadget"}, "name": "git"},
+        "defaultBranchRef": {"name": "master"},
+    },
+    "o/tools": {
+        "nameWithOwner": "o/tools",
+        "parent": None,
+        "defaultBranchRef": {"name": "main"},
+    },
+}
+
+
+class DefaultConfigTest(unittest.TestCase):
+    """Tests for default_config."""
+
+    def default_config(self, prs, entries=None, identity_error=False):
+        """Return the config that default_config constructs, given the prs of git/git.
+
+        What default_config writes to standard error is in self.stderr afterward.
+
+        Args:
+            prs: the open PRs of each repository, as dicts parsed from the JSON of "gh pr
+                list", with keys "author", "headRefName", and "headRepositoryOwner".
+            entries: the git clones, as git_entries returns them; by default, GIT_CLONES and
+                TOOLS_CLONES.
+            identity_error: True if GitHub does not tell who the user is, as for the token of
+                a GitHub App; then each `gh` command that needs to know, such as `gh api user`
+                or `gh pr list --author @me`, fails.
+
+        Returns:
+            The config, as default_config returns it.
+        """
+        if entries is None:
+            entries = {**GIT_CLONES, **TOOLS_CLONES}
+
+        def fake_run(cmd):
+            """Return what gh prints for the given command, whose user is "me".
+
+            Args:
+                cmd: a "gh repo view", "gh api user", or "gh pr list" command, as a list.
+
+            Returns:
+                What gh prints, such as the JSON of a repository.
+            """
+            if cmd[1:3] == ["api", "user"] or "@me" in cmd:
+                if identity_error:
+                    stderr = "HTTP 403: Resource not accessible by integration"
+                    raise pr_status.CommandError(1, cmd, "", stderr)
+                if cmd[1:3] == ["api", "user"]:
+                    return "me\n"
+            if cmd[1:3] == ["pr", "list"]:
+                if "--author" in cmd:
+                    return json.dumps([pr for pr in prs if pr["author"]["login"] == "me"])
+                return json.dumps(prs)
+            return json.dumps(REPO_VIEWS[cmd[3]])
+
+        def fake_fork_source(owner, name):
+            """Return the GitHub slug of the parent of the given repository.
+
+            Args:
+                owner: the owner of a repository in REPO_VIEWS, such as "me".
+                name: the repository's name, such as "git".
+
+            Returns:
+                The parent's GitHub slug, such as "git/git", or None if the repository is
+                not a fork.
+            """
+            parent = REPO_VIEWS[f"{owner}/{name}"]["parent"]
+            return parent and f"{parent['owner']['login']}/{parent['name']}"
+
+        self.stderr = io.StringIO()
+        with (
+            mock.patch.object(pr_status, "git_entries", return_value=entries),
+            mock.patch.object(pr_status, "run", side_effect=fake_run),
+            mock.patch.object(pr_status, "fork_source", side_effect=fake_fork_source),
+            mock.patch("sys.stderr", self.stderr),
+        ):
+            return pr_status.default_config("/base")
+
+    def reported(self, prs, identity_error=False):
+        """Return the repositories that default_config reports on, given git/git's prs.
+
+        Args:
+            prs: git/git's open PRs, as default_config takes them.
+            identity_error: True if GitHub does not tell who the user is, as default_config
+                takes it.
+
+        Returns:
+            The GitHub slugs, such as "o/tools", of the repositories in the config.
+        """
+        cfg = self.default_config(prs, identity_error=identity_error)
+        return sorted(r["gh"] for r in cfg["repos"].values())
+
+    @staticmethod
+    def pr(author, owner, branch):
+        """Return a PR of git/git by the given author from a branch of owner's repository.
+
+        Args:
+            author: the login of the PR's author, such as "me".
+            owner: the owner of the PR's head repository, such as "me", or None if GitHub
+                does not know the head repository, as when it has been deleted.
+            branch: the PR's head branch, such as "x".
+
+        Returns:
+            The PR, as a dict like those parsed from the JSON of "gh pr list".
+        """
+        return {
+            "author": {"login": author},
+            "headRefName": branch,
+            "headRepositoryOwner": None if owner is None else {"login": owner},
+        }
+
+    def test_no_own_pr(self):
+        """git/git, none of whose open PRs is the user's, is not reported on."""
+        self.assertEqual(self.reported([self.pr("other", "other", "x")]), ["o/tools"])
+        self.assertIn("skipping git/git, which has no open PR of yours", self.stderr.getvalue())
+
+    def test_own_pr(self):
+        """git/git is reported on if the user wrote one of its open PRs."""
+        self.assertEqual(self.reported([self.pr("me", "me", "z")]), ["git/git", "o/tools"])
+
+    def test_pr_with_working_copy(self):
+        """git/git is reported on if one of its open PRs has a working copy."""
+        self.assertEqual(self.reported([self.pr("bot", "me", "x")]), ["git/git", "o/tools"])
+
+    def test_pr_with_working_copy_owner_in_uppercase(self):
+        """A PR's head repository owner matches a clone's owner regardless of case."""
+        self.assertEqual(self.reported([self.pr("bot", "Me", "x")]), ["git/git", "o/tools"])
+
+    def test_pr_without_head_repository(self):
+        """A PR whose head repository GitHub does not know has no working copy."""
+        self.assertEqual(self.reported([self.pr("bot", None, "x")]), ["o/tools"])
+
+    def test_pr_with_working_copy_unknown_user(self):
+        """A PR with a working copy counts even if GitHub does not tell who the user is."""
+        prs = [self.pr("bot", "me", "x")]
+        self.assertEqual(self.reported(prs, identity_error=True), ["git/git", "o/tools"])
+        # The warning names the command that failed.
+        self.assertIn("--author @me", self.stderr.getvalue())
+
+    def test_fork_of_gitgitgadget_without_own_pr(self):
+        """gitgitgadget/git, none of whose open PRs is the user's, is not reported on."""
+        entries = {
+            "git-fork-u": pr_status.GitEntry("u", "git", "master"),
+            "git-fork-u-branch-x": pr_status.GitEntry("u", "git", "x"),
+            **TOOLS_CLONES,
+        }
+        cfg = self.default_config([self.pr("other", "other", "x")], entries=entries)
+        self.assertEqual([r["gh"] for r in cfg["repos"].values()], ["o/tools"])
+        self.assertIn(
+            "skipping gitgitgadget/git, which has no open PR of yours", self.stderr.getvalue()
+        )
+
+    def test_only_git_git_without_own_pr(self):
+        """With only clones of git/git, none of whose open PRs is the user's, says so."""
+        with self.assertRaises(pr_status.ConfigError) as cm:
+            self.default_config([self.pr("other", "other", "x")], entries=GIT_CLONES)
+        self.assertEqual(
+            str(cm.exception), "no pr-status-config.json and no GitHub repository to report on"
+        )
+        self.assertIn("skipping git/git, which has no open PR of yours", self.stderr.getvalue())
 
 
 # Clones of the repositories o/a and o/b, of a fork of o/a, of an unrelated repository
@@ -1970,6 +2585,51 @@ def config_repo(**extra):
             **extra,
         },
     )
+
+
+class DormantPrsTest(unittest.TestCase):
+    """Tests for dormant_prs."""
+
+    def test_old_head_commits_are_dormant(self):
+        """A PR whose head commit is older than the threshold is dormant; a newer one is not."""
+        repo = config_repo(dormant_after_days=10)
+        repo.prs = {1: {"headRefOid": "aaa"}, 2: {"headRefOid": "bbb"}, 3: {"headRefOid": "ccc"}}
+        now = int(time.time())
+        # The clone lacks PR 3's head commit, so git prints nothing for it.
+        log = f"aaa {now - 11 * 86400}\nbbb {now - 9 * 86400}\n"
+        with mock.patch.object(pr_status, "run", return_value=log) as run:
+            self.assertEqual(pr_status.dormant_prs(repo), {1})
+        self.assertEqual(run.call_args.args[0][:3], ["git", "-C", "/base/repo"])
+        self.assertIn("--ignore-missing", run.call_args.args[0])
+
+    def test_null_makes_no_pr_dormant(self):
+        """With "dormant_after_days" null, no PR is dormant, and git does not run."""
+        repo = config_repo(dormant_after_days=None)
+        repo.prs = {1: {"headRefOid": "aaa"}}
+        with mock.patch.object(pr_status, "run") as run:
+            self.assertEqual(pr_status.dormant_prs(repo), set())
+        run.assert_not_called()
+
+    def test_default(self):
+        """The default threshold is DEFAULT_DORMANT_AFTER_DAYS."""
+        self.assertEqual(
+            config_repo().dormant_after_days, pr_status_config.DEFAULT_DORMANT_AFTER_DAYS
+        )
+
+
+class DormantConflictingTest(unittest.TestCase):
+    """Tests for Model.dormant_conflicting."""
+
+    def test_only_prs_that_the_chains_with_conflicts_would_contain(self):
+        """An omitted dormant PR with no conflict, or in or after a cycle, is not listed."""
+        model = dormant_model(
+            {1: set(), 2: {1}, 3: set(), 4: set(), 5: set()},
+            {2: ["file"], 4: ["file"]},
+            dormant={1, 2, 3, 4},
+            cycle_affected={4},
+        )
+        self.assertEqual(model.dormant_omitted, {1, 2, 3})
+        self.assertEqual(model.dormant_conflicting, [1, 2])
 
 
 class DefaultBranchTest(unittest.TestCase):

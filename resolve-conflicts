@@ -12,7 +12,8 @@
 # This script does the following:
 #  * run `pr-status`, which regenerates the dependency document and records the
 #    dependency chains with conflicts (the chains of the document's section
-#    "Dependency chains with conflicts"),
+#    "Dependency chains with conflicts", which omit a PR whose head commit is
+#    old; see "dormant_after_days" in pr-status-config.md),
 #  * run `git-push-to` on each chain that `pr-status
 #    --print-conflicting-push-chains` prints, adding the "--claude" option (or
 #    "--codex"; see `git-push-to`, under "Asking an AI agent") and any
@@ -29,8 +30,8 @@
 #  * if every chain succeeded, start over, until no chain has conflicts.
 # It fails if a chain or a pull fails, or if chains with conflicts remain
 # after ${max_rounds} rounds.  It ends with a summary of the chains and pulls
-# that failed or that have changes by an AI agent to review, each with what
-# `git-push-to --summary` wrote for it, as in
+# that failed or that have changes by an AI agent or by a hook to review,
+# each with what `git-push-to --summary` wrote for it, as in
 #   * myrepo-branch-main myrepo-branch-feature myrepo-branch-part2 (failed)
 #       in /home/me/myrepo-branch-feature: claude also changed: README.md
 #       failed to push myrepo-branch-feature into myrepo-branch-part2, while building
