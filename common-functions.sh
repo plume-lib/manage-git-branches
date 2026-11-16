@@ -2942,6 +2942,10 @@ parse_llm_option() {
   return 0
 }
 
+## The file, in the git directory of a working tree, in which `pull_resolving`
+## records ${pull_fetched} for `recorded_pull_fetched`.
+pull_fetched_record=manage-git-branches-pull-fetched
+
 ## Usage: pull_resolving RESOLVER DIRECTORY [--no-rebase]
 ## Runs `git -C DIRECTORY pull -q [--no-rebase]`, which pulls the branch
 ## checked out in DIRECTORY from its upstream branch, but names the source of
@@ -2962,7 +2966,8 @@ parse_llm_option() {
 ## as when `branch.BRANCH.remote` is a URL.  Sets ${pull_fetched} to the empty
 ## string instead if the branches of the upstream branch's repository need
 ## not have been built (see `is_built_remote`), or if the pull did not record
-## the head in FETCH_HEAD.
+## the head in FETCH_HEAD.  Records ${pull_fetched} for
+## `recorded_pull_fetched`.
 ## Returns 1, after printing a diagnostic, if a merge is already in progress
 ## in DIRECTORY, if the pull fails without a merge in progress, as when the
 ## fetch fails or a rebase has conflicts, if the merge's message cannot be
@@ -3021,8 +3026,12 @@ pull_resolving() {
   if pull_branch="$(current_branch "${pull_dir}")" \
     && pull_remote="$(git -C "${pull_dir}" config --get "branch.${pull_branch}.remote")" \
     && is_built_remote "${pull_dir}" "${pull_remote}"; then
-    # shellcheck disable=SC2034 # used by the commands that source this file
     pull_fetched="$(git -C "${pull_dir}" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || true
+  fi
+  # For `recorded_pull_fetched`.  A failure to record leaves the record of an
+  # earlier pull, whose commit was also built where it was pushed.
+  if pull_record="$(git -C "${pull_dir}" rev-parse --path-format=absolute --git-path "${pull_fetched_record}")"; then
+    printf '%s\n' "${pull_fetched}" 2> /dev/null > "${pull_record}" || true
   fi
   if [ "${pull_conflicted}" -eq 0 ]; then
     return 0
@@ -3060,90 +3069,20 @@ refuse_merge_in_progress() {
   return 0
 }
 
-## Usage: upstream_fetch_head DIRECTORY
-## Prints the head of the upstream branch of the branch checked out in
-## DIRECTORY, as a full hash such as
-## "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", that the latest fetch of that
-## upstream branch recorded in FETCH_HEAD, as a pull does, if the upstream
-## branch's repository is one whose branches were built where they were
-## pushed (see `is_built_remote`).  That commit's history was built there,
-## even if no remote-tracking branch records it, as when
-## `branch.BRANCH.remote` is a URL.  Returns 1, printing nothing, if the
-## first line of FETCH_HEAD is not for that upstream branch, as when the
-## latest fetch fetched another repository or branch, or if the branches of
-## the upstream branch's repository need not have been built.
-upstream_fetch_head() {
-  if ! fetch_head_branch="$(current_branch "$1")" \
-    || ! fetch_head_remote="$(git -C "$1" config --get "branch.${fetch_head_branch}.remote")" \
-    || ! fetch_head_merge="$(git -C "$1" config --get "branch.${fetch_head_branch}.merge")" \
-    || ! is_built_remote "$1" "${fetch_head_remote}" \
-    || ! fetch_head_url="$(git -C "$1" ls-remote --get-url "${fetch_head_remote}" 2> /dev/null)" \
-    || ! fetch_head_file="$(git -C "$1" rev-parse --path-format=absolute --git-path FETCH_HEAD)" \
-    || [ ! -f "${fetch_head_file}" ]; then
-    return 1
-  fi
-  # The first line of FETCH_HEAD is "HASH<TAB><TAB>branch 'BRANCH' of
-  # LOCATION" for the branch that a pull merges; see `pull_merge_message`.
-  IFS= read -r fetch_head_line < "${fetch_head_file}" || return 1
-  fetch_head_hash="${fetch_head_line%%"	"*}"
-  fetch_head_source="${fetch_head_line#*"		"}"
-  if [ "${fetch_head_source}" = "${fetch_head_line}" ]; then
-    return 1
-  fi
-  case "${fetch_head_source}" in
-    "branch '${fetch_head_merge#refs/heads/}' of "*) ;;
-    *) return 1 ;;
-  esac
-  if ! is_fetch_head_location "$1" "${fetch_head_source#"branch '${fetch_head_merge#refs/heads/}' of "}" "${fetch_head_url}" \
-    || ! git -C "$1" rev-parse --verify --quiet "${fetch_head_hash}^{commit}"; then
-    return 1
-  fi
-}
-
-## Usage: is_fetch_head_location DIRECTORY LOCATION URL
-## Returns 0 if LOCATION, the location of a repository as `git fetch` writes
-## it in FETCH_HEAD, such as "github.com:org/proj" or "/srv/proj", names the
-## repository that URL names in DIRECTORY, where URL is a URL as
-## `git ls-remote --get-url` prints it, such as "git@github.com:org/proj.git";
-## returns 1 otherwise.  `git fetch` writes the URL without trailing slashes
-## and then without a trailing ".git".  LOCATION is compared with URL
-## stripped that way, as well as by key (see `url_key`), because a pathname
-## that git wrote, such as "/srv/proj" for "/srv/proj.git", might name no
-## directory and so have no key.
-is_fetch_head_location() {
-  fetch_location_stripped="${3%"${3##*[!/]}"}"
-  fetch_location_stripped="${fetch_location_stripped%.git}"
-  if [ "${fetch_location_stripped}" = "$2" ]; then
-    return 0
-  fi
-  fetch_location_key="$(url_key "$1" "$2")"
-  [ -n "${fetch_location_key}" ] && [ "$(url_key "$1" "$3")" = "${fetch_location_key}" ]
-}
-
-## Usage: is_pulled_first_dir DIRECTORY
-## Returns 0 if DIRECTORY, the first directory of a chain of `git-push-to`,
-## is one of ${pulled_first_dirs}, the first directories, each followed by a
-## newline, that earlier chains of the same run pulled; returns 1 otherwise.
-## A later chain that starts with DIRECTORY does not pull it again, so that
-## every chain merges the same commit of it; see `git-push-to`, under
-## "Several chains".
-is_pulled_first_dir() {
-  case "
-${pulled_first_dirs:-}" in
-    *"
-$1
-"*) return 0 ;;
-  esac
-  return 1
-}
-
-## Usage: add_pulled_first_dir DIRECTORY
-## Adds DIRECTORY to ${pulled_first_dirs} (see `is_pulled_first_dir`), unless
-## it is already there.
-add_pulled_first_dir() {
-  if ! is_pulled_first_dir "$1"; then
-    pulled_first_dirs="${pulled_first_dirs:-}$1
-"
+## Usage: recorded_pull_fetched DIRECTORY
+## Prints the commit that the latest `pull_resolving` in DIRECTORY set
+## ${pull_fetched} to, as a full hash such as
+## "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b".  That commit's history was
+## built where it was pushed.  Prints nothing if that pull set ${pull_fetched}
+## to the empty string, or if no `pull_resolving` has recorded a commit in
+## DIRECTORY.  Unlike FETCH_HEAD, which a later fetch overwrites, the record
+## changes only when `pull_resolving` pulls DIRECTORY again.
+recorded_pull_fetched() {
+  if recorded_file="$(git -C "$1" rev-parse --path-format=absolute --git-path "${pull_fetched_record}" 2> /dev/null)" \
+    && [ -f "${recorded_file}" ] \
+    && IFS= read -r recorded_hash < "${recorded_file}" \
+    && [ -n "${recorded_hash}" ]; then
+    git -C "$1" rev-parse --verify --quiet "${recorded_hash}^{commit}" || true
   fi
 }
 
@@ -3505,10 +3444,19 @@ fetch_head_location() {
 ## which updates no remote-tracking branch.  Returns 1, printing nothing, if
 ## no such remote-tracking branch exists.
 tracking_branch_of() {
+  tracking_of_key="$(url_key . "$2")"
   for tracking_of_remote in $(git remote); do
-    if git merge-base --is-ancestor "$3" "refs/remotes/${tracking_of_remote}/$1" 2> /dev/null \
-      && tracking_of_url="$(git ls-remote --get-url "${tracking_of_remote}" 2> /dev/null)" \
-      && is_fetch_head_location . "$2" "${tracking_of_url}"; then
+    if ! git merge-base --is-ancestor "$3" "refs/remotes/${tracking_of_remote}/$1" 2> /dev/null \
+      || ! tracking_of_url="$(git ls-remote --get-url "${tracking_of_remote}" 2> /dev/null)"; then
+      continue
+    fi
+    # URL is compared with the remote's URL as `git pull` writes it, as well
+    # as by key, because a pathname that `git pull` wrote, such as
+    # "/srv/proj" for "/srv/proj.git", might name no directory and so have no
+    # key.
+    if [ "$(fetch_head_location "${tracking_of_url}")" = "$2" ] \
+      || { [ -n "${tracking_of_key}" ] \
+        && [ "$(url_key . "${tracking_of_url}")" = "${tracking_of_key}" ]; }; then
       printf '%s/%s\n' "${tracking_of_remote}" "$1"
       return 0
     fi

@@ -160,8 +160,8 @@ esac
 
 ## Of several chains, each runs, even after one fails; a directory whose name
 ## contains a space is one argument; a chain that fails makes
-## resolve-conflicts fail; and a chain after one that failed before it pulled
-## their first directory pulls it, without --no-pull-first.
+## resolve-conflicts fail; and their first directory is pulled once, before
+## the chains, which run with --no-pull-first.
 setup_case several
 STUB_CHAINS="$(printf 'myrepo-branch-main\tno such dir\nmyrepo-branch-main\tmyrepo-branch-feature')"
 resolve_conflicts
@@ -172,9 +172,10 @@ case "${resolve_output}" in
   *"no such directory: no such dir"*"the chain failed: myrepo-branch-main no such dir"*) ;;
   *) fail "several: wrong output for the failed chain: ${resolve_output}" ;;
 esac
-case "${resolve_output}" in
-  *"--no-pull-first"*) fail "several: a chain got --no-pull-first: ${resolve_output}" ;;
-esac
+if [ "$(printf '%s\n' "${resolve_output}" | grep -c 'git-push-to --claude  myrepo-branch-main$')" -ne 1 ] \
+  || [ "$(printf '%s\n' "${resolve_output}" | grep -c 'git-push-to --claude  --no-pull-first ')" -ne 2 ]; then
+  fail "several: the first directory was not pulled exactly once, before the chains: ${resolve_output}"
+fi
 expected="$(printf '%s\n' \
   'resolve-conflicts: the dependency chains that failed or that have changes to review:' \
   '* myrepo-branch-main no such dir (failed)' \
@@ -186,6 +187,28 @@ fi
 expected="$(printf '%s\n' one two-feature two-main three)"
 if [ "$(git -C "${case_dir}/myrepo.git" show refs/heads/feature:file.txt)" != "${expected}" ]; then
   fail "several: the chain after the failed one was not pushed"
+fi
+
+## The chains whose first directory cannot be pulled are skipped, and the
+## pull is tried only once.
+setup_case unpulled
+STUB_CHAINS="$(printf 'no such first\tmyrepo-branch-feature\nno such first\tmyrepo-branch-main')"
+resolve_conflicts
+if [ "${resolve_status}" -eq 0 ]; then
+  fail "unpulled: resolve-conflicts succeeded: ${resolve_output}"
+fi
+if [ "$(printf '%s\n' "${resolve_output}" | grep -c 'no such directory: no such first')" -ne 1 ]; then
+  fail "unpulled: the pull was not tried exactly once: ${resolve_output}"
+fi
+expected="$(printf '%s\n' \
+  'resolve-conflicts: the dependency chains that failed or that have changes to review:' \
+  '* no such first (failed)' \
+  '    failed to pull no such first' \
+  '* no such first myrepo-branch-feature (skipped)' \
+  '* no such first myrepo-branch-main (skipped)' \
+  'resolve-conflicts: 0 of 2 dependency chains failed, and 2 were skipped; first directories that could not be pulled: 1')"
+if [ "$(printf '%s\n' "${resolve_output}" | tail -n 6)" != "${expected}" ]; then
+  fail "unpulled: wrong summary: ${resolve_output}"
 fi
 
 ## A chain is skipped if a chain that failed or was skipped would have pushed

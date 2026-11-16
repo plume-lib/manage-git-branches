@@ -3496,7 +3496,8 @@ def gen_updating_branches(models: list[Model], commands: PushCommands) -> list[s
         (
             "A command whose chain starts with the same directory as an earlier command's chain"
             " passes `--no-pull-first`, so that every chain merges the same commit of that"
-            " directory."
+            " directory.  It relies on the earlier command, which pulled that directory;"
+            " to run it alone, omit `--no-pull-first`."
         ),
         "`git-push-to` merges, compiles, and pushes; see its documentation.",
     ]

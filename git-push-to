@@ -7,6 +7,7 @@
 # Usage:
 #   git-push-to [OPTIONS] FROM_DIR TO_DIR ...
 #   git-push-to [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ...
+#   git-push-to [OPTIONS] DIR
 #
 # OPTIONS are [--nocompile] [--no-pull-first] [--rebase | --squash]
 # [--llm | --no-llm] [--claude | --codex] [--summary FILE].
@@ -29,8 +30,8 @@
 # (see "Asking an AI agent" below), as in
 #   in /home/me/myrepo-branch-feature: claude also changed: README.md
 # each merge left in progress and each agent session that can be continued,
-# which are also noted in AGENT-TODO.md, and, if a push or rebase fails, the
-# step that failed, as in
+# which are also noted in AGENT-TODO.md, and, if a pull, push, or rebase
+# fails, the step that failed, as in
 #   failed to push myrepo-branch-main into myrepo-branch-feature, while building
 # The same information is printed as diagnostics, along with the details of
 # each failure.
@@ -77,31 +78,34 @@
 #
 # If more than two directories are supplied, the procedure is performed on each
 # pair of adjacent directories in turn.  With "--no-pull-first", the first
-# directory, which is FROM_DIR of the first pair only, is not pulled.
+# directory, which is FROM_DIR of the first pair only, is not pulled.  Given
+# a single directory, this script only pulls it, resolving conflicts as it
+# would when it pulls the first directory of a chain.
 
 # Several chains
 #
 # A run that updates several chains, each of which starts with the same
 # directory, such as a working copy of the upstream default branch, pulls that
-# directory only for the first chain.  So every chain merges the same commit
-# of it, even if its remote changes during the run.  Otherwise, a branch could
-# merge a newer upstream commit than a branch that it builds on has; the next
-# merge of the latter branch into the former would then be a criss-cross
-# merge, which has several merge bases.
+# directory only once.  So every chain merges the same commit of it, even if
+# its remote changes during the run.  Otherwise, a branch could merge a newer
+# upstream commit than a branch that it builds on has; the next merge of the
+# latter branch into the former would then be a criss-cross merge, which has
+# several merge bases.
 #
-# This script does so for the chains of slugs:  each chain whose first
-# directory an earlier chain of the same run pulled is pushed as with
-# "--no-pull-first".  A chain that fails before it pulls its first directory,
-# as when the fetch fails, does not count, so a later chain pulls the
-# directory.  `resolve-conflicts`, and the commands that `pr-status` prints,
-# run each chain with a separate run of this script; they pass
-# "--no-pull-first" for each such chain.  Given directories, this script
-# exits with status 2, rather than 1, if it fails before it pulls the first
-# directory, which it pulls unless "--no-pull-first" is given, so that
-# `resolve-conflicts` can tell whether the chain pulled it.
+# This script does so for the chains of slugs:  before the first chain that
+# starts with a directory, it pulls that directory, as it does given that
+# single directory, and it runs every chain as with "--no-pull-first".  If
+# the pull fails, it skips the chains that start with that directory.
+# `resolve-conflicts` does the same, with a separate run of this script for
+# each pull and for each chain.  The commands that `pr-status` prints pass
+# "--no-pull-first" to each chain whose first directory an earlier chain
+# pulled; they stop at the first failure.
 #
 # Without the pull, this script still stops if a merge is in progress in the
-# first directory, or if it has unmerged files, as `git pull` would.
+# first directory, or if it has unmerged files, as `git pull` would.  As the
+# head that the pull of the first directory fetched (see "Asking an AI
+# agent"), it uses the head that the latest pull of that directory by this
+# script, or by another command of this package, fetched.
 
 # Rebasing
 #
@@ -667,43 +671,66 @@ finish_merge_in_progress() {
   commit_resolved_merge "${llm_agent}" MERGE_HEAD "${finish_source}" "${finish_message}"
 }
 
+## Usage: check_from_dir FROM_DIR
+## Returns 1, after printing a diagnostic, unless FROM_DIR is the top level
+## of a working tree whose branch has an upstream branch and still exists in
+## its remote.  Sets ${from_absolute} to the absolute pathname of FROM_DIR,
+## and ${from_branch} to the name of its branch, such as "main".
+check_from_dir() {
+  # A failure here is not yet an error, and it leaves the variable empty:  a
+  # nonexistent directory fails here, and the test just below diagnoses that
+  # better.
+  from_absolute="$(absolute_path "$1")"
+  if [ ! -d "$1" ]; then
+    if [ -n "${from_absolute}" ] && [ "$1" != "${from_absolute}" ]; then
+      echo "${SCRIPT_NAME}: no such directory: $1 = ${from_absolute}" >&2
+    else
+      echo "${SCRIPT_NAME}: no such directory: $1" >&2
+    fi
+    return 1
+  fi
+  if [ -z "${from_absolute}" ]; then
+    echo "${SCRIPT_NAME}: cannot canonicalize: $1" >&2
+    return 1
+  fi
+  # Check the upstream before asking whether the branch was deleted:
+  # `is_deleted_branch` cannot tell, and answers status 3, when the branch
+  # has no upstream, and its diagnostic is less specific than this one.
+  if ! check_upstream "${from_absolute}"; then
+    return 1
+  fi
+  # The branch that `git_push_to` fetches.  Read it now:  the call to
+  # `check_upstream` for TO_DIR overwrites ${checked_out_branch} with TO_DIR's
+  # branch.
+  from_branch="${checked_out_branch}"
+  check_branch_exists "${from_absolute}"
+}
+
 ## Usage: git_push_to FROM_DIR TO_DIR PULL_FROM
 ## A helper function that works on exactly two repositories.  Pulls FROM_DIR
 ## first if PULL_FROM is 1, and not if it is 0.  Sets ${push_step} to the
 ## step that it reached, such as "pulling DIR" or "building"; `push_chain`
-## reports it when this function fails.  Sets ${from_pulled} to 1 once it
-## has pulled FROM_DIR, and to 0 before then.
+## reports it when this function fails.
 git_push_to() {
 
   from="$1"
   to="$2"
   push_step='checking the directories'
-  from_pulled=0
 
-  # A failure here is not yet an error, and it leaves the variable empty:  a
-  # nonexistent directory fails here, and the tests just below diagnose that
-  # better.
-  from_absolute="$(absolute_path "${from}")"
-  to_absolute="$(absolute_path "${to}")"
-
-  if [ ! -d "${from}" ]; then
-    if [ -n "${from_absolute}" ] && [ "${from}" != "${from_absolute}" ]; then
-      echo "${SCRIPT_NAME}: no such directory: ${from} = ${from_absolute}" >&2
-    else
-      echo "${SCRIPT_NAME}: no such directory: ${from}" >&2
-    fi
+  if ! check_from_dir "${from}"; then
     return 1
   fi
+
+  # A failure here is not yet an error, and it leaves the variable empty:  a
+  # nonexistent directory fails here, and the test just below diagnoses that
+  # better.
+  to_absolute="$(absolute_path "${to}")"
   if [ ! -d "${to}" ]; then
     if [ -n "${to_absolute}" ] && [ "${to}" != "${to_absolute}" ]; then
       echo "${SCRIPT_NAME}: no such directory: ${to} = ${to_absolute}" >&2
     else
       echo "${SCRIPT_NAME}: no such directory: ${to}" >&2
     fi
-    return 1
-  fi
-  if [ -z "${from_absolute}" ]; then
-    echo "${SCRIPT_NAME}: cannot canonicalize: ${from}" >&2
     return 1
   fi
   if [ -z "${to_absolute}" ]; then
@@ -716,27 +743,11 @@ git_push_to() {
     return 1
   fi
 
-  # Check the upstream before asking whether the branch was deleted:
-  # `is_deleted_branch` cannot tell, and answers status 3, when the branch
-  # has no upstream, and its diagnostic is less specific than this one.
-  if ! check_upstream "${from_absolute}"; then
-    return 1
-  fi
-  # The branch that the `git fetch` below brings over.  Read it now:  the
-  # call to `check_upstream` for ${to_absolute} overwrites it with TO_DIR's
-  # branch.
-  from_branch="${checked_out_branch}"
-
-  if ! check_branch_exists "${from_absolute}"; then
-    return 1
-  fi
-
   if [ "$3" -eq 1 ]; then
     push_step="pulling ${from}"
     if ! pull_resolving "${llm_agent}" "${from_absolute}"; then
       return 1
     fi
-    from_pulled=1
     from_fetched="${pull_fetched}"
   else
     # As `pull_resolving` does, refuse to merge from a directory with a
@@ -745,9 +756,8 @@ git_push_to() {
     if ! refuse_merge_in_progress "${from_absolute}" "It was in progress when \`${SCRIPT_NAME}\` was about to merge from it."; then
       return 1
     fi
-    # The head that an earlier chain's pull of FROM_DIR fetched, as the pull
-    # would have set ${pull_fetched}.
-    from_fetched="$(upstream_fetch_head "${from_absolute}")" || from_fetched=''
+    # The head that the latest pull of FROM_DIR by `pull_resolving` fetched.
+    from_fetched="$(recorded_pull_fetched "${from_absolute}")"
   fi
   push_step="checking ${to}"
 
@@ -805,8 +815,8 @@ git_push_to() {
   #
   # The histories of the remote branches that FROM_DIR's branch pushes to and
   # pulls from, and of the heads that the pulls of FROM_DIR and TO_DIR
-  # fetched (or, if FROM_DIR was not pulled, that the latest fetch of its
-  # upstream branch fetched), were built where they were pushed, so a failed
+  # fetched (or, if FROM_DIR was not pulled, that its latest pull fetched),
+  # were built where they were pushed, so a failed
   # build of TO_DIR does not ask the agent about their merges.  FROM_DIR's own
   # merges, such as the one that the pull just made, are not among them.
   # Note: pwd=to_absolute
@@ -1089,29 +1099,30 @@ chain_failed() {
 }
 
 ## Pushes each given directory into the next one, without pulling the first
-## directory if ${no_pull_first} is 1.  Then, if ${rebase} is 1,
+## directory if ${no_pull_first} is 1.  Given a single directory, only pulls
+## it, unless ${no_pull_first} is 1.  Then, if ${rebase} is 1,
 ## rebases each directory's branch, except the first, onto the previous one.
 ## Returns 1 at the first failure, after printing a diagnostic that names the
 ## step that failed, such as "git-push-to: failed to push myrepo-branch-main
 ## into myrepo-branch-feature, while building", and appending it to the
-## summary.  Returns 2 instead if it fails before it has pulled the first
-## directory, which it pulls if ${no_pull_first} is 0.
+## summary.
 push_chain() {
-  prev=''
   pull_from=$((1 - no_pull_first))
-  # 1 until the first directory has been pulled, if it is to be pulled.
-  first_unpulled="${pull_from}"
+  if [ "$#" -eq 1 ] && [ "${pull_from}" -eq 1 ]; then
+    if ! check_from_dir "$1" || ! pull_resolving "${llm_agent}" "${from_absolute}"; then
+      chain_failed "failed to pull $1"
+      return 1
+    fi
+    return 0
+  fi
+  prev=''
   for arg; do
     if [ -n "$prev" ]; then
       if ! git_push_to "$prev" "$arg" "${pull_from}"; then
         chain_failed "failed to push ${prev} into ${arg}, while ${push_step}"
-        if [ "${first_unpulled}" -eq 1 ] && [ "${from_pulled}" -eq 0 ]; then
-          return 2
-        fi
         return 1
       fi
       pull_from=1
-      first_unpulled=0
     fi
     prev="$arg"
   done
@@ -1344,9 +1355,9 @@ while [ "$#" -ge 1 ]; do
   shift
 done
 
-if [ "$#" -lt 2 ]; then
+if [ "$#" -lt 1 ]; then
   echo "${SCRIPT_NAME}: not enough arguments" >&2
-  echo "Usage: ${SCRIPT_NAME} [OPTIONS] FROM_DIR TO_DIR ..." >&2
+  echo "Usage: ${SCRIPT_NAME} [OPTIONS] FROM_DIR [TO_DIR ...]" >&2
   echo "   or: ${SCRIPT_NAME} [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
   echo "OPTIONS: [--nocompile] [--no-pull-first] [--rebase | --squash] ${llm_options_usage} [--summary FILE]" >&2
   exit 1
@@ -1431,9 +1442,10 @@ slugs="$*"
 
 status=0
 num_chains=0
-# The first directories that the chains so far pulled; see
-# `is_pulled_first_dir`.
-pulled_first_dirs=''
+# The first directories of the chains so far, each followed by a newline,
+# that were pulled, and that could not be pulled; see "Several chains".
+pulled_dirs="${newline}"
+unpulled_dirs="${newline}"
 IFS="${newline}"
 for key in ${keys}; do
   IFS="${saved_ifs}"
@@ -1463,18 +1475,34 @@ for key in ${keys}; do
     continue
   fi
   num_chains=$((num_chains + 1))
-  # Pull a directory that starts several chains only for the first of them
-  # that pulls it; see "Several chains".
+  # Pull each first directory once, before the first chain that starts with
+  # it, and run each chain without pulling it; see "Several chains".
   chain_first="${chain%%"${newline}"*}"
-  chain_no_pull_first="${no_pull_first}"
-  if is_pulled_first_dir "${chain_first}"; then
-    chain_no_pull_first=1
+  if [ "${no_pull_first}" -eq 0 ]; then
+    case "${pulled_dirs}${unpulled_dirs}" in
+      *"${newline}${chain_first}${newline}"*) ;;
+      *)
+        if push_chain "${chain_first}"; then
+          pulled_dirs="${pulled_dirs}${chain_first}${newline}"
+        else
+          unpulled_dirs="${unpulled_dirs}${chain_first}${newline}"
+        fi
+        ;;
+    esac
+    case "${unpulled_dirs}" in
+      *"${newline}${chain_first}${newline}"*)
+        echo "${SCRIPT_NAME}: skipped the chain that starts with ${chain_first}, which could not be pulled" >&2
+        status=1
+        IFS="${newline}"
+        continue
+        ;;
+    esac
   fi
   # Run the chain in a subshell, because `git_push_to` changes the working
   # directory and does not change it back when it fails.  Continue with the
   # other chains after a failure, because they are independent of it.
-  (
-    no_pull_first="${chain_no_pull_first}"
+  if ! (
+    no_pull_first=1
     set -f
     IFS="${newline}"
     # shellcheck disable=SC2086 # Split ${chain} on newlines.
@@ -1482,15 +1510,8 @@ for key in ${keys}; do
     IFS="${saved_ifs}"
     set +f
     push_chain "$@"
-  )
-  chain_status=$?
-  if [ "${chain_status}" -ne 0 ]; then
+  ); then
     status=1
-  fi
-  # A chain that failed before it pulled its first directory leaves the
-  # directory for a later chain to pull.
-  if [ "${chain_status}" -ne 2 ] && [ "${chain_no_pull_first}" -eq 0 ]; then
-    add_pulled_first_dir "${chain_first}"
   fi
   IFS="${newline}"
 done
