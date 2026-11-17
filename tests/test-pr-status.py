@@ -1464,8 +1464,12 @@ class NewSnapshotTest(unittest.TestCase):
                 [],
             ),
         ]
-        snapshot = json.loads(json.dumps(pr_status.new_snapshot("now", {"repo": {}}, conflicting)))
+        unblocked = [{"repo": "a", "number": 1, "directories": ["/base/a-branch-x"]}]
+        snapshot = json.loads(
+            json.dumps(pr_status.new_snapshot("now", {"repo": {}}, conflicting, unblocked))
+        )
         self.assertEqual((snapshot["time"], snapshot["facts"]), ("now", {"repo": {}}))
+        self.assertEqual(json.loads("\n".join(pr_status.format_unblocked_prs(snapshot))), unblocked)
         self.assertEqual(
             pr_status.format_push_chains(snapshot),
             ["a\ta-branch-x", "b\tb-branch y", "b\tb-branch-z"],
@@ -1679,6 +1683,104 @@ class FormatMissingBranchesTest(unittest.TestCase):
                 pr_status.format_missing_branches({"missing_branches": [[d, "o:b"]]})
 
 
+class UnblockedPrsTest(unittest.TestCase):
+    """Tests for unblocked_prs."""
+
+    @staticmethod
+    def model(name, unblocked, reviews_and_ci):
+        """Return a model of a repository.
+
+        Args:
+            name: a repository's key in the config's "repos", such as "daikon"
+            unblocked: the numbers of the repository's unblocked PRs, such as [1, 2]
+            reviews_and_ci: the CI results of the repository's PRs, as a ReviewsAndCi
+
+        Returns:
+            A model whose repository's GitHub slug is "org/NAME".
+        """
+        gh = f"org/{name}"
+        repo = types.SimpleNamespace(
+            name=name,
+            gh=gh,
+            url=lambda n: f"https://github.com/{gh}/pull/{n}",
+            prs={n: {"number": n} for n in unblocked},
+            reviews_and_ci=reviews_and_ci,
+        )
+        return types.SimpleNamespace(repo=repo, unblocked=lambda: sorted(unblocked))
+
+    def test_prs(self):
+        """Each unblocked PR is described, in the order of the repositories and then by number."""
+        models = [
+            self.model("a", [3, 1, 2, 4], pr_status.ReviewsAndCi({}, {1}, {2})),
+            self.model("b", [5], pr_status.ReviewsAndCi({}, set(), set(), known=False)),
+        ]
+        directories = {1: ["a-branch-x", "a-branch-y"], 5: ["b-branch-z"]}
+        with mock.patch.object(
+            pr_status,
+            "pr_directories",
+            lambda _repo, pr, _base: directories.get(pr["number"], []),
+        ):
+            result = pr_status.unblocked_prs(models, "/base")
+        self.assertEqual(
+            result,
+            [
+                {
+                    "repo": "a",
+                    "gh": "org/a",
+                    "number": 1,
+                    "url": "https://github.com/org/a/pull/1",
+                    "directories": ["/base/a-branch-x", "/base/a-branch-y"],
+                    "ci": "failed",
+                },
+                {
+                    "repo": "a",
+                    "gh": "org/a",
+                    "number": 2,
+                    "url": "https://github.com/org/a/pull/2",
+                    "directories": [],
+                    "ci": "passed",
+                },
+                {
+                    "repo": "a",
+                    "gh": "org/a",
+                    "number": 3,
+                    "url": "https://github.com/org/a/pull/3",
+                    "directories": [],
+                    "ci": "pending",
+                },
+                {
+                    "repo": "a",
+                    "gh": "org/a",
+                    "number": 4,
+                    "url": "https://github.com/org/a/pull/4",
+                    "directories": [],
+                    "ci": "pending",
+                },
+                {
+                    "repo": "b",
+                    "gh": "org/b",
+                    "number": 5,
+                    "url": "https://github.com/org/b/pull/5",
+                    "directories": ["/base/b-branch-z"],
+                    "ci": "unknown",
+                },
+            ],
+        )
+
+
+class FormatUnblockedPrsTest(unittest.TestCase):
+    """Tests for format_unblocked_prs."""
+
+    def test_missing_key(self):
+        """A snapshot that does not record the unblocked PRs is an error."""
+        with self.assertRaisesRegex(ValueError, "does not record the unblocked PRs"):
+            pr_status.format_unblocked_prs({"time": "now", "facts": {}})
+
+    def test_no_prs(self):
+        """A snapshot that records no unblocked PR yields an empty JSON array."""
+        self.assertEqual(pr_status.format_unblocked_prs({"unblocked_prs": []}), ["[]"])
+
+
 class PrintConflictingPushChainsTest(unittest.TestCase):
     """Tests for `pr-status --print-conflicting-push-chains`."""
 
@@ -1713,6 +1815,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
                     [["a", "a-branch-x"], ["a", "a-branch y", "z"]], [], True, [], []
                 )
             ],
+            [],
         )
         result = self.run_option(json.dumps(snapshot))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1731,6 +1834,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
             "now",
             {},
             [pr_status.PushChains([], [], False, [pr_status.MissingBranch("a", "o:m")], [])],
+            [],
         )
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / pr_status_config.SNAPSHOT).write_text(json.dumps(snapshot))
@@ -1742,6 +1846,30 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "a\to:m\n")
+
+    def test_prints_unblocked_prs(self):
+        """`--print-unblocked-prs` prints only the unblocked PRs, as JSON."""
+        unblocked = [
+            {
+                "repo": "a",
+                "gh": "o/a",
+                "number": 1,
+                "url": "https://github.com/o/a/pull/1",
+                "directories": ["/base/a-branch-x"],
+                "ci": "passed",
+            }
+        ]
+        snapshot = pr_status.new_snapshot("now", {}, [], unblocked)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / pr_status_config.SNAPSHOT).write_text(json.dumps(snapshot))
+            result = subprocess.run(
+                [sys.executable, self.PR_STATUS, "-C", d, "--print-unblocked-prs"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), unblocked)
 
 
 class ExclusiveOptionsTest(unittest.TestCase):
@@ -1760,6 +1888,8 @@ class ExclusiveOptionsTest(unittest.TestCase):
             ["--print-conflicting-push-chains", "--highlight", "repo#1"],
             ["--print-conflicting-push-chains", "--print-missing-branches"],
             ["--print-missing-branches", "--highlight", "repo#1"],
+            ["--print-unblocked-prs", "--print-missing-branches"],
+            ["--print-unblocked-prs", "--highlight", "repo#1"],
         ]:
             with self.subTest(options=options), tempfile.TemporaryDirectory() as d:
                 result = subprocess.run(

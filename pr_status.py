@@ -8,6 +8,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --print-config    # print the config, with its defaults filled in, and exit
   pr-status --print-conflicting-push-chains  # print the chains with conflicts, and exit
   pr-status --print-missing-branches  # print the branches that conflicts need, and exit
+  pr-status --print-unblocked-prs  # print the unblocked PRs as JSON, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
   pr-status --highlight bottleneck  # highlight the next PR to work on in each repository
@@ -20,7 +21,8 @@ Inputs:
                            records the dependency chains with conflicts, which
                            --print-conflicting-push-chains prints, and the branches
                            that resolving the conflicts needs but that have no working
-                           copy, which --print-missing-branches prints
+                           copy, which --print-missing-branches prints, and the unblocked
+                           PRs, which --print-unblocked-prs prints
 Each run:
   * reads the open PRs with gh,
   * runs pr-merge-analysis (cached) on them, for each repository,
@@ -95,6 +97,8 @@ CONFLICTING_PUSH_CHAINS = "conflicting_push_chains"
 # The key of the snapshot's list of the branches that resolving the conflicts needs, but that
 # have no working copy.
 MISSING_BRANCHES = "missing_branches"
+# The key of the snapshot's list of the PRs that depend on no other open PR.
+UNBLOCKED_PRS = "unblocked_prs"
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -3550,19 +3554,24 @@ class PushCommands(NamedTuple):
 
 
 def new_snapshot(
-    time: str, new_facts: dict[str, Any], conflicting: list[PushChains]
+    time: str,
+    new_facts: dict[str, Any],
+    conflicting: list[PushChains],
+    unblocked: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Return the snapshot that records the given facts and chains with conflicts.
+    """Return the snapshot that records the given facts, chains with conflicts, and PRs.
 
     Args:
         time: a time, such as "2026-11-05T17:59:00-08:00", which the snapshot records
         new_facts: the facts, as facts computes them
         conflicting: the chains with conflicts of each repository, as push_chains computes
             them with conflicts_only
+        unblocked: the unblocked PRs, as unblocked_prs computes them
 
     Returns:
         The snapshot, as a dict that .pr-status-snapshot.json holds as JSON, with the keys
-        "time", "facts", "conflicting_push_chains", and "missing_branches".  The value of
+        "time", "facts", "conflicting_push_chains", "missing_branches", and
+        "unblocked_prs".  The value of "unblocked_prs" is unblocked.  The value of
         "conflicting_push_chains" is a list of chains, in the order of the "Dependency
         chains with conflicts" section of the dependency document; each chain is a list of
         directories, such as ["daikon", "daikon-branch-a"], each of which `git-push-to`
@@ -3575,7 +3584,57 @@ def new_snapshot(
         "facts": new_facts,
         CONFLICTING_PUSH_CHAINS: [chain for pc in conflicting for chain in pc.chains],
         MISSING_BRANCHES: [list(b) for pc in conflicting for b in pc.missing_branches],
+        UNBLOCKED_PRS: unblocked,
     }
+
+
+def unblocked_prs(models: list[Model], base: str) -> list[dict[str, Any]]:
+    """Return a description of each PR of the given models that depends on no other open PR.
+
+    Args:
+        models: the model of each repository.
+        base: the directory that holds the working copy directories, such as
+            "/home/me/research/types".
+
+    Returns:
+        One dict per PR, in the order of the "Unblocked PRs" sections of the dependency
+        document (the config's order of the repositories, and then the PRs' numbers), with
+        these keys:
+          "repo":  the repository's key in the config's "repos", such as "checker-framework";
+          "gh":  the repository's GitHub slug, such as "typetools/checker-framework";
+          "number":  the PR's number, an integer such as 6008;
+          "url":  the PR's URL, such as "https://github.com/typetools/checker-framework/pull/6008";
+          "directories":  the absolute paths of the PR's working copy directories, such as
+            ["/home/me/research/types/checker-framework-fork-me-branch-foo"], or [] if it has
+            none;
+          "ci":  "failed" if the PR's CI failed, "passed" if it completed and passed, "unknown"
+            if GitHub could not say, and otherwise "pending" (its CI has not completed, or the
+            PR has none).
+    """
+    result = []
+    for m in models:
+        r = m.repo
+        reviews_and_ci = r.reviews_and_ci
+        for n in m.unblocked():
+            if not reviews_and_ci.known:
+                ci = "unknown"
+            elif n in reviews_and_ci.ci_failed:
+                ci = "failed"
+            elif n in reviews_and_ci.ci_passed:
+                ci = "passed"
+            else:
+                ci = "pending"
+            result.append(
+                {
+                    "repo": r.name,
+                    "gh": r.gh,
+                    "number": n,
+                    "url": r.url(n),
+                    "directories": [f"{base}/{d}" for d in pr_directories(r, r.prs[n], base)],
+                    "ci": ci,
+                }
+            )
+    return result
 
 
 def format_push_chains(snapshot: dict[str, Any]) -> list[str]:
@@ -3641,6 +3700,30 @@ def format_missing_branches(snapshot: dict[str, Any]) -> list[str]:
             raise ValueError(msg)
         lines.append(f"{d}\t{branch}")
     return lines
+
+
+def format_unblocked_prs(snapshot: dict[str, Any]) -> list[str]:
+    """Return the unblocked PRs of the given snapshot, as JSON.
+
+    Args:
+        snapshot: a snapshot, as a dict parsed from the JSON of .pr-status-snapshot.json, with
+            keys such as "time", "facts", and "unblocked_prs"
+
+    Returns:
+        The lines of a JSON array whose elements describe the unblocked PRs that snapshot
+        records, as unblocked_prs describes them.
+
+    Raises:
+        ValueError: if snapshot does not record the unblocked PRs (even an empty list of
+            them).
+    """
+    if UNBLOCKED_PRS not in snapshot:
+        msg = (
+            f"{pr_status_config.SNAPSHOT} does not record the unblocked PRs, because an older"
+            " version of pr-status wrote it; run pr-status to rewrite it"
+        )
+        raise ValueError(msg)
+    return json.dumps(snapshot[UNBLOCKED_PRS], indent=1).splitlines()
 
 
 def dormant_note(model: Model) -> str:
@@ -4268,6 +4351,15 @@ def main() -> None:
             "  Do nothing else"
         ),
     )
+    mode.add_argument(
+        "--print-unblocked-prs",
+        action="store_true",
+        help=(
+            "print the PRs that depend on no other open PR, as the snapshot records them, as a"
+            ' JSON array of objects with the keys "repo", "gh", "number", "url",'
+            ' "directories", and "ci", and do nothing else'
+        ),
+    )
     parser.add_argument(
         "-C",
         "--directory",
@@ -4294,6 +4386,7 @@ def main() -> None:
     snapshot_printers = {
         "--print-conflicting-push-chains": format_push_chains,
         "--print-missing-branches": format_missing_branches,
+        "--print-unblocked-prs": format_unblocked_prs,
     }
 
     def given(option: str) -> bool:
@@ -4426,7 +4519,9 @@ def main() -> None:
     dependencies.write_text(
         dependency_document(models, cfg, base, as_of, title, all_chains, conflicting)
     )
-    snapshot = new_snapshot(now.isoformat(timespec="seconds"), new, conflicting)
+    snapshot = new_snapshot(
+        now.isoformat(timespec="seconds"), new, conflicting, unblocked_prs(models, base)
+    )
     write_json_atomically(pathlib.Path(pr_status_config.SNAPSHOT), snapshot)
     written = [d["file"] for d in unblocked_docs]
     written += [str(dependencies), pr_status_config.SNAPSHOT]
