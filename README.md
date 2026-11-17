@@ -228,13 +228,14 @@ The commands are:
   request that each of its "Land after" lines names in `ORG/REPO`, one per
   line, and does nothing else.
   With `--print-missing-branches`, it prints the branches that resolving the
-  conflicts needs, but that have no working copy (as of its previous run),
-  and does nothing else:  one line per branch, holding a directory and the
-  branch as `OWNER:BRANCH`, separated by a tab.  The directory is an entry of
-  the directory that holds the working copy directories (`DIR`, with `-C`).
-  In that directory, `git-checkout-branch OWNER:BRANCH` makes a working copy
-  of the branch, as another entry of the directory that holds the working
-  copy directories, after which `git-push-to` can merge it.
+  conflicts needs, but that have no working copy (as of its last run that
+  wrote the snapshot), and does nothing else:  one line per branch, holding
+  a directory and the branch as `OWNER:BRANCH`, separated by a tab.  The
+  directory is an entry of the directory that holds the working copy
+  directories (`DIR`, with `-C`).  In that directory, `git-checkout-branch
+  OWNER:BRANCH` makes a working copy of the branch, as another entry of the
+  directory that holds the working copy directories, after which
+  `git-push-to` can merge it.
   With `--print-unblocked-prs`, it prints the pull requests that depend on
   no other open pull request (as of its last run that wrote the snapshot),
   and does nothing else.  It prints them as a JSON array with one object per
