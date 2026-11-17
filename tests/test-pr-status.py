@@ -708,7 +708,7 @@ class ModelTest(unittest.TestCase):
             {1: "Land after #2.", 2: "Land after #3.", 3: "", 4: "Land after #3."}, set()
         )
         repo = model.repo
-        repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set())
+        repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), set())
         repo.master_conflicts = {1: ["c.txt"], 3: ["c.txt"]}
         repo.pair_conflicts = {(1, 2): ["b.txt"], (1, 3): ["c.txt"], (2, 3): ["a.txt"]}
         repo.link = lambda n: f"#{n}"
@@ -733,7 +733,7 @@ class ModelTest(unittest.TestCase):
         """The cell's parts are separated by one space, with none at either end."""
         model = self.conflicting_model()
         model.repo.reviews_and_ci = pr_status.ReviewsAndCi(
-            {1: [True, False], 4: [False]}, {1, 2}, {1, 4}
+            {1: [True, False], 4: [False]}, {1, 2}, {1, 4}, {3}
         )
         self.assertEqual(
             [model.unresolved_threads(n) for n in (1, 2, 3, 4)],
@@ -743,10 +743,43 @@ class ModelTest(unittest.TestCase):
     def test_unresolved_threads_shows_unknown_reviews_and_ci(self):
         """The cell shows "?" for the threads and CI results if GitHub could not say them."""
         model = self.conflicting_model()
-        model.repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), known=False)
+        model.repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), set(), known=False)
         self.assertEqual(
             [model.unresolved_threads(n) for n in (1, 2, 3, 4)], ["? 🔀", "? 🔀", "? 🔀", "?"]
         )
+
+    def test_read_reviews_and_ci_reads_ci_results(self):
+        """Each PR's CI is failed, passed, absent, or neither, according to its rollup."""
+
+        def pr(n, rollup, commits=True):
+            commit = {"commit": {"statusCheckRollup": rollup}}
+            return {
+                "number": n,
+                "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+                "commits": {"nodes": [commit] if commits else []},
+            }
+
+        def rollup(state, *contexts):
+            return {"state": state, "contexts": {"nodes": list(contexts)}}
+
+        prs = [
+            pr(1, rollup("FAILURE", {"status": "COMPLETED", "conclusion": "FAILURE"})),
+            pr(2, rollup("SUCCESS", {"status": "COMPLETED", "conclusion": "SUCCESS"})),
+            pr(3, rollup("PENDING", {"status": "IN_PROGRESS", "conclusion": None})),
+            pr(4, None),
+            pr(5, None, commits=False),
+        ]
+        with mock.patch.object(pr_status, "review_thread_query", return_value=prs):
+            result = pr_status.read_reviews_and_ci(REPO)
+        self.assertEqual(
+            [result.ci_state(n) for n in (1, 2, 3, 4, 5)],
+            ["failed", "passed", "pending", "none", "none"],
+        )
+
+    def test_ci_state_is_unknown_if_github_could_not_say(self):
+        """Every PR's CI state is "unknown" if GitHub could not say the CI results."""
+        reviews_and_ci = pr_status.ReviewsAndCi({}, {1}, {2}, {3}, known=False)
+        self.assertEqual([reviews_and_ci.ci_state(n) for n in (1, 2, 3, 4)], ["unknown"] * 4)
 
     def test_load_reviews_and_ci_survives_github_failure(self):
         """A failure to ask GitHub yields unknown reviews and CI results, and a warning."""
@@ -756,7 +789,7 @@ class ModelTest(unittest.TestCase):
             mock.patch("sys.stderr") as stderr,
         ):
             result = pr_status.load_reviews_and_ci(REPO)
-        self.assertEqual(result, pr_status.ReviewsAndCi({}, set(), set(), known=False))
+        self.assertEqual(result, pr_status.ReviewsAndCi({}, set(), set(), set(), known=False))
         written = "".join(call.args[0] for call in stderr.write.call_args_list)
         self.assertIn("cannot read the review threads and CI results of owner/repo", written)
         self.assertIn("HTTP 502: Bad Gateway", written)
@@ -919,7 +952,7 @@ class DependsOnTest(unittest.TestCase):
                 "default_branch": "master",
             },
         )
-        repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(failed), set())
+        repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(failed), set(), set())
         return repo
 
     def prerequisites_model(self):
@@ -979,7 +1012,7 @@ class DependsOnTest(unittest.TestCase):
         """An open prerequisite has a "?" if GitHub could not say what its CI results are."""
         model = self.prerequisites_model()
         for m in model.by_gh.values():
-            m.repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), known=False)
+            m.repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), set(), known=False)
         link = self.link
         self.assertEqual(
             pr_status.depends_on(model, 2, mark_failed=True),
@@ -1464,7 +1497,7 @@ class NewSnapshotTest(unittest.TestCase):
                 [],
             ),
         ]
-        unblocked = [{"repo": "a", "number": 1, "directories": ["/base/a-branch-x"]}]
+        unblocked = [{"repo": "a", "number": 1, "directories": ["a-branch-x"]}]
         snapshot = json.loads(
             json.dumps(pr_status.new_snapshot("now", {"repo": {}}, conflicting, unblocked))
         )
@@ -1693,26 +1726,44 @@ class UnblockedPrsTest(unittest.TestCase):
         Args:
             name: a repository's key in the config's "repos", such as "daikon"
             unblocked: the numbers of the repository's unblocked PRs, such as [1, 2]
-            reviews_and_ci: the CI results of the repository's PRs, as a ReviewsAndCi
+            reviews_and_ci: the CI results of the repository's PRs, as a ReviewsAndCi, or
+                None if reading them is an error
 
         Returns:
             A model whose repository's GitHub slug is "org/NAME".
         """
         gh = f"org/{name}"
-        repo = types.SimpleNamespace(
-            name=name,
-            gh=gh,
-            url=lambda n: f"https://github.com/{gh}/pull/{n}",
-            prs={n: {"number": n} for n in unblocked},
-            reviews_and_ci=reviews_and_ci,
-        )
-        return types.SimpleNamespace(repo=repo, unblocked=lambda: sorted(unblocked))
+
+        class Repo:
+            """A repository whose CI results are reviews_and_ci."""
+
+            def __init__(self):
+                self.name = name
+                self.gh = gh
+                self.prs = {n: {"number": n} for n in unblocked}
+
+            @staticmethod
+            def url(n):
+                return f"https://github.com/{gh}/pull/{n}"
+
+            @property
+            def reviews_and_ci(self):
+                if reviews_and_ci is None:
+                    msg = f"read the CI results of {gh}"
+                    raise AssertionError(msg)
+                return reviews_and_ci
+
+        return types.SimpleNamespace(repo=Repo(), unblocked=lambda: sorted(unblocked))
 
     def test_prs(self):
-        """Each unblocked PR is described, in the order of the repositories and then by number."""
+        """Each unblocked PR is described, in the order of the repositories and then by number.
+
+        The CI results of repository c, which has no unblocked PR, are not read.
+        """
         models = [
-            self.model("a", [3, 1, 2, 4], pr_status.ReviewsAndCi({}, {1}, {2})),
-            self.model("b", [5], pr_status.ReviewsAndCi({}, set(), set(), known=False)),
+            self.model("a", [3, 1, 2, 4], pr_status.ReviewsAndCi({}, {1}, {2}, {4})),
+            self.model("b", [5], pr_status.ReviewsAndCi({}, set(), set(), set(), known=False)),
+            self.model("c", [], None),
         ]
         directories = {1: ["a-branch-x", "a-branch-y"], 5: ["b-branch-z"]}
         with mock.patch.object(
@@ -1729,7 +1780,7 @@ class UnblockedPrsTest(unittest.TestCase):
                     "gh": "org/a",
                     "number": 1,
                     "url": "https://github.com/org/a/pull/1",
-                    "directories": ["/base/a-branch-x", "/base/a-branch-y"],
+                    "directories": ["a-branch-x", "a-branch-y"],
                     "ci": "failed",
                 },
                 {
@@ -1754,14 +1805,14 @@ class UnblockedPrsTest(unittest.TestCase):
                     "number": 4,
                     "url": "https://github.com/org/a/pull/4",
                     "directories": [],
-                    "ci": "pending",
+                    "ci": "none",
                 },
                 {
                     "repo": "b",
                     "gh": "org/b",
                     "number": 5,
                     "url": "https://github.com/org/b/pull/5",
-                    "directories": ["/base/b-branch-z"],
+                    "directories": ["b-branch-z"],
                     "ci": "unknown",
                 },
             ],
@@ -1855,7 +1906,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
                 "gh": "o/a",
                 "number": 1,
                 "url": "https://github.com/o/a/pull/1",
-                "directories": ["/base/a-branch-x"],
+                "directories": ["a-branch-x"],
                 "ci": "passed",
             }
         ]

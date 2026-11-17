@@ -354,9 +354,10 @@ class Repo:
             if the PR is open and GitHub could not say whether its CI failed; or ""
             otherwise.
         """
-        if not self.reviews_and_ci.known:
+        ci = self.reviews_and_ci.ci_state(n)
+        if ci == "unknown":
             return " ?" if n in self.prs else ""
-        return " " + FAILED_MARK if n in self.reviews_and_ci.ci_failed else ""
+        return " " + FAILED_MARK if ci == "failed" else ""
 
     def refs(self, ns: Iterable[int]) -> str:
         """Return how documents refer to the PRs ns.
@@ -603,6 +604,8 @@ class ReviewsAndCi(NamedTuple):
             is outdated.
         ci_failed: the numbers of the PRs whose CI failed.
         ci_passed: the numbers of the PRs whose CI completed and passed.
+        ci_absent: the numbers of the PRs whose head commit has no CI checks, as when the
+            repository has no CI, or when CI has not yet started on a newly pushed commit.
         known: True if they were read from GitHub; False if GitHub could not be asked, and
             the other attributes are empty.
     """
@@ -610,7 +613,29 @@ class ReviewsAndCi(NamedTuple):
     review_threads: dict[int, list[bool]]
     ci_failed: set[int]
     ci_passed: set[int]
+    ci_absent: set[int]
     known: bool = True
+
+    def ci_state(self, n: int) -> str:
+        """Return the state of the CI of the given PR.
+
+        Args:
+            n: a PR's number, such as 123.
+
+        Returns:
+            "unknown" if GitHub could not say; "failed" if the PR's CI failed; "passed" if it
+            completed and passed; "none" if the PR's head commit has no CI checks; and
+            otherwise "pending" (its CI has not completed).
+        """
+        if not self.known:
+            return "unknown"
+        if n in self.ci_failed:
+            return "failed"
+        if n in self.ci_passed:
+            return "passed"
+        if n in self.ci_absent:
+            return "none"
+        return "pending"
 
 
 def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
@@ -632,7 +657,7 @@ def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
             f" documents show them as unknown (?): {' '.join(error.stderr.split())}",
             file=sys.stderr,
         )
-        return ReviewsAndCi({}, set(), set(), known=False)
+        return ReviewsAndCi({}, set(), set(), set(), known=False)
 
 
 def read_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
@@ -645,7 +670,7 @@ def read_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
         The unresolved review threads and the CI results, read from GitHub.  If GitHub
         cannot be asked, raises a subprocess.CalledProcessError.
     """
-    result = ReviewsAndCi({}, set(), set())
+    result = ReviewsAndCi({}, set(), set(), set())
     for pr in review_thread_query(
         repo, REVIEW_THREADS_QUERY, ".data.repository.pullRequests.nodes[]"
     ):
@@ -663,10 +688,12 @@ def read_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
         ]
         commits = pr["commits"]["nodes"]
         rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
-        if rollup and ci_failed(rollup["contexts"]["nodes"]):
+        if not rollup:
+            result.ci_absent.add(pr["number"])
+        elif ci_failed(rollup["contexts"]["nodes"]):
             result.ci_failed.add(pr["number"])
         # The rollup's state is SUCCESS only if every check has completed and passed.
-        elif rollup and rollup["state"] == "SUCCESS":
+        elif rollup["state"] == "SUCCESS":
             result.ci_passed.add(pr["number"])
     return result
 
@@ -1497,13 +1524,14 @@ class Model:
         """
         reviews_and_ci = self.repo.reviews_and_ci
         threads = reviews_and_ci.review_threads.get(n, [])
-        cell = [] if reviews_and_ci.known else ["?"]
+        ci = reviews_and_ci.ci_state(n)
+        cell = ["?"] if ci == "unknown" else []
         if threads:
             outdated = sum(threads)
             cell.append(str(len(threads)) + (f" ({outdated} outdated)" if outdated else ""))
-        if n in reviews_and_ci.ci_failed:
+        if ci == "failed":
             cell.append(FAILED_MARK)
-        elif n in reviews_and_ci.ci_passed:
+        elif ci == "passed":
             cell.append("✅")
         if n in self.repo.master_conflicts or self.conflicting_prerequisites(n):
             cell.append("🔀")
@@ -3571,7 +3599,9 @@ def new_snapshot(
     Returns:
         The snapshot, as a dict that .pr-status-snapshot.json holds as JSON, with the keys
         "time", "facts", "conflicting_push_chains", "missing_branches", and
-        "unblocked_prs".  The value of "unblocked_prs" is unblocked.  The value of
+        "unblocked_prs".  The value of "unblocked_prs" is unblocked; it repeats the PR numbers
+        of the "unblocked" lists of new_facts, which report_changes compares, and adds what
+        --print-unblocked-prs prints about each PR.  The value of
         "conflicting_push_chains" is a list of chains, in the order of the "Dependency
         chains with conflicts" section of the dependency document; each chain is a list of
         directories, such as ["daikon", "daikon-branch-a"], each of which `git-push-to`
@@ -3592,9 +3622,9 @@ def unblocked_prs(models: list[Model], base: str) -> list[dict[str, Any]]:
     """Return a description of each PR of the given models that depends on no other open PR.
 
     Args:
-        models: the model of each repository.
-        base: the directory that holds the working copy directories, such as
-            "/home/me/research/types".
+        models: a list of models, one per repository.
+        base: the directory that holds the working copy directories of the models'
+            repositories, such as "/home/me/research/types".
 
     Returns:
         One dict per PR, in the order of the "Unblocked PRs" sections of the dependency
@@ -3604,37 +3634,23 @@ def unblocked_prs(models: list[Model], base: str) -> list[dict[str, Any]]:
           "gh":  the repository's GitHub slug, such as "typetools/checker-framework";
           "number":  the PR's number, an integer such as 6008;
           "url":  the PR's URL, such as "https://github.com/typetools/checker-framework/pull/6008";
-          "directories":  the absolute paths of the PR's working copy directories, such as
-            ["/home/me/research/types/checker-framework-fork-me-branch-foo"], or [] if it has
-            none;
-          "ci":  "failed" if the PR's CI failed, "passed" if it completed and passed, "unknown"
-            if GitHub could not say, and otherwise "pending" (its CI has not completed, or the
-            PR has none).
+          "directories":  the PR's working copy directories, which are entries of base, such
+            as ["checker-framework-fork-me-branch-foo"], or [] if it has none;
+          "ci":  the state of the PR's CI, as ReviewsAndCi.ci_state returns it, such as
+            "passed".
     """
-    result = []
-    for m in models:
-        r = m.repo
-        reviews_and_ci = r.reviews_and_ci
-        for n in m.unblocked():
-            if not reviews_and_ci.known:
-                ci = "unknown"
-            elif n in reviews_and_ci.ci_failed:
-                ci = "failed"
-            elif n in reviews_and_ci.ci_passed:
-                ci = "passed"
-            else:
-                ci = "pending"
-            result.append(
-                {
-                    "repo": r.name,
-                    "gh": r.gh,
-                    "number": n,
-                    "url": r.url(n),
-                    "directories": [f"{base}/{d}" for d in pr_directories(r, r.prs[n], base)],
-                    "ci": ci,
-                }
-            )
-    return result
+    return [
+        {
+            "repo": m.repo.name,
+            "gh": m.repo.gh,
+            "number": n,
+            "url": m.repo.url(n),
+            "directories": pr_directories(m.repo, m.repo.prs[n], base),
+            "ci": m.repo.reviews_and_ci.ci_state(n),
+        }
+        for m in models
+        for n in m.unblocked()
+    ]
 
 
 def format_push_chains(snapshot: dict[str, Any]) -> list[str]:

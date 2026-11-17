@@ -236,13 +236,16 @@ The commands are:
   of the branch, as another entry of the directory that holds the working
   copy directories, after which `git-push-to` can merge it.
   With `--print-unblocked-prs`, it prints the pull requests that depend on
-  no other open pull request (as of its previous run), and does nothing
-  else.  It prints them as a JSON array with one object per pull request,
-  whose keys are "repo" (the repository's key in the config, such as
-  "checker-framework"), "gh" (the repository's GitHub slug, such as
+  no other open pull request (as of its last run that wrote the snapshot),
+  and does nothing else.  It prints them as a JSON array with one object per
+  pull request, whose keys are "repo" (the repository's key in the config,
+  such as "checker-framework"), "gh" (the repository's GitHub slug, such as
   "typetools/checker-framework"), "number" (an integer such as 6008), "url",
-  "directories" (a list of the absolute paths of the pull request's working
-  copy directories), and "ci" ("failed", "passed", "pending", or "unknown").
+  "directories" (a list of the pull request's working copy directories,
+  which are entries of the directory that holds the working copy
+  directories, such as "checker-framework-fork-me-branch-foo"), and "ci"
+  ("failed", "none" if the pull request's head commit has no CI checks,
+  "passed", "pending", or "unknown").
   `--highlight PR...` highlights, wherever the documents that it regenerates
   name it, each given PR (such as `REPO#100` or `ORG/REPO#100`) and every
   PR that must land for it to land.
