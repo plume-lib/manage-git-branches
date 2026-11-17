@@ -330,10 +330,19 @@ fetch_head_location() {
 ## which updates no remote-tracking branch.  Returns 1, printing nothing, if
 ## no such remote-tracking branch exists.
 tracking_branch_of() {
+  tracking_of_key="$(url_key . "$2")"
   for tracking_of_remote in $(git remote); do
-    if git merge-base --is-ancestor "$3" "refs/remotes/${tracking_of_remote}/$1" 2> /dev/null \
-      && tracking_of_url="$(git ls-remote --get-url "${tracking_of_remote}" 2> /dev/null)" \
-      && is_fetch_head_location . "$2" "${tracking_of_url}"; then
+    if ! git merge-base --is-ancestor "$3" "refs/remotes/${tracking_of_remote}/$1" 2> /dev/null \
+      || ! tracking_of_url="$(git ls-remote --get-url "${tracking_of_remote}" 2> /dev/null)"; then
+      continue
+    fi
+    # URL is compared with the remote's URL as `git pull` writes it, as well
+    # as by key, because a pathname that `git pull` wrote, such as
+    # "/srv/proj" for "/srv/proj.git", might name no directory and so have no
+    # key.
+    if [ "$(fetch_head_location "${tracking_of_url}")" = "$2" ] \
+      || { [ -n "${tracking_of_key}" ] \
+        && [ "$(url_key . "${tracking_of_url}")" = "${tracking_of_key}" ]; }; then
       printf '%s/%s\n' "${tracking_of_remote}" "$1"
       return 0
     fi

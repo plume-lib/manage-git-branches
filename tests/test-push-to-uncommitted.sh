@@ -119,8 +119,7 @@ if [ "$(git -C "${FEATURE}" rev-parse HEAD)" != "${feature_before}" ] \
 fi
 
 ## In a chain, the last directory's uncommitted changes stop the chain before
-## it pulls the first directory or pushes the second.  The chain fails before
-## it pulls the first directory, so the status is 2.
+## it pulls the first directory or pushes the second.
 git -C "${FEATURE}" checkout -q -- edited.txt
 echo "an uncommitted line" >> "${DEPENDENT}/edited.txt"
 main_before="$(git -C "${MAIN}" rev-parse HEAD)"
@@ -130,8 +129,8 @@ set +e
   2> "${WORK_DIR}/stderr"
 status=$?
 set -e
-if [ "${status}" -ne 2 ]; then
-  fail "git-push-to of a chain exited with status ${status}, expected 2: $(cat "${WORK_DIR}/stderr")"
+if [ "${status}" -ne 1 ]; then
+  fail "git-push-to of a chain exited with status ${status}, expected 1: $(cat "${WORK_DIR}/stderr")"
 fi
 if [ "$(git -C "${MAIN}" rev-parse HEAD)" != "${main_before}" ]; then
   fail "git-push-to of a chain pulled the first directory"
@@ -166,8 +165,8 @@ set +e
   "${MAIN}" "${FEATURE}" 2> "${WORK_DIR}/stderr"
 status=$?
 set -e
-if [ "${status}" -ne 2 ]; then
-  fail "git-push-to from a first directory with uncommitted changes exited with status ${status}, expected 2: $(cat "${WORK_DIR}/stderr")"
+if [ "${status}" -ne 1 ]; then
+  fail "git-push-to from a first directory with uncommitted changes exited with status ${status}, expected 1: $(cat "${WORK_DIR}/stderr")"
 fi
 if [ "$(git -C "${MAIN}" rev-parse HEAD)" != "${main_before}" ]; then
   fail "git-push-to pulled a first directory with uncommitted changes"
@@ -175,6 +174,19 @@ fi
 if ! grep -q "while checking ${MAIN} for uncommitted changes" "${WORK_DIR}/summary-first"; then
   fail "wrong summary for uncommitted changes in the first directory: $(cat "${WORK_DIR}/summary-first")"
 fi
+
+## Given only the first directory, git-push-to refuses to pull it too.
+if "${COMMANDS_DIR}/git-push-to" --no-llm --summary "${WORK_DIR}/summary-single" \
+  "${MAIN}" 2> "${WORK_DIR}/stderr"; then
+  fail "git-push-to pulled a single directory with uncommitted changes: $(cat "${WORK_DIR}/stderr")"
+fi
+if [ "$(git -C "${MAIN}" rev-parse HEAD)" != "${main_before}" ]; then
+  fail "git-push-to pulled a single directory with uncommitted changes"
+fi
+if ! grep -q "failed to pull ${MAIN}, while checking ${MAIN} for uncommitted changes" "${WORK_DIR}/summary-single"; then
+  fail "wrong summary for uncommitted changes in a single directory: $(cat "${WORK_DIR}/summary-single")"
+fi
+
 if ! "${COMMANDS_DIR}/git-push-to" --no-llm --no-pull-first "${MAIN}" "${FEATURE}" \
   2> "${WORK_DIR}/stderr"; then
   fail "git-push-to --no-pull-first from a first directory with uncommitted changes failed: $(cat "${WORK_DIR}/stderr")"

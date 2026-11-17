@@ -105,16 +105,17 @@ The commands are:
   With `--rebase` or `--squash`, it then does what `git-rebase-to` does.
 
   With `--no-pull-first`, it does not pull the first directory, so the chain
-  merges the commit that the first directory already has.  A run of several
-  chains that start with the same directory, such as a working copy of the
-  upstream default branch, pulls it only for the first chain, so that every
-  chain merges the same commit of it, even if its remote changes during the
-  run.  Otherwise, a branch could get a newer upstream commit than a branch
-  that it builds on, and merging the latter into the former would later be a
-  criss-cross merge, which has several merge bases.  `git-push-to` itself
-  does so for the chains of slugs, and `pr-status` and `resolve-conflicts`
-  pass `--no-pull-first` to each such chain after the first that pulled the
-  directory.
+  merges the commit that the first directory already has.  Given a single
+  directory, it only pulls that directory.  A run of several chains that
+  start with the same directory, such as a working copy of the upstream
+  default branch, pulls it only once, so that every chain merges the same
+  commit of it, even if its remote changes during the run.  Otherwise, a
+  branch could get a newer upstream commit than a branch that it builds on,
+  and merging the latter into the former would later be a criss-cross merge,
+  which has several merge bases.  `git-push-to` itself,
+  `resolve-conflicts`, and the commands that `pr-status` prints pull each
+  first directory before the first chain that starts with it, and run every
+  chain with `--no-pull-first`.
 
   Suppose that a branch merged an earlier version of a pull request, whose
   branch then changed again before the pull request was squash-merged.
@@ -158,7 +159,7 @@ The commands are:
   review, each change by a hook to a file that a commit would not otherwise
   change, each file that changed after it staged a hook's changes, each
   merge that it left in progress, each agent session that can be continued,
-  and, if a push or rebase fails, the step that failed.
+  and, if a pull, push, or rebase fails, the step that failed.
 
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--no-pull-first] [--squash] [--llm | --no-llm]
@@ -257,11 +258,11 @@ The commands are:
   `pr-status.md`, then runs `git-push-to` on each chain of its section
   "Dependency chains with conflicts",
   with `--claude` (or `--codex`), which asks an AI agent for help, and with
-  `--no-pull-first` for each chain whose first directory an earlier chain
-  since `pr-status` ran pulled.
-  It ends with a summary of the chains that failed or that have changes by
-  the agent or by a hook to review, each with what `git-push-to --summary`
-  wrote for it, which names the step that failed.
+  `--no-pull-first`.  Before the first chain that starts with a directory,
+  it pulls that directory, with `git-push-to` given that single directory.
+  It ends with a summary of the chains and pulls that failed or that have
+  changes by the agent or by a hook to review, each with what
+  `git-push-to --summary` wrote for it, which names the step that failed.
 * [`crreview-resolve-all`](crreview-resolve-all)
   `[--dry-run] [--agent claude|codex] [-C DIR]`:
   Runs

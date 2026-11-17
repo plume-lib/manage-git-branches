@@ -21,14 +21,17 @@
 #    a chain is skipped if a chain that failed or was skipped would have
 #    pushed into the chain's first directory, because then that directory's
 #    branch lacks the updates that the chain would push from it,
-#  * add the "--no-pull-first" option for each chain whose first directory an
-#    earlier chain since `pr-status` ran pulled, so that all of those chains
-#    merge the same commit of it (see `git-push-to`, under "Several chains"),
+#  * pull each chain's first directory with `git-push-to`, given that single
+#    directory, before the first chain that starts with it, and add the
+#    "--no-pull-first" option to every chain, so that all chains that start
+#    with a directory merge the same commit of it (see `git-push-to`, under
+#    "Several chains"); a chain is skipped if its first directory could not
+#    be pulled,
 #  * if every chain succeeded, start over, until no chain has conflicts.
-# It fails if a chain fails, or if chains with conflicts remain after
-# ${max_rounds} rounds.  It ends with a summary of the chains that failed or
-# that have changes by an AI agent or by a hook to review, each with what
-# `git-push-to --summary` wrote for it, as in
+# It fails if a chain or a pull fails, or if chains with conflicts remain
+# after ${max_rounds} rounds.  It ends with a summary of the chains and pulls
+# that failed or that have changes by an AI agent or by a hook to review,
+# each with what `git-push-to --summary` wrote for it, as in
 #   * myrepo-branch-main myrepo-branch-feature myrepo-branch-part2 (failed)
 #       in /home/me/myrepo-branch-feature: claude also changed: README.md
 #       failed to push myrepo-branch-feature into myrepo-branch-part2, while building
@@ -123,14 +126,34 @@ newline='
 tab='	'
 
 # For each run of `git-push-to` that failed or that noted changes to
-# review, in every round, a line "* " followed by the chain, then each line
-# of the summary that it wrote, indented.
+# review, in every round, a line "* " followed by the chain, or by the
+# directory that it pulled, then each line of the summary that it wrote,
+# indented.
 summary=''
+
+## Usage: run_git_push_to [--no-pull-first] DIRECTORY...
+## Runs `git-push-to` with ${agent_option}, any "--nocompile" option, and the
+## arguments, and sets ${push_lines} to the lines that it wrote with
+## "--summary", each indented by 4 spaces.  Returns its exit status.
+run_git_push_to() {
+  echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} $*"
+  : > "${push_summary}"
+  # `git-push-to` does not read this script's standard input.
+  # shellcheck disable=SC2086 # ${nocompile_option} is empty or one word.
+  "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} \
+    --summary "${push_summary}" "$@" < /dev/null
+  run_status=$?
+  push_lines="$(sed -e 's/^/    /' -- "${push_summary}")"
+  if [ "${run_status}" -ne 0 ] && [ -z "${push_lines}" ]; then
+    push_lines="    (git-push-to failed with status ${run_status} and named no step in its summary)"
+  fi
+  return "${run_status}"
+}
 
 ## Prints ${summary}, if it is not empty, as a diagnostic.
 print_summary() {
   if [ -n "${summary}" ]; then
-    echo "${SCRIPT_NAME}: the dependency chains that failed or that have changes to review:" >&2
+    echo "${SCRIPT_NAME}: the dependency chains and pulls that failed or that have changes to review:" >&2
     printf '%s' "${summary}" >&2
   fi
 }
@@ -170,13 +193,15 @@ while :; do
 
   num_failed=0
   num_skipped=0
+  num_unpulled=0
   # The directories that a chain that failed or was skipped would have pushed
   # into (every directory of the chain but the first), each followed by a
   # newline.
   stale_dirs="${newline}"
-  # The first directories that this round's chains so far pulled; see
-  # `is_pulled_first_dir`.
-  pulled_first_dirs=''
+  # The first directories of this round's chains so far, each followed by a
+  # newline, that were pulled, and that could not be pulled.
+  pulled_dirs="${newline}"
+  unpulled_dirs="${newline}"
   IFS="${newline}"
   for chain in ${chains}; do
     IFS="${tab}"
@@ -185,38 +210,42 @@ while :; do
     IFS="${saved_ifs}"
     case "${stale_dirs}" in
       *"${newline}$1${newline}"*)
-        echo "${SCRIPT_NAME}: skipped the chain, because an earlier chain did not update its first directory: $*" >&2
-        num_skipped=$((num_skipped + 1))
-        summary="${summary}* $* (skipped)${newline}"
-        shift
-        for dir in "$@"; do stale_dirs="${stale_dirs}${dir}${newline}"; done
-        continue
+        skip_reason='an earlier chain did not update its first directory'
+        ;;
+      *)
+        case "${pulled_dirs}${unpulled_dirs}" in
+          *"${newline}$1${newline}"*) ;;
+          *)
+            if run_git_push_to "$1"; then
+              pulled_dirs="${pulled_dirs}$1${newline}"
+              if [ -n "${push_lines}" ]; then
+                summary="${summary}* $1${newline}${push_lines}${newline}"
+              fi
+            else
+              echo "${SCRIPT_NAME}: the pull failed: $1" >&2
+              num_unpulled=$((num_unpulled + 1))
+              unpulled_dirs="${unpulled_dirs}$1${newline}"
+              summary="${summary}* $1 (failed)${newline}${push_lines}${newline}"
+            fi
+            ;;
+        esac
+        case "${unpulled_dirs}" in
+          *"${newline}$1${newline}"*) skip_reason='its first directory could not be pulled' ;;
+          *) skip_reason='' ;;
+        esac
         ;;
     esac
-    if is_pulled_first_dir "$1"; then
-      no_pull_first_option='--no-pull-first'
-    else
-      no_pull_first_option=''
+    if [ -n "${skip_reason}" ]; then
+      echo "${SCRIPT_NAME}: skipped the chain, because ${skip_reason}: $*" >&2
+      num_skipped=$((num_skipped + 1))
+      summary="${summary}* $* (skipped)${newline}"
+      shift
+      for dir in "$@"; do stale_dirs="${stale_dirs}${dir}${newline}"; done
+      continue
     fi
-    echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} ${no_pull_first_option} $*"
-    : > "${push_summary}"
-    # The chain does not read this script's standard input.
-    # shellcheck disable=SC2086 # Each option is empty or one word.
-    "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} ${no_pull_first_option} \
-      --summary "${push_summary}" "$@" < /dev/null
-    push_status=$?
-    # `git-push-to` exits with status 2 if it failed before it pulled the
-    # first directory, which a later chain then pulls.
-    if [ "${push_status}" -ne 2 ]; then
-      add_pulled_first_dir "$1"
-    fi
-    push_lines="$(sed -e 's/^/    /' -- "${push_summary}")"
-    if [ "${push_status}" -ne 0 ]; then
+    if ! run_git_push_to --no-pull-first "$@"; then
       echo "${SCRIPT_NAME}: the chain failed: $*" >&2
       num_failed=$((num_failed + 1))
-      if [ -z "${push_lines}" ]; then
-        push_lines="    (git-push-to failed with status ${push_status} and named no step in its summary)"
-      fi
       summary="${summary}* $* (failed)${newline}${push_lines}${newline}"
       shift
       for dir in "$@"; do stale_dirs="${stale_dirs}${dir}${newline}"; done
@@ -226,13 +255,16 @@ while :; do
   done
   IFS="${saved_ifs}"
 
-  if [ "${num_failed}" -ne 0 ]; then
+  if [ "${num_failed}" -ne 0 ] || [ "${num_unpulled}" -ne 0 ]; then
     print_summary
+    message="${num_failed} of ${num_chains} dependency chains failed"
     if [ "${num_skipped}" -ne 0 ]; then
-      echo "${SCRIPT_NAME}: ${num_failed} of ${num_chains} dependency chains failed, and ${num_skipped} were skipped" >&2
-    else
-      echo "${SCRIPT_NAME}: ${num_failed} of ${num_chains} dependency chains failed" >&2
+      message="${message}, and ${num_skipped} were skipped"
     fi
+    if [ "${num_unpulled}" -ne 0 ]; then
+      message="${message}; first directories that could not be pulled: ${num_unpulled}"
+    fi
+    echo "${SCRIPT_NAME}: ${message}" >&2
     exit 1
   fi
   round=$((round + 1))
