@@ -22,16 +22,18 @@ check from any other service is reported and skipped.
 A job's failure is transient if the log of its failed steps contains a message about a
 network problem (such as a timeout, a refused or reset connection, or a failed DNS
 lookup), an HTTP status code that indicates an overloaded or rate-limited server (such
-as 429 or 503), or a lost CI runner.  TRANSIENT_PATTERNS below lists the messages.  The
-log of an Azure Pipelines or GitHub Actions job also contains the errors that the CI
-service reports for the job, which describe failures, such as a lost runner, that
-leave no log.  Shell trace lines, which start with `+ `, and the scripts that Azure
-Pipelines and GitHub Actions echo before running a step, are ignored, because a script
-that itself looks for such messages, in order to retry a command, contains them.  A
-CircleCI job whose status is `infrastructure_fail` is transient.  A cancelled GitHub
-Actions job is examined too, because GitHub Actions cancels a job whose runner shuts
-down; a cancelled job that did not fail transiently, such as one that a user or the
-failure of another job cancelled, is ignored.
+as 429 or 503), a lost or unresponsive CI runner, or a GitHub-hosted runner that never
+picked up the job.  TRANSIENT_PATTERNS below lists the messages.  The log of an Azure
+Pipelines or GitHub Actions job also contains the errors that the CI service reports for
+the job, which describe failures, such as a lost runner or a job that no runner picked
+up, that leave no log.  Shell trace lines, which start with `+ `, and the scripts that
+Azure Pipelines and GitHub Actions echo before running a step, are ignored, because a
+script that itself looks for such messages, in order to retry a command, contains them.
+An Azure Pipelines job that was abandoned, such as one whose agent stopped responding,
+is examined like a failed one.  A CircleCI job whose status is `infrastructure_fail` is
+transient.  A cancelled GitHub Actions job is examined too, because GitHub Actions
+cancels a job whose runner shuts down; a cancelled job that did not fail transiently,
+such as one that a user or the failure of another job cancelled, is ignored.
 
 For each build (Azure Pipelines), workflow (CircleCI), or workflow run (GitHub
 Actions) that has a job that failed transiently, this command reruns:
@@ -97,9 +99,16 @@ NORMALIZE_LOG = Path(__file__).resolve().parent / "normalize-log"
 # failure.  They are matched without regard to case.
 TRANSIENT_PATTERNS = [
     *request_util.TRANSIENT_NETWORK_PATTERNS,
+    # A runner that was lost or stopped responding.
     r"We stopped hearing from agent",
+    r"agent did not renew the lock",
     r"runner has received a shutdown signal",
     r"lost communication with the server",
+    # A GitHub-hosted runner that never picked up the job.  A job that waited for a runner
+    # until it timed out ("while awaiting a runner") is not transient, because the usual
+    # cause is a `runs-on` label that matches no runner or a self-hosted runner that is
+    # offline.
+    r"job was not acquired by Runner of type hosted",
 ]
 # Matches a line of a log that shows a transient failure.
 TRANSIENT_RE = re.compile("|".join(f"(?:{p})" for p in TRANSIENT_PATTERNS), re.IGNORECASE)
@@ -113,6 +122,9 @@ ECHOED_SCRIPTS = [
     (re.compile(r"##\[group\]Run "), re.compile(r"##\[endgroup\]")),
 ]
 
+# The results of a failed Azure Pipelines job or task.  Azure Pipelines abandons a job
+# whose agent stops responding.
+AZURE_FAILED = ("failed", "abandoned")
 # The statuses of a failed CircleCI job.
 CIRCLECI_FAILED = ("failed", "infrastructure_fail", "timedout")
 # The conclusions of a failed GitHub Actions job.
@@ -325,7 +337,7 @@ class Rerunner:
         stage_results: dict[str, set[str]] = {}
         stage_attempts: dict[str, int] = {}
         by_id = {r["id"]: r for r in records}
-        for job in (r for r in records if r["type"] == "Job" and r["result"] == "failed"):
+        for job in (r for r in records if r["type"] == "Job" and r["result"] in AZURE_FAILED):
             stage = azure_stage(job, by_id)
             name = stage.get("identifier") or ""
             stage_attempts[name] = max(
@@ -747,7 +759,8 @@ class JobLog(NamedTuple):
 
     Attributes:
         text: the log, followed by the errors that the CI service reports for the job.
-            The errors describe failures, such as a lost runner, that leave no log.
+            The errors describe failures, such as a lost runner or a job that no runner
+            picked up, that leave no log.
         read: True if the log could be read.  If it could not, text contains only the
             errors.
     """
@@ -793,7 +806,7 @@ def azure_job_log(api: str, job: dict[str, Any], records: list[dict[str, Any]]) 
         The logs and the errors.
     """
     failed_tasks = [
-        r for r in records if r.get("parentId") == job["id"] and r["result"] == "failed"
+        r for r in records if r.get("parentId") == job["id"] and r["result"] in AZURE_FAILED
     ]
     parts = []
     read = True

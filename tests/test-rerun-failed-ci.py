@@ -408,6 +408,18 @@ class ClassifyTest(unittest.TestCase):
             ),
             ("We stopped hearing from agent Azure Pipelines 3.", None),
             ("The runner has received a shutdown signal.", None),
+            (
+                (
+                    "##[error]The job was abandoned because agent did not renew the lock."
+                    "  Ensure agent is running, not sleeping, and has not lost communication"
+                    " with the service."
+                ),
+                None,
+            ),
+            (
+                "The job was not acquired by Runner of type hosted even after multiple attempts",
+                None,
+            ),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
         ]:
@@ -422,6 +434,8 @@ class ClassifyTest(unittest.TestCase):
                 "Could not GET 'https://repo.maven.apache.org/x.pom'. Received status code 404"
                 " from server: Not Found"
             ),
+            # A job that no runner matches, as for a misspelled `runs-on` label.
+            "The job has exceeded the maximum execution time while awaiting a runner for 24h0m0s",
             # A shell trace line, as from a script that looks for network errors itself.
             (
                 "+ grep -q -E 'Connection (reset|refused)|Read timed out' /tmp/log\n"
@@ -537,6 +551,22 @@ class AzureTest(RerunTestCase):
         )
         output = self.assert_reruns([self.stage_retry("s2")], self.BUILD, status=1)
         self.assertIn("Not rerunning stage s1:  it has a failed job whose log could not", output)
+
+    def test_abandoned_job(self) -> None:
+        """An abandoned job is examined like a failed one."""
+        self.server.azure_timeline(
+            500,
+            ("s1", 1, "a", "abandoned", ""),
+            issue={
+                "type": "error",
+                "message": (
+                    "The job was abandoned because agent did not renew the lock.  Ensure agent"
+                    " is running, not sleeping, and has not lost communication with the service."
+                ),
+            },
+        )
+        output = self.assert_reruns([self.RETRY], self.BUILD)
+        self.assertIn("a: transient: The job was abandoned", output)
 
     def test_warning_issue(self) -> None:
         """A warning that a task reports does not make a job transient."""
