@@ -22,16 +22,17 @@ check from any other service is reported and skipped.
 A job's failure is transient if the log of its failed steps contains a message about a
 network problem (such as a timeout, a refused or reset connection, or a failed DNS
 lookup), an HTTP status code that indicates an overloaded or rate-limited server (such
-as 429 or 503), or a lost CI runner.  TRANSIENT_PATTERNS below lists the messages.  The
-log of an Azure Pipelines or GitHub Actions job also contains the errors that the CI
-service reports for the job, which describe failures, such as a lost runner, that
-leave no log.  Shell trace lines, which start with `+ `, and the scripts that Azure
-Pipelines and GitHub Actions echo before running a step, are ignored, because a script
-that itself looks for such messages, in order to retry a command, contains them.  A
-CircleCI job whose status is `infrastructure_fail` is transient.  A cancelled GitHub
-Actions job is examined too, because GitHub Actions cancels a job whose runner shuts
-down; a cancelled job that did not fail transiently, such as one that a user or the
-failure of another job cancelled, is ignored.
+as 429 or 503), a lost CI runner, or a job that never got a runner.  TRANSIENT_PATTERNS
+below lists the messages.  The log of an Azure Pipelines or GitHub Actions job also
+contains the errors that the CI service reports for the job, which describe failures,
+such as a lost runner or a job that never got a runner, that leave no log.  Shell trace
+lines, which start with `+ `, and the scripts that Azure Pipelines and GitHub Actions
+echo before running a step, are ignored, because a script that itself looks for such
+messages, in order to retry a command, contains them.  A CircleCI job whose status is
+`infrastructure_fail` is transient.  A cancelled GitHub Actions job is examined too,
+because GitHub Actions cancels a job whose runner shuts down; a cancelled job that did
+not fail transiently, such as one that a user or the failure of another job cancelled,
+is ignored.
 
 For each build (Azure Pipelines), workflow (CircleCI), or workflow run (GitHub
 Actions) that has a job that failed transiently, this command reruns:
@@ -97,9 +98,14 @@ NORMALIZE_LOG = Path(__file__).resolve().parent / "normalize-log"
 # failure.  They are matched without regard to case.
 TRANSIENT_PATTERNS = [
     *request_util.TRANSIENT_NETWORK_PATTERNS,
+    # A lost runner.
     r"We stopped hearing from agent",
+    r"agent did not renew the lock",
     r"runner has received a shutdown signal",
     r"lost communication with the server",
+    # A job that never got a runner.
+    r"job was not acquired by Runner",
+    r"while awaiting a runner",
 ]
 # Matches a line of a log that shows a transient failure.
 TRANSIENT_RE = re.compile("|".join(f"(?:{p})" for p in TRANSIENT_PATTERNS), re.IGNORECASE)

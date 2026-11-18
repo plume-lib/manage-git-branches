@@ -408,6 +408,25 @@ class ClassifyTest(unittest.TestCase):
             ),
             ("We stopped hearing from agent Azure Pipelines 3.", None),
             ("The runner has received a shutdown signal.", None),
+            (
+                (
+                    "##[error]The job was abandoned because agent did not renew the lock."
+                    "  Ensure agent is running, not sleeping, and has not lost communication"
+                    " with the service."
+                ),
+                None,
+            ),
+            (
+                "The job was not acquired by Runner of type hosted even after multiple attempts",
+                None,
+            ),
+            (
+                (
+                    "The job has exceeded the maximum execution time while awaiting a runner"
+                    " for 24h0m0s"
+                ),
+                None,
+            ),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
         ]:
@@ -726,6 +745,24 @@ class GithubActionsTest(RerunTestCase):
                 self.assertIn(
                     "cannot read the log of the failed steps of GitHub Actions job c", output
                 )
+
+    def test_unstarted_job(self) -> None:
+        """A job that never got a runner failed transiently."""
+        s = self.server
+        s.gh_logs.pop(103)
+        s.gha_job(
+            103,
+            None,
+            "The job was not acquired by Runner of type hosted even after multiple attempts",
+        )
+        self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
+        s.gha_run("completed", "cancelled", [(101, "a", "failure"), (103, "c", "cancelled")])
+        s.gha_job(
+            103,
+            None,
+            "The job has exceeded the maximum execution time while awaiting a runner for 24h0m0s",
+        )
+        self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
 
     def test_cancelled(self) -> None:
         """A cancelled job is rerun if it failed transiently, and is ignored otherwise."""
