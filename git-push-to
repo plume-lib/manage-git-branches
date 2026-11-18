@@ -29,8 +29,8 @@
 # lines into its own summary.  They are each change by an AI agent to review
 # (see "Asking an AI agent" below), as in
 #   in /home/me/myrepo-branch-feature: claude also changed: README.md
-# each change by a hook to a file that a commit by this script would not
-# otherwise change, and each file that changed after this script staged the
+# each commit that a hook rejected and that this script did not make again,
+# with the reason, and each file that changed after this script staged a
 # hook's changes (see "Conflicts" below),
 # each merge left in progress and each agent session that can be continued,
 # which are also noted in AGENT-TODO.md, and, if a pull, push, or rebase
@@ -228,13 +228,12 @@
 # Then it runs a pre-merge-commit hook again, which must change no file,
 # builds a fix to the build again, and commits once more, with `git commit`,
 # which runs the pre-commit hook again.  The commit includes the hook's
-# changes to the files that it would not otherwise change; this script lists
-# those files, whether or not it commits, so that you can review the hook's
-# changes to them.  It also lists each file that changed after it staged the
-# hook's changes, as when the hook changed the file again when it ran again.
+# changes to the files that it would not otherwise change.  This script lists
+# each file that changed after it staged the hook's changes, as when the hook
+# changed the file again when it ran again.
 # If a condition does not hold, or if the hook, the build, or the second
 # commit fails, this script stops, with the merge still in progress or the
-# fix staged.
+# fix staged, and it lists the reason.
 
 # Asking an AI agent
 #

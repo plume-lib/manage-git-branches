@@ -2899,7 +2899,7 @@ install_git_hook "${feature_dir}" pre-commit \
 push_to STUB_BUILD=fix good --llm
 check_not_pushed "build fix with a hook that breaks the build"
 case "${push_output}" in
-  *"not committed in "*"compile-project\` failed"*"cannot commit the changes of claude"*) ;;
+  *"not committed again, because "*"compile-project\` failed"*"cannot commit the changes of claude"*) ;;
   *) fail "build fix with a hook that breaks the build: wrong diagnostic: ${push_output}" ;;
 esac
 if [ "$(git -C "${feature_dir}" log -1 --format=%s HEAD)" != "Merge branch 'main' into feature" ]; then
