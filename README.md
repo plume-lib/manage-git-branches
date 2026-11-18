@@ -156,9 +156,10 @@ The commands are:
   once the agent can run, asks the agent to do its task again.
 
   With `--summary FILE`, it appends to FILE each change by the agent to
-  review, each file that changed after it staged a hook's changes, each
-  merge that it left in progress, each agent session that can be continued,
-  and, if a pull, push, or rebase fails, the step that failed.
+  review, each commit that a hook rejected and that it did not make again,
+  with the reason, each file that changed after it staged a hook's changes,
+  each merge that it left in progress, each agent session that can be
+  continued, and, if a pull, push, or rebase fails, the step that failed.
 
 * [`git-rebase-to`](git-rebase-to)
   `[--nocompile] [--no-pull-first] [--squash] [--llm | --no-llm]

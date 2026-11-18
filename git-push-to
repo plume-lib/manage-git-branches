@@ -29,8 +29,9 @@
 # lines into its own summary.  They are each change by an AI agent to review
 # (see "Asking an AI agent" below), as in
 #   in /home/me/myrepo-branch-feature: claude also changed: README.md
-# each file that changed after this script staged a hook's changes (see
-# "Conflicts" below),
+# each commit that a hook rejected and that this script did not make again,
+# with the reason, and each file that changed after this script staged a
+# hook's changes (see "Conflicts" below),
 # each merge left in progress and each agent session that can be continued,
 # which are also noted in AGENT-TODO.md, and, if a pull, push, or rebase
 # fails, the step that failed, as in
@@ -232,7 +233,7 @@
 # changed the file again when it ran again.
 # If a condition does not hold, or if the hook, the build, or the second
 # commit fails, this script stops, with the merge still in progress or the
-# fix staged.
+# fix staged, and it lists the reason.
 
 # Asking an AI agent
 #

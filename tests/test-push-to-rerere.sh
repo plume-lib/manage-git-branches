@@ -374,11 +374,16 @@ check_no_hook_notice() {
   fi
 }
 
-## Usage: check_failure_summary DESCRIPTION
-## Checks that the summary file ${summary} says that the merge is in progress
-## in ${feature_dir}, as it does after a hook failure stops git-push-to.
+## Usage: check_failure_summary DESCRIPTION REASON
+## Checks that the summary file ${summary} says that the pre-commit hook
+## rejected the commit in ${feature_dir}, and then REASON, such as "not
+## committing again, because ...", and that the merge is in progress there,
+## as it does after a hook failure stops git-push-to.
 ## DESCRIPTION names the test case; used for diagnostics.
 check_failure_summary() {
+  if ! grep -q -x -F -- "in ${feature_dir}: the pre-commit hook rejected the commit; $2" "${summary}"; then
+    fail "$1: the summary does not report the hook failure: $(cat "${summary}")"
+  fi
   if ! grep -q -F -- "is in progress in ${feature_dir}." "${summary}"; then
     fail "$1: the summary does not report the merge in progress: $(cat "${summary}")"
   fi
@@ -434,7 +439,8 @@ case "${push_output}" in
   *) fail "a hook that always fails after changing another file: no diagnostic about the staged changes: ${push_output}" ;;
 esac
 check_no_hook_notice "a hook that always fails after changing another file"
-check_failure_summary "a hook that always fails after changing another file"
+check_failure_summary "a hook that always fails after changing another file" \
+  "not committed again, because the commit failed; the changes that the pre-commit hook made when it rejected the commit are staged; the working tree has later changes, which are not staged"
 check_unstaged_notice "a hook that always fails after changing another file" "are not staged"
 
 ## A hook that rejects the commit after reformatting a file that the merge
@@ -448,7 +454,8 @@ check_not_resolved "a hook that changes another file and creates a file" \
   "the pre-commit hook created or deleted an untracked file"
 check_no_retry "a hook that changes another file and creates a file"
 check_no_hook_notice "a hook that changes another file and creates a file"
-check_failure_summary "a hook that changes another file and creates a file"
+check_failure_summary "a hook that changes another file and creates a file" \
+  "not committing again, because the pre-commit hook created or deleted an untracked file"
 
 ## A hook that rejects the commit after changing a file that the merge does
 ## not change, and that changes it again when the second commit runs it,
@@ -601,7 +608,7 @@ setup_clean_case pre-merge-commit-stages
 install_git_hook "${feature_dir}" pre-merge-commit 'echo hooked >> sub/keep.txt' 'git add sub/keep.txt' 'exit 1'
 push_to
 check_not_resolved "a pre-merge-commit hook that stages a change" \
-  "not committing again in ${feature_dir}, because the pre-merge-commit hook staged a change"
+  "the pre-merge-commit hook rejected the commit; not committing again, because the pre-merge-commit hook staged a change"
 check_no_retry "a pre-merge-commit hook that stages a change"
 
 ## A pre-merge-commit hook that rejects the commit of a merge without
@@ -611,7 +618,7 @@ setup_clean_case pre-merge-commit-deletes
 install_git_hook "${feature_dir}" pre-merge-commit 'rm sub/keep.txt' 'exit 1'
 push_to
 check_not_resolved "a pre-merge-commit hook that deletes a file" \
-  "not committing again in ${feature_dir}, because the pre-merge-commit hook did more than modify files"
+  "the pre-merge-commit hook rejected the commit; not committing again, because the pre-merge-commit hook did more than modify files"
 check_no_retry "a pre-merge-commit hook that deletes a file"
 
 ## A pre-merge-commit hook that rejects the commit of the merge that a pull

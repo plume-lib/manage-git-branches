@@ -573,9 +573,9 @@ review_unstaged_changes() {
 ## hook that formats the whole project, such as one that runs
 ## `./gradlew spotlessApply`, can also change a file that the commit does not
 ## change, relative to HEAD, if that file was not formatted at HEAD; the
-## commit then includes the hook's changes to that file too.  A hook's
-## changes need no review:  if the commit of the files as the hook left them
-## succeeds, the hook accepted them.
+## commit then includes the hook's changes to that file too.  If the commit
+## of the files as the hook left them succeeds, the hook accepted its
+## changes, so they need no review.
 ## TREE is the tree that the rejected commit would have had, as a hash such
 ## as "4b825dc642cb6eb9a060e54bf8d69288fbee4904", or empty if it is not
 ## known.  This function stages the hook's changes only if
@@ -592,8 +592,13 @@ review_unstaged_changes() {
 ## changing or staging a file or creating or deleting an untracked file.
 ## Then it runs COMMAND, if it is given, as a check of those files, and
 ## commits only if COMMAND succeeds.  `git commit` runs the pre-commit hook
-## again.  For each file that has unstaged changes afterward, as when the
-## hook changed a file again when it ran again, it prints a notice and
+## again.  If a condition above does not hold, it does not stage the hook's
+## changes; if a later step fails, the hook's changes stay staged, and the
+## commit is not made.  In either case it prints a notice that says that the
+## hook rejected the commit, why it was not made again, and which changes
+## are staged, and appends the notice to the summary (see `review_notice`).
+## For each file that has unstaged changes afterward, as when the hook
+## changed a file again when it ran again, it also prints a notice and
 ## appends it to the summary (see `review_unstaged_changes`).
 ##
 ## Returns 0 if the commit succeeded, and a nonzero status otherwise.
@@ -630,7 +635,7 @@ commit_staged_again() {
     commit_again_refusal=''
   fi
   if [ -n "${commit_again_refusal}" ]; then
-    echo "${SCRIPT_NAME}: not committing again in $(pwd), because ${commit_again_refusal}" >&2
+    review_notice "the ${commit_again_hook} hook rejected the commit; not committing again, because ${commit_again_refusal}"
     return 1
   fi
   printf '%s\n' "${commit_again_changed}" | while IFS= read -r commit_again_file; do
@@ -668,7 +673,7 @@ commit_staged_again() {
     if ! git diff --quiet || untracked_files_changed; then
       commit_again_later="${commit_again_later}; the working tree has later changes, which are not staged"
     fi
-    echo "${SCRIPT_NAME}: not committed in $(pwd), because ${commit_again_failure}; the changes that the ${commit_again_hook} hook made when it rejected the commit are staged${commit_again_later}" >&2
+    review_notice "the ${commit_again_hook} hook rejected the commit; not committed again, because ${commit_again_failure}; the changes that the ${commit_again_hook} hook made when it rejected the commit are staged${commit_again_later}"
     review_unstaged_changes "${commit_again_hook}" "are not staged"
     return 1
   fi

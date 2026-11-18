@@ -245,8 +245,10 @@ append_merge_note_summary() {
 ## Usage: append_summary LINE
 ## Appends LINE, followed by a newline, to the file named by ${summary_file}, if
 ## that variable is set and not empty.  The summary lists what a person should
-## look at after a run:  each change by an AI agent to review, each file that
-## changed after a hook's changes were staged (see `commit_staged_again`),
+## look at after a run:  each change by an AI agent to review, each commit
+## that a hook rejected and that was not made again, with the reason, each
+## file that changed after a hook's changes were staged (see
+## `commit_staged_again`),
 ## each merge left in progress and each agent session that can be continued
 ## (which `report_merge_in_progress` and `report_agent_session` also note in
 ## AGENT-TODO.md), and the step that failed.  `git-push-to --summary` sets
