@@ -369,8 +369,11 @@ esac
 ## of a hook's changes to a file, which need no review.
 ## DESCRIPTION names the test case; used for diagnostics.
 check_no_hook_notice() {
+  # `grep` returns 1 if no line matches, and 2 if it cannot read the summary.
   if grep -q -F -- "hook changed" "${summary}"; then
     fail "$1: a summary line about the hook's changes: $(cat "${summary}")"
+  elif [ $? -ne 1 ]; then
+    fail "$1: cannot read the summary ${summary}"
   fi
 }
 
@@ -455,6 +458,20 @@ check_not_resolved "a hook that changes another file and creates a file" \
 check_no_retry "a hook that changes another file and creates a file"
 check_no_hook_notice "a hook that changes another file and creates a file"
 check_failure_summary "a hook that changes another file and creates a file" \
+  "not committing again, because the pre-commit hook created or deleted an untracked file; the pre-commit hook's changes to other.txt are not staged"
+
+## A hook that rejects the commit after creating a file, without changing a
+## tracked file, stops git-push-to, which reports why it does not commit
+## again.
+setup_case hook-only-creates-file
+record_resolution false
+install_git_hook "${feature_dir}" pre-commit 'echo generated > generated.txt' 'exit 1'
+summary="${case_dir}/summary.txt"
+push_to --summary "${summary}"
+check_not_resolved "a hook that only creates a file" \
+  "the pre-commit hook created or deleted an untracked file"
+check_no_retry "a hook that only creates a file"
+check_failure_summary "a hook that only creates a file" \
   "not committing again, because the pre-commit hook created or deleted an untracked file"
 
 ## A hook that rejects the commit after changing a file that the merge does

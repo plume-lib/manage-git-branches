@@ -564,6 +564,28 @@ review_unstaged_changes() {
   done
 }
 
+## Usage: hook_changes_state HOOK TREE
+## Prints a phrase that says which of the changes that the hook HOOK, such as
+## "pre-commit", made to tracked files in the current directory, the top
+## level of a working tree, are staged and which are not, such as "; the
+## pre-commit hook's changes to a.txt are staged; its changes to b.txt are
+## not staged".  TREE is the tree that the index held when the hook ran, as a
+## hash.  The staged changes are those between TREE and the index, and the
+## unstaged ones are those between the index and the working tree.  Prints
+## nothing if neither exists.
+hook_changes_state() {
+  hook_state_staged="$(print_nul_lines git diff --cached --name-only --no-renames -z "$2" | paste -s -d ' ' -)"
+  hook_state_unstaged="$(print_nul_lines git diff --name-only --no-renames -z | paste -s -d ' ' -)"
+  hook_state_owner="the $1 hook's"
+  if [ -n "${hook_state_staged}" ]; then
+    printf '%s' "; ${hook_state_owner} changes to ${hook_state_staged} are staged"
+    hook_state_owner=its
+  fi
+  if [ -n "${hook_state_unstaged}" ]; then
+    printf '%s' "; ${hook_state_owner} changes to ${hook_state_unstaged} are not staged"
+  fi
+}
+
 ## Usage: commit_staged_again HOOK MESSAGE TREE [COMMAND...]
 ## Commits again, with `git commit` and the message MESSAGE, in the current
 ## directory, the top level of a working tree, after the hook HOOK, such as
@@ -597,6 +619,11 @@ review_unstaged_changes() {
 ## commit is not made.  In either case it prints a notice that says that the
 ## hook rejected the commit, why it was not made again, and which changes
 ## are staged, and appends the notice to the summary (see `review_notice`).
+## A notice for a condition that does not hold names the files whose changes
+## are staged, as by a hook that staged them, and those whose changes are not
+## (see `hook_changes_state`).  If the hook changed no tracked file but
+## created or deleted an untracked file, it prints such a notice too; if the
+## hook changed nothing, it prints none.
 ## For each file that has unstaged changes afterward, as when the hook
 ## changed a file again when it ran again, it also prints a notice and
 ## appends it to the summary (see `review_unstaged_changes`).
@@ -618,8 +645,16 @@ commit_staged_again() {
   # `--no-renames` keeps git from pairing a deleted file with an added one.
   # An empty status means that the hook changed nothing.
   if [ "${commit_again_clean}" != 1 ] || [ -z "${commit_again_tree}" ] \
-    || ! commit_again_status="$(print_nul_lines git diff --name-status --no-renames -z "${commit_again_tree}")" \
-    || [ -z "${commit_again_status}" ]; then
+    || ! commit_again_status="$(print_nul_lines git diff --name-status --no-renames -z "${commit_again_tree}")"; then
+    return 1
+  fi
+  if [ -z "${commit_again_status}" ]; then
+    # The hook changed no tracked file, but it might have created or deleted
+    # an untracked file, which is reported as for a hook that also changed a
+    # tracked file.
+    if untracked_files_changed; then
+      review_notice "the ${commit_again_hook} hook rejected the commit; not committing again, because the ${commit_again_hook} hook created or deleted an untracked file"
+    fi
     return 1
   fi
   commit_again_changed="$(printf '%s\n' "${commit_again_status}" | sed -n -e 'n;p')"
@@ -635,7 +670,7 @@ commit_staged_again() {
     commit_again_refusal=''
   fi
   if [ -n "${commit_again_refusal}" ]; then
-    review_notice "the ${commit_again_hook} hook rejected the commit; not committing again, because ${commit_again_refusal}"
+    review_notice "the ${commit_again_hook} hook rejected the commit; not committing again, because ${commit_again_refusal}$(hook_changes_state "${commit_again_hook}" "${commit_again_tree}")"
     return 1
   fi
   printf '%s\n' "${commit_again_changed}" | while IFS= read -r commit_again_file; do
