@@ -8,6 +8,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --print-config    # print the config, with its defaults filled in, and exit
   pr-status --print-conflicting-push-chains  # print the chains with conflicts, and exit
   pr-status --print-missing-branches  # print the branches that conflicts need, and exit
+  pr-status --print-unblocked-prs  # print the unblocked PRs as JSON, and exit
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
   pr-status --highlight bottleneck  # highlight the next PR to work on in each repository
@@ -20,7 +21,8 @@ Inputs:
                            records the dependency chains with conflicts, which
                            --print-conflicting-push-chains prints, and the branches
                            that resolving the conflicts needs but that have no working
-                           copy, which --print-missing-branches prints
+                           copy, which --print-missing-branches prints, and the unblocked
+                           PRs, which --print-unblocked-prs prints
 Each run:
   * reads the open PRs with gh,
   * runs pr-merge-analysis (cached) on them, for each repository,
@@ -95,6 +97,8 @@ CONFLICTING_PUSH_CHAINS = "conflicting_push_chains"
 # The key of the snapshot's list of the branches that resolving the conflicts needs, but that
 # have no working copy.
 MISSING_BRANCHES = "missing_branches"
+# The key of the snapshot's list of the PRs that depend on no other open PR.
+UNBLOCKED_PRS = "unblocked_prs"
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -350,9 +354,10 @@ class Repo:
             if the PR is open and GitHub could not say whether its CI failed; or ""
             otherwise.
         """
-        if not self.reviews_and_ci.known:
+        ci = self.reviews_and_ci.ci_state(n)
+        if ci == "unknown":
             return " ?" if n in self.prs else ""
-        return " " + FAILED_MARK if n in self.reviews_and_ci.ci_failed else ""
+        return " " + FAILED_MARK if ci == "failed" else ""
 
     def refs(self, ns: Iterable[int]) -> str:
         """Return how documents refer to the PRs ns.
@@ -599,6 +604,8 @@ class ReviewsAndCi(NamedTuple):
             is outdated.
         ci_failed: the numbers of the PRs whose CI failed.
         ci_passed: the numbers of the PRs whose CI completed and passed.
+        ci_absent: the numbers of the PRs whose head commit has no CI checks, as when the
+            repository has no CI, or when CI has not yet started on a newly pushed commit.
         known: True if they were read from GitHub; False if GitHub could not be asked, and
             the other attributes are empty.
     """
@@ -606,7 +613,29 @@ class ReviewsAndCi(NamedTuple):
     review_threads: dict[int, list[bool]]
     ci_failed: set[int]
     ci_passed: set[int]
+    ci_absent: set[int]
     known: bool = True
+
+    def ci_state(self, n: int) -> str:
+        """Return the state of the CI of the given PR.
+
+        Args:
+            n: a PR's number, such as 123.
+
+        Returns:
+            "unknown" if GitHub could not say; "failed" if the PR's CI failed; "passed" if it
+            completed and passed; "none" if the PR's head commit has no CI checks; and
+            otherwise "pending" (its CI has not completed).
+        """
+        if not self.known:
+            return "unknown"
+        if n in self.ci_failed:
+            return "failed"
+        if n in self.ci_passed:
+            return "passed"
+        if n in self.ci_absent:
+            return "none"
+        return "pending"
 
 
 def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
@@ -628,7 +657,7 @@ def load_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
             f" documents show them as unknown (?): {' '.join(error.stderr.split())}",
             file=sys.stderr,
         )
-        return ReviewsAndCi({}, set(), set(), known=False)
+        return ReviewsAndCi({}, set(), set(), set(), known=False)
 
 
 def read_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
@@ -641,7 +670,7 @@ def read_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
         The unresolved review threads and the CI results, read from GitHub.  If GitHub
         cannot be asked, raises a subprocess.CalledProcessError.
     """
-    result = ReviewsAndCi({}, set(), set())
+    result = ReviewsAndCi({}, set(), set(), set())
     for pr in review_thread_query(
         repo, REVIEW_THREADS_QUERY, ".data.repository.pullRequests.nodes[]"
     ):
@@ -659,10 +688,12 @@ def read_reviews_and_ci(repo: Repo) -> ReviewsAndCi:
         ]
         commits = pr["commits"]["nodes"]
         rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
-        if rollup and ci_failed(rollup["contexts"]["nodes"]):
+        if not rollup:
+            result.ci_absent.add(pr["number"])
+        elif ci_failed(rollup["contexts"]["nodes"]):
             result.ci_failed.add(pr["number"])
         # The rollup's state is SUCCESS only if every check has completed and passed.
-        elif rollup and rollup["state"] == "SUCCESS":
+        elif rollup["state"] == "SUCCESS":
             result.ci_passed.add(pr["number"])
     return result
 
@@ -1493,13 +1524,14 @@ class Model:
         """
         reviews_and_ci = self.repo.reviews_and_ci
         threads = reviews_and_ci.review_threads.get(n, [])
-        cell = [] if reviews_and_ci.known else ["?"]
+        ci = reviews_and_ci.ci_state(n)
+        cell = ["?"] if ci == "unknown" else []
         if threads:
             outdated = sum(threads)
             cell.append(str(len(threads)) + (f" ({outdated} outdated)" if outdated else ""))
-        if n in reviews_and_ci.ci_failed:
+        if ci == "failed":
             cell.append(FAILED_MARK)
-        elif n in reviews_and_ci.ci_passed:
+        elif ci == "passed":
             cell.append("✅")
         if n in self.repo.master_conflicts or self.conflicting_prerequisites(n):
             cell.append("🔀")
@@ -3550,19 +3582,26 @@ class PushCommands(NamedTuple):
 
 
 def new_snapshot(
-    time: str, new_facts: dict[str, Any], conflicting: list[PushChains]
+    time: str,
+    new_facts: dict[str, Any],
+    conflicting: list[PushChains],
+    unblocked: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Return the snapshot that records the given facts and chains with conflicts.
+    """Return the snapshot that records the given facts, chains with conflicts, and PRs.
 
     Args:
         time: a time, such as "2026-11-05T17:59:00-08:00", which the snapshot records
         new_facts: the facts, as facts computes them
         conflicting: the chains with conflicts of each repository, as push_chains computes
             them with conflicts_only
+        unblocked: the unblocked PRs, as unblocked_prs computes them
 
     Returns:
         The snapshot, as a dict that .pr-status-snapshot.json holds as JSON, with the keys
-        "time", "facts", "conflicting_push_chains", and "missing_branches".  The value of
+        "time", "facts", "conflicting_push_chains", "missing_branches", and
+        "unblocked_prs".  The value of "unblocked_prs" is unblocked; it repeats the PR numbers
+        of the "unblocked" lists of new_facts, which report_changes compares, and adds what
+        --print-unblocked-prs prints about each PR.  The value of
         "conflicting_push_chains" is a list of chains, in the order of the "Dependency
         chains with conflicts" section of the dependency document; each chain is a list of
         directories, such as ["daikon", "daikon-branch-a"], each of which `git-push-to`
@@ -3575,7 +3614,43 @@ def new_snapshot(
         "facts": new_facts,
         CONFLICTING_PUSH_CHAINS: [chain for pc in conflicting for chain in pc.chains],
         MISSING_BRANCHES: [list(b) for pc in conflicting for b in pc.missing_branches],
+        UNBLOCKED_PRS: unblocked,
     }
+
+
+def unblocked_prs(models: list[Model], base: str) -> list[dict[str, Any]]:
+    """Return a description of each PR of the given models that depends on no other open PR.
+
+    Args:
+        models: a list of models, one per repository.
+        base: the directory that holds the working copy directories of the models'
+            repositories, such as "/home/me/research/types".
+
+    Returns:
+        One dict per PR, in the order of the "Unblocked PRs" sections of the dependency
+        document (the config's order of the repositories, and then the PRs' numbers), with
+        these keys:
+          "repo":  the repository's key in the config's "repos", such as "checker-framework";
+          "gh":  the repository's GitHub slug, such as "typetools/checker-framework";
+          "number":  the PR's number, an integer such as 6008;
+          "url":  the PR's URL, such as "https://github.com/typetools/checker-framework/pull/6008";
+          "directories":  the PR's working copy directories, which are entries of base, such
+            as ["checker-framework-fork-me-branch-foo"], or [] if it has none;
+          "ci":  the state of the PR's CI, as ReviewsAndCi.ci_state returns it, such as
+            "passed".
+    """
+    return [
+        {
+            "repo": m.repo.name,
+            "gh": m.repo.gh,
+            "number": n,
+            "url": m.repo.url(n),
+            "directories": pr_directories(m.repo, m.repo.prs[n], base),
+            "ci": m.repo.reviews_and_ci.ci_state(n),
+        }
+        for m in models
+        for n in m.unblocked()
+    ]
 
 
 def format_push_chains(snapshot: dict[str, Any]) -> list[str]:
@@ -3641,6 +3716,30 @@ def format_missing_branches(snapshot: dict[str, Any]) -> list[str]:
             raise ValueError(msg)
         lines.append(f"{d}\t{branch}")
     return lines
+
+
+def format_unblocked_prs(snapshot: dict[str, Any]) -> list[str]:
+    """Return the unblocked PRs of the given snapshot, as JSON.
+
+    Args:
+        snapshot: a snapshot, as a dict parsed from the JSON of .pr-status-snapshot.json, with
+            keys such as "time", "facts", and "unblocked_prs"
+
+    Returns:
+        The lines of a JSON array whose elements describe the unblocked PRs that snapshot
+        records, as unblocked_prs describes them.
+
+    Raises:
+        ValueError: if snapshot does not record the unblocked PRs (even an empty list of
+            them).
+    """
+    if UNBLOCKED_PRS not in snapshot:
+        msg = (
+            f"{pr_status_config.SNAPSHOT} does not record the unblocked PRs, because an older"
+            " version of pr-status wrote it; run pr-status to rewrite it"
+        )
+        raise ValueError(msg)
+    return json.dumps(snapshot[UNBLOCKED_PRS], indent=1).splitlines()
 
 
 def dormant_note(model: Model) -> str:
@@ -4268,6 +4367,15 @@ def main() -> None:
             "  Do nothing else"
         ),
     )
+    mode.add_argument(
+        "--print-unblocked-prs",
+        action="store_true",
+        help=(
+            "print the PRs that depend on no other open PR, as the snapshot records them, as a"
+            ' JSON array of objects with the keys "repo", "gh", "number", "url",'
+            ' "directories", and "ci", and do nothing else'
+        ),
+    )
     parser.add_argument(
         "-C",
         "--directory",
@@ -4294,6 +4402,7 @@ def main() -> None:
     snapshot_printers = {
         "--print-conflicting-push-chains": format_push_chains,
         "--print-missing-branches": format_missing_branches,
+        "--print-unblocked-prs": format_unblocked_prs,
     }
 
     def given(option: str) -> bool:
@@ -4426,7 +4535,9 @@ def main() -> None:
     dependencies.write_text(
         dependency_document(models, cfg, base, as_of, title, all_chains, conflicting)
     )
-    snapshot = new_snapshot(now.isoformat(timespec="seconds"), new, conflicting)
+    snapshot = new_snapshot(
+        now.isoformat(timespec="seconds"), new, conflicting, unblocked_prs(models, base)
+    )
     write_json_atomically(pathlib.Path(pr_status_config.SNAPSHOT), snapshot)
     written = [d["file"] for d in unblocked_docs]
     written += [str(dependencies), pr_status_config.SNAPSHOT]

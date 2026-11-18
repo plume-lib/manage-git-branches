@@ -1163,7 +1163,11 @@ check_built_remote "${WORK_DIR}/ibr/clone" bare 1
 
 ## Tests of remote_branch_refs.  It omits the remote-tracking branch of a
 ## remote whose branches need not have been built.
-git -C "${WORK_DIR}/ibr/working" commit -q --allow-empty -m "Initial commit"
+# The working clone's main gets the commit of the clone's main, which is also
+# the bare repository's.  An empty commit made here instead would have the
+# same hash only if it were made in the same second, and otherwise the pull
+# from the working clone, below, would find unrelated histories.
+git -C "${WORK_DIR}/ibr/working" pull -q ../clone main
 git -C "${WORK_DIR}/ibr/clone" fetch -q working
 git -C "${WORK_DIR}/ibr/clone" fetch -q bare
 git -C "${WORK_DIR}/ibr/clone" branch -q --set-upstream-to=working/main

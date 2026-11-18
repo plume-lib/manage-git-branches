@@ -204,7 +204,8 @@ The commands are:
   It handles conflicts and a failed build as `git-push-to` does.
 * [`pr-status`](pr-status)
   `[--check | --print-document | --print-config | --print-land-after ORG/REPO |`
-  `--print-conflicting-push-chains | --print-missing-branches] [-C DIR]`
+  `--print-conflicting-push-chains | --print-missing-branches |`
+  `--print-unblocked-prs] [-C DIR]`
   `[--highlight PR|bottleneck...]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
@@ -227,13 +228,25 @@ The commands are:
   request that each of its "Land after" lines names in `ORG/REPO`, one per
   line, and does nothing else.
   With `--print-missing-branches`, it prints the branches that resolving the
-  conflicts needs, but that have no working copy (as of its previous run),
-  and does nothing else:  one line per branch, holding a directory and the
-  branch as `OWNER:BRANCH`, separated by a tab.  The directory is an entry of
-  the directory that holds the working copy directories (`DIR`, with `-C`).
-  In that directory, `git-checkout-branch OWNER:BRANCH` makes a working copy
-  of the branch, as another entry of the directory that holds the working
-  copy directories, after which `git-push-to` can merge it.
+  conflicts needs, but that have no working copy (as of its last run that
+  wrote the snapshot), and does nothing else:  one line per branch, holding
+  a directory and the branch as `OWNER:BRANCH`, separated by a tab.  The
+  directory is an entry of the directory that holds the working copy
+  directories (`DIR`, with `-C`).  In that directory, `git-checkout-branch
+  OWNER:BRANCH` makes a working copy of the branch, as another entry of the
+  directory that holds the working copy directories, after which
+  `git-push-to` can merge it.
+  With `--print-unblocked-prs`, it prints the pull requests that depend on
+  no other open pull request (as of its last run that wrote the snapshot),
+  and does nothing else.  It prints them as a JSON array with one object per
+  pull request, whose keys are "repo" (the repository's key in the config,
+  such as "checker-framework"), "gh" (the repository's GitHub slug, such as
+  "typetools/checker-framework"), "number" (an integer such as 6008), "url",
+  "directories" (a list of the pull request's working copy directories,
+  which are entries of the directory that holds the working copy
+  directories, such as "checker-framework-fork-me-branch-foo"), and "ci"
+  ("failed", "none" if the pull request's head commit has no CI checks,
+  "passed", "pending", or "unknown").
   `--highlight PR...` highlights, wherever the documents that it regenerates
   name it, each given PR (such as `REPO#100` or `ORG/REPO#100`) and every
   PR that must land for it to land.
