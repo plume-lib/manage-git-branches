@@ -22,8 +22,9 @@ check from any other service is reported and skipped.
 A job's failure is transient if the log of its failed steps contains a message about a
 network problem (such as a timeout, a refused or reset connection, or a failed DNS
 lookup), an HTTP status code that indicates an overloaded or rate-limited server (such
-as 429 or 503), a lost or unresponsive CI runner, or a GitHub-hosted runner that never
-picked up the job.  TRANSIENT_PATTERNS below lists the messages.  The log of an Azure
+as 429 or 503), an artifact that the Gradle Plugin Portal did not find, a lost or
+unresponsive CI runner, or a GitHub-hosted runner that never picked up the job.
+TRANSIENT_PATTERNS below lists the messages.  The log of an Azure
 Pipelines or GitHub Actions job also contains the errors that the CI service reports for
 the job, which describe failures, such as a lost runner or a job that no runner picked
 up, that leave no log.  Shell trace lines, which start with `+ `, and the scripts that
@@ -109,6 +110,12 @@ TRANSIENT_PATTERNS = [
     # cause is a `runs-on` label that matches no runner or a self-hosted runner that is
     # offline.
     r"job was not acquired by Runner of type hosted",
+    # A location that Gradle searched in vain for an artifact.  The Gradle Plugin Portal
+    # serves the Maven Central artifacts that plugins depend on, such as slf4j-api, and
+    # it sometimes fails to find them.  A version that does not exist on the portal also
+    # matches, but a nonexistent plugin version yields a different message ("Plugin
+    # [id: ...] was not found").
+    r"^\s*- https://plugins\.gradle\.org/m2/",
 ]
 # Matches a line of a log that shows a transient failure.
 TRANSIENT_RE = re.compile("|".join(f"(?:{p})" for p in TRANSIENT_PATTERNS), re.IGNORECASE)

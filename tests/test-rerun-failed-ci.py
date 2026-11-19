@@ -420,6 +420,15 @@ class ClassifyTest(unittest.TestCase):
                 "The job was not acquired by Runner of type hosted even after multiple attempts",
                 None,
             ),
+            (
+                (
+                    "   > Could not find org.slf4j:slf4j-api:1.7.36.\n"
+                    "     Searched in the following locations:\n"
+                    "       - https://plugins.gradle.org/m2/org/slf4j/slf4j-api/1.7.36/"
+                    "slf4j-api-1.7.36.pom"
+                ),
+                "- https://plugins.gradle.org/m2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom",
+            ),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
         ]:
