@@ -61,7 +61,14 @@ class FakeServer:
             string).
         gh: a map from the path of a `gh api` request to its response.
         gh_logs: a map from a GitHub Actions job id to the `--log-failed` output.
-        pr_checks: a map from a pull request to its checks.
+        pr_checks: a map from a pull request to its checks.  The key "" is the pull
+            request that `gh` finds for the current branch; if it is absent, `gh` finds
+            none.
+        branch: the current branch.
+        repo: the GitHub repository of the current clone, as `gh repo view` describes
+            it, with keys "owner" and "parent".
+        pr_lists: a map from a GitHub slug, such as "ORG/REPO", and a head branch to the
+            open pull requests whose head is that branch, as `gh pr list` describes them.
         reruns: the rerun requests, as strings.
     """
 
@@ -71,6 +78,9 @@ class FakeServer:
         self.gh: dict[str, Any] = {}
         self.gh_logs: dict[int, str] = {}
         self.pr_checks: dict[str, list[dict[str, str]]] = {}
+        self.branch = "feature"
+        self.repo: dict[str, Any] = {"owner": {"login": "org"}, "parent": None}
+        self.pr_lists: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self.reruns: list[str] = []
 
     def http(
@@ -122,7 +132,18 @@ class FakeServer:
             self.reruns.append(" ".join(cmd))
             return ""
         if cmd[:3] == ["gh", "pr", "checks"]:
-            return json.dumps(self.pr_checks[cmd[3]])
+            pr = "" if cmd[3].startswith("--") else cmd[3]
+            if pr not in self.pr_checks:
+                stderr = f'no pull requests found for branch "{self.branch}"'
+                raise subprocess.CalledProcessError(1, cmd, "", stderr)
+            return json.dumps(self.pr_checks[pr])
+        if cmd == ["git", "branch", "--show-current"]:
+            return self.branch + "\n"
+        if cmd[:3] == ["gh", "repo", "view"]:
+            return json.dumps(self.repo)
+        if cmd[:3] == ["gh", "pr", "list"]:
+            key = (cmd[cmd.index("--repo") + 1], cmd[cmd.index("--head") + 1])
+            return json.dumps(self.pr_lists.get(key, []))
         msg = f"unsupported command: {cmd}"
         raise AssertionError(msg)
 
@@ -887,6 +908,29 @@ class PullRequestTest(RerunTestCase):
             {"name": "a", "bucket": "cancel", "link": "https://github.com/org/repo/actions/runs/100/job/101"},
         ]  # fmt: skip
         self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], "6")
+
+    def test_fork_parent_pr(self) -> None:
+        """In a clone of a fork, the pull request for the current branch is in the parent."""
+        s = self.server
+        s.gha_run("completed", "failure", [(101, "a", "failure")])
+        s.gha_job(101, "Read timed out")
+        s.repo = {"owner": {"login": "me"}, "parent": {"owner": {"login": "org"}, "name": "repo"}}
+        url = "https://github.com/org/repo/pull/7"
+        other_url = "https://github.com/org/repo/pull/8"
+        s.pr_lists["org/repo", "feature"] = [
+            {"url": other_url, "headRepositoryOwner": {"login": "someone"}},
+            {"url": url, "headRepositoryOwner": {"login": "me"}},
+        ]
+        s.pr_checks[url] = [
+            {"name": "a", "bucket": "fail", "link": "https://github.com/org/repo/actions/runs/100/job/101"},
+        ]  # fmt: skip
+        output = self.assert_reruns(["gh run rerun --repo org/repo --failed 100"])
+        self.assertIn(f"Pull request for the current branch: {url}", output)
+
+    def test_no_pr(self) -> None:
+        """A clone that is not of a fork, and whose current branch has no pull request."""
+        output = self.assert_reruns([], status=1)
+        self.assertIn('no pull requests found for branch "feature"', output)
 
 
 if __name__ == "__main__":

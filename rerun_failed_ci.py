@@ -8,7 +8,11 @@ Usage:
   rerun-failed-ci --classify [LOG-FILE]...
 
 With no PR, BRANCH, or URL, this command examines the GitHub pull request for the
-current branch.  A PR (a number or URL) or BRANCH names a pull request, as for
+current branch.  If `gh` finds none, and the clone's GitHub repository (as `gh` resolves
+it) is a fork, then this command examines the open pull request of the fork's parent
+whose head is the current branch of the fork.  For example, in a clone whose only remote
+is ME/REPO, a fork of ORG/REPO, it examines the pull request in ORG/REPO whose head is
+ME:BRANCH.  A PR (a number or URL) or BRANCH names a pull request, as for
 `gh pr checks`; for each failed check of that pull request, this command examines
 every failed job of the check's build, workflow, or workflow run, so that the jobs of
 one workflow are rerun together.  A URL of an Azure Pipelines build or of one of its
@@ -724,6 +728,20 @@ class Rerunner:
             )
             failed = [c for c in json.loads(checks) if c["bucket"] in PR_CHECK_FAILED]
         except request_util.REQUEST_ERRORS as e:
+            if pr is None and is_no_pr_error(e):
+                try:
+                    parent_pr = fork_parent_pr()
+                except request_util.REQUEST_ERRORS as parent_error:
+                    self.warn(
+                        f"cannot read the checks of pull request {description}:"
+                        f" {request_util.failure(e)}; cannot look for one in the parent"
+                        f" repository: {request_util.failure(parent_error)}"
+                    )
+                    return
+                if parent_pr is not None:
+                    print(f"Pull request for the current branch: {parent_pr}")
+                    self.pr_rerun_failed(parent_pr)
+                    return
             self.warn(
                 f"cannot read the checks of pull request {description}: {request_util.failure(e)}"
             )
@@ -747,6 +765,65 @@ class Rerunner:
                     f"{check['name']}: skipping a check from an unsupported CI service:"
                     f" {check['link']}"
                 )
+
+
+def is_no_pr_error(error: BaseException) -> bool:
+    """Return True if the given error shows that `gh` found no pull request for a branch.
+
+    Args:
+        error: an error that a `gh pr` command raised.
+
+    Returns:
+        True if error is the failure of a `gh` command that reported, as in
+        'no pull requests found for branch "BRANCH"', that the branch has no pull request.
+    """
+    return isinstance(error, subprocess.CalledProcessError) and "no pull requests found" in (
+        error.stderr or ""
+    )
+
+
+def fork_parent_pr() -> str | None:
+    """Return the URL of the open pull request in the parent repository for the current branch.
+
+    The parent repository is the one that the current clone's GitHub repository, as `gh`
+    resolves it, is a fork of.  For example, in a clone whose only remote is the fork
+    ME/REPO of ORG/REPO, the pull request is one in ORG/REPO whose head is the current
+    branch of ME/REPO.
+
+    If a command fails, this raises one of request_util.REQUEST_ERRORS.
+
+    Returns:
+        The URL of the pull request, such as "https://github.com/ORG/REPO/pull/123", or
+        None if the current clone's GitHub repository is not a fork, if no branch is
+        checked out, or if the parent repository has no such open pull request.
+    """
+    branch = request_util.run(["git", "branch", "--show-current"]).strip()
+    if not branch:
+        return None
+    repo = json.loads(request_util.run(["gh", "repo", "view", "--json", "owner,parent"]))
+    parent = repo.get("parent")
+    if not parent:
+        return None
+    parent_slug = f"{parent['owner']['login']}/{parent['name']}"
+    prs = json.loads(
+        request_util.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                parent_slug,
+                "--head",
+                branch,
+                "--state",
+                "open",
+                "--json",
+                "url,headRepositoryOwner",
+            ]
+        )
+    )
+    owner = repo["owner"]["login"]
+    return next((p["url"] for p in prs if p["headRepositoryOwner"]["login"] == owner), None)
 
 
 ###########################################################################

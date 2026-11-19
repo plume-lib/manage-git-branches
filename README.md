@@ -404,7 +404,8 @@ The commands are:
 * [`rerun-failed-ci`](rerun-failed-ci)
   `[--dry-run] [--max-attempts N] [--exit-3-if-reran] [PR | BRANCH | URL]...`:
   For each transient failure of a CI job, reruns it.  Works on the given
-  GitHub pull request (by default, the one for the current branch).  A URL
+  GitHub pull request (by default, the one for the current branch, which in
+  a clone of a fork can be a pull request in the fork's parent).  A URL
   names an Azure Pipelines, CircleCI, or GitHub Actions job or workflow.
   With `--exit-3-if-reran`, the exit status is 3 if it reran some job.
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
