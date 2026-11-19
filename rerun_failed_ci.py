@@ -29,10 +29,12 @@ A job's failure is transient if the log of its failed steps contains a message a
 network problem (such as a timeout, a refused or reset connection, or a failed DNS
 lookup), an HTTP status code that indicates an overloaded or rate-limited server (such
 as 429 or 503), a lost or unresponsive CI runner, or a GitHub-hosted runner that never
-picked up the job.  TRANSIENT_PATTERNS below lists the messages.  The log of an Azure
-Pipelines or GitHub Actions job also contains the errors that the CI service reports for
-the job, which describe failures, such as a lost runner or a job that no runner picked
-up, that leave no log.  Shell trace lines, which start with `+ `, and the scripts that
+picked up the job.  TRANSIENT_PATTERNS below lists the messages.  A job's failure is
+also transient if Gradle did not find an artifact and the Gradle Plugin Portal is the
+only location that Gradle searched for it.  The log of an Azure Pipelines or GitHub
+Actions job also contains the errors that the CI service reports for the job, which
+describe failures, such as a lost runner or a job that no runner picked up, that leave
+no log.  Shell trace lines, which start with `+ `, and the scripts that
 Azure Pipelines and GitHub Actions echo before running a step, are ignored, because a
 script that itself looks for such messages, in order to retry a command, contains them.
 An Azure Pipelines job that was abandoned, such as one whose agent stopped responding,
@@ -120,6 +122,20 @@ TRANSIENT_PATTERNS = [
 # Matches a line of a log that shows a transient failure.
 TRANSIENT_RE = re.compile("|".join(f"(?:{p})" for p in TRANSIENT_PATTERNS), re.IGNORECASE)
 
+# Matches the line that starts Gradle's list of the locations where it searched for an
+# artifact that it did not find.  The line follows one that names the artifact, such as
+# "> Could not find org.slf4j:slf4j-api:1.7.36.".
+SEARCHED_LOCATIONS_RE = re.compile(r"\s*Searched in the following locations:")
+# Matches an item of that list.  Group 1 is the location, a URL such as
+# "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom".
+SEARCHED_LOCATION_RE = re.compile(r"\s*- (\S+)")
+# The prefix of every location in the Gradle Plugin Portal.  The portal serves the Maven
+# Central artifacts that plugins depend on, such as slf4j-api, and it sometimes fails to
+# find them.  A Gradle failure to find an artifact is transient only if the portal is
+# the only location searched, because Gradle lists every repository that it searched,
+# and an artifact that no repository has, such as a misspelled one, is not transient.
+PLUGIN_PORTAL_URL = "https://plugins.gradle.org/m2/"
+
 # Matches a shell trace line, as `set -x` prints it.
 TRACE_LINE_RE = re.compile(r"\++ ")
 # For Azure Pipelines and for GitHub Actions, regular expressions that match the start
@@ -172,12 +188,58 @@ def normalize_log(log: str) -> str:
         sys.exit(f"{PROGRAM}: cannot run {NORMALIZE_LOG}: {request_util.failure(e)}")
 
 
+def examined_lines(log: str) -> list[str]:
+    """Return the lines of the given log that are examined for a transient failure.
+
+    Shell trace lines in the log are omitted, as are the scripts that Azure Pipelines
+    (between "Script contents:" and "Starting Command Output") and GitHub Actions
+    (between "##[group]Run" and "##[endgroup]") echo before running a step.
+
+    Args:
+        log: a log of the failed steps of a CI job.
+
+    Returns:
+        The examined lines, as `normalize-log` prints them.
+    """
+    result = []
+    end_of_echo = None
+    for line in normalize_log(log).splitlines():
+        if end_of_echo:
+            if end_of_echo.match(line):
+                end_of_echo = None
+            continue
+        end_of_echo = next((end for start, end in ECHOED_SCRIPTS if start.match(line)), None)
+        if not (end_of_echo or TRACE_LINE_RE.match(line)):
+            result.append(line)
+    return result
+
+
+def searched_only_plugin_portal(lines: list[str]) -> bool:
+    """Return True if the given lines start with locations, all in the Gradle Plugin Portal.
+
+    Args:
+        lines: the lines of a log that follow a "Searched in the following locations:"
+            line.
+
+    Returns:
+        True if the lines start with at least one location, and every location before
+        the first line that is not one is in the Gradle Plugin Portal.
+    """
+    locations = []
+    for line in lines:
+        match = SEARCHED_LOCATION_RE.match(line)
+        if not match:
+            break
+        locations.append(match[1])
+    return bool(locations) and all(loc.startswith(PLUGIN_PORTAL_URL) for loc in locations)
+
+
 def transient_reason(log: str) -> str | None:
     """Return the first line of the given log that shows a transient failure.
 
-    Shell trace lines in the log are ignored, as are the scripts that Azure Pipelines
-    (between "Script contents:" and "Starting Command Output") and GitHub Actions
-    (between "##[group]Run" and "##[endgroup]") echo before running a step.
+    A line shows a transient failure if it matches TRANSIENT_RE, or if it names an
+    artifact that Gradle did not find and the Gradle Plugin Portal is the only location
+    that Gradle searched for it.  The lines that `examined_lines` omits are ignored.
 
     Args:
         log: a log of the failed steps of a CI job.
@@ -186,17 +248,16 @@ def transient_reason(log: str) -> str | None:
         The first line that shows a transient failure, without leading whitespace and
         truncated to 200 characters, or None if there is none.
     """
-    end_of_echo = None
-    for line in normalize_log(log).splitlines():
-        if end_of_echo:
-            if end_of_echo.match(line):
-                end_of_echo = None
-            continue
-        end_of_echo = next((end for start, end in ECHOED_SCRIPTS if start.match(line)), None)
-        if end_of_echo or TRACE_LINE_RE.match(line):
-            continue
+    lines = examined_lines(log)
+    for i, line in enumerate(lines):
         if TRANSIENT_RE.search(line):
             return line.lstrip()[:200]
+        if (
+            i > 0
+            and SEARCHED_LOCATIONS_RE.match(line)
+            and searched_only_plugin_portal(lines[i + 1 :])
+        ):
+            return lines[i - 1].lstrip()[:200]
     return None
 
 
