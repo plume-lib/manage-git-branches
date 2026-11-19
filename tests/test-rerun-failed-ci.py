@@ -427,7 +427,7 @@ class ClassifyTest(unittest.TestCase):
                     "       - https://plugins.gradle.org/m2/org/slf4j/slf4j-api/1.7.36/"
                     "slf4j-api-1.7.36.pom"
                 ),
-                "- https://plugins.gradle.org/m2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom",
+                "> Could not find org.slf4j:slf4j-api:1.7.36.",
             ),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
@@ -442,6 +442,16 @@ class ClassifyTest(unittest.TestCase):
             (
                 "Could not GET 'https://repo.maven.apache.org/x.pom'. Received status code 404"
                 " from server: Not Found"
+            ),
+            # Gradle searched a repository other than the Gradle Plugin Portal, too.
+            (
+                "   > Could not find com.google.guava:guava:33.9-jre.\n"
+                "     Searched in the following locations:\n"
+                "       - https://repo.maven.apache.org/maven2/com/google/guava/guava/33.9-jre/"
+                "guava-33.9-jre.pom\n"
+                "       - https://plugins.gradle.org/m2/com/google/guava/guava/33.9-jre/"
+                "guava-33.9-jre.pom\n"
+                "     Required by:"
             ),
             # A job that no runner matches, as for a misspelled `runs-on` label.
             "The job has exceeded the maximum execution time while awaiting a runner for 24h0m0s",
