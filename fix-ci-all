@@ -1,0 +1,277 @@
+#!/bin/sh
+
+# Runs `fix-ci` once for each unblocked pull request whose CI failed, that you
+# opened, and that is checked out in a working copy directory of the directory
+# that holds the working copy directories.  An unblocked pull request is one
+# that depends on no other open pull request.  `fix-ci` makes the CI of the
+# current branch's pull request pass:  it reruns the CI jobs that failed for a
+# transient reason, or else runs Claude Code to fix the failure, commit, and
+# push.  It is in https://github.com/mernst/mdedots/blob/main/share/fix-ci .
+#
+# Usage:
+#   fix-ci-all [--dry-run] [--no-pr-status] [-C DIR] [-- CLAUDE-OPTION...]
+#
+# The directory that holds the working copy directories is DIR, or the
+# current directory; it is where `pr-status` runs.
+#
+# This command first runs `pr-status`, which regenerates the PR status
+# documents and records, for each unblocked pull request, its author, its
+# head commit, its working copy directories, and the state of its CI.  Then,
+# for each unblocked pull request whose CI failed, as
+# `pr-status --print-unblocked-prs` reports it, this command runs `fix-ci` in
+# one of the pull request's working copy directories:  one where `gh pr view`
+# shows the pull request, as it does in `fix-ci`.  A directory whose HEAD is
+# the pull request's head commit is preferred, because a directory whose HEAD
+# is an older commit would make commits that the push rejects.  If
+# `pr-status` exits with a failure status after recording the pull requests,
+# as it does when it cannot update a pull request's description, this command
+# continues.
+#
+# A pull request is skipped if someone else opened it, or if `gh pr view`
+# shows it in none of its working copy directories.  Fixing another person's
+# pull request is that person's job, and the push would usually be refused,
+# after the Claude Code session had run.  A directory where `gh pr view` shows
+# a different pull request, such as a clone of the upstream repository with a
+# branch of the same name, would make `fix-ci` work on that pull request.
+#
+# `fix-ci` runs in one directory at a time, because each run can start a
+# Claude Code session, which is interactive unless a CLAUDE-OPTION such as
+# "-p" says otherwise.  Each CLAUDE-OPTION is passed to `fix-ci`, which passes
+# it to `claude`.  The output of each run is preceded by a line that names its
+# directory and pull request.  This command continues after a run fails, and
+# at the end it lists the pull requests for which `fix-ci` failed.
+#
+#   --dry-run       run no `fix-ci`; just print each directory where this
+#                   command would run it, and its pull request.  It still runs
+#                   `pr-status`, with `--no-documents`, so it updates pull
+#                   request descriptions, renames directories, and records the
+#                   pull requests, but it writes no PR status document.
+#   --no-pr-status  do not run `pr-status`; use what its last run recorded.
+#                   A pull request's head commit is then the one that it had
+#                   at that run.
+#   -C DIR          the directory that holds the working copy directories
+#
+# Every argument after "--" is a CLAUDE-OPTION.  Any other argument that is
+# not one of the above options is a usage error.
+#
+# The exit status is 0 if `pr-status` and every run of `fix-ci` succeeded,
+# and 1 otherwise.  It is 2 for a usage error.
+
+SCRIPT_NAME="$(basename -- "$0")"
+
+# Resolve $0 through any symbolic links, so that ${SCRIPT_DIR} is the
+# directory that contains this package's other files even when this script is
+# invoked through a symbolic link from elsewhere, such as ~/bin.
+script_path="$0"
+case "${script_path}" in
+  */*) ;;
+  *)
+    # The shell found this script on the PATH, so "${script_path}" is a bare
+    # command name.  Interpreting it as a file name would resolve it relative
+    # to the current directory and make ${SCRIPT_DIR} the current directory.
+    script_path="$(command -v -- "${script_path}")"
+    case "${script_path}" in
+      */*) ;;
+      *)
+        echo "$(basename -- "$0"): cannot find this script on the PATH: $0" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+script_links=0
+while [ -L "${script_path}" ]; do
+  script_links=$((script_links + 1))
+  if [ "${script_links}" -gt 40 ]; then
+    echo "$(basename -- "$0"): too many levels of symbolic links: $0" >&2
+    exit 1
+  fi
+  if ! script_link="$(readlink -- "${script_path}")"; then
+    echo "$(basename -- "$0"): cannot read symbolic link: ${script_path}" >&2
+    exit 1
+  fi
+  case "${script_link}" in
+    /*) script_path="${script_link}" ;;
+    *) script_path="$(dirname -- "${script_path}")/${script_link}" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${script_path}")" && pwd -P)"
+
+if [ ! -r "${SCRIPT_DIR}/common-functions.sh" ]; then
+  echo "${SCRIPT_NAME}: cannot read ${SCRIPT_DIR}/common-functions.sh" >&2
+  exit 1
+fi
+# shellcheck source=common-functions.sh
+. "${SCRIPT_DIR}/common-functions.sh"
+
+usage() {
+  echo "Usage: ${SCRIPT_NAME} [--dry-run] [--no-pr-status] [-C DIR] [-- CLAUDE-OPTION...]"
+}
+
+dry_run=false
+run_pr_status=true
+base_arg="."
+while [ "$#" -ne 0 ]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    --no-pr-status)
+      run_pr_status=false
+      shift
+      ;;
+    -C)
+      if [ "$#" -lt 2 ]; then
+        usage >&2
+        exit 2
+      fi
+      base_arg="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      echo "${SCRIPT_NAME}: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+if ! base="$(physical_path "${base_arg}")"; then
+  echo "${SCRIPT_NAME}: cannot change to directory ${base_arg}" >&2
+  exit 2
+fi
+if [ "${dry_run}" = false ] && ! command -v fix-ci > /dev/null; then
+  echo "${SCRIPT_NAME}: fix-ci is not on the PATH;" \
+    "get it from https://github.com/mernst/mdedots/blob/main/share/fix-ci" >&2
+  exit 1
+fi
+
+status=0
+pr_status="${SCRIPT_DIR}/pr-status"
+if [ "${run_pr_status}" = true ]; then
+  # pr-status fails after writing the snapshot, which records the pull
+  # requests, only when it could not update a description.  The snapshot is
+  # then current.
+  snapshot="${base}/.pr-status-snapshot.json"
+  old_snapshot="$(cksum < "${snapshot}" 2> /dev/null)"
+  if [ "${dry_run}" = true ]; then
+    "${pr_status}" -C "${base}" --no-documents < /dev/null
+  else
+    "${pr_status}" -C "${base}" < /dev/null
+  fi
+  pr_status_status=$?
+  if [ "${pr_status_status}" -ne 0 ]; then
+    if [ "$(cksum < "${snapshot}" 2> /dev/null)" = "${old_snapshot}" ]; then
+      echo "${SCRIPT_NAME}: pr-status failed in ${base}" >&2
+      exit 1
+    fi
+    echo "${SCRIPT_NAME}: pr-status failed in ${base}, but it recorded the pull requests;" \
+      "continuing" >&2
+    status=1
+  fi
+fi
+if ! unblocked="$("${pr_status}" -C "${base}" --print-unblocked-prs < /dev/null)"; then
+  echo "${SCRIPT_NAME}: pr-status --print-unblocked-prs failed in ${base}" >&2
+  exit 1
+fi
+
+make_temp_dir
+# One line per unblocked pull request whose CI failed:  its URL, the GitHub
+# login of its author, its head commit, and its working copy directories,
+# separated by tabs.  A directory whose name contains a tab or a newline is
+# omitted, because it would be read as several directories.
+failing="${temp_dir}/failing"
+if ! printf '%s\n' "${unblocked}" | jq -r '
+  map(select(.ci == "failed"))
+  | if all(has("author") and has("head")) then .
+    else error("pr-status recorded no author or head commit; run pr-status to rewrite its snapshot")
+    end
+  | .[] | [.url, .author, .head] + (.directories | map(select(test("[\t\n]") | not)))
+  | join("\t")' > "${failing}"; then
+  echo "${SCRIPT_NAME}: cannot read the output of pr-status --print-unblocked-prs" >&2
+  exit 1
+fi
+if [ ! -s "${failing}" ]; then
+  echo "${SCRIPT_NAME}: no unblocked pull request has failing CI"
+  exit 0
+fi
+
+# The GitHub login of the user, such as "octocat".
+if ! me="$(gh_query "cannot determine your GitHub login" gh api user --jq .login)" \
+  || [ -z "${me}" ]; then
+  exit 1
+fi
+
+tab="$(printf '\t')"
+# The working copy directories of a pull request, one per line.
+candidates="${temp_dir}/candidates"
+# The pull requests for which `fix-ci` failed, one per line.
+failed=""
+# The loop reads the pull requests from file descriptor 3, so that `fix-ci`
+# and Claude Code can use the standard input.
+while IFS="${tab}" read -r url author head dirs <&3; do
+  if [ -z "${dirs}" ]; then
+    echo "${SCRIPT_NAME}: skipping ${url}, which has no working copy directory"
+    continue
+  fi
+  if [ "${author}" != "${me}" ]; then
+    echo "${SCRIPT_NAME}: skipping ${url}, which is by ${author}"
+    continue
+  fi
+  # The directories, one per line, those whose HEAD is the head commit first.
+  at_head=""
+  not_at_head=""
+  rest="${dirs}"
+  while [ -n "${rest}" ]; do
+    candidate="${rest%%"${tab}"*}"
+    case "${rest}" in
+      *"${tab}"*) rest="${rest#*"${tab}"}" ;;
+      *) rest="" ;;
+    esac
+    if [ "$(git -C "${base}/${candidate}" rev-parse HEAD 2> /dev/null)" = "${head}" ]; then
+      at_head="${at_head}${candidate}
+"
+    else
+      not_at_head="${not_at_head}${candidate}
+"
+    fi
+  done
+  printf '%s' "${at_head}${not_at_head}" > "${candidates}"
+  dir=""
+  while IFS= read -r candidate; do
+    if [ "$(cd -- "${base}/${candidate}" \
+      && gh pr view --json url --jq .url 2> /dev/null < /dev/null)" = "${url}" ]; then
+      dir="${candidate}"
+      break
+    fi
+  done < "${candidates}"
+  if [ -z "${dir}" ]; then
+    echo "${SCRIPT_NAME}: skipping ${url}, which gh pr view shows in none of its" \
+      "working copy directories"
+    continue
+  fi
+  if [ "${dry_run}" = true ]; then
+    echo "Would run fix-ci in ${dir} for ${url}"
+    continue
+  fi
+  echo "===== ${dir}: ${url}"
+  if ! (cd -- "${base}/${dir}" && fix-ci "$@"); then
+    failed="${failed}${url} (in ${dir})
+"
+    status=1
+  fi
+done 3< "${failing}"
+
+if [ -n "${failed}" ]; then
+  echo "${SCRIPT_NAME}: fix-ci failed for:" >&2
+  printf '%s' "${failed}" >&2
+fi
+exit "${status}"
