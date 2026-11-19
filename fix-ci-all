@@ -186,15 +186,16 @@ fi
 make_temp_dir
 # One line per unblocked pull request whose CI failed:  its URL, the GitHub
 # login of its author, its head commit, and its working copy directories,
-# separated by tabs.  A directory's name contains no tab, because
-# `working_copy_directories` skips such names.
+# separated by tabs.  A directory whose name contains a tab or a newline is
+# omitted, because it would be read as several directories.
 failing="${temp_dir}/failing"
 if ! printf '%s\n' "${unblocked}" | jq -r '
   map(select(.ci == "failed"))
   | if all(has("author") and has("head")) then .
     else error("pr-status recorded no author or head commit; run pr-status to rewrite its snapshot")
     end
-  | .[] | [.url, .author, .head] + .directories | join("\t")' > "${failing}"; then
+  | .[] | [.url, .author, .head] + (.directories | map(select(test("[\t\n]") | not)))
+  | join("\t")' > "${failing}"; then
   echo "${SCRIPT_NAME}: cannot read the output of pr-status --print-unblocked-prs" >&2
   exit 1
 fi

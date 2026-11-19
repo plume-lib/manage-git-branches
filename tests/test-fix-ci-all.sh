@@ -92,6 +92,8 @@ make_clone proj-branch-passed 6 > /dev/null
 make_clone proj-branch-upstream 99 > /dev/null
 make_clone proj-fork-me-branch-upstream 8 > /dev/null
 make_clone proj-branch-no-pr > /dev/null
+make_clone proj-branch-tab 10 > /dev/null
+tab="$(printf '\t')"
 other_head=0123456789012345678901234567890123456789
 
 # Usage: unblocked_pr NUMBER AUTHOR HEAD CI [DIRECTORY...]
@@ -116,6 +118,8 @@ unblocked_pr() {
 # `gh pr view` shows another pull request, as in a clone of the upstream
 # repository with a branch of the same name, so `fix-ci` runs in the second.
 # In no directory of PR 9 does `gh pr view` show PR 9, so it is skipped.
+# PR 10's only directory has a tab in its name, so it is skipped; it is not
+# mistaken for proj-branch-tab.
 {
   unblocked_pr 1 me "${a2_head}" failed proj-branch-a proj-branch-a2
   unblocked_pr 2 me "${other_head}" failed proj-branch-b proj-branch-a
@@ -126,6 +130,7 @@ unblocked_pr() {
   unblocked_pr 7 me "${other_head}" pending proj-branch-passed
   unblocked_pr 8 me "${other_head}" failed proj-branch-upstream proj-fork-me-branch-upstream
   unblocked_pr 9 me "${other_head}" failed proj-branch-no-pr
+  unblocked_pr 10 me "${other_head}" failed "proj-branch-tab${tab}x"
 } | jq -s '{time: "now", facts: {}, unblocked_prs: .}' > "${scan}/.pr-status-snapshot.json"
 
 # Usage: run_fix_ci_all ARGUMENT...
@@ -164,6 +169,7 @@ expect_output "fix-ci-all: skipping https://github.com/someone/proj/pull/4, whic
 expect_output "fix-ci-all: skipping https://github.com/someone/proj/pull/5, which has no working copy directory"
 expect_output "https://github.com/someone/proj/pull/3 (in proj-branch-c-fails)"
 expect_output "fix-ci-all: skipping https://github.com/someone/proj/pull/9, which gh pr view shows in none of its working copy directories"
+expect_output "fix-ci-all: skipping https://github.com/someone/proj/pull/10, which has no working copy directory"
 
 # An argument that is not an option of fix-ci-all, before "--", is a usage
 # error, even if it is a CLAUDE-OPTION or a misspelled option.
