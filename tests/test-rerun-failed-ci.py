@@ -36,6 +36,30 @@ GRADLE_429 = (
     " from server: Too Many Requests"
 )
 
+# A location in Maven Central of an artifact that Gradle did not find.
+OPTIONS_POM = "https://repo.maven.apache.org/maven2/org/plumelib/options/3.0.0/options-3.0.0.pom"
+# Gradle's report that it did not find the artifact at OPTIONS_POM.
+OPTIONS_NOT_FOUND = (
+    "   > Could not find org.plumelib:options:3.0.0.\n"
+    "     Searched in the following locations:\n"
+    f"       - {OPTIONS_POM}\n"
+    "     Required by:\n"
+    "         project :"
+)
+# Gradle's report that it did not find a misspelled artifact.
+GUAVA_NOT_FOUND = (
+    "   > Could not find com.google.guava:guava:33.9-jr.\n"
+    "     Searched in the following locations:\n"
+    "       - https://repo.maven.apache.org/maven2/com/google/guava/guava/33.9-jr/"
+    "guava-33.9-jr.pom\n"
+    "     Required by:\n"
+    "         project :"
+)
+# The report of `gradlew-retry` that OPTIONS_POM is on a mirror of Maven Central.
+OPTIONS_EXISTS = f"gradlew-retry: {OPTIONS_POM} exists on a mirror of Maven Central."
+# The line that `gradlew-retry` prints before it runs Gradle again.
+GRADLEW_RETRYING = "gradlew-retry: Gradle could not resolve a dependency; retrying in 60 seconds."
+
 CIRCLECI = "https://circleci.com/api"
 AZURE = "https://dev.azure.com/org/proj/_apis/build/builds"
 
@@ -449,24 +473,29 @@ class ClassifyTest(unittest.TestCase):
                 ),
                 "> Could not find org.slf4j:slf4j-api:1.7.36.",
             ),
-            # Maven Central did not serve an artifact that `gradlew-retry` found on a mirror.
+            # Maven Central did not serve, in either run of Gradle, an artifact that
+            # `gradlew-retry` found on a mirror.
             (
                 (
-                    "   > Could not find org.plumelib:options:3.0.0.\n"
-                    "     Searched in the following locations:\n"
-                    "       - https://repo.maven.apache.org/maven2/org/plumelib/options/3.0.0/"
-                    "options-3.0.0.pom\n"
-                    "gradlew-retry: https://repo.maven.apache.org/maven2/org/plumelib/options/"
-                    "3.0.0/options-3.0.0.pom exists on a mirror of Maven Central."
+                    f"{OPTIONS_NOT_FOUND}\n{OPTIONS_EXISTS}\n{GRADLEW_RETRYING}\n"
+                    f"{OPTIONS_NOT_FOUND}\nBUILD FAILED in 3s"
                 ),
-                None,
+                OPTIONS_EXISTS,
             ),
+            # The log ends before `gradlew-retry` runs Gradle again.
+            (f"{OPTIONS_NOT_FOUND}\n{OPTIONS_EXISTS}", OPTIONS_EXISTS),
+            # `gradlew-retry` found the artifact at the location where Gradle searched.
             (
                 (
-                    "gradlew-retry: https://repo.maven.apache.org/maven2/org/plumelib/options/"
-                    "3.0.0/options-3.0.0.pom exists."
+                    f"{OPTIONS_NOT_FOUND}\ngradlew-retry: {OPTIONS_POM} exists.\n"
+                    f"{GRADLEW_RETRYING}\n{OPTIONS_NOT_FOUND}"
                 ),
-                None,
+                f"gradlew-retry: {OPTIONS_POM} exists.",
+            ),
+            # The last run of Gradle failed for a network problem.
+            (
+                f"error: cannot find symbol\n{GRADLEW_RETRYING}\n{GRADLE_429}",
+                GRADLE_429.lstrip(),
             ),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
@@ -494,8 +523,36 @@ class ClassifyTest(unittest.TestCase):
             ),
             # An artifact that `gradlew-retry` found nowhere, as for a misspelled version.
             (
+                f"{GUAVA_NOT_FOUND}\n"
                 "gradlew-retry: Not retrying, because no missing artifact exists at a URL that"
                 " Gradle\n  reported, on the Gradle Plugin Portal, or on a mirror of Maven Central."
+            ),
+            # A report of `gradlew-retry` without a failure of Gradle to find an artifact.
+            OPTIONS_EXISTS,
+            # The last run of Gradle found the artifact that `gradlew-retry` reported, but
+            # the build failed for another reason.
+            (
+                f"{OPTIONS_NOT_FOUND}\n{OPTIONS_EXISTS}\n{GRADLEW_RETRYING}\n"
+                "error: cannot find symbol\nBUILD FAILED in 3s"
+            ),
+            # Likewise, after a network problem in an earlier run of Gradle.
+            f"{GRADLE_429}\n{GRADLEW_RETRYING}\nerror: cannot find symbol",
+            # The last run of Gradle also did not find a misspelled artifact, which
+            # `gradlew-retry` did not report.
+            (
+                f"{OPTIONS_NOT_FOUND}\n{GUAVA_NOT_FOUND}\n{OPTIONS_EXISTS}\n{GRADLEW_RETRYING}\n"
+                f"{OPTIONS_NOT_FOUND}\n{GUAVA_NOT_FOUND}"
+            ),
+            # `gradlew-retry` reported a URL that Gradle did not search, for a plugin that
+            # Gradle did not find in the repositories that the build names.
+            (
+                "   > Plugin [id: 'org.example.x', version: '1.0'] was not found in any of the"
+                " following sources:\n"
+                "gradlew-retry: https://plugins.gradle.org/m2/org/example/x/org.example.x.gradle"
+                ".plugin/1.0/org.example.x.gradle.plugin-1.0.pom exists.\n"
+                f"{GRADLEW_RETRYING}\n"
+                "   > Plugin [id: 'org.example.x', version: '1.0'] was not found in any of the"
+                " following sources:"
             ),
             # A job that no runner matches, as for a misspelled `runs-on` label.
             "The job has exceeded the maximum execution time while awaiting a runner for 24h0m0s",
