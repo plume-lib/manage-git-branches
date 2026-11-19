@@ -206,7 +206,7 @@ The commands are:
   `[--check | --print-document | --print-config | --print-land-after ORG/REPO |`
   `--print-conflicting-push-chains | --print-missing-branches |`
   `--print-unblocked-prs] [-C DIR]`
-  `[--highlight PR|bottleneck...]`:
+  `[--highlight PR|bottleneck... | --previous-arguments]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
   `pr-status.md`,
@@ -250,6 +250,11 @@ The commands are:
   `--highlight PR...` highlights, wherever the documents that it regenerates
   name it, each given PR (such as `REPO#100` or `ORG/REPO#100`) and every
   PR that must land for it to land.
+  `--previous-arguments` reuses the `--highlight` arguments of its last run
+  that wrote the snapshot, so that the documents are the ones that the
+  command line of that run would produce.  A script that regenerates the
+  documents should pass it, rather than discard the highlights that a
+  person chose.
 * [`pr-merge-analysis`](pr-merge-analysis)
   `[--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]`:
   For the given open pull requests of the GitHub repository OWNER/REPO (by
@@ -267,8 +272,9 @@ The commands are:
   `pr-status` runs it.
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--claude | --codex] [-C DIR]`:
-  Runs `pr-status`, which regenerates the dependency document
-  `pr-status.md`, then runs `git-push-to` on each chain of its section
+  Runs `pr-status --previous-arguments`, which regenerates the dependency
+  document `pr-status.md` with the highlights of the previous run of
+  `pr-status`, then runs `git-push-to` on each chain of its section
   "Dependency chains with conflicts",
   with `--claude` (or `--codex`), which asks an AI agent for help, and with
   `--no-pull-first`.  Before the first chain that starts with a directory,

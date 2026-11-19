@@ -12,6 +12,7 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status -C DIR     # work in DIR instead of the current directory
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
   pr-status --highlight bottleneck  # highlight the next PR to work on in each repository
+  pr-status --previous-arguments  # regenerate the documents as the previous run did
 
 Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
@@ -21,8 +22,9 @@ Inputs:
                            records the dependency chains with conflicts, which
                            --print-conflicting-push-chains prints, and the branches
                            that resolving the conflicts needs but that have no working
-                           copy, which --print-missing-branches prints, and the unblocked
-                           PRs, which --print-unblocked-prs prints
+                           copy, which --print-missing-branches prints, the unblocked
+                           PRs, which --print-unblocked-prs prints, and the --highlight
+                           arguments, which --previous-arguments reuses
 Each run:
   * reads the open PRs with gh,
   * runs pr-merge-analysis (cached) on them, for each repository,
@@ -62,6 +64,11 @@ REPO#100 or ORG/REPO#100) and, recursively, every PR that it depends on or lands
 It shows them in bold on a light red background, and as red nodes in the dependency
 graph.
 
+--previous-arguments reuses the --highlight arguments of the run that wrote the snapshot,
+so that the documents that it regenerates are the ones that the command line of that run
+would regenerate.  A script that regenerates the documents should use it, rather than
+discard the highlights of a run that a person chose.
+
 pr-status needs Python 3.10 or later, and the programs that pr-merge-analysis needs.
 """
 
@@ -99,6 +106,8 @@ CONFLICTING_PUSH_CHAINS = "conflicting_push_chains"
 MISSING_BRANCHES = "missing_branches"
 # The key of the snapshot's list of the PRs that depend on no other open PR.
 UNBLOCKED_PRS = "unblocked_prs"
+# The key of the snapshot's list of the arguments of --highlight.
+HIGHLIGHT = "highlight"
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -3586,8 +3595,9 @@ def new_snapshot(
     new_facts: dict[str, Any],
     conflicting: list[PushChains],
     unblocked: list[dict[str, Any]],
+    highlight: list[str],
 ) -> dict[str, Any]:
-    """Return the snapshot that records the given facts, chains with conflicts, and PRs.
+    """Return the snapshot that records the given facts, chains, PRs, and highlight arguments.
 
     Args:
         time: a time, such as "2026-11-05T17:59:00-08:00", which the snapshot records
@@ -3595,19 +3605,21 @@ def new_snapshot(
         conflicting: the chains with conflicts of each repository, as push_chains computes
             them with conflicts_only
         unblocked: the unblocked PRs, as unblocked_prs computes them
+        highlight: the arguments of --highlight, such as ["bottleneck", "repo#100"], or []
+            if the command line has none
 
     Returns:
         The snapshot, as a dict that .pr-status-snapshot.json holds as JSON, with the keys
-        "time", "facts", "conflicting_push_chains", "missing_branches", and
-        "unblocked_prs".  The value of "unblocked_prs" is unblocked; it repeats the PR numbers
-        of the "unblocked" lists of new_facts, which report_changes compares, and adds what
-        --print-unblocked-prs prints about each PR.  The value of
-        "conflicting_push_chains" is a list of chains, in the order of the "Dependency
-        chains with conflicts" section of the dependency document; each chain is a list of
-        directories, such as ["daikon", "daikon-branch-a"], each of which `git-push-to`
-        pushes into the next.  The value of "missing_branches" is a list of the missing
-        branches of each repository (see PushChains), each a list of a directory and a
-        branch, as MissingBranch describes them, such as ["daikon", "mernst:fix-typo"].
+        "time", "facts", "conflicting_push_chains", "missing_branches", "unblocked_prs", and
+        "highlight".  The value of "highlight" is highlight.  The value of "unblocked_prs" is
+        unblocked; it repeats the PR numbers of the "unblocked" lists of new_facts, which
+        report_changes compares, and adds what --print-unblocked-prs prints about each PR.
+        The value of "conflicting_push_chains" is a list of chains, in the order of the
+        "Dependency chains with conflicts" section of the dependency document; each chain is
+        a list of directories, such as ["daikon", "daikon-branch-a"], each of which
+        `git-push-to` pushes into the next.  The value of "missing_branches" is a list of the
+        missing branches of each repository (see PushChains), each a list of a directory and
+        a branch, as MissingBranch describes them, such as ["daikon", "mernst:fix-typo"].
     """
     return {
         "time": time,
@@ -3615,6 +3627,7 @@ def new_snapshot(
         CONFLICTING_PUSH_CHAINS: [chain for pc in conflicting for chain in pc.chains],
         MISSING_BRANCHES: [list(b) for pc in conflicting for b in pc.missing_branches],
         UNBLOCKED_PRS: unblocked,
+        HIGHLIGHT: highlight,
     }
 
 
@@ -3740,6 +3753,32 @@ def format_unblocked_prs(snapshot: dict[str, Any]) -> list[str]:
         )
         raise ValueError(msg)
     return json.dumps(snapshot[UNBLOCKED_PRS], indent=1).splitlines()
+
+
+def previous_highlight(snapshot: dict[str, Any] | None) -> list[str]:
+    """Return the arguments of --highlight of the run that wrote the given snapshot.
+
+    Args:
+        snapshot: a snapshot, as a dict parsed from the JSON of .pr-status-snapshot.json, with
+            keys such as "time", "facts", and "highlight", or None if there is no snapshot
+
+    Returns:
+        The arguments, such as ["bottleneck", "repo#100"], or [] if that run had none or if
+        snapshot is None.
+
+    Raises:
+        ValueError: if snapshot does not record the arguments (even an empty list of them).
+    """
+    if snapshot is None:
+        return []
+    if HIGHLIGHT not in snapshot:
+        msg = (
+            f"{pr_status_config.SNAPSHOT} does not record the arguments of the run that wrote"
+            " it, because an older version of pr-status wrote it; run pr-status, with the"
+            " arguments that you want, to rewrite it"
+        )
+        raise ValueError(msg)
+    return snapshot[HIGHLIGHT]
 
 
 def dormant_note(model: Model) -> str:
@@ -4383,6 +4422,15 @@ def main() -> None:
         help="change to DIR before doing anything else",
     )
     parser.add_argument(
+        "--previous-arguments",
+        action="store_true",
+        help=(
+            "use the arguments of --highlight of the run that wrote the snapshot, so that the"
+            " documents are the ones that the command line of that run would produce.  A script"
+            " that regenerates the documents should pass this option"
+        ),
+    )
+    parser.add_argument(
         "--highlight",
         action="extend",
         nargs="+",
@@ -4421,8 +4469,11 @@ def main() -> None:
         for o in ["--print-document", "--print-config", "--print-land-after", *snapshot_printers]
         if given(o)
     ]
-    if args.highlight and printing:
-        parser.error(f"--highlight is not allowed with {printing[0]}")
+    if args.highlight and args.previous_arguments:
+        parser.error("--highlight is not allowed with --previous-arguments")
+    for o in ["--highlight", "--previous-arguments"]:
+        if given(o) and printing:
+            parser.error(f"{o} is not allowed with {printing[0]}")
     check_only = args.check
     if args.directory is not None:
         try:
@@ -4455,13 +4506,24 @@ def main() -> None:
             print(line)
         return
     base = str(pathlib.Path.cwd())
+    old: dict[str, Any] | None = None
+    if pathlib.Path(pr_status_config.SNAPSHOT).exists():
+        with pathlib.Path(pr_status_config.SNAPSHOT).open() as f:
+            old = json.load(f)
+    highlight = args.highlight
+    if args.previous_arguments:
+        try:
+            highlight = previous_highlight(old)
+        except ValueError as error:
+            sys.exit(f"pr-status: --previous-arguments: {error}")
     cfg = load_config("pr-status")
     dependencies = pathlib.Path(pr_status_config.dependency_document_name(cfg))
     models = load_models(cfg)
     try:
-        HIGHLIGHTED.update(needed_to_land(models, highlight_selection(models, args.highlight)))
+        HIGHLIGHTED.update(needed_to_land(models, highlight_selection(models, highlight)))
     except ValueError as error:
-        sys.exit(f"pr-status: --highlight: {error}")
+        option = "--previous-arguments" if args.previous_arguments else "--highlight"
+        sys.exit(f"pr-status: {option}: {error}")
     updates = description_updates(models)
     failed_updates = []
     if not check_only:
@@ -4472,13 +4534,11 @@ def main() -> None:
     am = "am" if now.hour < 12 else ""
     as_of = f"{now:%Y-%m-%d %H:%M}{am} {now:%Z}"
     if HIGHLIGHTED:
-        command = " ".join(shell_word(w) for w in ["pr-status", "--highlight", *args.highlight])
+        command = " ".join(shell_word(w) for w in ["pr-status", "--highlight", *highlight])
         as_of += f", by `{command}`"
     new = facts(models)
-    old = {}
-    if pathlib.Path(pr_status_config.SNAPSHOT).exists():
-        with pathlib.Path(pr_status_config.SNAPSHOT).open() as f:
-            old = json.load(f)
+    if old is None:
+        old = {}
     changes = report_changes(models, old.get("facts", {}), new)
     if changes:
         print(f"## Changes since the previous snapshot ({old.get('time', 'none')})")
@@ -4536,7 +4596,11 @@ def main() -> None:
         dependency_document(models, cfg, base, as_of, title, all_chains, conflicting)
     )
     snapshot = new_snapshot(
-        now.isoformat(timespec="seconds"), new, conflicting, unblocked_prs(models, base)
+        now.isoformat(timespec="seconds"),
+        new,
+        conflicting,
+        unblocked_prs(models, base),
+        highlight,
     )
     write_json_atomically(pathlib.Path(pr_status_config.SNAPSHOT), snapshot)
     written = [d["file"] for d in unblocked_docs]

@@ -1499,7 +1499,11 @@ class NewSnapshotTest(unittest.TestCase):
         ]
         unblocked = [{"repo": "a", "number": 1, "directories": ["a-branch-x"]}]
         snapshot = json.loads(
-            json.dumps(pr_status.new_snapshot("now", {"repo": {}}, conflicting, unblocked))
+            json.dumps(
+                pr_status.new_snapshot(
+                    "now", {"repo": {}}, conflicting, unblocked, ["bottleneck", "a#1"]
+                )
+            )
         )
         self.assertEqual((snapshot["time"], snapshot["facts"]), ("now", {"repo": {}}))
         self.assertEqual(json.loads("\n".join(pr_status.format_unblocked_prs(snapshot))), unblocked)
@@ -1510,6 +1514,7 @@ class NewSnapshotTest(unittest.TestCase):
         self.assertEqual(
             pr_status.format_missing_branches(snapshot), ["a\towner:master", "b dir\tmernst:fix"]
         )
+        self.assertEqual(pr_status.previous_highlight(snapshot), ["bottleneck", "a#1"])
 
 
 class FormatPushChainsTest(unittest.TestCase):
@@ -1832,6 +1837,56 @@ class FormatUnblockedPrsTest(unittest.TestCase):
         self.assertEqual(pr_status.format_unblocked_prs({"unblocked_prs": []}), ["[]"])
 
 
+class PreviousHighlightTest(unittest.TestCase):
+    """Tests for previous_highlight."""
+
+    def test_no_snapshot(self):
+        """Without a snapshot, there are no previous arguments."""
+        self.assertEqual(pr_status.previous_highlight(None), [])
+
+    def test_missing_key(self):
+        """A snapshot that does not record the arguments is an error."""
+        with self.assertRaisesRegex(ValueError, "does not record the arguments"):
+            pr_status.previous_highlight({"time": "now", "facts": {}})
+
+    def test_recorded(self):
+        """The recorded arguments are returned."""
+        self.assertEqual(
+            pr_status.previous_highlight({"highlight": ["bottleneck"]}), ["bottleneck"]
+        )
+
+
+class PreviousArgumentsTest(unittest.TestCase):
+    """Tests for `pr-status --previous-arguments`."""
+
+    def test_old_snapshot(self):
+        """A snapshot that does not record the arguments makes the option fail.
+
+        pr-status then writes no document, rather than one without the previous highlights.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / pr_status_config.SNAPSHOT).write_text(
+                json.dumps({"time": "now", "facts": {}})
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    PrintConflictingPushChainsTest.PR_STATUS,
+                    "-C",
+                    d,
+                    "--previous-arguments",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(sorted(p.name for p in Path(d).iterdir()), [pr_status_config.SNAPSHOT])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("--previous-arguments: ", result.stderr)
+        self.assertIn("does not record the arguments", result.stderr)
+
+
 class PrintConflictingPushChainsTest(unittest.TestCase):
     """Tests for `pr-status --print-conflicting-push-chains`."""
 
@@ -1867,6 +1922,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
                 )
             ],
             [],
+            [],
         )
         result = self.run_option(json.dumps(snapshot))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1885,6 +1941,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
             "now",
             {},
             [pr_status.PushChains([], [], False, [pr_status.MissingBranch("a", "o:m")], [])],
+            [],
             [],
         )
         with tempfile.TemporaryDirectory() as d:
@@ -1910,7 +1967,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
                 "ci": "passed",
             }
         ]
-        snapshot = pr_status.new_snapshot("now", {}, [], unblocked)
+        snapshot = pr_status.new_snapshot("now", {}, [], unblocked, [])
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / pr_status_config.SNAPSHOT).write_text(json.dumps(snapshot))
             result = subprocess.run(
@@ -1941,6 +1998,9 @@ class ExclusiveOptionsTest(unittest.TestCase):
             ["--print-missing-branches", "--highlight", "repo#1"],
             ["--print-unblocked-prs", "--print-missing-branches"],
             ["--print-unblocked-prs", "--highlight", "repo#1"],
+            ["--previous-arguments", "--highlight", "repo#1"],
+            ["--print-unblocked-prs", "--previous-arguments"],
+            ["--print-document", "--previous-arguments"],
         ]:
             with self.subTest(options=options), tempfile.TemporaryDirectory() as d:
                 result = subprocess.run(

@@ -82,11 +82,17 @@ done
 ## On its first run, they are the chains in ${STUB_CHAINS}, one per line, with
 ## their directories separated by tabs; afterward, there are none.  With
 ## "--print-conflicting-push-chains", it prints the chains that it recorded.
+## Otherwise, it fails unless it is given "--previous-arguments", without
+## which it would discard the highlights of the previous run.
 cat > "${WORK_DIR}/commands/pr-status" << 'EOF'
 #!/bin/sh
 if [ "$1" = --print-conflicting-push-chains ]; then
   cat chains
   exit 0
+fi
+if [ "$*" != --previous-arguments ]; then
+  echo "stub pr-status: expected only --previous-arguments, got: $*" >&2
+  exit 2
 fi
 echo pr-status >> "${STUB_LOG}"
 if grep -q -x pr-status-ran "${STUB_LOG}"; then
