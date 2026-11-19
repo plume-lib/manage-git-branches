@@ -1945,6 +1945,8 @@ class ExclusiveOptionsTest(unittest.TestCase):
         """Each combination fails with a usage error, before reading any file."""
         for options in [
             ["--check", "--print-conflicting-push-chains"],
+            ["--check", "--no-documents"],
+            ["--no-documents", "--print-unblocked-prs"],
             ["--print-document", "--print-conflicting-push-chains"],
             ["--print-config", "--print-document"],
             ["--print-land-after", "o/r", "--check"],

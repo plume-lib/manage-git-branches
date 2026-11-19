@@ -203,7 +203,8 @@ The commands are:
   Unlike `git-pull-from`, it needs no working tree for the default branch.
   It handles conflicts and a failed build as `git-push-to` does.
 * [`pr-status`](pr-status)
-  `[--check | --print-document | --print-config | --print-land-after ORG/REPO |`
+  `[--check | --no-documents | --print-document | --print-config |`
+  `--print-land-after ORG/REPO |`
   `--print-conflicting-push-chains | --print-missing-branches |`
   `--print-unblocked-prs] [-C DIR]`
   `[--highlight PR|bottleneck...]`:
@@ -219,7 +220,10 @@ The commands are:
   that directory with `-C`.
 
   It prints what changed since its previous run.
-  With `--check`, it writes no document.  With `--print-document`, it
+  With `--check`, it writes no document, and it changes no snapshot, pull
+  request description, or directory.  With `--no-documents`, it does
+  everything except write a document:  it updates the pull request
+  descriptions, the directories, and the snapshot.  With `--print-document`, it
   prints the file name of the document that it regenerates and does nothing
   else.  With `--print-config`, it prints its config, with the defaults
   filled in, and does nothing else.
@@ -292,20 +296,23 @@ The commands are:
   to `crreview-resolve`.  Run it in a directory that holds the working copy
   directories, or pass that directory with `-C`.
 * [`fix-ci-all`](fix-ci-all)
-  `[--dry-run] [--no-pr-status] [-C DIR] [--] [CLAUDE-OPTION]...`:
+  `[--dry-run] [--no-pr-status] [-C DIR] [-- CLAUDE-OPTION...]`:
   Runs `pr-status`, then runs
   [`fix-ci`](https://github.com/mernst/mdedots/blob/main/share/fix-ci),
   which makes the CI of the current branch's pull request pass, for each
   unblocked pull request whose CI failed, that you opened, and that has a
-  working copy directory.  An unblocked pull request is one that depends on
-  no other open pull request.  `fix-ci` reruns the CI jobs that failed for a
-  transient reason, or else runs Claude Code to fix the failure, commit, and
-  push; each CLAUDE-OPTION is passed to `claude`.
+  working copy directory where `gh pr view` shows it.  An unblocked pull
+  request is one that depends on no other open pull request.  `fix-ci`
+  reruns the CI jobs that failed for a transient reason, or else runs Claude
+  Code to fix the failure, commit, and push; each CLAUDE-OPTION is passed to
+  `claude`.
 
   With `--dry-run`, it prints the directories and pull requests but runs no
-  `fix-ci`.  With `--no-pr-status`, it uses what the last run of `pr-status`
-  recorded.  Run it in a directory that holds the working copy directories,
-  or pass that directory with `-C`.
+  `fix-ci`.  It still runs `pr-status`, with `--no-documents`, which updates
+  pull request descriptions and directories but writes no document.  With
+  `--no-pr-status`, it uses what the last run of `pr-status` recorded.  Run
+  it in a directory that holds the working copy directories, or pass that
+  directory with `-C`.
 * [`fix-renovate-prs`](fix-renovate-prs) `[--dry-run] [-C DIR]`:
   For each open pull request that Renovate opened and whose CI fails, in a
   repository that a working copy directory is a clone of, runs
