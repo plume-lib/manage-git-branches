@@ -65,8 +65,8 @@ class FakeServer:
             request that `gh` finds for the current branch; if it is absent, `gh` finds
             none.
         branch: the current branch.
-        repo: the GitHub repository of the current clone, as `gh repo view` describes
-            it, with keys "owner" and "parent".
+        repo: the GitHub repository of the current clone, as a dict parsed from the JSON
+            of `gh repo view`, with keys "owner" and "parent".
         reruns: the rerun requests, as strings.
     """
 
@@ -131,7 +131,7 @@ class FakeServer:
         if cmd[:3] == ["gh", "pr", "checks"]:
             pr = "" if cmd[3].startswith("--") else cmd[3]
             if pr not in self.pr_checks:
-                stderr = f'no pull requests found for branch "{self.branch}"'
+                stderr = f'no pull requests found for branch "{pr or self.branch}"'
                 raise subprocess.CalledProcessError(1, cmd, "", stderr)
             return json.dumps(self.pr_checks[pr])
         if cmd == ["git", "branch", "--show-current"]:
@@ -916,6 +916,20 @@ class PullRequestTest(RerunTestCase):
         ]  # fmt: skip
         output = self.assert_reruns(["gh run rerun --repo org/repo --failed 100"])
         self.assertIn(f"Pull request for the current branch: {url}", output)
+
+    def test_fork_parent_pr_branch_argument(self) -> None:
+        """In a clone of a fork, the pull request for a given branch is in the parent."""
+        s = self.server
+        s.gha_run("completed", "failure", [(101, "a", "failure")])
+        s.gha_job(101, "Read timed out")
+        s.repo = {"owner": {"login": "me"}, "parent": {"owner": {"login": "org"}, "name": "repo"}}
+        url = "https://github.com/org/repo/pull/7"
+        s.gh["repos/org/repo/pulls?head=me%3Aother&state=open"] = [{"html_url": url}]
+        s.pr_checks[url] = [
+            {"name": "a", "bucket": "fail", "link": "https://github.com/org/repo/actions/runs/100/job/101"},
+        ]  # fmt: skip
+        output = self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], "other")
+        self.assertIn(f"Pull request for branch other: {url}", output)
 
     def test_no_pr(self) -> None:
         """A clone that is not of a fork, and whose current branch has no pull request."""

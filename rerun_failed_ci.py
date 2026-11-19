@@ -8,12 +8,13 @@ Usage:
   rerun-failed-ci --classify [LOG-FILE]...
 
 With no PR, BRANCH, or URL, this command examines the GitHub pull request for the
-current branch.  If `gh` finds none, and the clone's GitHub repository (as `gh` resolves
-it) is a fork, then this command examines the open pull request of the fork's parent
-whose head is the current branch of the fork.  For example, in a clone whose only remote
-is ME/REPO, a fork of ORG/REPO, it examines the pull request in ORG/REPO whose head is
-ME:BRANCH.  A PR (a number or URL) or BRANCH names a pull request, as for
-`gh pr checks`; for each failed check of that pull request, this command examines
+current branch.  A PR (a number or URL) or BRANCH names a pull request, as for
+`gh pr checks`.  If `gh` finds no pull request for a branch (the given BRANCH or the
+current branch), and the clone's GitHub repository (as `gh` resolves it) is a fork, then
+this command examines the open pull request of the fork's parent whose head is that
+branch of the fork.  For example, in a clone whose only remote is ME/REPO, a fork of
+ORG/REPO, it examines the pull request in ORG/REPO whose head is ME:BRANCH.  For each
+failed check of that pull request, this command examines
 every failed job of the check's build, workflow, or workflow run, so that the jobs of
 one workflow are rerun together.  A URL of an Azure Pipelines build or of one of its
 jobs names every failed job of the build.  A URL of a CircleCI job or workflow, or of a
@@ -729,9 +730,9 @@ class Rerunner:
             )
             failed = [c for c in json.loads(checks) if c["bucket"] in PR_CHECK_FAILED]
         except request_util.REQUEST_ERRORS as e:
-            if pr is None and is_no_pr_error(e):
+            if is_no_pr_error(e):
                 try:
-                    parent_pr = fork_parent_pr()
+                    parent_pr = fork_parent_pr(pr)
                 except request_util.REQUEST_ERRORS as parent_error:
                     self.warn(
                         f"cannot read the checks of pull request {description}:"
@@ -740,7 +741,8 @@ class Rerunner:
                     )
                     return
                 if parent_pr is not None:
-                    print(f"Pull request for the current branch: {parent_pr}")
+                    branch_description = f"branch {pr}" if pr else "the current branch"
+                    print(f"Pull request for {branch_description}: {parent_pr}")
                     self.pr_rerun_failed(parent_pr)
                     return
             self.warn(
@@ -783,22 +785,28 @@ def is_no_pr_error(error: BaseException) -> bool:
     )
 
 
-def fork_parent_pr() -> str | None:
-    """Return the URL of the open pull request in the parent repository for the current branch.
+def fork_parent_pr(branch: str | None = None) -> str | None:
+    """Return the URL of the open pull request in the parent repository for the given branch.
 
     The parent repository is the one that the current clone's GitHub repository, as `gh`
     resolves it, is a fork of.  For example, in a clone whose only remote is the fork
-    ME/REPO of ORG/REPO, the pull request is one in ORG/REPO whose head is the current
-    branch of ME/REPO.
+    ME/REPO of ORG/REPO, the pull request is one in ORG/REPO whose head is the branch of
+    ME/REPO.
 
     If a command fails, this raises one of request_util.REQUEST_ERRORS.
 
+    Args:
+        branch: a branch of the current clone's GitHub repository, such as "feature", or
+            None for the current branch.
+
     Returns:
         The URL of the pull request, such as "https://github.com/ORG/REPO/pull/123", or
-        None if the current clone's GitHub repository is not a fork, if no branch is
-        checked out, or if the parent repository has no such open pull request.
+        None if the current clone's GitHub repository is not a fork, if branch is None
+        and no branch is checked out, or if the parent repository has no such open pull
+        request.
     """
-    branch = request_util.run(["git", "branch", "--show-current"]).strip()
+    if branch is None:
+        branch = request_util.run(["git", "branch", "--show-current"]).strip()
     if not branch:
         return None
     repo = json.loads(request_util.run(["gh", "repo", "view", "--json", "owner,parent"]))
