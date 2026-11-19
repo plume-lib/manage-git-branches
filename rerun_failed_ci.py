@@ -12,10 +12,11 @@ current branch.  A PR (a number or URL) or BRANCH names a pull request, as for
 `gh pr checks`.  If `gh` finds no pull request for a branch (the given BRANCH or the
 current branch), and the clone's GitHub repository (as `gh` resolves it) is a fork, then
 this command examines the open pull request of the fork's parent whose head is that
-branch of the fork.  For example, in a clone whose only remote is ME/REPO, a fork of
-ORG/REPO, it examines the pull request in ORG/REPO whose head is ME:BRANCH.  For each
-failed check of that pull request, this command examines
-every failed job of the check's build, workflow, or workflow run, so that the jobs of
+branch of the fork.  For the current branch, that branch of the fork is the one that
+`git push` updates, whose name can differ.  For example, in a clone whose only remote
+is ME/REPO, a fork of ORG/REPO, it examines the pull request in ORG/REPO whose head is
+ME:BRANCH.  For each failed check of that pull request, this command examines every
+failed job of the check's build, workflow, or workflow run, so that the jobs of
 one workflow are rerun together.  A URL of an Azure Pipelines build or of one of its
 jobs names every failed job of the build.  A URL of a CircleCI job or workflow, or of a
 GitHub Actions job or workflow run, names the failed jobs to examine:  the given job,
@@ -785,6 +786,35 @@ def is_no_pr_error(error: BaseException) -> bool:
     )
 
 
+def pushed_branch() -> str:
+    """Return the name of the remote branch that `git push` updates from the current branch.
+
+    For example, for a local branch "wip" whose push destination is the remote-tracking
+    branch "origin/fix-timeout", this is "fix-timeout".  It is the name that `gh` uses to
+    find the pull request of the current branch.
+
+    If a command fails, this raises one of request_util.REQUEST_ERRORS.
+
+    Returns:
+        The name of the remote branch, such as "fix-timeout"; the name of the current
+        branch if git does not know where the current branch is pushed; or "" if no branch
+        is checked out.
+    """
+    branch = request_util.run(["git", "branch", "--show-current"]).strip()
+    if not branch:
+        return ""
+    # A remote's name cannot contain a tab.
+    remote, _, push = (
+        request_util.run(
+            ["git", "for-each-ref", "--format=%(push:remotename)%09%(push)", f"refs/heads/{branch}"]
+        )
+        .rstrip("\n")
+        .partition("\t")
+    )
+    prefix = f"refs/remotes/{remote}/"
+    return push[len(prefix) :] if remote and push.startswith(prefix) else branch
+
+
 def fork_parent_pr(branch: str | None = None) -> str | None:
     """Return the URL of the open pull request in the parent repository for the given branch.
 
@@ -797,7 +827,7 @@ def fork_parent_pr(branch: str | None = None) -> str | None:
 
     Args:
         branch: a branch of the current clone's GitHub repository, such as "feature", or
-            None for the current branch.
+            None for the branch that the current branch is pushed to.
 
     Returns:
         The URL of the pull request, such as "https://github.com/ORG/REPO/pull/123", or
@@ -806,7 +836,7 @@ def fork_parent_pr(branch: str | None = None) -> str | None:
         request.
     """
     if branch is None:
-        branch = request_util.run(["git", "branch", "--show-current"]).strip()
+        branch = pushed_branch()
     if not branch:
         return None
     repo = json.loads(request_util.run(["gh", "repo", "view", "--json", "owner,parent"]))

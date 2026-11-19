@@ -65,6 +65,8 @@ class FakeServer:
             request that `gh` finds for the current branch; if it is absent, `gh` finds
             none.
         branch: the current branch.
+        push: the remote-tracking branch that the current branch is pushed to, such as
+            "refs/remotes/origin/fix-timeout", or "" if it is unknown.
         repo: the GitHub repository of the current clone, as a dict parsed from the JSON
             of `gh repo view`, with keys "owner" and "parent".
         reruns: the rerun requests, as strings.
@@ -77,6 +79,7 @@ class FakeServer:
         self.gh_logs: dict[int, str] = {}
         self.pr_checks: dict[str, list[dict[str, str]]] = {}
         self.branch = "feature"
+        self.push = ""
         self.repo: dict[str, Any] = {"owner": {"login": "org"}, "parent": None}
         self.reruns: list[str] = []
 
@@ -136,6 +139,8 @@ class FakeServer:
             return json.dumps(self.pr_checks[pr])
         if cmd == ["git", "branch", "--show-current"]:
             return self.branch + "\n"
+        if cmd[:2] == ["git", "for-each-ref"] and cmd[-1] == f"refs/heads/{self.branch}":
+            return f"{'origin' if self.push else ''}\t{self.push}\n"
         if cmd[:3] == ["gh", "repo", "view"]:
             return json.dumps(self.repo)
         msg = f"unsupported command: {cmd}"
@@ -911,6 +916,21 @@ class PullRequestTest(RerunTestCase):
         s.repo = {"owner": {"login": "me"}, "parent": {"owner": {"login": "org"}, "name": "repo"}}
         url = "https://github.com/org/repo/pull/7"
         s.gh["repos/org/repo/pulls?head=me%3Afeature&state=open"] = [{"html_url": url}]
+        s.pr_checks[url] = [
+            {"name": "a", "bucket": "fail", "link": "https://github.com/org/repo/actions/runs/100/job/101"},
+        ]  # fmt: skip
+        output = self.assert_reruns(["gh run rerun --repo org/repo --failed 100"])
+        self.assertIn(f"Pull request for the current branch: {url}", output)
+
+    def test_fork_parent_pr_pushed_branch(self) -> None:
+        """In a clone of a fork, the head of the pull request is the branch pushed to."""
+        s = self.server
+        s.gha_run("completed", "failure", [(101, "a", "failure")])
+        s.gha_job(101, "Read timed out")
+        s.repo = {"owner": {"login": "me"}, "parent": {"owner": {"login": "org"}, "name": "repo"}}
+        s.push = "refs/remotes/origin/fix-timeout"
+        url = "https://github.com/org/repo/pull/7"
+        s.gh["repos/org/repo/pulls?head=me%3Afix-timeout&state=open"] = [{"html_url": url}]
         s.pr_checks[url] = [
             {"name": "a", "bucket": "fail", "link": "https://github.com/org/repo/actions/runs/100/job/101"},
         ]  # fmt: skip

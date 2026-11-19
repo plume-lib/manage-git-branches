@@ -406,8 +406,8 @@ The commands are:
   For each transient failure of a CI job, reruns it.  Works on the given
   GitHub pull request (by default, the one for the current branch).  In a
   clone of a fork, the pull request for a branch can be one in the fork's
-  parent.  A URL
-  names an Azure Pipelines, CircleCI, or GitHub Actions job or workflow.
+  parent.  A URL names an Azure Pipelines, CircleCI, or GitHub Actions job or
+  workflow.
   With `--exit-3-if-reran`, the exit status is 3 if it reran some job.
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
   shows a transient failure.  This command needs Python 3.9 or later and
