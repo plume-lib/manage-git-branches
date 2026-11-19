@@ -67,7 +67,8 @@ graph.
 --previous-arguments reuses the --highlight arguments of the run that wrote the snapshot,
 so that the documents that it regenerates are the ones that the command line of that run
 would regenerate.  A script that regenerates the documents should use it, rather than
-discard the highlights of a run that a person chose.
+discard the highlights of a run that a person chose.  It drops, with a warning, each PR
+that is no longer open, so the snapshot that it writes does not record that PR.
 
 pr-status needs Python 3.10 or later, and the programs that pr-merge-analysis needs.
 """
@@ -108,6 +109,9 @@ MISSING_BRANCHES = "missing_branches"
 UNBLOCKED_PRS = "unblocked_prs"
 # The key of the snapshot's list of the arguments of --highlight.
 HIGHLIGHT = "highlight"
+# The text that each document holds if it highlights PRs, in "As of ..., by `pr-status
+# --highlight bottleneck`."
+HIGHLIGHTED_BY = "by `pr-status --highlight"
 # The most open PRs of a repository that load_repo reads.
 PR_LIMIT = 300
 ANALYSIS = str(pathlib.Path(__file__).resolve().parent / "pr-merge-analysis")
@@ -767,6 +771,19 @@ def highlight(gh: str, n: int, text: str) -> str:
     return f'<span style="background-color:#fcc">**{text}**</span>'
 
 
+def highlight_words(arguments: Iterable[str]) -> list[str]:
+    """Return the words of the given arguments of --highlight.
+
+    Args:
+        arguments: strings, each of which holds words separated by commas or whitespace, such
+            as ["bottleneck, repo#100", "repo#101"].
+
+    Returns:
+        The words, such as ["bottleneck", "repo#100", "repo#101"].
+    """
+    return [w for arg in arguments for w in re.split(r"[,\s]+", arg) if w]
+
+
 def highlight_selection(models: list[Model], arguments: Iterable[str]) -> set[tuple[str, int]]:
     """Return the open PRs that the arguments of --highlight select.
 
@@ -783,7 +800,7 @@ def highlight_selection(models: list[Model], arguments: Iterable[str]) -> set[tu
         If a word is neither "bottleneck" nor the name of an open PR, resolve_pr_names
         raises ValueError.
     """
-    words = [w for arg in arguments for w in re.split(r"[,\s]+", arg) if w]
+    words = highlight_words(arguments)
     names = [w for w in words if w.lower() != "bottleneck"]
     result = resolve_pr_names(models, names)
     if len(names) < len(words):
@@ -834,6 +851,37 @@ def resolve_pr_names(models: list[Model], names: Iterable[str]) -> set[tuple[str
             msg = f"{name} is not an open PR of {m.repo.gh}"
             raise ValueError(msg)
         result.add((m.repo.gh.lower(), n))
+    return result
+
+
+def selecting_highlight_words(models: list[Model], arguments: Iterable[str]) -> list[str]:
+    """Return the words of the given arguments of --highlight that still select PRs.
+
+    Print a warning to standard error about each other word.  A word that named an open PR
+    when a person gave it stops selecting a PR once that PR lands or closes.
+
+    Args:
+        models: the model of each repository.
+        arguments: arguments of --highlight, as highlight_selection describes them, such as
+            ["bottleneck, repo#100"].
+
+    Returns:
+        The words, such as ["bottleneck"] if repo#100 has landed.  highlight_selection does
+        not raise ValueError for them.
+    """
+    result = []
+    for word in highlight_words(arguments):
+        if word.lower() != "bottleneck":
+            try:
+                resolve_pr_names(models, [word])
+            except ValueError as error:
+                print(
+                    f"pr-status: warning: --previous-arguments: {error}, so pr-status no longer"
+                    f" highlights {word}",
+                    file=sys.stderr,
+                )
+                continue
+        result.append(word)
     return result
 
 
@@ -3605,8 +3653,9 @@ def new_snapshot(
         conflicting: the chains with conflicts of each repository, as push_chains computes
             them with conflicts_only
         unblocked: the unblocked PRs, as unblocked_prs computes them
-        highlight: the arguments of --highlight, such as ["bottleneck", "repo#100"], or []
-            if the command line has none
+        highlight: the arguments of --highlight that chose the documents' highlights, such
+            as ["bottleneck", "repo#100"], whether the command line gives them or
+            --previous-arguments reuses them; or [] if there are none
 
     Returns:
         The snapshot, as a dict that .pr-status-snapshot.json holds as JSON, with the keys
@@ -3755,30 +3804,45 @@ def format_unblocked_prs(snapshot: dict[str, Any]) -> list[str]:
     return json.dumps(snapshot[UNBLOCKED_PRS], indent=1).splitlines()
 
 
-def previous_highlight(snapshot: dict[str, Any] | None) -> list[str]:
+def previous_highlight(snapshot: dict[str, Any] | None, document: str | None) -> list[str]:
     """Return the arguments of --highlight of the run that wrote the given snapshot.
 
     Args:
         snapshot: a snapshot, as a dict parsed from the JSON of .pr-status-snapshot.json, with
             keys such as "time", "facts", and "highlight", or None if there is no snapshot
+        document: the text of the dependency document that the run that wrote the snapshot
+            wrote, or None if there is no dependency document
 
     Returns:
         The arguments, such as ["bottleneck", "repo#100"], or [] if that run had none or if
-        snapshot is None.
+        snapshot is None.  An older version of pr-status wrote a snapshot without the
+        arguments; for such a snapshot, the result is [] if the document highlights nothing.
 
     Raises:
-        ValueError: if snapshot does not record the arguments (even an empty list of them).
+        ValueError: if snapshot does not record the arguments (even an empty list of them)
+            and the document highlights PRs, or if snapshot records something other than a
+            list of strings.
     """
     if snapshot is None:
         return []
     if HIGHLIGHT not in snapshot:
+        if document is None or HIGHLIGHTED_BY not in document:
+            return []
         msg = (
             f"{pr_status_config.SNAPSHOT} does not record the arguments of the run that wrote"
             " it, because an older version of pr-status wrote it; run pr-status, with the"
             " arguments that you want, to rewrite it"
         )
         raise ValueError(msg)
-    return snapshot[HIGHLIGHT]
+    highlight = snapshot[HIGHLIGHT]
+    if not isinstance(highlight, list) or not all(isinstance(a, str) for a in highlight):
+        msg = (
+            f"{pr_status_config.SNAPSHOT} records {json.dumps(highlight)}, not a list of strings,"
+            " as the arguments of the run that wrote it; run pr-status, with the arguments"
+            " that you want, to rewrite it"
+        )
+        raise ValueError(msg)
+    return highlight
 
 
 def dormant_note(model: Model) -> str:
@@ -4508,22 +4572,35 @@ def main() -> None:
     base = str(pathlib.Path.cwd())
     old: dict[str, Any] | None = None
     if pathlib.Path(pr_status_config.SNAPSHOT).exists():
-        with pathlib.Path(pr_status_config.SNAPSHOT).open() as f:
-            old = json.load(f)
+        try:
+            with pathlib.Path(pr_status_config.SNAPSHOT).open() as f:
+                old = json.load(f)
+        except (OSError, ValueError) as error:
+            sys.exit(f"pr-status: cannot read {pr_status_config.SNAPSHOT}: {error}")
+        if not isinstance(old, dict):
+            sys.exit(f"pr-status: {pr_status_config.SNAPSHOT} does not hold a JSON object")
     highlight = args.highlight
     if args.previous_arguments:
+        previous_document = pathlib.Path(
+            pr_status_config.dependency_document_name(
+                pr_status_config.read_config_file("pr-status")
+            )
+        )
         try:
-            highlight = previous_highlight(old)
-        except ValueError as error:
+            highlight = previous_highlight(
+                old, previous_document.read_text() if previous_document.exists() else None
+            )
+        except (OSError, ValueError) as error:
             sys.exit(f"pr-status: --previous-arguments: {error}")
     cfg = load_config("pr-status")
     dependencies = pathlib.Path(pr_status_config.dependency_document_name(cfg))
     models = load_models(cfg)
+    if args.previous_arguments:
+        highlight = selecting_highlight_words(models, highlight)
     try:
         HIGHLIGHTED.update(needed_to_land(models, highlight_selection(models, highlight)))
     except ValueError as error:
-        option = "--previous-arguments" if args.previous_arguments else "--highlight"
-        sys.exit(f"pr-status: {option}: {error}")
+        sys.exit(f"pr-status: --highlight: {error}")
     updates = description_updates(models)
     failed_updates = []
     if not check_only:

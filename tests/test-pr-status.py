@@ -878,6 +878,24 @@ class HighlightTest(unittest.TestCase):
         pr_status.unite_partners([empty])
         self.assertEqual(empty.deepest_roots(), set())
 
+    def test_selecting_highlight_words(self):
+        """Words that no longer select a PR are dropped, with a warning about each."""
+        models = self.models()
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            words = pr_status.selecting_highlight_words(
+                models, ["Bottleneck, owner/repo#9", "other/repo#5 third/repo#1"]
+            )
+        self.assertEqual(words, ["Bottleneck", "other/repo#5"])
+        self.assertEqual(
+            pr_status.highlight_selection(models, words),
+            {("owner/repo", 2), ("other/repo", 5), ("other/repo", 6)},
+        )
+        warnings = stderr.getvalue().splitlines()
+        self.assertEqual(len(warnings), 2)
+        self.assertIn("owner/repo#9 is not an open PR of owner/repo", warnings[0])
+        self.assertIn("no longer highlights third/repo#1", warnings[1])
+
     def test_rejects_bad_names(self):
         """A name must name one repository and an open PR of it."""
         models = self.models()
@@ -1514,7 +1532,7 @@ class NewSnapshotTest(unittest.TestCase):
         self.assertEqual(
             pr_status.format_missing_branches(snapshot), ["a\towner:master", "b dir\tmernst:fix"]
         )
-        self.assertEqual(pr_status.previous_highlight(snapshot), ["bottleneck", "a#1"])
+        self.assertEqual(pr_status.previous_highlight(snapshot, None), ["bottleneck", "a#1"])
 
 
 class FormatPushChainsTest(unittest.TestCase):
@@ -1840,51 +1858,89 @@ class FormatUnblockedPrsTest(unittest.TestCase):
 class PreviousHighlightTest(unittest.TestCase):
     """Tests for previous_highlight."""
 
+    HIGHLIGHTED_DOCUMENT = "As of 2026-11-05 17:59 PST, by `pr-status --highlight bottleneck`.\n"
+
     def test_no_snapshot(self):
         """Without a snapshot, there are no previous arguments."""
-        self.assertEqual(pr_status.previous_highlight(None), [])
+        self.assertEqual(pr_status.previous_highlight(None, self.HIGHLIGHTED_DOCUMENT), [])
 
     def test_missing_key(self):
-        """A snapshot that does not record the arguments is an error."""
+        """A snapshot that does not record the arguments of a highlighting run is an error."""
         with self.assertRaisesRegex(ValueError, "does not record the arguments"):
-            pr_status.previous_highlight({"time": "now", "facts": {}})
+            pr_status.previous_highlight({"time": "now", "facts": {}}, self.HIGHLIGHTED_DOCUMENT)
+
+    def test_missing_key_without_highlights(self):
+        """A snapshot without the arguments of a run that highlighted nothing yields []."""
+        old = {"time": "now", "facts": {}}
+        self.assertEqual(pr_status.previous_highlight(old, "As of 2026-11-05 17:59 PST.\n"), [])
+        self.assertEqual(pr_status.previous_highlight(old, None), [])
 
     def test_recorded(self):
         """The recorded arguments are returned."""
         self.assertEqual(
-            pr_status.previous_highlight({"highlight": ["bottleneck"]}), ["bottleneck"]
+            pr_status.previous_highlight({"highlight": ["bottleneck"]}, None), ["bottleneck"]
         )
+
+    def test_malformed(self):
+        """Recorded arguments that are not a list of strings are an error."""
+        for value in (None, "bottleneck", [1], {"a": "b"}):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "list of strings"):
+                pr_status.previous_highlight({"highlight": value}, None)
 
 
 class PreviousArgumentsTest(unittest.TestCase):
     """Tests for `pr-status --previous-arguments`."""
 
+    def run_in(self, d, snapshot_text, *options):
+        """Run pr-status in the given directory, which holds the given snapshot.
+
+        Args:
+            d: a directory that holds no working copy directory.
+            snapshot_text: the text of .pr-status-snapshot.json in d.
+            options: the command-line options of pr-status, such as "--previous-arguments".
+
+        Returns:
+            The completed process.
+        """
+        (Path(d) / pr_status_config.SNAPSHOT).write_text(snapshot_text)
+        return subprocess.run(
+            [sys.executable, PrintConflictingPushChainsTest.PR_STATUS, "-C", d, *options],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def test_old_snapshot(self):
-        """A snapshot that does not record the arguments makes the option fail.
+        """A snapshot that does not record the arguments of a highlighting run is an error.
 
         pr-status then writes no document, rather than one without the previous highlights.
         """
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / pr_status_config.SNAPSHOT).write_text(
-                json.dumps({"time": "now", "facts": {}})
+            document = Path(d) / pr_status_config.DEFAULT_DEPENDENCY_DOCUMENT
+            document.write_text(PreviousHighlightTest.HIGHLIGHTED_DOCUMENT)
+            result = self.run_in(
+                d, json.dumps({"time": "now", "facts": {}}), "--previous-arguments"
             )
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    PrintConflictingPushChainsTest.PR_STATUS,
-                    "-C",
-                    d,
-                    "--previous-arguments",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
+            self.assertEqual(
+                sorted(p.name for p in Path(d).iterdir()),
+                sorted([pr_status_config.SNAPSHOT, document.name]),
             )
-            self.assertEqual(sorted(p.name for p in Path(d).iterdir()), [pr_status_config.SNAPSHOT])
+            self.assertEqual(document.read_text(), PreviousHighlightTest.HIGHLIGHTED_DOCUMENT)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertIn("--previous-arguments: ", result.stderr)
         self.assertIn("does not record the arguments", result.stderr)
+
+    def test_malformed_snapshot(self):
+        """A snapshot that is not valid JSON yields an error message, not a traceback."""
+        for options in ([], ["--previous-arguments"]):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as d:
+                result = self.run_in(d, '{"time": ', *options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn(
+                    f"pr-status: cannot read {pr_status_config.SNAPSHOT}: ", result.stderr
+                )
 
 
 class PrintConflictingPushChainsTest(unittest.TestCase):

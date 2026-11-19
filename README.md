@@ -254,7 +254,8 @@ The commands are:
   that wrote the snapshot, so that the documents are the ones that the
   command line of that run would produce.  A script that regenerates the
   documents should pass it, rather than discard the highlights that a
-  person chose.
+  person chose.  It drops, with a warning, each highlighted PR that is no
+  longer open.
 * [`pr-merge-analysis`](pr-merge-analysis)
   `[--no-pairwise] [--default-branch BRANCH] [--prune] REPO_DIR OWNER/REPO [PR_NUMBER...]`:
   For the given open pull requests of the GitHub repository OWNER/REPO (by
