@@ -67,8 +67,6 @@ class FakeServer:
         branch: the current branch.
         repo: the GitHub repository of the current clone, as `gh repo view` describes
             it, with keys "owner" and "parent".
-        pr_lists: a map from a GitHub slug, such as "ORG/REPO", and a head branch to the
-            open pull requests whose head is that branch, as `gh pr list` describes them.
         reruns: the rerun requests, as strings.
     """
 
@@ -80,7 +78,6 @@ class FakeServer:
         self.pr_checks: dict[str, list[dict[str, str]]] = {}
         self.branch = "feature"
         self.repo: dict[str, Any] = {"owner": {"login": "org"}, "parent": None}
-        self.pr_lists: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self.reruns: list[str] = []
 
     def http(
@@ -141,9 +138,6 @@ class FakeServer:
             return self.branch + "\n"
         if cmd[:3] == ["gh", "repo", "view"]:
             return json.dumps(self.repo)
-        if cmd[:3] == ["gh", "pr", "list"]:
-            key = (cmd[cmd.index("--repo") + 1], cmd[cmd.index("--head") + 1])
-            return json.dumps(self.pr_lists.get(key, []))
         msg = f"unsupported command: {cmd}"
         raise AssertionError(msg)
 
@@ -916,11 +910,7 @@ class PullRequestTest(RerunTestCase):
         s.gha_job(101, "Read timed out")
         s.repo = {"owner": {"login": "me"}, "parent": {"owner": {"login": "org"}, "name": "repo"}}
         url = "https://github.com/org/repo/pull/7"
-        other_url = "https://github.com/org/repo/pull/8"
-        s.pr_lists["org/repo", "feature"] = [
-            {"url": other_url, "headRepositoryOwner": {"login": "someone"}},
-            {"url": url, "headRepositoryOwner": {"login": "me"}},
-        ]
+        s.gh["repos/org/repo/pulls?head=me%3Afeature&state=open"] = [{"html_url": url}]
         s.pr_checks[url] = [
             {"name": "a", "bucket": "fail", "link": "https://github.com/org/repo/actions/runs/100/job/101"},
         ]  # fmt: skip

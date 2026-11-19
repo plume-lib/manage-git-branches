@@ -85,6 +85,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -805,25 +806,12 @@ def fork_parent_pr() -> str | None:
     if not parent:
         return None
     parent_slug = f"{parent['owner']['login']}/{parent['name']}"
-    prs = json.loads(
-        request_util.run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--repo",
-                parent_slug,
-                "--head",
-                branch,
-                "--state",
-                "open",
-                "--json",
-                "url,headRepositoryOwner",
-            ]
-        )
-    )
-    owner = repo["owner"]["login"]
-    return next((p["url"] for p in prs if p["headRepositoryOwner"]["login"] == owner), None)
+    # The head filter "OWNER:BRANCH" selects only this fork's pull requests, so pull
+    # requests from other forks' branches of the same name cannot crowd this one out of
+    # the first page of results.
+    head = urllib.parse.quote(f"{repo['owner']['login']}:{branch}", safe="")
+    prs = request_util.gh_api(f"repos/{parent_slug}/pulls?head={head}&state=open")
+    return prs[0]["html_url"] if prs else None
 
 
 ###########################################################################
