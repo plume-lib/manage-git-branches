@@ -1740,7 +1740,10 @@ class UnblockedPrsTest(unittest.TestCase):
             def __init__(self):
                 self.name = name
                 self.gh = gh
-                self.prs = {n: {"number": n} for n in unblocked}
+                self.prs = {
+                    n: {"number": n, "author": {"login": f"user{n}"}, "headRefOid": f"{n:040x}"}
+                    for n in unblocked
+                }
 
             @staticmethod
             def url(n):
@@ -1780,6 +1783,8 @@ class UnblockedPrsTest(unittest.TestCase):
                     "gh": "org/a",
                     "number": 1,
                     "url": "https://github.com/org/a/pull/1",
+                    "author": "user1",
+                    "head": "0000000000000000000000000000000000000001",
                     "directories": ["a-branch-x", "a-branch-y"],
                     "ci": "failed",
                 },
@@ -1788,6 +1793,8 @@ class UnblockedPrsTest(unittest.TestCase):
                     "gh": "org/a",
                     "number": 2,
                     "url": "https://github.com/org/a/pull/2",
+                    "author": "user2",
+                    "head": "0000000000000000000000000000000000000002",
                     "directories": [],
                     "ci": "passed",
                 },
@@ -1796,6 +1803,8 @@ class UnblockedPrsTest(unittest.TestCase):
                     "gh": "org/a",
                     "number": 3,
                     "url": "https://github.com/org/a/pull/3",
+                    "author": "user3",
+                    "head": "0000000000000000000000000000000000000003",
                     "directories": [],
                     "ci": "pending",
                 },
@@ -1804,6 +1813,8 @@ class UnblockedPrsTest(unittest.TestCase):
                     "gh": "org/a",
                     "number": 4,
                     "url": "https://github.com/org/a/pull/4",
+                    "author": "user4",
+                    "head": "0000000000000000000000000000000000000004",
                     "directories": [],
                     "ci": "none",
                 },
@@ -1812,6 +1823,8 @@ class UnblockedPrsTest(unittest.TestCase):
                     "gh": "org/b",
                     "number": 5,
                     "url": "https://github.com/org/b/pull/5",
+                    "author": "user5",
+                    "head": "0000000000000000000000000000000000000005",
                     "directories": ["b-branch-z"],
                     "ci": "unknown",
                 },

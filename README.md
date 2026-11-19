@@ -242,7 +242,9 @@ The commands are:
   pull request, whose keys are "repo" (the repository's key in the config,
   such as "checker-framework"), "gh" (the repository's GitHub slug, such as
   "typetools/checker-framework"), "number" (an integer such as 6008), "url",
-  "directories" (a list of the pull request's working copy directories,
+  "author" (the GitHub login of the pull request's author, such as
+  "octocat"), "head" (the pull request's head commit, a 40-hexadecimal-digit
+  SHA-1 hash), "directories" (a list of the pull request's working copy directories,
   which are entries of the directory that holds the working copy
   directories, such as "checker-framework-fork-me-branch-foo"), and "ci"
   ("failed", "none" if the pull request's head commit has no CI checks,
@@ -289,6 +291,21 @@ The commands are:
   the directories and pull requests but runs nothing.  `--agent` is passed
   to `crreview-resolve`.  Run it in a directory that holds the working copy
   directories, or pass that directory with `-C`.
+* [`fix-ci-all`](fix-ci-all)
+  `[--dry-run] [--no-pr-status] [-C DIR] [--] [CLAUDE-OPTION]...`:
+  Runs `pr-status`, then runs
+  [`fix-ci`](https://github.com/mernst/mdedots/blob/main/share/fix-ci),
+  which makes the CI of the current branch's pull request pass, for each
+  unblocked pull request whose CI failed, that you opened, and that has a
+  working copy directory.  An unblocked pull request is one that depends on
+  no other open pull request.  `fix-ci` reruns the CI jobs that failed for a
+  transient reason, or else runs Claude Code to fix the failure, commit, and
+  push; each CLAUDE-OPTION is passed to `claude`.
+
+  With `--dry-run`, it prints the directories and pull requests but runs no
+  `fix-ci`.  With `--no-pr-status`, it uses what the last run of `pr-status`
+  recorded.  Run it in a directory that holds the working copy directories,
+  or pass that directory with `-C`.
 * [`fix-renovate-prs`](fix-renovate-prs) `[--dry-run] [-C DIR]`:
   For each open pull request that Renovate opened and whose CI fails, in a
   repository that a working copy directory is a clone of, runs

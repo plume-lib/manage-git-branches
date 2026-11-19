@@ -3634,6 +3634,8 @@ def unblocked_prs(models: list[Model], base: str) -> list[dict[str, Any]]:
           "gh":  the repository's GitHub slug, such as "typetools/checker-framework";
           "number":  the PR's number, an integer such as 6008;
           "url":  the PR's URL, such as "https://github.com/typetools/checker-framework/pull/6008";
+          "author":  the GitHub login of the PR's author, such as "octocat";
+          "head":  the PR's head commit, a 40-hexadecimal-digit SHA-1 hash;
           "directories":  the PR's working copy directories, which are entries of base, such
             as ["checker-framework-fork-me-branch-foo"], or [] if it has none;
           "ci":  the state of the PR's CI, as ReviewsAndCi.ci_state returns it, such as
@@ -3645,6 +3647,8 @@ def unblocked_prs(models: list[Model], base: str) -> list[dict[str, Any]]:
             "gh": m.repo.gh,
             "number": n,
             "url": m.repo.url(n),
+            "author": m.repo.prs[n]["author"]["login"],
+            "head": m.repo.prs[n]["headRefOid"],
             "directories": pr_directories(m.repo, m.repo.prs[n], base),
             "ci": m.repo.reviews_and_ci.ci_state(n),
         }
@@ -4372,8 +4376,8 @@ def main() -> None:
         action="store_true",
         help=(
             "print the PRs that depend on no other open PR, as the snapshot records them, as a"
-            ' JSON array of objects with the keys "repo", "gh", "number", "url",'
-            ' "directories", and "ci", and do nothing else'
+            ' JSON array of objects with the keys "repo", "gh", "number", "url", "author",'
+            ' "head", "directories", and "ci", and do nothing else'
         ),
     )
     parser.add_argument(
