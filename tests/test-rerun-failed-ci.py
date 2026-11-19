@@ -449,6 +449,25 @@ class ClassifyTest(unittest.TestCase):
                 ),
                 "> Could not find org.slf4j:slf4j-api:1.7.36.",
             ),
+            # Maven Central did not serve an artifact that `gradlew-retry` found on a mirror.
+            (
+                (
+                    "   > Could not find org.plumelib:options:3.0.0.\n"
+                    "     Searched in the following locations:\n"
+                    "       - https://repo.maven.apache.org/maven2/org/plumelib/options/3.0.0/"
+                    "options-3.0.0.pom\n"
+                    "gradlew-retry: https://repo.maven.apache.org/maven2/org/plumelib/options/"
+                    "3.0.0/options-3.0.0.pom exists on a mirror of Maven Central."
+                ),
+                None,
+            ),
+            (
+                (
+                    "gradlew-retry: https://repo.maven.apache.org/maven2/org/plumelib/options/"
+                    "3.0.0/options-3.0.0.pom exists."
+                ),
+                None,
+            ),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
         ]:
@@ -472,6 +491,11 @@ class ClassifyTest(unittest.TestCase):
                 "       - https://plugins.gradle.org/m2/com/google/guava/guava/33.9-jre/"
                 "guava-33.9-jre.pom\n"
                 "     Required by:"
+            ),
+            # An artifact that `gradlew-retry` found nowhere, as for a misspelled version.
+            (
+                "gradlew-retry: Not retrying, because no missing artifact exists at a URL that"
+                " Gradle\n  reported, on the Gradle Plugin Portal, or on a mirror of Maven Central."
             ),
             # A job that no runner matches, as for a misspelled `runs-on` label.
             "The job has exceeded the maximum execution time while awaiting a runner for 24h0m0s",

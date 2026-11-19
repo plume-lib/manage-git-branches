@@ -28,8 +28,10 @@ check from any other service is reported and skipped.
 A job's failure is transient if the log of its failed steps contains a message about a
 network problem (such as a timeout, a refused or reset connection, or a failed DNS
 lookup), an HTTP status code that indicates an overloaded or rate-limited server (such
-as 429 or 503), a lost or unresponsive CI runner, or a GitHub-hosted runner that never
-picked up the job.  TRANSIENT_PATTERNS below lists the messages.  A job's failure is
+as 429 or 503), a lost or unresponsive CI runner, a GitHub-hosted runner that never
+picked up the job, or an artifact that Gradle did not find but that the `gradlew-retry`
+script (from plume-lib/plume-scripts) reported to exist.  TRANSIENT_PATTERNS below lists
+the messages.  A job's failure is
 also transient if Gradle did not find an artifact and the Gradle Plugin Portal is the
 only location that Gradle searched for it.  The log of an Azure Pipelines or GitHub
 Actions job also contains the errors that the CI service reports for the job, which
@@ -118,6 +120,11 @@ TRANSIENT_PATTERNS = [
     # cause is a `runs-on` label that matches no runner or a self-hosted runner that is
     # offline.
     r"job was not acquired by Runner of type hosted",
+    # An artifact that Gradle did not find, but that the `gradlew-retry` script found at
+    # the URL where Gradle looked for it or on a mirror of Maven Central.  A repository
+    # such as Maven Central sometimes fails, for a minute or more, to serve an artifact
+    # that it holds.
+    r"gradlew-retry: \S+ exists(?: on a mirror of Maven Central)?\.$",
 ]
 # Matches a line of a log that shows a transient failure.
 TRANSIENT_RE = re.compile("|".join(f"(?:{p})" for p in TRANSIENT_PATTERNS), re.IGNORECASE)
