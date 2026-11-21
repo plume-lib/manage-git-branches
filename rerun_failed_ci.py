@@ -121,7 +121,10 @@ TRANSIENT_PATTERNS = [
     r"lost communication with the server",
     # A Java virtual machine that crashed with a segmentation fault, as the JVM reports it
     # in a line such as "#  SIGSEGV (0xb) at pc=0x000074a6b3df9d00, pid=10859, tid=...".
-    # Such a crash is usually a bug in the JVM that does not recur.
+    # A rerun often avoids such a crash.  The pattern does not check where the crash
+    # happened, so it also matches a crash that recurs on every run, such as one in the
+    # project's own native (JNI) code or one from a JIT-compiler bug that the same code
+    # always triggers.  Only `--max-attempts` limits the reruns of such a crash.
     r"#\s+SIGSEGV \(0xb\) at pc=",
     # A GitHub-hosted runner that never picked up the job.  A job that waited for a runner
     # until it timed out ("while awaiting a runner") is not transient, because the usual
