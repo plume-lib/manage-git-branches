@@ -4,7 +4,7 @@
 # asking an AI agent for help, as `git-push-to` does.
 #
 # Usage:
-#   resolve-conflicts [--nocompile] [--claude | --codex] [-C DIR]
+#   resolve-conflicts [--nocompile] [--noformat] [--claude | --codex] [-C DIR]
 #
 # Run it in the directory that holds the working copy directories, as for
 # `pr-status`, or pass that directory with "-C".
@@ -19,10 +19,10 @@
 #  * run `git-push-to` on each chain that `pr-status
 #    --print-conflicting-push-chains` prints, adding the "--claude" option (or
 #    "--codex"; see `git-push-to`, under "Asking an AI agent") and any
-#    "--nocompile" option; a chain that fails does not stop the others, but
-#    a chain is skipped if a chain that failed or was skipped would have
-#    pushed into the chain's first directory, because then that directory's
-#    branch lacks the updates that the chain would push from it,
+#    "--nocompile" and "--noformat" options; a chain that fails does not stop
+#    the others, but a chain is skipped if a chain that failed or was skipped
+#    would have pushed into the chain's first directory, because then that
+#    directory's branch lacks the updates that the chain would push from it,
 #  * pull each chain's first directory with `git-push-to`, given that single
 #    directory, before the first chain that starts with it, and add the
 #    "--no-pull-first" option to every chain, so that all chains that start
@@ -86,15 +86,17 @@ fi
 max_rounds=3
 
 usage() {
-  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--claude | --codex] [-C DIR]" >&2
+  echo "Usage: ${SCRIPT_NAME} [--nocompile] [--noformat] [--claude | --codex] [-C DIR]" >&2
   exit 1
 }
 
 agent_option='--claude'
 nocompile_option=''
+noformat_option=''
 while [ "$#" -ge 1 ]; do
   case "$1" in
     --nocompile) nocompile_option='--nocompile' ;;
+    --noformat) noformat_option='--noformat' ;;
     --claude | --codex) agent_option="$1" ;;
     -C)
       if [ "$#" -lt 2 ]; then usage; fi
@@ -134,15 +136,15 @@ tab='	'
 summary=''
 
 ## Usage: run_git_push_to [--no-pull-first] DIRECTORY...
-## Runs `git-push-to` with ${agent_option}, any "--nocompile" option, and the
-## arguments, and sets ${push_lines} to the lines that it wrote with
-## "--summary", each indented by 4 spaces.  Returns its exit status.
+## Runs `git-push-to` with ${agent_option}, any "--nocompile" and
+## "--noformat" options, and the arguments, and sets ${push_lines} to the
+## lines that it wrote with "--summary", each indented by 4 spaces.  Returns its exit status.
 run_git_push_to() {
-  echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} $*"
+  echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} ${noformat_option} $*"
   : > "${push_summary}"
   # `git-push-to` does not read this script's standard input.
-  # shellcheck disable=SC2086 # ${nocompile_option} is empty or one word.
-  "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} \
+  # shellcheck disable=SC2086 # Each of these options is empty or one word.
+  "${SCRIPT_DIR}"/git-push-to "${agent_option}" ${nocompile_option} ${noformat_option} \
     --summary "${push_summary}" "$@" < /dev/null
   run_status=$?
   push_lines="$(sed -e 's/^/    /' -- "${push_summary}")"

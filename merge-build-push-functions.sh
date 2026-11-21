@@ -1061,10 +1061,12 @@ refuse_uncommitted_changes() {
   return 0
 }
 
-## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [BUILT [DIRECTORY]]]
+## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE NOFORMAT [RESOLVER [BUILT [DIRECTORY]]]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
-## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
-## pushes the current branch if the build succeeds.  DESCRIPTION is the
+## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set,
+## reformats with `reformat_commit` unless NOFORMAT is 1 or
+## $MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT is set, and pushes the current
+## branch if the build and the reformatting succeed.  DESCRIPTION is the
 ## source of COMMIT as a line of FETCH_HEAD gives it, which
 ## `git fmt-merge-msg` turns into the merge message:  either a description of
 ## a ref of the local repository followed by " of .", such as
@@ -1096,7 +1098,7 @@ refuse_uncommitted_changes() {
 ## longer apply, such as one about a failed build (see `prune_agent_todo`).
 ## Returns 1, after printing a diagnostic, on failure.  Sets
 ## ${merge_build_push_step} to the step that it reached:  "merging",
-## "building", or "pushing".
+## "building", "reformatting", or "pushing".
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 # shellcheck disable=SC2034 # git-push-to reads ${merge_build_push_step}.
 merge_build_push() {
@@ -1122,10 +1124,17 @@ merge_build_push() {
   else
     merge_builds=0
   fi
+  # 1 if this call reformats the merge, and 0 otherwise.
+  if [ "$5" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT}" ]; then
+    merge_formats=1
+  else
+    merge_formats=0
+  fi
   # A build of uncommitted changes says nothing about the commit that is
-  # pushed.  Check before merging, so that a refusal leaves no merge commit
-  # behind.
-  if [ "${merge_builds}" -eq 1 ] && ! refuse_uncommitted_changes "$(pwd)"; then
+  # pushed, and a commit of the reformatting would include them.  Check before
+  # merging, so that a refusal leaves no merge commit behind.
+  if { [ "${merge_builds}" -eq 1 ] || [ "${merge_formats}" -eq 1 ]; } \
+    && ! refuse_uncommitted_changes "$(pwd)"; then
     return 1
   fi
   # HEAD before the merges, so that a merge that cannot start can be undone.
@@ -1172,7 +1181,7 @@ merge_build_push() {
     # Git names the conflicted files relative to the top level of the working
     # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
     # the current directory unchanged.
-    if ! (cd "${merge_top}" && commit_resolved_merge "${5:-}" "$1" "$3" "${merge_message}"); then
+    if ! (cd "${merge_top}" && commit_resolved_merge "${6:-}" "$1" "$3" "${merge_message}"); then
       if [ -n "${merged_landed_prs}" ]; then
         echo "${SCRIPT_NAME}: before merging $3, the branch in $(pwd) merged the final versions of pull requests ${merged_landed_prs}; if you abort the merge, \`git reset --keep ${merge_old_head}\` also removes those merges" >&2
       fi
@@ -1192,19 +1201,19 @@ merge_build_push() {
       # have broken the build is decided only now, because deciding can
       # fetch.  Whether the agent is ready to run is checked only once the
       # agent is needed, because checking can cost a request to its service.
-      if [ -z "${5:-}" ]; then
+      if [ -z "${6:-}" ]; then
         return 1
       fi
-      merge_built="${6:-}"
-      if [ -n "${7:-}" ]; then
-        merge_built="${merge_built}${merge_built:+ }$(built_commits "$7")"
+      merge_built="${7:-}"
+      if [ -n "${8:-}" ]; then
+        merge_built="${merge_built}${merge_built:+ }$(built_commits "$8")"
       fi
       if ! has_unbuilt_merge "${merge_built}"; then
         return 1
       fi
-      if ! agent_available "$5"; then
+      if ! agent_available "$6"; then
         [ -z "${agent_unavailable_reason}" ] \
-          || merge_build_note "${merge_fix_message}" "${agent_unavailable_reason}  $(agent_rerun_advice "$5" 'fix the build')"
+          || merge_build_note "${merge_fix_message}" "${agent_unavailable_reason}  $(agent_rerun_advice "$6" 'fix the build')"
         return 1
       fi
       # What this call's merge did, for the agent.
@@ -1232,10 +1241,10 @@ merge_build_push() {
       # An earlier entry that says that running the script again suffices is
       # out of date once the agent runs.
       prune_agent_todo 0 build
-      fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"
+      fix_failed_build "$6" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"
       merge_fix_status=$?
       if [ "${merge_fix_status}" -eq 3 ]; then
-        merge_build_note "${merge_fix_message}" "$(agent_unchanged_reason "$5")  $(agent_rerun_advice "$5" 'fix the build')"
+        merge_build_note "${merge_fix_message}" "$(agent_unchanged_reason "$6")  $(agent_rerun_advice "$6" 'fix the build')"
         cd -- "${merge_dir}" || true
         return 1
       elif [ "${merge_fix_status}" -ne 0 ]; then
@@ -1252,11 +1261,64 @@ merge_build_push() {
     prune_agent_todo 1
   fi
 
+  # Reformat after any fix of the build, so that the fix is reformatted too.
+  if [ "${merge_formats}" -eq 1 ]; then
+    merge_build_push_step='reformatting'
+    # `reformat_commit` stages changes, which `git add -u` stages only in the
+    # current directory, so it runs at the top level of the working tree.
+    if ! (cd -- "${merge_top}" && reformat_commit "${merge_builds}" "${merge_log:-}"); then
+      return 1
+    fi
+  fi
+
   merge_build_push_step='pushing'
   if ! git push --quiet; then
     echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
     return 1
   fi
+}
+
+## Usage: reformat_commit BUILD LOG
+## Reformats the project in the current directory, the top level of a working
+## tree, with `compile-project --format`, and commits the files that it
+## changed, if any, with the message "Reformat".  If BUILD is 1, first builds
+## the reformatted project with `compile-project`, writing the output to the
+## file LOG, and commits only if the build succeeds.  If a pre-commit hook
+## rejects the commit after changing files, commits the files as the hook left
+## them, as `commit_staged` describes.  Does not reformat, but prints a
+## notice and appends it to the summary (see `append_summary`), if the
+## working tree has uncommitted changes to tracked files, as when the build
+## changed them, because the commit would include those changes.
+## Returns 1, after printing a diagnostic, if the reformatting, the build, or
+## the commit fails; the reformatting's changes then remain, uncommitted.
+reformat_commit() {
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    reformat_note="in $(pwd): did not reformat, because tracked files have uncommitted changes, as from the build"
+    echo "${SCRIPT_NAME}: ${reformat_note}" >&2
+    append_summary "${reformat_note}"
+    return 0
+  fi
+  if ! "${SCRIPT_DIR}"/compile-project --format; then
+    echo "${SCRIPT_NAME}: unable to reformat $(pwd); its changes, if any, are not committed" >&2
+    return 1
+  fi
+  if git diff --quiet; then
+    return 0
+  fi
+  if [ "$1" -eq 1 ]; then
+    if ! build_logged "$2"; then
+      echo "${SCRIPT_NAME}: unable to build in $(pwd) after reformatting it; the reformatting's changes are not committed" >&2
+      return 1
+    fi
+    set -- "${SCRIPT_DIR}"/compile-project
+  else
+    set --
+  fi
+  if ! git add -u || ! commit_staged Reformat "$@"; then
+    echo "${SCRIPT_NAME}: cannot commit the reformatting's changes in $(pwd)" >&2
+    return 1
+  fi
+  echo "${SCRIPT_NAME}: reformatted $(pwd) in commit $(git rev-parse --short HEAD)" >&2
 }
 
 ## Usage: merge_build_note TASK NOTE

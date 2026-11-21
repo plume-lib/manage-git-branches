@@ -80,13 +80,19 @@ The commands are:
 
   Below is a definition for an alias `gnb`.
 * [`git-push-to`](git-push-to)
-  `[--nocompile] [--no-pull-first] [--rebase | --squash] [--llm | --no-llm]
-  [--claude | --codex] [--summary FILE] FROM_DIR TO_DIR ...`:
+  `[--nocompile] [--noformat] [--no-pull-first] [--rebase | --squash]
+  [--llm | --no-llm] [--claude | --codex] [--summary FILE] FROM_DIR TO_DIR ...`:
 
   Pulls from FROM_DIR into TO_DIR, compiles TO_DIR, then pushes TO_DIR to
   its remote if compilation succeeds.  Each directory must be the top level
   of a working tree and must have an upstream branch.  You can also pass a
   list of directories: each is pushed into the subsequent one.
+
+  Before pushing, it reformats TO_DIR with `compile-project --format`, which
+  runs the formatter that the buildfile configures, such as
+  `./gradlew spotlessApply`.  If that changes any file, it compiles TO_DIR
+  again and commits the changes with the message "Reformat".  `--noformat`
+  skips the reformatting.
 
   Instead of directories, you can pass slugs of the form `ORG:BRANCH`, such
   as `git-push-to upstream:main myname:feature`.  Each slug names the
@@ -162,7 +168,7 @@ The commands are:
   continued, and, if a pull, push, or rebase fails, the step that failed.
 
 * [`git-rebase-to`](git-rebase-to)
-  `[--nocompile] [--no-pull-first] [--squash] [--llm | --no-llm]
+  `[--nocompile] [--noformat] [--no-pull-first] [--squash] [--llm | --no-llm]
   [--claude | --codex] [--summary FILE] FROM_DIR TO_DIR ...`:
   Runs `git-push-to` on the arguments, then rebases each branch onto the
   previous branch, to eliminate merge commits, and force-pushes each
@@ -171,14 +177,17 @@ The commands are:
   becomes a single commit on top of the previous branch.
   The arguments may be slugs, as for `git-push-to`.
 * [`git-pull-from`](git-pull-from)
-  `[--nocompile] [--llm | --no-llm] [--claude | --codex] OTHER-REPO-DIR`:
+  `[--nocompile] [--noformat] [--llm | --no-llm] [--claude | --codex]
+  OTHER-REPO-DIR`:
   Pulls from OTHER-REPO-DIR into the current directory, just as
   `git-push-to` does.
 * [`git-pull-upstream`](git-pull-upstream)
-  `[--nocompile] [--allow-dependent] [--llm | --no-llm] [--claude | --codex]`:
+  `[--nocompile] [--noformat] [--allow-dependent] [--llm | --no-llm]
+  [--claude | --codex]`:
   Merges the default branch of the remote `upstream` (or `origin`, if there
   is no `upstream`, or the only remote, if there is neither) into the current
-  branch, compiles, then pushes the current branch if compilation succeeds.
+  branch, compiles, reformats as `git-push-to` does, then pushes the current
+  branch if compilation succeeds.
   It chooses the upstream repository as `git-diff-upstream` does, so in a
   GitHub fork that a user owns, it can merge from the fork's parent.
 
@@ -278,7 +287,7 @@ The commands are:
   against BRANCH rather than the repository's default branch.
   `pr-status` runs it.
 * [`resolve-conflicts`](resolve-conflicts)
-  `[--nocompile] [--claude | --codex] [-C DIR]`:
+  `[--nocompile] [--noformat] [--claude | --codex] [-C DIR]`:
   Runs `pr-status --previous-arguments`, which regenerates the dependency
   document `pr-status.md` with the highlights of the previous run of
   `pr-status`, then runs `git-push-to` on each chain of its section
@@ -443,9 +452,13 @@ The commands are:
   progress messages that a terminal would overwrite or erase:  the text
   before a carriage return that is not at the end of a line, and the text
   before an escape sequence that erases the whole line.
-* [`compile-project`](compile-project) `[--clean] [DIRECTORY]`:
+* [`compile-project`](compile-project) `[--clean | --format] [DIRECTORY]`:
   Runs a Gradle, Maven, or Make command to compile the project that contains
   the given directory, which defaults to the current directory.
+  With `--format`, it instead reformats the project with the formatter that
+  the buildfile configures:  Spotless's `spotlessApply` for Gradle or
+  `spotless:apply` for Maven, or the target `reformat` or `format` of a
+  Makefile.  It does nothing if the buildfile configures none of these.
   The command-line arguments for the compilation can be customized, using the
   environment variables described below.
   It prints nothing unless the build fails or writes to standard error, or no
@@ -475,6 +488,9 @@ takes effect when it is set to a non-empty value.
 * `MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT`: `git-push-to`,
   `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` skip the
   compilation step, and push whenever the merge succeeds.
+* `MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT`: `git-push-to`,
+  `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` skip the
+  reformatting step.
 * `MANAGE_GIT_BRANCHES_LLM_TIMEOUT`: the number of seconds that `git-push-to`,
   `git-pull-from`, `git-pull-upstream`, and `git-rebase-to` let an AI agent
   run when it resolves merge conflicts or fixes a build.  The time covers the

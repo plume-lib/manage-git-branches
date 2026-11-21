@@ -423,6 +423,99 @@ the reason"*) ;;
   *) fail "expected the build's output on standard error in ${quietfails}, got: ${quiet_stderr}" ;;
 esac
 
+## Tests of --format.
+
+# Usage: expect_format_log DIRECTORY EXPECTED DESCRIPTION
+# Runs `compile-project --format DIRECTORY`, and reports a failure, about
+# DESCRIPTION, if it fails or if the file DIRECTORY/log does not contain
+# EXPECTED.  A missing log counts as an empty one.
+expect_format_log() {
+  if ! "${COMPILE_PROJECT}" --format "$1" > /dev/null 2>&1; then
+    fail "--format: nonzero exit status for $3 in $1"
+  fi
+  format_log="$(cat "$1/log" 2> /dev/null)"
+  if [ "${format_log}" != "$2" ]; then
+    fail "--format: for $3, expected \"$2\" but got: ${format_log}"
+  fi
+}
+
+# Usage: make_logging_command FILE
+# Creates the executable FILE, which appends its arguments to the file "log" in
+# its directory.
+make_logging_command() {
+  # shellcheck disable=SC2016 # The created command expands the variables.
+  printf '#!/bin/sh\necho "$*" >> "$(dirname -- "$0")/log"\n' > "$1"
+  chmod +x "$1"
+}
+
+# A Makefile with a rule for "reformat" runs that target rather than building.
+fmtreformat="${tmpdir}/format-reformat"
+mkdir -p "${fmtreformat}"
+printf 'all:\n\t@echo built >> log\nformat:\n\t@echo format >> log\nreformat:\n\t@echo reformat >> log\n' \
+  > "${fmtreformat}/Makefile"
+expect_format_log "${fmtreformat}" reformat 'a Makefile with "reformat" and "format" rules'
+
+# A Makefile with a rule for "format" but not "reformat" runs "format".
+fmtformat="${tmpdir}/format-format"
+mkdir -p "${fmtformat}"
+printf 'all:\n\t@echo built >> log\nformat: all\n\t@echo format >> log\n' > "${fmtformat}/Makefile"
+expect_format_log "${fmtformat}" 'built
+format' 'a Makefile with a "format" rule'
+
+# A Makefile without such a rule is neither reformatted nor built.  A variable
+# named "format" is not a rule.
+fmtnone="${tmpdir}/format-none"
+mkdir -p "${fmtnone}"
+printf 'format := x\nreformat=y\nall:\n\t@echo built >> log\n' > "${fmtnone}/Makefile"
+expect_format_log "${fmtnone}" '' 'a Makefile without a formatting rule'
+
+# A failing formatter makes the exit status failure.
+fmtfails="${tmpdir}/format-fails"
+mkdir -p "${fmtfails}"
+printf 'reformat:\n\t@exit 3\n' > "${fmtfails}/Makefile"
+if "${COMPILE_PROJECT}" --format "${fmtfails}" > /dev/null 2>&1; then
+  fail "--format: zero exit status from a failing formatter in ${fmtfails}"
+fi
+
+# A Gradle project that mentions Spotless runs `spotlessApply`.
+fmtgradle="${tmpdir}/format-gradle"
+mkdir -p "${fmtgradle}"
+make_logging_command "${fmtgradle}/gradlew"
+printf 'plugins {\n  id("com.diffplug.spotless") version "8.0.0"\n}\n' > "${fmtgradle}/build.gradle"
+expect_format_log "${fmtgradle}" "--project-dir ${fmtgradle} spotlessApply -q" \
+  'a Gradle project that mentions Spotless in build.gradle'
+
+# Spotless can be mentioned only in a convention plugin under buildSrc/.
+fmtbuildsrc="${tmpdir}/format-buildsrc"
+mkdir -p "${fmtbuildsrc}/buildSrc/src/main/groovy"
+make_logging_command "${fmtbuildsrc}/gradlew"
+printf 'plugins {\n  id("my-conventions")\n}\n' > "${fmtbuildsrc}/build.gradle"
+printf 'apply plugin: "com.diffplug.spotless"\n' \
+  > "${fmtbuildsrc}/buildSrc/src/main/groovy/my-conventions.gradle"
+expect_format_log "${fmtbuildsrc}" "--project-dir ${fmtbuildsrc} spotlessApply -q" \
+  'a Gradle project that mentions Spotless in buildSrc/'
+
+# A Gradle project that does not mention Spotless is neither reformatted nor
+# built.
+fmtgradlenone="${tmpdir}/format-gradle-none"
+mkdir -p "${fmtgradlenone}"
+make_logging_command "${fmtgradlenone}/gradlew"
+printf 'plugins {\n  id("java")\n}\n' > "${fmtgradlenone}/build.gradle"
+expect_format_log "${fmtgradlenone}" '' 'a Gradle project without Spotless'
+
+# A Maven project that uses the Spotless plugin runs `spotless:apply`.
+fmtmaven="${tmpdir}/format-maven"
+mkdir -p "${fmtmaven}"
+make_logging_command "${fmtmaven}/mvnw"
+printf '<project><build><plugins><plugin><artifactId>spotless-maven-plugin</artifactId></plugin></plugins></build></project>\n' \
+  > "${fmtmaven}/pom.xml"
+expect_format_log "${fmtmaven}" '-q spotless:apply' 'a Maven project with Spotless'
+
+# --format and --clean cannot be combined.
+if "${COMPILE_PROJECT}" --format --clean "${fmtreformat}" > /dev/null 2>&1; then
+  fail "--format --clean: zero exit status"
+fi
+
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
 fi
