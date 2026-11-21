@@ -1064,10 +1064,11 @@ refuse_uncommitted_changes() {
 ## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE NOFORMAT [RESOLVER [BUILT [DIRECTORY]]]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
 ## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set,
-## reformats with `reformat_commit` unless NOFORMAT is 1 or
-## $MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT is set, and pushes the current
-## branch if the build and the reformatting succeed.  DESCRIPTION is the
-## source of COMMIT as a line of FETCH_HEAD gives it, which
+## reformats the files that the branch changes with `reformat_commit` unless
+## NOFORMAT is 1 or $MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT is set, and
+## pushes the current branch if the build, and any build after reformatting,
+## succeed.  DESCRIPTION is the source of COMMIT as a line of FETCH_HEAD gives
+## it, which
 ## `git fmt-merge-msg` turns into the merge message:  either a description of
 ## a ref of the local repository followed by " of .", such as
 ## "branch 'feature' of ." or "remote-tracking branch 'upstream/master' of .",
@@ -1280,42 +1281,78 @@ merge_build_push() {
 }
 
 ## Usage: reformat_commit BUILD LOG
-## Reformats the project in the current directory, the top level of a working
-## tree, with `compile-project --format`, and commits the files that it
-## changed, if any, with the message "Reformat".  If BUILD is 1, first builds
-## the reformatted project with `compile-project`, writing the output to the
-## file LOG, and commits only if the build succeeds.  The commit includes only
-## the formatter's changes, not changes that the build makes to tracked files.
-## If a pre-commit hook rejects the commit after changing files, commits the
-## files as the hook left them, as `commit_staged` describes.  Does not
-## reformat, but prints a notice and appends it to the summary (see
-## `append_summary`), if the working tree has uncommitted changes to tracked
-## files, as when the build changed them, because the commit would include
-## those changes.
-## Returns 1, after printing a diagnostic, if the reformatting, the build, or
-## the commit fails.  If the reformatting or the build fails, first restores
-## the tracked files to their committed contents, so that the formatter's
-## changes do not make later runs refuse to run (see
-## `refuse_uncommitted_changes`).
+## Reformats the files that the current branch changes, in the current
+## directory, the top level of a working tree, and commits them, if the
+## reformatting changed any, with the message "Reformat".  The files that the
+## branch changes are those that differ between HEAD and its merge base with
+## the default branch of the upstream repository, as `find_upstream_ref`
+## chooses it without fetching, such as `refs/remotes/upstream/master`.
+## Reformatting runs `compile-project --format`, which reformats the whole
+## project; this function then discards its changes to every other file, so
+## that code that came from the upstream repository, as on a downstream
+## fork, keeps the upstream repository's formatting.  So a branch that has
+## no commits of its own, such as a clone of the upstream repository's
+## default branch that merges only from it, is not reformatted.  If the
+## upstream repository's default branch has not been
+## fetched recently, the merge base is older, so the files that the branch
+## changes include those that it merged from upstream since then.
+##
+## If BUILD is 1, first builds the reformatted project with `compile-project`,
+## writing the output to the file LOG, and commits only if the build succeeds.
+## The commit includes only the formatter's changes, not changes that the
+## build makes to tracked files.  If a pre-commit hook rejects the commit
+## after changing files, commits the files as the hook left them, as
+## `commit_staged` describes.
+##
+## Does not reformat, but prints a notice and appends it to the summary (see
+## `append_summary`), and returns 0, if:
+##  * the working tree has uncommitted changes to tracked files, as when the
+##    build changed them, because the commit would include those changes;
+##  * the upstream repository's default branch cannot be determined; or
+##  * the formatter fails, as when a tool that it needs is not installed.
+##    The tracked files are then restored to their committed contents.
+## Returns 1, after printing a diagnostic, if the build after reformatting or
+## the commit fails.  If the build fails, first restores the tracked files to
+## their committed contents, so that the formatter's changes do not make later
+## runs refuse to run (see `refuse_uncommitted_changes`).
 reformat_commit() {
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-    reformat_note="in $(pwd): did not reformat, because tracked files have uncommitted changes, as from the build"
-    echo "${SCRIPT_NAME}: ${reformat_note}" >&2
-    append_summary "${reformat_note}"
+    reformat_note "did not reformat, because tracked files have uncommitted changes, as from the build"
+    return 0
+  fi
+  # `find_upstream_ref` reports a fallback to another remote on standard
+  # error, which does not matter here.
+  # shellcheck disable=SC2154 # `find_upstream_ref` sets ${upstream_ref}.
+  if ! find_upstream_ref 0 2> /dev/null \
+    || ! reformat_base="$(git merge-base "${upstream_ref}" HEAD)"; then
+    reformat_note "did not reformat, because the default branch of the upstream repository cannot be determined"
+    return 0
+  fi
+  if git diff --quiet --diff-filter=d "${reformat_base}" HEAD; then
+    # The branch changes no file, except perhaps by deleting it.
     return 0
   fi
   if ! "${SCRIPT_DIR}"/compile-project --format; then
-    reformat_restore "unable to reformat $(pwd)"
-    return 1
+    reformat_restore "unable to reformat $(pwd); pushing it without reformatting"
+    append_summary "in $(pwd): did not reformat, because the formatter failed"
+    return 0
   fi
   if git diff --quiet; then
     return 0
   fi
-  # Stage the formatter's changes now, so that the commit omits any change
-  # that the build makes.
-  if ! git add -u; then
+  # Stage the formatter's changes to the files that the branch changes, then
+  # discard its other changes.  Staging them now also makes the commit omit
+  # any change that the build makes.  A file that the branch deletes is not
+  # in the working tree, so it is not named, lest `git add` reject the
+  # pathspec.
+  if ! git diff --name-only --no-renames --diff-filter=d -z "${reformat_base}" HEAD \
+    | git add --pathspec-from-file=- --pathspec-file-nul \
+    || ! git checkout -q -- .; then
     reformat_restore "cannot stage the reformatting's changes in $(pwd)"
     return 1
+  fi
+  if git diff --cached --quiet; then
+    return 0
   fi
   if [ "$1" -eq 1 ]; then
     if ! build_logged "$2"; then
@@ -1331,6 +1368,15 @@ reformat_commit() {
     return 1
   fi
   echo "${SCRIPT_NAME}: reformatted $(pwd) in commit $(git rev-parse --short HEAD)" >&2
+}
+
+## Usage: reformat_note NOTE
+## For `reformat_commit`:  prints NOTE, prefixed by the current directory, and
+## appends it to the summary (see `append_summary`).
+reformat_note() {
+  reformat_note_line="in $(pwd): $1"
+  echo "${SCRIPT_NAME}: ${reformat_note_line}" >&2
+  append_summary "${reformat_note_line}"
 }
 
 ## Usage: reformat_restore PROBLEM

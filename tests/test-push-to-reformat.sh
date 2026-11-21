@@ -27,6 +27,9 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/manage-git-branches-test.XXXXXX")"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 trap 'rm -rf "${WORK_DIR}"; trap - INT; kill -s INT "$$"' INT
 trap 'rm -rf "${WORK_DIR}"; trap - TERM; kill -s TERM "$$"' TERM
+# The physical path, because git-push-to's diagnostics name physical paths,
+# and on macOS the temporary directory is reached through a symbolic link.
+WORK_DIR="$(CDPATH='' cd -- "${WORK_DIR}" && pwd -P)" || exit 1
 
 # shellcheck source=lib-git-test-env.sh
 . "${TESTS_DIR}/lib-git-test-env.sh"
@@ -151,6 +154,26 @@ elif [ "$(last_subject "${FEATURE_DIR}")" != "${MERGE_SUBJECT}" ]; then
   fail "formatted: the last commit is not the merge: $(git -C "${FEATURE_DIR}" log --oneline -3)"
 fi
 
+## Only the files that the branch changes are reformatted:  a file that is
+## unformatted on main, as code from an upstream repository whose formatting
+## differs can be, keeps its formatting.
+printf '%s\n' "upstream line" > "${MAIN_DIR}/upstream.txt"
+git -C "${MAIN_DIR}" add upstream.txt
+git -C "${MAIN_DIR}" commit -q -m "Add upstream.txt"
+git -C "${MAIN_DIR}" push -q
+add_feature_line "${FEATURE_DIR}" "branch line"
+if ! push_to "${MAIN_DIR}" "${FEATURE_DIR}"; then
+  fail "branch files: git-push-to failed: $(cat "${WORK_DIR}/errors")"
+elif [ "$(last_subject "${FEATURE_DIR}")" != "Reformat" ]; then
+  fail "branch files: the last commit is not \"Reformat\": $(git -C "${FEATURE_DIR}" log --oneline -3)"
+elif [ "$(git -C "${FEATURE_DIR}" show HEAD:upstream.txt)" != "upstream line" ]; then
+  fail "branch files: upstream.txt was reformatted: $(git -C "${FEATURE_DIR}" show HEAD:upstream.txt)"
+elif grep -q '[a-z]' "${FEATURE_DIR}/feature.txt"; then
+  fail "branch files: feature.txt was not reformatted: $(cat "${FEATURE_DIR}/feature.txt")"
+elif [ -n "$(git -C "${FEATURE_DIR}" status --porcelain)" ]; then
+  fail "branch files: the working tree is not clean: $(git -C "${FEATURE_DIR}" status --porcelain)"
+fi
+
 ## --noformat skips the reformatting.
 add_feature_line "${FEATURE_DIR}" "noformat line"
 add_main_line "FOURTH LINE"
@@ -219,21 +242,21 @@ else
 fi
 rm -f "${FEATURE_DIR}/broken"
 
-## A formatter that fails stops the push, and the tracked files that it
-## changed are restored.
+## A formatter that fails does not stop the push, and the tracked files that
+## it changed are restored.
 printf 'all:\n\t@:\nreformat:\n\t@echo changed > feature.txt; exit 3\n' > "${FEATURE_DIR}/Makefile"
 git -C "${FEATURE_DIR}" commit -q -a -m "Fail to reformat"
 add_main_line "SEVENTH LINE"
 before="$(pushed_head)"
-if push_to "${MAIN_DIR}" "${FEATURE_DIR}"; then
-  fail "failing formatter: git-push-to succeeded"
+if ! push_to "${MAIN_DIR}" "${FEATURE_DIR}"; then
+  fail "failing formatter: git-push-to failed: $(cat "${WORK_DIR}/errors")"
 else
   case "$(cat "${WORK_DIR}/errors")" in
-    *"unable to reformat ${FEATURE_DIR}"*"while reformatting"*) ;;
+    *"unable to reformat ${FEATURE_DIR}; pushing it without reformatting"*) ;;
     *) fail "failing formatter: wrong diagnostic: $(cat "${WORK_DIR}/errors")" ;;
   esac
-  if [ "$(pushed_head)" != "${before}" ]; then
-    fail "failing formatter: the branch was pushed"
+  if [ "$(pushed_head)" != "$(git -C "${FEATURE_DIR}" rev-parse HEAD)" ]; then
+    fail "failing formatter: the branch was not pushed"
   fi
   if [ -n "$(git -C "${FEATURE_DIR}" status --porcelain --untracked-files=no)" ]; then
     fail "failing formatter: the tracked files were not restored: $(git -C "${FEATURE_DIR}" status --porcelain)"

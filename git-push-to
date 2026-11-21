@@ -1,9 +1,9 @@
 #!/bin/sh
 
 # Pushes one git repository into another, from local clones.  Fails if the
-# resulting merge does not compile.  Reformats the result before pushing it.
-# If more than two repositories are given, each is pushed into the next in
-# turn.
+# resulting merge does not compile.  Reformats the files that the branch
+# changes before pushing it.  If more than two repositories are given, each
+# is pushed into the next in turn.
 #
 # Usage:
 #   git-push-to [OPTIONS] FROM_DIR TO_DIR ...
@@ -89,17 +89,22 @@
 #  * build TO_DIR using `compile-project` (see its documentation),
 #    (Skips the compilation step if environment variable
 #    MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set.)
-#  * reformat TO_DIR using `compile-project --format`, which runs the
+#  * reformat the files that TO_DIR's branch changes, relative to its merge
+#    base with the default branch of the upstream repository (see
+#    `git-diff-upstream`), using `compile-project --format`, which runs the
 #    formatter that the buildfile configures, such as
-#    `./gradlew spotlessApply` (see the documentation of `compile-project`),
-#    and, if that changed any file, build TO_DIR again (unless the compilation
-#    step is skipped) and commit the changes with the message "Reformat";
-#    if the reformatting or that build fails, restore the files that the
-#    reformatting changed,
+#    `./gradlew spotlessApply` (see the documentation of `compile-project`);
+#    discard the formatter's changes to other files; and, if it changed any
+#    file that the branch changes, build TO_DIR again (unless the compilation
+#    step is skipped) and commit the changes with the message "Reformat".  If
+#    that build fails, restore the files that the reformatting changed, and
+#    do not push.  If the formatter fails, restore those files, note the
+#    failure in the summary, and push without reformatting.
 #    (Skips the reformatting step if environment variable
 #    MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT is set.  Does not reformat, but
 #    notes that in the summary, if the build changed tracked files.)
-#  * push TO_DIR to its remote if the build and the reformatting succeed.
+#  * push TO_DIR to its remote if the build, and any build after
+#    reformatting, succeed.
 #
 # If more than two directories are supplied, the procedure is performed on each
 # pair of adjacent directories in turn.  With "--no-pull-first", the first

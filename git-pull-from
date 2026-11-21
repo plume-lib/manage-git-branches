@@ -25,7 +25,8 @@
 #  * reformat this one, as `git-push-to` does (skipped if the --noformat
 #    argument is given or if environment variable
 #    MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT is set),
-#  * push this one to its remote if the build and the reformatting succeed.
+#  * push this one to its remote if the build, and any build after
+#    reformatting, succeed.
 #
 # All the work is done by `git-push-to OTHER-REPO-DIR .`; diagnostics from that
 # step mention `git-push-to`.  Before running it, this script checks that the

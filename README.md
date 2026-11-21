@@ -88,13 +88,20 @@ The commands are:
   of a working tree and must have an upstream branch.  You can also pass a
   list of directories: each is pushed into the subsequent one.
 
-  Before pushing, it reformats TO_DIR with `compile-project --format`, which
-  runs the formatter that the buildfile configures, such as
-  `./gradlew spotlessApply`.  If that changes any file, it compiles TO_DIR
-  again, unless the compilation step is skipped, and commits the changes with
-  the message "Reformat".  If the reformatting or that compilation fails, it
-  restores the files that the reformatting changed and does not push.
-  `--noformat` skips the reformatting.
+  Before pushing, it reformats the files that TO_DIR's branch changes, with
+  `compile-project --format`, which runs the formatter that the buildfile
+  configures, such as `./gradlew spotlessApply`.  The files that the branch
+  changes are those that differ from the merge base of the branch and the
+  default branch of the upstream repository, chosen as for
+  `git-diff-upstream`.  The formatter's changes to other files are discarded,
+  so code that came from the upstream repository, as on a downstream fork,
+  keeps its formatting.  If the reformatting changes any file, `git-push-to`
+  compiles TO_DIR again, unless the compilation step is skipped, and commits
+  the changes with the message "Reformat".  If that compilation fails, it
+  restores the files that the reformatting changed and does not push.  If the
+  formatter fails, as when a tool that it needs is not installed, it restores
+  those files, notes the failure in the summary, and pushes without
+  reformatting.  `--noformat` skips the reformatting.
 
   Instead of directories, you can pass slugs of the form `ORG:BRANCH`, such
   as `git-push-to upstream:main myname:feature`.  Each slug names the
