@@ -1,20 +1,23 @@
 #!/bin/sh
 
 # Pushes one git repository into another, from local clones.  Fails if the
-# resulting merge does not compile.  If more than two repositories are given,
-# each is pushed into the next in turn.
+# resulting merge does not compile.  Reformats the result before pushing it.
+# If more than two repositories are given, each is pushed into the next in
+# turn.
 #
 # Usage:
 #   git-push-to [OPTIONS] FROM_DIR TO_DIR ...
 #   git-push-to [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ...
 #   git-push-to [OPTIONS] DIR
 #
-# OPTIONS are [--nocompile] [--no-pull-first] [--rebase | --squash]
-# [--llm | --no-llm] [--claude | --codex] [--summary FILE].
+# OPTIONS are [--nocompile] [--noformat] [--no-pull-first]
+# [--rebase | --squash] [--llm | --no-llm] [--claude | --codex]
+# [--summary FILE].
 #
 # Each argument names the top level of a working tree.
 # Each may be absolute directory names or relative to the current directory.
 # The "--nocompile" option skips the compilation step.
+# The "--noformat" option skips the reformatting step.
 # The "--no-pull-first" option skips pulling the first directory from its
 # remote, so that the chain merges the commit that the first directory already
 # has; see "Several chains" below.
@@ -86,7 +89,15 @@
 #  * build TO_DIR using `compile-project` (see its documentation),
 #    (Skips the compilation step if environment variable
 #    MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set.)
-#  * push TO_DIR to its remote if the build succeeds.
+#  * reformat TO_DIR using `compile-project --format`, which runs the
+#    formatter that the buildfile configures, such as
+#    `./gradlew spotlessApply` (see the documentation of `compile-project`),
+#    and, if that changed any file, build TO_DIR again and commit the changes
+#    with the message "Reformat",
+#    (Skips the reformatting step if environment variable
+#    MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT is set.  Does not reformat, but
+#    notes that in the summary, if the build changed tracked files.)
+#  * push TO_DIR to its remote if the build and the reformatting succeed.
 #
 # If more than two directories are supplied, the procedure is performed on each
 # pair of adjacent directories in turn.  With "--no-pull-first", the first
@@ -426,6 +437,7 @@
 #     MYDIR/myrepo-branch-allchanges
 
 nocompile=0
+noformat=0
 # 1 if the first directory of a chain is not pulled; see "Several chains".
 no_pull_first=0
 rebase=0
@@ -849,7 +861,7 @@ git_push_to() {
   # merges, such as the one that the pull just made, are not among them.
   # Note: pwd=to_absolute
   if ! merge_build_push "${merge_head}" "branch '${from_branch}' of ." \
-    "${from_branch} of ${from_absolute}" "${nocompile}" "${llm_agent}" \
+    "${from_branch} of ${from_absolute}" "${nocompile}" "${noformat}" "${llm_agent}" \
     "${to_fetched} ${from_fetched}" "${from_absolute}"; then
     push_step="${merge_build_push_step}"
     return 1
@@ -1414,6 +1426,7 @@ slug_matches() {
 while [ "$#" -ge 1 ]; do
   case "$1" in
     --nocompile) nocompile=1 ;;
+    --noformat) noformat=1 ;;
     --no-pull-first) no_pull_first=1 ;;
     --rebase) rebase=1 ;;
     --squash)
@@ -1449,7 +1462,7 @@ if [ "$#" -lt 1 ]; then
   echo "${SCRIPT_NAME}: not enough arguments" >&2
   echo "Usage: ${SCRIPT_NAME} [OPTIONS] FROM_DIR [TO_DIR ...]" >&2
   echo "   or: ${SCRIPT_NAME} [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
-  echo "OPTIONS: [--nocompile] [--no-pull-first] [--rebase | --squash] ${llm_options_usage} [--summary FILE]" >&2
+  echo "OPTIONS: [--nocompile] [--noformat] [--no-pull-first] [--rebase | --squash] ${llm_options_usage} [--summary FILE]" >&2
   exit 1
 fi
 if [ "$#" -eq 1 ] && [ "${no_pull_first}" -eq 1 ]; then
