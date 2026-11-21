@@ -462,11 +462,17 @@ printf 'all:\n\t@echo built >> log\nformat: all\n\t@echo format >> log\n' > "${f
 expect_format_log "${fmtformat}" 'built
 format' 'a Makefile with a "format" rule'
 
+# A double-colon rule for "format" runs "format".
+fmtdouble="${tmpdir}/format-double-colon"
+mkdir -p "${fmtdouble}"
+printf 'all:\n\t@echo built >> log\nformat::\n\t@echo format >> log\n' > "${fmtdouble}/Makefile"
+expect_format_log "${fmtdouble}" format 'a Makefile with a double-colon "format" rule'
+
 # A Makefile without such a rule is neither reformatted nor built.  A variable
-# named "format" is not a rule.
+# named "format" or "reformat" is not a rule, whatever its assignment operator.
 fmtnone="${tmpdir}/format-none"
 mkdir -p "${fmtnone}"
-printf 'format := x\nreformat=y\nall:\n\t@echo built >> log\n' > "${fmtnone}/Makefile"
+printf 'format := x\nformat ::= x\nformat :::= x\nreformat=y\nall:\n\t@echo built >> log\n' > "${fmtnone}/Makefile"
 expect_format_log "${fmtnone}" '' 'a Makefile without a formatting rule'
 
 # A failing formatter makes the exit status failure.
@@ -494,6 +500,24 @@ printf 'apply plugin: "com.diffplug.spotless"\n' \
   > "${fmtbuildsrc}/buildSrc/src/main/groovy/my-conventions.gradle"
 expect_format_log "${fmtbuildsrc}" "--project-dir ${fmtbuildsrc} spotlessApply -q" \
   'a Gradle project that mentions Spotless in buildSrc/'
+
+# A plugin alias of a version catalog refers to Spotless.
+fmtalias="${tmpdir}/format-alias"
+mkdir -p "${fmtalias}/gradle"
+make_logging_command "${fmtalias}/gradlew"
+printf 'plugins {\n  alias(libs.plugins.spotless)\n}\n' > "${fmtalias}/build.gradle.kts"
+expect_format_log "${fmtalias}" "--project-dir ${fmtalias} spotlessApply -q" \
+  'a Gradle project that applies Spotless by a version-catalog alias'
+
+# A comment that mentions Spotless, or a version catalog that declares a
+# plugin that no project applies, does not count.
+fmtcomment="${tmpdir}/format-comment"
+mkdir -p "${fmtcomment}/gradle"
+make_logging_command "${fmtcomment}/gradlew"
+printf '// TODO: adopt spotless\nplugins {\n  id("java")\n}\n' > "${fmtcomment}/build.gradle"
+printf '[plugins]\nspotless = { id = "com.diffplug.spotless", version = "8.0.0" }\n' \
+  > "${fmtcomment}/gradle/libs.versions.toml"
+expect_format_log "${fmtcomment}" '' 'a Gradle project that only mentions Spotless'
 
 # A Gradle project that does not mention Spotless is neither reformatted nor
 # built.

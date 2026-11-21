@@ -91,8 +91,10 @@ The commands are:
   Before pushing, it reformats TO_DIR with `compile-project --format`, which
   runs the formatter that the buildfile configures, such as
   `./gradlew spotlessApply`.  If that changes any file, it compiles TO_DIR
-  again and commits the changes with the message "Reformat".  `--noformat`
-  skips the reformatting.
+  again, unless the compilation step is skipped, and commits the changes with
+  the message "Reformat".  If the reformatting or that compilation fails, it
+  restores the files that the reformatting changed and does not push.
+  `--noformat` skips the reformatting.
 
   Instead of directories, you can pass slugs of the form `ORG:BRANCH`, such
   as `git-push-to upstream:main myname:feature`.  Each slug names the

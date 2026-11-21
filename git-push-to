@@ -92,8 +92,10 @@
 #  * reformat TO_DIR using `compile-project --format`, which runs the
 #    formatter that the buildfile configures, such as
 #    `./gradlew spotlessApply` (see the documentation of `compile-project`),
-#    and, if that changed any file, build TO_DIR again and commit the changes
-#    with the message "Reformat",
+#    and, if that changed any file, build TO_DIR again (unless the compilation
+#    step is skipped) and commit the changes with the message "Reformat";
+#    if the reformatting or that build fails, restore the files that the
+#    reformatting changed,
 #    (Skips the reformatting step if environment variable
 #    MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT is set.  Does not reformat, but
 #    notes that in the summary, if the build changed tracked files.)

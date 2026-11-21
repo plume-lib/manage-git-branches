@@ -165,7 +165,12 @@ fi
 ## MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT skips the reformatting.
 add_feature_line "${FEATURE_DIR}" "skip line"
 add_main_line "FIFTH LINE"
-if ! MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT=1 push_to "${MAIN_DIR}" "${FEATURE_DIR}"; then
+# The subshell confines the variable to this call:  an assignment that
+# prefixes a call of a shell function, as `push_to` is, stays set after the
+# call in Bash 3.2, which is /bin/sh on macOS.
+if ! (MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT=1 \
+  && export MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT \
+  && push_to "${MAIN_DIR}" "${FEATURE_DIR}"); then
   fail "MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT: git-push-to failed: $(cat "${WORK_DIR}/errors")"
 elif [ "$(last_subject "${FEATURE_DIR}")" != "${MERGE_SUBJECT}" ]; then
   fail "MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT: the last commit is not the merge: $(git -C "${FEATURE_DIR}" log --oneline -3)"
@@ -186,8 +191,9 @@ elif [ "$(pushed_head)" != "$(git -C "${FEATURE_DIR}" rev-parse HEAD)" ]; then
 fi
 
 ## If the reformatted project does not build, the reformatting is not
-## committed, and nothing is pushed.  This branch's formatter also creates
-## the file `broken`, as if the reformatting broke the build.
+## committed, the tracked files are restored, and nothing is pushed.  This
+## branch's formatter also creates the file `broken`, as if the reformatting
+## broke the build.
 # shellcheck disable=SC2059 # The format contains the rule's escapes.
 printf "all:\n\t@test ! -e broken\n${FORMAT_RULE}; touch broken\n" > "${FEATURE_DIR}/Makefile"
 git -C "${FEATURE_DIR}" commit -q -a -m "Break the build when reformatting"
@@ -204,18 +210,18 @@ else
   if [ "$(last_subject "${FEATURE_DIR}")" != "${MERGE_SUBJECT}" ]; then
     fail "broken by reformatting: the last commit is not the merge: $(git -C "${FEATURE_DIR}" log --oneline -3)"
   fi
-  if git -C "${FEATURE_DIR}" diff --quiet; then
-    fail "broken by reformatting: the reformatting's changes are gone"
+  if [ -n "$(git -C "${FEATURE_DIR}" status --porcelain --untracked-files=no)" ]; then
+    fail "broken by reformatting: the tracked files were not restored: $(git -C "${FEATURE_DIR}" status --porcelain)"
   fi
   if [ "$(pushed_head)" != "${before}" ]; then
     fail "broken by reformatting: the branch was pushed"
   fi
 fi
 rm -f "${FEATURE_DIR}/broken"
-git -C "${FEATURE_DIR}" checkout -q -- .
 
-## A formatter that fails stops the push.
-printf 'all:\n\t@:\nreformat:\n\t@exit 3\n' > "${FEATURE_DIR}/Makefile"
+## A formatter that fails stops the push, and the tracked files that it
+## changed are restored.
+printf 'all:\n\t@:\nreformat:\n\t@echo changed > feature.txt; exit 3\n' > "${FEATURE_DIR}/Makefile"
 git -C "${FEATURE_DIR}" commit -q -a -m "Fail to reformat"
 add_main_line "SEVENTH LINE"
 before="$(pushed_head)"
@@ -229,13 +235,38 @@ else
   if [ "$(pushed_head)" != "${before}" ]; then
     fail "failing formatter: the branch was pushed"
   fi
+  if [ -n "$(git -C "${FEATURE_DIR}" status --porcelain --untracked-files=no)" ]; then
+    fail "failing formatter: the tracked files were not restored: $(git -C "${FEATURE_DIR}" status --porcelain)"
+  fi
 fi
+
+## The "Reformat" commit omits a change that the build makes to a tracked
+## file.  This branch's build rewrites generated.dat, which the formatter does
+## not change, once feature.txt is formatted.
+# shellcheck disable=SC2059 # The format contains the rule's escapes.
+printf "all:\n\t@if ! grep -q '[a-z]' feature.txt; then echo built > generated.dat; fi\n${FORMAT_RULE}\n" \
+  > "${FEATURE_DIR}/Makefile"
+echo original > "${FEATURE_DIR}/generated.dat"
+git -C "${FEATURE_DIR}" add Makefile generated.dat
+git -C "${FEATURE_DIR}" commit -q -m "Generate a file when formatted"
+add_feature_line "${FEATURE_DIR}" "generated line"
+add_main_line "EIGHTH LINE"
+if ! push_to "${MAIN_DIR}" "${FEATURE_DIR}"; then
+  fail "build changes: git-push-to failed: $(cat "${WORK_DIR}/errors")"
+elif [ "$(last_subject "${FEATURE_DIR}")" != "Reformat" ]; then
+  fail "build changes: the last commit is not \"Reformat\": $(git -C "${FEATURE_DIR}" log --oneline -3)"
+elif [ "$(git -C "${FEATURE_DIR}" show HEAD:generated.dat)" != "original" ]; then
+  fail "build changes: the reformatting commit includes the build's change: $(git -C "${FEATURE_DIR}" show --stat HEAD)"
+elif [ "$(git -C "${FEATURE_DIR}" show HEAD:feature.txt | grep -c '[a-z]')" -ne 0 ]; then
+  fail "build changes: feature.txt was not reformatted: $(git -C "${FEATURE_DIR}" show HEAD:feature.txt)"
+fi
+git -C "${FEATURE_DIR}" checkout -q -- .
 
 ## `git-pull-upstream` reformats too.
 UPSTREAM_DIR="${WORK_DIR}/myrepo-branch-upstream-feature"
 make_clone "${REMOTE}" upstream-feature "${UPSTREAM_DIR}"
 add_feature_line "${UPSTREAM_DIR}" "upstream line"
-add_main_line "EIGHTH LINE"
+add_main_line "NINTH LINE"
 if ! (cd "${UPSTREAM_DIR}" && "${COMMANDS_DIR}/git-pull-upstream" --no-llm) \
   > /dev/null 2> "${WORK_DIR}/errors"; then
   fail "git-pull-upstream: failed: $(cat "${WORK_DIR}/errors")"

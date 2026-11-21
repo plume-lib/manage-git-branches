@@ -1264,8 +1264,9 @@ merge_build_push() {
   # Reformat after any fix of the build, so that the fix is reformatted too.
   if [ "${merge_formats}" -eq 1 ]; then
     merge_build_push_step='reformatting'
-    # `reformat_commit` stages changes, which `git add -u` stages only in the
-    # current directory, so it runs at the top level of the working tree.
+    # `reformat_commit` runs at the top level of the working tree, as
+    # `commit_staged` requires, and so that it restores every file that the
+    # formatter changed if it fails.
     if ! (cd -- "${merge_top}" && reformat_commit "${merge_builds}" "${merge_log:-}"); then
       return 1
     fi
@@ -1283,14 +1284,19 @@ merge_build_push() {
 ## tree, with `compile-project --format`, and commits the files that it
 ## changed, if any, with the message "Reformat".  If BUILD is 1, first builds
 ## the reformatted project with `compile-project`, writing the output to the
-## file LOG, and commits only if the build succeeds.  If a pre-commit hook
-## rejects the commit after changing files, commits the files as the hook left
-## them, as `commit_staged` describes.  Does not reformat, but prints a
-## notice and appends it to the summary (see `append_summary`), if the
-## working tree has uncommitted changes to tracked files, as when the build
-## changed them, because the commit would include those changes.
+## file LOG, and commits only if the build succeeds.  The commit includes only
+## the formatter's changes, not changes that the build makes to tracked files.
+## If a pre-commit hook rejects the commit after changing files, commits the
+## files as the hook left them, as `commit_staged` describes.  Does not
+## reformat, but prints a notice and appends it to the summary (see
+## `append_summary`), if the working tree has uncommitted changes to tracked
+## files, as when the build changed them, because the commit would include
+## those changes.
 ## Returns 1, after printing a diagnostic, if the reformatting, the build, or
-## the commit fails; the reformatting's changes then remain, uncommitted.
+## the commit fails.  If the reformatting or the build fails, first restores
+## the tracked files to their committed contents, so that the formatter's
+## changes do not make later runs refuse to run (see
+## `refuse_uncommitted_changes`).
 reformat_commit() {
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     reformat_note="in $(pwd): did not reformat, because tracked files have uncommitted changes, as from the build"
@@ -1299,26 +1305,49 @@ reformat_commit() {
     return 0
   fi
   if ! "${SCRIPT_DIR}"/compile-project --format; then
-    echo "${SCRIPT_NAME}: unable to reformat $(pwd); its changes, if any, are not committed" >&2
+    reformat_restore "unable to reformat $(pwd)"
     return 1
   fi
   if git diff --quiet; then
     return 0
   fi
+  # Stage the formatter's changes now, so that the commit omits any change
+  # that the build makes.
+  if ! git add -u; then
+    reformat_restore "cannot stage the reformatting's changes in $(pwd)"
+    return 1
+  fi
   if [ "$1" -eq 1 ]; then
     if ! build_logged "$2"; then
-      echo "${SCRIPT_NAME}: unable to build in $(pwd) after reformatting it; the reformatting's changes are not committed" >&2
+      reformat_restore "unable to build in $(pwd) after reformatting it"
       return 1
     fi
     set -- "${SCRIPT_DIR}"/compile-project
   else
     set --
   fi
-  if ! git add -u || ! commit_staged Reformat "$@"; then
+  if ! commit_staged Reformat "$@"; then
     echo "${SCRIPT_NAME}: cannot commit the reformatting's changes in $(pwd)" >&2
     return 1
   fi
   echo "${SCRIPT_NAME}: reformatted $(pwd) in commit $(git rev-parse --short HEAD)" >&2
+}
+
+## Usage: reformat_restore PROBLEM
+## For `reformat_commit`, which found the tracked files unchanged before it
+## reformatted them:  restores the tracked files in the current directory, the
+## top level of a working tree, to their contents at HEAD, and prints a
+## diagnostic that starts with PROBLEM, such as "unable to reformat DIR", and
+## names the files that were restored.
+reformat_restore() {
+  reformat_restored="$(print_nul_lines git diff HEAD --name-only --no-renames -z | paste -s -d ' ' -)"
+  if [ -z "${reformat_restored}" ]; then
+    echo "${SCRIPT_NAME}: $1" >&2
+  elif git checkout -q HEAD -- .; then
+    echo "${SCRIPT_NAME}: $1; restored the files that the reformatting changed: ${reformat_restored}" >&2
+  else
+    echo "${SCRIPT_NAME}: $1; cannot restore the files that the reformatting changed: ${reformat_restored}" >&2
+  fi
 }
 
 ## Usage: merge_build_note TASK NOTE
