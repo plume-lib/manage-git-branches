@@ -28,17 +28,18 @@ check from any other service is reported and skipped.
 A job's failure is transient if the log of its failed steps contains a message about a
 network problem (such as a timeout, a refused or reset connection, or a failed DNS
 lookup), an HTTP status code that indicates an overloaded or rate-limited server (such
-as 429 or 503), a lost or unresponsive CI runner, or a GitHub-hosted runner that never
-picked up the job.  TRANSIENT_PATTERNS below lists the messages.  A job's failure is
-also transient if Gradle did not find an artifact and the Gradle Plugin Portal is the
-only location that Gradle searched for it, or if Gradle did not find some artifacts and,
-for each one, the `gradlew-retry` script of plume-lib/plume-scripts reported that some
-location where Gradle searched for it serves it.  If the log shows that `gradlew-retry`
-ran Gradle again, then only the output of the last run of Gradle is examined, except
-for the reports of `gradlew-retry` about locations that serve artifacts.  The log of an
-Azure Pipelines or GitHub Actions job also contains the errors that the CI service
-reports for the job, which describe failures, such as a lost runner or a job that no
-runner picked up, that leave no log.  Shell trace lines, which start with `+ `, and the
+as 429 or 503), a lost or unresponsive CI runner, a segmentation fault (SIGSEGV) that
+crashed a Java virtual machine, or a GitHub-hosted runner that never picked up the job.
+TRANSIENT_PATTERNS below lists the messages.  A job's failure is also transient if
+Gradle did not find an artifact and the Gradle Plugin Portal is the only location that
+Gradle searched for it, or if Gradle did not find some artifacts and, for each one, the
+`gradlew-retry` script of plume-lib/plume-scripts reported that some location where
+Gradle searched for it serves it.  If the log shows that `gradlew-retry` ran Gradle
+again, then only the output of the last run of Gradle is examined, except for the
+reports of `gradlew-retry` about locations that serve artifacts.  The log of an Azure
+Pipelines or GitHub Actions job also contains the errors that the CI service reports
+for the job, which describe failures, such as a lost runner or a job that no runner
+picked up, that leave no log.  Shell trace lines, which start with `+ `, and the
 scripts that Azure Pipelines and GitHub Actions echo before running a step, are
 ignored, because a script that itself looks for such messages, in order to retry a
 command, contains them.
@@ -118,6 +119,10 @@ TRANSIENT_PATTERNS = [
     r"agent did not renew the lock",
     r"runner has received a shutdown signal",
     r"lost communication with the server",
+    # A Java virtual machine that crashed with a segmentation fault, as the JVM reports it
+    # in a line such as "#  SIGSEGV (0xb) at pc=0x000074a6b3df9d00, pid=10859, tid=...".
+    # Such a crash is usually a bug in the JVM that does not recur.
+    r"#\s+SIGSEGV \(0xb\) at pc=",
     # A GitHub-hosted runner that never picked up the job.  A job that waited for a runner
     # until it timed out ("while awaiting a runner") is not transient, because the usual
     # cause is a `runs-on` label that matches no runner or a self-hosted runner that is
