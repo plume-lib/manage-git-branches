@@ -140,7 +140,7 @@ summary=''
 ## "--noformat" options, and the arguments, and sets ${push_lines} to the
 ## lines that it wrote with "--summary", each indented by 4 spaces.  Returns its exit status.
 run_git_push_to() {
-  echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option} ${nocompile_option} ${noformat_option} $*"
+  echo "${SCRIPT_NAME}: in $(pwd): git-push-to ${agent_option}${nocompile_option:+ ${nocompile_option}}${noformat_option:+ ${noformat_option}} $*"
   : > "${push_summary}"
   # `git-push-to` does not read this script's standard input.
   # shellcheck disable=SC2086 # Each of these options is empty or one word.
