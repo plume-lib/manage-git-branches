@@ -264,8 +264,9 @@ else
 fi
 
 ## The "Reformat" commit omits a change that the build makes to a tracked
-## file.  This branch's build rewrites generated.dat, which the formatter does
-## not change, once feature.txt is formatted.
+## file, and the change is discarded and reported.  This branch's build
+## rewrites generated.dat, which the formatter does not change, once
+## feature.txt is formatted.
 # shellcheck disable=SC2059 # The format contains the rule's escapes.
 printf "all:\n\t@if ! grep -q '[a-z]' feature.txt; then echo built > generated.dat; fi\n${FORMAT_RULE}\n" \
   > "${FEATURE_DIR}/Makefile"
@@ -282,8 +283,14 @@ elif [ "$(git -C "${FEATURE_DIR}" show HEAD:generated.dat)" != "original" ]; the
   fail "build changes: the reformatting commit includes the build's change: $(git -C "${FEATURE_DIR}" show --stat HEAD)"
 elif [ "$(git -C "${FEATURE_DIR}" show HEAD:feature.txt | grep -c '[a-z]')" -ne 0 ]; then
   fail "build changes: feature.txt was not reformatted: $(git -C "${FEATURE_DIR}" show HEAD:feature.txt)"
+elif [ -n "$(git -C "${FEATURE_DIR}" status --porcelain --untracked-files=no)" ]; then
+  fail "build changes: the build's change was not discarded: $(git -C "${FEATURE_DIR}" status --porcelain)"
+else
+  case "$(cat "${WORK_DIR}/errors")" in
+    *"discarded the changes that the build made after reformatting to generated.dat"*) ;;
+    *) fail "build changes: no notice of the discarded change: $(cat "${WORK_DIR}/errors")" ;;
+  esac
 fi
-git -C "${FEATURE_DIR}" checkout -q -- .
 
 ## `git-pull-upstream` reformats too.
 UPSTREAM_DIR="${WORK_DIR}/myrepo-branch-upstream-feature"

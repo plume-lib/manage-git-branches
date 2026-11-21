@@ -34,10 +34,9 @@
 # by the formatter that its buildfile configures:
 #  * Gradle:  `gradlew spotlessApply` or `gradle spotlessApply`, if a Gradle
 #    buildfile refers to Spotless as `gradle_uses_spotless`, below, describes.
-#    The buildfiles are the files `*.gradle` and `*.gradle.kts` in the
-#    directory or in its subdirectories, and such files anywhere under
-#    `buildSrc/` or `build-logic/`, which can hold a convention plugin that
-#    applies Spotless.
+#    The buildfiles are the files `*.gradle` and `*.gradle.kts` anywhere in
+#    the directory, including under `buildSrc/` or `build-logic/`, which can
+#    hold a convention plugin that applies Spotless.
 #  * Maven:  `mvnw spotless:apply` or `mvn spotless:apply`, if `pom.xml`
 #    mentions "spotless-maven-plugin".
 #  * Make:  `make reformat`, or else `make format`, if the Makefile has a rule
@@ -270,36 +269,45 @@ run_gradle() {
 
 # Returns 0 if a Gradle buildfile of the project in directory $1 refers to
 # Spotless, and 1 otherwise.  The buildfiles are the files `*.gradle` and
-# `*.gradle.kts` in $1 and its subdirectories, such as `$1/build.gradle` and
-# `$1/lib/build.gradle.kts`, and those anywhere under `$1/buildSrc/` and
-# `$1/build-logic/`.  A buildfile refers to Spotless if it names the plugin's
-# id, as in `id("com.diffplug.spotless")`, names a plugin of a version catalog
-# whose alias ends with "spotless", as in `alias(libs.plugins.spotless)`, or
-# starts a line with a `spotless` block, as in `spotless {`.  Another mention
-# of the word, as in a comment `// TODO: adopt spotless`, does not count.  A
-# version catalog, such as `gradle/libs.versions.toml`, is not searched,
-# because it can declare a plugin that no project applies.
+# `*.gradle.kts` anywhere in $1, such as `$1/build.gradle`,
+# `$1/services/api/build.gradle.kts`, and a convention plugin under
+# `$1/buildSrc/` or `$1/build-logic/`, except under a directory that holds
+# version-control data, build output, or downloaded dependencies, such as
+# `.git`, `build`, `.gradle`, or `node_modules`.  A buildfile refers to
+# Spotless if a line names the plugin's id, as in
+# `id("com.diffplug.spotless")`, names a plugin of a version catalog whose
+# alias ends with "spotless", as in `alias(libs.plugins.spotless)`, or starts
+# a `spotless` block, as in `spotless {`.  A line that starts with a comment,
+# as in `// id("com.diffplug.spotless")` or a line ` * ...` within a block
+# comment, or that names Spotless only after a "/", as in a comment
+# `// TODO: adopt spotless`, does not count.  A version catalog, such as
+# `gradle/libs.versions.toml`, is not searched, because it can declare a
+# plugin that no project applies.
 gradle_uses_spotless() {
-  # `-s` suppresses the diagnostic for a pathname that does not exist, as when
-  # a pattern matches nothing.  With `-q`, the status is 0 if a line matches,
-  # even if a pathname does not exist.
-  grep -r -s -q -E --include='*.gradle' --include='*.gradle.kts' \
-    -e 'com\.diffplug\.spotless' -e 'plugins\.([A-Za-z0-9_]+\.)*spotless([^A-Za-z0-9_.]|$)' \
+  # Each pattern but the last requires that no "/" or leading "*" precede the
+  # mention, so that a comment does not count.
+  grep -r -q -E --include='*.gradle' --include='*.gradle.kts' \
+    --exclude-dir=.git --exclude-dir=.gradle --exclude-dir=build \
+    --exclude-dir=node_modules \
+    -e '^[[:space:]]*([^*/[:space:]][^/]*)?com\.diffplug\.spotless' \
+    -e '^[[:space:]]*([^*/[:space:]][^/]*)?plugins\.([A-Za-z0-9_]+\.)*spotless([^A-Za-z0-9_.]|$)' \
     -e '^[[:space:]]*spotless[[:space:]]*\{' \
-    -- "$1"/*.gradle "$1"/*.gradle.kts "$1"/*/*.gradle "$1"/*/*.gradle.kts \
-    "$1/buildSrc" "$1/build-logic"
+    -- "$1"
 }
 
 # Prints the first of the targets "reformat" and "format" for which the
-# Makefile $1 has a rule, or nothing if it has a rule for neither.  A rule
-# made by an `include`d file is not found.
+# Makefile $1 has a rule, or nothing if it has a rule for neither.  A rule can
+# have several targets, as in "format reformat: ...".  A rule made by an
+# `include`d file is not found.
 make_format_target() {
   for make_target in reformat format; do
     # A rule's target is followed by ":", or by "::" for a double-colon rule.
     # Colons that are followed by "=" are those of a variable assignment, such
     # as "format := ...", "format ::= ...", or "format :::= ...", rather than
     # those of a rule.
-    if grep -q -E "^${make_target}[[:space:]]*::?([^:=]|\$)" "$1"; then
+    # The other targets of the rule precede or follow the target, separated
+    # by spaces.
+    if grep -q -E "^([^#:=[:space:]]+[[:space:]]+)*${make_target}([[:space:]]+[^#:=[:space:]]+)*[[:space:]]*::?([^:=]|\$)" "$1"; then
       printf '%s\n' "${make_target}"
       return
     fi
@@ -314,7 +322,7 @@ format_in_directory() {
   dir="$1"
   buildfile_found_here=1
 
-  if [ -f "$dir/gradlew" ] || [ -f "$dir/build.gradle" ]; then
+  if [ -f "$dir/gradlew" ] || [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
     if ! gradle_uses_spotless "$dir"; then
       return 0
     fi
@@ -370,7 +378,7 @@ compile_in_directory() {
     # shellcheck disable=SC2086 # Word splitting is desirable here.
     run_gradle "$dir/gradlew" "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS}
     return $?
-  elif [ -f "$dir/build.gradle" ]; then
+  elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
     if [ -n "$CLEAN" ]; then
       run_gradle gradle "$dir" clean -q || return $?
     fi

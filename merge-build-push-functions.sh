@@ -1299,8 +1299,9 @@ merge_build_push() {
 ##
 ## If BUILD is 1, first builds the reformatted project with `compile-project`,
 ## writing the output to the file LOG, and commits only if the build succeeds.
-## The commit includes only the formatter's changes, not changes that the
-## build makes to tracked files.  If a pre-commit hook rejects the commit
+## The commit includes only the formatter's changes:  this function discards
+## the changes that the build makes to tracked files, and prints a notice
+## that names those files and appends it to the summary.  If a pre-commit hook rejects the commit
 ## after changing files, commits the files as the hook left them, as
 ## `commit_staged` describes.
 ##
@@ -1359,6 +1360,18 @@ reformat_commit() {
       reformat_restore "unable to build in $(pwd) after reformatting it"
       return 1
     fi
+    # Discard the build's changes to tracked files, which the commit omits,
+    # so that the working tree matches the index, as `commit_staged_again`
+    # requires to retry a commit that a pre-commit hook rejected, and so that
+    # later runs do not refuse to run (see `refuse_uncommitted_changes`).
+    reformat_built="$(print_nul_lines git diff --name-only --no-renames -z | paste -s -d ' ' -)"
+    if [ -n "${reformat_built}" ]; then
+      if ! git checkout -q -- .; then
+        reformat_restore "cannot discard the changes that the build made in $(pwd) after reformatting it"
+        return 1
+      fi
+      reformat_note "discarded the changes that the build made after reformatting to ${reformat_built}"
+    fi
     set -- "${SCRIPT_DIR}"/compile-project
   else
     set --
@@ -1382,11 +1395,16 @@ reformat_note() {
 ## Usage: reformat_restore PROBLEM
 ## For `reformat_commit`, which found the tracked files unchanged before it
 ## reformatted them:  restores the tracked files in the current directory, the
-## top level of a working tree, to their contents at HEAD, and prints a
-## diagnostic that starts with PROBLEM, such as "unable to reformat DIR", and
-## names the files that were restored.
+## top level of a working tree, both in the index and in the working tree, to
+## their contents at HEAD, and prints a diagnostic that starts with PROBLEM,
+## such as "unable to reformat DIR", and names the files that were restored.
 reformat_restore() {
-  reformat_restored="$(print_nul_lines git diff HEAD --name-only --no-renames -z | paste -s -d ' ' -)"
+  # A file's staged contents can differ from HEAD even if its contents in the
+  # working tree do not, as when the build undid the formatter's change.
+  reformat_restored="$({
+    print_nul_lines git diff --cached --name-only --no-renames -z
+    print_nul_lines git diff HEAD --name-only --no-renames -z
+  } | sort -u | paste -s -d ' ' -)"
   if [ -z "${reformat_restored}" ]; then
     echo "${SCRIPT_NAME}: $1" >&2
   elif git checkout -q HEAD -- .; then

@@ -462,6 +462,12 @@ printf 'all:\n\t@echo built >> log\nformat: all\n\t@echo format >> log\n' > "${f
 expect_format_log "${fmtformat}" 'built
 format' 'a Makefile with a "format" rule'
 
+# A rule with several targets, one of which is "format", runs "format".
+fmtmulti="${tmpdir}/format-multi-target"
+mkdir -p "${fmtmulti}"
+printf 'all:\n\t@echo built >> log\nlint format check:\n\t@echo format >> log\n' > "${fmtmulti}/Makefile"
+expect_format_log "${fmtmulti}" format 'a Makefile with a multi-target "format" rule'
+
 # A double-colon rule for "format" runs "format".
 fmtdouble="${tmpdir}/format-double-colon"
 mkdir -p "${fmtdouble}"
@@ -509,15 +515,37 @@ printf 'plugins {\n  alias(libs.plugins.spotless)\n}\n' > "${fmtalias}/build.gra
 expect_format_log "${fmtalias}" "--project-dir ${fmtalias} spotlessApply -q" \
   'a Gradle project that applies Spotless by a version-catalog alias'
 
-# A comment that mentions Spotless, or a version catalog that declares a
-# plugin that no project applies, does not count.
+# Spotless can be applied only in a subproject that is nested two levels deep.
+fmtnested="${tmpdir}/format-nested"
+mkdir -p "${fmtnested}/services/api"
+make_logging_command "${fmtnested}/gradlew"
+printf 'plugins {\n  id("java")\n}\n' > "${fmtnested}/build.gradle"
+printf 'plugins {\n  id("com.diffplug.spotless")\n}\n' > "${fmtnested}/services/api/build.gradle.kts"
+expect_format_log "${fmtnested}" "--project-dir ${fmtnested} spotlessApply -q" \
+  'a Gradle project that applies Spotless in a nested subproject'
+
+# A comment that mentions Spotless, even by its plugin id, or a version
+# catalog that declares a plugin that no project applies, does not count.
 fmtcomment="${tmpdir}/format-comment"
 mkdir -p "${fmtcomment}/gradle"
 make_logging_command "${fmtcomment}/gradlew"
-printf '// TODO: adopt spotless\nplugins {\n  id("java")\n}\n' > "${fmtcomment}/build.gradle"
+printf '// TODO: adopt spotless\nplugins {\n  id("java")\n  // id("com.diffplug.spotless")\n}\n/*\n * alias(libs.plugins.spotless)\n */\n' \
+  > "${fmtcomment}/build.gradle"
 printf '[plugins]\nspotless = { id = "com.diffplug.spotless", version = "8.0.0" }\n' \
   > "${fmtcomment}/gradle/libs.versions.toml"
 expect_format_log "${fmtcomment}" '' 'a Gradle project that only mentions Spotless'
+
+# A Gradle project without a wrapper whose only buildfile is
+# `build.gradle.kts` runs `gradle spotlessApply`.
+fmtkts="${tmpdir}/format-kts"
+mkdir -p "${fmtkts}/bin"
+make_logging_command "${fmtkts}/bin/gradle"
+printf 'plugins {\n  id("com.diffplug.spotless")\n}\n' > "${fmtkts}/build.gradle.kts"
+if ! PATH="${fmtkts}/bin:${PATH}" "${COMPILE_PROJECT}" --format "${fmtkts}" > /dev/null 2>&1; then
+  fail "--format: nonzero exit status for a wrapperless build.gradle.kts in ${fmtkts}"
+elif [ "$(cat "${fmtkts}/bin/log" 2> /dev/null)" != "--project-dir ${fmtkts} spotlessApply -q" ]; then
+  fail "--format: for a wrapperless build.gradle.kts, got: $(cat "${fmtkts}/bin/log" 2> /dev/null)"
+fi
 
 # A Gradle project that does not mention Spotless is neither reformatted nor
 # built.
