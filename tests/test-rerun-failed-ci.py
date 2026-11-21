@@ -452,6 +452,18 @@ class ClassifyTest(unittest.TestCase):
             ),
             ("We stopped hearing from agent Azure Pipelines 3.", None),
             ("The runner has received a shutdown signal.", None),
+            # A JVM crash, in a test's output that Gradle indents.
+            (
+                (
+                    "    # A fatal error has been detected by the Java Runtime Environment:\n"
+                    "    #\n"
+                    "    #  SIGSEGV (0xb) at pc=0x000074a6b3df9d00, pid=10859,"
+                    " tid=0x000074a68e3fe6c0\n"
+                    "    #\n"
+                    "    # JRE version: OpenJDK Runtime Environment (8.0_482-b08)"
+                ),
+                "#  SIGSEGV (0xb) at pc=0x000074a6b3df9d00, pid=10859, tid=0x000074a68e3fe6c0",
+            ),
             (
                 (
                     "##[error]The job was abandoned because agent did not renew the lock."
