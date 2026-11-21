@@ -185,8 +185,8 @@ case "${resolve_output}" in
   *"no such directory: no such dir"*"the chain failed: myrepo-branch-main no such dir"*) ;;
   *) fail "several: wrong output for the failed chain: ${resolve_output}" ;;
 esac
-if [ "$(printf '%s\n' "${resolve_output}" | grep -c 'git-push-to --claude  myrepo-branch-main$')" -ne 1 ] \
-  || [ "$(printf '%s\n' "${resolve_output}" | grep -c 'git-push-to --claude  --no-pull-first ')" -ne 2 ]; then
+if [ "$(printf '%s\n' "${resolve_output}" | grep -c 'git-push-to --claude myrepo-branch-main$')" -ne 1 ] \
+  || [ "$(printf '%s\n' "${resolve_output}" | grep -c 'git-push-to --claude --no-pull-first ')" -ne 2 ]; then
   fail "several: the first directory was not pulled exactly once, before the chains: ${resolve_output}"
 fi
 expected="$(printf '%s\n' \
@@ -285,7 +285,7 @@ if ! grep -q -x advanced "${STUB_LOG}"; then
   fail "pinned: the stub agent did not advance main"
 fi
 case "${resolve_output}" in
-  *"git-push-to --claude  --no-pull-first myrepo-branch-main myrepo-branch-other"*) ;;
+  *"git-push-to --claude --no-pull-first myrepo-branch-main myrepo-branch-other"*) ;;
   *) fail "pinned: the second chain did not get --no-pull-first: ${resolve_output}" ;;
 esac
 main_head="$(git -C "${case_dir}/myrepo-branch-main" rev-parse HEAD)"

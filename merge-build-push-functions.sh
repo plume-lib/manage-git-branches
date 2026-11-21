@@ -1061,11 +1061,14 @@ refuse_uncommitted_changes() {
   return 0
 }
 
-## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE [RESOLVER [BUILT [DIRECTORY]]]
+## Usage: merge_build_push COMMIT DESCRIPTION SOURCE NOCOMPILE NOFORMAT [RESOLVER [BUILT [DIRECTORY]]]
 ## Merges COMMIT into the current branch, builds with `compile-project` unless
-## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set, and
-## pushes the current branch if the build succeeds.  DESCRIPTION is the
-## source of COMMIT as a line of FETCH_HEAD gives it, which
+## NOCOMPILE is 1 or $MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT is set,
+## reformats the files that the branch changes with `reformat_commit` unless
+## NOFORMAT is 1 or $MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT is set, and
+## pushes the current branch if the build, and any build after reformatting,
+## succeed.  DESCRIPTION is the source of COMMIT as a line of FETCH_HEAD gives
+## it, which
 ## `git fmt-merge-msg` turns into the merge message:  either a description of
 ## a ref of the local repository followed by " of .", such as
 ## "branch 'feature' of ." or "remote-tracking branch 'upstream/master' of .",
@@ -1096,7 +1099,7 @@ refuse_uncommitted_changes() {
 ## longer apply, such as one about a failed build (see `prune_agent_todo`).
 ## Returns 1, after printing a diagnostic, on failure.  Sets
 ## ${merge_build_push_step} to the step that it reached:  "merging",
-## "building", or "pushing".
+## "building", "reformatting", or "pushing".
 ## ${SCRIPT_DIR} must be set; see the top of this file.
 # shellcheck disable=SC2034 # git-push-to reads ${merge_build_push_step}.
 merge_build_push() {
@@ -1122,10 +1125,17 @@ merge_build_push() {
   else
     merge_builds=0
   fi
+  # 1 if this call reformats the merge, and 0 otherwise.
+  if [ "$5" -eq 0 ] && [ -z "${MANAGE_GIT_BRANCHES_SKIP_FORMAT_PROJECT}" ]; then
+    merge_formats=1
+  else
+    merge_formats=0
+  fi
   # A build of uncommitted changes says nothing about the commit that is
-  # pushed.  Check before merging, so that a refusal leaves no merge commit
-  # behind.
-  if [ "${merge_builds}" -eq 1 ] && ! refuse_uncommitted_changes "$(pwd)"; then
+  # pushed, and a commit of the reformatting would include them.  Check before
+  # merging, so that a refusal leaves no merge commit behind.
+  if { [ "${merge_builds}" -eq 1 ] || [ "${merge_formats}" -eq 1 ]; } \
+    && ! refuse_uncommitted_changes "$(pwd)"; then
     return 1
   fi
   # HEAD before the merges, so that a merge that cannot start can be undone.
@@ -1172,7 +1182,7 @@ merge_build_push() {
     # Git names the conflicted files relative to the top level of the working
     # tree, so `resolve_merge_conflicts` runs there, in a subshell that leaves
     # the current directory unchanged.
-    if ! (cd "${merge_top}" && commit_resolved_merge "${5:-}" "$1" "$3" "${merge_message}"); then
+    if ! (cd "${merge_top}" && commit_resolved_merge "${6:-}" "$1" "$3" "${merge_message}"); then
       if [ -n "${merged_landed_prs}" ]; then
         echo "${SCRIPT_NAME}: before merging $3, the branch in $(pwd) merged the final versions of pull requests ${merged_landed_prs}; if you abort the merge, \`git reset --keep ${merge_old_head}\` also removes those merges" >&2
       fi
@@ -1192,19 +1202,19 @@ merge_build_push() {
       # have broken the build is decided only now, because deciding can
       # fetch.  Whether the agent is ready to run is checked only once the
       # agent is needed, because checking can cost a request to its service.
-      if [ -z "${5:-}" ]; then
+      if [ -z "${6:-}" ]; then
         return 1
       fi
-      merge_built="${6:-}"
-      if [ -n "${7:-}" ]; then
-        merge_built="${merge_built}${merge_built:+ }$(built_commits "$7")"
+      merge_built="${7:-}"
+      if [ -n "${8:-}" ]; then
+        merge_built="${merge_built}${merge_built:+ }$(built_commits "$8")"
       fi
       if ! has_unbuilt_merge "${merge_built}"; then
         return 1
       fi
-      if ! agent_available "$5"; then
+      if ! agent_available "$6"; then
         [ -z "${agent_unavailable_reason}" ] \
-          || merge_build_note "${merge_fix_message}" "${agent_unavailable_reason}  $(agent_rerun_advice "$5" 'fix the build')"
+          || merge_build_note "${merge_fix_message}" "${agent_unavailable_reason}  $(agent_rerun_advice "$6" 'fix the build')"
         return 1
       fi
       # What this call's merge did, for the agent.
@@ -1232,10 +1242,10 @@ merge_build_push() {
       # An earlier entry that says that running the script again suffices is
       # out of date once the agent runs.
       prune_agent_todo 0 build
-      fix_failed_build "$5" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"
+      fix_failed_build "$6" "${merge_log}" "${merge_fix_message}" "${merge_did}  ${merge_fix_account}"
       merge_fix_status=$?
       if [ "${merge_fix_status}" -eq 3 ]; then
-        merge_build_note "${merge_fix_message}" "$(agent_unchanged_reason "$5")  $(agent_rerun_advice "$5" 'fix the build')"
+        merge_build_note "${merge_fix_message}" "$(agent_unchanged_reason "$6")  $(agent_rerun_advice "$6" 'fix the build')"
         cd -- "${merge_dir}" || true
         return 1
       elif [ "${merge_fix_status}" -ne 0 ]; then
@@ -1252,10 +1262,155 @@ merge_build_push() {
     prune_agent_todo 1
   fi
 
+  # Reformat after any fix of the build, so that the fix is reformatted too.
+  if [ "${merge_formats}" -eq 1 ]; then
+    merge_build_push_step='reformatting'
+    # `reformat_commit` runs at the top level of the working tree, as
+    # `commit_staged` requires, and so that it restores every file that the
+    # formatter changed if it fails.
+    if ! (cd -- "${merge_top}" && reformat_commit "${merge_builds}" "${merge_log:-}"); then
+      return 1
+    fi
+  fi
+
   merge_build_push_step='pushing'
   if ! git push --quiet; then
     echo "${SCRIPT_NAME}: problem pushing from $(pwd)" >&2
     return 1
+  fi
+}
+
+## Usage: reformat_commit BUILD LOG
+## Reformats the files that the current branch changes, in the current
+## directory, the top level of a working tree, and commits them, if the
+## reformatting changed any, with the message "Reformat".  The files that the
+## branch changes are those that differ between HEAD and its merge base with
+## the default branch of the upstream repository, as `find_upstream_ref`
+## chooses it without fetching, such as `refs/remotes/upstream/master`.
+## Reformatting runs `compile-project --format`, which reformats the whole
+## project; this function then discards its changes to every other file, so
+## that code that came from the upstream repository, as on a downstream
+## fork, keeps the upstream repository's formatting.  So a branch that has
+## no commits of its own, such as a clone of the upstream repository's
+## default branch that merges only from it, is not reformatted.  If the
+## upstream repository's default branch has not been
+## fetched recently, the merge base is older, so the files that the branch
+## changes include those that it merged from upstream since then.
+##
+## If BUILD is 1, first builds the reformatted project with `compile-project`,
+## writing the output to the file LOG, and commits only if the build succeeds.
+## The commit includes only the formatter's changes:  this function discards
+## the changes that the build makes to tracked files, and prints a notice
+## that names those files and appends it to the summary.  If a pre-commit hook rejects the commit
+## after changing files, commits the files as the hook left them, as
+## `commit_staged` describes.
+##
+## Does not reformat, but prints a notice and appends it to the summary (see
+## `append_summary`), and returns 0, if:
+##  * the working tree has uncommitted changes to tracked files, as when the
+##    build changed them, because the commit would include those changes;
+##  * the upstream repository's default branch cannot be determined; or
+##  * the formatter fails, as when a tool that it needs is not installed.
+##    The tracked files are then restored to their committed contents.
+## Returns 1, after printing a diagnostic, if the build after reformatting or
+## the commit fails.  If the build fails, first restores the tracked files to
+## their committed contents, so that the formatter's changes do not make later
+## runs refuse to run (see `refuse_uncommitted_changes`).
+reformat_commit() {
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    reformat_note "did not reformat, because tracked files have uncommitted changes, as from the build"
+    return 0
+  fi
+  # `find_upstream_ref` reports a fallback to another remote on standard
+  # error, which does not matter here.
+  # shellcheck disable=SC2154 # `find_upstream_ref` sets ${upstream_ref}.
+  if ! find_upstream_ref 0 2> /dev/null \
+    || ! reformat_base="$(git merge-base "${upstream_ref}" HEAD)"; then
+    reformat_note "did not reformat, because the default branch of the upstream repository cannot be determined"
+    return 0
+  fi
+  if git diff --quiet --diff-filter=d "${reformat_base}" HEAD; then
+    # The branch changes no file, except perhaps by deleting it.
+    return 0
+  fi
+  if ! "${SCRIPT_DIR}"/compile-project --format; then
+    reformat_restore "unable to reformat $(pwd); pushing it without reformatting"
+    append_summary "in $(pwd): did not reformat, because the formatter failed"
+    return 0
+  fi
+  if git diff --quiet; then
+    return 0
+  fi
+  # Stage the formatter's changes to the files that the branch changes, then
+  # discard its other changes.  Staging them now also makes the commit omit
+  # any change that the build makes.  A file that the branch deletes is not
+  # in the working tree, so it is not named, lest `git add` reject the
+  # pathspec.
+  if ! git diff --name-only --no-renames --diff-filter=d -z "${reformat_base}" HEAD \
+    | git add --pathspec-from-file=- --pathspec-file-nul \
+    || ! git checkout -q -- .; then
+    reformat_restore "cannot stage the reformatting's changes in $(pwd)"
+    return 1
+  fi
+  if git diff --cached --quiet; then
+    return 0
+  fi
+  if [ "$1" -eq 1 ]; then
+    if ! build_logged "$2"; then
+      reformat_restore "unable to build in $(pwd) after reformatting it"
+      return 1
+    fi
+    # Discard the build's changes to tracked files, which the commit omits,
+    # so that the working tree matches the index, as `commit_staged_again`
+    # requires to retry a commit that a pre-commit hook rejected, and so that
+    # later runs do not refuse to run (see `refuse_uncommitted_changes`).
+    reformat_built="$(print_nul_lines git diff --name-only --no-renames -z | paste -s -d ' ' -)"
+    if [ -n "${reformat_built}" ]; then
+      if ! git checkout -q -- .; then
+        reformat_restore "cannot discard the changes that the build made in $(pwd) after reformatting it"
+        return 1
+      fi
+      reformat_note "discarded the changes that the build made after reformatting to ${reformat_built}"
+    fi
+    set -- "${SCRIPT_DIR}"/compile-project
+  else
+    set --
+  fi
+  if ! commit_staged Reformat "$@"; then
+    echo "${SCRIPT_NAME}: cannot commit the reformatting's changes in $(pwd)" >&2
+    return 1
+  fi
+  echo "${SCRIPT_NAME}: reformatted $(pwd) in commit $(git rev-parse --short HEAD)" >&2
+}
+
+## Usage: reformat_note NOTE
+## For `reformat_commit`:  prints NOTE, prefixed by the current directory, and
+## appends it to the summary (see `append_summary`).
+reformat_note() {
+  reformat_note_line="in $(pwd): $1"
+  echo "${SCRIPT_NAME}: ${reformat_note_line}" >&2
+  append_summary "${reformat_note_line}"
+}
+
+## Usage: reformat_restore PROBLEM
+## For `reformat_commit`, which found the tracked files unchanged before it
+## reformatted them:  restores the tracked files in the current directory, the
+## top level of a working tree, both in the index and in the working tree, to
+## their contents at HEAD, and prints a diagnostic that starts with PROBLEM,
+## such as "unable to reformat DIR", and names the files that were restored.
+reformat_restore() {
+  # A file's staged contents can differ from HEAD even if its contents in the
+  # working tree do not, as when the build undid the formatter's change.
+  reformat_restored="$({
+    print_nul_lines git diff --cached --name-only --no-renames -z
+    print_nul_lines git diff HEAD --name-only --no-renames -z
+  } | sort -u | paste -s -d ' ' -)"
+  if [ -z "${reformat_restored}" ]; then
+    echo "${SCRIPT_NAME}: $1" >&2
+  elif git checkout -q HEAD -- .; then
+    echo "${SCRIPT_NAME}: $1; restored the files that the reformatting changed: ${reformat_restored}" >&2
+  else
+    echo "${SCRIPT_NAME}: $1; cannot restore the files that the reformatting changed: ${reformat_restored}" >&2
   fi
 }
 

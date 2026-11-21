@@ -7,8 +7,9 @@
 #   git-rebase-to [OPTIONS] FROM_DIR TO_DIR ...
 #   git-rebase-to [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ...
 #
-# OPTIONS are [--nocompile] [--no-pull-first] [--squash] [--llm | --no-llm]
-# [--claude | --codex] [--summary FILE], as for `git-push-to`.
+# OPTIONS are [--nocompile] [--noformat] [--no-pull-first] [--squash]
+# [--llm | --no-llm] [--claude | --codex] [--summary FILE], as for
+# `git-push-to`.
 #
 # The arguments are the same as those of `git-push-to`.  This command is
 # useful for maintaining a stack of GitHub pull requests, each of whose base
@@ -80,7 +81,7 @@ fi
 usage() {
   echo "Usage: ${SCRIPT_NAME} [OPTIONS] FROM_DIR TO_DIR ..." >&2
   echo "   or: ${SCRIPT_NAME} [OPTIONS] [ORG:]BRANCH [ORG:]BRANCH ..." >&2
-  echo "OPTIONS: [--nocompile] [--no-pull-first] [--squash] ${llm_options_usage} [--summary FILE]" >&2
+  echo "OPTIONS: [--nocompile] [--noformat] [--no-pull-first] [--squash] ${llm_options_usage} [--summary FILE]" >&2
   exit 1
 }
 num_args=0
@@ -94,7 +95,7 @@ for arg; do
   fi
   if [ "${in_options}" -eq 1 ]; then
     case "${arg}" in
-      --nocompile | --no-pull-first | --rebase | --squash) continue ;;
+      --nocompile | --noformat | --no-pull-first | --rebase | --squash) continue ;;
       --summary)
         summary_argument=1
         continue

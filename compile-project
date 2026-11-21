@@ -1,6 +1,7 @@
 #!/bin/sh
 
-# Compiles the project that contains the current or given directory.
+# Compiles the project that contains the current or given directory, or, with
+# --format, reformats its source code.
 #
 # Supports Gradle, Maven, and Make projects.  If no buildfile is found
 # at the top level, searches at (only) the next level down.
@@ -25,10 +26,24 @@
 # a non-empty value, then the exit status is failure.
 #
 # Usage:
-#   compile-project [--clean] [<directory>]
+#   compile-project [--clean | --format] [<directory>]
 #
 # If --clean is passed, then the project is cleaned before being compiled.
 # If the clean fails, the project is not compiled and the exit status is failure.
+# If --format is passed, then the project is reformatted rather than compiled,
+# by the formatter that its buildfile configures:
+#  * Gradle:  `gradlew spotlessApply` or `gradle spotlessApply`, if a Gradle
+#    buildfile refers to Spotless as `gradle_uses_spotless`, below, describes.
+#    The buildfiles are the files `*.gradle` and `*.gradle.kts` anywhere in
+#    the directory, including under `buildSrc/` or `build-logic/`, which can
+#    hold a convention plugin that applies Spotless.
+#  * Maven:  `mvnw spotless:apply` or `mvn spotless:apply`, if `pom.xml`
+#    mentions "spotless-maven-plugin".
+#  * Make:  `make reformat`, or else `make format`, if the Makefile has a rule
+#    for that target.
+# A project whose buildfile configures none of these is left unchanged, and
+# the exit status is success.  The flag variables below are not passed to the
+# formatter.
 # If variable GRADLE_ASSEMBLE_FLAGS is defined, it is passed to `gradlew assemble` or `gradle assemble`.
 # If a Gradle command fails, writing "Failed to exec spawn helper" to standard
 # error, and was not stopped by a signal, and some of the user's idle Gradle
@@ -70,11 +85,18 @@ unset GIT_INDEX_FILE
 CDPATH=''
 
 CLEAN=""
+FORMAT=""
 if [ "$#" -ge 1 ]; then
-  if [ "$1" = "--clean" ]; then
-    CLEAN="$1"
-    shift
-  fi
+  case "$1" in
+    --clean)
+      CLEAN="$1"
+      shift
+      ;;
+    --format)
+      FORMAT="$1"
+      shift
+      ;;
+  esac
 fi
 
 # SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
@@ -134,7 +156,7 @@ elif [ "$#" -eq 1 ]; then
     *) exit 1 ;;
   esac
 else
-  printf '%s\n' "Usage: ${SCRIPT_NAME} [--clean] [<directory>]" >&2
+  printf '%s\n' "Usage: ${SCRIPT_NAME} [--clean | --format] [<directory>]" >&2
   exit 1
 fi
 
@@ -245,13 +267,107 @@ run_gradle() {
   "${run_gradle_command}" --project-dir "${run_gradle_dir}" "$@" < /dev/null
 }
 
+# Returns 0 if a Gradle buildfile of the project in directory $1 refers to
+# Spotless, and 1 otherwise.  The buildfiles are the files `*.gradle` and
+# `*.gradle.kts` anywhere in $1, such as `$1/build.gradle`,
+# `$1/services/api/build.gradle.kts`, and a convention plugin under
+# `$1/buildSrc/` or `$1/build-logic/`, except under a directory that holds
+# version-control data, build output, or downloaded dependencies, such as
+# `.git`, `build`, `.gradle`, or `node_modules`.  A buildfile refers to
+# Spotless if a line names the plugin's id, as in
+# `id("com.diffplug.spotless")`, names a plugin of a version catalog whose
+# alias ends with "spotless", as in `alias(libs.plugins.spotless)`, or starts
+# a `spotless` block, as in `spotless {`.  A line that starts with a comment,
+# as in `// id("com.diffplug.spotless")` or a line ` * ...` within a block
+# comment, or that names Spotless only after a "/", as in a comment
+# `// TODO: adopt spotless`, does not count.  A version catalog, such as
+# `gradle/libs.versions.toml`, is not searched, because it can declare a
+# plugin that no project applies.
+gradle_uses_spotless() {
+  # Each pattern but the last requires that no "/" or leading "*" precede the
+  # mention, so that a comment does not count.
+  grep -r -q -E --include='*.gradle' --include='*.gradle.kts' \
+    --exclude-dir=.git --exclude-dir=.gradle --exclude-dir=build \
+    --exclude-dir=node_modules \
+    -e '^[[:space:]]*([^*/[:space:]][^/]*)?com\.diffplug\.spotless' \
+    -e '^[[:space:]]*([^*/[:space:]][^/]*)?plugins\.([A-Za-z0-9_]+\.)*spotless([^A-Za-z0-9_.]|$)' \
+    -e '^[[:space:]]*spotless[[:space:]]*\{' \
+    -- "$1"
+}
+
+# Prints the first of the targets "reformat" and "format" for which the
+# Makefile $1 has a rule, or nothing if it has a rule for neither.  A rule can
+# have several targets, as in "format reformat: ...".  A rule made by an
+# `include`d file is not found.
+make_format_target() {
+  for make_target in reformat format; do
+    # A rule's target is followed by ":", or by "::" for a double-colon rule.
+    # Colons that are followed by "=" are those of a variable assignment, such
+    # as "format := ...", "format ::= ...", or "format :::= ...", rather than
+    # those of a rule.
+    # The other targets of the rule precede or follow the target, separated
+    # by spaces.
+    if grep -q -E "^([^#:=[:space:]]+[[:space:]]+)*${make_target}([[:space:]]+[^#:=[:space:]]+)*[[:space:]]*::?([^:=]|\$)" "$1"; then
+      printf '%s\n' "${make_target}"
+      return
+    fi
+  done
+}
+
+# Sets $buildfile_found_here to 1 if a buildfile was found in directory $1, or to 0
+# if none was.  Returns the status of the formatter that the buildfile
+# configures (see the --format option, above), or 0 if no buildfile was found or
+# it configures no formatter.
+format_in_directory() {
+  dir="$1"
+  buildfile_found_here=1
+
+  if [ -f "$dir/gradlew" ] || [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
+    if ! gradle_uses_spotless "$dir"; then
+      return 0
+    fi
+    if [ -f "$dir/gradlew" ]; then
+      run_gradle "$dir/gradlew" "$dir" spotlessApply -q
+    else
+      run_gradle gradle "$dir" spotlessApply -q
+    fi
+    return $?
+  elif [ -f "$dir/mvnw" ] || [ -f "$dir/pom.xml" ]; then
+    if ! grep -q -e spotless-maven-plugin -- "$dir/pom.xml" 2> /dev/null; then
+      return 0
+    fi
+    if [ -f "$dir/mvnw" ]; then
+      (cd "$dir" && ./mvnw -q spotless:apply)
+    else
+      (cd "$dir" && mvn -q spotless:apply)
+    fi
+    return $?
+  elif [ -f "$dir/Makefile" ]; then
+    format_target="$(make_format_target "$dir/Makefile")"
+    if [ -z "${format_target}" ]; then
+      return 0
+    fi
+    (cd "$dir" && make "${format_target}")
+    return $?
+  else
+    # No buildfile was found.
+    buildfile_found_here=0
+    return 0
+  fi
+}
+
 # Sets $buildfile_found_here to 1 if a buildfile was found in directory $1, or to 0
 # if none was.  Returns the status of the build; or, if --clean was given and the
 # clean failed, the status of the clean, without building; or 0 if no buildfile
-# was found.
+# was found.  With --format, reformats rather than builds, as
+# `format_in_directory` does.
 # The "was a buildfile found?" answer is a variable rather than a reserved exit
 # status, because every exit status is one that a build command itself might return.
 compile_in_directory() {
+  if [ -n "$FORMAT" ]; then
+    format_in_directory "$1"
+    return $?
+  fi
   dir="$1"
   buildfile_found_here=1
 
@@ -262,7 +378,7 @@ compile_in_directory() {
     # shellcheck disable=SC2086 # Word splitting is desirable here.
     run_gradle "$dir/gradlew" "$dir" assemble -q ${GRADLE_ASSEMBLE_FLAGS}
     return $?
-  elif [ -f "$dir/build.gradle" ]; then
+  elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
     if [ -n "$CLEAN" ]; then
       run_gradle gradle "$dir" clean -q || return $?
     fi
@@ -301,7 +417,8 @@ compile_in_directory() {
 # each subdirectory of $toplevel that has one, stopping at the first build that
 # fails.  Returns the status of that build, or 0 if no build fails.  If no
 # buildfile is found and ERR_IF_NO_BUILDFILE is non-empty, prints a diagnostic
-# and returns 1.
+# and returns 1.  With --format, reformats rather than builds, as
+# `compile_in_directory` does.
 compile_project() {
   compile_in_directory "$toplevel"
   result=$?
