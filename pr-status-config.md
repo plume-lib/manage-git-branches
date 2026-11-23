@@ -183,10 +183,11 @@ The repository object's key in `"repos"` is the repository's name, such as
   ("depends on", "depend on", "builds on", "land", and "merge").  For
   example, with `["requires"]`, the description "This requires #12."
   makes #12 a prerequisite.  Matching ignores case.  The default is `[]`.
-* `"show_author"`:  true if the tables of PRs have an "Author" column.  The
-  default is false.  In an unblocked document, which can report on several
-  repositories, the column appears if any repository sets
-  `"show_author"`.
+* `"show_author"`:  true if the tables of PRs have an "Author" column, which
+  gives the GitHub login of the PR's author and precedes the "Assigned to"
+  column.  The default is true.  In an unblocked document, which can report
+  on several repositories, the column appears unless every repository sets
+  `"show_author"` to false.
 * `"routine_files"`:  a list of file names, such as `["CHANGELOG.md"]`,
   whose textual conflicts the documents do not report.  Each one is a base
   name, without a directory, and it matches a file of that name in any

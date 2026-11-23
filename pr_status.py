@@ -311,7 +311,7 @@ class Repo:
         self.dir_name = cfg.get("dir_name", self.name)
         self.default_branch = repo_default_branch(cfg)
         self.keywords = cfg.get("dependency_keywords", [])
-        self.show_author = cfg.get("show_author", False)
+        self.show_author = cfg.get("show_author", True)
         # The number of days, such as 730:  a PR is dormant if its head commit's committer
         # date is more than this many days ago.  None if no PR is dormant.
         self.dormant_after_days: int | None = cfg.get(
@@ -2876,13 +2876,16 @@ def gen_details(model: Model, cfg: dict[str, Any], label: str | None) -> list[st
     shown = [n for n in sorted(model.open) if model.in_graph(n) or model.external[n]]
     if not shown:
         return []
-    lines = [
-        (
-            "| PR | Assigned to | Depends on | Stated in description"
-            " | Branch contains prerequisites' commits | Notes |"
-        ),
-        "| --- | --- | --- | --- | --- | --- |",
+    heading = [
+        "PR",
+        *(["Author"] if r.show_author else []),
+        "Assigned to",
+        "Depends on",
+        "Stated in description",
+        "Branch contains prerequisites' commits",
+        "Notes",
     ]
+    lines = [table_row(heading), "|" + " --- |" * len(heading)]
     for n in shown:
         t = title(model, cfg, n)
         has_prerequisite = bool(model.direct[n] or model.external[n])
@@ -2893,7 +2896,9 @@ def gen_details(model: Model, cfg: dict[str, Any], label: str | None) -> list[st
         # The "Depends on" cell of a PR that has a prerequisite marks the PR's conflict with
         # the default branch, unless a direct prerequisite conflicts too.
         notes = detail_notes(model, cfg, n, master=not has_prerequisite)
-        lines.append(table_row([r.link(n) + " " + t, model.assigned_to(n), *cells, notes]))
+        author = [r.prs[n]["author"]["login"]] if r.show_author else []
+        row = [r.link(n) + " " + t, *author, model.assigned_to(n), *cells, notes]
+        lines.append(table_row(row))
     return headed("Dependency details", label, lines)
 
 
@@ -3003,16 +3008,23 @@ def gen_independent(model: Model, cfg: dict[str, Any], label: str | None) -> lis
     if not independent:
         return []
     notes = cfg["repos"][r.name].get("independent_notes", {})
-    lines = [
-        "| PR | Assigned to | Unresolved threads | Title | Textual conflicts | Notes |",
-        "| --- | --- | --- | --- | --- | --- |",
+    heading = [
+        "PR",
+        *(["Author"] if r.show_author else []),
+        "Assigned to",
+        "Unresolved threads",
+        "Title",
+        "Textual conflicts",
+        "Notes",
     ]
+    lines = [table_row(heading), "|" + " --- |" * len(heading)]
     for n in independent:
         note = notes.get(str(n), "")
         auto = auto_notes(model, n, master=False)
         note = capitalize("; ".join(([note] if note else []) + auto))
         cells = [
             r.link(n),
+            *([r.prs[n]["author"]["login"]] if r.show_author else []),
             model.assigned_to(n),
             model.unresolved_threads(n),
             title(model, cfg, n),
