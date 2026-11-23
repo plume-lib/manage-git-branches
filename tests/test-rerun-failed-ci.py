@@ -36,6 +36,19 @@ GRADLE_429 = (
     " from server: Too Many Requests"
 )
 
+# Maven's warning that Maven Central refused to serve metadata.
+MAVEN_CENTRAL_METADATA_403 = (
+    "[WARNING] Could not transfer metadata /.meta/prefixes.txt from/to central"
+    " (https://repo.maven.apache.org/maven2): HTTP Status: 403"
+)
+# Maven's error that Maven Central refused to serve an artifact that it holds.
+MAVEN_CENTRAL_ARTIFACT_403 = (
+    "[ERROR] Plugin org.apache.felix:maven-bundle-plugin:5.1.8 or one of its dependencies"
+    " could not be resolved: Could not transfer artifact"
+    " org.apache.felix:maven-bundle-plugin:pom:5.1.8 from/to central"
+    " (https://repo.maven.apache.org/maven2): HTTP Status: 403"
+)
+
 # A location in Maven Central of an artifact that Gradle did not find.
 OPTIONS_POM = "https://repo.maven.apache.org/maven2/org/plumelib/options/3.0.0/options-3.0.0.pom"
 # Gradle's report that it did not find the artifact at OPTIONS_POM.
@@ -464,6 +477,36 @@ class ClassifyTest(unittest.TestCase):
                 ),
                 "#  SIGSEGV (0xb) at pc=0x000074a6b3df9d00, pid=10859, tid=0x000074a68e3fe6c0",
             ),
+            # Maven Central refused to serve an artifact that it holds.  The result is
+            # truncated to 200 characters.
+            (
+                f"{MAVEN_CENTRAL_METADATA_403}\n{MAVEN_CENTRAL_ARTIFACT_403}",
+                MAVEN_CENTRAL_ARTIFACT_403[:200],
+            ),
+            # Maven Central refused to serve an artifact, in another wording of Maven.
+            (
+                (
+                    "Could not transfer artifact com.example:x:pom:1.0 from/to central"
+                    " (https://repo.maven.apache.org/maven2): status code: 403, reason"
+                    " phrase: Forbidden (403)"
+                ),
+                None,
+            ),
+            # GitHub refused a request, as it does for a client that exceeds its rate limit.
+            (
+                (
+                    "> Could not GET 'https://raw.githubusercontent.com/a/b/main/x.gradle'."
+                    " Received status code 403 from server: Forbidden"
+                ),
+                None,
+            ),
+            (
+                (
+                    "java.io.IOException: Server returned HTTP response code: 403 for URL:"
+                    " https://api.github.com/repos/a/b/releases"
+                ),
+                None,
+            ),
             (
                 (
                     "##[error]The job was abandoned because agent did not renew the lock."
@@ -519,6 +562,27 @@ class ClassifyTest(unittest.TestCase):
         """A log that does not show a transient failure yields nothing."""
         for log in [
             "Execution failed for task ':spotlessJavaCheck'.\nBUILD FAILED in 28s",
+            # Maven Central refused to serve metadata, which Maven reports only as a warning.
+            f"{MAVEN_CENTRAL_METADATA_403}\n[ERROR] COMPILATION ERROR",
+            # A repository other than Maven Central refused to serve an artifact.
+            (
+                "Could not transfer artifact com.example:x:pom:1.0 from/to private"
+                " (https://maven.example.com/releases): HTTP Status: 403"
+            ),
+            (
+                "Could not transfer artifact com.example:x:pom:1.0 from/to private"
+                " (https://maven.example.com/releases): status code: 403, reason phrase:"
+                " Forbidden (403)"
+            ),
+            (
+                "   > Could not GET 'https://maven.example.com/x.pom'. Received status code"
+                " 403 from server: Forbidden"
+            ),
+            # GitHub Packages refused a request; the usual cause is missing credentials.
+            (
+                "   > Could not GET 'https://maven.pkg.github.com/a/b/x.pom'. Received status"
+                " code 403 from server: Forbidden"
+            ),
             (
                 "Could not GET 'https://repo.maven.apache.org/x.pom'. Received status code 404"
                 " from server: Not Found"

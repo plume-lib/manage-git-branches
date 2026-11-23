@@ -25,24 +25,20 @@ or every failed job of the given workflow or run.
 The supported CI services are Azure Pipelines, CircleCI, and GitHub Actions.  A failed
 check from any other service is reported and skipped.
 
-A job's failure is transient if the log of its failed steps contains a message about a
-network problem (such as a timeout, a refused or reset connection, or a failed DNS
-lookup), an HTTP status code that indicates an overloaded or rate-limited server (such
-as 429 or 503), a lost or unresponsive CI runner, a segmentation fault (SIGSEGV) that
-crashed a Java virtual machine, or a GitHub-hosted runner that never picked up the job.
-TRANSIENT_PATTERNS below lists the messages.  A job's failure is also transient if
-Gradle did not find an artifact and the Gradle Plugin Portal is the only location that
-Gradle searched for it, or if Gradle did not find some artifacts and, for each one, the
+A job's failure is transient if the log of its failed steps contains a message that
+TRANSIENT_PATTERNS below lists, such as a message about a network problem, an overloaded
+or rate-limited server, or a lost CI runner.  A job's failure is also transient if Gradle
+did not find an artifact and the Gradle Plugin Portal is the only location that Gradle
+searched for it, or if Gradle did not find some artifacts and, for each one, the
 `gradlew-retry` script of plume-lib/plume-scripts reported that some location where
 Gradle searched for it serves it.  If the log shows that `gradlew-retry` ran Gradle
 again, then only the output of the last run of Gradle is examined, except for the
 reports of `gradlew-retry` about locations that serve artifacts.  The log of an Azure
-Pipelines or GitHub Actions job also contains the errors that the CI service reports
-for the job, which describe failures, such as a lost runner or a job that no runner
-picked up, that leave no log.  Shell trace lines, which start with `+ `, and the
-scripts that Azure Pipelines and GitHub Actions echo before running a step, are
-ignored, because a script that itself looks for such messages, in order to retry a
-command, contains them.
+Pipelines or GitHub Actions job also contains the errors that the CI service reports for
+the job, which describe failures, such as a lost runner or a job that no runner picked
+up, that leave no log.  Shell trace lines, which start with `+ `, and the scripts that
+Azure Pipelines and GitHub Actions echo before running a step, are ignored, because a
+script that itself looks for such messages, in order to retry a command, contains them.
 An Azure Pipelines job that was abandoned, such as one whose agent stopped responding,
 is examined like a failed one.  A CircleCI job whose status is `infrastructure_fail` is
 transient.  A cancelled GitHub Actions job is examined too, because GitHub Actions
@@ -126,6 +122,22 @@ TRANSIENT_PATTERNS = [
     # project's own native (JNI) code or one from a JIT-compiler bug that the same code
     # always triggers.  Only `--max-attempts` limits the reruns of such a crash.
     r"#\s+SIGSEGV \(0xb\) at pc=",
+    # An artifact that Maven Central refused to serve, as Maven reports it in a line such
+    # as "Could not transfer artifact org.apache.felix:maven-bundle-plugin:pom:5.1.8
+    # from/to central (https://repo.maven.apache.org/maven2): HTTP Status: 403" or, in
+    # some versions of Maven, "...: status code: 403, reason phrase: Forbidden (403)".
+    # Maven Central sometimes responds with status 403 (Forbidden) to a request for a file
+    # that it holds; for a file that it does not hold, it responds with status 404.  Maven
+    # Central also responds with status 403 to a client that it blocks, such as one from a
+    # blocked IP address; that failure recurs on every run, and only `--max-attempts`
+    # limits its reruns.  Status 403 from another repository is not transient (neither
+    # this pattern nor any other matches it), because the usual cause is missing or wrong
+    # credentials.  A failure to transfer metadata, such as "Could not transfer metadata
+    # /.meta/prefixes.txt", is not matched, because Maven reports it only as a warning.
+    (
+        r"Could not transfer artifact .* \(https://repo1?\.maven(\.apache)?\.org/maven2/?\):"
+        r" (HTTP Status|status code): 403\b"
+    ),
     # A GitHub-hosted runner that never picked up the job.  A job that waited for a runner
     # until it timed out ("while awaiting a runner") is not transient, because the usual
     # cause is a `runs-on` label that matches no runner or a self-hosted runner that is
