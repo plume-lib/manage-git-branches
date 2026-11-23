@@ -147,17 +147,19 @@ The repository object's key in `"repos"` is the repository's name, such as
 * `"prefix"`:  the text that precedes a PR number when the documents refer
   to a PR, such as `"daikon#"` (which yields "daikon#95") or `"#"` (which
   yields "#95").  The default is `"#"` if `"repos"` has one repository, and
-  otherwise the repository's name followed by "#", as in `"daikon#"`.  A
-  table of a repository's PRs omits the prefix in every column other than
-  the PR column, as in "#95", when it refers to a PR of the same
-  repository.  A reference to a PR of another configured repository uses
-  that repository's prefix, as in "fjalar#95", unless that prefix is `"#"`;
-  then it uses the repository's GitHub slug, as in "codespecs/fjalar#95".
-  Two repositories must not have the same prefix, ignoring case, so that a
-  reference is unambiguous.  `--highlight` names a PR as `REPO#N`, where
-  `REPO` is the prefix without its final "#", the repository's name, or its
-  GitHub slug, as in `--highlight daikon#95` or
-  `--highlight codespecs/daikon#95`.
+  otherwise the repository's name followed by "#", as in `"daikon#"`.  In
+  every column other than the PR column, a table of a repository's PRs
+  names a PR of the same repository as "#N", as in "#95", rather than with
+  the prefix.  The table determines the repository:  in such a cell, "#95"
+  means PR 95 of the table's repository, even if another repository's
+  prefix is `"#"`.  A reference to a PR of another configured repository
+  uses that repository's prefix, as in "fjalar#95", unless that prefix is
+  `"#"`; then it uses the repository's GitHub slug, as in
+  "codespecs/fjalar#95".  Two repositories must not have the same prefix,
+  ignoring case, so that a reference outside such a cell is unambiguous.
+  `--highlight` names a PR as `REPO#N`, where `REPO` is the prefix without
+  its final "#", the repository's name, or its GitHub slug, as in
+  `--highlight daikon#95` or `--highlight codespecs/daikon#95`.
 * `"label"`:  the repository's name as the documents show it to a reader,
   such as `"Daikon"`.  It appears in headings and list items when the
   documents report on several repositories, as in "## Unblocked PRs

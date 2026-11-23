@@ -357,7 +357,8 @@ class Repo:
 
         Args:
             n: a PR number, such as 95.
-            short: True if the link's text omits the repository's prefix, as in "#95".
+            short: True if the link's text is "#N", as in "#95", rather than the PR's
+                reference, which uses the repository's prefix.
 
         Returns:
             A link whose text is "#N" if short is true, or else the PR's reference, and whose
@@ -391,8 +392,8 @@ class Repo:
         """Return Markdown links to the PRs ns.
 
         Args:
-            ns: PR numbers, such as [95, 100].
-            short: True if the links' text omits the repository's prefix, as for Repo.link.
+            ns: a collection of PR numbers, such as [95, 100].
+            short: True if each link's text is "#N", as for Repo.link.
 
         Returns:
             The PRs' links, in numeric order, as an English list.
@@ -749,7 +750,7 @@ def external_link(model: Model, ref: str) -> str:
 
     Args:
         model: a Model.
-        ref: a PR in a repository other than model's, such as "owner/repo#5".
+        ref: the PR, in a repository other than model's, such as "owner/repo#5".
 
     Returns:
         A link whose target is the PR on GitHub.  If the PR's repository is one of the models
@@ -1956,7 +1957,7 @@ def apply_description_updates(
     return failures
 
 
-def needed_by(model: Model, n: int, short: bool = True) -> str:
+def needed_by(model: Model, n: int, short: bool = False) -> str:
     """Return the "Needed by" cell of PR n.
 
     Args:
@@ -1995,7 +1996,7 @@ def external_failed_mark(model: Model, ref: str) -> str:
     return other.repo.failed_mark(int(n)) if other else ""
 
 
-def depends_on(model: Model, n: int, mark_failed: bool = False, short: bool = True) -> str:
+def depends_on(model: Model, n: int, mark_failed: bool = False, short: bool = False) -> str:
     """Return the "Depends on" cell of PR n.
 
     If mark_failed is true, each prerequisite whose CI failed is followed by a red X, and
@@ -2609,7 +2610,7 @@ def unblocked_doc(
                 m.unresolved_threads(n),
                 title(m, cfg, n),
                 pr_directory(r, n, base),
-                needed_by(m, n),
+                needed_by(m, n, short=True),
                 unblocked_notes(m, cfg, n),
             ]
             lines.append(table_row(cells))
@@ -2635,7 +2636,7 @@ def unblocked_doc(
                 external_link(m, e) for e in m.external[n]
             ]
             # In a cycle of dependencies, a PR can have no direct prerequisite.
-            on_text = ", ".join(on) or depends_on(m, n, short=False)
+            on_text = ", ".join(on) or depends_on(m, n)
             items.append(f"{m.repo.link(n)} (on {on_text})")
         if items:
             lines.append(f"* {m.repo.label}: {', '.join(items)}.")
@@ -2856,7 +2857,7 @@ def dependency_cells(model: Model, n: int, mark_failed: bool = False) -> list[st
         stated_text = "no"
     else:
         stated_text = f"{and_list(stated)}:  yes; {and_list(unstated)}:  no"
-    return [depends_on(model, n, mark_failed), stated_text, branch_contains(model, n)]
+    return [depends_on(model, n, mark_failed, short=True), stated_text, branch_contains(model, n)]
 
 
 def branch_contains(model: Model, n: int) -> str:
@@ -2948,7 +2949,7 @@ def gen_prerequisites(model: Model, label: str | None) -> list[str]:
     for n in sorted(model.open):
         if model.direct[n] or not model.dependents[n]:
             continue
-        extra = [f"needed by {needed_by(model, n, short=False)}"]
+        extra = [f"needed by {needed_by(model, n)}"]
         who = model.assignees(n)
         if who:
             extra.append("assigned to " + and_list(who))
@@ -3128,7 +3129,7 @@ def gen_unblocked(model: Model, cfg: dict[str, Any], base: str, label: str | Non
             (
                 n,
                 [
-                    needed_by(model, n),
+                    needed_by(model, n, short=True),
                     textual_conflicts(model, cfg, n),
                     unblocked_notes(model, cfg, n, master=False),
                 ],

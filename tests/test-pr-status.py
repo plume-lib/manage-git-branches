@@ -1035,15 +1035,15 @@ class DependsOnTest(unittest.TestCase):
         model = self.prerequisites_model("repo#", "other#")
         url = "https://github.com/{}/pull/{}".format
         self.assertEqual(
-            pr_status.depends_on(model, 2),
+            pr_status.depends_on(model, 2, short=True),
             f"[#3]({url('owner/repo', 3)}) and [other#5]({url('other/repo', 5)})",
         )
         self.assertEqual(
-            pr_status.depends_on(model, 2, short=False),
+            pr_status.depends_on(model, 2),
             f"[repo#3]({url('owner/repo', 3)}) and [other#5]({url('other/repo', 5)})",
         )
         self.assertEqual(
-            pr_status.needed_by(model, 3),
+            pr_status.needed_by(model, 3, short=True),
             f"[#2]({url('owner/repo', 2)}) (and transitively [#1]({url('owner/repo', 1)}))",
         )
         with mock.patch.object(model, "head_status", return_value="newest"):
@@ -1069,7 +1069,7 @@ class DependsOnTest(unittest.TestCase):
         """A PR of another repository whose prefix is "#" is named by its GitHub slug."""
         model = self.prerequisites_model("repo#", "#")
         self.assertEqual(
-            pr_status.depends_on(model, 2),
+            pr_status.depends_on(model, 2, short=True),
             "[#3](https://github.com/owner/repo/pull/3)"
             " and [other/repo#5](https://github.com/other/repo/pull/5)",
         )
