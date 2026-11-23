@@ -28,8 +28,9 @@ check from any other service is reported and skipped.
 A job's failure is transient if the log of its failed steps contains a message about a
 network problem (such as a timeout, a refused or reset connection, or a failed DNS
 lookup), an HTTP status code that indicates an overloaded or rate-limited server (such
-as 429 or 503), a lost or unresponsive CI runner, a segmentation fault (SIGSEGV) that
-crashed a Java virtual machine, or a GitHub-hosted runner that never picked up the job.
+as 429 or 503, or 403 from Maven Central), a lost or unresponsive CI runner, a
+segmentation fault (SIGSEGV) that crashed a Java virtual machine, or a GitHub-hosted
+runner that never picked up the job.
 TRANSIENT_PATTERNS below lists the messages.  A job's failure is also transient if
 Gradle did not find an artifact and the Gradle Plugin Portal is the only location that
 Gradle searched for it, or if Gradle did not find some artifacts and, for each one, the
@@ -126,6 +127,19 @@ TRANSIENT_PATTERNS = [
     # project's own native (JNI) code or one from a JIT-compiler bug that the same code
     # always triggers.  Only `--max-attempts` limits the reruns of such a crash.
     r"#\s+SIGSEGV \(0xb\) at pc=",
+    # An artifact that Maven Central refused to serve, as Maven reports it in a line such
+    # as "Could not transfer artifact org.apache.felix:maven-bundle-plugin:pom:5.1.8
+    # from/to central (https://repo.maven.apache.org/maven2): HTTP Status: 403".  Maven
+    # Central sometimes responds with status 403 (Forbidden) to a request for a file that
+    # it holds; for a file that it does not hold, it responds with status 404.  Status 403
+    # from another repository is not transient, because the usual cause is missing or
+    # wrong credentials.  A failure to transfer metadata, such as "Could not transfer
+    # metadata /.meta/prefixes.txt", is not matched, because Maven reports it only as a
+    # warning.
+    (
+        r"Could not transfer artifact .* \(https://repo1?\.maven(\.apache)?\.org/maven2/?\):"
+        r" HTTP Status: 403\b"
+    ),
     # A GitHub-hosted runner that never picked up the job.  A job that waited for a runner
     # until it timed out ("while awaiting a runner") is not transient, because the usual
     # cause is a `runs-on` label that matches no runner or a self-hosted runner that is
