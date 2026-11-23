@@ -352,13 +352,19 @@ class Repo:
         """
         return f"https://github.com/{self.gh}/pull/{n}"
 
-    def link(self, n: int) -> str:
+    def link(self, n: int, short: bool = False) -> str:
         """Return a Markdown link to PR n.
 
+        Args:
+            n: a PR number, such as 95.
+            short: True if the link's text omits the repository's prefix, as in "#95".
+
         Returns:
-            A link whose text is the PR's reference and whose target is the PR on GitHub.
+            A link whose text is "#N" if short is true, or else the PR's reference, and whose
+            target is the PR on GitHub.
         """
-        return highlight(self.gh, n, f"[{self.ref(n)}]({self.url(n)})")
+        text = f"#{n}" if short else self.ref(n)
+        return highlight(self.gh, n, f"[{text}]({self.url(n)})")
 
     def failed_mark(self, n: int) -> str:
         """Return the mark that a link to PR n carries if the PR's CI failed.
@@ -381,13 +387,17 @@ class Repo:
         """
         return and_list(self.ref(n) for n in sorted(ns))
 
-    def links(self, ns: Iterable[int]) -> str:
+    def links(self, ns: Iterable[int], short: bool = False) -> str:
         """Return Markdown links to the PRs ns.
+
+        Args:
+            ns: PR numbers, such as [95, 100].
+            short: True if the links' text omits the repository's prefix, as for Repo.link.
 
         Returns:
             The PRs' links, in numeric order, as an English list.
         """
-        return and_list(self.link(n) for n in sorted(ns))
+        return and_list(self.link(n, short=short) for n in sorted(ns))
 
     def state_of(self, n: int) -> str | None:
         """Return the state of PR n, which is not open.
@@ -734,13 +744,22 @@ def external_state(ref: str) -> str | None:
     return EXTERNAL_STATE[ref]
 
 
-def external_link(ref: str) -> str:
-    """Return a Markdown link to a PR "owner/repo#N" in another repository.
+def external_link(model: Model, ref: str) -> str:
+    """Return a Markdown link to the given PR in another repository.
+
+    Args:
+        model: a Model.
+        ref: a PR in a repository other than model's, such as "owner/repo#5".
 
     Returns:
-        A link whose text is ref and whose target is the PR on GitHub.
+        A link whose target is the PR on GitHub.  If the PR's repository is one of the models
+        that unite_partners united with model, and its prefix is not just "#", the link's
+        text is the PR's reference, such as "fjalar#5" (see Repo.ref); otherwise it is ref.
     """
     gh, n = ref.split("#")
+    other = model.by_gh.get(gh.lower())
+    if other and other.repo.prefix != "#":
+        return other.repo.link(int(n))
     return highlight(gh, int(n), f"[{ref}](https://github.com/{gh}/pull/{n})")
 
 
@@ -1937,8 +1956,14 @@ def apply_description_updates(
     return failures
 
 
-def needed_by(model: Model, n: int) -> str:
+def needed_by(model: Model, n: int, short: bool = True) -> str:
     """Return the "Needed by" cell of PR n.
+
+    Args:
+        model: a Model.
+        n: the number of an open PR of model's repository, such as 123.
+        short: True if the cell names each PR as "#N" rather than with the repository's
+            prefix, as for Repo.link.
 
     Returns:
         The PR's direct dependents, followed by its transitive ones, or "" if it has none.
@@ -1947,10 +1972,10 @@ def needed_by(model: Model, n: int) -> str:
     if not direct:
         return ""
     r = model.repo
-    text = r.links(direct)
+    text = r.links(direct, short=short)
     more = model.all_dependents[n] - direct
     if more:
-        text += f" (and transitively {r.links(more)})"
+        text += f" (and transitively {r.links(more, short=short)})"
     return text
 
 
@@ -1970,11 +1995,13 @@ def external_failed_mark(model: Model, ref: str) -> str:
     return other.repo.failed_mark(int(n)) if other else ""
 
 
-def depends_on(model: Model, n: int, mark_failed: bool = False) -> str:
+def depends_on(model: Model, n: int, mark_failed: bool = False, short: bool = True) -> str:
     """Return the "Depends on" cell of PR n.
 
     If mark_failed is true, each prerequisite whose CI failed is followed by a red X, and
-    each open prerequisite whose CI results GitHub could not say is followed by a "?".
+    each open prerequisite whose CI results GitHub could not say is followed by a "?".  If
+    short is true, the cell names each PR of model's repository as "#N" rather than with the
+    repository's prefix, as for Repo.link.
 
     Returns:
         The PR's direct prerequisites, followed by its transitive ones.  Shuffle arrows (🔀)
@@ -1985,10 +2012,10 @@ def depends_on(model: Model, n: int, mark_failed: bool = False) -> str:
     r = model.repo
 
     def link(d: int) -> str:
-        return r.link(d) + (r.failed_mark(d) if mark_failed else "")
+        return r.link(d, short=short) + (r.failed_mark(d) if mark_failed else "")
 
     def ext_link(e: str) -> str:
-        return external_link(e) + (external_failed_mark(model, e) if mark_failed else "")
+        return external_link(model, e) + (external_failed_mark(model, e) if mark_failed else "")
 
     conflicting = model.conflicting_prerequisites(n) & model.direct[n]
     items = [link(d) + (" 🔀" if d in conflicting else "") for d in sorted(model.direct[n])] + [
@@ -2012,7 +2039,8 @@ def auto_notes(model: Model, n: int, master: bool = True) -> list[str]:
     "Depends on".
 
     Returns:
-        Note fragments, each starting with a lowercase letter.
+        Note fragments, each starting with a lowercase letter, which name each PR of model's
+        repository as "#N".
     """
     r = model.repo
     notes = []
@@ -2021,13 +2049,15 @@ def auto_notes(model: Model, n: int, master: bool = True) -> list[str]:
     elif n in model.cycle_affected:
         notes.append("it depends on a cycle of dependencies")
     if n in model.lands_into:
-        notes.append(f"it fixes, and lands into, {r.link(model.lands_into[n])}'s branch")
+        notes.append(
+            f"it fixes, and lands into, {r.link(model.lands_into[n], short=True)}'s branch"
+        )
     elif n in model.base_pr:
-        notes.append(f"its base branch is {r.link(model.base_pr[n])}'s branch")
+        notes.append(f"its base branch is {r.link(model.base_pr[n], short=True)}'s branch")
     landed = [c.number for c in model.stated_closed[n] if c.state == "landed"]
     if landed:
         notes.append(
-            f"its description still names the landed {r.links(landed)} as "
+            f"its description still names the landed {r.links(landed, short=True)} as "
             + ("a prerequisite" if len(landed) == 1 else "prerequisites")
         )
     if master and n in r.master_conflicts:
@@ -2602,10 +2632,11 @@ def unblocked_doc(
         items = []
         for n in m.blocked():
             on = [m.repo.link(d) for d in sorted(m.direct[n])] + [
-                external_link(e) for e in m.external[n]
+                external_link(m, e) for e in m.external[n]
             ]
             # In a cycle of dependencies, a PR can have no direct prerequisite.
-            items.append(f"{m.repo.link(n)} (on {', '.join(on) or depends_on(m, n)})")
+            on_text = ", ".join(on) or depends_on(m, n, short=False)
+            items.append(f"{m.repo.link(n)} (on {on_text})")
         if items:
             lines.append(f"* {m.repo.label}: {', '.join(items)}.")
     if flt != "all":
@@ -2801,7 +2832,7 @@ def dependency_cells(model: Model, n: int, mark_failed: bool = False) -> list[st
     """Return the dependency cells of PR n, which has a prerequisite.
 
     If mark_failed is true, each prerequisite in the "Depends on" cell whose CI failed is
-    followed by a red X.
+    followed by a red X.  The cells name each PR of model's repository as "#N".
 
     Returns:
         The "Depends on", "Stated in description", and
@@ -2810,10 +2841,12 @@ def dependency_cells(model: Model, n: int, mark_failed: bool = False) -> list[st
     r = model.repo
     direct = sorted(model.direct[n])
     stated = [
-        r.link(d) for d in direct if d in model.stated[n] or n in model.stated_dependents[d]
-    ] + [external_link(e) for e in model.external[n]]
+        r.link(d, short=True)
+        for d in direct
+        if d in model.stated[n] or n in model.stated_dependents[d]
+    ] + [external_link(model, e) for e in model.external[n]]
     unstated = [
-        r.link(d)
+        r.link(d, short=True)
         for d in direct
         if d not in model.stated[n] and n not in model.stated_dependents[d]
     ]
@@ -2831,7 +2864,8 @@ def branch_contains(model: Model, n: int) -> str:
 
     The cell is about the branches that PR n's branch is updated from (see
     Model.update_direct), such as a fix's base PR's branch.  It is not about a fix to PR n,
-    whose commits PR n's branch receives only when the fix lands.
+    whose commits PR n's branch receives only when the fix lands.  The cell names each PR
+    as "#N".
 
     Returns:
         "not applicable" if PR n's branch is updated from no other PR's branch; "yes" if it
@@ -2850,12 +2884,12 @@ def branch_contains(model: Model, n: int) -> str:
     parts = []
     if newest:
         parts.append(
-            f"lacks the newest commits of {r.links(newest)}"
+            f"lacks the newest commits of {r.links(newest, short=True)}"
             if len(newest) > 1
-            else f"lacks {r.link(newest[0])}'s newest commits"
+            else f"lacks {r.link(newest[0], short=True)}'s newest commits"
         )
     if none:
-        parts.append(f"lacks every commit of {r.links(none)}")
+        parts.append(f"lacks every commit of {r.links(none, short=True)}")
     return f"no ({'; '.join(parts)})"
 
 
@@ -2914,7 +2948,7 @@ def gen_prerequisites(model: Model, label: str | None) -> list[str]:
     for n in sorted(model.open):
         if model.direct[n] or not model.dependents[n]:
             continue
-        extra = [f"needed by {needed_by(model, n)}"]
+        extra = [f"needed by {needed_by(model, n, short=False)}"]
         who = model.assignees(n)
         if who:
             extra.append("assigned to " + and_list(who))
@@ -2930,7 +2964,7 @@ def textual_conflicts(model: Model, cfg: dict[str, Any], n: int) -> str:
 
     If PR n conflicts with the default branch or with a neighbor in a chain of dependencies
     (a direct prerequisite or a direct dependent, in the landing graph or the update graph),
-    the cell gives only those conflicts.
+    the cell gives only those conflicts.  The cell names each PR as "#N".
 
     Returns:
         The non-routine files in which PR n conflicts with the default branch and with other
@@ -2970,7 +3004,7 @@ def textual_conflicts(model: Model, cfg: dict[str, Any], n: int) -> str:
         by_partners[frozenset(partners)].append(f)
 
     def partner_list(partners: frozenset[int | None]) -> str:
-        prs = [r.link(m) for m in sorted(m for m in partners if m is not None)]
+        prs = [r.link(m, short=True) for m in sorted(m for m in partners if m is not None)]
         return and_list(([f"`{r.default_branch}`"] if None in partners else []) + prs)
 
     groups = [

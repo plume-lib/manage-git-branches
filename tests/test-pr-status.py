@@ -606,7 +606,7 @@ class ModelTest(unittest.TestCase):
         )
         model.repo.master_conflicts = {}
         model.repo.pair_conflicts = {(1, 3): ["a.txt"], (2, 3): ["b.txt"]}
-        model.repo.link = lambda n: f"#{n}"
+        model.repo.link = lambda n, **_: f"#{n}"
         model.excluded = set()
         cfg = {"repos": {model.repo.name: {}}}
         self.assertEqual(
@@ -616,7 +616,7 @@ class ModelTest(unittest.TestCase):
     def test_branch_contains_for_fix(self):
         """The cell says whether a fix's branch has its base PR's current commits."""
         model = self.model({1: "", 2: "Land before #1."}, {(2, 1)}, bases={2: 1})
-        model.repo.link = lambda n: f"#{n}"
+        model.repo.link = lambda n, **_: f"#{n}"
         with mock.patch.object(model, "head_status", return_value="newest"):
             self.assertEqual(pr_status.branch_contains(model, 2), "no (lacks #1's newest commits)")
         self.assertEqual(pr_status.branch_contains(model, 1), "not applicable")
@@ -626,8 +626,8 @@ class ModelTest(unittest.TestCase):
         model = self.model({1: "", 2: "Land before #1."}, {(2, 1)}, bases={2: 1})
         model.repo.master_conflicts = {}
         model.repo.pair_conflicts = {}
-        model.repo.link = lambda n: f"#{n}"
-        model.repo.links = lambda ns: pr_status.and_list(f"#{n}" for n in sorted(ns))
+        model.repo.link = lambda n, **_: f"#{n}"
+        model.repo.links = lambda ns, **_: pr_status.and_list(f"#{n}" for n in sorted(ns))
         model.repo.prs[2]["assignees"] = []
         self.assertEqual(pr_status.depends_on(model, 1), "#2")
         self.assertEqual(pr_status.needed_by(model, 2), "#1")
@@ -711,8 +711,8 @@ class ModelTest(unittest.TestCase):
         repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(), set(), set())
         repo.master_conflicts = {1: ["c.txt"], 3: ["c.txt"]}
         repo.pair_conflicts = {(1, 2): ["b.txt"], (1, 3): ["c.txt"], (2, 3): ["a.txt"]}
-        repo.link = lambda n: f"#{n}"
-        repo.links = lambda ns: pr_status.and_list(f"#{n}" for n in sorted(ns))
+        repo.link = lambda n, **_: f"#{n}"
+        repo.links = lambda ns, **_: pr_status.and_list(f"#{n}" for n in sorted(ns))
         return model
 
     def test_unresolved_threads_shows_conflict_with_direct_prerequisite(self):
@@ -943,7 +943,7 @@ class HighlightTest(unittest.TestCase):
             )
             self.assertEqual(repo.link(2), "[#2](https://github.com/Owner/Repo/pull/2)")
             self.assertEqual(
-                pr_status.external_link("other/repo#5"),
+                pr_status.external_link(types.SimpleNamespace(by_gh={}), "other/repo#5"),
                 '<span style="background-color:#fcc">'
                 "**[other/repo#5](https://github.com/other/repo/pull/5)**</span>",
             )
@@ -953,18 +953,18 @@ class DependsOnTest(unittest.TestCase):
     """Tests for depends_on."""
 
     @staticmethod
-    def repo(gh, failed):
+    def repo(gh, failed, prefix="#"):
         """Build a Repo whose CI results are loaded.
 
         Returns:
-            A Repo with GitHub slug gh, whose PRs in failed failed CI.
+            A Repo with GitHub slug gh and the given prefix, whose PRs in failed failed CI.
         """
         repo = pr_status.Repo(
             gh,
             {
                 "gh": gh,
                 "clone": "/base/repo",
-                "prefix": "#",
+                "prefix": prefix,
                 "label": gh,
                 "node_prefix": "pr",
                 "default_branch": "master",
@@ -973,14 +973,18 @@ class DependsOnTest(unittest.TestCase):
         repo.reviews_and_ci = pr_status.ReviewsAndCi({}, set(failed), set(), set())
         return repo
 
-    def prerequisites_model(self):
+    def prerequisites_model(self, prefix="#", other_prefix="#"):
         """Build a model in which #1 depends on #2, which depends on #3 and other/repo#5.
+
+        Args:
+            prefix: the prefix of owner/repo, such as "#" or "repo#".
+            other_prefix: the prefix of other/repo, such as "#" or "other#".
 
         Returns:
             The model of owner/repo, united with the model of other/repo, in which the CI of
             #3 and of other/repo#5 failed.
         """
-        repo = self.repo("owner/repo", {3})
+        repo = self.repo("owner/repo", {3}, prefix)
         repo.prs = {
             n: {"body": body, "baseRefName": "master", "owner": "owner", "headRefName": f"b{n}"}
             for n, body in {
@@ -989,7 +993,7 @@ class DependsOnTest(unittest.TestCase):
                 3: "",
             }.items()
         }
-        other = self.repo("other/repo", {5})
+        other = self.repo("other/repo", {5}, other_prefix)
         other.prs = {
             5: {"body": "", "baseRefName": "master", "owner": "owner", "headRefName": "b5"}
         }
@@ -1024,6 +1028,50 @@ class DependsOnTest(unittest.TestCase):
         self.assertEqual(
             pr_status.depends_on(model, 2),
             f"{link('owner/repo', 3)} and {link('other/repo', 5)}",
+        )
+
+    def test_table_cells_omit_prefix_of_same_repository(self):
+        """A cell names a PR of its own repository as "#N", and another's with its prefix."""
+        model = self.prerequisites_model("repo#", "other#")
+        url = "https://github.com/{}/pull/{}".format
+        self.assertEqual(
+            pr_status.depends_on(model, 2),
+            f"[#3]({url('owner/repo', 3)}) and [other#5]({url('other/repo', 5)})",
+        )
+        self.assertEqual(
+            pr_status.depends_on(model, 2, short=False),
+            f"[repo#3]({url('owner/repo', 3)}) and [other#5]({url('other/repo', 5)})",
+        )
+        self.assertEqual(
+            pr_status.needed_by(model, 3),
+            f"[#2]({url('owner/repo', 2)}) (and transitively [#1]({url('owner/repo', 1)}))",
+        )
+        with mock.patch.object(model, "head_status", return_value="newest"):
+            self.assertEqual(
+                pr_status.dependency_cells(model, 2),
+                [
+                    f"[#3]({url('owner/repo', 3)}) and [other#5]({url('other/repo', 5)})",
+                    "yes",
+                    f"no (lacks [#3]({url('owner/repo', 3)})'s newest commits)",
+                ],
+            )
+        for pr in model.repo.prs.values():
+            pr["assignees"] = []
+        lines = pr_status.gen_prerequisites(model, None)
+        self.assertEqual(
+            lines[-2],
+            f"Prerequisites with no prerequisite of their own: [repo#3]({url('owner/repo', 3)})"
+            f" (needed by [repo#2]({url('owner/repo', 2)})"
+            f" (and transitively [repo#1]({url('owner/repo', 1)}))).",
+        )
+
+    def test_other_repository_without_prefix_is_named_by_slug(self):
+        """A PR of another repository whose prefix is "#" is named by its GitHub slug."""
+        model = self.prerequisites_model("repo#", "#")
+        self.assertEqual(
+            pr_status.depends_on(model, 2),
+            "[#3](https://github.com/owner/repo/pull/3)"
+            " and [other/repo#5](https://github.com/other/repo/pull/5)",
         )
 
     def test_marks_prerequisites_whose_ci_is_unknown(self):
