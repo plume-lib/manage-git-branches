@@ -2053,6 +2053,33 @@ def table_row(cells: Iterable[str]) -> str:
     return "|" + "".join(f" {cell} |" if cell else " |" for cell in escaped)
 
 
+def author_heading(show_author: bool) -> list[str]:
+    """Return the heading of the "Author" column of a table of PRs.
+
+    Args:
+        show_author: true if the table has an "Author" column.
+
+    Returns:
+        ["Author"] if show_author, else the empty list.
+    """
+    return ["Author"] if show_author else []
+
+
+def author_cells(repo: Repo, n: int, show_author: bool) -> list[str]:
+    """Return the "Author" cell of the given PR's row in a table of PRs.
+
+    Args:
+        repo: a repository.
+        n: the number of an open PR in the repository, such as 123.
+        show_author: true if the table has an "Author" column.
+
+    Returns:
+        A list of the GitHub login of the PR's author, such as ["octocat"], if show_author,
+        else the empty list.
+    """
+    return [repo.prs[n]["author"]["login"]] if show_author else []
+
+
 def capitalize(s: str) -> str:
     """Capitalize the first letter of s, leaving the rest of s unchanged.
 
@@ -2554,7 +2581,7 @@ def unblocked_doc(
         r = m.repo
         heading = [
             "PR",
-            *(["Author"] if show_author else []),
+            *author_heading(show_author),
             "Assigned to",
             "Unresolved threads",
             "Title",
@@ -2571,10 +2598,9 @@ def unblocked_doc(
         for n in m.unblocked():
             if not keep(m, n, flt):
                 continue
-            author = [r.prs[n]["author"]["login"]] if show_author else []
             cells = [
                 r.link(n),
-                *author,
+                *author_cells(r, n, show_author),
                 m.assigned_to(n),
                 m.unresolved_threads(n),
                 title(m, cfg, n),
@@ -2878,7 +2904,7 @@ def gen_details(model: Model, cfg: dict[str, Any], label: str | None) -> list[st
         return []
     heading = [
         "PR",
-        *(["Author"] if r.show_author else []),
+        *author_heading(r.show_author),
         "Assigned to",
         "Depends on",
         "Stated in description",
@@ -2896,8 +2922,13 @@ def gen_details(model: Model, cfg: dict[str, Any], label: str | None) -> list[st
         # The "Depends on" cell of a PR that has a prerequisite marks the PR's conflict with
         # the default branch, unless a direct prerequisite conflicts too.
         notes = detail_notes(model, cfg, n, master=not has_prerequisite)
-        author = [r.prs[n]["author"]["login"]] if r.show_author else []
-        row = [r.link(n) + " " + t, *author, model.assigned_to(n), *cells, notes]
+        row = [
+            r.link(n) + " " + t,
+            *author_cells(r, n, r.show_author),
+            model.assigned_to(n),
+            *cells,
+            notes,
+        ]
         lines.append(table_row(row))
     return headed("Dependency details", label, lines)
 
@@ -3010,7 +3041,7 @@ def gen_independent(model: Model, cfg: dict[str, Any], label: str | None) -> lis
     notes = cfg["repos"][r.name].get("independent_notes", {})
     heading = [
         "PR",
-        *(["Author"] if r.show_author else []),
+        *author_heading(r.show_author),
         "Assigned to",
         "Unresolved threads",
         "Title",
@@ -3024,7 +3055,7 @@ def gen_independent(model: Model, cfg: dict[str, Any], label: str | None) -> lis
         note = capitalize("; ".join(([note] if note else []) + auto))
         cells = [
             r.link(n),
-            *([r.prs[n]["author"]["login"]] if r.show_author else []),
+            *author_cells(r, n, r.show_author),
             model.assigned_to(n),
             model.unresolved_threads(n),
             title(model, cfg, n),
@@ -3054,7 +3085,7 @@ def pr_table(
     r = model.repo
     heading = [
         "PR",
-        *(["Author"] if r.show_author else []),
+        *author_heading(r.show_author),
         "Assigned to",
         "Unresolved threads",
         "Title",
@@ -3063,10 +3094,9 @@ def pr_table(
     ]
     lines = [table_row(heading), "|" + " --- |" * len(heading)]
     for n, cells in rows:
-        author = [r.prs[n]["author"]["login"]] if r.show_author else []
         row = [
             r.link(n),
-            *author,
+            *author_cells(r, n, r.show_author),
             model.assigned_to(n),
             model.unresolved_threads(n),
             title(model, cfg, n),

@@ -2984,7 +2984,7 @@ class AuthorColumnTest(unittest.TestCase):
 
     @staticmethod
     def model(**extra):
-        """Build a model whose repository has one open PR, #1, which has no prerequisite.
+        """Return a model whose repository has one open PR, #1, which has no prerequisite.
 
         Args:
             extra: config keys of the repository, such as show_author.
@@ -3012,7 +3012,8 @@ class AuthorColumnTest(unittest.TestCase):
             extra: config keys of the repository, such as show_author.
 
         Returns:
-            The lines of the two tables, without their headings.
+            The lines of the two tables, without the section headings:  each line that starts
+            with "|", including each table's header and separator rows.
         """
         model = self.model(**extra)
         cfg = {"repos": {"repo": {}}}
