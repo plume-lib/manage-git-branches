@@ -483,6 +483,30 @@ class ClassifyTest(unittest.TestCase):
                 f"{MAVEN_CENTRAL_METADATA_403}\n{MAVEN_CENTRAL_ARTIFACT_403}",
                 MAVEN_CENTRAL_ARTIFACT_403[:200],
             ),
+            # Maven Central refused to serve an artifact, in another wording of Maven.
+            (
+                (
+                    "Could not transfer artifact com.example:x:pom:1.0 from/to central"
+                    " (https://repo.maven.apache.org/maven2): status code: 403, reason"
+                    " phrase: Forbidden (403)"
+                ),
+                None,
+            ),
+            # GitHub refused a request, as it does for a client that exceeds its rate limit.
+            (
+                (
+                    "> Could not GET 'https://raw.githubusercontent.com/a/b/main/x.gradle'."
+                    " Received status code 403 from server: Forbidden"
+                ),
+                None,
+            ),
+            (
+                (
+                    "java.io.IOException: Server returned HTTP response code: 403 for URL:"
+                    " https://api.github.com/repos/a/b/releases"
+                ),
+                None,
+            ),
             (
                 (
                     "##[error]The job was abandoned because agent did not renew the lock."
@@ -544,6 +568,20 @@ class ClassifyTest(unittest.TestCase):
             (
                 "Could not transfer artifact com.example:x:pom:1.0 from/to private"
                 " (https://maven.example.com/releases): HTTP Status: 403"
+            ),
+            (
+                "Could not transfer artifact com.example:x:pom:1.0 from/to private"
+                " (https://maven.example.com/releases): status code: 403, reason phrase:"
+                " Forbidden (403)"
+            ),
+            (
+                "   > Could not GET 'https://maven.example.com/x.pom'. Received status code"
+                " 403 from server: Forbidden"
+            ),
+            # GitHub Packages refused a request; the usual cause is missing credentials.
+            (
+                "   > Could not GET 'https://maven.pkg.github.com/a/b/x.pom'. Received status"
+                " code 403 from server: Forbidden"
             ),
             (
                 "Could not GET 'https://repo.maven.apache.org/x.pom'. Received status code 404"

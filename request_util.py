@@ -39,14 +39,23 @@ REQUEST_ERRORS = (
     KeyError,
 )
 
+# Matches a URL of GitHub, such as "https://api.github.com/repos/ORG/REPO" or
+# "https://raw.githubusercontent.com/ORG/REPO/main/build.gradle", but not a URL of GitHub
+# Packages, such as "https://maven.pkg.github.com/ORG/REPO".
+GITHUB_URL_RE = r"https?://([a-z]+\.)?github(usercontent)?\.com\b"
+
 # Regular expressions, each of which matches a message that shows that a network request
 # failed for a reason that might go away by itself, such as "HTTP 502: Bad Gateway",
 # "Connection refused", or "Could not resolve host: github.com".  They are meant to be
 # matched without regard to case.  A 403 status is transient in a message such as
-# "status code 403", which an HTTP client in a CI log reports, because GitHub responds
-# with 403 to a client that exceeds its rate limit.
+# "Received status code 403" that names a URL of GitHub, because GitHub responds with
+# 403 to a client that exceeds its rate limit.  A 403 status from another server, such
+# as a private Maven repository, is not transient, because the usual cause is missing or
+# wrong credentials.
 TRANSIENT_NETWORK_PATTERNS = [
-    r"(status|response) code:? (403|408|429|5[0-9][0-9])([^0-9]|$)",
+    rf"{GITHUB_URL_RE}.*(status|response) code:? 403([^0-9]|$)",
+    rf"(status|response) code:? 403([^0-9].*)?{GITHUB_URL_RE}",
+    r"(status|response) code:? (408|429|5[0-9][0-9])([^0-9]|$)",
     r"HTTP[/0-9.]*( error| status)?:? (408|429|500|502|503|504)([^0-9]|$)",
     r"The requested URL returned error: (408|429|5[0-9][0-9])",
     r"Too Many Requests",
