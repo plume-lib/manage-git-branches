@@ -3027,6 +3027,83 @@ class DefaultBranchTest(unittest.TestCase):
         run.assert_not_called()
 
 
+class AuthorColumnTest(unittest.TestCase):
+    """Tests for the "Author" column of the tables of PRs."""
+
+    @staticmethod
+    def model(**extra):
+        """Return a model whose repository has one open PR, #1, which has no prerequisite.
+
+        Args:
+            extra: config keys of the repository, such as show_author.
+
+        Returns:
+            The model, whose PR was opened by octocat.
+        """
+        repo = config_repo(**extra)
+        repo.prs = {1: {"author": {"login": "octocat"}, "title": "Fix it"}}
+        return types.SimpleNamespace(
+            repo=repo,
+            open={1},
+            in_graph=lambda _: True,
+            external={1: []},
+            direct={1: set()},
+            independent=lambda: [1],
+            assigned_to=lambda _: "",
+            unresolved_threads=lambda _: "✅",
+        )
+
+    def tables(self, **extra):
+        """Return the tables of the "details" and "independent" sections.
+
+        Args:
+            extra: config keys of the repository, such as show_author.
+
+        Returns:
+            The lines of the two tables, without the section headings:  each line that starts
+            with "|", including each table's header and separator rows.
+        """
+        model = self.model(**extra)
+        cfg = {"repos": {"repo": {}}}
+        with mock.patch.multiple(
+            pr_status,
+            branch_contains=mock.Mock(return_value="not applicable"),
+            detail_notes=mock.Mock(return_value=""),
+            auto_notes=mock.Mock(return_value=[]),
+            textual_conflicts=mock.Mock(return_value="none"),
+        ):
+            details = pr_status.gen_details(model, cfg, None)
+            independent = pr_status.gen_independent(model, cfg, None)
+        return [line for line in details + independent if line.startswith("|")]
+
+    def test_shown_by_default(self):
+        """Without "show_author" in the config, each table has an "Author" column."""
+        link = "[#1](https://github.com/Owner/Repo/pull/1)"
+        self.assertEqual(
+            self.tables(),
+            [
+                (
+                    "| PR | Author | Assigned to | Depends on | Stated in description"
+                    " | Branch contains prerequisites' commits | Notes |"
+                ),
+                "| --- | --- | --- | --- | --- | --- | --- |",
+                f"| {link} Fix it | octocat | | none | not applicable | not applicable | |",
+                (
+                    "| PR | Author | Assigned to | Unresolved threads | Title | Textual conflicts"
+                    " | Notes |"
+                ),
+                "| --- | --- | --- | --- | --- | --- | --- |",
+                f"| {link} | octocat | | ✅ | Fix it | none | |",
+            ],
+        )
+
+    def test_hidden_if_configured(self):
+        """With "show_author": false, no table has an "Author" column."""
+        tables = self.tables(show_author=False)
+        self.assertNotIn("Author", "".join(tables))
+        self.assertNotIn("octocat", "".join(tables))
+
+
 class ExcludedByDecisionTest(unittest.TestCase):
     """Tests for the "Excluded by decision" section of an unblocked document."""
 
