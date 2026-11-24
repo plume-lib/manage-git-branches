@@ -103,6 +103,13 @@ fail() {
 ##           which names no configured remote
 ##   current-upstream: as "good", but also changes the upstream of the
 ##           current branch, feature
+##   switch-upstream: as "good", but also changes the upstream of the
+##           current branch, feature, and then makes the branch other, at the
+##           same commit, the current branch
+##   deleted-branch-config: as "good", but also deletes the branch old and
+##           sets its pushRemote to a URL
+##   other-upstream: as "good", but also changes the upstream of the branch
+##           other
 ##   multiline-config: as "good", but also changes the second line of the
 ##           value of core.pager, a line that looks like an entry for a branch
 ##           that does not exist
@@ -323,6 +330,15 @@ case "${STUB_MODE}" in
     ;;
   upstream-url) git config branch.other.remote https://example.com/elsewhere.git ;;
   current-upstream) git config branch.feature.merge refs/heads/other ;;
+  switch-upstream)
+    git config branch.feature.merge refs/heads/other
+    git symbolic-ref HEAD refs/heads/other
+    ;;
+  deleted-branch-config)
+    git branch -q -D old
+    git config branch.old.pushRemote https://example.com/elsewhere.git
+    ;;
+  other-upstream) git config branch.other.merge refs/heads/main ;;
   multiline-config) git config core.pager "$(printf 'less\nbranch.gone.remote=pwned')" ;;
 esac
 if [ "${STUB_MODE}" = commit ]; then
@@ -2036,16 +2052,64 @@ case "${push_output}" in
   *) fail "agent that changes the current branch's upstream, with a tag of its name: wrong diagnostic: ${push_output}" ;;
 esac
 
-## An agent that changes git's configuration is rejected even if the
-## repository has so many branches that their names exceed the size limit of
-## an environment variable, so that the configurations cannot be compared.
+## An agent that changes the current branch's upstream is rejected even if it
+## then makes another branch current.
+setup_case switch-upstream
+git -C "${feature_dir}" branch other
+push_to switch-upstream --llm
+check_not_resolved "agent that changes the current branch's upstream, then switches branches"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes the current branch's upstream, then switches branches: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that deletes a branch and sets its configuration is rejected:  the
+## configuration takes effect if the branch is created again.
+setup_case deleted-branch-config
+git -C "${feature_dir}" branch old
+push_to deleted-branch-config --llm
+check_not_resolved "agent that sets the configuration of a branch that it deletes"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that sets the configuration of a branch that it deletes: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that changes the upstream that another branch already has is
+## rejected:  the change takes effect at once in a working tree of that
+## branch.
+setup_case other-upstream
+git -C "${feature_dir}" branch other
+git -C "${feature_dir}" config branch.other.remote origin
+git -C "${feature_dir}" config branch.other.merge refs/heads/other
+push_to other-upstream --llm
+check_not_resolved "agent that changes another branch's upstream"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes another branch's upstream: wrong diagnostic: ${push_output}" ;;
+esac
+
+## Usage: make_many_branches
+## Creates, in ${feature_dir}, so many branches that their names exceed the
+## size limit of an environment variable, about 128 KiB on Linux.
+make_many_branches() {
+  make_many_branches_name="many-branches-$(printf '%080d' 0)"
+  make_many_branches_i=0
+  while [ "${make_many_branches_i}" -lt 2000 ]; do
+    printf 'create refs/heads/%s-%d HEAD\n' "${make_many_branches_name}" "${make_many_branches_i}"
+    make_many_branches_i=$((make_many_branches_i + 1))
+  done | git -C "${feature_dir}" update-ref --stdin
+}
+
+## A repository can have so many branches that their names exceed the size
+## limit of an environment variable.  An agent that leaves git's
+## configuration alone is accepted there, and one that changes it is
+## rejected.
+setup_case good-many-branches
+make_many_branches
+push_to good --llm
+check_resolved claude "many branches"
 setup_case config-many-branches
-many_branch_name="many-branches-$(printf '%080d' 0)"
-i=0
-while [ "${i}" -lt 2000 ]; do
-  printf 'create refs/heads/%s-%d HEAD\n' "${many_branch_name}" "${i}"
-  i=$((i + 1))
-done | git -C "${feature_dir}" update-ref --stdin
+make_many_branches
 push_to config --llm
 check_not_resolved "agent that changes git's configuration, with many branches"
 case "${push_output}" in

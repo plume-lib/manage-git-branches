@@ -924,10 +924,12 @@ toml_string() {
 ## chooses among them, for `git_control_changed` to compare with:  git's
 ## configuration, including each file that it includes; the repository's
 ## `info/attributes` file; and its hooks that are outside the working tree.
-## Also records the names of the repository's branches.  Returns 1 if it
-## cannot read them.  The current directory must be the top level of the
-## working tree.
+## Also records the names of the repository's branches and of the current
+## branch.  Returns 1 if it cannot read them.  The current directory must be
+## the top level of the working tree.
 git_control_record() {
+  # Empty if HEAD is detached.
+  git_control_record_current="$(current_branch)" || git_control_record_current=''
   git_control_record_branches="$(git for-each-ref --format='%(refname:strip=2)' refs/heads/)" || return 1
   git_control_record_config="$(git_config_entries)" || return 1
   git_control_record_files="$(git_control_files_state)" || return 1
@@ -935,49 +937,41 @@ git_control_record() {
 
 ## Usage: git_control_changed
 ## Returns 0 if what `git_control_record` recorded has changed since then, or
-## cannot be read or compared now, and 1 otherwise.  It cannot compare the
-## configurations if the repository has so many branches that their names
-## exceed the size limit of an environment variable, about 128 KiB on Linux.
+## cannot be read or compared now, and 1 otherwise.
 ##
-## It ignores these entries of git's configuration for a branch:
-##  * each entry, such as "branch.NAME.remote" or "branch.NAME.merge", for a
-##    branch that did not exist both when `git_control_record` ran and now.
-##    Git reads a branch's entries only for that branch, so an entry for a
-##    branch that does not exist takes effect only if a branch of that name
-##    is created later.
-##  * the upstream of a branch other than the current one, as `git push -u`
-##    sets it:  "branch.NAME.remote" if its value names a configured remote,
+## It ignores these changes to git's configuration, which another process can
+## make at any time, because linked worktrees share one configuration file:
+##  * the removal of an entry for a branch, such as "branch.NAME.remote" or
+##    "branch.NAME.merge", if the branch did not exist both when
+##    `git_control_record` ran and now, as when another process deletes the
+##    branch.
+##  * the addition of an entry for a branch that exists now but did not when
+##    `git_control_record` ran, as when another process creates a worktree
+##    for the branch:  "branch.NAME.createdForBranchDirectory" if its value is
+##    "true", "branch.NAME.remote" if its value names a configured remote,
 ##    such as "origin", and "branch.NAME.merge" if its value names a branch,
-##    such as "refs/heads/NAME".  Either entry takes effect only in a working
-##    tree of that branch, and there it names a remote and a branch that the
-##    repository already uses.
-## Linked worktrees share one configuration file, so another process can
-## change such entries at any time, as by creating a worktree for a new
-## branch, deleting a branch, or pushing a new branch with `git push -u`.
+##    such as "refs/heads/main".
+##  * the addition of an upstream to a branch that had none, other than the
+##    branch that was current when `git_control_record` ran, as another
+##    process's `git push -u` adds it:  "branch.NAME.remote" if its value
+##    names a configured remote, and "branch.NAME.merge" if its value is
+##    "refs/heads/NAME".
+## Any other change of an entry for a branch counts.  That includes an entry
+## for a branch that does not exist, which takes effect if a branch of that
+## name is created later, and a change of an upstream that a branch already
+## has, which takes effect at once in a working tree of that branch.
 ## The current directory must be the top level of the working tree.
 git_control_changed() {
   git_control_changed_branches="$(git for-each-ref --format='%(refname:strip=2)' refs/heads/)" || return 0
   git_control_changed_config="$(git_config_entries)" || return 0
   git_control_changed_files="$(git_control_files_state)" || return 0
   git_control_changed_remotes="$(git remote)" || return 0
-  # Not `git symbolic-ref --short`, which prints "heads/NAME" if a tag is also
-  # named NAME.  Empty if HEAD is detached.
-  git_control_changed_current="$(current_branch)"
   if [ "${git_control_changed_files}" != "${git_control_record_files}" ]; then
     return 0
   fi
-  # A pipeline's status is that of its last command, here the filter.  The
-  # filter fails if the shell cannot pass it the names of the branches, as
-  # when there are so many that their names exceed the size limit of an
-  # environment variable.  Then both outputs are empty, so compare them only
-  # if the filter succeeded.
-  git_control_record_filtered="$(printf '%s\n' "${git_control_record_config}" \
-    | omit_other_branch_config "${git_control_record_branches}" "${git_control_changed_branches}" \
-      "${git_control_changed_current}" "${git_control_changed_remotes}")" || return 0
-  git_control_changed_filtered="$(printf '%s\n' "${git_control_changed_config}" \
-    | omit_other_branch_config "${git_control_record_branches}" "${git_control_changed_branches}" \
-      "${git_control_changed_current}" "${git_control_changed_remotes}")" || return 0
-  [ "${git_control_record_filtered}" != "${git_control_changed_filtered}" ]
+  ! git_config_unchanged "${git_control_record_branches}" "${git_control_changed_branches}" \
+    "${git_control_record_current}" "${git_control_changed_remotes}" \
+    "${git_control_record_config}" "${git_control_changed_config}"
 }
 
 ## Usage: git_config_entries
@@ -997,40 +991,89 @@ git_config_entries() {
   git config --list -z | tr '\000\012' '\012\001'
 }
 
-## Usage: omit_other_branch_config BRANCHES1 BRANCHES2 CURRENT REMOTES
-## Copies the entries of git's configuration on standard input, in the form
-## that `git_config_entries` prints, to standard output, omitting each entry
-## for a branch NAME, such as "branch.NAME.remote", unless NAME is a line of
-## both BRANCHES1 and BRANCHES2.  If NAME is not CURRENT, it also omits
-## "branch.NAME.remote" if its value is a line of REMOTES, and
-## "branch.NAME.merge" if its value starts with "refs/heads/".  An entry of
-## the section "branch" that names no branch, such as
-## "branch.autoSetupMerge", is copied.
-omit_other_branch_config() {
-  # A key is "SECTION.NAME" or "SECTION.SUBSECTION.NAME", in which only
-  # SUBSECTION, here the branch's name, can contain a dot.  Git prints
-  # SECTION and NAME in lower case.
-  OMIT_BRANCHES1="$1" OMIT_BRANCHES2="$2" OMIT_CURRENT="$3" OMIT_REMOTES="$4" awk '
-    BEGIN {
-      FS = "\001"
-      count = split(ENVIRON["OMIT_BRANCHES1"], names, "\n")
-      for (i = 1; i <= count; i++) { first[names[i]] = 1 }
-      count = split(ENVIRON["OMIT_BRANCHES2"], names, "\n")
-      for (i = 1; i <= count; i++) { if (names[i] in first) { both[names[i]] = 1 } }
-      count = split(ENVIRON["OMIT_REMOTES"], names, "\n")
-      for (i = 1; i <= count; i++) { if (names[i] != "") { remote[names[i]] = 1 } }
-    }
-    substr($1, 1, 7) == "branch." && match(substr($1, 8), /\.[^.]*$/) {
-      branch = substr($1, 8, RSTART - 1)
-      if (!(branch in both)) { next }
-      if (branch != ENVIRON["OMIT_CURRENT"] && NF == 2) {
+## Usage: git_config_unchanged BRANCHES1 BRANCHES2 CURRENT REMOTES CONFIG1 CONFIG2
+## Returns 0 if CONFIG2 equals CONFIG1, apart from the changes that
+## `git_control_changed` ignores, and 1 otherwise, including if it cannot
+## compare them.  CONFIG1 is entries of git's configuration, in the form that
+## `git_config_entries` prints, and CONFIG2 is the entries at a later time;
+## BRANCHES1 and BRANCHES2 are the names of the repository's branches at
+## those times, one per line; CURRENT is the name of the branch, such as
+## "main", that was current at the first time, or the empty string if HEAD
+## was detached; and REMOTES is the names of the configured remotes, such as
+## "origin", one per line.
+git_config_unchanged() {
+  # The names and entries go to awk on standard input, not in the
+  # environment, whose variables have a size limit, about 128 KiB on Linux,
+  # that the names of a repository's branches can exceed.  A line that is a
+  # control-A character ends each list; no name of a branch or remote, and no
+  # entry, is such a line.
+  git_config_unchanged_end="$(printf '\001')"
+  printf '%s\n' "$1" "${git_config_unchanged_end}" "$2" "${git_config_unchanged_end}" \
+    "$4" "${git_config_unchanged_end}" "$5" "${git_config_unchanged_end}" "$6" \
+    | GIT_CONFIG_UNCHANGED_CURRENT="$3" awk '
+      # Sets name and key, and returns 1, if the current entry is for a
+      # branch.  A key is "SECTION.NAME" or "SECTION.SUBSECTION.NAME", in
+      # which only SUBSECTION, here the branch name, can contain a dot.  Git
+      # prints SECTION and NAME in lower case.
+      function branch_entry() {
+        if (substr($1, 1, 7) != "branch." || !match(substr($1, 8), /\.[^.]*$/)) {
+          return 0
+        }
+        name = substr($1, 8, RSTART - 1)
         key = substr($1, 8 + RSTART)
-        if (key == "remote" && ($2 in remote)) { next }
-        if (key == "merge" && substr($2, 1, 11) == "refs/heads/") { next }
+        return 1
       }
-    }
-    { print }
-  '
+      # Returns 1 if the current entry, of CONFIG2, is for a branch and is
+      # one that `git_control_changed` ignores.  A value that contains a
+      # newline, which `git_config_entries` prints as a control-A character,
+      # makes NF greater than 2.
+      function ignored() {
+        if (!branch_entry()) {
+          return 0
+        }
+        if (!(name in both)) {
+          # CONFIG1 omits the entries for such a branch, and so does CONFIG2
+          # for an entry that CONFIG1 has.
+          if ($0 in entry1) {
+            return 1
+          }
+          if (!(name in branches2) || NF != 2) {
+            return 0
+          }
+          return (key == "createdforbranchdirectory" && $2 == "true") \
+            || (key == "remote" && ($2 in remote)) \
+            || (key == "merge" && substr($2, 1, 11) == "refs/heads/")
+        }
+        if (name == current || ($1 in key1) || NF != 2) {
+          return 0
+        }
+        return (key == "remote" && ($2 in remote)) \
+          || (key == "merge" && $2 == "refs/heads/" name)
+      }
+      BEGIN {
+        FS = "\001"
+        current = ENVIRON["GIT_CONFIG_UNCHANGED_CURRENT"]
+      }
+      $0 == "\001" { list++; next }
+      list == 0 { if ($0 != "") { branches1[$0] = 1 }; next }
+      list == 1 {
+        if ($0 != "") {
+          branches2[$0] = 1
+          if ($0 in branches1) { both[$0] = 1 }
+        }
+        next
+      }
+      list == 2 { if ($0 != "") { remote[$0] = 1 }; next }
+      list == 3 {
+        entry1[$0] = 1
+        key1[$1] = 1
+        if (!branch_entry() || (name in both)) { kept[++count1] = $0 }
+        next
+      }
+      ignored() { next }
+      ++count2 > count1 || kept[count2] != $0 { differs = 1; exit }
+      END { if (differs || list != 4 || count2 != count1) { exit 1 } }
+    '
 }
 
 ## Usage: git_control_files_state
