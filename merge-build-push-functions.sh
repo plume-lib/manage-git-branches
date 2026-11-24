@@ -1108,7 +1108,13 @@ refuse_uncommitted_changes() {
 ## If the build fails, and the agent does not fix it, prints a diagnostic,
 ## which it also appends to the summary, that names the commit and a copy of
 ## the build's output, and that says why the agent was not asked to fix it if
-## no merge might have broken the build (see `merge_build_failed`).
+## no merge might have broken the build (see `merge_build_failed`); in that
+## case, it also records the commit (see `record_build_failure`).  If the build fails
+## after a merge, and it failed, with no merge to blame, at the commit that
+## HEAD named before this call's merges, the agent is told so, and the
+## message of its fix says so, as in "Fix the build, which already failed at
+## commit 1a2b3c4 before merging branch 'main'".  After a successful build,
+## removes HEAD from that record (see `forget_build_failure`).
 ## After a successful build, removes the entries of AGENT-TODO.md that no
 ## longer apply, such as one about a failed build (see `prune_agent_todo`).
 ## Returns 1, after printing a diagnostic, on failure.  Sets
@@ -1226,8 +1232,23 @@ merge_build_push() {
         merge_built="${merge_built}${merge_built:+ }$(built_commits "$8")"
       fi
       if ! has_unbuilt_merge "${merge_built}"; then
+        if [ -n "${merge_fix_reason}" ]; then
+          record_build_failure
+        fi
         merge_build_failed "${merge_fix_reason:+$6 was not asked to fix it, because ${merge_fix_reason}, so no merge broke the build}"
         return 1
+      fi
+      # The build of the branch already failed before this call merged
+      # anything, and no merge had broken it then (see
+      # `record_build_failure`), so the merges might not have caused the
+      # failure.
+      if build_failure_recorded . "${merge_old_head}"; then
+        merge_old_short="$(git rev-parse --short "${merge_old_head}")"
+        case "${merge_fix_message}" in
+          "Fix the build after merges"*) merge_fix_message="Fix the build, which already failed at commit ${merge_old_short} before the merges${merge_fix_message#Fix the build after merges}" ;;
+          "Fix the build after "*) merge_fix_message="Fix the build, which already failed at commit ${merge_old_short} before ${merge_fix_message#Fix the build after }" ;;
+        esac
+        merge_fix_account="Before the script merged anything, the build of branch ${merge_fix_branch} already failed at commit ${merge_old_head}, which no merge had broken, so the merges below might not have caused the failure.  ${merge_fix_account}"
       fi
       if ! agent_available "$6"; then
         [ -z "${agent_unavailable_reason}" ] \
@@ -1280,6 +1301,7 @@ merge_build_push() {
     fi
     # No merge is in progress, and the build succeeded.
     prune_agent_todo 1
+    forget_build_failure
   fi
 
   # Reformat after any fix of the build, so that the fix is reformatted too.
