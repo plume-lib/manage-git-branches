@@ -568,6 +568,78 @@ if "${COMPILE_PROJECT}" --format --clean "${fmtreformat}" > /dev/null 2>&1; then
   fail "--format --clean: zero exit status"
 fi
 
+# Creates, in directory $1, a Makefile whose "all" target copies the file
+# "stderr.txt", which holds the remaining arguments, one per line, to standard
+# error, and then exits with status 0.
+make_stderr_project() {
+  make_stderr_dir="$1"
+  shift
+  mkdir -p "${make_stderr_dir}"
+  printf 'all:\n\t@cat stderr.txt >&2\n' > "${make_stderr_dir}/Makefile"
+  printf '%s\n' "$@" > "${make_stderr_dir}/stderr.txt"
+}
+
+# Warnings about missing documentation, as javadoc prints them.
+missing_doc_warnings() {
+  printf '%s\n' \
+    '/p/src/Foo.java:42: warning: no @param for x' \
+    '  void bar(int x) {' \
+    '       ^' \
+    '/p/src/Foo.java:50: warning: no comment' \
+    '  private void baz() {' \
+    '               ^' \
+    '/p/src/Foo.java:60: warning: no @return' \
+    '   * Returns the answer.' \
+    '     ^'
+}
+
+# A build whose only output to standard error is warnings about missing
+# documentation, and their count, prints nothing.
+elideall="${tmpdir}/elide-all"
+make_stderr_project "${elideall}" "$(missing_doc_warnings)" '3 warnings'
+if ! elide_output="$("${COMPILE_PROJECT}" "${elideall}" 2>&1)"; then
+  fail "elide-all: nonzero exit status: ${elide_output}"
+elif [ -n "${elide_output}" ]; then
+  fail "elide-all: expected no output, got: ${elide_output}"
+fi
+
+# Other warnings remain, with their source and caret lines, and their count
+# says how many warnings were elided.
+elidesome="${tmpdir}/elide-some"
+make_stderr_project "${elidesome}" "$(missing_doc_warnings)" \
+  '/p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
+  '    old();' \
+  '    ^' \
+  '4 warnings'
+elide_expected="$(printf '%s\n' \
+  "Running compile-project in ${elidesome}" \
+  '/p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
+  '    old();' \
+  '    ^' \
+  '1 warning (and 3 about missing documentation, which are not shown)')"
+if ! elide_output="$("${COMPILE_PROJECT}" "${elidesome}" 2>&1)"; then
+  fail "elide-some: nonzero exit status: ${elide_output}"
+elif [ "${elide_output}" != "${elide_expected}" ]; then
+  fail "elide-some: expected:
+${elide_expected}
+but got:
+${elide_output}"
+fi
+
+# With "-Werror", the warnings caused the failure, so none is elided.
+elidewerror="${tmpdir}/elide-werror"
+make_stderr_project "${elidewerror}" 'error: warnings found and -Werror specified' \
+  "$(missing_doc_warnings)" '1 error' '3 warnings'
+printf 'all:\n\t@cat stderr.txt >&2; exit 1\n' > "${elidewerror}/Makefile"
+if elide_output="$("${COMPILE_PROJECT}" "${elidewerror}" 2>&1)"; then
+  fail "elide-werror: zero exit status"
+else
+  case "${elide_output}" in
+    *"$(cat "${elidewerror}/stderr.txt")"*) ;;
+    *) fail "elide-werror: expected every warning, but got: ${elide_output}" ;;
+  esac
+fi
+
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
 fi

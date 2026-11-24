@@ -15,6 +15,11 @@
 # standard output, as many programs do when it is not a terminal, can write it
 # long after standard error that it wrote later.  The output is printed after
 # the builds finish, or when this command is interrupted, not while they run.
+# The output omits the warnings about missing documentation that javadoc and
+# javac's doclint print, such as "warning: no @param for x", unless the build
+# failed because of warnings, as with "-Werror" (see
+# `elide_missing_doc_warnings`, below).  So a build whose only output to
+# standard error is such warnings prints nothing.
 # The builds' standard input is /dev/null, so a build that prompts for input
 # fails rather than waiting for input with its prompt hidden.  If a build
 # starts a background process that keeps standard error open, this command
@@ -459,6 +464,82 @@ gradle_errors="$tmpdir/gradle-errors"
 # The exit status of the last command that `run_copying_errors` ran.
 gradle_status_file="$tmpdir/gradle-status"
 
+# The message with which javadoc and javac fail because of warnings, such as
+# "error: warnings found and -Werror specified".  Then the warnings are the
+# cause of the failure, so none is elided.
+werror_message='warnings found and -Werror specified'
+
+# Removes from file $1 the warnings about missing documentation that javadoc
+# and javac's doclint print, such as
+#   /home/me/proj/src/main/java/Foo.java:42: warning: no @param for x
+#     void bar(int x) {
+#          ^
+# that is, a warning "no comment", "no main description", "no @param",
+# "no @param for ...", "no @return", "no @throws for ...", or "use of default
+# constructor, which does not provide a comment", each with the source line
+# and the line with a caret ("^") that follow it.  A count of the warnings,
+# such as "22 warnings", that follows elided warnings is removed if every
+# warning that it counts was elided; otherwise it is replaced by a count of
+# the warnings that remain and of those that were elided, such as
+# "2 warnings (and 20 about missing documentation, which are not shown)".
+# Leaves the file unchanged if it cannot be rewritten.
+elide_missing_doc_warnings() {
+  # State 1:  a warning was elided, and its source line is expected next.
+  # State 2:  that source line is held, and the caret line is expected next.
+  # A line that is not a caret line ends the warning, and the held line is
+  # printed, because it was not the warning's source line.
+  if awk '
+    function is_missing_doc_warning(line) {
+      return line ~ /(^|: )warning: (no (comment|main description|@return|@param|@param for .*|@throws for .*)|use of default constructor, which does not provide a comment)$/
+    }
+    state == 2 {
+      state = 0
+      if ($0 ~ /^[ \t]*\^[ \t]*$/) {
+        next
+      }
+      print held
+    }
+    state == 1 {
+      if (is_missing_doc_warning($0)) {
+        elided++
+        next
+      }
+      state = 0
+      if ($0 !~ /: (warning|error): / && $0 !~ /^[0-9]+ warnings?$/) {
+        held = $0
+        state = 2
+        next
+      }
+    }
+    is_missing_doc_warning($0) {
+      elided++
+      state = 1
+      next
+    }
+    /^[0-9]+ warnings?$/ && elided > 0 {
+      kept = $1 - elided
+      if (kept > 0) {
+        printf "%d warning%s (and %d about missing documentation, which are not shown)\n", kept, (kept == 1 ? "" : "s"), elided
+      }
+      elided = 0
+      next
+    }
+    /^[0-9]+ warnings?$/ {
+      elided = 0
+    }
+    { print }
+    END {
+      if (state == 2) {
+        print held
+      }
+    }
+  ' "$1" > "$1.elided"; then
+    mv -f -- "$1.elided" "$1"
+  else
+    rm -f -- "$1.elided"
+  fi
+}
+
 # When interrupted, print the output so far, which might show why the build
 # was slow or stuck.  That includes a hang-up:  standard error might be a file
 # rather than the terminal that hung up, and if it is that terminal, the write
@@ -474,6 +555,9 @@ gradle_status_file="$tmpdir/gradle-status"
 # Prints the output so far, removes the temporary directory, and dies of signal $1.
 # shellcheck disable=SC2329 # Invoked by `trap`.
 on_signal() {
+  if ! grep -q -F -e "$werror_message" -- "$output" 2> /dev/null; then
+    elide_missing_doc_warnings "$output"
+  fi
   cat "$output" >&2
   rm -rf "$tmpdir"
   trap - "$1" EXIT
@@ -508,6 +592,10 @@ printf '%s\n' "$running_message" > "$output"
 build_status="$(cat "$status_file" 2> /dev/null)"
 build_status="${build_status:-1}"
 
+if ! grep -q -F -e "$werror_message" -- "$errors" 2> /dev/null; then
+  elide_missing_doc_warnings "$errors"
+  elide_missing_doc_warnings "$output"
+fi
 if [ "$build_status" != 0 ] || [ -s "$errors" ]; then
   cat "$output" >&2
 fi
