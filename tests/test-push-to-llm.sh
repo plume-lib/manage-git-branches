@@ -3086,10 +3086,12 @@ case "${push_output}" in
   *"not committed again, because "*"compile-project\` failed"*"cannot commit the changes of claude"*) ;;
   *) fail "build fix with a hook that breaks the build: wrong diagnostic: ${push_output}" ;;
 esac
+# The diagnostic names the directory by a physical path, as on macOS, where
+# the temporary directory is reached through a symbolic link.
 broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
 failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}.log")"
 case "${push_output}" in
-  *"git-push-to: in ${feature_dir}: the build of commit ${broken_head} failed; the changes that claude staged fix the build, but they cannot be committed; its output is in ${failed_log}"*) ;;
+  *"git-push-to: in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; the changes that claude staged fix the build, but they cannot be committed; its output is in ${failed_log}"*) ;;
   *) fail "build fix with a hook that breaks the build: the diagnostic does not say that the commit failed: ${push_output}" ;;
 esac
 if [ "$(git -C "${feature_dir}" log -1 --format=%s HEAD)" != "Merge branch 'main' into feature" ]; then
@@ -3161,7 +3163,7 @@ esac
 broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
 failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}-claude.log")"
 case "${push_output}" in
-  *"git-push-to: in ${feature_dir}: the build of commit ${broken_head} with the changes that claude staged to fix its build failed; its output is in ${failed_log}"*) ;;
+  *"git-push-to: in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} with the changes that claude staged to fix its build failed; its output is in ${failed_log}"*) ;;
   *) fail "bad build fix: the diagnostic does not name the last build's output: ${push_output}" ;;
 esac
 if ! grep -q 'other.txt is broken' "${failed_log}" 2> /dev/null; then
@@ -3422,7 +3424,7 @@ fi
 # copy of the build's output that is named for the commit.
 broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
 failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}.log")"
-expected="in ${feature_dir}: the build of commit ${broken_head} failed; claude was not asked to fix it, because every merge that combined changes is in refs/remotes/origin/feature, so no merge broke the build; its output is in ${failed_log}"
+expected="in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; claude was not asked to fix it, because every merge that combined changes is in refs/remotes/origin/feature, so no merge broke the build; its output is in ${failed_log}"
 case "${push_output}" in
   *"git-push-to: ${expected}"*) ;;
   *) fail "build failure without a merge: the diagnostic does not say why the agent was not asked: ${push_output}" ;;
@@ -3446,7 +3448,7 @@ check_not_pushed "pushed build failure without a merge"
 broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
 failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}.log")"
 expected="$(printf '%s\n' \
-  "in ${feature_dir}: the build of commit ${broken_head} failed; claude was not asked to fix it, because refs/remotes/origin/feature has the same files, so no merge broke the build; its output is in ${failed_log}" \
+  "in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; claude was not asked to fix it, because refs/remotes/origin/feature has the same files, so no merge broke the build; its output is in ${failed_log}" \
   "failed to push ${main_dir} into ${feature_dir}, while building")"
 if [ "$(cat "${summary_file}")" != "${expected}" ]; then
   fail "pushed build failure without a merge: wrong summary: $(cat "${summary_file}")"
