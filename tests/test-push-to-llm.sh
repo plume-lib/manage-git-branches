@@ -3405,7 +3405,7 @@ fi
 # copy of the build's output that is named for the commit.
 broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
 failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}.log")"
-expected="in ${feature_dir}: the build of commit ${broken_head} failed; claude was not asked to fix it, because no merge that refs/remotes/origin/feature lacks combined changes, so no merge broke the build; its output is in ${failed_log}"
+expected="in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; claude was not asked to fix it, because no merge that refs/remotes/origin/feature lacks combined changes, so no merge broke the build; its output is in ${failed_log}"
 case "${push_output}" in
   *"git-push-to: ${expected}"*) ;;
   *) fail "build failure without a merge: the diagnostic does not say why the agent was not asked: ${push_output}" ;;
@@ -3429,7 +3429,7 @@ check_not_pushed "pushed build failure without a merge"
 broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
 failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}.log")"
 expected="$(printf '%s\n' \
-  "in ${feature_dir}: the build of commit ${broken_head} failed; claude was not asked to fix it, because refs/remotes/origin/feature has the same files, so no merge broke the build; its output is in ${failed_log}" \
+  "in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; claude was not asked to fix it, because refs/remotes/origin/feature has the same files, so no merge broke the build; its output is in ${failed_log}" \
   "failed to push ${main_dir} into ${feature_dir}, while building")"
 if [ "$(cat "${summary_file}")" != "${expected}" ]; then
   fail "pushed build failure without a merge: wrong summary: $(cat "${summary_file}")"
