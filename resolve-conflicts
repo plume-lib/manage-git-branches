@@ -24,9 +24,10 @@
 #    would have pushed into the chain's first directory, because then that
 #    directory's branch lacks the updates that the chain would push from it,
 #    and a chain is skipped if it would push into a directory of a chain that
-#    failed, whose build failed although no merge broke it (see
-#    `record_build_failure` in common-functions.sh), because the agent would
-#    be asked to fix a failure that the chain's merge did not cause,
+#    failed, whose build already failed at its current commit, although no
+#    merge broke it (see `record_build_failure` in common-functions.sh),
+#    because the agent would be asked to fix a failure that the chain's merge
+#    did not cause,
 #  * pull each chain's first directory with `git-push-to`, given that single
 #    directory, before the first chain that starts with it, and add the
 #    "--no-pull-first" option to every chain, so that all chains that start
@@ -207,7 +208,7 @@ while :; do
   # newline.
   stale_dirs="${newline}"
   # The directories of chains that failed, each followed by a newline, whose
-  # build failed although no merge broke it.
+  # build already failed at their current commit, although no merge broke it.
   broken_dirs="${newline}"
   # The first directories of this round's chains so far, each followed by a
   # newline, that were pulled, and that could not be pulled.
@@ -252,7 +253,7 @@ while :; do
       for dir in "$@"; do
         case "${broken_dirs}" in
           *"${newline}${dir}${newline}"*)
-            skip_reason="the build of ${dir} failed in an earlier chain, although no merge broke it"
+            skip_reason="the build of ${dir} already failed at its current commit, although no merge broke it"
             break
             ;;
         esac

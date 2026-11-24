@@ -1109,9 +1109,11 @@ refuse_uncommitted_changes() {
 ## which it also appends to the summary, that names the commit and a copy of
 ## the build's output, and that says why the agent was not asked to fix it if
 ## no merge might have broken the build (see `merge_build_failed`); in that
-## case, it also records the commit (see `record_build_failure`).  If the build fails
-## after a merge, and it failed, with no merge to blame, at a commit before
-## the merges (see `failed_before_merges`), the agent is told so, and the
+## case, it also records the commit (see `record_build_failure`).  If
+## RESOLVER is empty, it does not decide whether a merge might have broken
+## the build, so it does not record the commit.  If the build fails after a
+## merge, and it failed, with no merge to blame, at a commit before the
+## merges (see `failed_before_merges`), the agent is told so, and the
 ## message of its fix says so, as in "Fix the build, which already failed at
 ## commit 1a2b3c4 before merging branch 'main'".  After a successful build,
 ## removes HEAD from that record (see `forget_build_failure`).

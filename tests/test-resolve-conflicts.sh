@@ -277,7 +277,7 @@ if [ "${resolve_status}" -eq 0 ]; then
   fail "broken: resolve-conflicts succeeded: ${resolve_output}"
 fi
 case "${resolve_output}" in
-  *"skipped the chain, because the build of myrepo-branch-feature failed in an earlier chain, although no merge broke it: myrepo-branch-other myrepo-branch-feature"*) ;;
+  *"skipped the chain, because the build of myrepo-branch-feature already failed at its current commit, although no merge broke it: myrepo-branch-other myrepo-branch-feature"*) ;;
   *) fail "broken: the second chain was not skipped: ${resolve_output}" ;;
 esac
 expected="$(printf '%s\n' \
