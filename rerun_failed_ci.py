@@ -122,6 +122,14 @@ TRANSIENT_PATTERNS = [
     # project's own native (JNI) code or one from a JIT-compiler bug that the same code
     # always triggers.  Only `--max-attempts` limits the reruns of such a crash.
     r"#\s+SIGSEGV \(0xb\) at pc=",
+    # A Checker Framework warning that type-checking one method or class took too long, as
+    # in "Foo.java:201: warning: [compilermessages:slow.typechecking] typechecking took 48
+    # seconds; consider making inferred type variables explicit".  The warning fails a
+    # build that treats warnings as errors.  The time depends on how busy the CI machine
+    # is, so a rerun often avoids the warning.  Code that is slow to type-check on every
+    # run also yields the warning; only `--max-attempts` limits the reruns of such a
+    # failure.
+    r"slow\.typechecking\] typechecking took \d+ seconds",
     # An artifact that Maven Central refused to serve, as Maven reports it in a line such
     # as "Could not transfer artifact org.apache.felix:maven-bundle-plugin:pom:5.1.8
     # from/to central (https://repo.maven.apache.org/maven2): HTTP Status: 403" or, in

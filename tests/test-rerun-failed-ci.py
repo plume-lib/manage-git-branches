@@ -552,6 +552,20 @@ class ClassifyTest(unittest.TestCase):
                 f"error: cannot find symbol\n{GRADLEW_RETRYING}\n{GRADLE_429}",
                 GRADLE_429.lstrip(),
             ),
+            # The Checker Framework took long to type-check a method, on a busy CI machine.
+            (
+                (
+                    "/home/runner/work/a/b/BaseTypeVisitor.java:201: warning:"
+                    " [compilermessages:slow.typechecking] typechecking took 48 seconds;"
+                    " consider making inferred type variables explicit\nerror: warnings found"
+                    " and -Werror specified"
+                ),
+                (
+                    "/home/runner/work/a/b/BaseTypeVisitor.java:201: warning:"
+                    " [compilermessages:slow.typechecking] typechecking took 48 seconds;"
+                    " consider making inferred type variables explicit"
+                ),
+            ),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
         ]:
