@@ -935,7 +935,9 @@ git_control_record() {
 
 ## Usage: git_control_changed
 ## Returns 0 if what `git_control_record` recorded has changed since then, or
-## cannot be read now, and 1 otherwise.
+## cannot be read or compared now, and 1 otherwise.  It cannot compare the
+## configurations if the repository has so many branches that their names
+## exceed the size limit of an environment variable, about 128 KiB on Linux.
 ##
 ## It ignores these entries of git's configuration for a branch:
 ##  * each entry, such as "branch.NAME.remote" or "branch.NAME.merge", for a
@@ -958,17 +960,24 @@ git_control_changed() {
   git_control_changed_config="$(git_config_entries)" || return 0
   git_control_changed_files="$(git_control_files_state)" || return 0
   git_control_changed_remotes="$(git remote)" || return 0
-  # Empty if HEAD is detached.
-  git_control_changed_current="$(git symbolic-ref --quiet --short HEAD)"
+  # Not `git symbolic-ref --short`, which prints "heads/NAME" if a tag is also
+  # named NAME.  Empty if HEAD is detached.
+  git_control_changed_current="$(current_branch)"
   if [ "${git_control_changed_files}" != "${git_control_record_files}" ]; then
     return 0
   fi
-  [ "$(printf '%s\n' "${git_control_record_config}" \
+  # A pipeline's status is that of its last command, here the filter.  The
+  # filter fails if the shell cannot pass it the names of the branches, as
+  # when there are so many that their names exceed the size limit of an
+  # environment variable.  Then both outputs are empty, so compare them only
+  # if the filter succeeded.
+  git_control_record_filtered="$(printf '%s\n' "${git_control_record_config}" \
     | omit_other_branch_config "${git_control_record_branches}" "${git_control_changed_branches}" \
-      "${git_control_changed_current}" "${git_control_changed_remotes}")" \
-    != "$(printf '%s\n' "${git_control_changed_config}" \
-      | omit_other_branch_config "${git_control_record_branches}" "${git_control_changed_branches}" \
-        "${git_control_changed_current}" "${git_control_changed_remotes}")" ]
+      "${git_control_changed_current}" "${git_control_changed_remotes}")" || return 0
+  git_control_changed_filtered="$(printf '%s\n' "${git_control_changed_config}" \
+    | omit_other_branch_config "${git_control_record_branches}" "${git_control_changed_branches}" \
+      "${git_control_changed_current}" "${git_control_changed_remotes}")" || return 0
+  [ "${git_control_record_filtered}" != "${git_control_changed_filtered}" ]
 }
 
 ## Usage: git_config_entries

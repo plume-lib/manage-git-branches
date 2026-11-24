@@ -2025,6 +2025,34 @@ case "${push_output}" in
   *) fail "agent that changes the current branch's upstream: wrong diagnostic: ${push_output}" ;;
 esac
 
+## A tag with the name of the current branch does not make the current branch
+## look like another branch, whose upstream another process can set.
+setup_case current-upstream-tag
+git -C "${feature_dir}" tag feature
+push_to current-upstream --llm
+check_not_resolved "agent that changes the current branch's upstream, with a tag of its name"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes the current branch's upstream, with a tag of its name: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that changes git's configuration is rejected even if the
+## repository has so many branches that their names exceed the size limit of
+## an environment variable, so that the configurations cannot be compared.
+setup_case config-many-branches
+many_branch_name="many-branches-$(printf '%080d' 0)"
+i=0
+while [ "${i}" -lt 2000 ]; do
+  printf 'create refs/heads/%s-%d HEAD\n' "${many_branch_name}" "${i}"
+  i=$((i + 1))
+done | git -C "${feature_dir}" update-ref --stdin
+push_to config --llm
+check_not_resolved "agent that changes git's configuration, with many branches"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes git's configuration, with many branches: wrong diagnostic: ${push_output}" ;;
+esac
+
 ## An agent that changes a line of a value that looks like an entry for a
 ## branch that does not exist is rejected.
 setup_case multiline-config
