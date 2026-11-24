@@ -464,10 +464,13 @@ gradle_errors="$tmpdir/gradle-errors"
 # The exit status of the last command that `run_copying_errors` ran.
 gradle_status_file="$tmpdir/gradle-status"
 
-# The message with which javadoc and javac fail because of warnings, such as
-# "error: warnings found and -Werror specified".  Then the warnings are the
-# cause of the failure, so none is elided.
-werror_message='warnings found and -Werror specified'
+# Matches a message with which a build fails because of warnings:  javac's and
+# javadoc's "error: warnings found and -Werror specified", or
+# maven-javadoc-plugin's "Project contains Javadoc Warnings", which
+# `<failOnWarnings>` causes.  Then the warnings are the cause of the failure,
+# so none is elided.  JDK 8's javadoc prints no such message when `-Xwerror`
+# makes it fail, so its warnings about missing documentation are elided.
+warnings_failure_regex='warnings found and -Werror specified|Project contains Javadoc Warnings'
 
 # Removes from file $1 the warnings about missing documentation that javadoc
 # and javac's doclint print, such as
@@ -477,11 +480,17 @@ werror_message='warnings found and -Werror specified'
 # that is, a warning "no comment", "no main description", "no @param",
 # "no @param for ...", "no @return", "no @throws for ...", or "use of default
 # constructor, which does not provide a comment", each with the source line
-# and the line with a caret ("^") that follow it.  A count of the warnings,
-# such as "22 warnings", that follows elided warnings is removed if every
-# warning that it counts was elided; otherwise it is replaced by a count of
-# the warnings that remain and of those that were elided, such as
-# "2 warnings (and 20 about missing documentation, which are not shown)".
+# and the line with a caret ("^") that follow it.  Each line can start with a
+# log level, as in Maven's "[WARNING] void bar(int x) {".
+# A count of the warnings, such as "22 warnings", that follows elided warnings
+# is replaced by a count of the warnings that remain and of those that were
+# elided, such as
+# "2 warnings (and 20 about missing documentation, which are not shown)", or
+# is removed if every warning that it counts was elided.  But a count of 100,
+# the number of warnings at which javadoc and javac stop by default, is never
+# removed, and its replacement says that other warnings might not have been
+# printed.  A count that is smaller than the number of warnings elided, as
+# when two builds' output is interleaved, is left unchanged.
 # Leaves the file unchanged if it cannot be rewritten.
 elide_missing_doc_warnings() {
   # State 1:  a warning was elided, and its source line is expected next.
@@ -490,11 +499,21 @@ elide_missing_doc_warnings() {
   # printed, because it was not the warning's source line.
   if awk '
     function is_missing_doc_warning(line) {
-      return line ~ /(^|: )warning: (no (comment|main description|@return|@param|@param for .*|@throws for .*)|use of default constructor, which does not provide a comment)$/
+      return line ~ /(^|: |^\[[A-Z]+\] )warning: (no (comment|main description|@return|@param|@param for .*|@throws for .*)|use of default constructor, which does not provide a comment)$/
+    }
+    function is_caret(line) {
+      return line ~ /^(\[[A-Z]+\] )?[ \t]*\^[ \t]*$/
+    }
+    function is_count(line) {
+      return line ~ /^(\[[A-Z]+\] )?[0-9]+ warnings?$/
+    }
+    BEGIN {
+      # The number of warnings at which javadoc and javac stop by default.
+      maxwarns = 100
     }
     state == 2 {
       state = 0
-      if ($0 ~ /^[ \t]*\^[ \t]*$/) {
+      if (is_caret($0)) {
         next
       }
       print held
@@ -505,7 +524,7 @@ elide_missing_doc_warnings() {
         next
       }
       state = 0
-      if ($0 !~ /: (warning|error): / && $0 !~ /^[0-9]+ warnings?$/) {
+      if ($0 !~ /: (warning|error): / && !is_count($0)) {
         held = $0
         state = 2
         next
@@ -516,15 +535,24 @@ elide_missing_doc_warnings() {
       state = 1
       next
     }
-    /^[0-9]+ warnings?$/ && elided > 0 {
-      kept = $1 - elided
-      if (kept > 0) {
-        printf "%d warning%s (and %d about missing documentation, which are not shown)\n", kept, (kept == 1 ? "" : "s"), elided
+    is_count($0) && elided > 0 {
+      match($0, /[0-9]+ warnings?$/)
+      prefix = substr($0, 1, RSTART - 1)
+      count = substr($0, RSTART) + 0
+      kept = count - elided
+      if (kept < 0) {
+        print
+      } else if (kept > 0 || count == maxwarns) {
+        printf "%s%d warning%s (and %d about missing documentation, which are not shown)", prefix, kept, (kept == 1 ? "" : "s"), elided
+        if (count == maxwarns) {
+          printf "; other warnings might not be printed, because javadoc and javac stop at %d unless given -Xmaxwarns", maxwarns
+        }
+        printf "\n"
       }
       elided = 0
       next
     }
-    /^[0-9]+ warnings?$/ {
+    is_count($0) {
       elided = 0
     }
     { print }
@@ -537,6 +565,18 @@ elide_missing_doc_warnings() {
     mv -f -- "$1.elided" "$1"
   else
     rm -f -- "$1.elided"
+  fi
+}
+
+# Elides, from each of the given files, the warnings about missing
+# documentation, unless $output shows that warnings caused the build to fail.
+# $output holds everything that the build printed, including the standard
+# output to which Maven writes its warnings and errors.
+elide_unless_warnings_failed() {
+  if ! grep -q -E -e "$warnings_failure_regex" -- "$output" 2> /dev/null; then
+    for elide_file; do
+      elide_missing_doc_warnings "$elide_file"
+    done
   fi
 }
 
@@ -555,9 +595,7 @@ elide_missing_doc_warnings() {
 # Prints the output so far, removes the temporary directory, and dies of signal $1.
 # shellcheck disable=SC2329 # Invoked by `trap`.
 on_signal() {
-  if ! grep -q -F -e "$werror_message" -- "$output" 2> /dev/null; then
-    elide_missing_doc_warnings "$output"
-  fi
+  elide_unless_warnings_failed "$output"
   cat "$output" >&2
   rm -rf "$tmpdir"
   trap - "$1" EXIT
@@ -592,10 +630,7 @@ printf '%s\n' "$running_message" > "$output"
 build_status="$(cat "$status_file" 2> /dev/null)"
 build_status="${build_status:-1}"
 
-if ! grep -q -F -e "$werror_message" -- "$errors" 2> /dev/null; then
-  elide_missing_doc_warnings "$errors"
-  elide_missing_doc_warnings "$output"
-fi
+elide_unless_warnings_failed "$errors" "$output"
 if [ "$build_status" != 0 ] || [ -s "$errors" ]; then
   cat "$output" >&2
 fi

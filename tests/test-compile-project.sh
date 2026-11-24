@@ -579,7 +579,8 @@ make_stderr_project() {
   printf '%s\n' "$@" > "${make_stderr_dir}/stderr.txt"
 }
 
-# Warnings about missing documentation, as javadoc prints them.
+# Prints, to standard output, warnings about missing documentation, as javadoc
+# prints them.
 missing_doc_warnings() {
   printf '%s\n' \
     '/p/src/Foo.java:42: warning: no @param for x' \
@@ -639,6 +640,84 @@ else
     *) fail "elide-werror: expected every warning, but got: ${elide_output}" ;;
   esac
 fi
+
+# Prints, to standard output, the lines that are its arguments, each prefixed
+# by "[WARNING] ", as Maven prints javadoc's output.
+maven_warnings() {
+  printf '[WARNING] %s\n' "$@"
+}
+
+# Checks that compile-project, run on directory $2, exits with status 0 and
+# prints the remaining arguments, one per line, after the line that says that
+# compile-project is running.  $1 names the test; used for diagnostics.
+expect_elided_output() {
+  expect_name="$1"
+  expect_dir="$2"
+  shift 2
+  expect_expected="$(printf '%s\n' "Running compile-project in ${expect_dir}" "$@")"
+  if ! expect_output="$("${COMPILE_PROJECT}" "${expect_dir}" 2>&1)"; then
+    fail "${expect_name}: nonzero exit status: ${expect_output}"
+  elif [ "${expect_output}" != "${expect_expected}" ]; then
+    fail "${expect_name}: expected:
+${expect_expected}
+but got:
+${expect_output}"
+  fi
+}
+
+# Maven prefixes each line with a log level and removes leading whitespace.
+# Those warnings are elided, with their source and caret lines, and the count
+# keeps its prefix.
+elidemaven="${tmpdir}/elide-maven"
+make_stderr_project "${elidemaven}" \
+  "$(maven_warnings '/p/src/Foo.java:42: warning: no @param for x' \
+    'void bar(int x) {' '^' \
+    '/p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
+    'old();' '^' '2 warnings')"
+expect_elided_output elide-maven "${elidemaven}" \
+  '[WARNING] /p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
+  '[WARNING] old();' \
+  '[WARNING] ^' \
+  '[WARNING] 1 warning (and 1 about missing documentation, which are not shown)'
+
+# A count of 100 warnings, at which javadoc stops by default, is not removed
+# even if every warning that it counts was elided, because javadoc might have
+# stopped before printing other warnings.
+elidemax="${tmpdir}/elide-max"
+make_stderr_project "${elidemax}" \
+  "$(for _ in $(seq 100); do
+    printf '%s\n' '/p/src/Foo.java:42: warning: no comment' '  void bar() {' '       ^'
+  done)" '100 warnings'
+expect_elided_output elide-max "${elidemax}" \
+  '0 warnings (and 100 about missing documentation, which are not shown); other warnings might not be printed, because javadoc and javac stop at 100 unless given -Xmaxwarns'
+
+# A count that is smaller than the number of warnings elided, as when two
+# builds' output is interleaved, is left unchanged.
+elidesmall="${tmpdir}/elide-small"
+make_stderr_project "${elidesmall}" "$(missing_doc_warnings)" '2 warnings'
+expect_elided_output elide-small "${elidesmall}" '2 warnings'
+
+# When Maven fails because of warnings, it writes the message to standard
+# output, and no warning is elided.
+for elidefail_message in \
+  '[ERROR] error: warnings found and -Werror specified' \
+  '[ERROR] Failed to execute goal: Project contains Javadoc Warnings -> [Help 1]'; do
+  elidefail="${tmpdir}/elide-fail"
+  rm -rf "${elidefail}"
+  mkdir -p "${elidefail}"
+  maven_warnings '/p/src/Foo.java:42: warning: no @param for x' \
+    'void bar(int x) {' '^' '1 warning' > "${elidefail}/stdout.txt"
+  printf '%s\n' "${elidefail_message}" >> "${elidefail}/stdout.txt"
+  printf 'all:\n\t@cat stdout.txt; exit 1\n' > "${elidefail}/Makefile"
+  if elide_output="$("${COMPILE_PROJECT}" "${elidefail}" 2>&1)"; then
+    fail "elide-fail (${elidefail_message}): zero exit status"
+  else
+    case "${elide_output}" in
+      *"$(cat "${elidefail}/stdout.txt")"*) ;;
+      *) fail "elide-fail (${elidefail_message}): expected every warning, but got: ${elide_output}" ;;
+    esac
+  fi
+done
 
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
