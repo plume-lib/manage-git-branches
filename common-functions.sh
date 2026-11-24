@@ -251,7 +251,8 @@ append_merge_note_summary() {
 ## `commit_staged_again`),
 ## each merge left in progress and each agent session that can be continued
 ## (which `report_merge_in_progress` and `report_agent_session` also note in
-## AGENT-TODO.md), and the step that failed.  `git-push-to --summary` sets
+## AGENT-TODO.md), each build that failed, with a copy of its output (see
+## `merge_build_failed`), and the step that failed.  `git-push-to --summary` sets
 ## ${summary_file}.  A failure to write the summary goes unreported, because
 ## the same information is printed as a diagnostic.
 append_summary() {

@@ -3086,6 +3086,14 @@ case "${push_output}" in
   *"not committed again, because "*"compile-project\` failed"*"cannot commit the changes of claude"*) ;;
   *) fail "build fix with a hook that breaks the build: wrong diagnostic: ${push_output}" ;;
 esac
+# The diagnostic names the directory by a physical path, as on macOS, where
+# the temporary directory is reached through a symbolic link.
+broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
+failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}.log")"
+case "${push_output}" in
+  *"git-push-to: in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; the changes that claude staged fix the build, but they cannot be committed; its output is in ${failed_log}"*) ;;
+  *) fail "build fix with a hook that breaks the build: the diagnostic does not say that the commit failed: ${push_output}" ;;
+esac
 if [ "$(git -C "${feature_dir}" log -1 --format=%s HEAD)" != "Merge branch 'main' into feature" ]; then
   fail "build fix with a hook that breaks the build: committed the fix"
 fi
@@ -3150,6 +3158,17 @@ case "${push_output}" in
   *"in 3 attempts"*) ;;
   *) fail "bad build fix: wrong diagnostic: ${push_output}" ;;
 esac
+# The diagnostic names a copy of the output of the last build, which built
+# the agent's changes.
+broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
+failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}-claude.log")"
+case "${push_output}" in
+  *"git-push-to: in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} with the changes that claude staged to fix its build failed; its output is in ${failed_log}"*) ;;
+  *) fail "bad build fix: the diagnostic does not name the last build's output: ${push_output}" ;;
+esac
+if ! grep -q 'other.txt is broken' "${failed_log}" 2> /dev/null; then
+  fail "bad build fix: no copy of the last build's output in ${failed_log}"
+fi
 if [ "$(wc -l < "${STUB_LOG}")" -ne 4 ]; then
   fail "bad build fix: expected claude to run 4 times, but ran: $(cat "${STUB_LOG}")"
 fi
@@ -3405,7 +3424,7 @@ fi
 # copy of the build's output that is named for the commit.
 broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
 failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}.log")"
-expected="in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; claude was not asked to fix it, because no merge that refs/remotes/origin/feature lacks combined changes, so no merge broke the build; its output is in ${failed_log}"
+expected="in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; claude was not asked to fix it, because every merge that combined changes is in refs/remotes/origin/feature, so no merge broke the build; its output is in ${failed_log}"
 case "${push_output}" in
   *"git-push-to: ${expected}"*) ;;
   *) fail "build failure without a merge: the diagnostic does not say why the agent was not asked: ${push_output}" ;;

@@ -230,6 +230,15 @@ else
     *"unable to build in ${FEATURE_DIR} after reformatting it"*"while reformatting"*) ;;
     *) fail "broken by reformatting: wrong diagnostic: $(cat "${WORK_DIR}/errors")" ;;
   esac
+  broken_head="$(git -C "${FEATURE_DIR}" rev-parse --short HEAD)"
+  failed_log="$(git -C "${FEATURE_DIR}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}-reformatted.log")"
+  case "$(cat "${WORK_DIR}/errors")" in
+    *"git-push-to: in ${FEATURE_DIR}: the build of commit ${broken_head} after reformatting failed; its output is in ${failed_log}"*) ;;
+    *) fail "broken by reformatting: the diagnostic does not name a copy of the build's output: $(cat "${WORK_DIR}/errors")" ;;
+  esac
+  if [ ! -f "${failed_log}" ]; then
+    fail "broken by reformatting: no copy of the build's output in ${failed_log}"
+  fi
   if [ "$(last_subject "${FEATURE_DIR}")" != "${MERGE_SUBJECT}" ]; then
     fail "broken by reformatting: the last commit is not the merge: $(git -C "${FEATURE_DIR}" log --oneline -3)"
   fi
