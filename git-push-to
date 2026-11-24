@@ -39,7 +39,7 @@
 # which are also noted in AGENT-TODO.md, each build that failed, with a copy
 # of its output that later builds do not overwrite and, if no merge might have
 # broken the build, why the agent was not asked to fix it, as in
-#   in /home/me/myrepo-branch-feature: the build of commit 1a2b3c4 failed; claude was not asked to fix it, because refs/remotes/origin/feature has the same files, so no merge broke the build; its output is in /home/me/myrepo/.git/manage-git-branches-build-failed-1a2b3c4.log
+#   in /home/me/myrepo-branch-feature: the build of commit 1a2b3c4 failed; claude was not asked to fix it, because refs/remotes/origin/feature has the same files, so no merge broke the build; its output is in /home/me/myrepo-branch-feature/.git/manage-git-branches-build-failed-1a2b3c4.log
 # and, if a pull, push, or rebase fails, the step that failed, as in
 #   failed to push myrepo-branch-main into myrepo-branch-feature, while building
 # The same information is printed as diagnostics, along with the details of

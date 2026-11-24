@@ -1171,10 +1171,15 @@ build_logged() {
 ## Returns 3 instead if `run_agent` returned 3 for the first attempt:  the
 ## agent failed each time without changing anything and is not ready to
 ## run, so nothing remains to review, and no session can be continued.
+## Sets ${fix_built} to "failed" or "succeeded" according to the last build
+## of the agent's changes, whose output LOG then holds, or to "" if no build
+## of them ran, so that LOG still holds the output of the build that failed
+## before this call.
 build_fix_attempts=3
 fix_failed_build() {
   fix_with="$1"
   fix_log="$2"
+  fix_built=''
   # No session is reported if this function fails before the agent runs.
   agent_session_ids=''
   # The agent's changes are committed below, and so would be any change that
@@ -1261,8 +1266,11 @@ $(tail -n 100 "${fix_log}")"
       return 1
     fi
     if build_logged "${fix_log}"; then
+      fix_built=succeeded
       break
     fi
+    # shellcheck disable=SC2034 # set for the caller
+    fix_built=failed
     echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
     # The next attempt's changes are staged with \`git add -u\`, which would
     # also stage any change that the build made.
