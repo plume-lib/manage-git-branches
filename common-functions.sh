@@ -1512,33 +1512,55 @@ build_failures_max=50
 ## Usage: record_build_failure
 ## Adds the commit HEAD of the current directory to the commits that
 ## `build_failures_file` lists, after removing the oldest commits beyond
-## ${build_failures_max}.  A failure to write the file goes unreported,
-## because the file serves only to explain later failures of the build.
+## ${build_failures_max}.  A failure to read or write the file goes
+## unreported, and leaves the file as it was, because the file serves only to
+## explain later failures of the build.
 record_build_failure() {
   rbf_file="$(build_failures_file)" || return 0
   rbf_head="$(git rev-parse --verify HEAD)" || return 0
-  {
-    if [ -f "${rbf_file}" ]; then grep -v -x -F -e "${rbf_head}" -- "${rbf_file}"; fi
-    printf '%s\n' "${rbf_head}"
-  } | tail -n "${build_failures_max}" > "${rbf_file}.new" 2> /dev/null \
-    && mv -f -- "${rbf_file}.new" "${rbf_file}" 2> /dev/null
-  rm -f -- "${rbf_file}.new"
+  rbf_others=''
+  if [ -f "${rbf_file}" ]; then
+    rbf_others="$(build_failures_other_than "${rbf_file}" "${rbf_head}")" || return 0
+  fi
+  write_build_failures "${rbf_file}" "${rbf_others}${rbf_others:+
+}${rbf_head}"
 }
 
 ## Usage: forget_build_failure
 ## Removes the commit HEAD of the current directory, whose build succeeded,
-## from the commits that `build_failures_file` lists.  A failure to write the
-## file goes unreported, as in `record_build_failure`.
+## from the commits that `build_failures_file` lists.  A failure to read or
+## write the file goes unreported, as in `record_build_failure`.
 forget_build_failure() {
   rbf_file="$(build_failures_file)" || return 0
   rbf_head="$(git rev-parse --verify HEAD)" || return 0
   if ! build_failure_recorded . "${rbf_head}"; then
     return 0
   fi
-  grep -v -x -F -e "${rbf_head}" -- "${rbf_file}" > "${rbf_file}.new" 2> /dev/null
-  # `grep` fails when it selects no line, as when HEAD was the only commit.
-  mv -f -- "${rbf_file}.new" "${rbf_file}" 2> /dev/null
-  rm -f -- "${rbf_file}.new"
+  rbf_others="$(build_failures_other_than "${rbf_file}" "${rbf_head}")" || return 0
+  write_build_failures "${rbf_file}" "${rbf_others}"
+}
+
+## Usage: build_failures_other_than FILE COMMIT
+## Prints the lines of FILE, a file that `build_failures_file` names, other
+## than COMMIT, a full hash.  Fails if it cannot read FILE.
+build_failures_other_than() {
+  # `grep` fails with status 1 when it selects no line, as when COMMIT is
+  # the only line, and with status 2 when it cannot read FILE.
+  grep -v -x -F -e "$2" -- "$1" 2> /dev/null || [ "$?" -eq 1 ]
+}
+
+## Usage: write_build_failures FILE COMMITS
+## Replaces the contents of FILE, a file that `build_failures_file` names,
+## by the last ${build_failures_max} lines of COMMITS, full hashes one per
+## line, or by nothing if COMMITS is empty.  A failure goes unreported, and
+## leaves FILE as it was.
+write_build_failures() {
+  {
+    if [ -n "$2" ]; then printf '%s\n' "$2"; fi \
+      | tail -n "${build_failures_max}" > "$1.new" \
+      && mv -f -- "$1.new" "$1"
+  } 2> /dev/null
+  rm -f -- "$1.new"
 }
 
 ## Usage: build_failure_recorded DIRECTORY [COMMIT]

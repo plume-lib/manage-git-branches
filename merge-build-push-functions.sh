@@ -1110,8 +1110,8 @@ refuse_uncommitted_changes() {
 ## the build's output, and that says why the agent was not asked to fix it if
 ## no merge might have broken the build (see `merge_build_failed`); in that
 ## case, it also records the commit (see `record_build_failure`).  If the build fails
-## after a merge, and it failed, with no merge to blame, at the commit that
-## HEAD named before this call's merges, the agent is told so, and the
+## after a merge, and it failed, with no merge to blame, at a commit before
+## the merges (see `failed_before_merges`), the agent is told so, and the
 ## message of its fix says so, as in "Fix the build, which already failed at
 ## commit 1a2b3c4 before merging branch 'main'".  After a successful build,
 ## removes HEAD from that record (see `forget_build_failure`).
@@ -1238,17 +1238,16 @@ merge_build_push() {
         merge_build_failed "${merge_fix_reason:+$6 was not asked to fix it, because ${merge_fix_reason}, so no merge broke the build}"
         return 1
       fi
-      # The build of the branch already failed before this call merged
-      # anything, and no merge had broken it then (see
-      # `record_build_failure`), so the merges might not have caused the
-      # failure.
-      if build_failure_recorded . "${merge_old_head}"; then
-        merge_old_short="$(git rev-parse --short "${merge_old_head}")"
+      # The build of the branch already failed before the merges, and no
+      # merge had broken it then (see `record_build_failure`), so the merges
+      # might not have caused the failure.
+      if merge_failed_before="$(failed_before_merges "${merge_old_head}" "${merge_fix_remotes}")"; then
+        merge_failed_before_short="$(git rev-parse --short "${merge_failed_before}")"
         case "${merge_fix_message}" in
-          "Fix the build after merges"*) merge_fix_message="Fix the build, which already failed at commit ${merge_old_short} before the merges${merge_fix_message#Fix the build after merges}" ;;
-          "Fix the build after "*) merge_fix_message="Fix the build, which already failed at commit ${merge_old_short} before ${merge_fix_message#Fix the build after }" ;;
+          "Fix the build after merges"*) merge_fix_message="Fix the build, which already failed at commit ${merge_failed_before_short} before the merges${merge_fix_message#Fix the build after merges}" ;;
+          "Fix the build after "*) merge_fix_message="Fix the build, which already failed at commit ${merge_failed_before_short} before ${merge_fix_message#Fix the build after }" ;;
         esac
-        merge_fix_account="Before the script merged anything, the build of branch ${merge_fix_branch} already failed at commit ${merge_old_head}, which no merge had broken, so the merges below might not have caused the failure.  ${merge_fix_account}"
+        merge_fix_account="Before the merges, the build of branch ${merge_fix_branch} already failed at commit ${merge_failed_before}, which no merge had broken, so the merges below might not have caused the failure.  ${merge_fix_account}"
       fi
       if ! agent_available "$6"; then
         [ -z "${agent_unavailable_reason}" ] \
@@ -1454,6 +1453,30 @@ reformat_restore() {
   else
     echo "${SCRIPT_NAME}: $1; cannot restore the files that the reformatting changed: ${reformat_restored}" >&2
   fi
+}
+
+## Usage: failed_before_merges COMMIT REMOTES
+## Prints the full hash, such as "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+## of the first commit, among COMMIT and the commits that its first parents
+## reach through merges, whose build failed in the current directory with no
+## merge to blame (see `build_failure_recorded`).  Follows the first parent
+## only of a merge that is not in the history of REMOTES, a space-separated
+## list of refs such as "refs/remotes/origin/feature", as of a merge that an
+## earlier call made but did not push because its build failed.  Fails,
+## printing nothing, if there is no such commit.
+failed_before_merges() {
+  failed_before_commit="$1"
+  while ! build_failure_recorded . "${failed_before_commit}"; do
+    if ! git rev-parse --verify --quiet "${failed_before_commit}^2" > /dev/null; then
+      return 1
+    fi
+    # shellcheck disable=SC2086 # the variable is a list of refs
+    if [ -z "$(git rev-list -n 1 "${failed_before_commit}" --not $2 --)" ]; then
+      return 1
+    fi
+    failed_before_commit="$(git rev-parse --verify "${failed_before_commit}^1")" || return 1
+  done
+  printf '%s\n' "${failed_before_commit}"
 }
 
 ## Usage: save_failed_build_log LOG

@@ -1876,4 +1876,44 @@ case "${pat_output}" in
 esac
 rm -f "${pat_todo}"
 
+## Tests of record_build_failure and forget_build_failure.  A failure to read
+## or write the file of recorded commits is not reported, and leaves the file
+## as it was.
+rbf_dir="${WORK_DIR}/rbf"
+git init -q -b main "${rbf_dir}"
+git -C "${rbf_dir}" commit -q --allow-empty -m "First"
+rbf_first="$(git -C "${rbf_dir}" rev-parse HEAD)"
+git -C "${rbf_dir}" commit -q --allow-empty -m "Second"
+rbf_second="$(git -C "${rbf_dir}" rev-parse HEAD)"
+rbf_list="$(build_failures_file "${rbf_dir}")"
+(cd "${rbf_dir}" && git checkout -q "${rbf_first}" && record_build_failure \
+  && git checkout -q "${rbf_second}" && record_build_failure)
+[ "$(cat "${rbf_list}")" = "${rbf_first}
+${rbf_second}" ] || fail "record_build_failure: wrong list: $(cat "${rbf_list}")"
+(cd "${rbf_dir}" && forget_build_failure)
+[ "$(cat "${rbf_list}")" = "${rbf_first}" ] \
+  || fail "forget_build_failure: wrong list: $(cat "${rbf_list}")"
+# Root can read and write files regardless of their permissions.
+if [ "$(id -u)" -ne 0 ]; then
+  chmod a-r "${rbf_list}"
+  rbf_output="$(cd "${rbf_dir}" && record_build_failure 2>&1)"
+  chmod u+r "${rbf_list}"
+  [ -z "${rbf_output}" ] \
+    || fail "record_build_failure, unreadable file: unexpected diagnostic: ${rbf_output}"
+  [ "$(cat "${rbf_list}")" = "${rbf_first}" ] \
+    || fail "record_build_failure, unreadable file: changed the list: $(cat "${rbf_list}")"
+  git -C "${rbf_dir}" checkout -q "${rbf_first}"
+  rbf_git_dir="$(dirname -- "${rbf_list}")"
+  chmod a-w "${rbf_git_dir}"
+  rbf_output="$(cd "${rbf_dir}" && record_build_failure 2>&1)"
+  rbf_forget_output="$(cd "${rbf_dir}" && forget_build_failure 2>&1)"
+  chmod u+w "${rbf_git_dir}"
+  [ -z "${rbf_output}" ] \
+    || fail "record_build_failure, unwritable directory: unexpected diagnostic: ${rbf_output}"
+  [ -z "${rbf_forget_output}" ] \
+    || fail "forget_build_failure, unwritable directory: unexpected diagnostic: ${rbf_forget_output}"
+  [ "$(cat "${rbf_list}")" = "${rbf_first}" ] \
+    || fail "unwritable directory: changed the list: $(cat "${rbf_list}")"
+fi
+
 echo "${SCRIPT_NAME}: OK"

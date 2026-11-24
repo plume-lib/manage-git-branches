@@ -355,10 +355,11 @@
 # in the file manage-git-branches-build-failures in TO_DIR's git directory,
 # until a build of it succeeds.  If a later merge's build fails, and the
 # build of the commit that TO_DIR's branch had before the merge is recorded
-# as failed, the agent is told that the merge might not have caused the
-# failure, and the fix's message is "Fix the build, which already failed at
-# commit ... before merging ...".  After a chain fails, `resolve-conflicts`
-# skips each later chain that would push into such a directory of it.
+# as failed (before any merge that an earlier run made but did not push),
+# the agent is told that the merge might not have caused the failure, and
+# the fix's message is "Fix the build, which already failed at commit ...
+# before merging ...".  After a chain fails, `resolve-conflicts` skips each
+# later chain that would push into such a directory of it.
 #
 # When the agent fails to resolve the conflicts or to fix the build, or when
 # this script rejects its work, this script prints a command such as
