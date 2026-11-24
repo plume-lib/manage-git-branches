@@ -509,12 +509,16 @@ built_commits() {
 ## If it returns 1, a failure of the build is not one that a merge on the
 ## branch caused, and the agent would merely work around it.  For example, a
 ## pull that fast-forwarded the branch brought only commits that the remote
-## already had.  Prints a diagnostic if it returns 1 because git fails.
+## already had.  If it returns 1, it sets ${merge_fix_reason} to why no merge
+## might have broken the build, such as "refs/remotes/origin/feature has the
+## same files" or "no merge that refs/remotes/origin/feature lacks combined
+## changes", or, after printing a diagnostic, to "" if git fails.
 ## The account in ${merge_fix_account} omits each commit in BUILT that is in
 ## the history of a remote branch or of another commit in BUILT, because it
 ## excludes no more commits, but that commit's tree still counts.  Of commits
 ## in BUILT that are the same commit, the account keeps the first.
 has_unbuilt_merge() {
+  merge_fix_reason=''
   merge_fix_remotes="$(remote_branch_refs .)"
   # The commits in BUILT that are in the repository, each named once:  of two
   # names of one commit, such as a ref and a hash, only the first.
@@ -571,6 +575,7 @@ has_unbuilt_merge() {
   # not a merge's doing.
   for merge_fix_commit in ${merge_fix_remotes} ${merge_fix_present}; do
     if [ "$(git rev-parse --verify --quiet "${merge_fix_commit}^{tree}")" = "${merge_fix_tree}" ]; then
+      merge_fix_reason="${merge_fix_commit} has the same files"
       return 1
     fi
   done
@@ -647,7 +652,13 @@ has_unbuilt_merge() {
       esac
     fi
   done
+  merge_fix_excluded="${merge_fix_remotes}${merge_fix_remotes:+${merge_fix_built:+ }}${merge_fix_built}"
   if [ -z "${merge_fix_subjects}" ]; then
+    case "${merge_fix_excluded}" in
+      '') merge_fix_reason='no merge combined changes' ;;
+      *' '*) merge_fix_reason="no merge that $(printf '%s' "${merge_fix_excluded}" | sed -e 's/ / and /g') lack combined changes" ;;
+      *) merge_fix_reason="no merge that ${merge_fix_excluded} lacks combined changes" ;;
+    esac
     return 1
   fi
   merge_fix_branch="$(current_branch)" || merge_fix_branch=HEAD
@@ -671,7 +682,6 @@ has_unbuilt_merge() {
   if [ -n "${merge_fix_remotes}" ] && [ -n "${merge_fix_built}" ]; then
     merge_fix_other="other than those in ${merge_fix_built_history}"
   fi
-  merge_fix_excluded="${merge_fix_remotes}${merge_fix_remotes:+${merge_fix_built:+ }}${merge_fix_built}"
   merge_fix_account="${merge_fix_lack}${merge_fix_other:+, ${merge_fix_other}}.  Among those commits are these merges, oldest first, any of which might have combined changes that do not fit together:
 
 ${merge_fix_list}
@@ -1095,6 +1105,10 @@ refuse_uncommitted_changes() {
 ## comes from, if DIRECTORY is given and not empty.  The merge commit can be
 ## the one that this call made, one that a pull made, or one that an earlier
 ## call made but did not push, as when its build failed.
+## If the build fails, and the agent does not fix it, prints a diagnostic,
+## which it also appends to the summary, that names the commit and a copy of
+## the build's output, and that says why the agent was not asked to fix it if
+## no merge might have broken the build (see `merge_build_failed`).
 ## After a successful build, removes the entries of AGENT-TODO.md that no
 ## longer apply, such as one about a failed build (see `prune_agent_todo`).
 ## Returns 1, after printing a diagnostic, on failure.  Sets
@@ -1198,11 +1212,13 @@ merge_build_push() {
     fi
     if ! build_logged "${merge_log}"; then
       echo "${SCRIPT_NAME}: unable to build in $(pwd)" >&2
+      save_failed_build_log "${merge_log}"
       # Without the agent, stop as with "--no-llm".  Whether a merge might
       # have broken the build is decided only now, because deciding can
       # fetch.  Whether the agent is ready to run is checked only once the
       # agent is needed, because checking can cost a request to its service.
       if [ -z "${6:-}" ]; then
+        merge_build_failed ''
         return 1
       fi
       merge_built="${7:-}"
@@ -1210,11 +1226,13 @@ merge_build_push() {
         merge_built="${merge_built}${merge_built:+ }$(built_commits "$8")"
       fi
       if ! has_unbuilt_merge "${merge_built}"; then
+        merge_build_failed "${merge_fix_reason:+$6 was not asked to fix it, because ${merge_fix_reason}, so no merge broke the build}"
         return 1
       fi
       if ! agent_available "$6"; then
         [ -z "${agent_unavailable_reason}" ] \
           || merge_build_note "${merge_fix_message}" "${agent_unavailable_reason}  $(agent_rerun_advice "$6" 'fix the build')"
+        merge_build_failed ''
         return 1
       fi
       # What this call's merge did, for the agent.
@@ -1246,10 +1264,12 @@ merge_build_push() {
       merge_fix_status=$?
       if [ "${merge_fix_status}" -eq 3 ]; then
         merge_build_note "${merge_fix_message}" "$(agent_unchanged_reason "$6")  $(agent_rerun_advice "$6" 'fix the build')"
+        merge_build_failed ''
         cd -- "${merge_dir}" || true
         return 1
       elif [ "${merge_fix_status}" -ne 0 ]; then
         report_agent_session "${merge_fix_message}"
+        merge_build_failed ''
         cd -- "${merge_dir}" || true
         return 1
       fi
@@ -1412,6 +1432,46 @@ reformat_restore() {
   else
     echo "${SCRIPT_NAME}: $1; cannot restore the files that the reformatting changed: ${reformat_restored}" >&2
   fi
+}
+
+## Usage: save_failed_build_log LOG
+## For `merge_build_push`, after a build of the current directory failed:
+## copies LOG, the file that holds the build's output, to a file in the same
+## directory that is named for the commit HEAD, such as
+## "manage-git-branches-build-failed-1a2b3c4.log", which a later build in the
+## same working tree does not overwrite, and sets ${merge_failed_log} to the
+## copy's name.  Sets ${merge_failed_log} to LOG if it cannot copy LOG.
+## First removes the copies in that directory that are more than
+## ${failed_build_log_days} days old.
+failed_build_log_days=30
+save_failed_build_log() {
+  merge_failed_log="$1"
+  failed_log_dir="$(dirname -- "$1")"
+  # `-prune` keeps `find` from descending into the subdirectories of a
+  # repository's git directory, such as `objects`.
+  find "${failed_log_dir}/." ! -name . -prune -name 'manage-git-branches-build-failed-*.log' \
+    -mtime +"${failed_build_log_days}" -exec rm -f {} + 2> /dev/null
+  failed_log_head="$(git rev-parse --short HEAD)" || return 0
+  failed_log_copy="${failed_log_dir}/manage-git-branches-build-failed-${failed_log_head}.log"
+  if cp -- "$1" "${failed_log_copy}"; then
+    merge_failed_log="${failed_log_copy}"
+  fi
+}
+
+## Usage: merge_build_failed REASON
+## For `merge_build_push`, when it fails because the build of the current
+## directory failed:  prints a diagnostic that names the commit HEAD and the
+## file ${merge_failed_log}, which holds the build's output (see
+## `save_failed_build_log`), and appends it to the summary (see
+## `append_summary`), as in "in /home/me/myrepo-branch-feature: the build of
+## commit 1a2b3c4 failed; its output is in FILE".  REASON, if not empty, says
+## more, such as why no AI agent was asked to fix the build, and follows the
+## commit, as in "...failed; claude was not asked to fix it, because ...".
+merge_build_failed() {
+  merge_failed_head="$(git rev-parse --short HEAD 2> /dev/null)" || merge_failed_head=HEAD
+  merge_failed_note="in $(pwd): the build of commit ${merge_failed_head} failed${1:+; $1}; its output is in ${merge_failed_log}"
+  echo "${SCRIPT_NAME}: ${merge_failed_note}" >&2
+  append_summary "${merge_failed_note}"
 }
 
 ## Usage: merge_build_note TASK NOTE
