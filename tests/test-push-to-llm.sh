@@ -3086,6 +3086,14 @@ case "${push_output}" in
   *"not committed again, because "*"compile-project\` failed"*"cannot commit the changes of claude"*) ;;
   *) fail "build fix with a hook that breaks the build: wrong diagnostic: ${push_output}" ;;
 esac
+# The diagnostic names the directory by a physical path, as on macOS, where
+# the temporary directory is reached through a symbolic link.
+broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
+failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}.log")"
+case "${push_output}" in
+  *"git-push-to: in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; the changes that claude staged fix the build, but they cannot be committed; its output is in ${failed_log}"*) ;;
+  *) fail "build fix with a hook that breaks the build: the diagnostic does not say that the commit failed: ${push_output}" ;;
+esac
 if [ "$(git -C "${feature_dir}" log -1 --format=%s HEAD)" != "Merge branch 'main' into feature" ]; then
   fail "build fix with a hook that breaks the build: committed the fix"
 fi
@@ -3150,6 +3158,17 @@ case "${push_output}" in
   *"in 3 attempts"*) ;;
   *) fail "bad build fix: wrong diagnostic: ${push_output}" ;;
 esac
+# The diagnostic names a copy of the output of the last build, which built
+# the agent's changes.
+broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
+failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}-claude.log")"
+case "${push_output}" in
+  *"git-push-to: in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} with the changes that claude staged to fix its build failed; its output is in ${failed_log}"*) ;;
+  *) fail "bad build fix: the diagnostic does not name the last build's output: ${push_output}" ;;
+esac
+if ! grep -q 'other.txt is broken' "${failed_log}" 2> /dev/null; then
+  fail "bad build fix: no copy of the last build's output in ${failed_log}"
+fi
 if [ "$(wc -l < "${STUB_LOG}")" -ne 4 ]; then
   fail "bad build fix: expected claude to run 4 times, but ran: $(cat "${STUB_LOG}")"
 fi
@@ -3400,6 +3419,51 @@ case "${push_output}" in
 esac
 if [ -s "${STUB_LOG}" ]; then
   fail "build failure without a merge: an agent ran: $(cat "${STUB_LOG}")"
+fi
+# The diagnostic and the summary say why the agent was not asked, and name a
+# copy of the build's output that is named for the commit.
+broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
+failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}.log")"
+expected="in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; claude was not asked to fix it, because every merge that combined changes is in refs/remotes/origin/feature, so no merge broke the build; its output is in ${failed_log}"
+case "${push_output}" in
+  *"git-push-to: ${expected}"*) ;;
+  *) fail "build failure without a merge: the diagnostic does not say why the agent was not asked: ${push_output}" ;;
+esac
+if ! grep -q 'other.txt is broken' "${failed_log}" 2> /dev/null; then
+  fail "build failure without a merge: no copy of the build's output in ${failed_log}"
+fi
+
+## The summary says why the agent was not asked to fix a build that a pushed
+## commit broke, and the copy of the build's output outlasts a later build.
+setup_case build-pushed-no-merge build
+git -C "${main_dir}" reset -q --hard HEAD^
+git -C "${main_dir}" push -q --force
+echo "BROKEN" >> "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Break the build and push"
+git -C "${feature_dir}" push -q
+feature_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+summary_file="${case_dir}/summary"
+push_to STUB_BUILD=fix good --llm --summary "${summary_file}"
+check_not_pushed "pushed build failure without a merge"
+broken_head="$(git -C "${feature_dir}" rev-parse --short HEAD)"
+failed_log="$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path "manage-git-branches-build-failed-${broken_head}.log")"
+expected="$(printf '%s\n' \
+  "in $(cd "${feature_dir}" && pwd -P): the build of commit ${broken_head} failed; claude was not asked to fix it, because refs/remotes/origin/feature has the same files, so no merge broke the build; its output is in ${failed_log}" \
+  "failed to push ${main_dir} into ${feature_dir}, while building")"
+if [ "$(cat "${summary_file}")" != "${expected}" ]; then
+  fail "pushed build failure without a merge: wrong summary: $(cat "${summary_file}")"
+fi
+if [ -s "${STUB_LOG}" ]; then
+  fail "pushed build failure without a merge: an agent ran: $(cat "${STUB_LOG}")"
+fi
+echo "fine" > "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Fix the build"
+push_to STUB_BUILD=fix good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "build after a failed build: git-push-to failed: ${push_output}"
+fi
+if ! grep -q 'other.txt is broken' "${failed_log}" 2> /dev/null; then
+  fail "build after a failed build: the copy of the failed build's output in ${failed_log} did not last"
 fi
 
 ## A merge that FROM_DIR's branch has but its remote lacks was not built, so
