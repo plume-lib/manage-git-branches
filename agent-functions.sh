@@ -209,7 +209,7 @@ index_digest() {
 run_agent() {
   # Each agent's sandbox keeps it from changing git's configuration or hooks,
   # which name commands that git runs.  Check that anyway.
-  if ! run_agent_git_state="$(git_control_state)"; then
+  if ! git_control_record; then
     echo "${SCRIPT_NAME}: cannot read git's configuration in $(pwd)" >&2
     return 1
   fi
@@ -373,7 +373,7 @@ run_agent() {
     if [ -n "${run_agent_session}" ]; then
       agent_session_ids="${agent_session_ids:-}${agent_session_ids:+ }${run_agent_session}"
     fi
-    if [ "$(git_control_state)" != "${run_agent_git_state}" ]; then
+    if git_control_changed; then
       run_agent_remove_marker
       echo "${SCRIPT_NAME}: $1 changed git's configuration, attributes, or hooks in $(pwd); check them before running git there" >&2
       return 2
@@ -919,18 +919,94 @@ toml_string() {
   printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 }
 
-## Usage: git_control_state
-## Prints a summary of what in the current repository names commands that git
-## runs, or chooses among them:  git's configuration, including each file
-## that it includes; the repository's `info/attributes` file; and its hooks
-## that are outside the working tree.  The summary changes if any of them
-## changes.  The current directory must be the top level of the working tree.
-git_control_state() {
-  # The configuration's values, rather than its files, are summarized, so
-  # that a change to a file that the configuration includes, such as through
-  # "include.path", changes the summary.
-  git_control_config="$(git config --list)" || return 1
-  printf '%s\n' "${git_control_config}" | cksum
+## Usage: git_control_record
+## Records what in the current repository names commands that git runs, or
+## chooses among them, for `git_control_changed` to compare with:  git's
+## configuration, including each file that it includes; the repository's
+## `info/attributes` file; and its hooks that are outside the working tree.
+## Also records the names of the repository's branches.  Returns 1 if it
+## cannot read them.  The current directory must be the top level of the
+## working tree.
+git_control_record() {
+  git_control_record_branches="$(git for-each-ref --format='%(refname:strip=2)' refs/heads/)" || return 1
+  git_control_record_config="$(git_config_entries)" || return 1
+  git_control_record_files="$(git_control_files_state)" || return 1
+}
+
+## Usage: git_control_changed
+## Returns 0 if what `git_control_record` recorded has changed since then, or
+## cannot be read now, and 1 otherwise.
+##
+## It ignores each entry of git's configuration for a branch, such as
+## "branch.NAME.remote" or "branch.NAME.merge", if the branch did not exist
+## both when `git_control_record` ran and now.  Linked worktrees share one
+## configuration file, so another process can add or remove such entries at
+## any time, as by creating a worktree for a new branch or deleting a branch.
+## Git reads a branch's entries only for that branch, so an entry for a
+## branch that does not exist takes effect only if a branch of that name is
+## created later.  The current directory must be the top level of the working
+## tree.
+git_control_changed() {
+  git_control_changed_branches="$(git for-each-ref --format='%(refname:strip=2)' refs/heads/)" || return 0
+  git_control_changed_config="$(git_config_entries)" || return 0
+  git_control_changed_files="$(git_control_files_state)" || return 0
+  if [ "${git_control_changed_files}" != "${git_control_record_files}" ]; then
+    return 0
+  fi
+  [ "$(printf '%s\n' "${git_control_record_config}" \
+    | omit_other_branch_config "${git_control_record_branches}" "${git_control_changed_branches}")" \
+    != "$(printf '%s\n' "${git_control_changed_config}" \
+      | omit_other_branch_config "${git_control_record_branches}" "${git_control_changed_branches}")" ]
+}
+
+## Usage: git_config_entries
+## Prints the entries of git's configuration, including those of each file
+## that it includes, one per line:  each entry's key, and then, if the entry
+## has a value, a control-A character and the value, in which each newline is
+## replaced by a control-A character.  For example, it prints the entry
+## "core.bare = false" as "core.bare^Afalse", where ^A is the control-A
+## character.  Returns 1 if it cannot read the configuration.
+git_config_entries() {
+  # A pipeline's status is that of its last command, so check first that git
+  # can read the configuration.
+  git config --list > /dev/null || return 1
+  # "--list -z" ends each entry with a NUL character and separates its key
+  # from its value with a newline, so that a newline in a value cannot make
+  # the rest of the value look like another entry, as it would without "-z".
+  git config --list -z | tr '\000\012' '\012\001'
+}
+
+## Usage: omit_other_branch_config BRANCHES1 BRANCHES2
+## Copies the entries of git's configuration on standard input, in the form
+## that `git_config_entries` prints, to standard output, omitting each entry
+## for a branch, such as "branch.NAME.remote", unless NAME is a line of both
+## BRANCHES1 and BRANCHES2.  An entry of the section "branch" that names no
+## branch, such as "branch.autoSetupMerge", is copied.
+omit_other_branch_config() {
+  # A key is "SECTION.NAME" or "SECTION.SUBSECTION.NAME", in which only
+  # SUBSECTION, here the branch's name, can contain a dot.  Git prints
+  # SECTION in lower case.
+  OMIT_BRANCHES1="$1" OMIT_BRANCHES2="$2" awk '
+    BEGIN {
+      FS = "\001"
+      count = split(ENVIRON["OMIT_BRANCHES1"], names, "\n")
+      for (i = 1; i <= count; i++) { first[names[i]] = 1 }
+      count = split(ENVIRON["OMIT_BRANCHES2"], names, "\n")
+      for (i = 1; i <= count; i++) { if (names[i] in first) { both[names[i]] = 1 } }
+    }
+    substr($1, 1, 7) == "branch." && match(substr($1, 8), /\.[^.]*$/) {
+      if (!(substr($1, 8, RSTART - 1) in both)) { next }
+    }
+    { print }
+  '
+}
+
+## Usage: git_control_files_state
+## Prints a summary of the repository's `info/attributes` file and of its
+## hooks that are outside the working tree, which name commands that git
+## runs, or choose among them.  The summary changes if any of them changes.
+## The current directory must be the top level of the working tree.
+git_control_files_state() {
   git_control_attributes="$(git rev-parse --path-format=absolute --git-path info/attributes)" || return 1
   if [ -f "${git_control_attributes}" ]; then
     cksum < "${git_control_attributes}"
@@ -969,7 +1045,7 @@ git_control_state() {
 ## the top level itself; and prints nothing otherwise.  The directory need
 ## not exist.  The current directory must be the top level of the working
 ## tree.  Git resolves a symbolic link in `core.hooksPath`, so the pathname
-## is that of the directory that the link leads to; `git_control_state`
+## is that of the directory that the link leads to; `git_control_changed`
 ## detects a change to such a link.
 working_tree_hooks() {
   wth_hooks="$(git rev-parse --path-format=absolute --git-path hooks)" || return 0

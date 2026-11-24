@@ -88,6 +88,17 @@ fail() {
 ##   relink-hooks: as "good", but also makes the symbolic link .githooks
 ##           point to the directory other-hooks
 ##   config: as "good", but also changes git's configuration
+##   new-branch: as "good", but also creates the branch other, with an entry
+##           in git's configuration, as another process can while the agent
+##           runs
+##   delete-branch: as "good", but also deletes the branch old, and with it
+##           its entries in git's configuration, as another process can while
+##           the agent runs
+##   branch-config: as "good", but also changes the configuration of the
+##           branch feature
+##   multiline-config: as "good", but also changes the second line of the
+##           value of core.pager, a line that looks like an entry for a branch
+##           that does not exist
 ##   change-untracked: as "good", but also changes the untracked file notes.txt
 ##   delete-untracked: as "good", but also deletes the untracked file notes.txt
 ##   separator: as "good", but keeps the line "======="
@@ -291,9 +302,16 @@ fi
 if [ "${STUB_MODE}" = hook-link ]; then
   ln -s ../../file.txt .git/hooks/pre-commit
 fi
-if [ "${STUB_MODE}" = config ]; then
-  git config core.fsmonitor "echo pwned"
-fi
+case "${STUB_MODE}" in
+  config) git config core.fsmonitor "echo pwned" ;;
+  new-branch)
+    git branch other
+    git config branch.other.createdForBranchDirectory true
+    ;;
+  delete-branch) git branch -q -D old ;;
+  branch-config) git config branch.feature.pushRemote elsewhere ;;
+  multiline-config) git config core.pager "$(printf 'less\nbranch.gone.remote=pwned')" ;;
+esac
 if [ "${STUB_MODE}" = commit ]; then
   git add file.txt
   git commit -q -m "Resolved by the agent"
@@ -1942,6 +1960,40 @@ check_not_resolved "agent that changes git's configuration"
 case "${push_output}" in
   *"changed git's configuration, attributes, or hooks"*) ;;
   *) fail "agent that changes git's configuration: wrong diagnostic: ${push_output}" ;;
+esac
+
+## Another process can add or remove the configuration of a branch other than
+## the current one while the agent runs, as by creating a worktree for a new
+## branch or deleting a branch:  linked worktrees share one configuration
+## file.  Such a change is not the agent's.
+setup_case new-branch
+push_to new-branch --llm
+check_resolved claude "branch created while the agent runs"
+setup_case delete-branch
+git -C "${feature_dir}" branch old
+git -C "${feature_dir}" config branch.old.remote origin
+push_to delete-branch --llm
+check_resolved claude "branch deleted while the agent runs"
+
+## An agent that changes the configuration of a branch that exists is
+## rejected.
+setup_case branch-config
+push_to branch-config --llm
+check_not_resolved "agent that changes a branch's configuration"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes a branch's configuration: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that changes a line of a value that looks like an entry for a
+## branch that does not exist is rejected.
+setup_case multiline-config
+git -C "${feature_dir}" config core.pager "$(printf 'less\nbranch.gone.remote=origin')"
+push_to multiline-config --llm
+check_not_resolved "agent that changes a line of a multi-line value"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes a line of a multi-line value: wrong diagnostic: ${push_output}" ;;
 esac
 
 ## A rerun finishes the merge that an earlier run left in progress:  it asks
