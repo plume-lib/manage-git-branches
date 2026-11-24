@@ -88,6 +88,31 @@ fail() {
 ##   relink-hooks: as "good", but also makes the symbolic link .githooks
 ##           point to the directory other-hooks
 ##   config: as "good", but also changes git's configuration
+##   new-branch: as "good", but also creates the branch other, with an entry
+##           in git's configuration, as another process can while the agent
+##           runs
+##   delete-branch: as "good", but also deletes the branch old, and with it
+##           its entries in git's configuration, as another process can while
+##           the agent runs
+##   branch-config: as "good", but also changes the configuration of the
+##           branch feature
+##   push-upstream: as "good", but also sets the upstream of the branch
+##           other, as another process's `git push -u` can while the agent
+##           runs
+##   upstream-url: as "good", but also sets branch.other.remote to a URL,
+##           which names no configured remote
+##   current-upstream: as "good", but also changes the upstream of the
+##           current branch, feature
+##   switch-upstream: as "good", but also changes the upstream of the
+##           current branch, feature, and then makes the branch other, at the
+##           same commit, the current branch
+##   deleted-branch-config: as "good", but also deletes the branch old and
+##           sets its pushRemote to a URL
+##   other-upstream: as "good", but also changes the upstream of the branch
+##           other
+##   multiline-config: as "good", but also changes the second line of the
+##           value of core.pager, a line that looks like an entry for a branch
+##           that does not exist
 ##   change-untracked: as "good", but also changes the untracked file notes.txt
 ##   delete-untracked: as "good", but also deletes the untracked file notes.txt
 ##   separator: as "good", but keeps the line "======="
@@ -291,9 +316,31 @@ fi
 if [ "${STUB_MODE}" = hook-link ]; then
   ln -s ../../file.txt .git/hooks/pre-commit
 fi
-if [ "${STUB_MODE}" = config ]; then
-  git config core.fsmonitor "echo pwned"
-fi
+case "${STUB_MODE}" in
+  config) git config core.fsmonitor "echo pwned" ;;
+  new-branch)
+    git branch other
+    git config branch.other.createdForBranchDirectory true
+    ;;
+  delete-branch) git branch -q -D old ;;
+  branch-config) git config branch.feature.pushRemote elsewhere ;;
+  push-upstream)
+    git config branch.other.remote origin
+    git config branch.other.merge refs/heads/other
+    ;;
+  upstream-url) git config branch.other.remote https://example.com/elsewhere.git ;;
+  current-upstream) git config branch.feature.merge refs/heads/other ;;
+  switch-upstream)
+    git config branch.feature.merge refs/heads/other
+    git symbolic-ref HEAD refs/heads/other
+    ;;
+  deleted-branch-config)
+    git branch -q -D old
+    git config branch.old.pushRemote https://example.com/elsewhere.git
+    ;;
+  other-upstream) git config branch.other.merge refs/heads/main ;;
+  multiline-config) git config core.pager "$(printf 'less\nbranch.gone.remote=pwned')" ;;
+esac
 if [ "${STUB_MODE}" = commit ]; then
   git add file.txt
   git commit -q -m "Resolved by the agent"
@@ -1942,6 +1989,143 @@ check_not_resolved "agent that changes git's configuration"
 case "${push_output}" in
   *"changed git's configuration, attributes, or hooks"*) ;;
   *) fail "agent that changes git's configuration: wrong diagnostic: ${push_output}" ;;
+esac
+
+## Another process can add or remove the configuration of a branch other than
+## the current one while the agent runs, as by creating a worktree for a new
+## branch or deleting a branch:  linked worktrees share one configuration
+## file.  Such a change is not the agent's.
+setup_case new-branch
+push_to new-branch --llm
+check_resolved claude "branch created while the agent runs"
+setup_case delete-branch
+git -C "${feature_dir}" branch old
+git -C "${feature_dir}" config branch.old.remote origin
+push_to delete-branch --llm
+check_resolved claude "branch deleted while the agent runs"
+
+## An agent that changes the configuration of a branch that exists is
+## rejected.
+setup_case branch-config
+push_to branch-config --llm
+check_not_resolved "agent that changes a branch's configuration"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes a branch's configuration: wrong diagnostic: ${push_output}" ;;
+esac
+
+## Another process can set the upstream of a branch other than the current
+## one while the agent runs, as by pushing it with `git push -u`.  Such a
+## change is not the agent's.
+setup_case push-upstream
+git -C "${feature_dir}" branch other
+push_to push-upstream --llm
+check_resolved claude "upstream of another branch set while the agent runs"
+
+## An agent that sets the remote of another branch to a value that names no
+## configured remote, or that changes the upstream of the current branch, is
+## rejected.
+setup_case upstream-url
+git -C "${feature_dir}" branch other
+push_to upstream-url --llm
+check_not_resolved "agent that sets another branch's remote to a URL"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that sets another branch's remote to a URL: wrong diagnostic: ${push_output}" ;;
+esac
+setup_case current-upstream
+push_to current-upstream --llm
+check_not_resolved "agent that changes the current branch's upstream"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes the current branch's upstream: wrong diagnostic: ${push_output}" ;;
+esac
+
+## A tag with the name of the current branch does not make the current branch
+## look like another branch, whose upstream another process can set.
+setup_case current-upstream-tag
+git -C "${feature_dir}" tag feature
+push_to current-upstream --llm
+check_not_resolved "agent that changes the current branch's upstream, with a tag of its name"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes the current branch's upstream, with a tag of its name: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that changes the current branch's upstream is rejected even if it
+## then makes another branch current.
+setup_case switch-upstream
+git -C "${feature_dir}" branch other
+push_to switch-upstream --llm
+check_not_resolved "agent that changes the current branch's upstream, then switches branches"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes the current branch's upstream, then switches branches: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that deletes a branch and sets its configuration is rejected:  the
+## configuration takes effect if the branch is created again.
+setup_case deleted-branch-config
+git -C "${feature_dir}" branch old
+push_to deleted-branch-config --llm
+check_not_resolved "agent that sets the configuration of a branch that it deletes"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that sets the configuration of a branch that it deletes: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that changes the upstream that another branch already has is
+## rejected:  the change takes effect at once in a working tree of that
+## branch.
+setup_case other-upstream
+git -C "${feature_dir}" branch other
+git -C "${feature_dir}" config branch.other.remote origin
+git -C "${feature_dir}" config branch.other.merge refs/heads/other
+push_to other-upstream --llm
+check_not_resolved "agent that changes another branch's upstream"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes another branch's upstream: wrong diagnostic: ${push_output}" ;;
+esac
+
+## Usage: make_many_branches
+## Creates, in ${feature_dir}, so many branches that their names exceed the
+## size limit of an environment variable, about 128 KiB on Linux.
+make_many_branches() {
+  make_many_branches_name="many-branches-$(printf '%080d' 0)"
+  make_many_branches_i=0
+  while [ "${make_many_branches_i}" -lt 2000 ]; do
+    printf 'create refs/heads/%s-%d HEAD\n' "${make_many_branches_name}" "${make_many_branches_i}"
+    make_many_branches_i=$((make_many_branches_i + 1))
+  done | git -C "${feature_dir}" update-ref --stdin
+}
+
+## A repository can have so many branches that their names exceed the size
+## limit of an environment variable.  An agent that leaves git's
+## configuration alone is accepted there, and one that changes it is
+## rejected.
+setup_case good-many-branches
+make_many_branches
+push_to good --llm
+check_resolved claude "many branches"
+setup_case config-many-branches
+make_many_branches
+push_to config --llm
+check_not_resolved "agent that changes git's configuration, with many branches"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes git's configuration, with many branches: wrong diagnostic: ${push_output}" ;;
+esac
+
+## An agent that changes a line of a value that looks like an entry for a
+## branch that does not exist is rejected.
+setup_case multiline-config
+git -C "${feature_dir}" config core.pager "$(printf 'less\nbranch.gone.remote=origin')"
+push_to multiline-config --llm
+check_not_resolved "agent that changes a line of a multi-line value"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes a line of a multi-line value: wrong diagnostic: ${push_output}" ;;
 esac
 
 ## A rerun finishes the merge that an earlier run left in progress:  it asks
