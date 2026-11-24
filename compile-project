@@ -464,13 +464,20 @@ gradle_errors="$tmpdir/gradle-errors"
 # The exit status of the last command that `run_copying_errors` ran.
 gradle_status_file="$tmpdir/gradle-status"
 
-# Matches a message with which a build fails because of warnings:  javac's and
-# javadoc's "error: warnings found and -Werror specified", or
-# maven-javadoc-plugin's "Project contains Javadoc Warnings", which
-# `<failOnWarnings>` causes.  Then the warnings are the cause of the failure,
-# so none is elided.  JDK 8's javadoc prints no such message when `-Xwerror`
+# Matches a line with which a build fails because of warnings:  javac's and
+# javadoc's "error: warnings found and -Werror specified", which Maven can
+# print as "[ERROR] error: warnings found and -Werror specified",
+# "[ERROR] warnings found and -Werror specified", or
+# "[ERROR] Exit code: 1 - error: warnings found and -Werror specified"; or
+# maven-javadoc-plugin's
+# "[ERROR] Failed to execute goal ...: Project contains Javadoc Warnings -> [Help 1]",
+# which `<failOnWarnings>` causes.  Then the warnings are the cause of the
+# failure, so none is elided.  The whole line must have one of these forms, so
+# that a source line that a warning quotes, such as
+#   String MSG = "warnings found and -Werror specified";
+# does not match.  JDK 8's javadoc prints no such message when `-Xwerror`
 # makes it fail, so its warnings about missing documentation are elided.
-warnings_failure_regex='warnings found and -Werror specified|Project contains Javadoc Warnings'
+warnings_failure_regex='^((\[ERROR\] )?(Exit code: [0-9]+ - )?error: |\[ERROR\] )warnings found and -Werror specified[[:space:]]*$|^\[ERROR\] Failed to execute goal.*: Project contains Javadoc Warnings( -> \[Help [0-9]+\])?[[:space:]]*$'
 
 # Removes from file $1 the warnings about missing documentation that javadoc
 # and javac's doclint print, such as

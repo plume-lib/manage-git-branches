@@ -701,6 +701,7 @@ expect_elided_output elide-small "${elidesmall}" '2 warnings'
 # output, and no warning is elided.
 for elidefail_message in \
   '[ERROR] error: warnings found and -Werror specified' \
+  '[ERROR] warnings found and -Werror specified' \
   '[ERROR] Failed to execute goal: Project contains Javadoc Warnings -> [Help 1]'; do
   elidefail="${tmpdir}/elide-fail"
   rm -rf "${elidefail}"
@@ -718,6 +719,29 @@ for elidefail_message in \
     esac
   fi
 done
+
+# A source line that a warning quotes, and that contains a message with which a
+# build fails because of warnings, does not stop the warning from being elided
+# when the build succeeds.
+elidequote="${tmpdir}/elide-quote"
+make_stderr_project "${elidequote}" \
+  '/p/src/Foo.java:42: warning: no comment' \
+  '  public static final String MSG = "error: warnings found and -Werror specified";' \
+  '                                ^' \
+  '/p/src/Foo.java:43: warning: no comment' \
+  '  public static final String MSG2 = "Project contains Javadoc Warnings";' \
+  '                                ^' \
+  "$(maven_warnings '/p/src/Foo.java:44: warning: no comment' \
+    'String MSG3 = "[ERROR] warnings found and -Werror specified";' '^')" \
+  '/p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
+  '    old();' \
+  '    ^' \
+  '4 warnings'
+expect_elided_output elide-quote "${elidequote}" \
+  '/p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
+  '    old();' \
+  '    ^' \
+  '1 warning (and 3 about missing documentation, which are not shown)'
 
 if [ "${status}" = 0 ]; then
   echo "${SCRIPT_NAME}: OK"
