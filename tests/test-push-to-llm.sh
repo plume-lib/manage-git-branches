@@ -96,6 +96,13 @@ fail() {
 ##           the agent runs
 ##   branch-config: as "good", but also changes the configuration of the
 ##           branch feature
+##   push-upstream: as "good", but also sets the upstream of the branch
+##           other, as another process's `git push -u` can while the agent
+##           runs
+##   upstream-url: as "good", but also sets branch.other.remote to a URL,
+##           which names no configured remote
+##   current-upstream: as "good", but also changes the upstream of the
+##           current branch, feature
 ##   multiline-config: as "good", but also changes the second line of the
 ##           value of core.pager, a line that looks like an entry for a branch
 ##           that does not exist
@@ -310,6 +317,12 @@ case "${STUB_MODE}" in
     ;;
   delete-branch) git branch -q -D old ;;
   branch-config) git config branch.feature.pushRemote elsewhere ;;
+  push-upstream)
+    git config branch.other.remote origin
+    git config branch.other.merge refs/heads/other
+    ;;
+  upstream-url) git config branch.other.remote https://example.com/elsewhere.git ;;
+  current-upstream) git config branch.feature.merge refs/heads/other ;;
   multiline-config) git config core.pager "$(printf 'less\nbranch.gone.remote=pwned')" ;;
 esac
 if [ "${STUB_MODE}" = commit ]; then
@@ -1983,6 +1996,33 @@ check_not_resolved "agent that changes a branch's configuration"
 case "${push_output}" in
   *"changed git's configuration, attributes, or hooks"*) ;;
   *) fail "agent that changes a branch's configuration: wrong diagnostic: ${push_output}" ;;
+esac
+
+## Another process can set the upstream of a branch other than the current
+## one while the agent runs, as by pushing it with `git push -u`.  Such a
+## change is not the agent's.
+setup_case push-upstream
+git -C "${feature_dir}" branch other
+push_to push-upstream --llm
+check_resolved claude "upstream of another branch set while the agent runs"
+
+## An agent that sets the remote of another branch to a value that names no
+## configured remote, or that changes the upstream of the current branch, is
+## rejected.
+setup_case upstream-url
+git -C "${feature_dir}" branch other
+push_to upstream-url --llm
+check_not_resolved "agent that sets another branch's remote to a URL"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that sets another branch's remote to a URL: wrong diagnostic: ${push_output}" ;;
+esac
+setup_case current-upstream
+push_to current-upstream --llm
+check_not_resolved "agent that changes the current branch's upstream"
+case "${push_output}" in
+  *"changed git's configuration, attributes, or hooks"*) ;;
+  *) fail "agent that changes the current branch's upstream: wrong diagnostic: ${push_output}" ;;
 esac
 
 ## An agent that changes a line of a value that looks like an entry for a
