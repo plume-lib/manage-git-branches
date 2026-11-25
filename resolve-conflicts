@@ -23,6 +23,11 @@
 #    the others, but a chain is skipped if a chain that failed or was skipped
 #    would have pushed into the chain's first directory, because then that
 #    directory's branch lacks the updates that the chain would push from it,
+#    and a chain is skipped if it would push into a directory of a chain that
+#    failed, whose build already failed at its current commit, although no
+#    merge broke it (see `record_build_failure` in common-functions.sh),
+#    because the agent would be asked to fix a failure that the chain's merge
+#    did not cause,
 #  * pull each chain's first directory with `git-push-to`, given that single
 #    directory, before the first chain that starts with it, and add the
 #    "--no-pull-first" option to every chain, so that all chains that start
@@ -202,6 +207,9 @@ while :; do
   # into (every directory of the chain but the first), each followed by a
   # newline.
   stale_dirs="${newline}"
+  # The directories of chains that failed, each followed by a newline, whose
+  # build already failed at their current commit, although no merge broke it.
+  broken_dirs="${newline}"
   # The first directories of this round's chains so far, each followed by a
   # newline, that were pulled, and that could not be pulled.
   pulled_dirs="${newline}"
@@ -239,6 +247,19 @@ while :; do
         esac
         ;;
     esac
+    if [ -z "${skip_reason}" ]; then
+      first_dir="$1"
+      shift
+      for dir in "$@"; do
+        case "${broken_dirs}" in
+          *"${newline}${dir}${newline}"*)
+            skip_reason="the build of ${dir} already failed at its current commit, although no merge broke it"
+            break
+            ;;
+        esac
+      done
+      set -- "${first_dir}" "$@"
+    fi
     if [ -n "${skip_reason}" ]; then
       echo "${SCRIPT_NAME}: skipped the chain, because ${skip_reason}: $*" >&2
       num_skipped=$((num_skipped + 1))
@@ -252,7 +273,12 @@ while :; do
       num_failed=$((num_failed + 1))
       summary="${summary}* $* (failed)${newline}${push_lines}${newline}"
       shift
-      for dir in "$@"; do stale_dirs="${stale_dirs}${dir}${newline}"; done
+      for dir in "$@"; do
+        stale_dirs="${stale_dirs}${dir}${newline}"
+        if build_failure_recorded "${dir}" 2> /dev/null; then
+          broken_dirs="${broken_dirs}${dir}${newline}"
+        fi
+      done
     elif [ -n "${push_lines}" ]; then
       summary="${summary}* $*${newline}${push_lines}${newline}"
     fi

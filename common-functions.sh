@@ -1494,3 +1494,87 @@ git_batch_ssh_capture() {
 physical_path() {
   (CDPATH='' cd -- "$1" && pwd -P)
 }
+
+## Usage: build_failures_file [DIRECTORY]
+## Prints the absolute name of the file, in the git directory of the working
+## tree DIRECTORY (by default, the current directory), that lists the commits
+## whose build failed in that working tree although no merge might have broken
+## the build (see `has_unbuilt_merge`), one full hash per line, oldest first,
+## such as "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b".  `merge_build_push`
+## adds such a commit (see `record_build_failure`), and removes a commit once
+## its build succeeds (see `forget_build_failure`).
+build_failures_file() {
+  git -C "${1:-.}" rev-parse --path-format=absolute --git-path manage-git-branches-build-failures
+}
+
+## The number of commits that the file of `build_failures_file` keeps.
+build_failures_max=50
+
+## Usage: record_build_failure
+## Adds the commit HEAD of the current directory to the commits that
+## `build_failures_file` lists, after removing the oldest commits beyond
+## ${build_failures_max}.  A failure to read or write the file goes
+## unreported, and leaves the file as it was, because the file serves only to
+## explain later failures of the build.
+record_build_failure() {
+  rbf_file="$(build_failures_file)" || return 0
+  rbf_head="$(git rev-parse --verify HEAD)" || return 0
+  rbf_others=''
+  if [ -f "${rbf_file}" ]; then
+    rbf_others="$(build_failures_other_than "${rbf_file}" "${rbf_head}")" || return 0
+  fi
+  write_build_failures "${rbf_file}" "${rbf_others}${rbf_others:+
+}${rbf_head}"
+}
+
+## Usage: forget_build_failure
+## Removes the commit HEAD of the current directory, whose build succeeded,
+## from the commits that `build_failures_file` lists.  A failure to read or
+## write the file goes unreported, as in `record_build_failure`.
+forget_build_failure() {
+  rbf_file="$(build_failures_file)" || return 0
+  rbf_head="$(git rev-parse --verify HEAD)" || return 0
+  if ! build_failure_recorded . "${rbf_head}"; then
+    return 0
+  fi
+  rbf_others="$(build_failures_other_than "${rbf_file}" "${rbf_head}")" || return 0
+  write_build_failures "${rbf_file}" "${rbf_others}"
+}
+
+## Usage: build_failures_other_than FILE COMMIT
+## Prints the lines of FILE, a file that `build_failures_file` names, other
+## than COMMIT, a full hash.  Fails if it cannot read FILE.
+build_failures_other_than() {
+  # `grep` fails with status 1 when it selects no line, as when COMMIT is
+  # the only line, and with status 2 when it cannot read FILE.
+  grep -v -x -F -e "$2" -- "$1" 2> /dev/null || [ "$?" -eq 1 ]
+}
+
+## Usage: write_build_failures FILE COMMITS
+## Replaces the contents of FILE, a file that `build_failures_file` names,
+## by the last ${build_failures_max} lines of COMMITS, full hashes one per
+## line, or by nothing if COMMITS is empty.  A failure goes unreported, and
+## leaves FILE as it was.
+write_build_failures() {
+  {
+    if [ -n "$2" ]; then printf '%s\n' "$2"; fi \
+      | tail -n "${build_failures_max}" > "$1.new" \
+      && mv -f -- "$1.new" "$1"
+  } 2> /dev/null
+  rm -f -- "$1.new"
+}
+
+## Usage: build_failure_recorded DIRECTORY [COMMIT]
+## Succeeds if COMMIT, a full hash, is among the commits that
+## `build_failures_file` lists for the working tree DIRECTORY:  if COMMIT's
+## build failed there, although no merge might have broken it.  COMMIT is by
+## default the commit HEAD of DIRECTORY.
+build_failure_recorded() {
+  bfr_file="$(build_failures_file "$1")" || return 1
+  if [ "$#" -ge 2 ]; then
+    bfr_commit="$2"
+  else
+    bfr_commit="$(git -C "$1" rev-parse --verify HEAD)" || return 1
+  fi
+  [ -f "${bfr_file}" ] && grep -q -x -F -e "${bfr_commit}" -- "${bfr_file}"
+}

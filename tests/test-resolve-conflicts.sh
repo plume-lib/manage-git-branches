@@ -252,6 +252,41 @@ if [ "$(git -C "${case_dir}/myrepo.git" show refs/heads/feature:file.txt)" != "$
   fail "skipped: the chain that starts with a failed chain's first directory was not pushed"
 fi
 
+## A chain is skipped if it would push into a directory of a failed chain
+## whose build failed although no merge broke it.  Feature has already merged
+## main, and it has pushed a commit that breaks its build, so the first
+## chain's merge changes nothing and its build fails.  The second chain would
+## push into feature too.
+setup_case broken
+git -C "${case_dir}/seed" push -q origin main:refs/heads/other
+git clone -q -b other "${case_dir}/myrepo.git" "${case_dir}/myrepo-branch-other"
+git -C "${case_dir}/myrepo-branch-other" config pull.rebase false
+feature_dir="${case_dir}/myrepo-branch-feature"
+git -C "${feature_dir}" fetch -q
+git -C "${feature_dir}" merge -q -s ours --no-edit origin/main
+printf 'all:\n\t@if grep BROKEN other.txt; then exit 1; fi\n' > "${feature_dir}/Makefile"
+echo BROKEN > "${feature_dir}/other.txt"
+git -C "${feature_dir}" add Makefile other.txt
+git -C "${feature_dir}" commit -q -m "Break the build"
+git -C "${feature_dir}" push -q
+STUB_CHAINS="$(printf 'myrepo-branch-main\tmyrepo-branch-feature\nmyrepo-branch-other\tmyrepo-branch-feature')"
+MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=''
+resolve_conflicts
+MANAGE_GIT_BRANCHES_SKIP_COMPILE_PROJECT=1
+if [ "${resolve_status}" -eq 0 ]; then
+  fail "broken: resolve-conflicts succeeded: ${resolve_output}"
+fi
+case "${resolve_output}" in
+  *"skipped the chain, because the build of myrepo-branch-feature already failed at its current commit, although no merge broke it: myrepo-branch-other myrepo-branch-feature"*) ;;
+  *) fail "broken: the second chain was not skipped: ${resolve_output}" ;;
+esac
+expected="$(printf '%s\n' \
+  '* myrepo-branch-other myrepo-branch-feature (skipped)' \
+  'resolve-conflicts: 1 of 2 dependency chains failed, and 1 were skipped')"
+if [ "$(printf '%s\n' "${resolve_output}" | tail -n 2)" != "${expected}" ]; then
+  fail "broken: wrong summary: ${resolve_output}"
+fi
+
 ## A chain's directory is passed literally, not expanded as a pattern, and a
 ## chain that fails makes resolve-conflicts fail.
 setup_case literal

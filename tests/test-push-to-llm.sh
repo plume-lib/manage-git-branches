@@ -3466,6 +3466,76 @@ if ! grep -q 'other.txt is broken' "${failed_log}" 2> /dev/null; then
   fail "build after a failed build: the copy of the failed build's output in ${failed_log} did not last"
 fi
 
+## When a merge's build fails, but the build already failed before the merge
+## with no merge to blame, the agent is told so, and the message of its fix
+## says so.  Feature pushes a commit that breaks its build; the first run
+## merges nothing, so it fails without asking the agent, and records the
+## commit.  Then main makes a change, which the second run merges.
+setup_case build-already-failed build
+git -C "${main_dir}" reset -q --hard HEAD^
+git -C "${main_dir}" push -q --force
+echo "BROKEN" >> "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Break the build and push"
+git -C "${feature_dir}" push -q
+broken_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+feature_head="${broken_head}"
+push_to STUB_BUILD=fix good --llm
+check_not_pushed "build that already failed, first run"
+if ! grep -q -x -F "${broken_head}" "$(git -C "${feature_dir}" rev-parse --path-format=absolute --git-path manage-git-branches-build-failures)" 2> /dev/null; then
+  fail "build that already failed: the first run did not record the commit whose build failed"
+fi
+echo "main" > "${main_dir}/main.txt"
+git -C "${main_dir}" add main.txt
+git -C "${main_dir}" commit -q -m "Add main.txt"
+git -C "${main_dir}" push -q
+push_to STUB_BUILD=fix good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "build that already failed: git-push-to failed: ${push_output}"
+fi
+if ! grep -q "the build of branch feature already failed at commit ${broken_head}, which no merge had broken" "${STUB_PROMPT}"; then
+  fail "build that already failed: the instructions do not say that the build already failed: $(cat "${STUB_PROMPT}")"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build, which already failed at commit $(git -C "${feature_dir}" rev-parse --short "${broken_head}") before merging branch 'main'" ]; then
+  fail "build that already failed: wrong message for the fix: ${message}"
+fi
+
+## The agent is told that the build already failed before the merges even
+## when an earlier run merged, but did not push the merge, because the agent
+## did not fix the build.  The first run fails without asking the agent, as
+## above; the second merges main, and the agent changes nothing; the third
+## builds that unpushed merge again.
+setup_case build-already-failed-unpushed build
+git -C "${main_dir}" reset -q --hard HEAD^
+git -C "${main_dir}" push -q --force
+echo "BROKEN" >> "${feature_dir}/other.txt"
+git -C "${feature_dir}" commit -q -a -m "Break the build and push"
+git -C "${feature_dir}" push -q
+broken_head="$(git -C "${feature_dir}" rev-parse HEAD)"
+feature_head="${broken_head}"
+push_to STUB_BUILD=fix good --llm
+check_not_pushed "unpushed merge after a build that already failed, first run"
+echo "main" > "${main_dir}/main.txt"
+git -C "${main_dir}" add main.txt
+git -C "${main_dir}" commit -q -m "Add main.txt"
+git -C "${main_dir}" push -q
+push_to STUB_BUILD=none good --llm
+check_not_pushed "unpushed merge after a build that already failed, second run"
+if [ "$(git -C "${feature_dir}" rev-parse HEAD^1)" != "${broken_head}" ]; then
+  fail "unpushed merge after a build that already failed: the second run left no merge of main: $(git -C "${feature_dir}" log --oneline -3)"
+fi
+push_to STUB_BUILD=fix good --llm
+if [ "${push_status}" -ne 0 ]; then
+  fail "unpushed merge after a build that already failed: git-push-to failed: ${push_output}"
+fi
+if ! grep -q "the build of branch feature already failed at commit ${broken_head}, which no merge had broken" "${STUB_PROMPT}"; then
+  fail "unpushed merge after a build that already failed: the instructions do not say that the build already failed: $(cat "${STUB_PROMPT}")"
+fi
+message="$(git -C "${remote}" log -1 --format=%B refs/heads/feature)"
+if [ "${message}" != "Fix the build, which already failed at commit $(git -C "${feature_dir}" rev-parse --short "${broken_head}") before merging branch 'main'" ]; then
+  fail "unpushed merge after a build that already failed: wrong message for the fix: ${message}"
+fi
+
 ## A merge that FROM_DIR's branch has but its remote lacks was not built, so
 ## the agent is asked to fix a build that it breaks, even when TO_DIR's
 ## branch fast-forwards to FROM_DIR's.  Main and feature are reset to the
