@@ -418,6 +418,28 @@ compile_in_directory() {
   fi
 }
 
+# Returns 0 (true) if directory $1 has a buildfile that `compile_in_directory`
+# builds with.
+has_buildfile() {
+  [ -f "$1/gradlew" ] || [ -f "$1/build.gradle" ] || [ -f "$1/build.gradle.kts" ] \
+    || [ -f "$1/mvnw" ] || [ -f "$1/pom.xml" ] || [ -f "$1/Makefile" ]
+}
+
+# Prints, one per line, the directories in which `compile_project` builds:
+# $toplevel if it has a buildfile, and otherwise each subdirectory of $toplevel
+# that has one.
+build_directories() {
+  if has_buildfile "$toplevel"; then
+    printf '%s\n' "$toplevel"
+  else
+    for build_subdir in "$toplevel"/*/; do
+      if has_buildfile "$build_subdir"; then
+        printf '%s\n' "$build_subdir"
+      fi
+    done
+  fi
+}
+
 # Compiles the project in $toplevel or, if $toplevel has no buildfile, in
 # each subdirectory of $toplevel that has one, stopping at the first build that
 # fails.  Returns the status of that build, or 0 if no build fails.  If no
@@ -494,9 +516,11 @@ warnings_failure_regex='^((\[ERROR\] )?(Exit code: [0-9]+ - )?error: |\[ERROR\] 
 # interleaved line by line, so that lines of another build come between a
 # warning and its source line, or between the source line and its caret line.
 # A line is the source line of a warning if, ignoring leading and trailing
-# whitespace, it is the line of the file that the warning names (a relative
-# file name is relative to $toplevel), or if it directly follows the warning
-# and a caret line directly follows it.  A caret line belongs to the earliest
+# whitespace, it is the line of the Java file that the warning names (a
+# relative file name is relative to the directory in which the build ran, as
+# `build_directories` prints them).  If that file cannot be read, a line is
+# the source line of the warning if it directly follows the warning and a
+# caret line directly follows it.  A caret line belongs to the earliest
 # source line, found by its text, whose caret line has not yet appeared.  So
 # when interleaved output holds both elided and other warnings, a caret line
 # that is printed can be another warning's, in a different column.
@@ -505,15 +529,18 @@ warnings_failure_regex='^((\[ERROR\] )?(Exit code: [0-9]+ - )?error: |\[ERROR\] 
 # the warnings that remain and of those that were elided, such as
 # "2 warnings (and 20 about missing documentation, which are not shown)", or
 # is removed if every warning that it counts was elided.  The warnings that a
-# count counts are taken to be those that precede it and that no earlier count
-# counted.  If those are more than the count, as when builds' output is
-# interleaved, then which of them the count counts is unknown:  the count is
-# removed if all of them were elided, and is left unchanged otherwise.  After
+# count counts are taken to be those of javac and javadoc (that is, those that
+# name a Java file, and lint warnings such as "warning: [options] ...") that
+# precede it and that no earlier count counted.  If those are more than the
+# count, as when builds' output is interleaved, then which of them the count
+# counts is unknown:  the count is removed if all of them were elided, and is
+# left unchanged otherwise.  After
 # such a count is left unchanged, it is unknown which of the remaining
 # warnings were elided, so a later count is removed only if it can count only
-# elided warnings, and is otherwise left unchanged.  But a count of 100, the number of warnings at
-# which javadoc and javac stop by default, is never removed, and its
-# replacement says that other warnings might not have been printed.
+# elided warnings, and is otherwise left unchanged.  But a count of 100, the
+# number of warnings at which javadoc and javac stop by default, is never
+# removed, and its replacement says that other warnings might not have been
+# printed.
 # Leaves the file unchanged if it cannot be rewritten.
 elide_missing_doc_warnings() {
   # The awk variable uncounted is the number of warnings that no count has
@@ -522,22 +549,26 @@ elide_missing_doc_warnings() {
   # are inexact after a count that counts some, but not all, of the uncounted
   # warnings when those include both elided warnings and others, because which
   # ones that count counts is unknown.
-  # A diagnostic whose file can be read expects a source line with known text:
-  # tail_of[TEXT] diagnostics have expected TEXT, and head_of[TEXT] of them
-  # have found it; elides[TEXT, I] is 1 if the Ith of them is elided.
+  # A diagnostic whose Java file can be read expects a source line with known
+  # text:  tail_of[TEXT] diagnostics have expected TEXT, and head_of[TEXT] of
+  # them have found it; elides[TEXT, I] is 1 if the Ith of them is elided.
   # The caret queue, caret_elide[caret_head..caret_tail], holds, for each
   # source line that was found by its text and whose caret line has not yet
   # appeared, 1 if that caret line is to be elided and 0 if it is to be
   # printed.
-  if ELIDE_TOPLEVEL="${toplevel:-}" awk '
+  if ELIDE_BUILD_DIRS="$(build_directories)" awk '
     function is_missing_doc_warning(line) {
       return line ~ /(^|: |^\[[A-Z]+\] )warning: (no (comment|main description|@return|@param|@param for .*|@throws for .*)|use of default constructor, which does not provide a comment)$/
     }
     function is_diagnostic(line) {
       return line ~ /: (warning|error): / || line ~ /^(\[[A-Z]+\] )?(warning|error): /
     }
-    function is_warning(line) {
-      return line ~ /: warning: / || line ~ /^(\[[A-Z]+\] )?warning: /
+    # Returns true (1) if line is a warning that javac or javadoc counts:  one
+    # that names a Java file, or a lint warning such as
+    # "warning: [options] bootstrap class path not set".  Other tools, such as
+    # make and git, print warnings that no count counts.
+    function is_counted_warning(line) {
+      return line ~ /\.java:[0-9]+: warning: / || line ~ /^(\[[A-Z]+\] )?warning: \[/
     }
     function is_caret(line) {
       return line ~ /^(\[[A-Z]+\] )?[ \t]*\^[ \t]*$/
@@ -554,10 +585,26 @@ elide_missing_doc_warnings() {
       return line
     }
     # Returns the nth line of the file named path, trimmed, or the empty
-    # string if the file cannot be read or has fewer than n lines.
-    function source_text(path, n,   line, i, result) {
-      if (path !~ /^\// && toplevel != "") {
-        path = toplevel "/" path
+    # string if the file cannot be read or has fewer than n lines.  A relative
+    # path is relative to the build directory that has a file at that path,
+    # and names no file if no build directory or more than one has one.
+    function source_text(path, n,   line, i, result, candidate) {
+      if (path !~ /^\//) {
+        result = ""
+        for (i = 1; i <= num_build_dirs; i++) {
+          candidate = build_dirs[i] "/" path
+          if ((getline line < candidate) >= 0) {
+            close(candidate)
+            if (result != "") {
+              return ""
+            }
+            result = candidate
+          }
+        }
+        if (result == "") {
+          return ""
+        }
+        path = result
       }
       result = ""
       i = 0
@@ -570,23 +617,32 @@ elide_missing_doc_warnings() {
       close(path)
       return result
     }
+    # Returns true (1) if line, trimmed, is the text of a source line that a
+    # diagnostic expects and has not yet found.
+    function is_expected_source(line) {
+      line = trimmed(line)
+      return line != "" && tail_of[line] > head_of[line]
+    }
     # Records that the source line of the diagnostic on line is expected;
-    # elide is 1 if the diagnostic is elided.  A diagnostic that is not elided
-    # and that names no file expects no source line.
-    function expect_source(line, elide,   text) {
+    # elide is 1 if the diagnostic is elided.  The text of the source line is
+    # known if the diagnostic names a Java file that can be read.  A diagnostic
+    # that is not elided and that names no file expects no source line.
+    function expect_source(line, elide,   file, text) {
       last_nr = 0
-      last_text = ""
       sub(/^\[[A-Z]+\] /, "", line)
       if (match(line, /:[0-9]+: (warning|error): /)) {
-        text = source_text(substr(line, 1, RSTART - 1), substr(line, RSTART + 1) + 0)
+        file = substr(line, 1, RSTART - 1)
+        if (file ~ /\.java$/) {
+          text = source_text(file, substr(line, RSTART + 1) + 0)
+        }
       } else if (!elide) {
         return
       }
-      last_nr = NR
-      last_elide = elide
       if (text != "") {
-        last_text = text
         elides[text, ++tail_of[text]] = elide
+      } else {
+        last_nr = NR
+        last_elide = elide
       }
     }
     # Prints the count on the current line, rewritten as the comment of
@@ -630,28 +686,43 @@ elide_missing_doc_warnings() {
     BEGIN {
       # The number of warnings at which javadoc and javac stop by default.
       maxwarns = 100
-      toplevel = ENVIRON["ELIDE_TOPLEVEL"]
+      num_build_dirs = split(ENVIRON["ELIDE_BUILD_DIRS"], build_dirs, "\n")
+      for (i = 1; i <= num_build_dirs; i++) {
+        sub(/\/+$/, "", build_dirs[i])
+      }
       caret_head = 1
       caret_tail = 0
     }
-    # The previous line, held, directly followed an elided warning, and its
-    # text is not that of any expected source line.  It is the source line of
-    # the warning if this line is a caret line.
+    # The previous line, held, directly followed an elided warning whose
+    # source line has unknown text, and its text is not that of any expected
+    # source line.  It is the source line of the warning if this line is a
+    # caret line.
     holding {
       holding = 0
       if (is_caret($0)) {
-        if (held_text != "" && tail_of[held_text] > head_of[held_text]) {
-          tail_of[held_text]--
-        }
         next
       }
       print held
     }
-    # The previous line directly followed a diagnostic that is not elided, and
-    # its text is not that of any expected source line.  If this line is a
-    # caret line, it belongs to that diagnostic.
+    # The previous line directly followed a diagnostic that is not elided and
+    # whose source line has unknown text, and its text is not that of any
+    # expected source line.  If this line is a caret line, it belongs to that
+    # diagnostic.
     printed_nr && printed_nr == NR - 1 && is_caret($0) {
       print
+      next
+    }
+    # This line is the source line of the earliest diagnostic that expects its
+    # text.  The test precedes the others, because a source line can look like
+    # a diagnostic or a count, as in
+    #   String MSG = "x: warning: y";
+    is_expected_source($0) {
+      text = trimmed($0)
+      elide = elides[text, ++head_of[text]]
+      caret_elide[++caret_tail] = elide
+      if (!elide) {
+        print
+      }
       next
     }
     is_missing_doc_warning($0) {
@@ -672,7 +743,7 @@ elide_missing_doc_warnings() {
       next
     }
     is_diagnostic($0) {
-      if (is_warning($0)) {
+      if (is_counted_warning($0)) {
         kept_pool++
         uncounted++
       }
@@ -681,19 +752,9 @@ elide_missing_doc_warnings() {
       next
     }
     {
-      text = trimmed($0)
-      if (text != "" && tail_of[text] > head_of[text]) {
-        elide = elides[text, ++head_of[text]]
-        caret_elide[++caret_tail] = elide
-        if (!elide) {
-          print
-        }
-        next
-      }
       if (last_nr && last_nr == NR - 1) {
         if (last_elide) {
           held = $0
-          held_text = last_text
           holding = 1
           next
         }

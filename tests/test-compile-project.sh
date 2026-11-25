@@ -784,6 +784,101 @@ expect_elided_output elide-interleaved-kept "${elideinterkept}" \
   '2 warnings' \
   '2 warnings'
 
+# Expects compile-project, run on directory $2, to succeed and to print
+# nothing; $1 names the test, for diagnostics.
+expect_no_output() {
+  if ! expect_output="$("${COMPILE_PROJECT}" "$2" 2>&1)"; then
+    fail "$1: nonzero exit status: ${expect_output}"
+  elif [ -n "${expect_output}" ]; then
+    fail "$1: expected no output, got: ${expect_output}"
+  fi
+}
+
+# A warning of make names a file that is not a Java file, so no source line is
+# expected for it, even though make then echoes a command that is the text of
+# the line that the warning names.  So the caret line of an elided warning is
+# not printed.  Make's warnings are not counted, so the count is removed.
+elidemake="${tmpdir}/elide-make"
+mkdir -p "${elidemake}"
+printf 'all:\n\t@cat stderr.txt >&2\nall:\n\tcat err.txt >&2\n' > "${elidemake}/Makefile"
+printf '%s\n' 'class F {' '  // F' '  void foo() {}' '}' > "${elidemake}/F.java"
+printf '%s\n' 'F.java:3: warning: no comment' '  void foo() {}' '       ^' '1 warning' \
+  > "${elidemake}/err.txt"
+if ! elide_output="$("${COMPILE_PROJECT}" "${elidemake}" 2>&1)"; then
+  fail "elide-make: nonzero exit status: ${elide_output}"
+elif printf '%s\n' "${elide_output}" | grep -q -E -e '\^|warning: no comment|foo\(\)|1 warning'; then
+  fail "elide-make: an elided warning or its count was printed: ${elide_output}"
+elif ! printf '%s\n' "${elide_output}" | grep -q -F -e 'cat err.txt >&2'; then
+  fail "elide-make: make's echo of a command was not printed: ${elide_output}"
+fi
+
+# Warnings of other tools, such as make and git, are not counted, so a count
+# whose warnings were all elided is removed.
+elideother="${tmpdir}/elide-other-tools"
+make_stderr_project "${elideother}" \
+  "Makefile:3: warning: overriding recipe for target 'all'" \
+  'warning: in the working copy of x.txt, LF will be replaced by CRLF' \
+  "$(missing_doc_warnings)" '3 warnings'
+expect_elided_output elide-other-tools "${elideother}" \
+  "Makefile:3: warning: overriding recipe for target 'all'" \
+  'warning: in the working copy of x.txt, LF will be replaced by CRLF'
+
+# A source line that looks like a warning is still the source line of an
+# elided warning.
+elidelookalike="${tmpdir}/elide-lookalike"
+mkdir -p "${elidelookalike}"
+printf '%s\n' 'class F {' '  String MSG = "x: warning: y";' '}' > "${elidelookalike}/F.java"
+make_stderr_project "${elidelookalike}" \
+  "${elidelookalike}/F.java:2: warning: no comment" \
+  '  String MSG = "x: warning: y";' \
+  '         ^' \
+  '1 warning'
+expect_no_output elide-lookalike "${elidelookalike}"
+
+# A line that directly follows an elided warning, but whose text differs from
+# the source line, which can be read, belongs to another build, as does the
+# caret line that follows it.
+elideotherline="${tmpdir}/elide-other-line"
+mkdir -p "${elideotherline}"
+printf '%s\n' 'class F {' '  // F' '  void foo() {}' '}' > "${elideotherline}/F.java"
+make_stderr_project "${elideotherline}" \
+  '/nonexistent/B.java:5: warning: [deprecation] old() in B has been deprecated' \
+  "${elideotherline}/F.java:3: warning: no comment" \
+  '    old();' \
+  '    ^' \
+  '  void foo() {}' \
+  '       ^'
+expect_elided_output elide-other-line "${elideotherline}" \
+  '/nonexistent/B.java:5: warning: [deprecation] old() in B has been deprecated' \
+  '    old();' \
+  '    ^'
+
+# A relative file name is relative to the directory in which the build runs,
+# here a subdirectory of the project, which has no buildfile.  The project
+# directory has a different file at the same relative name.
+elidesubdir="${tmpdir}/elide-subdir"
+mkdir -p "${elidesubdir}/src" "${elidesubdir}/sub"
+printf '%s\n' 'class A {' '  int x;' '  int y;' '}' > "${elidesubdir}/src/A.java"
+cp -R "${elideinter}/a" "${elideinter}/b" "${elidesubdir}/sub/"
+mkdir -p "${elidesubdir}/sub/src"
+cp "${elideinter}/a/A.java" "${elidesubdir}/sub/src/A.java"
+make_stderr_project "${elidesubdir}/sub" \
+  'src/A.java:2: warning: no comment' \
+  'b/B.java:2: warning: no comment' \
+  '  public Constant copy() {' \
+  '  public R visitPrimitive(' \
+  '           ^' \
+  '                  ^' \
+  'src/A.java:3: warning: no comment' \
+  'b/B.java:3: warning: no comment' \
+  '    BOTTOM,' \
+  '    THEN,' \
+  '    ^' \
+  '2 warnings' \
+  '    ^' \
+  '2 warnings'
+expect_no_output elide-subdir "${elidesubdir}"
+
 # When Maven fails because of warnings, it writes the message to standard
 # output, and no warning is elided.
 for elidefail_message in \
