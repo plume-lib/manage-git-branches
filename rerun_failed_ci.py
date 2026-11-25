@@ -27,23 +27,25 @@ check from any other service is reported and skipped.
 
 A job's failure is transient if the log of its failed steps contains a message that
 TRANSIENT_PATTERNS below lists, such as a message about a network problem, an overloaded
-or rate-limited server, or a lost CI runner.  A job's failure is also transient if Gradle
-did not find an artifact and the Gradle Plugin Portal is the only location that Gradle
-searched for it, or if Gradle did not find some artifacts and, for each one, the
+or rate-limited server, or a lost CI runner.  A job's failure is also transient if
+Gradle did not find an artifact and the Gradle Plugin Portal is the only location that
+Gradle searched for it, or if Gradle did not find some artifacts and, for each one, the
 `gradlew-retry` script of plume-lib/plume-scripts reported that some location where
-Gradle searched for it serves it.  If the log shows that `gradlew-retry` ran Gradle
-again, then only the output of the last run of Gradle is examined, except for the
-reports of `gradlew-retry` about locations that serve artifacts.  The log of an Azure
-Pipelines or GitHub Actions job also contains the errors that the CI service reports for
-the job, which describe failures, such as a lost runner or a job that no runner picked
-up, that leave no log.  Shell trace lines, which start with `+ `, and the scripts that
-Azure Pipelines and GitHub Actions echo before running a step, are ignored, because a
-script that itself looks for such messages, in order to retry a command, contains them.
-An Azure Pipelines job that was abandoned, such as one whose agent stopped responding,
-is examined like a failed one.  A CircleCI job whose status is `infrastructure_fail` is
-transient.  A cancelled GitHub Actions job is examined too, because GitHub Actions
-cancels a job whose runner shuts down; a cancelled job that did not fail transiently,
-such as one that a user or the failure of another job cancelled, is ignored.
+Gradle searched for it serves it, or if javac failed only because of -Werror and a
+Checker Framework warning that type-checking was too slow.  If the log shows that
+`gradlew-retry` ran Gradle again, then only the output of the last run of Gradle is
+examined, except for the reports of `gradlew-retry` about locations that serve
+artifacts.  The log of an Azure Pipelines or GitHub Actions job also contains the errors
+that the CI service reports for the job, which describe failures, such as a lost runner
+or a job that no runner picked up, that leave no log.  Shell trace lines, which start
+with `+ `, and the scripts that Azure Pipelines and GitHub Actions echo before running a
+step, are ignored, because a script that itself looks for such messages, in order to
+retry a command, contains them.  An Azure Pipelines job that was abandoned, such as one
+whose agent stopped responding, is examined like a failed one.  A CircleCI job whose
+status is `infrastructure_fail` is transient.  A cancelled GitHub Actions job is
+examined too, because GitHub Actions cancels a job whose runner shuts down; a cancelled
+job that did not fail transiently, such as one that a user or the failure of another job
+cancelled, is ignored.
 
 For each build (Azure Pipelines), workflow (CircleCI), or workflow run (GitHub
 Actions) that has a job that failed transiently, this command reruns:
@@ -146,6 +148,27 @@ TRANSIENT_PATTERNS = [
 ]
 # Matches a line of a log that shows a transient failure.
 TRANSIENT_RE = re.compile("|".join(f"(?:{p})" for p in TRANSIENT_PATTERNS), re.IGNORECASE)
+
+# Matches a line that contains the Checker Framework's warning that type-checking one
+# method or class took too long, as in "Foo.java:201: warning:
+# [compilermessages:slow.typechecking] typechecking took 48 seconds; consider making
+# inferred type variables explicit".  The key "slow.typechecking" is in square brackets,
+# with a prefix such as "compilermessages:" or "[nullness, allcheckers]:" if the
+# Checker Framework shows one.  The rest of the line differs among the Checker
+# Framework's message formats:  under `-Anomsgtext`, nothing follows the key, and under
+# `-Adetailedmsgtext`, fields separated by " $$ " follow it.
+SLOW_TYPECHECKING_RE = re.compile(r"[\[:]slow\.typechecking\]")
+# Matches the line in which javac reports that it failed because it issued a warning and
+# the -Werror command-line option was given, as in "error: warnings found and -Werror
+# specified" or, from Maven, "[ERROR] warnings found and -Werror specified".
+WERROR_RE = re.compile(r"warnings found and -Werror specified")
+# Matches a line that contains a javac warning or error, such as "Foo.java:5: error:
+# cannot find symbol", "[WARNING] /a/b/Foo.java:[5,13] [deprecation] ...", as Maven
+# reports a diagnostic, or "warning: [options] source value 8 is obsolete", which names
+# no source file.
+COMPILER_DIAGNOSTIC_RE = re.compile(
+    r"\.java:(?:\d+: (?:error|warning):|\[\d+,\d+\] )|^\s*(?:\[\w+\] )?warning: \["
+)
 
 # Matches the line that starts Gradle's list of the locations where it searched for an
 # artifact that it did not find.  The line follows one that names the artifact, such as
@@ -327,6 +350,37 @@ def gradlew_retry_reason(lines: list[str], last_run: list[str]) -> str | None:
     return result
 
 
+def slow_typechecking_reason(lines: list[str]) -> str | None:
+    """Return the line of the given log that shows that type-checking was too slow.
+
+    The result is a line that matches SLOW_TYPECHECKING_RE.  It shows a transient failure
+    only if javac failed because the Checker Framework warned that type-checking was too
+    slow and the -Werror command-line option was given, and javac reported no other
+    warning or error.  The time that type-checking takes depends on how busy the CI
+    machine is, so a rerun often avoids the warning.  Code that is slow to type-check on
+    every run also yields the warning; only `--max-attempts` limits the reruns of such a
+    failure.  A failure other than javac's, such as a test failure in another project of
+    a Gradle build that runs with `--continue`, is not detected.
+
+    Args:
+        lines: the lines of a log of the failed steps of a CI job.
+
+    Returns:
+        The first line that shows that type-checking was too slow, without leading
+        whitespace and truncated to 200 characters, or None if the log does not show such
+        a transient failure.
+    """
+    result = None
+    found_werror = False
+    for line in lines:
+        if SLOW_TYPECHECKING_RE.search(line):
+            result = result or line.lstrip()[:200]
+        elif COMPILER_DIAGNOSTIC_RE.search(line):
+            return None
+        found_werror = found_werror or bool(WERROR_RE.search(line))
+    return result if found_werror else None
+
+
 def transient_reason(log: str) -> str | None:
     """Return the first line of the given log that shows a transient failure.
 
@@ -336,7 +390,8 @@ def transient_reason(log: str) -> str | None:
     Of those lines, one shows a transient failure if it matches TRANSIENT_RE, or if it
     names an artifact that Gradle did not find and the Gradle Plugin Portal is the only
     location that Gradle searched for it.  Otherwise, the result is as for
-    gradlew_retry_reason.  The lines that `examined_lines` omits are ignored.
+    slow_typechecking_reason or, if that is None, as for gradlew_retry_reason.  The lines
+    that `examined_lines` omits are ignored.
 
     Args:
         log: a log of the failed steps of a CI job.
@@ -357,7 +412,7 @@ def transient_reason(log: str) -> str | None:
             locations = searched_locations(last_run[i + 1 :])
             if locations and all(loc.startswith(PLUGIN_PORTAL_URL) for loc in locations):
                 return last_run[i - 1].lstrip()[:200]
-    return gradlew_retry_reason(lines, last_run)
+    return slow_typechecking_reason(last_run) or gradlew_retry_reason(lines, last_run)
 
 
 def classify(files: list[str]) -> int:

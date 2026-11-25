@@ -72,6 +72,12 @@ GUAVA_NOT_FOUND = (
 OPTIONS_EXISTS = f"gradlew-retry: {OPTIONS_POM} exists on a mirror of Maven Central."
 # The line that `gradlew-retry` prints before it runs Gradle again.
 GRADLEW_RETRYING = "gradlew-retry: Gradle could not resolve a dependency; retrying in 60 seconds."
+# The Checker Framework's warning that type-checking a method took too long.
+SLOW_TYPECHECKING = (
+    "/home/runner/work/a/b/BaseTypeVisitor.java:201: warning:"
+    " [compilermessages:slow.typechecking] typechecking took 48 seconds;"
+    " consider making inferred type variables explicit"
+)
 
 CIRCLECI = "https://circleci.com/api"
 AZURE = "https://dev.azure.com/org/proj/_apis/build/builds"
@@ -552,6 +558,33 @@ class ClassifyTest(unittest.TestCase):
                 f"error: cannot find symbol\n{GRADLEW_RETRYING}\n{GRADLE_429}",
                 GRADLE_429.lstrip(),
             ),
+            # The Checker Framework took long to type-check a method, on a busy CI machine.
+            (
+                f"{SLOW_TYPECHECKING}\nerror: warnings found and -Werror specified",
+                SLOW_TYPECHECKING,
+            ),
+            # Likewise, under `-Anomsgtext`, which omits the message text.
+            (
+                (
+                    "Issue301.java:9: warning: [slow.typechecking]\n1 error\n1 warning\n"
+                    "error: warnings found and -Werror specified\nBUILD FAILED in 3m"
+                ),
+                "Issue301.java:9: warning: [slow.typechecking]",
+            ),
+            # Likewise, as Maven reports it, with a prefix that lists several checkers.
+            (
+                (
+                    "[WARNING] /a/b/Foo.java:[201,13] [[nullness, allcheckers]:slow.typechecking]"
+                    " typechecking took 48 seconds; consider making inferred type variables"
+                    " explicit\n[ERROR] warnings found and -Werror specified\n"
+                    "[ERROR] COMPILATION ERROR"
+                ),
+                (
+                    "[WARNING] /a/b/Foo.java:[201,13] [[nullness, allcheckers]:slow.typechecking]"
+                    " typechecking took 48 seconds; consider making inferred type variables"
+                    " explicit"
+                ),
+            ),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
         ]:
@@ -613,6 +646,20 @@ class ClassifyTest(unittest.TestCase):
             ),
             # Likewise, after a network problem in an earlier run of Gradle.
             f"{GRADLE_429}\n{GRADLEW_RETRYING}\nerror: cannot find symbol",
+            # The Checker Framework took long to type-check a method, but javac also
+            # reported an error.
+            (
+                f"{SLOW_TYPECHECKING}\nBar.java:5: error: cannot find symbol\n1 error\n"
+                "1 warning\nerror: warnings found and -Werror specified"
+            ),
+            # Likewise, with another warning, which also fails a build under -Werror.
+            (
+                f"{SLOW_TYPECHECKING}\nwarning: [options] source value 8 is obsolete\n"
+                "error: warnings found and -Werror specified"
+            ),
+            # The Checker Framework took long to type-check a method, without -Werror, and
+            # a test failed.
+            f"{SLOW_TYPECHECKING}\nFooTest > testBar() FAILED\nBUILD FAILED in 3m",
             # The last run of Gradle also did not find a misspelled artifact, which
             # `gradlew-retry` did not report.
             (
