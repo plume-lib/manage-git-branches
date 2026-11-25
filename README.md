@@ -475,6 +475,11 @@ The commands are:
   [`cronic`](https://github.com/plume-lib/plume-scripts#cronic).
   Then it prints, to standard error, the build's standard output and standard
   error together, in approximately the order in which the build wrote them.
+  It omits the warnings about missing documentation that javadoc prints,
+  such as "warning: no @param for x", unless the build failed because of
+  warnings, as with `-Werror` or with maven-javadoc-plugin's
+  `<failOnWarnings>`.  (JDK 8's `javadoc -Xwerror` does not say that it
+  failed because of warnings, so its warnings are omitted.)
 * [`relative-path`](relative-path) `BASE TARGET`:
   Prints the pathname of TARGET, relative to BASE.  This is a portable
   replacement for GNU `realpath --relative-to=BASE TARGET`.
