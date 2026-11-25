@@ -692,10 +692,81 @@ expect_elided_output elide-max "${elidemax}" \
   '0 warnings (and 100 about missing documentation, which are not shown); other warnings might not be printed, because javadoc and javac stop at 100 unless given -Xmaxwarns'
 
 # A count that is smaller than the number of warnings elided, as when two
-# builds' output is interleaved, is left unchanged.
+# builds' output is interleaved, is removed if every warning since the last
+# count was elided.
 elidesmall="${tmpdir}/elide-small"
 make_stderr_project "${elidesmall}" "$(missing_doc_warnings)" '2 warnings'
-expect_elided_output elide-small "${elidesmall}" '2 warnings'
+if ! elide_output="$("${COMPILE_PROJECT}" "${elidesmall}" 2>&1)"; then
+  fail "elide-small: nonzero exit status: ${elide_output}"
+elif [ -n "${elide_output}" ]; then
+  fail "elide-small: expected no output, got: ${elide_output}"
+fi
+
+# Otherwise, such a count is left unchanged.
+elidesmallkept="${tmpdir}/elide-small-kept"
+make_stderr_project "${elidesmallkept}" "$(missing_doc_warnings)" \
+  '/p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
+  '    old();' '    ^' '2 warnings'
+expect_elided_output elide-small-kept "${elidesmallkept}" \
+  '/p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
+  '    old();' '    ^' '2 warnings'
+
+# When the output of builds that run in parallel, as Gradle's tasks do, is
+# interleaved, the source line of a warning is found by its text, which is read
+# from the file that the warning names.  Here, one build prints the warnings
+# about A.java, and another prints those about B.java.
+elideinter="${tmpdir}/elide-interleaved"
+mkdir -p "${elideinter}/a" "${elideinter}/b"
+printf '%s\n' 'class A {' '  public Constant copy() {' '    BOTTOM,' '}' > "${elideinter}/a/A.java"
+printf '%s\n' 'class B {' '  public R visitPrimitive(' '    THEN,' '    old();' '}' > "${elideinter}/b/B.java"
+make_stderr_project "${elideinter}" \
+  "${elideinter}/a/A.java:2: warning: no comment" \
+  "${elideinter}/b/B.java:2: warning: no comment" \
+  '  public Constant copy() {' \
+  '  public R visitPrimitive(' \
+  '           ^' \
+  '                  ^' \
+  "${elideinter}/a/A.java:3: warning: no comment" \
+  "${elideinter}/b/B.java:3: warning: no comment" \
+  '    BOTTOM,' \
+  '    THEN,' \
+  '    ^' \
+  '2 warnings' \
+  '    ^' \
+  '2 warnings'
+if ! elide_output="$("${COMPILE_PROJECT}" "${elideinter}" 2>&1)"; then
+  fail "elide-interleaved: nonzero exit status: ${elide_output}"
+elif [ -n "${elide_output}" ]; then
+  fail "elide-interleaved: expected no output, got: ${elide_output}"
+fi
+
+# A warning that is not elided keeps its source line and caret line when the
+# output is interleaved.  Each count counts both elided warnings and other
+# warnings, and which ones it counts is unknown, so the counts are unchanged.
+elideinterkept="${tmpdir}/elide-interleaved-kept"
+mkdir -p "${elideinterkept}"
+cp -R "${elideinter}/a" "${elideinter}/b" "${elideinterkept}/"
+make_stderr_project "${elideinterkept}" \
+  "${elideinterkept}/a/A.java:2: warning: no comment" \
+  "${elideinterkept}/b/B.java:4: warning: [deprecation] old() in B has been deprecated" \
+  '  public Constant copy() {' \
+  '    old();' \
+  '           ^' \
+  '    ^' \
+  "${elideinterkept}/a/A.java:3: warning: no comment" \
+  "${elideinterkept}/b/B.java:3: warning: no comment" \
+  '    THEN,' \
+  '    BOTTOM,' \
+  '    ^' \
+  '2 warnings' \
+  '    ^' \
+  '2 warnings'
+expect_elided_output elide-interleaved-kept "${elideinterkept}" \
+  "${elideinterkept}/b/B.java:4: warning: [deprecation] old() in B has been deprecated" \
+  '    old();' \
+  '    ^' \
+  '2 warnings' \
+  '2 warnings'
 
 # When Maven fails because of warnings, it writes the message to standard
 # output, and no warning is elided.
