@@ -79,6 +79,13 @@ SLOW_TYPECHECKING = (
     " consider making inferred type variables explicit"
 )
 
+# The annotation of a GitHub Actions job whose run its concurrency group cancelled.
+CONCURRENCY_CANCEL = "Canceling since a higher priority waiting request for CI-5 exists"
+# The request for the runs of GitHub Actions run 100's branch that are no older than it.
+NEWER_RUNS = (
+    "repos/org/repo/actions/runs?branch=feature&created=%3E%3D2026-11-24T22%3A40%3A03Z&per_page=100"
+)
+
 CIRCLECI = "https://circleci.com/api"
 AZURE = "https://dev.azure.com/org/proj/_apis/build/builds"
 
@@ -113,6 +120,7 @@ class FakeServer:
         repo: the GitHub repository of the current clone, as a dict parsed from the JSON
             of `gh repo view`, with keys "owner" and "parent".
         reruns: the rerun requests, as strings.
+        gh_requests: the paths of the `gh api` requests, in order.
     """
 
     def __init__(self) -> None:
@@ -125,6 +133,7 @@ class FakeServer:
         self.push = ""
         self.repo: dict[str, Any] = {"owner": {"login": "org"}, "parent": None}
         self.reruns: list[str] = []
+        self.gh_requests: list[str] = []
 
     def http(
         self,
@@ -163,6 +172,7 @@ class FakeServer:
         """
         if cmd[:2] == ["gh", "api"]:
             path = cmd[-1]
+            self.gh_requests.append(path)
             if path not in self.gh:
                 raise subprocess.CalledProcessError(1, cmd, "", "gh: Not Found (HTTP 404)")
             return json.dumps(self.gh[path])
@@ -350,10 +360,18 @@ class FakeServer:
             jobs: the id, name, and conclusion of each job of the latest attempt.
         """
         self.gh["repos/org/repo/actions/runs/100"] = {
+            "id": 100,
             "name": "CI",
             "status": status,
             "conclusion": conclusion,
             "run_attempt": 1,
+            "run_number": 50,
+            "workflow_id": 7,
+            "event": "pull_request",
+            "head_branch": "feature",
+            "head_repository": {"full_name": "me/repo"},
+            "head_sha": "abc",
+            "created_at": "2026-11-24T22:40:03Z",
         }
         page = [{"jobs": [{"id": i, "name": n, "conclusion": c} for i, n, c in jobs]}]
         self.gh["repos/org/repo/actions/runs/100/jobs?filter=latest&per_page=100"] = page
@@ -1014,6 +1032,131 @@ class GithubActionsTest(RerunTestCase):
         self.assertIn("c: cancelled, not transient", output)
         s.gha_run("completed", "cancelled", [(103, "c", "cancelled")])
         self.assert_reruns([], self.RUN)
+
+    def test_concurrency_cancelled(self) -> None:
+        """A run that its concurrency group cancelled is rerun, unless a newer run exists."""
+        s = self.server
+
+        def job(
+            job_id: int, name: str, conclusion: str, started: str, completed: str = ""
+        ) -> dict[str, Any]:
+            return {
+                "id": job_id,
+                "name": name,
+                "conclusion": conclusion,
+                "started_at": started,
+                "completed_at": completed,
+            }
+
+        def serve(*jobs: dict[str, Any]) -> None:
+            page = [{"jobs": list(jobs)}]
+            s.gh["repos/org/repo/actions/runs/100/jobs?filter=latest&per_page=100"] = page
+            s.gh["repos/org/repo/actions/runs/100/jobs?filter=all&per_page=100"] = page
+
+        # Job a was running when the run was cancelled, and took a while to stop.  Job b
+        # never started, so it has no annotation.  Job all_green started after the
+        # cancellation, and failed because the jobs that it needs were cancelled.
+        s.gha_run("completed", "cancelled", [])
+        cancelled = [
+            job(101, "a", "cancelled", "2026-11-24T22:40:04Z", "2026-11-24T23:38:00Z"),
+            job(102, "b", "cancelled", "2026-11-24T23:36:11Z", "2026-11-24T23:36:11Z"),
+            job(103, "all_green", "failure", "2026-11-24T23:36:15Z"),
+        ]
+        serve(*cancelled)
+        s.gh_logs.pop(101)
+        s.gha_job(101, None, CONCURRENCY_CANCEL)
+        s.gh["repos/org/repo/check-runs/102/annotations?per_page=100"] = [[]]
+        s.gha_job(
+            103,
+            "##[error]Process completed with exit code 1.",
+            "Process completed with exit code 1.",
+        )
+
+        def run(
+            run_id: int,
+            head_repo: str = "me/repo",
+            workflow: int = 7,
+            sha: str = "def",
+            event: str = "push",
+        ) -> dict[str, Any]:
+            return {
+                "id": run_id,
+                "workflow_id": workflow,
+                "event": event,
+                "head_sha": sha,
+                "created_at": f"2026-11-24T22:40:{run_id - 97:02}Z",
+                "head_branch": "feature",
+                "head_repository": {"full_name": head_repo},
+                "html_url": f"https://github.com/org/repo/actions/runs/{run_id}",
+            }
+
+        # The run itself, a newer run for a branch of the same name in another fork, and
+        # a run of another workflow that the same event started.
+        s.gh[NEWER_RUNS] = [
+            {
+                "workflow_runs": [
+                    run(101, head_repo="other/repo"),
+                    run(102, workflow=8, sha="abc", event="pull_request"),
+                    run(100, sha="abc", event="pull_request"),
+                ]
+            }
+        ]
+        output = self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
+        self.assertIn(f"a: transient: {CONCURRENCY_CANCEL}", output)
+        self.assertIn(
+            f"all_green: transient: started after the run was cancelled: {CONCURRENCY_CANCEL}",
+            output,
+        )
+        # Each job's annotations are read once.
+        annotation_requests = [r for r in s.gh_requests if "/annotations" in r]
+        self.assertEqual(len(annotation_requests), len(set(annotation_requests)))
+        # A URL that names the job that failed because of the cancellation reruns the
+        # jobs that it needs too.
+        output = self.assert_reruns(
+            ["gh run rerun --repo org/repo --failed 100"], f"{self.RUN}/job/103"
+        )
+        self.assertIn("would not rerun the cancelled jobs that it needs", output)
+
+        # A job that failed before the cancellation did not fail transiently.
+        serve(*cancelled, job(104, "d", "failure", "2026-11-24T22:40:04Z"))
+        s.gha_job(104, "Test failed")
+        output = self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
+        self.assertIn("d: not transient", output)
+        # A URL that names it does not read the newer runs.
+        s.gh_requests.clear()
+        self.assert_reruns([], f"{self.RUN}/job/104")
+        self.assertNotIn(NEWER_RUNS, s.gh_requests)
+
+        # Without the completion times of the cancelled jobs, no job is known to have
+        # started after the cancellation.
+        serve(*[{**j, "completed_at": None} for j in cancelled])
+        output = self.assert_reruns(["gh run rerun --repo org/repo --job 101"], self.RUN)
+        self.assertIn("all_green: not transient", output)
+
+        # A newer run for the same branch, of another workflow and for another event,
+        # superseded the run.
+        serve(*cancelled)
+        s.gh[NEWER_RUNS][0]["workflow_runs"].append(run(103, workflow=8))
+        output = self.assert_reruns([], self.RUN)
+        self.assertIn(
+            "Its concurrency group cancelled it in favor of a newer run:"
+            " https://github.com/org/repo/actions/runs/103",
+            output,
+        )
+        self.assertIn("a: cancelled, not transient", output)
+        self.assertIn("all_green: not transient", output)
+
+        # The newer runs cannot be read.
+        del s.gh[NEWER_RUNS]
+        output = self.assert_reruns([], self.RUN, status=1)
+        self.assertIn("cannot read the newer runs", output)
+
+        # A run that failed, rather than being cancelled, does not read the newer runs.
+        s.gha_run("completed", "failure", [])
+        serve(*cancelled)
+        s.gh_requests.clear()
+        self.assert_reruns([], self.RUN)
+        self.assertNotIn(NEWER_RUNS, s.gh_requests)
 
     def test_normalize_log_failure(self) -> None:
         """If normalize-log cannot be run, the command reports it and exits."""
