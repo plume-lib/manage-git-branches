@@ -47,8 +47,9 @@ examined too, because GitHub Actions cancels a job whose runner shuts down.  A G
 Actions job also failed transiently if the concurrency group of its workflow run
 cancelled the run in favor of a waiting request, as an annotation of the job such as
 "Canceling since a higher priority waiting request for CI-8598 exists" shows, and the
-workflow has no newer run for the same branch and event, so that the waiting request
-never became a run and the branch was left with no CI result.  So did a job of such a
+repository has no newer workflow run for the same branch, so that the waiting request
+never became a run and the branch was left with no CI result.  (A run of another
+workflow for the same commit is not considered newer.)  So did a job of such a
 run that started after the cancellation, such as a job that runs `if: always()` and
 fails because the jobs that it needs were cancelled.  A cancelled job that did not fail
 transiently, such as one that a user or the failure of another job cancelled, is
@@ -63,7 +64,10 @@ Actions) that has a job that failed transiently, this command reruns:
    GitHub Actions does not permit a job to be rerun while its workflow run is in
    progress, so this command reruns only one of them; run this command again after
    the workflow run completes.
-Rerunning a job also reruns the jobs that depend on it.
+Rerunning a job also reruns the jobs that depend on it.  A GitHub Actions job that
+failed transiently because it started after its run was cancelled failed because the
+jobs that it needs were cancelled, and rerunning a job does not rerun the jobs that it
+needs, so for such a job this command reruns every failed job of its run.
 
 This command does nothing to a build, workflow, or workflow run that is still in
 progress or that has been rerun since the failure.  It also does not rerun an Azure
@@ -95,7 +99,7 @@ project's jobs does not require credentials.
 from __future__ import annotations
 
 import argparse
-import contextlib
+import functools
 import json
 import operator
 import re
@@ -842,7 +846,24 @@ class Rerunner:
                 f" {request_util.failure(e)}"
             )
             return
-        cancellation = self.gha_concurrency_cancellation(repo, run_json, latest_jobs)
+        # The failure annotations of each job whose annotations have been read, or None
+        # for a job whose annotations cannot be read.
+        annotations: dict[int, list[str] | None] = {}
+
+        def job_annotations(job_id: int) -> list[str] | None:
+            if job_id not in annotations:
+                try:
+                    annotations[job_id] = gha_failure_annotations(repo, job_id)
+                except request_util.REQUEST_ERRORS:
+                    annotations[job_id] = None
+            return annotations[job_id]
+
+        # The annotation that shows that the run's concurrency group cancelled the run, as
+        # for gha_concurrency_cancellation.  It is computed only if some job needs it,
+        # because it reads the newer runs.
+        concurrency_cancellation = functools.cache(
+            lambda: self.gha_concurrency_cancellation(repo, run_json, latest_jobs, job_annotations)
+        )
         failed_jobs = [
             j for j in latest_jobs if j["conclusion"] in {*GITHUB_FAILED, GITHUB_CANCELLED}
         ]
@@ -861,17 +882,39 @@ class Rerunner:
         for j in all_jobs:
             runs_of_job.setdefault(j["name"], set()).add(j.get("started_at") or str(j["id"]))
 
+        # When the run was cancelled, if it was:  the earliest time at which a cancelled
+        # job of the run completed, a timestamp such as "2026-11-24T23:36:11Z", or None if
+        # GitHub provides no such time.  A job that was running when the run was cancelled
+        # can complete much later.
+        cancel_time = min(
+            (
+                j["completed_at"]
+                for j in latest_jobs
+                if j["conclusion"] == GITHUB_CANCELLED and j.get("completed_at")
+            ),
+            default=None,
+        )
+
         rerun_ids = []
         all_transient = True
+        # The first job to rerun that failed because the jobs that it needs were cancelled.
+        needs_cancelled = None
         for job in failed_jobs:
-            log = gha_job_log(repo, job["id"])
+            log = gha_job_log(repo, job["id"], job_annotations(job["id"]))
             reason = transient_reason(log.text)
-            if reason is None and cancellation is not None:
-                if job["conclusion"] == GITHUB_CANCELLED:
-                    if GHA_CONCURRENCY_CANCEL_RE.search(log.text):
-                        reason = cancellation.reason
-                elif (job.get("started_at") or "") >= cancellation.time:
-                    reason = f"started after the run was cancelled: {cancellation.reason}"
+            started_after = False
+            if reason is None and job["conclusion"] == GITHUB_CANCELLED:
+                if GHA_CONCURRENCY_CANCEL_RE.search(log.text):
+                    reason = concurrency_cancellation()
+            elif (
+                reason is None
+                and cancel_time is not None
+                and (job.get("started_at") or "") >= cancel_time
+            ):
+                cancellation = concurrency_cancellation()
+                if cancellation is not None:
+                    reason = f"started after the run was cancelled: {cancellation}"
+                    started_after = True
             if reason is None:
                 if job["conclusion"] == GITHUB_CANCELLED:
                     # A cancelled job has no failed steps, so the only part of its log
@@ -894,11 +937,19 @@ class Rerunner:
                 all_transient = False
                 continue
             rerun_ids.append(job["id"])
+            if started_after and needs_cancelled is None:
+                needs_cancelled = job["name"]
 
         if not rerun_ids:
             return
         if all_transient and only_job is None:
             args, what = ["--failed", str(run)], "the failed jobs"
+        elif needs_cancelled is not None:
+            args = ["--failed", str(run)]
+            what = (
+                f"the failed jobs (rerunning job {needs_cancelled} alone would not rerun"
+                " the cancelled jobs that it needs)"
+            )
         else:
             args, what = ["--job", str(rerun_ids[0])], f"job {rerun_ids[0]}"
             if len(rerun_ids) > 1:
@@ -913,49 +964,59 @@ class Rerunner:
             self.warn(f"cannot rerun GitHub Actions workflow run {run}: {request_util.failure(e)}")
 
     def gha_concurrency_cancellation(
-        self, repo: str, run_json: dict[str, Any], jobs: list[dict[str, Any]]
-    ) -> ConcurrencyCancellation | None:
-        """Return the cancellation of the given run by its concurrency group, if it is transient.
+        self,
+        repo: str,
+        run_json: dict[str, Any],
+        jobs: list[dict[str, Any]],
+        annotations_of: Callable[[int], list[str] | None],
+    ) -> str | None:
+        """Return the annotation that shows that the given run's concurrency group cancelled it.
 
-        The cancellation is transient if the workflow has no newer run for the same branch
-        and event, so that the waiting request in whose favor the run was cancelled never
-        became a run.
+        The cancellation is transient, and the annotation is returned, only if
+        gha_newer_run finds no newer run, so that the waiting request in whose favor the
+        run was cancelled never became a run.
 
         Args:
             repo: a repository's GitHub slug, such as "ORG/REPO".
             run_json: a workflow run of the repository, as a dict parsed from the GitHub
                 API's JSON, with keys such as "id", "workflow_id", and "head_branch".
             jobs: the jobs of the latest attempt of the run, as for gha_jobs.
+            annotations_of: a function that returns the failure annotations of a job,
+                given its id, as gha_failure_annotations does, or None if they cannot be
+                read.
 
         Returns:
-            The cancellation, or None if the concurrency group did not cancel the run,
-            or the workflow has a newer run for the same branch and event, or the newer
-            runs cannot be read.
+            The failure annotation of a cancelled job of the run, such as "Canceling
+            since a higher priority waiting request for CI-8598 exists", or None if the
+            concurrency group did not cancel the run, or gha_newer_run finds a newer run,
+            or the newer runs cannot be read.
         """
-        for job in jobs:
-            if job["conclusion"] != GITHUB_CANCELLED:
-                continue
-            try:
-                annotations = gha_failure_annotations(repo, job["id"])
-            except request_util.REQUEST_ERRORS:
-                continue
-            reason = next((a for a in annotations if GHA_CONCURRENCY_CANCEL_RE.search(a)), None)
-            if reason is not None:
-                break
-        else:
+        if run_json["conclusion"] != GITHUB_CANCELLED:
+            return None
+        cancelled = [j for j in jobs if j["conclusion"] == GITHUB_CANCELLED]
+        reason = next(
+            (
+                a
+                for j in cancelled
+                for a in annotations_of(j["id"]) or []
+                if GHA_CONCURRENCY_CANCEL_RE.search(a)
+            ),
+            None,
+        )
+        if reason is None:
             return None
         try:
             newer = gha_newer_run(repo, run_json)
         except request_util.REQUEST_ERRORS as e:
             self.warn(
-                f"cannot read the newer runs of the workflow of GitHub Actions workflow run"
+                f"cannot read the newer runs for the branch of GitHub Actions workflow run"
                 f" {run_json['id']}: {request_util.failure(e)}"
             )
             return None
         if newer is not None:
             print(f"  Its concurrency group cancelled it in favor of a newer run: {newer}")
             return None
-        return ConcurrencyCancellation(job.get("completed_at") or "", reason)
+        return reason
 
     def gha_rerun_failed_url(self, url: str, whole_run: bool = False) -> None:
         """Rerun the transiently failed jobs that the given GitHub Actions URL names.
@@ -1154,20 +1215,6 @@ class JobLog(NamedTuple):
     read: bool
 
 
-class ConcurrencyCancellation(NamedTuple):
-    """The cancellation of a GitHub Actions workflow run by its concurrency group.
-
-    Attributes:
-        time: when a job of the run was cancelled, a timestamp such as
-            "2026-11-24T23:36:11Z", or "" if GitHub does not provide it.
-        reason: the job's annotation that shows the cancellation, such as "Canceling
-            since a higher priority waiting request for CI-8598 exists".
-    """
-
-    time: str
-    reason: str
-
-
 def azure_stage(record: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Return the stage that contains the given record of an Azure Pipelines timeline.
 
@@ -1277,19 +1324,20 @@ def gha_jobs(repo: str, run: int, which: str) -> list[dict[str, Any]]:
     return [job for page in pages for job in page["jobs"]]
 
 
-def gha_job_log(repo: str, job: int) -> JobLog:
-    """Return the log of the given GitHub Actions job's failed steps, and its failure annotations.
+def gha_job_log(repo: str, job: int, annotations: list[str] | None) -> JobLog:
+    """Return the log of the given GitHub Actions job's failed steps, and the given annotations.
 
     The errors in the result are the job's failure annotations.  Warning and notice
     annotations are omitted, because a step that succeeded can produce them.  The log is
     unreadable if `gh` fails or prints nothing, as it does for a job that has no failed
-    step or whose log it cannot find.  If the annotations cannot be read, the result
-    contains only the log.
+    step or whose log it cannot find.
 
     Args:
         repo: a repository's GitHub slug, such as "ORG/REPO".
         job: the id of a job of the repository, an integer such as 456 in
             "https://github.com/ORG/REPO/actions/runs/123/job/456".
+        annotations: the job's failure annotations, as gha_failure_annotations returns
+            them, or None if they cannot be read.
 
     Returns:
         The log and the failure annotations.
@@ -1303,8 +1351,7 @@ def gha_job_log(repo: str, job: int) -> JobLog:
     # Each line starts with the job name and the step name, each followed by a tab.
     parts = [line.split("\t", 2)[-1] for line in log.splitlines()]
     read = any(part.strip() for part in parts)
-    with contextlib.suppress(*request_util.REQUEST_ERRORS):
-        parts.extend(gha_failure_annotations(repo, job))
+    parts.extend(annotations or [])
     return JobLog("\n".join(parts), read)
 
 
@@ -1328,10 +1375,13 @@ def gha_failure_annotations(repo: str, job: int) -> list[str]:
 
 
 def gha_newer_run(repo: str, run_json: dict[str, Any]) -> str | None:
-    """Return the URL of a newer run of the given run's workflow, for the same branch and event.
+    """Return the URL of a newer workflow run of the given run's repository, for the same branch.
 
-    The branch is the run's head branch in the run's head repository, which for a pull
-    request from a fork is the fork.  If `gh` fails, this raises one of
+    The newer run can be of any workflow and for any event, because a concurrency group
+    can span workflows and events, except that a run of another workflow for the same
+    commit is not considered newer:  the event that started the given run usually started
+    it too.  The branch is the run's head branch in the run's head repository, which for
+    a pull request from a fork is the fork.  If `gh` fails, this raises one of
     request_util.REQUEST_ERRORS.
 
     Args:
@@ -1341,28 +1391,29 @@ def gha_newer_run(repo: str, run_json: dict[str, Any]) -> str | None:
 
     Returns:
         The URL of the newer run, such as "https://github.com/ORG/REPO/actions/runs/124",
-        or None if the workflow has no newer run for the branch and event.
+        or None if the repository has no newer run for the branch.
     """
     head_repo = (run_json.get("head_repository") or {}).get("full_name")
     query = {
         **({"branch": run_json["head_branch"]} if run_json.get("head_branch") else {}),
-        "event": run_json["event"],
         "created": f">={run_json['created_at']}",
         "per_page": 100,
     }
     pages = request_util.gh_api(
-        f"repos/{repo}/actions/workflows/{run_json['workflow_id']}/runs"
-        f"?{urllib.parse.urlencode(query)}",
-        paginate=True,
+        f"repos/{repo}/actions/runs?{urllib.parse.urlencode(query)}", paginate=True
     )
     return next(
         (
             r["html_url"]
             for page in pages
             for r in page["workflow_runs"]
-            if r["run_number"] > run_json["run_number"]
+            if (r["created_at"], r["id"]) > (run_json["created_at"], run_json["id"])
             and r.get("head_branch") == run_json.get("head_branch")
             and (r.get("head_repository") or {}).get("full_name") == head_repo
+            and (
+                r["workflow_id"] == run_json["workflow_id"]
+                or r.get("head_sha") != run_json.get("head_sha")
+            )
         ),
         None,
     )
