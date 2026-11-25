@@ -507,14 +507,21 @@ warnings_failure_regex='^((\[ERROR\] )?(Exit code: [0-9]+ - )?error: |\[ERROR\] 
 # is removed if every warning that it counts was elided.  The warnings that a
 # count counts are taken to be those that precede it and that no earlier count
 # counted.  If those are more than the count, as when builds' output is
-# interleaved, then the count is removed if all of them were elided, and is
-# left unchanged otherwise.  But a count of 100, the number of warnings at
+# interleaved, then which of them the count counts is unknown:  the count is
+# removed if all of them were elided, and is left unchanged otherwise.  After
+# such a count is left unchanged, it is unknown which of the remaining
+# warnings were elided, so a later count is removed only if it can count only
+# elided warnings, and is otherwise left unchanged.  But a count of 100, the number of warnings at
 # which javadoc and javac stop by default, is never removed, and its
 # replacement says that other warnings might not have been printed.
 # Leaves the file unchanged if it cannot be rewritten.
 elide_missing_doc_warnings() {
-  # Each awk variable whose name ends in "_pool" is a number of warnings that
-  # no count has counted yet.
+  # The awk variable uncounted is the number of warnings that no count has
+  # counted yet.  At most elided_pool of them are elided, and at most kept_pool
+  # of them are not; each of the two is exact if their sum is uncounted.  They
+  # are inexact after a count that counts some, but not all, of the uncounted
+  # warnings when those include both elided warnings and others, because which
+  # ones that count counts is unknown.
   # A diagnostic whose file can be read expects a source line with known text:
   # tail_of[TEXT] diagnostics have expected TEXT, and head_of[TEXT] of them
   # have found it; elides[TEXT, I] is 1 if the Ith of them is elided.
@@ -588,23 +595,27 @@ elide_missing_doc_warnings() {
       match($0, /[0-9]+ warnings?$/)
       prefix = substr($0, 1, RSTART - 1)
       count = substr($0, RSTART) + 0
-      if (elided_pool + kept_pool <= count) {
-        elided = elided_pool
-        kept = count - elided_pool
-        elided_pool = 0
-        kept_pool = 0
-      } else if (kept_pool == 0) {
-        elided = count
-        kept = 0
-        elided_pool -= count
-      } else if (elided_pool == 0) {
-        elided = 0
-        kept_pool -= count
+      elided = 0
+      if (uncounted <= count) {
+        # The count counts every warning that no earlier count counted.
+        if (elided_pool + kept_pool == uncounted) {
+          elided = elided_pool
+          kept = count - elided_pool
+        }
+        uncounted = 0
       } else {
-        # Which of the warnings the count counts is unknown.
-        elided = 0
-        elided_pool = 0
-        kept_pool = 0
+        # The count counts some of those warnings; which ones is unknown.
+        if (kept_pool == 0) {
+          elided = count
+          kept = 0
+        }
+        uncounted -= count
+      }
+      if (elided_pool > uncounted) {
+        elided_pool = uncounted
+      }
+      if (kept_pool > uncounted) {
+        kept_pool = uncounted
       }
       if (elided == 0) {
         print
@@ -645,6 +656,7 @@ elide_missing_doc_warnings() {
     }
     is_missing_doc_warning($0) {
       elided_pool++
+      uncounted++
       expect_source($0, 1)
       next
     }
@@ -662,6 +674,7 @@ elide_missing_doc_warnings() {
     is_diagnostic($0) {
       if (is_warning($0)) {
         kept_pool++
+        uncounted++
       }
       expect_source($0, 0)
       print

@@ -711,6 +711,22 @@ expect_elided_output elide-small-kept "${elidesmallkept}" \
   '/p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
   '    old();' '    ^' '2 warnings'
 
+# After such a count, which of the remaining warnings were elided is unknown,
+# so a later count that might count a warning that is not elided is left
+# unchanged.  Here, three builds' output is interleaved:  the first build
+# prints the deprecation warning and the last count.
+elidesmallafter="${tmpdir}/elide-small-after"
+make_stderr_project "${elidesmallafter}" \
+  '/p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
+  '/p/src/Bar.java:10: warning: no comment' \
+  '1 warning' \
+  '/p/src/Baz.java:20: warning: no comment' \
+  '/p/src/Baz.java:30: warning: no comment' \
+  '1 warning'
+expect_elided_output elide-small-after "${elidesmallafter}" \
+  '/p/src/Foo.java:70: warning: [deprecation] old() in Foo has been deprecated' \
+  '1 warning' '1 warning'
+
 # When the output of builds that run in parallel, as Gradle's tasks do, is
 # interleaved, the source line of a warning is found by its text, which is read
 # from the file that the warning names.  Here, one build prints the warnings
