@@ -10,6 +10,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from typing import Any, ClassVar
 from unittest import mock
 
 TOPLEVEL = Path(__file__).resolve().parent.parent
@@ -1567,11 +1568,15 @@ class NewSnapshotTest(unittest.TestCase):
         snapshot = json.loads(
             json.dumps(
                 pr_status.new_snapshot(
-                    "now", {"repo": {}}, conflicting, unblocked, ["bottleneck", "a#1"]
+                    "now", "then", {"repo": {}}, conflicting, unblocked, ["bottleneck", "a#1"]
                 )
             )
         )
-        self.assertEqual((snapshot["time"], snapshot["facts"]), ("now", {"repo": {}}))
+        self.assertEqual(
+            (snapshot["time"], snapshot["facts_time"], snapshot["facts"]),
+            ("now", "then", {"repo": {}}),
+        )
+        self.assertEqual(pr_status.baseline(snapshot), ("then", {"repo": {}}))
         self.assertEqual(json.loads("\n".join(pr_status.format_unblocked_prs(snapshot))), unblocked)
         self.assertEqual(
             pr_status.format_push_chains(snapshot),
@@ -1581,6 +1586,111 @@ class NewSnapshotTest(unittest.TestCase):
             pr_status.format_missing_branches(snapshot), ["a\towner:master", "b dir\tmernst:fix"]
         )
         self.assertEqual(pr_status.previous_highlight(snapshot, None), ["bottleneck", "a#1"])
+
+
+class BaselineTest(unittest.TestCase):
+    """Tests for baseline."""
+
+    def test_no_snapshot(self):
+        """Without a snapshot, there are no facts to compare with."""
+        self.assertEqual(pr_status.baseline(None), (None, {}))
+
+    def test_old_snapshot(self):
+        """A snapshot without "facts_time" records the facts of the run that wrote it."""
+        self.assertEqual(
+            pr_status.baseline({"time": "then", "facts": {"repo": {}}}), ("then", {"repo": {}})
+        )
+
+
+class ChangeReportTest(unittest.TestCase):
+    """Tests that a run of pr-status reports the changes since the previous report."""
+
+    OLD_FACTS: ClassVar[dict[str, Any]] = {
+        "repo": {"prs": {}, "direct": {}, "master_conflicts": {}, "unblocked": [1]}
+    }
+    NEW_FACTS: ClassVar[dict[str, Any]] = {
+        "repo": {"prs": {}, "direct": {}, "master_conflicts": {}, "unblocked": [2]}
+    }
+
+    def run_main(self, d, *options):
+        """Run pr-status in the given directory, with one repository whose facts are NEW_FACTS.
+
+        Args:
+            d: a directory that holds no working copy directory.
+            options: the command-line options of pr-status, such as "--no-change-report".
+
+        Returns:
+            What pr-status printed to standard output, and the snapshot that it wrote, as a
+            dict parsed from the JSON of .pr-status-snapshot.json.
+        """
+        cfg = {"documents": {"dependencies": "pr-status.md"}}
+
+        def report_changes(_models, old, new):
+            return [f"unblocked: {old['repo']['unblocked']} -> {new['repo']['unblocked']}"]
+
+        with (
+            mock.patch.object(sys, "argv", ["pr-status", "-C", d, "--no-documents", *options]),
+            mock.patch.object(pr_status, "load_config", return_value=cfg),
+            mock.patch.object(pr_status, "load_models", return_value=[]),
+            mock.patch.object(pr_status, "facts", return_value=self.NEW_FACTS),
+            mock.patch.object(pr_status, "report_changes", side_effect=report_changes),
+            mock.patch.object(pr_status, "HIGHLIGHTED", set()),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            cwd = Path.cwd()
+            try:
+                pr_status.main()
+            finally:
+                os.chdir(cwd)
+        snapshot = json.loads((Path(d) / pr_status_config.SNAPSHOT).read_text())
+        return stdout.getvalue(), snapshot
+
+    def test_report(self):
+        """A run without --no-change-report reports the changes, and records its facts."""
+        with tempfile.TemporaryDirectory() as d:
+            old = {"time": "t1", "facts_time": "t0", "facts": self.OLD_FACTS}
+            (Path(d) / pr_status_config.SNAPSHOT).write_text(json.dumps(old))
+            output, snapshot = self.run_main(d)
+        self.assertIn("## Changes since the previous report of changes (t0)", output)
+        self.assertIn("unblocked: [1] -> [2]", output)
+        self.assertEqual(snapshot["facts"], self.NEW_FACTS)
+        self.assertEqual(snapshot["facts_time"], snapshot["time"])
+        self.assertNotEqual(snapshot["time"], "t1")
+
+    def test_no_change_report(self):
+        """A run with --no-change-report keeps the facts, for the next run to report."""
+        with tempfile.TemporaryDirectory() as d:
+            old = {"time": "t1", "facts_time": "t0", "facts": self.OLD_FACTS}
+            (Path(d) / pr_status_config.SNAPSHOT).write_text(json.dumps(old))
+            output, snapshot = self.run_main(d, "--no-change-report")
+            self.assertNotIn("Changes since", output)
+            self.assertEqual((snapshot["facts_time"], snapshot["facts"]), ("t0", self.OLD_FACTS))
+            self.assertNotEqual(snapshot["time"], "t1")
+            output, snapshot = self.run_main(d)
+        self.assertIn("## Changes since the previous report of changes (t0)", output)
+        self.assertIn("unblocked: [1] -> [2]", output)
+
+    def test_no_change_report_without_snapshot(self):
+        """Without a snapshot, a run with --no-change-report records no facts."""
+        with tempfile.TemporaryDirectory() as d:
+            _, snapshot = self.run_main(d, "--no-change-report")
+        self.assertEqual((snapshot["facts_time"], snapshot["facts"]), (None, {}))
+
+    def test_not_with_printing(self):
+        """--no-change-report is not allowed with an option that prints the snapshot."""
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(TOPLEVEL / "pr-status"),
+                "--no-change-report",
+                "--print-unblocked-prs",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--no-change-report is not allowed with --print-unblocked-prs", result.stderr)
 
 
 class FormatPushChainsTest(unittest.TestCase):
@@ -2032,6 +2142,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
         """Only the chains are printed, one per line."""
         snapshot = pr_status.new_snapshot(
             "now",
+            "now",
             {},
             [
                 pr_status.PushChains(
@@ -2055,6 +2166,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
     def test_prints_missing_branches(self):
         """`--print-missing-branches` prints only the branches, one per line."""
         snapshot = pr_status.new_snapshot(
+            "now",
             "now",
             {},
             [pr_status.PushChains([], [], False, [pr_status.MissingBranch("a", "o:m")], [])],
@@ -2084,7 +2196,7 @@ class PrintConflictingPushChainsTest(unittest.TestCase):
                 "ci": "passed",
             }
         ]
-        snapshot = pr_status.new_snapshot("now", {}, [], unblocked, [])
+        snapshot = pr_status.new_snapshot("now", "now", {}, [], unblocked, [])
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / pr_status_config.SNAPSHOT).write_text(json.dumps(snapshot))
             result = subprocess.run(

@@ -10,8 +10,9 @@
 # `pr-status`, or pass that directory with "-C".
 #
 # This script does the following:
-#  * run `pr-status --previous-arguments`, which regenerates the dependency
-#    document, with the highlights of the previous run of `pr-status`, and
+#  * run `pr-status --previous-arguments --no-change-report`, which
+#    regenerates the dependency document, with the highlights of the previous
+#    run of `pr-status`, and
 #    records the dependency chains with conflicts (the chains of the
 #    document's section "Dependency chains with conflicts", which omit a PR
 #    whose head commit is old; see "dormant_after_days" in
@@ -169,9 +170,9 @@ print_summary() {
 
 round=1
 while :; do
-  if ! "${pr_status}" --previous-arguments; then
+  if ! "${pr_status}" --previous-arguments --no-change-report; then
     print_summary
-    echo "${SCRIPT_NAME}: ${pr_status} --previous-arguments failed in $(pwd)" >&2
+    echo "${SCRIPT_NAME}: ${pr_status} --previous-arguments --no-change-report failed in $(pwd)" >&2
     exit 1
   fi
   # One chain per line, its directories separated by tabs.

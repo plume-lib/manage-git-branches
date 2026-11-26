@@ -14,13 +14,16 @@ must not itself be in a git working copy, or pass that directory with -C):
   pr-status --highlight avocado-agent#100  # highlight a PR and the PRs it needs to land
   pr-status --highlight bottleneck  # highlight the next PR to work on in each repository
   pr-status --previous-arguments  # regenerate the documents as the previous run did
+  pr-status --no-change-report  # like pr-status, but print no change (for scripts)
 
 Inputs:
   pr-status-config.json    hand-maintained:  repositories, notes, labels, decisions
                            (optional; see default_config for the default, and
                            pr-status-config.md for the format)
-  .pr-status-snapshot.json written by the previous run; compared with this run.  It also
-                           records the dependency chains with conflicts, which
+  .pr-status-snapshot.json written by the previous run.  It records the facts of the
+                           previous run that reported changes, with which this run
+                           compares its facts.  It also records the dependency
+                           chains with conflicts, which
                            --print-conflicting-push-chains prints, and the branches
                            that resolving the conflicts needs but that have no working
                            copy, which --print-missing-branches prints, the unblocked
@@ -50,7 +53,8 @@ Each run:
     newer PR builds,
   * updates each modeled PR description's "Land after" and "Land before" lines, but keeps
     the lines about a PR in or after a cycle of dependencies,
-  * prints what changed since the previous snapshot (input for the summary),
+  * prints what changed since the previous run that printed what changed (input for the
+    summary), unless --no-change-report is given,
   * renames the working copies whose name does not match their branch's PR, and
     re-creates the ones whose origin is not the PR's head repository as working trees
     of a clone of that repository, when doing so loses no information,
@@ -70,6 +74,11 @@ so that the documents that it regenerates are the ones that the command line of 
 would regenerate.  A script that regenerates the documents should use it, rather than
 discard the highlights of a run that a person chose.  It drops, with a warning, each PR
 that is no longer open, so the snapshot that it writes does not record that PR.
+
+--no-change-report prints no change, and it keeps in the snapshot the facts with which the
+next run compares its facts.  A script that runs pr-status should use it, so that when a
+person runs pr-status, it reports every change since that person's previous run, rather
+than only the changes since the script's run.
 
 pr-status needs Python 3.10 or later, and the programs that pr-merge-analysis needs.
 """
@@ -110,6 +119,8 @@ MISSING_BRANCHES = "missing_branches"
 UNBLOCKED_PRS = "unblocked_prs"
 # The key of the snapshot's list of the arguments of --highlight.
 HIGHLIGHT = "highlight"
+# The key of the snapshot's time of the facts that the next report of changes compares with.
+FACTS_TIME = "facts_time"
 # The text that each document holds if it highlights PRs, in "As of ..., by `pr-status
 # --highlight bottleneck`."
 HIGHLIGHTED_BY = "by `pr-status --highlight"
@@ -3718,7 +3729,8 @@ class PushCommands(NamedTuple):
 
 def new_snapshot(
     time: str,
-    new_facts: dict[str, Any],
+    facts_time: str | None,
+    recorded_facts: dict[str, Any],
     conflicting: list[PushChains],
     unblocked: list[dict[str, Any]],
     highlight: list[str],
@@ -3726,8 +3738,12 @@ def new_snapshot(
     """Return the snapshot that records the given facts, chains, PRs, and highlight arguments.
 
     Args:
-        time: a time, such as "2026-11-05T17:59:00-08:00", which the snapshot records
-        new_facts: the facts, as facts computes them
+        time: a time, such as "2026-11-05T17:59:00-08:00", which the snapshot records as the
+            time of the run that wrote it
+        facts_time: the time, such as "2026-11-05T17:59:00-08:00", of the run that computed
+            recorded_facts, or None if no run did
+        recorded_facts: the facts that the next report of changes compares with, as facts
+            computes them, or {} if there are none
         conflicting: the chains with conflicts of each repository, as push_chains computes
             them with conflicts_only
         unblocked: the unblocked PRs, as unblocked_prs computes them
@@ -3737,10 +3753,10 @@ def new_snapshot(
 
     Returns:
         The snapshot, as a dict that .pr-status-snapshot.json holds as JSON, with the keys
-        "time", "facts", "conflicting_push_chains", "missing_branches", "unblocked_prs", and
-        "highlight".  The value of "highlight" is highlight.  The value of "unblocked_prs" is
-        unblocked; it repeats the PR numbers of the "unblocked" lists of new_facts, which
-        report_changes compares, and adds what --print-unblocked-prs prints about each PR.
+        "time", "facts_time", "facts", "conflicting_push_chains", "missing_branches",
+        "unblocked_prs", and "highlight".  The values of "time", "facts_time", "facts", and
+        "highlight" are time, facts_time, recorded_facts, and highlight.  The value of
+        "unblocked_prs" is unblocked, which --print-unblocked-prs prints.
         The value of "conflicting_push_chains" is a list of chains, in the order of the
         "Dependency chains with conflicts" section of the dependency document; each chain is
         a list of directories, such as ["daikon", "daikon-branch-a"], each of which
@@ -3750,7 +3766,8 @@ def new_snapshot(
     """
     return {
         "time": time,
-        "facts": new_facts,
+        FACTS_TIME: facts_time,
+        "facts": recorded_facts,
         CONFLICTING_PUSH_CHAINS: [chain for pc in conflicting for chain in pc.chains],
         MISSING_BRANCHES: [list(b) for pc in conflicting for b in pc.missing_branches],
         UNBLOCKED_PRS: unblocked,
@@ -3884,6 +3901,26 @@ def format_unblocked_prs(snapshot: dict[str, Any]) -> list[str]:
         )
         raise ValueError(msg)
     return json.dumps(snapshot[UNBLOCKED_PRS], indent=1).splitlines()
+
+
+def baseline(snapshot: dict[str, Any] | None) -> tuple[str | None, dict[str, Any]]:
+    """Return the facts that the given snapshot records, and the time of the run that computed them.
+
+    The report of changes compares the current facts with them.
+
+    Args:
+        snapshot: a snapshot, as a dict parsed from the JSON of .pr-status-snapshot.json, with
+            keys such as "time", "facts_time", and "facts", or None if there is no snapshot
+
+    Returns:
+        The time, such as "2026-11-05T17:59:00-08:00", or None if no run computed the facts,
+        and the facts, as facts computes them, or {} if there are none.  A snapshot without
+        "facts_time", which an older version of pr-status wrote, records the facts of the
+        run that wrote it, at its "time".
+    """
+    if snapshot is None:
+        return None, {}
+    return snapshot.get(FACTS_TIME, snapshot.get("time")), snapshot.get("facts", {})
 
 
 def previous_highlight(snapshot: dict[str, Any] | None, document: str | None) -> list[str]:
@@ -4139,7 +4176,7 @@ def facts(models: list[Model]) -> dict[str, Any]:
 
 
 def report_changes(models: list[Model], old: dict[str, Any], new: dict[str, Any]) -> list[str]:
-    """Compare the facts of the previous snapshot with the current ones.
+    """Compare the facts that the snapshot records with the current ones.
 
     Returns:
         One line for each change.
@@ -4576,6 +4613,17 @@ def main() -> None:
         help="change to DIR before doing anything else",
     )
     parser.add_argument(
+        "--no-change-report",
+        action="store_true",
+        help=(
+            "do not print what changed, and record in the snapshot the same facts as the"
+            " previous snapshot, so that the next run without this option reports the changes"
+            " since the previous run without it.  A script that runs pr-status should pass this"
+            " option, so that a person who runs pr-status sees every change since that"
+            " person's previous run"
+        ),
+    )
+    parser.add_argument(
         "--previous-arguments",
         action="store_true",
         help=(
@@ -4625,7 +4673,7 @@ def main() -> None:
     ]
     if args.highlight and args.previous_arguments:
         parser.error("--highlight is not allowed with --previous-arguments")
-    for o in ["--highlight", "--previous-arguments"]:
+    for o in ["--highlight", "--no-change-report", "--previous-arguments"]:
         if given(o) and printing:
             parser.error(f"{o} is not allowed with {printing[0]}")
     check_only = args.check
@@ -4698,19 +4746,21 @@ def main() -> None:
     now = dt.datetime.now().astimezone()
     # A 24-hour clock, with "am" after a morning time, as in "2026-11-05 09:07am PST"
     # and "2026-11-05 15:07 PST".
+    now_iso = now.isoformat(timespec="seconds")
     am = "am" if now.hour < 12 else ""
     as_of = f"{now:%Y-%m-%d %H:%M}{am} {now:%Z}"
     if HIGHLIGHTED:
         command = " ".join(shell_word(w) for w in ["pr-status", "--highlight", *highlight])
         as_of += f", by `{command}`"
-    new = facts(models)
-    if old is None:
-        old = {}
-    changes = report_changes(models, old.get("facts", {}), new)
-    if changes:
-        print(f"## Changes since the previous snapshot ({old.get('time', 'none')})")
-        for line in changes:
-            print(line)
+    facts_time, recorded_facts = baseline(old)
+    if not args.no_change_report:
+        new = facts(models)
+        changes = report_changes(models, recorded_facts, new)
+        if changes:
+            print(f"## Changes since the previous report of changes ({facts_time or 'none'})")
+            for line in changes:
+                print(line)
+        facts_time, recorded_facts = now_iso, new
     for m in models:
         if m.cyclic:
             print(
@@ -4767,8 +4817,9 @@ def main() -> None:
         written += [d["file"] for d in unblocked_docs]
         written.append(str(dependencies))
     snapshot = new_snapshot(
-        now.isoformat(timespec="seconds"),
-        new,
+        now_iso,
+        facts_time,
+        recorded_facts,
         conflicting,
         unblocked_prs(models, base),
         highlight,
