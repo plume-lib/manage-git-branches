@@ -4176,17 +4176,22 @@ def facts(models: list[Model]) -> dict[str, Any]:
 
 
 def report_changes(models: list[Model], old: dict[str, Any], new: dict[str, Any]) -> list[str]:
-    """Compare the facts that the snapshot records with the current ones.
+    """Return one line for each difference between the recorded facts and the current facts.
+
+    Args:
+        models: the models of the repositories.
+        old: the facts that the snapshot records, as computed by `facts`.
+        new: the current facts, as computed by `facts`.
 
     Returns:
-        One line for each change.
+        One line for each difference.
     """
     out = []
     for m in models:
         r = m.repo
         o, n = old.get(r.name), new[r.name]
         if not o:
-            out.append(f"{r.label}: no previous snapshot")
+            out.append(f"{r.label}: no previous report of changes")
             continue
         op, np_ = o["prs"], n["prs"]
         out.extend(

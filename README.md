@@ -239,9 +239,9 @@ The commands are:
 
   It prints what changed since its previous run that printed what changed.
   With `--no-change-report`, it prints no change, so that its next run
-  without `--no-change-report` prints them.  A script that runs `pr-status`
-  should pass `--no-change-report`, so that when a person runs `pr-status`,
-  it reports every change since that person's previous run.
+  without `--no-change-report` prints the changes.  A script that runs
+  `pr-status` should pass `--no-change-report`, so that when a person runs
+  `pr-status`, it reports every change since that person's previous run.
   With `--check`, it writes no document, and it changes no snapshot, pull
   request description, or directory.  With `--no-documents`, it does
   everything except write a document:  it updates the pull request
