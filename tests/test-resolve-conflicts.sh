@@ -83,15 +83,17 @@ done
 ## their directories separated by tabs; afterward, there are none.  With
 ## "--print-conflicting-push-chains", it prints the chains that it recorded.
 ## Otherwise, it fails unless it is given "--previous-arguments", without
-## which it would discard the highlights of the previous run.
+## which it would discard the highlights of the previous run, and
+## "--no-change-report", without which a person's next run of pr-status would
+## not report the changes before this run.
 cat > "${WORK_DIR}/commands/pr-status" << 'EOF'
 #!/bin/sh
 if [ "$1" = --print-conflicting-push-chains ]; then
   cat chains
   exit 0
 fi
-if [ "$*" != --previous-arguments ]; then
-  echo "stub pr-status: expected only --previous-arguments, got: $*" >&2
+if [ "$*" != "--previous-arguments --no-change-report" ]; then
+  echo "stub pr-status: expected only --previous-arguments --no-change-report, got: $*" >&2
   exit 2
 fi
 echo pr-status >> "${STUB_LOG}"

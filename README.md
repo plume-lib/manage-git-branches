@@ -225,7 +225,7 @@ The commands are:
   `--print-land-after ORG/REPO |`
   `--print-conflicting-push-chains | --print-missing-branches |`
   `--print-unblocked-prs] [-C DIR]`
-  `[--highlight PR|bottleneck... | --previous-arguments]`:
+  `[--highlight PR|bottleneck... | --previous-arguments] [--no-change-report]`:
   Computes the dependencies among the open pull requests, updates the "Land
   after" and "Land before" lines of their descriptions, and regenerates
   `pr-status.md`,
@@ -237,7 +237,11 @@ The commands are:
   Run it in a directory that holds the working copy directories, or pass
   that directory with `-C`.
 
-  It prints what changed since its previous run.
+  It prints what changed since its previous run that printed what changed.
+  With `--no-change-report`, it prints no change, so that its next run
+  without `--no-change-report` prints the changes.  A script that runs
+  `pr-status` should pass `--no-change-report`, so that when a person runs
+  `pr-status`, it reports every change since that person's previous run.
   With `--check`, it writes no document, and it changes no snapshot, pull
   request description, or directory.  With `--no-documents`, it does
   everything except write a document:  it updates the pull request
@@ -297,10 +301,10 @@ The commands are:
   `pr-status` runs it.
 * [`resolve-conflicts`](resolve-conflicts)
   `[--nocompile] [--noformat] [--claude | --codex] [-C DIR]`:
-  Runs `pr-status --previous-arguments`, which regenerates the dependency
-  document `pr-status.md` with the highlights of the previous run of
-  `pr-status`, then runs `git-push-to` on each chain of its section
-  "Dependency chains with conflicts",
+  Runs `pr-status --previous-arguments --no-change-report`, which
+  regenerates the dependency document `pr-status.md` with the highlights of
+  the previous run of `pr-status`, then runs `git-push-to` on each chain of
+  its section "Dependency chains with conflicts",
   with `--claude` (or `--codex`), which asks an AI agent for help, and with
   `--no-pull-first`.  Before the first chain that starts with a directory,
   it pulls that directory, with `git-push-to` given that single directory.
@@ -322,7 +326,7 @@ The commands are:
   directories, or pass that directory with `-C`.
 * [`fix-ci-all`](fix-ci-all)
   `[--dry-run] [--no-pr-status] [-C DIR] [-- CLAUDE-OPTION...]`:
-  Runs `pr-status`, then runs
+  Runs `pr-status --previous-arguments --no-change-report`, then runs
   [`fix-ci`](https://github.com/mernst/mdedots/blob/main/share/fix-ci),
   which makes the CI of the current branch's pull request pass, for each
   unblocked pull request whose CI failed, that you opened, and that has a

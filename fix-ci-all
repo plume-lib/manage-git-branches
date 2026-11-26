@@ -14,9 +14,11 @@
 # The directory that holds the working copy directories is DIR, or the
 # current directory; it is where `pr-status` runs.
 #
-# This command first runs `pr-status`, which regenerates the PR status
-# documents and records, for each unblocked pull request, its author, its
-# head commit, its working copy directories, and the state of its CI.  Then,
+# This command first runs `pr-status --previous-arguments --no-change-report`,
+# which regenerates the PR status documents, with the highlights of the
+# previous run of `pr-status`, and records, for each unblocked pull request,
+# its author, its head commit, its working copy directories, and the state of
+# its CI.  Then,
 # for each unblocked pull request whose CI failed, as
 # `pr-status --print-unblocked-prs` reports it, this command runs `fix-ci` in
 # one of the pull request's working copy directories:  one where `gh pr view`
@@ -163,9 +165,9 @@ if [ "${run_pr_status}" = true ]; then
   snapshot="${base}/.pr-status-snapshot.json"
   old_snapshot="$(cksum < "${snapshot}" 2> /dev/null)"
   if [ "${dry_run}" = true ]; then
-    "${pr_status}" -C "${base}" --no-documents < /dev/null
+    "${pr_status}" -C "${base}" --no-documents --previous-arguments --no-change-report < /dev/null
   else
-    "${pr_status}" -C "${base}" < /dev/null
+    "${pr_status}" -C "${base}" --previous-arguments --no-change-report < /dev/null
   fi
   pr_status_status=$?
   if [ "${pr_status_status}" -ne 0 ]; then

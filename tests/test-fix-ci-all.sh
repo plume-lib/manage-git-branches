@@ -263,7 +263,7 @@ mv "${work}/new-snapshot.json.saved" "${work}/new-snapshot.json"
 
 # --dry-run runs pr-status with --no-documents.
 run_fix_ci_all --dry-run
-if [ "$(cat "${work}/pr-status-args")" != "--no-documents" ]; then
+if [ "$(cat "${work}/pr-status-args")" != "--no-documents --previous-arguments --no-change-report" ]; then
   fail "--dry-run ran pr-status with the arguments \"$(cat "${work}/pr-status-args")\""
 fi
 
@@ -271,7 +271,7 @@ fi
 # the pull requests that the new snapshot records, and fails.
 cp "${work}/old-snapshot.json" "${scan}/.pr-status-snapshot.json"
 run_fix_ci_all
-if [ "$(cat "${work}/pr-status-args")" != "" ]; then
+if [ "$(cat "${work}/pr-status-args")" != "--previous-arguments --no-change-report" ]; then
   fail "fix-ci-all ran pr-status with the arguments \"$(cat "${work}/pr-status-args")\""
 fi
 if [ "${run_status}" -ne 1 ] || [ "$(cat "${work}/runs.log")" != "proj-branch-a2" ]; then
