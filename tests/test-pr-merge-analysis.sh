@@ -940,6 +940,41 @@ if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_names
 fi
 prs='1 2 3 4'
 
+## When git merge-tree fails, the diagnostic names the commits, in the order
+## in which the run merges them:  here, PR 54, which has no commit in common
+## with main, makes "git merge-tree" refuse to merge unrelated histories.
+git -C "${seed}" checkout -q --orphan unrelated
+git -C "${seed}" commit -q -m "PR 54"
+git -C "${seed}" push -q "${STUB_REMOTE}" HEAD:refs/pull/54/head
+git -C "${seed}" checkout -q main
+pr54="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/54/head)"
+msha="$(git -C "${STUB_REMOTE}" rev-parse main)"
+prs=54
+analyze ''
+if [ "${analysis_status}" -eq 0 ]; then
+  fail "unrelated: pr-merge-analysis succeeded: ${analysis_output}"
+fi
+case "${analysis_output}" in
+  *"cannot merge the default branch (${msha}) with PR 54 (${pr54}) in ${clone}: git merge-tree failed:"*"unrelated histories"*) ;;
+  *) fail "unrelated: wrong diagnostic: ${analysis_output}" ;;
+esac
+git -C "${STUB_REMOTE}" update-ref -d refs/pull/54/head
+git -C "${clone}" update-ref -d refs/remotes/pr/54
+prs='1 2 3 4'
+
+## A shallow clone is an error, whose diagnostic says how to fetch the full
+## history.
+shallow_clone="${WORK_DIR}/shallow clone"
+git clone -q --depth 1 "file://${STUB_REMOTE}" "${shallow_clone}"
+if output="$(cd "${run_dir}" && PATH="${WORK_DIR}/test-bin:${PATH}" \
+  "${ANALYSIS}" "${shallow_clone}" test/repo 4 2>&1)"; then
+  fail "shallow: pr-merge-analysis succeeded: ${output}"
+fi
+case "${output}" in
+  *"${shallow_clone} is a shallow clone"*"git -C '${shallow_clone}' fetch --unshallow") ;;
+  *) fail "shallow: wrong diagnostic: ${output}" ;;
+esac
+
 ## No run leaves a temporary file behind.
 leftovers="$(find "${run_dir}" -name '.pr-merge-analysis-cache.tsv.*')"
 if [ -n "${leftovers}" ]; then

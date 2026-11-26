@@ -429,7 +429,8 @@ class Repo:
 def load_repo(repo: Repo, pairwise: bool = True) -> None:
     """Read the open PRs and the merge analysis.
 
-    Without pairwise, repo.pair_conflicts stays empty.
+    Without pairwise, repo.pair_conflicts stays empty.  If a command fails, even after any
+    retries, raises a CommandError.
     """
     fields = (
         "number,title,headRefName,headRefOid,headRepositoryOwner,baseRefName,"
@@ -1840,12 +1841,23 @@ def load_models(cfg: dict[str, Any], pairwise: bool = True) -> list[Model]:
     """Read the open PRs of each repository that cfg describes, and model their dependencies.
 
     Returns:
-        The model of each repository, in the order that cfg gives.
+        The model of each repository, in the order that cfg gives, except a repository whose
+        open PRs cannot be read or analyzed, about which a warning is printed on standard
+        error.
     """
     models = []
     for name in cfg["order"]:
         repo = Repo(name, cfg["repos"][name])
-        load_repo(repo, pairwise=pairwise)
+        try:
+            load_repo(repo, pairwise=pairwise)
+        except CommandError as error:
+            print(
+                f"pr-status: warning: cannot read or analyze the open PRs of {repo.gh} in"
+                f" {repo.clone}, so the documents omit them: {brief_command(error.cmd)}"
+                f" failed:\n{error.stderr.rstrip()}",
+                file=sys.stderr,
+            )
+            continue
         models.append(Model(repo, cfg))
     unite_partners(models)
     return models
@@ -4813,6 +4825,13 @@ def main() -> None:
     facts_time, recorded_facts = baseline(old)
     if not args.no_change_report:
         new = facts(models)
+        # A configured repository that load_models omitted keeps its recorded facts, so that
+        # a later run reports its changes since them.
+        new.update(
+            (name, recorded)
+            for name, recorded in recorded_facts.items()
+            if name in cfg["order"] and name not in new
+        )
         changes = report_changes(models, recorded_facts, new)
         if changes:
             print(f"## Changes since the previous report of changes ({facts_time or 'none'})")
