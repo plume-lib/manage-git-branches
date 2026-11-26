@@ -168,6 +168,11 @@ else
     || exit 1
   PRUNE=yes
 fi
+# A shallow clone's history can omit the merge base of two commits.  Then git
+# merge-tree either fails or merges from a later commit than the merge base,
+# which yields wrong conflicts.
+[ "$("${G[@]}" rev-parse --is-shallow-repository)" != true ] \
+  || die "$REPO_DIR is a shallow clone, whose history can omit the merge base of two commits.  To fetch its full history, run:  git -C '$REPO_DIR' fetch --unshallow"
 # Fetch only the open PRs; refs/pull/*/head would also fetch every closed PR.
 # The ref is named "master" whatever the default branch, so that callers need
 # not know it.  The remote's HEAD is its default branch.
@@ -291,11 +296,6 @@ merge_tree() {
     echo "$0: cannot merge $name1 with $name2 in $REPO_DIR: git merge-tree failed:" >&2
     cat "$MERGE_TREE_ERR" >&2
     [ -z "$out" ] || echo "$out" >&2
-    if grep -q 'unrelated histories' "$MERGE_TREE_ERR" \
-      && [ "$("${G[@]}" rev-parse --is-shallow-repository)" = true ]; then
-      echo "$REPO_DIR is a shallow clone, whose history can omit the commits' common ancestor." >&2
-      echo "To fetch its full history, run:  git -C '$REPO_DIR' fetch --unshallow" >&2
-    fi
     exit 1
   fi
   RESULT=${out%%$'\n'*}
@@ -318,7 +318,9 @@ merge_result() {
   }
   local key="merge $x $y"
   if [ -z "${CACHED[$key]+set}" ]; then
-    merge_tree "$x" "$y"
+    # The commits' order, which the cache key ignores, does not change which
+    # files conflict, but a diagnostic names them in the caller's order.
+    merge_tree "$1" "$2"
     CACHED[$key]="$MERGE_STATUS	$MERGE_FILES"
     printf '%s\tmerge\t%s\t%s\t%s\t%s\n' "$REPO" "$x" "$y" "$MERGE_STATUS" "$MERGE_FILES" >> "$CACHE"
   fi

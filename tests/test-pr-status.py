@@ -1623,7 +1623,7 @@ class ChangeReportTest(unittest.TestCase):
             What pr-status printed to standard output, and the snapshot that it wrote, as a
             dict parsed from the JSON of .pr-status-snapshot.json.
         """
-        cfg = {"documents": {"dependencies": "pr-status.md"}}
+        cfg = {"documents": {"dependencies": "pr-status.md"}, "order": ["repo"]}
 
         def report_changes(_models, old, new):
             return [f"unblocked: {old['repo']['unblocked']} -> {new['repo']['unblocked']}"]
