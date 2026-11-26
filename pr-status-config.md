@@ -10,13 +10,16 @@ that `pr-status` cannot compute from GitHub.
 If the file does not exist, `pr-status` constructs a default config.  The
 default config reports on each GitHub repository that at least 2 of the git
 clones in the directory are clones of (or, if there is none, the one that the
-most clones are clones of), and its only document is `pr-status.md`.  If that
-repository is a fork with the same name, the default config reports on the
-fork's parent instead, unless the fork has open pull requests and the
-directory holds no clone of the parent.  For example, a clone of a personal
-fork stands for the upstream repository, but if the directory holds clones of
-`typetools/jdk` and none of `openjdk/jdk`, the default config reports on
-`typetools/jdk`.  Writing
+most clones are clones of), and its only document is `pr-status.md`.  Clones
+of a repository and of its forks are grouped by repository name, and each
+group stands for the repository that the most clones in the group are clones
+of.  If that repository is a fork with the same name, the default config
+reports on the fork's parent instead, unless the directory holds no clone of
+the parent and either the fork has an open pull request to its default branch
+or GitHub does not list the fork's open pull requests.  For example, a clone
+of a personal fork stands for the upstream repository, but if the directory
+holds clones of `typetools/jdk` and none of `openjdk/jdk`, the default config
+reports on `typetools/jdk`.  Writing
 a config file is a way to choose the repositories, to name other documents,
 and to record notes and decisions.
 

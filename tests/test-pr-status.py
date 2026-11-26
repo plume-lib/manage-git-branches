@@ -2809,7 +2809,8 @@ TOOLS_CLONES = {
 }
 
 # The repositories that "gh repo view" describes, as dicts parsed from its JSON, with keys
-# "nameWithOwner", "parent", and "defaultBranchRef", by GitHub slug, such as "o/tools".
+# "nameWithOwner", "parent", and "defaultBranchRef", by GitHub slug in lowercase, such as
+# "o/tools".  The parent of o/jdk has an owner whose login has uppercase letters.
 REPO_VIEWS = {
     "me/git": {
         "nameWithOwner": "me/git",
@@ -2838,7 +2839,12 @@ REPO_VIEWS = {
     },
     "o/jdk": {
         "nameWithOwner": "o/jdk",
-        "parent": {"owner": {"login": "up"}, "name": "jdk"},
+        "parent": {"owner": {"login": "Up"}, "name": "jdk"},
+        "defaultBranchRef": {"name": "master"},
+    },
+    "me/jdk": {
+        "nameWithOwner": "me/jdk",
+        "parent": {"owner": {"login": "Up"}, "name": "jdk"},
         "defaultBranchRef": {"name": "master"},
     },
     "up/jdk": {
@@ -2858,14 +2864,16 @@ JDK_CLONES = {
 class DefaultConfigTest(unittest.TestCase):
     """Tests for default_config."""
 
-    def default_config(self, prs, entries=None, identity_error=False, other_prs=None):
-        """Return the config that default_config constructs, given the prs of git/git.
+    def default_config(
+        self, prs, entries=None, identity_error=False, other_prs=None, unlisted=frozenset()
+    ):
+        """Return the config that default_config constructs, given the open PRs on GitHub.
 
         What default_config writes to standard error is in self.stderr afterward.
 
         Args:
             prs: the open PRs of git/git and of gitgitgadget/git, as dicts parsed from the
-                JSON of "gh pr list", with keys "author", "headRefName", and
+                JSON of "gh pr list", with keys "author", "baseRefName", "headRefName", and
                 "headRepositoryOwner".
             entries: the git clones, as git_entries returns them; by default, GIT_CLONES and
                 TOOLS_CLONES.
@@ -2874,6 +2882,8 @@ class DefaultConfigTest(unittest.TestCase):
                 or `gh pr list --author @me`, fails.
             other_prs: the open PRs of other repositories, as prs gives them, by GitHub slug,
                 such as "o/jdk"; by default, no other repository has an open PR.
+            unlisted: the GitHub slugs, such as "o/jdk", of the repositories whose open PRs
+                GitHub does not list; for each, `gh pr list` fails.
 
         Returns:
             The config, as default_config returns it.
@@ -2900,12 +2910,17 @@ class DefaultConfigTest(unittest.TestCase):
                     return "me\n"
             if cmd[1:3] == ["pr", "list"]:
                 repo = cmd[cmd.index("-R") + 1]
+                if repo in unlisted:
+                    raise pr_status.CommandError(1, cmd, "", "HTTP 502: Bad Gateway")
                 repo_prs = prs if repo in {"git/git", "gitgitgadget/git"} else []
                 repo_prs = other_prs.get(repo, repo_prs)
+                if "--base" in cmd:
+                    base = cmd[cmd.index("--base") + 1]
+                    repo_prs = [pr for pr in repo_prs if pr["baseRefName"] == base]
                 if "--author" in cmd:
                     return json.dumps([pr for pr in repo_prs if pr["author"]["login"] == "me"])
                 return json.dumps(repo_prs)
-            return json.dumps(REPO_VIEWS[cmd[3]])
+            return json.dumps(REPO_VIEWS[cmd[3].lower()])
 
         def fake_fork_source(owner, name):
             """Return the GitHub slug of the parent of the given repository.
@@ -2915,11 +2930,11 @@ class DefaultConfigTest(unittest.TestCase):
                 name: the repository's name, such as "git".
 
             Returns:
-                The parent's GitHub slug, such as "git/git", or None if the repository is
-                not a fork.
+                The parent's GitHub slug in lowercase, such as "git/git", or None if the
+                repository is not a fork.
             """
             parent = REPO_VIEWS[f"{owner}/{name}"]["parent"]
-            return parent and f"{parent['owner']['login']}/{parent['name']}"
+            return parent and f"{parent['owner']['login']}/{parent['name']}".lower()
 
         self.stderr = io.StringIO()
         with (
@@ -2945,20 +2960,22 @@ class DefaultConfigTest(unittest.TestCase):
         return sorted(r["gh"] for r in cfg["repos"].values())
 
     @staticmethod
-    def pr(author, owner, branch):
-        """Return a PR of git/git by the given author from a branch of owner's repository.
+    def pr(author, owner, branch, base="master"):
+        """Return a PR by the given author from a branch of owner's repository.
 
         Args:
             author: the login of the PR's author, such as "me".
             owner: the owner of the PR's head repository, such as "me", or None if GitHub
                 does not know the head repository, as when it has been deleted.
             branch: the PR's head branch, such as "x".
+            base: the PR's base branch, such as "master".
 
         Returns:
             The PR, as a dict like those parsed from the JSON of "gh pr list".
         """
         return {
             "author": {"login": author},
+            "baseRefName": base,
             "headRefName": branch,
             "headRepositoryOwner": None if owner is None else {"login": owner},
         }
@@ -3018,6 +3035,29 @@ class DefaultConfigTest(unittest.TestCase):
             [], entries=entries, other_prs={"o/jdk": [self.pr("other", "other", "x")]}
         )
         self.assertEqual([r["gh"] for r in cfg["repos"].values()], ["up/jdk"])
+
+    def test_fork_with_prs_not_to_default_branch(self):
+        """A fork stands for its parent if none of its open PRs is to its default branch."""
+        cfg = self.default_config(
+            [], entries=JDK_CLONES, other_prs={"o/jdk": [self.pr("me", "o", "y", base="z")]}
+        )
+        self.assertEqual([r["gh"] for r in cfg["repos"].values()], ["up/jdk"])
+
+    def test_fork_whose_prs_are_unlisted(self):
+        """A fork stands for itself, after a message, if GitHub does not list its PRs."""
+        cfg = self.default_config([], entries=JDK_CLONES, unlisted={"o/jdk"})
+        self.assertEqual([r["gh"] for r in cfg["repos"].values()], ["o/jdk"])
+        self.assertIn("cannot list the open PRs of o/jdk", self.stderr.getvalue())
+        self.assertIn("o/jdk stands for itself, not for its parent Up/jdk", self.stderr.getvalue())
+
+    def test_owner_of_most_clones(self):
+        """The repository of a group of clones is the one that most of them are clones of."""
+        # me/jdk, a fork of up/jdk with no open PRs, would stand for up/jdk.
+        entries = {"aaa-jdk": pr_status.GitEntry("me", "jdk", "master"), **JDK_CLONES}
+        cfg = self.default_config(
+            [], entries=entries, other_prs={"o/jdk": [self.pr("other", "other", "x")]}
+        )
+        self.assertEqual([r["gh"] for r in cfg["repos"].values()], ["o/jdk"])
 
     def test_fork_without_prs(self):
         """A fork without open PRs stands for its parent."""

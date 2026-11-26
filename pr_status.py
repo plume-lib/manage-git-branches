@@ -4350,7 +4350,7 @@ def find_clone(base: str, owner: str, name: str, default_branch: Callable[[], st
 REPORTED_ONLY_FOR_OWN_PRS = frozenset({"git/git", "gitgitgadget/git"})
 
 
-def open_prs(gh: str, *args: str) -> list[dict[str, Any]]:
+def open_prs(gh: str, *args: str) -> list[dict[str, Any]] | None:
     """Return the open PRs of the given repository, as `gh pr list` lists them.
 
     Args:
@@ -4359,8 +4359,8 @@ def open_prs(gh: str, *args: str) -> list[dict[str, Any]]:
 
     Returns:
         The PRs, as dicts parsed from the JSON of `gh pr list`, with the keys that args
-        request, such as "number"; or the empty list, after a warning on standard error, if
-        GitHub does not give them.
+        request, such as "number"; or None, after a warning on standard error, if GitHub
+        does not give them.
     """
     cmd = ["gh", "pr", "list", "-R", gh, "--state", "open", *args]
     try:
@@ -4370,31 +4370,50 @@ def open_prs(gh: str, *args: str) -> list[dict[str, Any]]:
             f"pr-status: cannot list the open PRs of {gh}: {command_failure(error)}",
             file=sys.stderr,
         )
-        return []
+        return None
 
 
-def stands_for_parent(fork: str, parent: str, clones: dict[str, GitEntry]) -> bool:
-    """Return True if default_config describes the given fork's parent rather than the fork.
+def stands_for_parent(
+    fork: str, default_branch: str, parent: str, clones: dict[str, GitEntry]
+) -> bool:
+    """Return True if the given fork stands for its parent, and False if it stands for itself.
 
     A fork stands for its parent, as a personal fork that holds the head branches of PRs to
-    the parent does, if one of clones is a clone of the parent, or if the fork has no open
-    PR.  Otherwise the fork is a downstream fork that takes PRs of its own, such as
-    typetools/jdk, a fork of openjdk/jdk; its parent can have hundreds of open PRs, none of
-    which concerns the clones.
+    the parent does, if one of clones is a clone of the parent, or if no open PR of the fork
+    has the fork's default branch as its base.  A PR whose base is another branch, such as
+    a PR that is stacked on another PR of the fork, does not count.  Otherwise the fork is a
+    downstream fork that takes PRs of its own, such as typetools/jdk, a fork of
+    openjdk/jdk; its parent can have hundreds of open PRs, none of which concerns the
+    clones.
 
     Args:
         fork: a fork's GitHub slug, such as "ORG/REPO".
-        parent: the GitHub slug of the repository that fork is a fork of, such as "ORG/REPO".
+        default_branch: the name of the fork's default branch, such as "master".
+        parent: the GitHub slug of the repository that the fork is a fork of, such as
+            "ORG/REPO".
         clones: the git clones in the directory that holds the working copy directories, as
             git_entries returns them.
 
     Returns:
-        True if fork stands for parent, and False if it stands for itself.
+        True if the fork stands for its parent, and False if it stands for itself.  If
+        GitHub does not list the fork's open PRs, the result is False.  Whenever the result
+        is False, a message on standard error says why.
     """
     owner, name = parent.lower().split("/")
     if any(info.owner == owner and info.repo_name == name for info in clones.values()):
         return True
-    return not open_prs(fork, "--limit", "1", "--json", "number")
+    prs = open_prs(fork, "--base", default_branch, "--limit", "1", "--json", "number")
+    if prs is None:
+        reason = "GitHub does not list its open PRs"
+    elif prs:
+        reason = f"it has an open PR to {default_branch}, and no clone is of {parent}"
+    else:
+        return True
+    print(
+        f"pr-status: {fork} stands for itself, not for its parent {parent}: {reason}",
+        file=sys.stderr,
+    )
+    return False
 
 
 def has_own_pr(gh: str, clones: dict[str, GitEntry]) -> bool:
@@ -4418,7 +4437,7 @@ def has_own_pr(gh: str, clones: dict[str, GitEntry]) -> bool:
         return True
     name = gh.split("/")[1].lower()
     branches = {(info.owner, info.branch) for info in clones.values() if info.repo_name == name}
-    prs = open_prs(gh, "--limit", str(PR_LIMIT), "--json", "headRefName,headRepositoryOwner")
+    prs = open_prs(gh, "--limit", str(PR_LIMIT), "--json", "headRefName,headRepositoryOwner") or []
     return any(
         ((pr.get("headRepositoryOwner") or {}).get("login", "").lower(), pr["headRefName"])
         in branches
@@ -4435,7 +4454,8 @@ def default_config(base: str) -> dict[str, Any]:
     (see stands_for_parent).  A repository in
     REPORTED_ONLY_FOR_OWN_PRS is described only if one of its open PRs is the user's (see
     has_own_pr).  Clones are grouped by repository name, so the clones of a repository and
-    of its forks are counted together.
+    of its forks are counted together, and the repository of a group is the one that the
+    most clones in the group are clones of, or its upstream.
     The config has no notes or decisions, and its only document is pr-status.md.
     (Its "Unblocked PRs" sections serve in place of an unblocked document.)
 
@@ -4456,14 +4476,19 @@ def default_config(base: str) -> dict[str, Any]:
     fields = ["--json", "nameWithOwner,parent,defaultBranchRef"]
     repos: dict[str, dict[str, Any]] = {}
     for name in names:
-        first_owner = next(info.owner for info in clones.values() if info.repo_name == name)
+        # The owner of the most clones, so that a stray clone of some other fork does not
+        # choose the repository.
+        owner = Counter(
+            info.owner for info in clones.values() if info.repo_name == name
+        ).most_common(1)[0][0]
         try:
-            j = json.loads(run(["gh", "repo", "view", f"{first_owner}/{name}", *fields]))
+            j = json.loads(run(["gh", "repo", "view", f"{owner}/{name}", *fields]))
             parent = j["parent"]
             # A renamed fork, such as of a large project, is a project of its own.
             if parent and parent["name"].lower() == name:
                 parent_gh = f"{parent['owner']['login']}/{parent['name']}"
-                if stands_for_parent(j["nameWithOwner"], parent_gh, clones):
+                fork_default = j["defaultBranchRef"]["name"]
+                if stands_for_parent(j["nameWithOwner"], fork_default, parent_gh, clones):
                     j = json.loads(run(["gh", "repo", "view", parent_gh, *fields]))
         except subprocess.CalledProcessError as error:
             print(
