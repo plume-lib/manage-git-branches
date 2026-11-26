@@ -125,7 +125,8 @@ while true; do
   esac
 done
 [ $# -ge 2 ] || usage
-G=(git -C "$1")
+REPO_DIR=$1
+G=(git -C "$REPO_DIR")
 # The GitHub slug, such as "plume-lib/manage-git-branches", that starts each of
 # this repository's cache lines.
 REPO=$2
@@ -242,6 +243,25 @@ done <<< "$own_lines"
 # These functions set RESULT rather than printing it, because a command
 # substitution per call would fork a subshell for each of thousands of pairs.
 
+# Sets RESULT to a description of commit $1 for a diagnostic, such as
+# "PR 72 (1d9026a97b0e361767196d87b0205b1db43b974d)" or "master (f5572a6...)",
+# where "master" is the --default-branch argument, if any.  A commit that is
+# the head of several PRs is described as "PR 3 and PR 5 (...)", and a commit
+# that is neither master nor the head of a PR, such as one that merge_commits
+# makes, is described as "commit 0a1b2c3...".
+describe_commit() {
+  local n names=
+  [ "$1" != "$MSHA" ] || names=" and ${DEFAULT_BRANCH:-the default branch}"
+  for n in $P; do
+    [ "${SHA[$n]}" != "$1" ] || names+=" and PR $n"
+  done
+  if [ -z "$names" ]; then
+    RESULT="commit $1"
+  else
+    RESULT="${names# and } ($1)"
+  fi
+}
+
 # Runs "git merge-tree" on commits $1 and $2.  Sets RESULT to the object ID of
 # the merged tree, MERGE_STATUS to "clean" or "conflict", and MERGE_FILES to the
 # names of the files on which the commits conflict, separated by spaces and
@@ -263,9 +283,19 @@ merge_tree() {
   # Any other result, including exit status 1 with other output, as for an
   # argument that is not a commit, is an error.
   if [ $status -gt 1 ] || ! [[ ${out%%$'\n'*} =~ $OID_RE ]]; then
-    echo "$0: git merge-tree $1 $2 failed:" >&2
+    local name1 name2
+    describe_commit "$1"
+    name1=$RESULT
+    describe_commit "$2"
+    name2=$RESULT
+    echo "$0: cannot merge $name1 with $name2 in $REPO_DIR: git merge-tree failed:" >&2
     cat "$MERGE_TREE_ERR" >&2
     [ -z "$out" ] || echo "$out" >&2
+    if grep -q 'unrelated histories' "$MERGE_TREE_ERR" \
+      && [ "$("${G[@]}" rev-parse --is-shallow-repository)" = true ]; then
+      echo "$REPO_DIR is a shallow clone, whose history can omit the commits' common ancestor." >&2
+      echo "To fetch its full history, run:  git -C '$REPO_DIR' fetch --unshallow" >&2
+    fi
     exit 1
   fi
   RESULT=${out%%$'\n'*}

@@ -940,6 +940,23 @@ if [ "${analysis_status}" -ne 0 ] || [ "${analysis_output}" != "${expected_names
 fi
 prs='1 2 3 4'
 
+## In a shallow clone whose history omits the merge base of a PR and main,
+## the diagnostic names the PR and main, and says how to fetch the full
+## history.  The run has its own cache, so that the merges are not cached.
+shallow_clone="${WORK_DIR}/shallow clone"
+git clone -q --depth 1 "file://${STUB_REMOTE}" "${shallow_clone}"
+shallow_run_dir="${WORK_DIR}/shallow-run"
+mkdir "${shallow_run_dir}"
+if output="$(cd "${shallow_run_dir}" && PATH="${WORK_DIR}/test-bin:${PATH}" \
+  "${ANALYSIS}" "${shallow_clone}" test/repo 4 2>&1)"; then
+  fail "shallow: pr-merge-analysis succeeded: ${output}"
+fi
+pr4="$(git -C "${STUB_REMOTE}" rev-parse refs/pull/4/head)"
+case "${output}" in
+  *"cannot merge PR 4 (${pr4}) with the default branch ("*"unrelated histories"*"${shallow_clone} is a shallow clone"*"git -C '${shallow_clone}' fetch --unshallow"*) ;;
+  *) fail "shallow: wrong diagnostic: ${output}" ;;
+esac
+
 ## No run leaves a temporary file behind.
 leftovers="$(find "${run_dir}" -name '.pr-merge-analysis-cache.tsv.*')"
 if [ -n "${leftovers}" ]; then

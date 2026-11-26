@@ -429,7 +429,8 @@ class Repo:
 def load_repo(repo: Repo, pairwise: bool = True) -> None:
     """Read the open PRs and the merge analysis.
 
-    Without pairwise, repo.pair_conflicts stays empty.
+    Without pairwise, repo.pair_conflicts stays empty.  If the merge analysis fails, exits
+    with its error message.
     """
     fields = (
         "number,title,headRefName,headRefOid,headRepositoryOwner,baseRefName,"
@@ -458,20 +459,26 @@ def load_repo(repo: Repo, pairwise: bool = True) -> None:
         repo.prs[pr["number"]] = pr
     if not repo.prs:
         return
-    out = run(
-        [
-            ANALYSIS,
-            *([] if pairwise else ["--no-pairwise"]),
-            "--default-branch",
-            repo.default_branch,
-            # Prune only if repo.prs holds every open PR.  "gh pr list" lists at most
-            # PR_LIMIT of them.
-            *(["--prune"] if len(repo.prs) < PR_LIMIT else []),
-            repo.clone,
-            repo.gh,
-            *map(str, sorted(repo.prs)),
-        ]
-    )
+    try:
+        out = run(
+            [
+                ANALYSIS,
+                *([] if pairwise else ["--no-pairwise"]),
+                "--default-branch",
+                repo.default_branch,
+                # Prune only if repo.prs holds every open PR.  "gh pr list" lists at most
+                # PR_LIMIT of them.
+                *(["--prune"] if len(repo.prs) < PR_LIMIT else []),
+                repo.clone,
+                repo.gh,
+                *map(str, sorted(repo.prs)),
+            ]
+        )
+    except CommandError as error:
+        sys.exit(
+            f"pr-status: cannot analyze the open PRs of {repo.gh} in {repo.clone}:\n"
+            + error.stderr.rstrip()
+        )
     section = None
     for line in out.splitlines():
         if line.startswith("## "):
