@@ -501,6 +501,30 @@ class ClassifyTest(unittest.TestCase):
                 ),
                 "#  SIGSEGV (0xb) at pc=0x000074a6b3df9d00, pid=10859, tid=0x000074a68e3fe6c0",
             ),
+            # A JVM crash, in an older JVM's wording, with another task's output inside the
+            # report.
+            (
+                (
+                    "# An unexpected error has been detected by Java Runtime Environment:\n"
+                    "#\n"
+                    "> Task :other:compileJava\n"
+                    "#  SIGSEGV (0xb) at pc=0x000074a6b3df9d00, pid=10859, tid=1234\n"
+                    "#\n"
+                    "# Java VM: Java HotSpot(TM) Server VM (1.6.0-b105 mixed mode)"
+                ),
+                "#  SIGSEGV (0xb) at pc=0x000074a6b3df9d00, pid=10859, tid=1234",
+            ),
+            # The diagnostics of a failed test, in the TAP output of Bats.
+            (
+                (
+                    "ok 1 compiles\n"
+                    "not ok 2 downloads the file\n"
+                    "# (in test file test/download.bats, line 3)\n"
+                    "#   `curl -fsSL https://example.com/x' failed\n"
+                    "# curl: (56) Recv failure: Connection reset by peer"
+                ),
+                "# curl: (56) Recv failure: Connection reset by peer",
+            ),
             # Maven Central refused to serve an artifact that it holds.  The result is
             # truncated to 200 characters.
             (
@@ -713,6 +737,24 @@ class ClassifyTest(unittest.TestCase):
             ),
             # A shell comment that mentions a JVM crash, outside a fatal error report.
             "#  SIGSEGV (0xb) at pc=0x000074a6b3df9d00\nerror: cannot find symbol",
+            # A JVM crash that is not transient, followed by a shell comment.
+            (
+                "# A fatal error has been detected by the Java Runtime Environment:\n"
+                "#\n"
+                "#  SIGBUS (0x7) at pc=0x000074a6b3df9d00, pid=10859, tid=0x000074a68e3fe6c0\n"
+                "#\n"
+                "# JRE version: OpenJDK Runtime Environment (8.0_482-b08)\n"
+                "#\n"
+                '# Retry if the log contains "Connection reset".'
+            ),
+            # A shell comment that follows a TAP test, but not as the test's diagnostics.
+            '1..1\nok 1 compiles\n# Retry if the log contains "Connection reset".',
+            (
+                "not ok 1 downloads the file\n"
+                "# (in test file test/download.bats, line 3)\n"
+                "make: *** [Makefile:12: test] Error 1\n"
+                '# Retry if the log contains "Connection reset".'
+            ),
             # A script that Azure Pipelines echoes before running it.
             (
                 "Generating script.\nScript contents:\ngrep -q 'Connection reset' build.log\n"

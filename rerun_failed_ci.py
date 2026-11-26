@@ -40,14 +40,19 @@ that the CI service reports for the job, which describe failures, such as a lost
 or a job that no runner picked up, that leave no log.  Shell trace lines, which start
 with `+ `, and the scripts that Azure Pipelines and GitHub Actions echo before running a
 step, are ignored, because a script that itself looks for such messages, in order to
-retry a command, contains them.  Shell comment lines, which start with `#` and which a
-shell echoes under `set -o verbose`, are ignored too, because a comment can mention such
-a message, as in `This can avoid "403 rate limit exceeded" failures.`  The lines of a
-Java virtual machine's fatal error report, which also start with `#`, are examined.  An
-Azure Pipelines job that was abandoned, such as one whose agent stopped responding, is
-examined like a failed one.  A CircleCI job whose status is `infrastructure_fail` is
-transient.  A cancelled GitHub Actions job is examined too, because GitHub Actions
-cancels a job whose runner shuts down.  A GitHub Actions job also failed transiently if
+retry a command, contains them.  Shell comment lines, which a shell echoes under `set -o
+verbose`, are ignored too, because a comment can mention such a message, as in `This
+can avoid "403 rate limit exceeded" failures.`  A line is taken to be a shell comment
+if it starts with `#` followed by whitespace or by the end of the line, so a comment
+such as `#Retry on Connection reset` is examined, as are the commands that a shell
+echoes under `set -o verbose`.  Two kinds of tool output also start with `#` and are
+examined:  the diagnostics that follow a failed test (`not ok`) in TAP output, as from
+Bats or Perl's `prove`, and the first lines of a Java virtual machine's fatal error
+report, which name the signal that crashed the JVM.  An Azure Pipelines job that was
+abandoned, such as one whose agent stopped responding, is examined like a failed one.  A
+CircleCI job whose status is `infrastructure_fail` is transient.  A cancelled GitHub
+Actions job is examined too, because GitHub Actions cancels a job whose runner shuts
+down.  A GitHub Actions job also failed transiently if
 the concurrency group of its workflow run cancelled the run in favor of a waiting
 request, as an annotation of the job such as "Canceling since a higher priority waiting
 request for CI-8598 exists" shows, and the repository has no newer workflow run for the
@@ -226,18 +231,31 @@ GRADLEW_RETRY_EXISTS_RE = re.compile(
 
 # Matches a shell trace line, as `set -x` prints it.
 TRACE_LINE_RE = re.compile(r"\++ ")
-# Matches a shell comment line, as `set -o verbose` prints it when a shell reads a
+# Matches a line that starts with "#" followed by whitespace or by the end of the line.
+# Such a line is a shell comment, as `set -o verbose` prints it when a shell reads a
 # script, such as `# calls.  This can avoid "403 rate limit exceeded" failures.`, or a
-# line of a Java virtual machine's fatal error report, such as "#  SIGSEGV (0xb) at
-# pc=0x000074a6b3df9d00".  It does not match an Azure Pipelines logging command, such as
-# "##[error]Bash exited with code '1'.".
+# line of a tool's output, such as a TAP diagnostic or a line of a Java virtual machine's
+# fatal error report.  It does not match a comment with no whitespace after "#", such as
+# "#Retry on Connection reset", an Azure Pipelines logging command, such as
+# "##[error]Bash exited with code '1'.", or a line of Docker BuildKit's output, such as
+# "#12 0.345 curl: (56) Recv failure: Connection reset by peer".
 COMMENT_LINE_RE = re.compile(r"\s*#+(\s|$)")
+# Matches a TAP line that reports a failed test, such as "not ok 1 downloads the file".
+# The diagnostics that follow it start with "#", as in "# curl: (56) Recv failure:
+# Connection reset by peer".
+TAP_NOT_OK_RE = re.compile(r"\s*not ok\b")
 # Matches the line that starts a Java virtual machine's fatal error report, such as
-# "# A fatal error has been detected by the Java Runtime Environment:".  The lines of the
-# report all start with "#".
+# "# A fatal error has been detected by the Java Runtime Environment:" or, from older
+# JVMs, "# An unexpected error has been detected by Java Runtime Environment:".  The
+# lines of the report all start with "#".  The line that names the signal that crashed
+# the JVM, such as "#  SIGSEGV (0xb) at pc=0x000074a6b3df9d00", comes soon after it.
 JVM_FATAL_ERROR_RE = re.compile(
-    r"\s*#\s*A fatal error has been detected by the Java Runtime Environment"
+    r"\s*#\s*An? (fatal|unexpected) error has been detected by (the )?Java Runtime Environment"
 )
+# Matches the line of a Java virtual machine's fatal error report that follows the line
+# that names the signal, such as "# JRE version: OpenJDK Runtime Environment (8.0_482-b08)"
+# or, from older JVMs, "# Java VM: Java HotSpot(TM) Server VM (1.6.0-b105 mixed mode)".
+JVM_FATAL_ERROR_VERSION_RE = re.compile(r"\s*#\s*(JRE version|Java VM):")
 # For Azure Pipelines and for GitHub Actions, regular expressions that match the start
 # and the end of the script that the CI service echoes before running a step.
 ECHOED_SCRIPTS = [
@@ -299,9 +317,13 @@ def examined_lines(log: str) -> list[str]:
 
     Shell trace lines in the log are omitted, as are the scripts that Azure Pipelines
     (between "Script contents:" and "Starting Command Output") and GitHub Actions
-    (between "##[group]Run" and "##[endgroup]") echo before running a step.  Shell
-    comment lines are omitted too, except for the lines of a Java virtual machine's fatal
-    error report.
+    (between "##[group]Run" and "##[endgroup]") echo before running a step.  The lines
+    that COMMENT_LINE_RE matches, such as shell comments, are omitted too, except for two
+    kinds of tool output:  the diagnostics that immediately follow a TAP line that reports
+    a failed test ("not ok"), up to the next line that COMMENT_LINE_RE does not match, and
+    a Java virtual machine's fatal error report up to the line that gives the JVM's
+    version, which follows the line that names the signal that crashed the JVM.  Other
+    lines, such as another process's output, can come between the lines of the report.
 
     Args:
         log: a log of the failed steps of a CI job.
@@ -311,7 +333,11 @@ def examined_lines(log: str) -> list[str]:
     """
     result = []
     end_of_echo = None
-    # True if the line is in a Java virtual machine's fatal error report.
+    # True if the line follows a TAP line that reports a failed test, and every line since
+    # that one matches COMMENT_LINE_RE.
+    in_tap_diagnostics = False
+    # True if the line follows the start of a Java virtual machine's fatal error report
+    # but does not follow the line that gives the JVM's version.
     in_jvm_report = False
     for line in normalize_log(log).splitlines():
         if end_of_echo:
@@ -320,8 +346,15 @@ def examined_lines(log: str) -> list[str]:
             continue
         end_of_echo = next((end for start, end in ECHOED_SCRIPTS if start.match(line)), None)
         is_comment = bool(COMMENT_LINE_RE.match(line))
-        in_jvm_report = is_comment and (in_jvm_report or bool(JVM_FATAL_ERROR_RE.match(line)))
-        if not (end_of_echo or TRACE_LINE_RE.match(line) or (is_comment and not in_jvm_report)):
+        in_tap_diagnostics = is_comment and in_tap_diagnostics
+        if JVM_FATAL_ERROR_RE.match(line):
+            in_jvm_report = True
+        is_output = in_tap_diagnostics or in_jvm_report
+        if JVM_FATAL_ERROR_VERSION_RE.match(line):
+            in_jvm_report = False
+        if TAP_NOT_OK_RE.match(line):
+            in_tap_diagnostics = True
+        if not (end_of_echo or TRACE_LINE_RE.match(line) or (is_comment and not is_output)):
             result.append(line)
     return result
 
