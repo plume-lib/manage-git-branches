@@ -702,6 +702,17 @@ class ClassifyTest(unittest.TestCase):
                 "+ grep -q -E 'Connection (reset|refused)|Read timed out' /tmp/log\n"
                 "2026-10-31T13:41:49.6228534Z ++ echo 'Connection reset'"
             ),
+            # A shell comment, as `set -o verbose` prints it when a shell reads a script.
+            (
+                "# If environment variable GITHUB_PAT or GH_TOKEN is set when this script is\n"
+                '# calls.  This can avoid "403 rate limit exceeded" failures.\n'
+                '  # Retry if the log contains "Connection reset".\n'
+                "#\n"
+                "warning: [nullness:argument] incompatible argument\n"
+                "##[error]Bash exited with code '1'."
+            ),
+            # A shell comment that mentions a JVM crash, outside a fatal error report.
+            "#  SIGSEGV (0xb) at pc=0x000074a6b3df9d00\nerror: cannot find symbol",
             # A script that Azure Pipelines echoes before running it.
             (
                 "Generating script.\nScript contents:\ngrep -q 'Connection reset' build.log\n"
