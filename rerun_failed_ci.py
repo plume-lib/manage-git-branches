@@ -48,11 +48,15 @@ such as `#Retry on Connection reset` is examined, as are the commands that a she
 echoes under `set -o verbose`.  Two kinds of tool output also start with `#` and are
 examined:  the diagnostics that follow a failed test (`not ok`) in TAP output, as from
 Bats or Perl's `prove`, and the first lines of a Java virtual machine's fatal error
-report, which name the signal that crashed the JVM.  An Azure Pipelines job that was
-abandoned, such as one whose agent stopped responding, is examined like a failed one.  A
-CircleCI job whose status is `infrastructure_fail` is transient.  A cancelled GitHub
-Actions job is examined too, because GitHub Actions cancels a job whose runner shuts
-down.  A GitHub Actions job also failed transiently if
+report, which name the signal that crashed the JVM.  A GitHub API response that a
+script of plume-lib/plume-scripts, such as `set-ci-org-and-branch`, prints after a
+warning that the response yields no answer is ignored, because after such a warning the
+script continues, so a message in the response, such as "API rate limit exceeded", did
+not cause a failure.  An Azure Pipelines job that was abandoned, such as one whose agent
+stopped responding, is examined like a failed one.  A CircleCI job whose status is
+`infrastructure_fail` is transient.  A cancelled GitHub Actions job is examined too,
+because GitHub Actions cancels a job whose runner shuts down.  A GitHub Actions job also
+failed transiently if
 the concurrency group of its workflow run cancelled the run in favor of a waiting
 request, as an annotation of the job such as "Canceling since a higher priority waiting
 request for CI-8598 exists" shows, and the repository has no newer workflow run for the
@@ -263,6 +267,28 @@ ECHOED_SCRIPTS = [
     (re.compile(r"##\[group\]Run "), re.compile(r"##\[endgroup\]")),
 ]
 
+# The scripts of plume-lib/plume-scripts, such as `set-ci-org-and-branch` and `ci-info`,
+# print a GitHub API response that yields no answer, as in:
+#   set-ci-org-and-branch warning: bad output for https://api.github.com/repos/ORG/REPO/pulls/5
+#   ---- start of curl output ----
+#   {"message":"API rate limit exceeded for 203.0.113.7. ..."}
+#   ---- end of curl output ----
+# A line "auth_token is set." can come between the first two lines.  After a warning, the
+# script finds the answer elsewhere and continues, so the response did not cause a
+# failure.  After an error, as in "ci-info error: bad output for URL", the script exits,
+# so the response can show a transient failure.  These expressions match the messages of
+# those scripts, so a change to their wording requires a change here.
+#
+# Matches the line in which such a script warns that a response yields no answer, such
+# as "set-ci-org-and-branch warning: bad output for https://api.github.com/repos/ORG/REPO".
+BAD_OUTPUT_WARNING_RE = re.compile(r"\s*\S+ warning: bad output for \S+$")
+# Matches the line that such a script can print between that warning and the response.
+AUTH_TOKEN_SET_RE = re.compile(r"\s*auth_token is set\.$")
+# Matches the line that starts the response, such as "---- start of curl output ----".
+RESPONSE_START_RE = re.compile(r"\s*---- start of \S+ output ----$")
+# Matches the line that ends the response, such as "---- end of curl output ----".
+RESPONSE_END_RE = re.compile(r"\s*---- end of \S+ output ----$")
+
 # The results of a failed Azure Pipelines job or task.  Azure Pipelines abandons a job
 # whose agent stops responding.
 AZURE_FAILED = ("failed", "abandoned")
@@ -324,6 +350,9 @@ def examined_lines(log: str) -> list[str]:
     a Java virtual machine's fatal error report up to the line that gives the JVM's
     version, which follows the line that names the signal that crashed the JVM.  Other
     lines, such as another process's output, can come between the lines of the report.
+    A response that a script of plume-lib/plume-scripts prints after a warning that
+    BAD_OUTPUT_WARNING_RE matches is omitted, from the line that RESPONSE_START_RE
+    matches through the line that RESPONSE_END_RE matches.
 
     Args:
         log: a log of the failed steps of a CI job.
@@ -339,7 +368,22 @@ def examined_lines(log: str) -> list[str]:
     # True if the line follows the start of a Java virtual machine's fatal error report
     # but does not follow the line that gives the JVM's version.
     in_jvm_report = False
+    # True if the line follows a line that BAD_OUTPUT_WARNING_RE matches, and every line
+    # since that one matches AUTH_TOKEN_SET_RE.
+    after_bad_output_warning = False
+    # True if the line is in a response that follows such a warning.
+    in_warned_response = False
     for line in normalize_log(log).splitlines():
+        if in_warned_response:
+            in_warned_response = not RESPONSE_END_RE.match(line)
+            continue
+        if after_bad_output_warning and RESPONSE_START_RE.match(line):
+            in_warned_response = True
+            after_bad_output_warning = False
+            continue
+        after_bad_output_warning = bool(BAD_OUTPUT_WARNING_RE.match(line)) or (
+            after_bad_output_warning and bool(AUTH_TOKEN_SET_RE.match(line))
+        )
         if end_of_echo:
             if end_of_echo.match(line):
                 end_of_echo = None

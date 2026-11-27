@@ -72,6 +72,10 @@ GUAVA_NOT_FOUND = (
 OPTIONS_EXISTS = f"gradlew-retry: {OPTIONS_POM} exists on a mirror of Maven Central."
 # The line that `gradlew-retry` prints before it runs Gradle again.
 GRADLEW_RETRYING = "gradlew-retry: Gradle could not resolve a dependency; retrying in 60 seconds."
+# The warning of `set-ci-org-and-branch` that a GitHub API response yields no answer.
+SET_CI_WARNING = (
+    "set-ci-org-and-branch warning: bad output for https://api.github.com/repos/a/b/pulls/5"
+)
 # The Checker Framework's warning that type-checking a method took too long.
 SLOW_TYPECHECKING = (
     "/home/runner/work/a/b/BaseTypeVisitor.java:201: warning:"
@@ -627,6 +631,24 @@ class ClassifyTest(unittest.TestCase):
                     " explicit"
                 ),
             ),
+            # A script of plume-lib/plume-scripts exited because of a GitHub API response.
+            (
+                (
+                    "ci-info error: bad output for https://api.github.com/repos/a/b/pulls/5\n"
+                    "---- start of curl output ----\n"
+                    '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                    "---- end of curl output ----"
+                ),
+                '{"message":"API rate limit exceeded for 203.0.113.7."}',
+            ),
+            # A transient line follows a GitHub API response that a warning precedes.
+            (
+                (
+                    f"{SET_CI_WARNING}\n---- start of curl output ----\n{{}}\n"
+                    "---- end of curl output ----\nConnection reset"
+                ),
+                None,
+            ),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
         ]:
@@ -754,6 +776,14 @@ class ClassifyTest(unittest.TestCase):
                 "# (in test file test/download.bats, line 3)\n"
                 "make: *** [Makefile:12: test] Error 1\n"
                 '# Retry if the log contains "Connection reset".'
+            ),
+            # A GitHub API response that a script of plume-lib/plume-scripts warned about,
+            # before the failure.
+            (
+                f"{SET_CI_WARNING}\nauth_token is set.\n---- start of wget output ----\n"
+                '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                "---- end of wget output ----\n"
+                "> Task :buildSrc:compileJava FAILED\nBUILD FAILED in 7s"
             ),
             # A script that Azure Pipelines echoes before running it.
             (
