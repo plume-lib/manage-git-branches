@@ -1,0 +1,20 @@
+name: Bench (temporary)
+"on": [push]
+permissions:
+  contents: read
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          show-progress: false
+          persist-credentials: false
+      - run: scratch-bench/bench.sh
+      - run: time sh -x tests/test-git-new-branch.sh 2>&1 | tail -3
