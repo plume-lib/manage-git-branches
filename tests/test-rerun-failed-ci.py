@@ -72,6 +72,16 @@ GUAVA_NOT_FOUND = (
 OPTIONS_EXISTS = f"gradlew-retry: {OPTIONS_POM} exists on a mirror of Maven Central."
 # The line that `gradlew-retry` prints before it runs Gradle again.
 GRADLEW_RETRYING = "gradlew-retry: Gradle could not resolve a dependency; retrying in 60 seconds."
+# The warning of `set-ci-org-and-branch` that names the HTTP status of a failed GitHub API
+# request.
+SET_CI_STATUS = (
+    "set-ci-org-and-branch warning: HTTP 429 (throttled or forbidden) for"
+    " https://api.github.com/repos/a/b/pulls/5"
+)
+# The warning of `set-ci-org-and-branch` that a GitHub API response yields no answer.
+SET_CI_WARNING = (
+    "set-ci-org-and-branch warning: bad output for https://api.github.com/repos/a/b/pulls/5"
+)
 # The Checker Framework's warning that type-checking a method took too long.
 SLOW_TYPECHECKING = (
     "/home/runner/work/a/b/BaseTypeVisitor.java:201: warning:"
@@ -627,6 +637,70 @@ class ClassifyTest(unittest.TestCase):
                     " explicit"
                 ),
             ),
+            # A script of plume-lib/plume-scripts exited because of a GitHub API response.
+            (
+                (
+                    "ci-info error: bad output for https://api.github.com/repos/a/b/pulls/5\n"
+                    "---- start of curl output ----\n"
+                    '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                    "---- end of curl output ----"
+                ),
+                '{"message":"API rate limit exceeded for 203.0.113.7."}',
+            ),
+            # A script of plume-lib/plume-scripts warned about a GitHub API response, then
+            # failed because it found the branch nowhere else.
+            (
+                (
+                    f"{SET_CI_WARNING}\n---- start of curl output ----\n"
+                    '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                    "---- end of curl output ----\n"
+                    "set-ci-org-and-branch: cannot determine the branch of"
+                    " https://api.github.com/repos/a/b/pulls/5\n"
+                    "set-ci-org-and-branch: the request may succeed if it is made again later."
+                ),
+                '{"message":"API rate limit exceeded for 203.0.113.7."}',
+            ),
+            # Likewise, after a line that names the HTTP status, which is the first line that
+            # shows the transient failure.
+            (
+                (
+                    f"{SET_CI_STATUS}\n{SET_CI_WARNING}\n---- start of curl output ----\n"
+                    '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                    "---- end of curl output ----\n"
+                    "set-ci-org-and-branch: cannot determine the branch of"
+                    " https://api.github.com/repos/a/b/pulls/5"
+                ),
+                SET_CI_STATUS,
+            ),
+            # Likewise, for `ci-info` under `set -o verbose`, which echoes each command that
+            # `ci-info` writes for `eval`.
+            (
+                (
+                    "echo 'ci-info warning: bad output for"
+                    " https://api.github.com/repos/a/b/pulls/5';\n"
+                    "ci-info warning: bad output for https://api.github.com/repos/a/b/pulls/5\n"
+                    "echo '---- start of curl output ----';\n---- start of curl output ----\n"
+                    """echo '{"message":"API rate limit exceeded for 203.0.113.7."}';\n"""
+                    '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                    "echo '---- end of curl output ----';\n---- end of curl output ----\n"
+                    "echo 'ci-info: cannot determine the branch of"
+                    " https://api.github.com/repos/a/b/pulls/5';\n"
+                    "ci-info: cannot determine the branch of"
+                    " https://api.github.com/repos/a/b/pulls/5\n"
+                    "exit 2"
+                ),
+                '{"message":"API rate limit exceeded for 203.0.113.7."}',
+            ),
+            # A transient line follows a GitHub API response that a warning precedes.
+            (
+                (
+                    f"{SET_CI_WARNING}\n---- start of curl output ----\n{{}}\n"
+                    "---- end of curl output ----\nConnection reset"
+                ),
+                None,
+            ),
+            # Likewise, in a log that ends before the end of the response.
+            (f"{SET_CI_WARNING}\n---- start of curl output ----\n{{}}\nConnection reset", None),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
         ]:
@@ -754,6 +828,56 @@ class ClassifyTest(unittest.TestCase):
                 "# (in test file test/download.bats, line 3)\n"
                 "make: *** [Makefile:12: test] Error 1\n"
                 '# Retry if the log contains "Connection reset".'
+            ),
+            # A GitHub API response that a script of plume-lib/plume-scripts warned about,
+            # before the failure.
+            (
+                f"{SET_CI_WARNING}\nauth_token is set.\n---- start of wget output ----\n"
+                '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                "---- end of wget output ----\n"
+                "> Task :buildSrc:compileJava FAILED\nBUILD FAILED in 7s"
+            ),
+            # Likewise, after a line that names the HTTP status, and the advice that follows
+            # it.
+            (
+                f"{SET_CI_STATUS}\n  The request was unauthenticated; setting GITHUB_PAT or"
+                " GH_TOKEN raises the rate limit.\n"
+                f"{SET_CI_WARNING}\n---- start of curl output ----\n"
+                '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                "---- end of curl output ----\nset-ci-org-and-branch: using organization x.\n"
+                "> Task :buildSrc:compileJava FAILED\nBUILD FAILED in 7s"
+            ),
+            # Likewise, after a line that reports no response, and the message of `wget`.
+            (
+                "set-ci-org-and-branch warning: no response for"
+                " https://api.github.com/repos/a/b/pulls/5\n"
+                "Connecting to api.github.com (api.github.com)|140.82.112.6|:443... failed:"
+                " Connection refused.\n"
+                f"{SET_CI_WARNING}\n---- start of wget output ----\n\n"
+                "---- end of wget output ----\n"
+                "> Task :buildSrc:compileJava FAILED\nBUILD FAILED in 7s"
+            ),
+            # Likewise, under `set -x`, which traces the commands that print the response.
+            (
+                f"++ echo '{SET_CI_WARNING}'\n{SET_CI_WARNING}\n++ '[' -n x ']'\n"
+                "++ echo 'auth_token is set.'\nauth_token is set.\n"
+                "++ echo '---- start of curl output ----'\n---- start of curl output ----\n"
+                """++ printf '%s\\n' '{"message":"API rate limit exceeded for 203.0.113.7."}'\n"""
+                '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                "++ echo '---- end of curl output ----'\n---- end of curl output ----\n"
+                "> Task :buildSrc:compileJava FAILED\nBUILD FAILED in 7s"
+            ),
+            # Likewise, for `ci-info` under `set -o verbose`, which echoes each command that
+            # `ci-info` writes for `eval`.
+            (
+                "echo 'ci-info warning: bad output for https://api.github.com/repos/a/b/pulls/5';\n"
+                "ci-info warning: bad output for https://api.github.com/repos/a/b/pulls/5\n"
+                "echo 'auth_token is set.';\nauth_token is set.\n"
+                "echo '---- start of curl output ----';\n---- start of curl output ----\n"
+                """echo '{"message":"API rate limit exceeded for 203.0.113.7."}';\n"""
+                '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                "echo '---- end of curl output ----';\n---- end of curl output ----\n"
+                "> Task :buildSrc:compileJava FAILED\nBUILD FAILED in 7s"
             ),
             # A script that Azure Pipelines echoes before running it.
             (
