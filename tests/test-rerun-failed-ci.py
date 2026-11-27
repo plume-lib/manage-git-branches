@@ -146,12 +146,12 @@ class FakeServer:
     ) -> bytes:
         """Serve the given HTTP request, as request_util.http does.
 
-        A request other than a GET, which reruns jobs, requires credentials.
+        A request other than a GET or a HEAD, which reruns jobs, requires credentials.
 
         Returns:
-            The response body.
+            The response body, which is empty for a HEAD request.
         """
-        if method != "GET":
+        if method not in ("GET", "HEAD"):
             if not headers:
                 raise urllib.error.HTTPError(url, 401, "Unauthorized", Message(), None)
             self.reruns.append(f"{method} {url} {json.dumps(body)}")
@@ -161,6 +161,8 @@ class FakeServer:
             path += "#" + query.split("page-token=")[1].split("&")[0]
         if path not in self.urls:
             raise urllib.error.HTTPError(url, 404, "Not Found", Message(), None)
+        if method == "HEAD":
+            return b""
         response = self.urls[path]
         return (response if isinstance(response, str) else json.dumps(response)).encode()
 
@@ -455,8 +457,12 @@ class RerunTestCase(unittest.TestCase):
 class ClassifyTest(unittest.TestCase):
     """Tests for --classify, which run the script."""
 
-    def classify(self, log: str) -> tuple[int, str]:
+    def classify(self, log: str, existing: tuple[str, ...] = ()) -> tuple[int, str]:
         """Run rerun-failed-ci --classify on a log containing the given text.
+
+        Args:
+            log: the text of a log.
+            existing: the URLs that serve a file; no other URL serves one.
 
         Returns:
             The exit status, and the output after the file name.
@@ -464,10 +470,16 @@ class ClassifyTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
             f.write(log + "\n")
         self.addCleanup(Path(f.name).unlink)
-        result = subprocess.run(
-            [RERUN, "--classify", f.name], capture_output=True, text=True, check=False
-        )
-        return result.returncode, result.stdout.removeprefix(f"{f.name}: ").rstrip("\n")
+        server = FakeServer()
+        server.urls = dict.fromkeys(existing, "")
+        output = io.StringIO()
+        with (
+            mock.patch.object(request_util, "http", server.http),
+            mock.patch.object(sys, "argv", ["rerun-failed-ci", "--classify", f.name]),
+            contextlib.redirect_stdout(output),
+        ):
+            status = rerun_failed_ci.main()
+        return status, output.getvalue().removeprefix(f"{f.name}: ").rstrip("\n")
 
     def test_transient(self) -> None:
         """A log that shows a transient failure yields the line that shows it."""
@@ -769,6 +781,61 @@ class ClassifyTest(unittest.TestCase):
         ]:
             with self.subTest(log=log):
                 self.assertEqual(self.classify(log), (1, ""))
+
+    def test_missing_artifact_exists(self) -> None:
+        """A log in which Gradle did not find artifacts that exist now is transient."""
+        spotless_pom = "com/diffplug/spotless/spotless-lib/4.12.0/spotless-lib-4.12.0.pom"
+        spotless_not_found = (
+            "   > Could not find com.diffplug.spotless:spotless-lib:4.12.0.\n"
+            "     Searched in the following locations:\n"
+            f"       - https://plugins.gradle.org/m2/{spotless_pom}\n"
+            f"       - https://repo.maven.apache.org/maven2/{spotless_pom}\n"
+            "     Required by:"
+        )
+        for log, existing, expected in [
+            # Maven Central serves an artifact now that it did not serve to Gradle.
+            (
+                spotless_not_found,
+                (f"https://repo.maven.apache.org/maven2/{spotless_pom}",),
+                (0, "> Could not find com.diffplug.spotless:spotless-lib:4.12.0."),
+            ),
+            # Likewise, for each of two artifacts.
+            (
+                f"{OPTIONS_NOT_FOUND}\n{spotless_not_found}\nBUILD FAILED in 7s",
+                (OPTIONS_POM, f"https://plugins.gradle.org/m2/{spotless_pom}"),
+                (0, "> Could not find org.plumelib:options:3.0.0."),
+            ),
+            # `gradlew-retry` reported one artifact, and Maven Central serves the other now.
+            (
+                f"{OPTIONS_NOT_FOUND}\n{spotless_not_found}\n{OPTIONS_EXISTS}",
+                (f"https://repo.maven.apache.org/maven2/{spotless_pom}",),
+                (0, OPTIONS_EXISTS),
+            ),
+            # No location serves an artifact that Gradle did not find.
+            (spotless_not_found, (), (1, "")),
+            # No location serves one of two artifacts that Gradle did not find, such as a
+            # misspelled one.
+            (f"{OPTIONS_NOT_FOUND}\n{GUAVA_NOT_FOUND}", (OPTIONS_POM,), (1, "")),
+            # Gradle did not find a plugin, so the log does not show where it searched.
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "   > Plugin [id: 'org.example.x', version: '1.0'] was not found in any of"
+                    " the following sources:"
+                ),
+                (OPTIONS_POM,),
+                (1, ""),
+            ),
+            # An earlier run of Gradle did not find an artifact, and the last run failed for
+            # another reason.
+            (
+                f"{OPTIONS_NOT_FOUND}\n{GRADLEW_RETRYING}\nerror: cannot find symbol",
+                (OPTIONS_POM,),
+                (1, ""),
+            ),
+        ]:
+            with self.subTest(log=log, existing=existing):
+                self.assertEqual(self.classify(log, existing), expected)
 
     def test_standard_input(self) -> None:
         """--classify reads standard input when no file is given."""

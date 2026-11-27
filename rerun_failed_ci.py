@@ -29,13 +29,14 @@ A job's failure is transient if the log of its failed steps contains a message t
 TRANSIENT_PATTERNS below lists, such as a message about a network problem, an overloaded
 or rate-limited server, or a lost CI runner.  A job's failure is also transient if
 Gradle did not find an artifact and the Gradle Plugin Portal is the only location that
-Gradle searched for it, or if Gradle did not find some artifacts and, for each one, the
-`gradlew-retry` script of plume-lib/plume-scripts reported that some location where
-Gradle searched for it serves it, or if javac failed only because of -Werror and a
-Checker Framework warning that type-checking was too slow.  If the log shows that
-`gradlew-retry` ran Gradle again, then only the output of the last run of Gradle is
-examined, except for the reports of `gradlew-retry` about locations that serve
-artifacts.  The log of an Azure Pipelines or GitHub Actions job also contains the errors
+Gradle searched for it, or if Gradle did not find some artifacts and, for each one, some
+location where Gradle searched for it serves it, or if javac failed only because of
+-Werror and a Checker Framework warning that type-checking was too slow.  A location
+serves an artifact if the `gradlew-retry` script of plume-lib/plume-scripts reported
+that it does, or if it serves the artifact when this command requests it.  If the log
+shows that `gradlew-retry` ran Gradle again, then only the output of the last run of
+Gradle is examined, except for the reports of `gradlew-retry` about locations that
+serve artifacts.  The log of an Azure Pipelines or GitHub Actions job also contains the errors
 that the CI service reports for the job, which describe failures, such as a lost runner
 or a job that no runner picked up, that leave no log.  Shell trace lines, which start
 with `+ `, and the scripts that Azure Pipelines and GitHub Actions echo before running a
@@ -92,7 +93,8 @@ even if some other build could not be examined or rerun.  A caller can use it to
 that some check of a pull request is about to run again, which GitHub might not show
 until some time after the rerun.
 
-With `--classify`, this command reruns nothing and contacts no server.  It reads each
+With `--classify`, this command reruns nothing and contacts no server other than the
+locations where Gradle searched for an artifact that it did not find.  It reads each
 LOG-FILE (or standard input), and for each one that shows a transient failure, it
 prints the line that shows it.  It does not recognize a run that its concurrency group
 cancelled, because that requires asking GitHub about newer runs.  The exit status is 0
@@ -379,28 +381,53 @@ def searched_locations(lines: list[str]) -> list[str]:
     return locations
 
 
-def gradlew_retry_reason(lines: list[str], last_run: list[str]) -> str | None:
-    """Return the line in which `gradlew-retry` reports that a missing artifact exists.
+def serves_file(url: str) -> bool:
+    """Return True if the given URL serves a file now.
 
-    The result is a line that matches GRADLEW_RETRY_EXISTS_RE.  It shows a transient
-    failure only if the last run of Gradle failed only because it did not find artifacts,
-    and for each such artifact, `gradlew-retry` reported that some location where Gradle
-    searched for the artifact serves it.  A repository such as Maven Central sometimes
-    fails, for a minute or more, to serve an artifact that it holds.  `gradlew-retry`
-    reports at most one URL each time it runs Gradle again, so a last run that did not
-    find several artifacts usually does not show a transient failure.  A plugin that
-    Gradle did not find prevents a transient failure, because Gradle does not report
-    where it searched for the plugin.
+    Args:
+        url: a URL, such as
+            "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom".
+
+    Returns:
+        True if the server responds to a HEAD request of the URL with a successful status,
+        after following redirects; False if it responds with an error status or cannot
+        be reached.
+    """
+    try:
+        request_util.http("HEAD", url)
+    except request_util.REQUEST_ERRORS:
+        return False
+    return True
+
+
+def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | None:
+    """Return the line that shows that the artifacts that Gradle did not find exist.
+
+    The result shows a transient failure only if the last run of Gradle failed only
+    because it did not find artifacts, and for each such artifact, some location where
+    Gradle searched for it serves it.  A location serves an artifact if `gradlew-retry`
+    reported that it does, in a line that matches GRADLEW_RETRY_EXISTS_RE, or if
+    serves_file returns True for it.  A repository such as Maven Central sometimes fails,
+    for a minute or more, to serve an artifact that it holds.  An artifact that no
+    location serves, such as a misspelled one, prevents a transient failure.  So does a
+    plugin that Gradle did not find, because Gradle does not report where it searched
+    for the plugin.  The locations are requested only for an artifact for which
+    `gradlew-retry` reported no location.
 
     Args:
         lines: the lines of a log of the failed steps of a CI job.
         last_run: the lines of the log from the last run of Gradle, a suffix of lines.
 
     Returns:
-        The first line that reports a URL that serves an artifact that the last run did
-        not find, without leading whitespace and truncated to 200 characters, or None if
-        the log does not show such a transient failure.
+        For the first artifact that the last run did not find, the line in which
+        `gradlew-retry` reported a location that serves it or, if there is none, the line
+        in which Gradle reported that it did not find it, such as "> Could not find
+        org.slf4j:slf4j-api:1.7.36.".  The line is without leading whitespace and
+        truncated to 200 characters.  The result is None if the log does not show such a
+        transient failure.
     """
+    if any(PLUGIN_NOT_FOUND_RE.search(line) for line in last_run):
+        return None
     # Maps each URL that `gradlew-retry` reported to serve a file, to the first line that
     # reported it.
     existing: dict[str, str] = {}
@@ -408,15 +435,13 @@ def gradlew_retry_reason(lines: list[str], last_run: list[str]) -> str | None:
         match = GRADLEW_RETRY_EXISTS_RE.search(line)
         if match:
             existing.setdefault(match[1], line.lstrip()[:200])
-    if not existing or any(PLUGIN_NOT_FOUND_RE.search(line) for line in last_run):
-        return None
     result = None
     for i, line in enumerate(last_run):
-        if SEARCHED_LOCATIONS_RE.match(line):
-            reason = next(
-                (existing[loc] for loc in searched_locations(last_run[i + 1 :]) if loc in existing),
-                None,
-            )
+        if i > 0 and SEARCHED_LOCATIONS_RE.match(line):
+            locations = searched_locations(last_run[i + 1 :])
+            reason = next((existing[loc] for loc in locations if loc in existing), None)
+            if reason is None and any(serves_file(loc) for loc in locations):
+                reason = last_run[i - 1].lstrip()[:200]
             if reason is None:
                 return None
             result = result or reason
@@ -463,8 +488,8 @@ def transient_reason(log: str) -> str | None:
     Of those lines, one shows a transient failure if it matches TRANSIENT_RE, or if it
     names an artifact that Gradle did not find and the Gradle Plugin Portal is the only
     location that Gradle searched for it.  Otherwise, the result is as for
-    slow_typechecking_reason or, if that is None, as for gradlew_retry_reason.  The lines
-    that `examined_lines` omits are ignored.
+    slow_typechecking_reason or, if that is None, as for missing_artifacts_reason.  The
+    lines that `examined_lines` omits are ignored.
 
     Args:
         log: a log of the failed steps of a CI job.
@@ -485,7 +510,7 @@ def transient_reason(log: str) -> str | None:
             locations = searched_locations(last_run[i + 1 :])
             if locations and all(loc.startswith(PLUGIN_PORTAL_URL) for loc in locations):
                 return last_run[i - 1].lstrip()[:200]
-    return slow_typechecking_reason(last_run) or gradlew_retry_reason(lines, last_run)
+    return slow_typechecking_reason(last_run) or missing_artifacts_reason(lines, last_run)
 
 
 def classify(files: list[str]) -> int:
@@ -1517,7 +1542,7 @@ def main() -> int:
         "--exit-3-if-reran", action="store_true", help="exit with status 3 if a job was rerun"
     )
     parser.add_argument(
-        "--classify", action="store_true", help="classify log files; contact no server"
+        "--classify", action="store_true", help="classify log files; contact no CI server"
     )
     parser.add_argument("args", nargs="*", metavar="PR | BRANCH | URL | LOG-FILE")
     args = parser.parse_args()
