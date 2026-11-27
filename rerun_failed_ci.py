@@ -34,12 +34,15 @@ and, for each one, some location where Gradle searched for it serves it, or if j
 failed only because of -Werror and a Checker Framework warning that type-checking was
 too slow.  A location serves an artifact if the `gradlew-retry` script of
 plume-lib/plume-scripts reported that it does, or if it is in a public repository, such
-as Maven Central, and serves the artifact when this command requests it.  If the log
-shows that `gradlew-retry` ran Gradle again, then only the output of the last run of
-Gradle is examined, except for the reports of `gradlew-retry` about locations that
-serve artifacts.  The log of an Azure Pipelines or GitHub Actions job also contains the
-errors that the CI service reports for the job, which describe failures, such as a lost
-runner or a job that no runner picked up, that leave no log.  Shell trace lines, which start
+as Maven Central, and serves the artifact when this command requests it.  A job's
+failure is also transient if the last run of Maven failed only because it did not find
+some artifacts, and each one is in a public repository where Maven did not find it, and
+that repository serves it when this command requests it.  If the log shows that
+`gradlew-retry` ran Gradle again, then only the output of the last run of Gradle is
+examined, except for the reports of `gradlew-retry` about locations that serve
+artifacts.  The log of an Azure Pipelines or GitHub Actions job also contains the errors
+that the CI service reports for the job, which describe failures, such as a lost runner
+or a job that no runner picked up, that leave no log.  Shell trace lines, which start
 with `+ `, and the scripts that Azure Pipelines and GitHub Actions echo before running a
 step, are ignored, because a script that itself looks for such messages, in order to
 retry a command, contains them.  Shell comment lines, which a shell echoes under `set -o
@@ -95,12 +98,12 @@ that some check of a pull request is about to run again, which GitHub might not 
 until some time after the rerun.
 
 With `--classify`, this command reruns nothing and contacts no server other than the
-public repositories, such as Maven Central, where Gradle searched for an artifact that
-it did not find.  It reads each LOG-FILE (or standard input), and for each one that
-shows a transient failure, it prints the line that shows it.  It does not recognize a
-run that its concurrency group cancelled, because that requires asking GitHub about
-newer runs.  The exit status is 0 if every LOG-FILE shows a transient failure, and 1
-otherwise.
+public repositories, such as Maven Central, where Gradle or Maven searched for an
+artifact that it did not find.  It reads each LOG-FILE (or standard input), and for each
+one that shows a transient failure, it prints the line that shows it.  It does not
+recognize a run that its concurrency group cancelled, because that requires asking
+GitHub about newer runs.  The exit status is 0 if every LOG-FILE shows a transient
+failure, and 1 otherwise.
 
 This command requires `gh`, authenticated to GitHub.  Rerunning an Azure Pipelines
 build or a CircleCI job requires credentials, as described in `ci_build.py`.  The Azure
@@ -263,6 +266,49 @@ IDENTICAL_FAILURES_RE = re.compile(
 # ':compileJava'." and "> Error while evaluating property 'filteredArgumentsMap' of task
 # ':compileKotlin'.".
 COULD_NOT_RESOLVE_RE = re.compile(r"Could not resolve all ")
+
+# Matches the line in which Maven reports that a run failed, "[INFO] BUILD FAILURE".
+MAVEN_BUILD_FAILURE_RE = re.compile(r"\s*\[INFO\] BUILD FAILURE\s*$")
+# Matches the line in which Maven reports that a run succeeded, "[INFO] BUILD SUCCESS".
+MAVEN_BUILD_SUCCESS_RE = re.compile(r"\s*\[INFO\] BUILD SUCCESS\s*$")
+# Matches a line in which Maven describes a failure, such as "[ERROR] Plugin
+# org.apache.maven.plugins:maven-clean-plugin:3.4.0 or one of its dependencies could not
+# be resolved:".  Group 1 is the description, which can be empty, as in "[ERROR] ".
+MAVEN_ERROR_RE = re.compile(r"\s*\[ERROR\](.*)")
+# Matches the reference to the help that ends Maven's description of a failure, as in
+# "[ERROR] -> [Help 1]" or "[ERROR] ... in central (https://repo.maven.apache.org/maven2)
+# -> [Help 1]".  The lines after it give general advice, such as "[ERROR] To see the full
+# stack trace of the errors, re-run Maven with the '-e' switch".
+MAVEN_HELP_RE = re.compile(r"\s*-> \[Help \d+\]")
+# Matches Maven's description of a failure to find some artifacts, such as "Plugin
+# org.apache.maven.plugins:maven-clean-plugin:3.4.0 or one of its dependencies could not
+# be resolved:" or "Failed to execute goal on project app: Could not resolve dependencies
+# for project com.example:app:jar:1.0: ...".
+MAVEN_UNRESOLVED_RE = re.compile(
+    r"Plugin \S+ or one of its dependencies could not be resolved"
+    r"|Could not resolve dependencies for project "
+)
+# Matches Maven's report of a request for an artifact that failed for a reason other than
+# that the repository does not hold it, such as "Could not transfer artifact
+# com.example:foo:jar:1.0 from/to private (https://repo.example.com/maven2): status code:
+# 401, reason phrase: Unauthorized (401)".  A transfer failure that is transient, such as
+# one with status 503, matches TRANSIENT_RE.
+MAVEN_TRANSFER_FAILED_RE = re.compile(r"Could not transfer artifact ")
+# Regular expressions, each of which matches Maven's report of an artifact that a
+# repository did not serve.  Group "artifact" is the artifact's coordinates, of the form
+# GROUP:ARTIFACT:EXTENSION:VERSION or GROUP:ARTIFACT:EXTENSION:CLASSIFIER:VERSION, such
+# as "com.example:foo:jar:1.0" or "com.example:foo:jar:sources:1.0".  Group "repository"
+# is the URL of the repository, such as "https://repo.maven.apache.org/maven2".
+MAVEN_NOT_FOUND_RES = [
+    # Matches a report such as "Could not find artifact com.example:foo:jar:1.0 in central
+    # (https://repo.maven.apache.org/maven2)".
+    re.compile(r"Could not find artifact (?P<artifact>\S+) in \S+ \((?P<repository>[^)\s]+)\)"),
+    # Matches a report such as "org.apache.maven.plugins:maven-clean-plugin:jar:3.4.0 was
+    # not found in https://repo.maven.apache.org/maven2 during a previous attempt.".  Maven
+    # did not request the artifact again, because its local repository records that an
+    # earlier request failed.
+    re.compile(r"(?P<artifact>\S+) was not found in (?P<repository>\S+) during a previous attempt"),
+]
 
 # The `gradlew-retry` script of plume-lib/plume-scripts runs Gradle, and if Gradle fails
 # in a way that a retry might fix, then it prints a line about the failure, prints a line
@@ -632,6 +678,97 @@ def slow_typechecking_reason(lines: list[str]) -> str | None:
     return result if found_werror else None
 
 
+def maven_artifact_url(artifact: str, repository: str) -> str | None:
+    """Return the URL of the given artifact's file in the given Maven repository.
+
+    Args:
+        artifact: an artifact's coordinates, of the form GROUP:ARTIFACT:EXTENSION:VERSION
+            or GROUP:ARTIFACT:EXTENSION:CLASSIFIER:VERSION, such as
+            "org.apache.maven.plugins:maven-clean-plugin:jar:3.4.0".
+        repository: the URL of a Maven repository, such as
+            "https://repo.maven.apache.org/maven2".
+
+    Returns:
+        The URL, such as "https://repo.maven.apache.org/maven2/org/apache/maven/plugins/
+        maven-clean-plugin/3.4.0/maven-clean-plugin-3.4.0.jar", or None if the
+        coordinates are not of either form.
+    """
+    parts = artifact.split(":")
+    if len(parts) == 4:
+        group, name, extension, version = parts
+        suffix = ""
+    elif len(parts) == 5:
+        group, name, extension, classifier, version = parts
+        suffix = f"-{classifier}"
+    else:
+        return None
+    path = f"{group.replace('.', '/')}/{name}/{version}/{name}-{version}{suffix}.{extension}"
+    return f"{repository.rstrip('/')}/{path}"
+
+
+def maven_missing_artifacts_reason(lines: list[str]) -> str | None:
+    """Return a line that shows that the artifacts that Maven did not find exist.
+
+    The result shows a transient failure only if the last run of Maven in the given lines
+    failed, and Maven described only failures to find artifacts, and for each such
+    artifact, the repository where Maven did not find it serves it now.  A repository
+    such as Maven Central sometimes fails, for a minute or more, to serve an artifact that
+    it holds.  Maven records such a failure in its local repository, and until the
+    record expires, a later run of Maven reports that the artifact "was not found ...
+    during a previous attempt" without requesting it again.
+
+    The last run of Maven failed if a line that matches MAVEN_BUILD_FAILURE_RE is not
+    followed by one that matches MAVEN_BUILD_SUCCESS_RE.  Maven describes the failure in
+    the lines that follow it and that match MAVEN_ERROR_RE, up to the first line that
+    matches MAVEN_HELP_RE.  Each nonempty description must match MAVEN_UNRESOLVED_RE or
+    one of MAVEN_NOT_FOUND_RES, and at least one must match one of MAVEN_NOT_FOUND_RES.
+    A description that matches MAVEN_TRANSFER_FAILED_RE prevents a transient failure, even
+    if it also matches MAVEN_UNRESOLVED_RE.  So another failure, such as a compilation
+    error or a 401 (Unauthorized) status from a repository, prevents a transient failure.
+    A failure outside Maven, such as a failure of a later step of the CI job, is not
+    detected.  Only a file that PROBED_LOCATION_RE matches is requested, so an artifact in
+    a repository that is not public prevents a transient failure.
+
+    Args:
+        lines: the lines of a log of the failed steps of a CI job.
+
+    Returns:
+        A line that names the file of the first artifact that Maven did not find, such as
+        "https://repo.maven.apache.org/maven2/com/example/foo/1.0/foo-1.0.jar exists
+        now.", truncated to 200 characters, or None if the log does not show such a
+        transient failure.
+    """
+    last_failure = max(
+        (i for i, line in enumerate(lines) if MAVEN_BUILD_FAILURE_RE.match(line)), default=None
+    )
+    if last_failure is None or any(
+        MAVEN_BUILD_SUCCESS_RE.match(line) for line in lines[last_failure + 1 :]
+    ):
+        return None
+    urls: list[str] = []
+    for line in lines[last_failure + 1 :]:
+        error = MAVEN_ERROR_RE.match(line)
+        if not error:
+            continue
+        description = MAVEN_HELP_RE.sub("", error[1]).strip()
+        found = [match for regex in MAVEN_NOT_FOUND_RES for match in regex.finditer(description)]
+        if MAVEN_TRANSFER_FAILED_RE.search(description) or (
+            description and not found and not MAVEN_UNRESOLVED_RE.search(description)
+        ):
+            return None
+        for match in found:
+            url = maven_artifact_url(match["artifact"], match["repository"])
+            if url is None or not PROBED_LOCATION_RE.fullmatch(url):
+                return None
+            if url not in urls:
+                urls.append(url)
+        if MAVEN_HELP_RE.search(error[1]):
+            break
+    if not urls or not all(serves_file(url) for url in urls):
+        return None
+    return f"{urls[0]} exists now."[:200]
+
+
 def transient_reason(log: str) -> str | None:
     """Return the line that shows that the failure in the given log is transient.
 
@@ -642,16 +779,18 @@ def transient_reason(log: str) -> str | None:
     names an artifact that Gradle did not find, the Gradle Plugin Portal is the only
     location that Gradle searched for it, and only_missing_artifacts returns True.
     Otherwise, the result is as for
-    slow_typechecking_reason or, if that is None, as for missing_artifacts_reason.  The
-    lines that `examined_lines` omits are ignored.
+    slow_typechecking_reason or, if that is None, as for missing_artifacts_reason or, if
+    that is None, as for maven_missing_artifacts_reason.  The lines that `examined_lines`
+    omits are ignored.
 
     Args:
         log: a log of the failed steps of a CI job.
 
     Returns:
         The first line of the log that shows a transient failure, or the line that
-        missing_artifacts_reason constructs, without leading whitespace and truncated to
-        200 characters, or None if the log shows no transient failure.
+        missing_artifacts_reason or maven_missing_artifacts_reason constructs, without
+        leading whitespace and truncated to 200 characters, or None if the log shows no
+        transient failure.
     """
     lines = examined_lines(log)
     last_retry = max(
@@ -669,7 +808,11 @@ def transient_reason(log: str) -> str | None:
                 and only_missing_artifacts(last_run)
             ):
                 return last_run[i - 1].lstrip()[:200]
-    return slow_typechecking_reason(last_run) or missing_artifacts_reason(lines, last_run)
+    return (
+        slow_typechecking_reason(last_run)
+        or missing_artifacts_reason(lines, last_run)
+        or maven_missing_artifacts_reason(last_run)
+    )
 
 
 def classify(files: list[str]) -> int:

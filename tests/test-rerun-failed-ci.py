@@ -76,6 +76,37 @@ GUAVA_NOT_FOUND = (
     "     Required by:\n"
     "         project :"
 )
+# The location in Maven Central of a Maven plugin that Maven did not find.
+CLEAN_PLUGIN_JAR = (
+    "https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-clean-plugin/3.4.0/"
+    "maven-clean-plugin-3.4.0.jar"
+)
+# The lines with which Maven starts its report of a failed run.
+MAVEN_BUILD_FAILURE = (
+    "[INFO] ------------------------------------------------------------------------\n"
+    "[INFO] BUILD FAILURE\n"
+    "[INFO] ------------------------------------------------------------------------\n"
+    "[INFO] Total time:  0.170 s"
+)
+# Maven's description of its failure to find the plugin at CLEAN_PLUGIN_JAR, because an
+# earlier request for the plugin failed, as in a log of a Checker Framework CI job.
+CLEAN_PLUGIN_ERRORS = (
+    "[ERROR] Plugin org.apache.maven.plugins:maven-clean-plugin:3.4.0 or one of its"
+    " dependencies could not be resolved:\n"
+    "[ERROR] \torg.apache.maven.plugins:maven-clean-plugin:jar:3.4.0 was not found in"
+    " https://repo.maven.apache.org/maven2 during a previous attempt. This failure was cached"
+    " in the local repository and resolution is not reattempted until the update interval of"
+    " central has elapsed or updates are forced: The following artifacts could not be"
+    " resolved: org.apache.maven.plugins:maven-clean-plugin:jar:3.4.0 (absent):"
+    " org.apache.maven.plugins:maven-clean-plugin:jar:3.4.0 was not found in"
+    " https://repo.maven.apache.org/maven2 during a previous attempt.\n"
+    "[ERROR] -> [Help 1]\n"
+    "[ERROR] \n"
+    "[ERROR] To see the full stack trace of the errors, re-run Maven with the '-e' switch\n"
+    "[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/PluginResolutionException"
+)
+# Maven's report of a failed run, in which it did not find the plugin at CLEAN_PLUGIN_JAR.
+CLEAN_PLUGIN_NOT_FOUND = f"{MAVEN_BUILD_FAILURE}\n{CLEAN_PLUGIN_ERRORS}"
 # The report of `gradlew-retry` that OPTIONS_POM is on a mirror of Maven Central.
 OPTIONS_EXISTS = f"gradlew-retry: {OPTIONS_POM} exists on a mirror of Maven Central."
 # The line that `gradlew-retry` prints before it runs Gradle again.
@@ -985,6 +1016,107 @@ class ClassifyTest(unittest.TestCase):
                 f"{OPTIONS_NOT_FOUND}\n{GRADLEW_RETRYING}\nerror: cannot find symbol",
                 (OPTIONS_POM,),
                 (1, ""),
+            ),
+        ]:
+            with self.subTest(log=log, existing=existing):
+                self.assertEqual(self.classify(log, existing), expected)
+
+    def test_maven_missing_artifact_exists(self) -> None:
+        """A log in which Maven did not find artifacts that exist now is transient."""
+        foo_jar = "https://repo.maven.apache.org/maven2/com/example/foo/1.0/foo-1.0.jar"
+        bar_jar = "https://repo.maven.apache.org/maven2/com/example/bar/1.0/bar-1.0.jar"
+        foo_sources_jar = (
+            "https://repo.maven.apache.org/maven2/com/example/foo/1.0/foo-1.0-sources.jar"
+        )
+        foo_not_found = (
+            f"{MAVEN_BUILD_FAILURE}\n"
+            "[ERROR] Failed to execute goal on project app: Could not resolve dependencies for"
+            " project com.example:app:jar:1.0: The following artifacts could not be resolved:"
+            " com.example:foo:jar:1.0 (absent): Could not find artifact com.example:foo:jar:1.0"
+            " in central (https://repo.maven.apache.org/maven2) -> [Help 1]\n"
+            "[ERROR] \n"
+            "[ERROR] Re-run Maven using the '-X' switch to enable verbose output"
+        )
+        foo_bar_not_found = foo_not_found.replace(
+            " -> [Help 1]",
+            ", Could not find artifact com.example:bar:jar:1.0 in central"
+            " (https://repo.maven.apache.org/maven2) -> [Help 1]",
+        )
+        for log, existing, expected in [
+            # Maven Central serves a plugin now that Maven did not find.
+            (CLEAN_PLUGIN_NOT_FOUND, (CLEAN_PLUGIN_JAR,), (0, f"{CLEAN_PLUGIN_JAR} exists now.")),
+            # Maven ran again later, and it still did not find the plugin.
+            (
+                f"{CLEAN_PLUGIN_NOT_FOUND}\nTrying again:\n{CLEAN_PLUGIN_NOT_FOUND}",
+                (CLEAN_PLUGIN_JAR,),
+                (0, f"{CLEAN_PLUGIN_JAR} exists now."),
+            ),
+            # Maven Central does not serve the plugin.
+            (CLEAN_PLUGIN_NOT_FOUND, (), (1, "")),
+            # Maven Central serves a dependency now that Maven did not find.
+            (foo_not_found, (foo_jar,), (0, f"{foo_jar} exists now.")),
+            # Maven Central serves an artifact with a classifier now.
+            (
+                foo_not_found.replace("foo:jar:1.0", "foo:jar:sources:1.0"),
+                (foo_sources_jar,),
+                (0, f"{foo_sources_jar} exists now."),
+            ),
+            # Maven Central serves both artifacts that Maven did not find.
+            (foo_bar_not_found, (foo_jar, bar_jar), (0, f"{foo_jar} exists now.")),
+            # Maven Central serves only one of two artifacts that Maven did not find.
+            (foo_bar_not_found, (foo_jar,), (1, "")),
+            # A later run of Maven succeeded, so some other command failed.
+            (
+                f"{CLEAN_PLUGIN_NOT_FOUND}\n[INFO] BUILD SUCCESS\nlint: 3 problems",
+                (CLEAN_PLUGIN_JAR,),
+                (1, ""),
+            ),
+            # Maven also reported a compilation error.
+            (
+                (
+                    f"{MAVEN_BUILD_FAILURE}\n"
+                    "[ERROR] COMPILATION ERROR : \n"
+                    "[ERROR] /a/App.java:[5,13] cannot find symbol\n"
+                    f"{CLEAN_PLUGIN_ERRORS}"
+                ),
+                (CLEAN_PLUGIN_JAR,),
+                (1, ""),
+            ),
+            # Maven also failed to transfer an artifact from a private repository.
+            (
+                foo_not_found.replace(
+                    " -> [Help 1]",
+                    ", Could not transfer artifact com.example:bar:jar:1.0 from/to private"
+                    " (https://repo.example.com/maven2): status code: 401, reason phrase:"
+                    " Unauthorized (401) -> [Help 1]",
+                ),
+                (foo_jar,),
+                (1, ""),
+            ),
+            # A location in a repository that is not public is not requested.
+            (
+                foo_not_found.replace(
+                    "central (https://repo.maven.apache.org/maven2)",
+                    "private (https://repo.example.com/maven2)",
+                ),
+                ("https://repo.example.com/maven2/com/example/foo/1.0/foo-1.0.jar",),
+                (1, ""),
+            ),
+            # Maven did not find an artifact whose coordinates are not of a known form.
+            (
+                foo_not_found.replace("com.example:foo:jar:1.0", "com.example:foo:1.0"),
+                (foo_jar,),
+                (1, ""),
+            ),
+            # The lines after the help reference give general advice, not failures.
+            (
+                (
+                    f"{CLEAN_PLUGIN_NOT_FOUND}\n"
+                    "[ERROR] After correcting the problems, you can resume the build with the"
+                    " command"
+                ),
+                (CLEAN_PLUGIN_JAR,),
+                (0, f"{CLEAN_PLUGIN_JAR} exists now."),
             ),
         ]:
             with self.subTest(log=log, existing=existing):
