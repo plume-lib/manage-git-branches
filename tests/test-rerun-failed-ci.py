@@ -86,6 +86,12 @@ NEWER_RUNS = (
     "repos/org/repo/actions/runs?branch=feature&created=%3E%3D2026-11-24T22%3A40%3A03Z&per_page=100"
 )
 
+# The annotation of a GitHub Actions job that ran longer than its time limit.
+GHA_TIMEOUT = (
+    "The job running on runner GitHub Actions 2 has exceeded the maximum execution time of"
+    " 360 minutes."
+)
+
 CIRCLECI = "https://circleci.com/api"
 AZURE = "https://dev.azure.com/org/proj/_apis/build/builds"
 
@@ -794,6 +800,15 @@ class ClassifyTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
 
 
+class RerunLabelTest(unittest.TestCase):
+    """Tests for rerun_label."""
+
+    def test_rerun_label(self) -> None:
+        """A transient failure whose log line is "cancelled" is not taken for a cancellation."""
+        self.assertEqual(rerun_failed_ci.rerun_label(rerun_failed_ci.CANCELLED), "cancelled")
+        self.assertEqual(rerun_failed_ci.rerun_label("cancelled"), "transient: cancelled")
+
+
 ###########################################################################
 ### Azure Pipelines
 ###
@@ -911,6 +926,31 @@ class AzureTest(RerunTestCase):
         ]:
             self.assertIn(message, output)
         self.assertNotIn("stage s2", output)
+
+    def test_timed_out(self) -> None:
+        """A job that ran longer than its time limit is examined like a failed job."""
+        s = self.server
+        s.azure_timeline(
+            500,
+            ("s1", 1, "a", "succeeded", ""),
+            ("s2", 1, "b", "canceled", None),
+            ("s3", 1, "c", "canceled", None),
+        )
+        job_b = next(r for r in s.urls[f"{AZURE}/500/timeline"]["records"] if r["id"] == "b")
+        job_b["issues"] = [
+            {
+                "type": "error",
+                "message": "The job running on agent Azure Pipelines 3 ran longer than the"
+                " maximum time of 60 minutes. For more information, see"
+                " https://go.microsoft.com/fwlink/?linkid=2077134",
+            }
+        ]
+        output = self.assert_reruns([], self.BUILD)
+        self.assertIn("b: not transient", output)
+        self.assertIn("c: cancelled", output)
+        self.assertIn(
+            "Not rerunning the cancelled jobs:  some job did not fail transiently.", output
+        )
 
     def test_warning_issue(self) -> None:
         """A warning that a task reports does not make a job transient."""
@@ -1196,6 +1236,138 @@ class GithubActionsTest(RerunTestCase):
         self.assertNotIn(NEWER_RUNS, s.gh_requests)
         # The attempt limit applies to a cancelled job.
         self.assert_reruns([], "--max-attempts", "1", self.RUN)
+
+    def user_cancelled_run(self, *extra_jobs: dict[str, Any]) -> None:
+        """Serve run 100, which a user cancelled, as in test_user_cancelled.
+
+        Job canary (101) was cancelled, and job all_green (102) started after the
+        cancellation.  The newer runs for the run's branch include only the run itself.
+
+        Args:
+            extra_jobs: other jobs of the run, each a dict with keys such as "id" and
+                "conclusion".
+        """
+        s = self.server
+        s.gha_run("completed", "cancelled", [])
+        jobs = [
+            {
+                "id": 101,
+                "name": "canary",
+                "conclusion": "cancelled",
+                "started_at": "2026-11-26T21:16:24Z",
+                "completed_at": "2026-11-26T22:52:49Z",
+            },
+            {
+                "id": 102,
+                "name": "all_green",
+                "conclusion": "failure",
+                "started_at": "2026-11-26T22:52:50Z",
+                "completed_at": "2026-11-26T22:52:53Z",
+            },
+            *extra_jobs,
+        ]
+        s.gh["repos/org/repo/actions/runs/100/jobs?filter=latest&per_page=100"] = [{"jobs": jobs}]
+        s.gh["repos/org/repo/actions/runs/100/jobs?filter=all&per_page=100"] = [{"jobs": jobs}]
+        s.gh_logs.pop(101, None)
+        s.gha_job(101, None, "The run was canceled by @someone.")
+        s.gha_job(
+            102,
+            "##[error]Process completed with exit code 1.",
+            "Process completed with exit code 1.",
+        )
+        s.gh[NEWER_RUNS] = [{"workflow_runs": [self.newer_run(100)]}]
+
+    @staticmethod
+    def newer_run(run_id: int) -> dict[str, Any]:
+        """Return a run of run 100's workflow for run 100's branch, no older than run 100.
+
+        Args:
+            run_id: a run's id.
+
+        Returns:
+            The run, as a dict as for the GitHub API's JSON.
+        """
+        return {
+            "id": run_id,
+            "workflow_id": 7,
+            "event": "pull_request",
+            "head_sha": "abc" if run_id == 100 else "def",
+            "created_at": f"2026-11-24T22:40:{run_id - 97:02}Z",
+            "head_branch": "feature",
+            "head_repository": {"full_name": "me/repo"},
+            "html_url": f"https://github.com/org/repo/actions/runs/{run_id}",
+        }
+
+    def test_user_cancelled_unreadable_annotations(self) -> None:
+        """If a cancelled job's annotations cannot be read, a newer run prevents a rerun."""
+        s = self.server
+        self.user_cancelled_run()
+        del s.gh["repos/org/repo/check-runs/101/annotations?per_page=100"]
+        output = self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
+        self.assertIn("canary: cancelled", output)
+        # The concurrency group might have cancelled the run in favor of a newer run.
+        s.gh[NEWER_RUNS][0]["workflow_runs"].append(self.newer_run(103))
+        output = self.assert_reruns([], self.RUN)
+        self.assertIn(
+            "Its concurrency group might have cancelled it in favor of a newer run, because the"
+            " annotations of a cancelled job cannot be read:"
+            " https://github.com/org/repo/actions/runs/103",
+            output,
+        )
+        self.assertIn("canary: cancelled, not rerun", output)
+        del s.gh[NEWER_RUNS]
+        output = self.assert_reruns([], self.RUN, status=1)
+        self.assertIn("cannot read the newer runs", output)
+
+    def test_user_cancelled_at_limit(self) -> None:
+        """A job that started after a cancellation is not rerun if a failed job is at the limit.
+
+        Rerunning such a job reruns every failed job, including the one at the limit.
+        """
+        s = self.server
+        flaky = {
+            "id": 104,
+            "name": "flaky",
+            "conclusion": "failure",
+            "started_at": "2026-11-26T21:16:24Z",
+            "completed_at": "2026-11-26T21:20:00Z",
+        }
+        self.user_cancelled_run(flaky)
+        s.gha_job(104, "Connection reset")
+        # An earlier attempt ran job flaky too.
+        s.gh["repos/org/repo/actions/runs/100/jobs?filter=all&per_page=100"].append(
+            {"jobs": [{**flaky, "id": 4, "started_at": "2026-11-26T20:00:00Z"}]}
+        )
+        output = self.assert_reruns(
+            ["gh run rerun --repo org/repo --job 101"], "--max-attempts", "2", self.RUN
+        )
+        for message in [
+            "Not rerunning flaky:  it has already been run 2 times.",
+            (
+                "Not rerunning job all_green:  only rerunning every failed job would rerun the"
+                " cancelled jobs that it needs, and flaky has already been run the maximum"
+                " number of times."
+            ),
+        ]:
+            self.assertIn(message, output)
+
+    def test_timed_out(self) -> None:
+        """A job that ran longer than its time limit is examined like a failed job."""
+        s = self.server
+        s.gha_run("completed", "failure", [(101, "a", "failure"), (103, "c", "cancelled")])
+        s.gh_logs.pop(103)
+        s.gha_job(103, None, GHA_TIMEOUT)
+        output = self.assert_reruns(["gh run rerun --repo org/repo --job 101"], self.RUN)
+        self.assertIn("c: timed out, not transient", output)
+        # It is not a cancellation, so it keeps another cancelled job from being rerun.
+        s.gha_run(
+            "completed",
+            "failure",
+            [(102, "b", "cancelled"), (103, "c", "cancelled")],
+        )
+        s.gha_job(102, None, "The operation was canceled.")
+        output = self.assert_reruns([], self.RUN)
+        self.assertIn("Not rerunning the cancelled jobs:  c did not fail transiently.", output)
 
     def test_concurrency_cancelled(self) -> None:
         """A run that its concurrency group cancelled is rerun, unless a newer run exists."""

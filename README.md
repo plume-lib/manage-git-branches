@@ -345,7 +345,7 @@ The commands are:
 * [`fix-renovate-prs`](fix-renovate-prs) `[--dry-run] [-C DIR]`:
   For each open pull request that Renovate opened and whose CI fails, in a
   repository that a working copy directory is a clone of, runs
-  `rerun-failed-ci` and then, unless that reran a transient failure, runs
+  `rerun-failed-ci` and then, unless that reran a job, runs
   Claude Code (with every permission) in the directory of the pull
   request's branch, which it makes with `git-checkout-branch --no-pull` if no
   working copy directory has that branch.  Claude either commits a fix, which this

@@ -56,29 +56,38 @@ A cancelled job is rerun like a job that failed transiently, whoever cancelled i
 user, the CI service (as when a GitHub Actions runner shuts down), or the failure of
 another job.  So is a GitHub Actions job of a cancelled workflow run that started after
 the cancellation, such as a job that runs `if: always()` and fails because the jobs that
-it needs were cancelled.  There are two exceptions.  First, such jobs are not rerun if
-another examined job of their build, workflow, or workflow run did not fail
-transiently, because the code needs a change anyway.  (A job whose log cannot be read
-is not known to have failed transiently or not.)  Second, a GitHub Actions workflow run
-that its concurrency group cancelled in favor of a waiting request, as an annotation of
-a job such as "Canceling since a higher priority waiting request for CI-8598 exists"
-shows, is rerun only if the repository has no newer workflow run for the same branch,
-so that the waiting request never became a run and the branch was left with no CI
-result.  (A run of another workflow for the same commit is not considered newer.)
+it needs were cancelled.  There are three exceptions.  First, a job that Azure Pipelines
+or GitHub Actions cancelled because it ran longer than its time limit is examined like a
+failed job, because the hang is usually a problem with the code.  Second, the jobs
+above are not rerun if another examined job of their build, workflow, or workflow run did not fail
+transiently, because the code needs a change anyway.  (A job whose log cannot be read is
+not known to have failed transiently or not.)  Third, a GitHub Actions workflow run that
+its concurrency group cancelled in favor of a waiting request, as an annotation of a job
+such as "Canceling since a higher priority waiting request for CI-8598 exists" shows, is
+rerun only if the repository has no newer workflow run for the same branch, so that the
+waiting request never became a run and the branch was left with no CI result.  (A run of
+another workflow for the same commit is not considered newer.)  The same holds for a
+cancelled workflow run if the annotations of one of its cancelled jobs cannot be read,
+because its concurrency group might have cancelled it.
 
 For each build (Azure Pipelines), workflow (CircleCI), or workflow run (GitHub
-Actions) that has a job that failed transiently, this command reruns:
- * every failed job, if every failed job failed transiently, or
- * otherwise, only the jobs that failed transiently.  Azure Pipelines reruns only all
-   the failed jobs of a stage together, so this command reruns a stage only if every
-   failed job of the stage failed transiently, and it reruns only one stage at a time.
+Actions) that has a job to rerun (one that failed transiently or was cancelled), this
+command reruns:
+ * every failed or cancelled job, if every such job is one to rerun, or
+ * otherwise, only the jobs to rerun.  Azure Pipelines reruns only all the failed and
+   cancelled jobs of a stage together, so this command reruns a stage only if every
+   failed or cancelled job of the stage is one to rerun, and it reruns only one stage
+   at a time.
    GitHub Actions does not permit a job to be rerun while its workflow run is in
    progress, so this command reruns only one of them; run this command again after
    the workflow run completes.
 Rerunning a job also reruns the jobs that depend on it.  A GitHub Actions job that
 failed transiently because it started after its run was cancelled failed because the
 jobs that it needs were cancelled, and rerunning a job does not rerun the jobs that it
-needs, so for such a job this command reruns every failed job of its run.
+needs, so for such a job this command reruns every failed job of its run.  If some
+failed job of the run has already been run the maximum number of times (see
+`--max-attempts`), then this command does not rerun such a job, because rerunning every
+failed job would rerun that one too.
 
 This command does nothing to a build, workflow, or workflow run that is still in
 progress or that has been rerun since the failure.  It also does not rerun an Azure
@@ -110,6 +119,7 @@ project's jobs does not require credentials.
 from __future__ import annotations
 
 import argparse
+import enum
 import functools
 import json
 import operator
@@ -279,8 +289,16 @@ CIRCLECI_CANCELLED = "canceled"
 GITHUB_FAILED = ("failure", "timed_out")
 # The conclusion of a cancelled GitHub Actions job, such as one whose runner shut down.
 GITHUB_CANCELLED = "cancelled"
+
+
+class Cancelled(enum.Enum):
+    """The type of CANCELLED, which is distinct from str so that no log line equals it."""
+
+    CANCELLED = "cancelled"
+
+
 # The reason to rerun a cancelled job that did not fail transiently.
-CANCELLED = "cancelled"
+CANCELLED = Cancelled.CANCELLED
 # The `gh pr checks` buckets of a check that failed or was cancelled.
 PR_CHECK_FAILED = ("fail", "cancel")
 # Matches the failure annotation of a GitHub Actions job whose workflow run its
@@ -288,6 +306,14 @@ PR_CHECK_FAILED = ("fail", "cancel")
 # higher priority waiting request for CI-8598 exists", in which "CI-8598" is the group.
 GHA_CONCURRENCY_CANCEL_RE = re.compile(
     r"Canceling since a higher priority waiting request for .* exists"
+)
+# Matches the error that Azure Pipelines or GitHub Actions reports for a job that ran
+# longer than its time limit, which the CI service reports as cancelled, such as "The
+# job running on agent Azure Pipelines 3 ran longer than the maximum time of 60 minutes."
+# (Azure Pipelines) or "The job running on runner GitHub Actions 2 has exceeded the
+# maximum execution time of 360 minutes." (GitHub Actions).
+JOB_TIMEOUT_RE = re.compile(
+    r"ran longer than the maximum time of|has exceeded the maximum execution time of"
 )
 
 
@@ -497,17 +523,19 @@ def transient_reason(log: str) -> str | None:
     return slow_typechecking_reason(last_run) or gradlew_retry_reason(lines, last_run)
 
 
-def rerun_label(reason: str) -> str:
-    """Return the description of a job to rerun, which follows its name and a colon.
+def rerun_label(reason: str | Cancelled) -> str:
+    """Return the text that describes the given reason to rerun a job.
+
+    The text is printed after the job's name and a colon.
 
     Args:
-        reason: why the job is to be rerun:  CANCELLED, or a description of its transient
-            failure, such as a line of its log.
+        reason: a reason to rerun a job:  CANCELLED, or a description of the job's
+            transient failure, such as a line of its log.
 
     Returns:
-        The description, such as "cancelled" or "transient: Connection reset".
+        The text, such as "cancelled" or "transient: Connection reset".
     """
-    return reason if reason == CANCELLED else f"transient: {reason}"
+    return "cancelled" if reason is CANCELLED else f"transient: {reason}"
 
 
 def classify(files: list[str]) -> int:
@@ -544,7 +572,7 @@ def classify(files: list[str]) -> int:
 
 
 class Rerunner:
-    """Reruns the transiently failed jobs of CI builds.
+    """Reruns the transiently failed or cancelled jobs of CI builds.
 
     A Rerunner represents one invocation of this command:  the command-line options,
     the builds that the invocation has examined so far, and the exit status so far.
@@ -614,7 +642,7 @@ class Rerunner:
     ###
 
     def azure_rerun_failed(self, org: str, project: str, build: int) -> None:
-        """Rerun the failed jobs of the given Azure Pipelines build that failed transiently.
+        """Rerun the transiently failed or cancelled jobs of the given Azure Pipelines build.
 
         Args:
             org: an Azure DevOps organization.
@@ -665,14 +693,18 @@ class Rerunner:
             stage_attempts[name] = max(
                 stage_attempts.get(name, 0), stage.get("attempt") or job.get("attempt") or 1
             )
-            if job["result"] == AZURE_CANCELLED:
-                log, reason = JobLog("", read=True), CANCELLED
+            log = azure_job_log(api, job, records)
+            reason: str | Cancelled | None
+            if job["result"] == AZURE_CANCELLED and not JOB_TIMEOUT_RE.search(log.text):
+                # A cancelled job's log need not be readable.
+                reason = CANCELLED
             else:
-                log = azure_job_log(api, job, records)
+                # A job that ran longer than its time limit is examined like a failed one,
+                # because the hang is usually a problem with the code.
                 reason = transient_reason(log.text)
             if reason is not None:
                 print(f"  {job['name']}: {rerun_label(reason)}")
-                result = "cancelled" if reason == CANCELLED else "transient"
+                result = "cancelled" if reason is CANCELLED else "transient"
             elif log.read:
                 print(f"  {job['name']}: not transient")
                 result = "not transient"
@@ -748,7 +780,7 @@ class Rerunner:
             )
 
     def azure_rerun_failed_url(self, url: str) -> None:
-        """Rerun the transiently failed jobs of the Azure Pipelines build that url names.
+        """Rerun the transiently failed or cancelled jobs of the Azure build that url names.
 
         Args:
             url: a URL of an Azure Pipelines build, or of one of its jobs.
@@ -765,7 +797,7 @@ class Rerunner:
     ###
 
     def circleci_rerun_failed(self, workflow: str, only_job: int | None = None) -> None:
-        """Rerun the transiently failed jobs of the given CircleCI workflow, or only the given one.
+        """Rerun the given CircleCI workflow's transiently failed or cancelled jobs, or only one.
 
         Args:
             workflow: a workflow's id, a UUID such as "ecc46ce8-..." in
@@ -875,7 +907,7 @@ class Rerunner:
         if all_transient and only_job is None:
             body, what = {"from_failed": True}, "the failed jobs"
         else:
-            body, what = {"jobs": rerun_ids}, "the transiently failed jobs"
+            body, what = {"jobs": rerun_ids}, "the transiently failed or cancelled jobs"
 
         def rerunning() -> str | None:
             result = request_util.request_object(
@@ -891,7 +923,7 @@ class Rerunner:
             self.warn(f"cannot rerun CircleCI workflow {workflow}: {request_util.failure(e)}{hint}")
 
     def circleci_rerun_failed_url(self, url: str, whole_workflow: bool = False) -> None:
-        """Rerun the transiently failed jobs that the given CircleCI URL names.
+        """Rerun the transiently failed or cancelled jobs that the given CircleCI URL names.
 
         Args:
             url: a URL of a CircleCI workflow, or of a job.
@@ -917,7 +949,7 @@ class Rerunner:
     ###
 
     def gha_rerun_failed(self, repo: str, run: int, only_job: int | None = None) -> None:
-        """Rerun the transiently failed jobs of the given GitHub Actions run, or only the given one.
+        """Rerun the given GitHub Actions run's transiently failed or cancelled jobs, or only one.
 
         Args:
             repo: a repository's GitHub slug, such as "ORG/REPO".
@@ -1009,11 +1041,20 @@ class Rerunner:
         real_failure = None
         # The first job to rerun that failed because the jobs that it needs were cancelled.
         needs_cancelled = None
+        # The ids of the jobs to rerun that failed because the jobs that they need were
+        # cancelled.
+        started_after_ids = set()
+        # The name of the first failed job that is not rerun because it has already been
+        # run the maximum number of times, or None if there is none.
+        at_limit = None
         for job in failed_jobs:
             log = gha_job_log(repo, job["id"], job_annotations(job["id"]))
-            reason = transient_reason(log.text)
+            reason: str | Cancelled | None = transient_reason(log.text)
             started_after = False
-            if reason is None and job["conclusion"] == GITHUB_CANCELLED:
+            # A job that ran longer than its time limit is examined like a failed one,
+            # because the hang is usually a problem with the code.
+            timed_out = job["conclusion"] == GITHUB_CANCELLED and JOB_TIMEOUT_RE.search(log.text)
+            if reason is None and job["conclusion"] == GITHUB_CANCELLED and not timed_out:
                 reason = cancellation()
                 cancelled_ids.add(job["id"])
             elif (
@@ -1025,18 +1066,19 @@ class Rerunner:
                 why = cancellation()
                 if why is not None:
                     reason = "started after the run was cancelled"
-                    if why != CANCELLED:
+                    if why is not CANCELLED:
                         reason += f": {why}"
                     started_after = True
                     cancelled_ids.add(job["id"])
             if reason is None:
-                if job["conclusion"] == GITHUB_CANCELLED:
+                if job["conclusion"] == GITHUB_CANCELLED and not timed_out:
                     # A cancelled job has no failed steps, so the only part of its log
                     # is its failure annotations, and an empty log is not a problem.
                     print(f"  {job['name']}: cancelled, not rerun")
                     continue
-                if log.read:
-                    print(f"  {job['name']}: not transient")
+                # The annotation that shows that a job timed out is a readable log.
+                if log.read or timed_out:
+                    print(f"  {job['name']}: {'timed out, ' if timed_out else ''}not transient")
                     real_failure = real_failure or job["name"]
                 else:
                     self.warn(
@@ -1050,14 +1092,25 @@ class Rerunner:
             if attempts >= self.max_attempts:
                 print(f"  Not rerunning {job['name']}:  it has already been run {attempts} times.")
                 all_transient = False
+                at_limit = at_limit or job["name"]
                 continue
             rerun_ids.append(job["id"])
-            if started_after and needs_cancelled is None:
-                needs_cancelled = job["name"]
+            if started_after:
+                started_after_ids.add(job["id"])
+                needs_cancelled = needs_cancelled or job["name"]
 
         if real_failure is not None and cancelled_ids & set(rerun_ids):
             print(f"  Not rerunning the cancelled jobs:  {real_failure} did not fail transiently.")
             rerun_ids = [i for i in rerun_ids if i not in cancelled_ids]
+            needs_cancelled = None
+        if needs_cancelled is not None and at_limit is not None:
+            # Rerunning the failed jobs would rerun job at_limit too.
+            print(
+                f"  Not rerunning job {needs_cancelled}:  only rerunning every failed job would"
+                f" rerun the cancelled jobs that it needs, and {at_limit} has already been run"
+                " the maximum number of times."
+            )
+            rerun_ids = [i for i in rerun_ids if i not in started_after_ids]
             needs_cancelled = None
         if not rerun_ids:
             return
@@ -1072,7 +1125,10 @@ class Rerunner:
         else:
             args, what = ["--job", str(rerun_ids[0])], f"job {rerun_ids[0]}"
             if len(rerun_ids) > 1:
-                what += " (rerun the other transiently failed jobs after the workflow run finishes)"
+                what += (
+                    " (rerun the other transiently failed or cancelled jobs after the workflow"
+                    " run finishes)"
+                )
 
         def rerunning() -> None:
             request_util.run(["gh", "run", "rerun", "--repo", repo, *args])
@@ -1088,12 +1144,14 @@ class Rerunner:
         run_json: dict[str, Any],
         jobs: list[dict[str, Any]],
         annotations_of: Callable[[int], list[str] | None],
-    ) -> str | None:
+    ) -> str | Cancelled | None:
         """Return why the cancelled jobs of the given run are to be rerun.
 
         They are not rerun if the run's concurrency group cancelled the run in favor of a
         waiting request and gha_newer_run finds a newer run, so that the waiting request
-        became that run.
+        became that run.  If the annotations of some cancelled job cannot be read, then
+        the concurrency group might have cancelled the run, so they are not rerun if
+        gha_newer_run finds a newer run.
 
         Args:
             repo: a repository's GitHub slug, such as "ORG/REPO".
@@ -1108,22 +1166,23 @@ class Rerunner:
             The failure annotation of a cancelled job of the run that shows that the
             run's concurrency group cancelled it, such as "Canceling since a higher
             priority waiting request for CI-8598 exists", if gha_newer_run finds no
-            newer run; CANCELLED if the concurrency group did not cancel the run; or None
-            if gha_newer_run finds a newer run, or the newer runs cannot be read.
+            newer run; CANCELLED if no such annotation exists and gha_newer_run is not
+            needed or finds no newer run; or None if gha_newer_run is needed and finds a
+            newer run, or the newer runs cannot be read.
         """
         if run_json["conclusion"] != GITHUB_CANCELLED:
             return CANCELLED
-        cancelled = [j for j in jobs if j["conclusion"] == GITHUB_CANCELLED]
+        annotations = [annotations_of(j["id"]) for j in jobs if j["conclusion"] == GITHUB_CANCELLED]
         reason = next(
             (
                 a
-                for j in cancelled
-                for a in annotations_of(j["id"]) or []
+                for a_list in annotations
+                for a in a_list or []
                 if GHA_CONCURRENCY_CANCEL_RE.search(a)
             ),
             None,
         )
-        if reason is None:
+        if reason is None and None not in annotations:
             return CANCELLED
         try:
             newer = gha_newer_run(repo, run_json)
@@ -1134,12 +1193,18 @@ class Rerunner:
             )
             return None
         if newer is not None:
-            print(f"  Its concurrency group cancelled it in favor of a newer run: {newer}")
+            if reason is None:
+                print(
+                    "  Its concurrency group might have cancelled it in favor of a newer run,"
+                    f" because the annotations of a cancelled job cannot be read: {newer}"
+                )
+            else:
+                print(f"  Its concurrency group cancelled it in favor of a newer run: {newer}")
             return None
-        return reason
+        return reason or CANCELLED
 
     def gha_rerun_failed_url(self, url: str, whole_run: bool = False) -> None:
-        """Rerun the transiently failed jobs that the given GitHub Actions URL names.
+        """Rerun the transiently failed or cancelled jobs that the given GitHub Actions URL names.
 
         Args:
             url: a URL of a GitHub Actions workflow run, or of a job.
@@ -1160,7 +1225,7 @@ class Rerunner:
     ###
 
     def url_rerun_failed(self, url: str, whole_workflow: bool = False) -> bool:
-        """Rerun the transiently failed jobs that the given CI URL names.
+        """Rerun the transiently failed or cancelled jobs that the given CI URL names.
 
         Args:
             url: a URL of a build, workflow, workflow run, or job.
@@ -1181,7 +1246,7 @@ class Rerunner:
         return True
 
     def pr_rerun_failed(self, pr: str | None = None) -> None:
-        """Rerun the transiently failed checks of the given pull request.
+        """Rerun the transiently failed or cancelled jobs of the given pull request's checks.
 
         Args:
             pr: a pull request (a number, URL, or branch), or None for the pull request

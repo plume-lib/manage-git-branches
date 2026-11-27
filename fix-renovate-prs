@@ -45,8 +45,9 @@
 #
 # For each failing pull request, this command:
 #  1. Runs `rerun-failed-ci` on it, which reruns the CI jobs whose failure
-#     appears to be transient, such as a network error.  If it reran a job,
-#     or if the CI is no longer failing afterward, the pull request is
+#     appears to be transient, such as a network error, and the cancelled CI
+#     jobs (unless another job failed for some other reason).  If it reran a
+#     job, or if the CI is no longer failing afterward, the pull request is
 #     skipped; run this command again after the checks finish.
 #  2. Finds or makes the directory for the pull request's branch.  That is a
 #     working copy directory whose branch `git push` pushes to the pull
@@ -556,7 +557,7 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     continue
   fi
 
-  # Rerun the transient failures.  GitHub might not show a rerun job as
+  # Rerun the transient failures and the cancelled jobs.  GitHub might not show a rerun job as
   # running until some time after the rerun, so skip the pull request if a
   # job was rerun, whatever its checks say.  Then skip it if its CI is
   # running, as it might be after a rerun by someone else.
@@ -564,7 +565,7 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
   case "$?" in
     0) ;;
     3)
-      echo "${SCRIPT_NAME}: skipping ${url}, whose transient CI failures were rerun"
+      echo "${SCRIPT_NAME}: skipping ${url}, whose transiently failed or cancelled CI jobs were rerun"
       case "${dir_state}" in
         usable) note="" ;;
         blocked) note=" (exists, but does not push to the pull request's branch)" ;;
@@ -782,7 +783,7 @@ if [ "${count}" -eq 0 ] && [ -z "${problems}" ]; then
   echo "${SCRIPT_NAME}: found no failing Renovate pull requests"
 fi
 if [ -n "${reran}" ]; then
-  echo "Reran transient CI failures; run ${SCRIPT_NAME} again after CI finishes:"
+  echo "Reran transiently failed or cancelled CI jobs; run ${SCRIPT_NAME} again after CI finishes:"
   printf '%s' "${reran}"
 fi
 if [ -n "${problems}" ]; then
