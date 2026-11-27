@@ -271,15 +271,31 @@ COULD_NOT_RESOLVE_RE = re.compile(r"Could not resolve all ")
 MAVEN_BUILD_FAILURE_RE = re.compile(r"\s*\[INFO\] BUILD FAILURE\s*$")
 # Matches the line in which Maven reports that a run succeeded, "[INFO] BUILD SUCCESS".
 MAVEN_BUILD_SUCCESS_RE = re.compile(r"\s*\[INFO\] BUILD SUCCESS\s*$")
+# Matches the line with which Maven starts a run, "[INFO] Scanning for projects...".
+# Maven does not print it if it is run with the "-q" option.
+MAVEN_RUN_START_RE = re.compile(r"\s*\[INFO\] Scanning for projects\.\.\.\s*$")
 # Matches a line in which Maven describes a failure, such as "[ERROR] Plugin
 # org.apache.maven.plugins:maven-clean-plugin:3.4.0 or one of its dependencies could not
 # be resolved:".  Group 1 is the description, which can be empty, as in "[ERROR] ".
 MAVEN_ERROR_RE = re.compile(r"\s*\[ERROR\](.*)")
 # Matches the reference to the help that ends Maven's description of a failure, as in
 # "[ERROR] -> [Help 1]" or "[ERROR] ... in central (https://repo.maven.apache.org/maven2)
-# -> [Help 1]".  The lines after it give general advice, such as "[ERROR] To see the full
-# stack trace of the errors, re-run Maven with the '-e' switch".
+# -> [Help 1]".  Maven describes each failure of a run, such as each failure of a run with
+# the "-fae" option, and ends each description with its own reference.
 MAVEN_HELP_RE = re.compile(r"\s*-> \[Help \d+\]")
+# Matches the general advice that Maven gives after it describes the failures of a run,
+# without the "[ERROR]" prefix and leading whitespace, such as "To see the full stack trace
+# of the errors, re-run Maven with the '-e' switch", "[Help 1]
+# http://cwiki.apache.org/confluence/display/MAVEN/PluginResolutionException", or
+# "mvn <args> -rf :app".
+MAVEN_ADVICE_RE = re.compile(
+    r"To see the full stack trace of the errors, re-run Maven with "
+    r"|Re-run Maven using the "
+    r"|For more information about the errors and possible solutions, "
+    r"|\[Help \d+\] https?://"
+    r"|After correcting the problems, you can resume the build with the command"
+    r"|mvn .* -rf :"
+)
 # Matches Maven's description of a failure to find some artifacts, such as "Plugin
 # org.apache.maven.plugins:maven-clean-plugin:3.4.0 or one of its dependencies could not
 # be resolved:" or "Failed to execute goal on project app: Could not resolve dependencies
@@ -288,6 +304,20 @@ MAVEN_UNRESOLVED_RE = re.compile(
     r"Plugin \S+ or one of its dependencies could not be resolved"
     r"|Could not resolve dependencies for project "
 )
+# Matches Maven's list of the artifacts that one request did not resolve, such as "The
+# following artifacts could not be resolved: com.example:foo:jar:1.0 (absent),
+# com.example:bar:jar:1.0 (absent)".  Group "artifacts" is the list, such as
+# "com.example:foo:jar:1.0 (absent), com.example:bar:jar:1.0 (absent)".  Maven follows the
+# list with the reason for only the first artifact in it, such as ": Could not find
+# artifact com.example:foo:jar:1.0 in central (https://repo.maven.apache.org/maven2)".
+MAVEN_UNRESOLVED_LIST_RE = re.compile(
+    r"The following artifacts could not be resolved: "
+    r"(?P<artifacts>\S+?(?: \([^)]*\))?(?:, \S+?(?: \([^)]*\))?)*)(?=: |:?$)"
+)
+# Matches an element of a list that MAVEN_UNRESOLVED_LIST_RE matches, such as
+# "com.example:foo:jar:1.0 (absent)" or "com.example:foo:jar:1.0".  Group "artifact" is the
+# artifact's coordinates, such as "com.example:foo:jar:1.0".
+MAVEN_LISTED_ARTIFACT_RE = re.compile(r"(?P<artifact>[^\s,]+?)(?: \([^)]*\))?(?:, |$)")
 # Matches Maven's report of a request for an artifact that failed for a reason other than
 # that the repository does not hold it, such as "Could not transfer artifact
 # com.example:foo:jar:1.0 from/to private (https://repo.example.com/maven2): status code:
@@ -707,7 +737,7 @@ def maven_artifact_url(artifact: str, repository: str) -> str | None:
 
 
 def maven_missing_artifacts_reason(lines: list[str]) -> str | None:
-    """Return a line that shows that the artifacts that Maven did not find exist.
+    """Return the line that shows that the artifacts that Maven did not find exist.
 
     The result shows a transient failure only if the last run of Maven in the given lines
     failed, and Maven described only failures to find artifacts, and for each such
@@ -717,15 +747,20 @@ def maven_missing_artifacts_reason(lines: list[str]) -> str | None:
     record expires, a later run of Maven reports that the artifact "was not found ...
     during a previous attempt" without requesting it again.
 
-    The last run of Maven failed if a line that matches MAVEN_BUILD_FAILURE_RE is not
-    followed by one that matches MAVEN_BUILD_SUCCESS_RE.  Maven describes the failure in
-    the lines that follow it and that match MAVEN_ERROR_RE, up to the first line that
-    matches MAVEN_HELP_RE.  Each nonempty description must match MAVEN_UNRESOLVED_RE or
-    one of MAVEN_NOT_FOUND_RES, and at least one must match one of MAVEN_NOT_FOUND_RES.
-    A description that matches MAVEN_TRANSFER_FAILED_RE prevents a transient failure, even
-    if it also matches MAVEN_UNRESOLVED_RE.  So another failure, such as a compilation
-    error or a 401 (Unauthorized) status from a repository, prevents a transient failure.
-    A failure outside Maven, such as a failure of a later step of the CI job, is not
+    The last run of Maven failed if a line that matches MAVEN_BUILD_FAILURE_RE is followed
+    by no line that matches MAVEN_BUILD_SUCCESS_RE or MAVEN_RUN_START_RE.  Maven describes
+    the failures in the lines that follow it and that match MAVEN_ERROR_RE, other than
+    those that MAVEN_ADVICE_RE matches.  Each nonempty description must match
+    MAVEN_UNRESOLVED_RE or one of MAVEN_NOT_FOUND_RES, and at least one must match one of
+    MAVEN_NOT_FOUND_RES.  A description that matches MAVEN_TRANSFER_FAILED_RE prevents a
+    transient failure, even if it also matches MAVEN_UNRESOLVED_RE.  A description that
+    lists artifacts (MAVEN_UNRESOLVED_LIST_RE) must also match one of MAVEN_NOT_FOUND_RES,
+    and each listed artifact must be served now by the repository that that match names,
+    because Maven gives the reason for only the first listed artifact but searched the same
+    repositories for each.  So another failure, such as a compilation error, a 401
+    (Unauthorized) status from a repository, or a failure of a later run of Maven with the
+    "-q" option, prevents a transient failure.  A failure that prints no line that
+    MAVEN_ERROR_RE matches, such as a failure of a later step of the CI job, is not
     detected.  Only a file that PROBED_LOCATION_RE matches is requested, so an artifact in
     a repository that is not public prevents a transient failure.
 
@@ -741,29 +776,46 @@ def maven_missing_artifacts_reason(lines: list[str]) -> str | None:
     last_failure = max(
         (i for i, line in enumerate(lines) if MAVEN_BUILD_FAILURE_RE.match(line)), default=None
     )
-    if last_failure is None or any(
-        MAVEN_BUILD_SUCCESS_RE.match(line) for line in lines[last_failure + 1 :]
+    if last_failure is None:
+        return None
+    after_failure = lines[last_failure + 1 :]
+    if any(
+        MAVEN_BUILD_SUCCESS_RE.match(line) or MAVEN_RUN_START_RE.match(line)
+        for line in after_failure
     ):
         return None
     urls: list[str] = []
-    for line in lines[last_failure + 1 :]:
+    for line in after_failure:
         error = MAVEN_ERROR_RE.match(line)
         if not error:
             continue
         description = MAVEN_HELP_RE.sub("", error[1]).strip()
-        found = [match for regex in MAVEN_NOT_FOUND_RES for match in regex.finditer(description)]
-        if MAVEN_TRANSFER_FAILED_RE.search(description) or (
-            description and not found and not MAVEN_UNRESOLVED_RE.search(description)
+        if not description or MAVEN_ADVICE_RE.match(description):
+            continue
+        # Pairs of an artifact's coordinates and the URL of a repository that did not serve it.
+        missing = [
+            (match["artifact"], match["repository"])
+            for regex in MAVEN_NOT_FOUND_RES
+            for match in regex.finditer(description)
+        ]
+        listed = [
+            match["artifact"]
+            for artifacts in MAVEN_UNRESOLVED_LIST_RE.finditer(description)
+            for match in MAVEN_LISTED_ARTIFACT_RE.finditer(artifacts["artifacts"])
+        ]
+        if (
+            MAVEN_TRANSFER_FAILED_RE.search(description)
+            or (listed and not missing)
+            or (not missing and not MAVEN_UNRESOLVED_RE.search(description))
         ):
             return None
-        for match in found:
-            url = maven_artifact_url(match["artifact"], match["repository"])
+        missing += [(artifact, missing[0][1]) for artifact in listed]
+        for artifact, repository in missing:
+            url = maven_artifact_url(artifact, repository)
             if url is None or not PROBED_LOCATION_RE.fullmatch(url):
                 return None
             if url not in urls:
                 urls.append(url)
-        if MAVEN_HELP_RE.search(error[1]):
-            break
     if not urls or not all(serves_file(url) for url in urls):
         return None
     return f"{urls[0]} exists now."[:200]

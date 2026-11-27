@@ -1037,10 +1037,16 @@ class ClassifyTest(unittest.TestCase):
             "[ERROR] \n"
             "[ERROR] Re-run Maven using the '-X' switch to enable verbose output"
         )
+        # Maven gives the reason for only the first artifact that it lists.
         foo_bar_not_found = foo_not_found.replace(
-            " -> [Help 1]",
-            ", Could not find artifact com.example:bar:jar:1.0 in central"
-            " (https://repo.maven.apache.org/maven2) -> [Help 1]",
+            "com.example:foo:jar:1.0 (absent):",
+            "com.example:foo:jar:1.0 (absent), com.example:bar:jar:1.0 (absent):",
+        )
+        # A failure that is not about a missing artifact.
+        compilation_failure = (
+            "[ERROR] Failed to execute goal"
+            " org.apache.maven.plugins:maven-compiler-plugin:3.13.0:compile (default-compile)"
+            " on project b: Compilation failure -> [Help 2]"
         )
         for log, existing, expected in [
             # Maven Central serves a plugin now that Maven did not find.
@@ -1063,8 +1069,48 @@ class ClassifyTest(unittest.TestCase):
             ),
             # Maven Central serves both artifacts that Maven did not find.
             (foo_bar_not_found, (foo_jar, bar_jar), (0, f"{foo_jar} exists now.")),
-            # Maven Central serves only one of two artifacts that Maven did not find.
+            # Maven Central serves only the first of two artifacts that Maven did not find.
             (foo_bar_not_found, (foo_jar,), (1, "")),
+            # Maven Central serves only the second of two artifacts that Maven did not find.
+            (foo_bar_not_found, (bar_jar,), (1, "")),
+            # Maven listed artifacts that it did not find, without a reason that names a
+            # repository.
+            (
+                foo_not_found.replace(
+                    "Could not find artifact com.example:foo:jar:1.0 in central",
+                    "Failure to find com.example:foo:jar:1.0 in",
+                ),
+                (foo_jar,),
+                (1, ""),
+            ),
+            # A run with the "-fae" option also failed to compile another module.
+            (
+                foo_not_found.replace("[ERROR] \n", f"{compilation_failure}\n[ERROR] \n", 1),
+                (foo_jar,),
+                (1, ""),
+            ),
+            # A later run of Maven, with the "-q" option, failed tests.
+            (
+                (
+                    f"{CLEAN_PLUGIN_NOT_FOUND}\n"
+                    "[ERROR] Failed to execute goal"
+                    " org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test)"
+                    " on project app: There are test failures."
+                ),
+                (CLEAN_PLUGIN_JAR,),
+                (1, ""),
+            ),
+            # A later run of Maven was killed before it reported a result.
+            (
+                (
+                    f"{CLEAN_PLUGIN_NOT_FOUND}\n"
+                    "[INFO] Scanning for projects...\n"
+                    "[INFO] Building app 1.0\n"
+                    "Error: The operation was canceled."
+                ),
+                (CLEAN_PLUGIN_JAR,),
+                (1, ""),
+            ),
             # A later run of Maven succeeded, so some other command failed.
             (
                 f"{CLEAN_PLUGIN_NOT_FOUND}\n[INFO] BUILD SUCCESS\nlint: 3 problems",
@@ -1113,7 +1159,8 @@ class ClassifyTest(unittest.TestCase):
                 (
                     f"{CLEAN_PLUGIN_NOT_FOUND}\n"
                     "[ERROR] After correcting the problems, you can resume the build with the"
-                    " command"
+                    " command\n"
+                    "[ERROR]   mvn <args> -rf :app"
                 ),
                 (CLEAN_PLUGIN_JAR,),
                 (0, f"{CLEAN_PLUGIN_JAR} exists now."),
