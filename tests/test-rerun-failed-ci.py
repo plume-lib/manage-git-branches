@@ -891,14 +891,26 @@ class AzureTest(RerunTestCase):
         output = self.assert_reruns([self.RETRY], self.BUILD)
         self.assertIn("b: cancelled", output)
         self.server.azure_timeline(
+            500, ("s1", 1, "a", "failed", "Read timed out"), ("s1", 1, "b", "canceled", None)
+        )
+        self.assert_reruns([self.RETRY], self.BUILD)
+        # A cancelled job is not rerun if some job did not fail transiently.
+        self.server.azure_build(500, "completed", "failed")
+        self.server.azure_timeline(
             500,
             ("s1", 1, "a", "failed", "Test failed"),
             ("s2", 1, "b", "canceled", None),
-            ("s3", 1, "c", "failed", "Test failed"),
-            ("s3", 1, "d", "canceled", None),
+            ("s3", 1, "c", "failed", "Read timed out"),
+            ("s4", 1, "d", "failed", "Read timed out"),
+            ("s4", 1, "e", "canceled", None),
         )
-        output = self.assert_reruns([self.stage_retry("s2")], self.BUILD)
-        self.assertIn("Not rerunning stage s3:  it has a failed job that did not fail", output)
+        output = self.assert_reruns([self.stage_retry("s3")], self.BUILD)
+        for message in [
+            "Not rerunning the cancelled jobs:  some job did not fail transiently.",
+            "Not rerunning stage s4:  it has a cancelled job",
+        ]:
+            self.assertIn(message, output)
+        self.assertNotIn("stage s2", output)
 
     def test_warning_issue(self) -> None:
         """A warning that a task reports does not make a job transient."""
@@ -1006,12 +1018,16 @@ class CircleciTest(RerunTestCase):
             [f'POST {CIRCLECI}/v2/workflow/{uuid(3)}/rerun {{"from_failed": true}}'], url
         )
         self.assertIn("job32: cancelled", output)
-        # A cancelled job is rerun even if another job did not fail transiently.
-        s.circleci_jobs(3, [(31, "failed"), (32, "canceled")])
+        # A cancelled job is not rerun if another job did not fail transiently.
+        s.circleci_jobs(3, [(31, "failed"), (32, "canceled"), (33, "failed")])
         s.circleci_job(31, "Test failed")
-        self.assert_reruns(
-            [f'POST {CIRCLECI}/v2/workflow/{uuid(3)}/rerun {{"jobs": ["id32"]}}'], url
+        s.circleci_job(33, "Connection reset")
+        output = self.assert_reruns(
+            [f'POST {CIRCLECI}/v2/workflow/{uuid(3)}/rerun {{"jobs": ["id33"]}}'], url
         )
+        self.assertIn("Not rerunning the cancelled jobs:  job31 did not fail transiently.", output)
+        s.circleci_jobs(3, [(31, "failed"), (32, "canceled")])
+        self.assert_reruns([], url)
 
     def test_paginated_jobs(self) -> None:
         """The jobs on every page are examined."""
@@ -1121,13 +1137,22 @@ class GithubActionsTest(RerunTestCase):
         self.assert_reruns(["gh run rerun --repo org/repo --job 103"], f"{self.RUN}/job/103")
         s.gha_run("completed", "cancelled", [(103, "c", "cancelled")])
         self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
-        # A cancelled job of a run that failed, such as one that the failure of another
-        # job cancelled.
+        # A cancelled job is not rerun if another job did not fail transiently, as when
+        # the failure of that job cancelled it.
         s.gha_job(101, "Test failed")
-        s.gha_run("completed", "failure", [(101, "a", "failure"), (103, "c", "cancelled")])
-        output = self.assert_reruns(["gh run rerun --repo org/repo --job 103"], self.RUN)
+        s.gha_job(104, "Read timed out")
+        s.gha_run(
+            "completed",
+            "failure",
+            [(101, "a", "failure"), (103, "c", "cancelled"), (104, "d", "failure")],
+        )
+        output = self.assert_reruns(["gh run rerun --repo org/repo --job 104"], self.RUN)
         self.assertIn("a: not transient", output)
-        self.assertIn("c: cancelled", output)
+        self.assertIn("Not rerunning the cancelled jobs:  a did not fail transiently.", output)
+        s.gha_run("completed", "failure", [(101, "a", "failure"), (103, "c", "cancelled")])
+        self.assert_reruns([], self.RUN)
+        # A URL that names the cancelled job examines only that job.
+        self.assert_reruns(["gh run rerun --repo org/repo --job 103"], f"{self.RUN}/job/103")
 
     def test_user_cancelled(self) -> None:
         """A run that a user cancelled is rerun, including the jobs that started after it."""
@@ -1256,20 +1281,23 @@ class GithubActionsTest(RerunTestCase):
         )
         self.assertIn("would not rerun the cancelled jobs that it needs", output)
 
-        # A job that failed before the cancellation did not fail transiently.
+        # A job that failed before the cancellation did not fail transiently, so the
+        # cancelled jobs are not rerun.
         serve(*cancelled, job(104, "d", "failure", "2026-11-24T22:40:04Z"))
         s.gha_job(104, "Test failed")
-        output = self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
+        output = self.assert_reruns([], self.RUN)
         self.assertIn("d: not transient", output)
+        self.assertIn("Not rerunning the cancelled jobs:  d did not fail transiently.", output)
         # A URL that names it does not read the newer runs.
         s.gh_requests.clear()
         self.assert_reruns([], f"{self.RUN}/job/104")
         self.assertNotIn(NEWER_RUNS, s.gh_requests)
 
         # Without the completion times of the cancelled jobs, no job is known to have
-        # started after the cancellation.
+        # started after the cancellation, so job all_green did not fail transiently, and
+        # the cancelled jobs are not rerun.
         serve(*[{**j, "completed_at": None} for j in cancelled])
-        output = self.assert_reruns(["gh run rerun --repo org/repo --job 101"], self.RUN)
+        output = self.assert_reruns([], self.RUN)
         self.assertIn("all_green: not transient", output)
 
         # A newer run for the same branch, of another workflow and for another event,
@@ -1292,12 +1320,11 @@ class GithubActionsTest(RerunTestCase):
         self.assertIn("cannot read the newer runs", output)
 
         # A run that failed, rather than being cancelled, does not read the newer runs.
-        # Its cancelled jobs are rerun, and its job that started after a job was
-        # cancelled did not fail transiently.
+        # Its job that started after a job was cancelled did not fail transiently.
         s.gha_run("completed", "failure", [])
         serve(*cancelled)
         s.gh_requests.clear()
-        output = self.assert_reruns(["gh run rerun --repo org/repo --job 101"], self.RUN)
+        output = self.assert_reruns([], self.RUN)
         self.assertNotIn(NEWER_RUNS, s.gh_requests)
         self.assertIn("all_green: not transient", output)
 

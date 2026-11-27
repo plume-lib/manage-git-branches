@@ -56,12 +56,15 @@ A cancelled job is rerun like a job that failed transiently, whoever cancelled i
 user, the CI service (as when a GitHub Actions runner shuts down), or the failure of
 another job.  So is a GitHub Actions job of a cancelled workflow run that started after
 the cancellation, such as a job that runs `if: always()` and fails because the jobs that
-it needs were cancelled.  The exception is a GitHub Actions workflow run that its
-concurrency group cancelled in favor of a waiting request, as an annotation of a job
-such as "Canceling since a higher priority waiting request for CI-8598 exists" shows.
-Its jobs are rerun only if the repository has no newer workflow run for the same
-branch, so that the waiting request never became a run and the branch was left with no
-CI result.  (A run of another workflow for the same commit is not considered newer.)
+it needs were cancelled.  There are two exceptions.  First, such jobs are not rerun if
+another examined job of their build, workflow, or workflow run did not fail
+transiently, because the code needs a change anyway.  (A job whose log cannot be read
+is not known to have failed transiently or not.)  Second, a GitHub Actions workflow run
+that its concurrency group cancelled in favor of a waiting request, as an annotation of
+a job such as "Canceling since a higher priority waiting request for CI-8598 exists"
+shows, is rerun only if the repository has no newer workflow run for the same branch,
+so that the waiting request never became a run and the branch was left with no CI
+result.  (A run of another workflow for the same commit is not considered newer.)
 
 For each build (Azure Pipelines), workflow (CircleCI), or workflow run (GitHub
 Actions) that has a job that failed transiently, this command reruns:
@@ -646,8 +649,9 @@ class Rerunner:
             )
             return
 
-        # For each stage that has a failed job:  whether each of its failed jobs failed
-        # transiently, could not be read, or did not fail transiently.
+        # For each stage that has a failed or cancelled job:  whether each of its failed
+        # jobs failed transiently, could not be read, or did not fail transiently, and
+        # whether it has a cancelled job.
         stage_results: dict[str, set[str]] = {}
         stage_attempts: dict[str, int] = {}
         by_id = {r["id"]: r for r in records}
@@ -668,7 +672,7 @@ class Rerunner:
                 reason = transient_reason(log.text)
             if reason is not None:
                 print(f"  {job['name']}: {rerun_label(reason)}")
-                result = "transient"
+                result = "cancelled" if reason == CANCELLED else "transient"
             elif log.read:
                 print(f"  {job['name']}: not transient")
                 result = "not transient"
@@ -677,9 +681,15 @@ class Rerunner:
                 result = "unreadable"
             stage_results.setdefault(name, set()).add(result)
 
-        if not any("transient" in results for results in stage_results.values()):
+        # The results of the failed or cancelled jobs whose stage can be rerun.
+        rerunnable = {"transient", "cancelled"}
+        if any("not transient" in results for results in stage_results.values()):
+            rerunnable = {"transient"}
+            if any("cancelled" in results for results in stage_results.values()):
+                print("  Not rerunning the cancelled jobs:  some job did not fail transiently.")
+        if not any(results & rerunnable for results in stage_results.values()):
             return
-        if all(results == {"transient"} for results in stage_results.values()):
+        if all(results <= rerunnable for results in stage_results.values()):
             attempts = max(stage_attempts.values())
             if attempts >= self.max_attempts:
                 print(f"  Not rerunning:  the build has already been run {attempts} times.")
@@ -688,7 +698,7 @@ class Rerunner:
         else:
             stages = []
             for name, results in sorted(stage_results.items()):
-                if "transient" not in results:
+                if not results & rerunnable:
                     continue
                 if "not transient" in results:
                     print(
@@ -701,6 +711,11 @@ class Rerunner:
                         f"  Not rerunning stage {name or 'of the build'}:  it has a failed job"
                         " whose log could not be read, and Azure Pipelines reruns all the"
                         " failed jobs of a stage."
+                    )
+                elif not results <= rerunnable:
+                    print(
+                        f"  Not rerunning stage {name or 'of the build'}:  it has a cancelled"
+                        " job, and Azure Pipelines reruns all the failed jobs of a stage."
                     )
                 elif stage_attempts[name] >= self.max_attempts:
                     print(
@@ -820,8 +835,13 @@ class Rerunner:
 
         rerun_ids = []
         all_transient = True
+        # The ids of the cancelled jobs to rerun.
+        cancelled_ids = set()
+        # The name of the first job that did not fail transiently, or None if there is none.
+        real_failure = None
         for job in failed_jobs:
             if job["status"] == CIRCLECI_CANCELLED:
+                cancelled_ids.add(job["id"])
                 reason = CANCELLED
             elif job["status"] == "infrastructure_fail":
                 reason = "CircleCI infrastructure failure"
@@ -839,10 +859,14 @@ class Rerunner:
                 if reason is None:
                     print(f"  {job['name']}: not transient")
                     all_transient = False
+                    real_failure = real_failure or job["name"]
                     continue
             print(f"  {job['name']}: {rerun_label(reason)}")
             rerun_ids.append(job["id"])
 
+        if real_failure is not None and cancelled_ids:
+            print(f"  Not rerunning the cancelled jobs:  {real_failure} did not fail transiently.")
+            rerun_ids = [i for i in rerun_ids if i not in cancelled_ids]
         if not rerun_ids:
             return
         if attempts >= self.max_attempts:
@@ -978,6 +1002,11 @@ class Rerunner:
 
         rerun_ids = []
         all_transient = True
+        # The ids of the jobs to rerun because they were cancelled, or because they
+        # started after the run was cancelled.
+        cancelled_ids = set()
+        # The name of the first job that did not fail transiently, or None if there is none.
+        real_failure = None
         # The first job to rerun that failed because the jobs that it needs were cancelled.
         needs_cancelled = None
         for job in failed_jobs:
@@ -986,6 +1015,7 @@ class Rerunner:
             started_after = False
             if reason is None and job["conclusion"] == GITHUB_CANCELLED:
                 reason = cancellation()
+                cancelled_ids.add(job["id"])
             elif (
                 reason is None
                 and run_json["conclusion"] == GITHUB_CANCELLED
@@ -998,6 +1028,7 @@ class Rerunner:
                     if why != CANCELLED:
                         reason += f": {why}"
                     started_after = True
+                    cancelled_ids.add(job["id"])
             if reason is None:
                 if job["conclusion"] == GITHUB_CANCELLED:
                     # A cancelled job has no failed steps, so the only part of its log
@@ -1006,6 +1037,7 @@ class Rerunner:
                     continue
                 if log.read:
                     print(f"  {job['name']}: not transient")
+                    real_failure = real_failure or job["name"]
                 else:
                     self.warn(
                         f"cannot read the log of the failed steps of GitHub Actions job"
@@ -1023,6 +1055,10 @@ class Rerunner:
             if started_after and needs_cancelled is None:
                 needs_cancelled = job["name"]
 
+        if real_failure is not None and cancelled_ids & set(rerun_ids):
+            print(f"  Not rerunning the cancelled jobs:  {real_failure} did not fail transiently.")
+            rerun_ids = [i for i in rerun_ids if i not in cancelled_ids]
+            needs_cancelled = None
         if not rerun_ids:
             return
         if all_transient and only_job is None:
