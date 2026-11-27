@@ -555,6 +555,22 @@ class ClassifyTest(unittest.TestCase):
                 ),
                 None,
             ),
+            # GitHub refused a request of git, or of JGit (as in Gradle).
+            (
+                (
+                    "fatal: unable to access 'https://github.com/a/b.git/': The requested URL"
+                    " returned error: 403"
+                ),
+                None,
+            ),
+            (
+                (
+                    "> Error cloning repository https://github.com/a/b.git:"
+                    " https://github.com/a/b.git: git-upload-pack not permitted on"
+                    " 'https://github.com/a/b.git/'"
+                ),
+                None,
+            ),
             (
                 (
                     "##[error]The job was abandoned because agent did not renew the lock."
@@ -657,6 +673,16 @@ class ClassifyTest(unittest.TestCase):
             (
                 "   > Could not GET 'https://maven.pkg.github.com/a/b/x.pom'. Received status"
                 " code 403 from server: Forbidden"
+            ),
+            # A Git server other than GitHub refused a request of git, or of JGit.
+            (
+                "fatal: unable to access 'https://git.example.com/a/b.git/': The requested"
+                " URL returned error: 403"
+            ),
+            (
+                "Error cloning repository https://git.example.com/a/b.git:"
+                " https://git.example.com/a/b.git: git-upload-pack not permitted on"
+                " 'https://git.example.com/a/b.git/'"
             ),
             (
                 "Could not GET 'https://repo.maven.apache.org/x.pom'. Received status code 404"

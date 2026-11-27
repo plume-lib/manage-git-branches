@@ -47,14 +47,18 @@ GITHUB_URL_RE = r"https?://([a-z]+\.)?github(usercontent)?\.com\b"
 # Regular expressions, each of which matches a message that shows that a network request
 # failed for a reason that might go away by itself, such as "HTTP 502: Bad Gateway",
 # "Connection refused", or "Could not resolve host: github.com".  They are meant to be
-# matched without regard to case.  A 403 status is transient in a message such as
-# "Received status code 403" that names a URL of GitHub, because GitHub responds with
-# 403 to a client that exceeds its rate limit.  A 403 status from another server, such
-# as a private Maven repository, is not transient, because the usual cause is missing or
-# wrong credentials.
+# matched without regard to case.  A 403 status is transient in a message that names a
+# URL of GitHub, because GitHub responds with 403 to a client that exceeds its rate
+# limit.  Such a message is one such as "Received status code 403", or one with which a
+# Git client reports a 403 status:  git's "The requested URL returned error: 403" or
+# JGit's "git-upload-pack not permitted on 'https://github.com/ORG/REPO.git/'".  A 403
+# status from another server, such as a private Maven repository, is not transient,
+# because the usual cause is missing or wrong credentials.
 TRANSIENT_NETWORK_PATTERNS = [
     rf"{GITHUB_URL_RE}.*(status|response) code:? 403([^0-9]|$)",
     rf"(status|response) code:? 403([^0-9].*)?{GITHUB_URL_RE}",
+    rf"{GITHUB_URL_RE}.*The requested URL returned error: 403([^0-9]|$)",
+    rf"git-upload-pack not permitted on '?{GITHUB_URL_RE}",
     r"(status|response) code:? (408|429|5[0-9][0-9])([^0-9]|$)",
     r"HTTP[/0-9.]*( error| status)?:? (408|429|500|502|503|504)([^0-9]|$)",
     r"The requested URL returned error: (408|429|5[0-9][0-9])",
