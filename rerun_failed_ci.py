@@ -76,10 +76,10 @@ For each build (Azure Pipelines), workflow (CircleCI), or workflow run (GitHub
 Actions) that has a job to rerun (one that failed transiently or was cancelled), this
 command reruns:
  * every failed or cancelled job, if every such job is one to rerun, or
- * otherwise, only the jobs to rerun.  Azure Pipelines reruns only all the failed and
-   cancelled jobs of a stage together, so this command reruns a stage only if every
-   failed or cancelled job of the stage is one to rerun, and it reruns only one stage
-   at a time.
+ * otherwise, only the jobs to rerun.  Azure Pipelines reruns only all the failed jobs
+   of a stage together, and this command treats a stage's cancelled jobs the same way,
+   so it reruns a stage only if every failed or cancelled job of the stage is one to
+   rerun, and it reruns only one stage at a time.
    GitHub Actions does not permit a job to be rerun while its workflow run is in
    progress, so this command reruns only one of them; run this command again after
    the workflow run completes.
@@ -94,7 +94,7 @@ failed job would rerun that one too.
 Azure Pipelines does not document whether rerunning the failed jobs of a build, or
 retrying a stage, reruns its cancelled jobs.  So after it reruns a build or stage that
 has a cancelled job, this command reads the build's timeline again, for up to 15
-seconds, and reports each cancelled job that Azure Pipelines did not rerun.
+seconds, and reports each cancelled job that Azure Pipelines has not rerun by then.
 
 This command does nothing to a build, workflow, or workflow run that is still in
 progress or that has been rerun since the failure.  It also does not rerun an Azure
@@ -729,6 +729,9 @@ class Rerunner:
                 self.warn(f"cannot read the log of Azure Pipelines job {job['name']} ({job['id']})")
                 result = "unreadable"
             stage_results.setdefault(name, set()).add(result)
+        if not stage_results:
+            print("  It has no failed or cancelled job.")
+            return
 
         # The results of the failed or cancelled jobs whose stage can be rerun.
         rerunnable = {"transient", "cancelled"}
@@ -848,8 +851,8 @@ class Rerunner:
             if not jobs:
                 return
         self.warn(
-            f"Azure Pipelines did not rerun the cancelled jobs of build {build_url}:"
-            f" {', '.join(j['name'] for _, j in jobs)}; rerun them by hand"
+            f"Azure Pipelines has not yet rerun the cancelled jobs of build {build_url}:"
+            f" {', '.join(j['name'] for _, j in jobs)}; if it does not, rerun them by hand"
         )
 
     def azure_rerun_failed_url(self, url: str) -> None:
@@ -1160,17 +1163,23 @@ class Rerunner:
                 cancelled_ids.add(job["id"])
             elif (
                 reason is None
+                and not timed_out
                 and run_json["conclusion"] == GITHUB_CANCELLED
                 and cancel_time is not None
                 and (job.get("started_at") or "") >= cancel_time
             ):
                 why = cancellation()
-                if why is not None:
-                    reason = "started after the run was cancelled"
-                    if why is not CANCELLED:
-                        reason += f": {why}"
-                    started_after = True
-                    cancelled_ids.add(job["id"])
+                if why is None:
+                    # It failed because of a cancellation that is not rerun, not because
+                    # of a problem with the code.
+                    print(f"  {job['name']}: started after the run was cancelled, not rerun")
+                    superseded = True
+                    continue
+                reason = "started after the run was cancelled"
+                if why is not CANCELLED:
+                    reason += f": {why}"
+                started_after = True
+                cancelled_ids.add(job["id"])
             if reason is None:
                 if job["conclusion"] == GITHUB_CANCELLED and not timed_out:
                     # A cancelled job has no failed steps, so the only part of its log

@@ -919,13 +919,13 @@ class AzureTest(RerunTestCase):
         )
         output = self.assert_reruns([self.RETRY], self.BUILD)
         self.assertIn("b: cancelled", output)
-        self.assertNotIn("did not rerun", output)
+        self.assertNotIn("has not yet rerun", output)
         # Azure Pipelines does not document whether it reruns a cancelled job.
         self.server.azure_reruns_cancelled = False
         output = self.assert_reruns([self.RETRY], self.BUILD, status=1)
         self.assertIn(
-            f"Azure Pipelines did not rerun the cancelled jobs of build {self.BUILD}: b;"
-            " rerun them by hand",
+            f"Azure Pipelines has not yet rerun the cancelled jobs of build {self.BUILD}: b;"
+            " if it does not, rerun them by hand",
             output,
         )
         self.assert_reruns([], "--dry-run", self.BUILD)
@@ -969,6 +969,13 @@ class AzureTest(RerunTestCase):
         ]:
             self.assertIn(message, output)
         self.assertNotIn("stage s2", output)
+
+    def test_cancelled_without_jobs(self) -> None:
+        """A cancelled build that has no failed or cancelled job is reported as such."""
+        self.server.azure_build(500, "completed", "canceled")
+        self.server.azure_timeline(500, ("s1", 1, "a", "succeeded", ""))
+        output = self.assert_reruns([], self.BUILD)
+        self.assertIn("It has no failed or cancelled job.", output)
 
     def test_timed_out(self) -> None:
         """A job that ran longer than its time limit is examined like a failed job."""
@@ -1369,7 +1376,7 @@ class GithubActionsTest(RerunTestCase):
             " https://github.com/org/repo/actions/runs/103",
             output,
         )
-        self.assertIn("all_green: not transient", output)
+        self.assertIn("all_green: started after the run was cancelled, not rerun", output)
         del s.gh[NEWER_RUNS]
         output = self.assert_reruns([], self.RUN, status=1)
         self.assertIn("cannot read the newer runs", output)
@@ -1405,6 +1412,22 @@ class GithubActionsTest(RerunTestCase):
             ),
         ]:
             self.assertIn(message, output)
+
+    def test_user_cancelled_timed_out(self) -> None:
+        """A job that started after the cancellation and then timed out is a failed job."""
+        s = self.server
+        slow = {
+            "id": 104,
+            "name": "slow",
+            "conclusion": "cancelled",
+            "started_at": "2026-11-26T22:52:50Z",
+            "completed_at": "2026-11-27T04:52:50Z",
+        }
+        self.user_cancelled_run(slow)
+        s.gha_job(104, None, GHA_TIMEOUT)
+        output = self.assert_reruns([], self.RUN)
+        self.assertIn("slow: timed out, not transient", output)
+        self.assertIn("Not rerunning the cancelled jobs:  slow did not fail transiently.", output)
 
     def test_user_cancelled_unexamined_at_limit(self) -> None:
         """The attempt limit applies to a failed job that is not rerun for another reason.
@@ -1569,7 +1592,7 @@ class GithubActionsTest(RerunTestCase):
         )
         self.assertIn("a: cancelled, not rerun", output)
         self.assertIn("b: cancelled, not rerun", output)
-        self.assertIn("all_green: not transient", output)
+        self.assertIn("all_green: started after the run was cancelled, not rerun", output)
         # No job of a run that a newer run replaces is rerun, even one that failed
         # transiently.
         serve(*cancelled, job(104, "d", "failure", "2026-11-24T22:40:04Z"))
@@ -1579,10 +1602,11 @@ class GithubActionsTest(RerunTestCase):
         self.assertIn("Not rerunning any job:  a newer run replaces the run", output)
         serve(*cancelled)
 
-        # The newer runs cannot be read.
+        # The newer runs cannot be read.  Job all_green did not fail because of the code.
         del s.gh[NEWER_RUNS]
         output = self.assert_reruns([], self.RUN, status=1)
         self.assertIn("cannot read the newer runs", output)
+        self.assertIn("all_green: started after the run was cancelled, not rerun", output)
 
         # A run that failed, rather than being cancelled, does not read the newer runs.
         # Its job that started after a job was cancelled did not fail transiently.
