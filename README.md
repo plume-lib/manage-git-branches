@@ -449,7 +449,8 @@ The commands are:
   This command needs Python 3.11 or later, `gh`, and `pr_status.py`.
 * [`rerun-failed-ci`](rerun-failed-ci)
   `[--dry-run] [--max-attempts N] [--exit-3-if-reran] [PR | BRANCH | URL]...`:
-  For each transient failure of a CI job, reruns it.  Works on the given
+  For each transient failure of a CI job, and each cancelled CI job, reruns
+  it.  Works on the given
   GitHub pull request (by default, the one for the current branch).  In a
   clone of a fork, the pull request for a branch can be one in the fork's
   parent.  A URL names an Azure Pipelines, CircleCI, or GitHub Actions job or
