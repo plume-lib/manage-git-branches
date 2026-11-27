@@ -39,10 +39,11 @@ REQUEST_ERRORS = (
     KeyError,
 )
 
-# Matches a URL of GitHub, such as "https://api.github.com/repos/ORG/REPO" or
-# "https://raw.githubusercontent.com/ORG/REPO/main/build.gradle", but not a URL of GitHub
+# Matches a URL of GitHub, such as "https://api.github.com/repos/ORG/REPO",
+# "https://raw.githubusercontent.com/ORG/REPO/main/build.gradle", or one with a user name,
+# such as "https://x-access-token@github.com/ORG/REPO.git", but not a URL of GitHub
 # Packages, such as "https://maven.pkg.github.com/ORG/REPO".
-GITHUB_URL_RE = r"https?://([a-z]+\.)?github(usercontent)?\.com\b"
+GITHUB_URL_RE = r"https?://([^/@\s]+@)?([a-z]+\.)?github(usercontent)?\.com\b"
 
 # Regular expressions, each of which matches a message that shows that a network request
 # failed for a reason that might go away by itself, such as "HTTP 502: Bad Gateway",
@@ -53,7 +54,12 @@ GITHUB_URL_RE = r"https?://([a-z]+\.)?github(usercontent)?\.com\b"
 # Git client reports a 403 status:  git's "The requested URL returned error: 403" or
 # JGit's "git-upload-pack not permitted on 'https://github.com/ORG/REPO.git/'".  A 403
 # status from another server, such as a private Maven repository, is not transient,
-# because the usual cause is missing or wrong credentials.
+# because the usual cause is missing or wrong credentials.  GitHub also responds with 403
+# for a reason that recurs, such as a push that the credentials do not permit or a token
+# that is not authorized for an organization's SAML single sign-on, and these patterns
+# match such a refusal too, because a pattern that tests one line cannot tell it from a
+# rate limit.  Git, but not JGit, prints GitHub's explanation of such a refusal on an
+# earlier line, such as "remote: Permission to ORG/REPO.git denied to USER.".
 TRANSIENT_NETWORK_PATTERNS = [
     rf"{GITHUB_URL_RE}.*(status|response) code:? 403([^0-9]|$)",
     rf"(status|response) code:? 403([^0-9].*)?{GITHUB_URL_RE}",
@@ -61,7 +67,7 @@ TRANSIENT_NETWORK_PATTERNS = [
     rf"git-upload-pack not permitted on '?{GITHUB_URL_RE}",
     r"(status|response) code:? (408|429|5[0-9][0-9])([^0-9]|$)",
     r"HTTP[/0-9.]*( error| status)?:? (408|429|500|502|503|504)([^0-9]|$)",
-    r"The requested URL returned error: (408|429|5[0-9][0-9])",
+    r"The requested URL returned error: (408|429|5[0-9][0-9])([^0-9]|$)",
     r"Too Many Requests",
     r"toomanyrequests",
     r"rate limit (exceeded|reached)",
@@ -82,7 +88,11 @@ TRANSIENT_NETWORK_PATTERNS = [
     r"TLS handshake timeout",
     r"i/o timeout",
     r"early EOF",
-    r"RPC failed",
+    # A failure of git's HTTP request, such as "error: RPC failed; curl 56 GnuTLS recv
+    # error (-9)".  One with a 4xx status, such as "error: RPC failed; HTTP 403 curl 22 The
+    # requested URL returned error: 403", is not matched, because it names no server;
+    # statuses 408 and 429 match another pattern.
+    r"RPC failed(?!; HTTP 4)",
     r"remote end hung up unexpectedly",
     r"gnutls_handshake\(\) failed",
     r"SSL_ERROR_SYSCALL",

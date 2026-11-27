@@ -571,6 +571,17 @@ class ClassifyTest(unittest.TestCase):
                 ),
                 None,
             ),
+            # The URL has a user name.
+            (
+                (
+                    "> Error cloning repository https://x-access-token@github.com/a/b.git:"
+                    " git-upload-pack not permitted on"
+                    " 'https://x-access-token@github.com/a/b.git/'"
+                ),
+                None,
+            ),
+            # A request of git that a server, such as GitHub, refused with status 429.
+            ("error: RPC failed; HTTP 429 curl 22 The requested URL returned error: 429", None),
             (
                 (
                     "##[error]The job was abandoned because agent did not renew the lock."
@@ -683,6 +694,30 @@ class ClassifyTest(unittest.TestCase):
                 "Error cloning repository https://git.example.com/a/b.git:"
                 " https://git.example.com/a/b.git: git-upload-pack not permitted on"
                 " 'https://git.example.com/a/b.git/'"
+            ),
+            # GitHub refused a push or a fetch of git for a reason that recurs.
+            (
+                "remote: Permission to a/b.git denied to github-actions[bot].\n"
+                "fatal: unable to access 'https://github.com/a/b/': The requested URL returned"
+                " error: 403"
+            ),
+            (
+                "remote: Write access to repository not granted.\n"
+                "fatal: unable to access 'https://github.com/a/b/': The requested URL returned"
+                " error: 403"
+            ),
+            (
+                "remote: The 'a' organization has enabled or enforced SAML SSO. To access\n"
+                "remote: this repository, you must re-authorize the OAuth Application.\n"
+                "fatal: unable to access 'https://github.com/a/b.git/': The requested URL"
+                " returned error: 403"
+            ),
+            # A server that git does not name refused a request.
+            "error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403",
+            # A status that is not an HTTP status.
+            (
+                "fatal: unable to access 'https://git.example.com/a/b.git/': The requested"
+                " URL returned error: 5000"
             ),
             (
                 "Could not GET 'https://repo.maven.apache.org/x.pom'. Received status code 404"
