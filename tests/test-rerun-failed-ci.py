@@ -51,8 +51,16 @@ MAVEN_CENTRAL_ARTIFACT_403 = (
 
 # A location in Maven Central of an artifact that Gradle did not find.
 OPTIONS_POM = "https://repo.maven.apache.org/maven2/org/plumelib/options/3.0.0/options-3.0.0.pom"
+# Gradle's report that it did not resolve the dependencies of a compilation, which
+# precedes its reports of the artifacts that it did not find.
+RESOLUTION_FAILED = (
+    "* What went wrong:\n"
+    "Execution failed for task ':compileJava'.\n"
+    "> Could not resolve all files for configuration ':compileClasspath'."
+)
 # Gradle's report that it did not find the artifact at OPTIONS_POM.
 OPTIONS_NOT_FOUND = (
+    f"{RESOLUTION_FAILED}\n"
     "   > Could not find org.plumelib:options:3.0.0.\n"
     "     Searched in the following locations:\n"
     f"       - {OPTIONS_POM}\n"
@@ -405,6 +413,7 @@ class RerunTestCase(unittest.TestCase):
     def setUp(self) -> None:
         """Create the FakeServer and install it in place of the real servers."""
         self.server = FakeServer()
+        rerun_failed_ci.serves_file.cache_clear()
         for patcher in [
             mock.patch.object(request_util, "http", self.server.http),
             mock.patch.object(request_util, "run", self.server.run),
@@ -455,7 +464,11 @@ class RerunTestCase(unittest.TestCase):
 
 
 class ClassifyTest(unittest.TestCase):
-    """Tests for --classify, which call main() with a fake server."""
+    """Tests for --classify.
+
+    Most of the tests call main() with a fake server; test_standard_input and test_errors
+    run the script.
+    """
 
     def classify(self, log: str, existing: tuple[str, ...] = ()) -> tuple[int, str]:
         """Run rerun-failed-ci --classify on a log containing the given text.
@@ -796,15 +809,15 @@ class ClassifyTest(unittest.TestCase):
         for log, existing, expected in [
             # Maven Central serves an artifact now that it did not serve to Gradle.
             (
-                spotless_not_found,
+                f"{RESOLUTION_FAILED}\n{spotless_not_found}",
                 (f"https://repo.maven.apache.org/maven2/{spotless_pom}",),
-                (0, "> Could not find com.diffplug.spotless:spotless-lib:4.12.0."),
+                (0, f"https://repo.maven.apache.org/maven2/{spotless_pom} exists now."),
             ),
             # Likewise, for each of two artifacts.
             (
                 f"{OPTIONS_NOT_FOUND}\n{spotless_not_found}\nBUILD FAILED in 7s",
                 (OPTIONS_POM, f"https://plugins.gradle.org/m2/{spotless_pom}"),
-                (0, "> Could not find org.plumelib:options:3.0.0."),
+                (0, f"{OPTIONS_POM} exists now."),
             ),
             # `gradlew-retry` reported one artifact, and Maven Central serves the other now.
             (
@@ -813,7 +826,14 @@ class ClassifyTest(unittest.TestCase):
                 (0, OPTIONS_EXISTS),
             ),
             # No location serves an artifact that Gradle did not find.
-            (spotless_not_found, (), (1, "")),
+            (f"{RESOLUTION_FAILED}\n{spotless_not_found}", (), (1, "")),
+            # Gradle reported no failure, as for `./gradlew dependencies`, so some other
+            # command failed.
+            (
+                f"{spotless_not_found}\nBUILD SUCCESSFUL in 2s\nlint: 3 problems",
+                (f"https://repo.maven.apache.org/maven2/{spotless_pom}",),
+                (1, ""),
+            ),
             # No location serves one of two artifacts that Gradle did not find, such as a
             # misspelled one.
             (f"{OPTIONS_NOT_FOUND}\n{GUAVA_NOT_FOUND}", (OPTIONS_POM,), (1, "")),
@@ -827,23 +847,35 @@ class ClassifyTest(unittest.TestCase):
                 (OPTIONS_POM,),
                 (1, ""),
             ),
-            # Gradle describes the failure to find an artifact after "* What went wrong:".
+            # Gradle's description of the failure ends before "* Try:".
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "* Try:\n"
+                    "> Run with --stacktrace option to get the stack trace."
+                ),
+                (OPTIONS_POM,),
+                (0, f"{OPTIONS_POM} exists now."),
+            ),
+            # Gradle reports the failure to find an artifact under another cause.
             (
                 (
                     "* What went wrong:\n"
-                    "Execution failed for task ':compileJava'.\n"
-                    "> Could not resolve all files for configuration ':compileClasspath'.\n"
-                    f"{OPTIONS_NOT_FOUND}"
+                    "Execution failed for task ':app:compileKotlin'.\n"
+                    "> Error while evaluating property 'filteredArgumentsMap' of task"
+                    " ':app:compileKotlin'.\n"
+                    "   > Could not resolve all files for configuration ':app:compileClasspath'.\n"
+                    "      > Could not find org.plumelib:options:3.0.0.\n"
+                    "        Searched in the following locations:\n"
+                    f"          - {OPTIONS_POM}"
                 ),
                 (OPTIONS_POM,),
-                (0, "> Could not find org.plumelib:options:3.0.0."),
+                (0, f"{OPTIONS_POM} exists now."),
             ),
             # Gradle did not find an artifact that exists now, and with `--continue`, it also
             # reported a test failure.
             (
                 (
-                    "* What went wrong:\n"
-                    "Could not resolve all files for configuration ':compileClasspath'.\n"
                     f"{OPTIONS_NOT_FOUND}\n"
                     "* What went wrong:\n"
                     "Execution failed for task ':other:test'.\n"
@@ -852,10 +884,35 @@ class ClassifyTest(unittest.TestCase):
                 (OPTIONS_POM,),
                 (1, ""),
             ),
+            # Gradle also reported a cause other than an artifact that it did not find.
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "   > Could not resolve com.example:private:1.0.\n"
+                    "      > Could not GET 'https://repo.example.com/com/example/private/1.0/"
+                    "private-1.0.pom'. Received status code 401 from server: Unauthorized\n"
+                    "* Try:\n"
+                    "> Run with --stacktrace option to get the stack trace."
+                ),
+                (OPTIONS_POM,),
+                (1, ""),
+            ),
+            # A location in a repository that is not public is not requested.
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find com.example:foo:1.0.\n"
+                    "     Searched in the following locations:\n"
+                    "       - http://192.168.1.1/com/example/foo/1.0/foo-1.0.pom"
+                ),
+                ("http://192.168.1.1/com/example/foo/1.0/foo-1.0.pom",),
+                (1, ""),
+            ),
             # No version satisfies a dynamic version, although the artifact's list of
             # versions exists.
             (
                 (
+                    f"{RESOLUTION_FAILED}\n"
                     "   > Could not find any version that matches com.example:foo:2.+.\n"
                     "     Versions that do not match:\n"
                     "       - 1.0\n"
@@ -869,6 +926,7 @@ class ClassifyTest(unittest.TestCase):
             # A location that is not an http or https URL is not requested.
             (
                 (
+                    f"{RESOLUTION_FAILED}\n"
                     "   > Could not find com.example:foo:1.0.\n"
                     "     Searched in the following locations:\n"
                     "       - file:/home/runner/.m2/repository/com/example/foo/1.0/foo-1.0.pom"
