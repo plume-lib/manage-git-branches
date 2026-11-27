@@ -37,9 +37,9 @@ plume-lib/plume-scripts reported that it does, or if it is in a public repositor
 as Maven Central, and serves the artifact when this command requests it.  If the log
 shows that `gradlew-retry` ran Gradle again, then only the output of the last run of
 Gradle is examined, except for the reports of `gradlew-retry` about locations that
-serve artifacts.  The log of an Azure Pipelines or GitHub Actions job also contains the errors
-that the CI service reports for the job, which describe failures, such as a lost runner
-or a job that no runner picked up, that leave no log.  Shell trace lines, which start
+serve artifacts.  The log of an Azure Pipelines or GitHub Actions job also contains the
+errors that the CI service reports for the job, which describe failures, such as a lost
+runner or a job that no runner picked up, that leave no log.  Shell trace lines, which start
 with `+ `, and the scripts that Azure Pipelines and GitHub Actions echo before running a
 step, are ignored, because a script that itself looks for such messages, in order to
 retry a command, contains them.  Shell comment lines, which a shell echoes under `set -o
@@ -96,11 +96,11 @@ until some time after the rerun.
 
 With `--classify`, this command reruns nothing and contacts no server other than the
 public repositories, such as Maven Central, where Gradle searched for an artifact that
-it did not find.  It reads each
-LOG-FILE (or standard input), and for each one that shows a transient failure, it
-prints the line that shows it.  It does not recognize a run that its concurrency group
-cancelled, because that requires asking GitHub about newer runs.  The exit status is 0
-if every LOG-FILE shows a transient failure, and 1 otherwise.
+it did not find.  It reads each LOG-FILE (or standard input), and for each one that
+shows a transient failure, it prints the line that shows it.  It does not recognize a
+run that its concurrency group cancelled, because that requires asking GitHub about
+newer runs.  The exit status is 0 if every LOG-FILE shows a transient failure, and 1
+otherwise.
 
 This command requires `gh`, authenticated to GitHub.  Rerunning an Azure Pipelines
 build or a CircleCI job requires credentials, as described in `ci_build.py`.  The Azure
@@ -118,6 +118,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -199,6 +200,13 @@ COMPILER_DIAGNOSTIC_RE = re.compile(
 # "> Could not find org.slf4j:slf4j-api:1.7.36." or "> Could not find any version that
 # matches com.example:foo:2.+.".
 COULD_NOT_FIND_RE = re.compile(r"Could not find ")
+# Matches the line in which Gradle reports that no version satisfies a dynamic version
+# such as "2.+", as in "> Could not find any version that matches com.example:foo:2.+."
+# or "> Could not find any matches for com.example:foo:2.+ as no versions of
+# com.example:foo are available.".
+DYNAMIC_VERSION_NOT_FOUND_RE = re.compile(
+    r"Could not find any (?:version that matches|matches for) "
+)
 # Matches the line that starts Gradle's list of the locations where it searched for an
 # artifact that it did not find.  The line follows one that names the artifact, such as
 # "> Could not find org.slf4j:slf4j-api:1.7.36.", or, for a dynamic version such as
@@ -242,6 +250,12 @@ GRADLE_SECTION_RE = re.compile(r"\s*\* [A-Z]")
 # org.slf4j:slf4j-api:1.7.36." or "   > Could not GET '...'. Received status code 401
 # from server: Unauthorized".
 CAUSE_LINE_RE = re.compile(r"\s*> ")
+# Matches a line in which Gradle says that it omits failures like one that it reported,
+# such as "> There is 1 more failure with an identical cause." or "> There are 2 more
+# failures with identical causes.".  It reports no other cause.
+IDENTICAL_FAILURES_RE = re.compile(
+    r"There (?:is|are) \d+ more failures? with (?:an )?identical cause"
+)
 # Matches the line in which Gradle reports that it did not find some dependencies, such
 # as "Could not resolve all files for configuration ':compileClasspath'." or "> Could not
 # resolve all artifacts for configuration ':classpath'.".  It can follow lines that
@@ -420,12 +434,12 @@ def searched_locations(lines: list[str]) -> list[str]:
     return locations
 
 
-@functools.cache
 def serves_file(url: str) -> bool:
     """Return True if the given URL serves a file now.
 
-    The URL is requested at most once per process, because Gradle often reports the same
-    location for several configurations and projects.
+    The server's answer for the URL is requested at most once per process, because Gradle
+    often reports the same location for several configurations and projects.  A server
+    that cannot be reached is asked again the next time.
 
     Args:
         url: a URL, such as
@@ -437,8 +451,30 @@ def serves_file(url: str) -> bool:
         be reached.
     """
     try:
-        request_util.http("HEAD", url)
+        return server_serves_file(url)
     except request_util.REQUEST_ERRORS:
+        return False
+
+
+@functools.cache
+def server_serves_file(url: str) -> bool:
+    """Return True if the server of the given URL serves the file at it.
+
+    The result for each URL is computed once per process.  If the server cannot be
+    reached, as for a timeout, the exception in request_util.REQUEST_ERRORS that
+    request_util.http raises propagates, so the failure is not remembered.
+
+    Args:
+        url: a URL, such as
+            "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom".
+
+    Returns:
+        True if the server responds to a HEAD request of the URL with a successful status,
+        after following redirects; False if it responds with an error status.
+    """
+    try:
+        request_util.http("HEAD", url)
+    except urllib.error.HTTPError:
         return False
     return True
 
@@ -450,7 +486,8 @@ def only_missing_artifacts(last_run: list[str]) -> bool:
     WHAT_WENT_WRONG_RE and ends before the next line that matches GRADLE_SECTION_RE, such
     as "* Try:".  The block describes only a failure to find artifacts if some line of it
     matches COULD_NOT_RESOLVE_RE, and each later line of it that matches CAUSE_LINE_RE
-    also matches COULD_NOT_RESOLVE_RE or COULD_NOT_FIND_RE.  The lines before the first
+    also matches COULD_NOT_RESOLVE_RE, COULD_NOT_FIND_RE, or IDENTICAL_FAILURES_RE.  The
+    lines before the first
     line that matches COULD_NOT_RESOLVE_RE describe what failed because of it.  A later
     cause, such as "> Could not resolve com.example:x:1.0." followed by a 401 status, "> No
     matching variant of ...", or "> Conflict found for ...", is another failure.  A
@@ -482,6 +519,7 @@ def only_missing_artifacts(last_run: list[str]) -> bool:
             CAUSE_LINE_RE.match(block_line)
             and not COULD_NOT_RESOLVE_RE.search(block_line)
             and not COULD_NOT_FIND_RE.search(block_line)
+            and not IDENTICAL_FAILURES_RE.search(block_line)
             for block_line in block[resolution + 1 :]
         ):
             return False
@@ -502,12 +540,15 @@ def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | Non
     plugin that Gradle did not find, because Gradle does not report where it searched
     for the plugin, and a run for which only_missing_artifacts returns False, such as one
     in which Gradle also reported another failure.  A failure outside Gradle, such as a
-    failure of a later step of the CI job, is not detected.
-    The locations are requested only for an artifact for which `gradlew-retry` reported
-    no location, and only those that PROBED_LOCATION_RE matches.  So an artifact that has
-    a dynamic version, such as "2.+", that no version satisfies prevents a transient
-    failure, unless `gradlew-retry` reported a location for it, and so does an artifact
-    that Gradle searched for only in a repository that is not public.
+    failure of a later step of the CI job, is not detected.  An artifact also prevents a
+    transient failure if the line that reports it, which matches CAUSE_LINE_RE and
+    COULD_NOT_FIND_RE, is not followed by a line that matches SEARCHED_LOCATIONS_RE, or if
+    it matches DYNAMIC_VERSION_NOT_FOUND_RE.  No version satisfies such a dynamic version,
+    such as "2.+", even if a location that Gradle lists for it, such as maven-metadata.xml
+    or the .pom of a version that a rule rejected, exists.  The locations are requested
+    only for an artifact for which `gradlew-retry` reported no location, and only those
+    that PROBED_LOCATION_RE matches.  So an artifact that Gradle searched for only in a
+    repository that is not public prevents a transient failure.
 
     Args:
         lines: the lines of a log of the failed steps of a CI job.
@@ -535,8 +576,14 @@ def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | Non
             existing.setdefault(match[1], line.lstrip()[:200])
     result = None
     for i, line in enumerate(last_run):
-        if SEARCHED_LOCATIONS_RE.match(line):
-            locations = searched_locations(last_run[i + 1 :])
+        if CAUSE_LINE_RE.match(line) and COULD_NOT_FIND_RE.search(line):
+            if (
+                DYNAMIC_VERSION_NOT_FOUND_RE.search(line)
+                or i + 1 == len(last_run)
+                or not SEARCHED_LOCATIONS_RE.match(last_run[i + 1])
+            ):
+                return None
+            locations = searched_locations(last_run[i + 2 :])
             reason = next((existing[loc] for loc in locations if loc in existing), None)
             if reason is None:
                 served = next(
@@ -592,8 +639,9 @@ def transient_reason(log: str) -> str | None:
     shows that `gradlew-retry` ran Gradle again.  An earlier run's failure did not cause
     the job's failure, even if it was transient, because `gradlew-retry` ran Gradle again.
     Of those lines, one shows a transient failure if it matches TRANSIENT_RE, or if it
-    names an artifact that Gradle did not find and the Gradle Plugin Portal is the only
-    location that Gradle searched for it.  Otherwise, the result is as for
+    names an artifact that Gradle did not find, the Gradle Plugin Portal is the only
+    location that Gradle searched for it, and only_missing_artifacts returns True.
+    Otherwise, the result is as for
     slow_typechecking_reason or, if that is None, as for missing_artifacts_reason.  The
     lines that `examined_lines` omits are ignored.
 
@@ -615,7 +663,11 @@ def transient_reason(log: str) -> str | None:
             return line.lstrip()[:200]
         if i > 0 and SEARCHED_LOCATIONS_RE.match(line):
             locations = searched_locations(last_run[i + 1 :])
-            if locations and all(loc.startswith(PLUGIN_PORTAL_URL) for loc in locations):
+            if (
+                locations
+                and all(loc.startswith(PLUGIN_PORTAL_URL) for loc in locations)
+                and only_missing_artifacts(last_run)
+            ):
                 return last_run[i - 1].lstrip()[:200]
     return slow_typechecking_reason(last_run) or missing_artifacts_reason(lines, last_run)
 

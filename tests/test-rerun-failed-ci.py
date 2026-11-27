@@ -413,7 +413,7 @@ class RerunTestCase(unittest.TestCase):
     def setUp(self) -> None:
         """Create the FakeServer and install it in place of the real servers."""
         self.server = FakeServer()
-        rerun_failed_ci.serves_file.cache_clear()
+        rerun_failed_ci.server_serves_file.cache_clear()
         for patcher in [
             mock.patch.object(request_util, "http", self.server.http),
             mock.patch.object(request_util, "run", self.server.run),
@@ -485,7 +485,7 @@ class ClassifyTest(unittest.TestCase):
         self.addCleanup(Path(f.name).unlink)
         server = FakeServer()
         server.urls = dict.fromkeys(existing, "")
-        rerun_failed_ci.serves_file.cache_clear()
+        rerun_failed_ci.server_serves_file.cache_clear()
         output = io.StringIO()
         with (
             mock.patch.object(request_util, "http", server.http),
@@ -595,6 +595,7 @@ class ClassifyTest(unittest.TestCase):
             ),
             (
                 (
+                    f"{RESOLUTION_FAILED}\n"
                     "   > Could not find org.slf4j:slf4j-api:1.7.36.\n"
                     "     Searched in the following locations:\n"
                     "       - https://plugins.gradle.org/m2/org/slf4j/slf4j-api/1.7.36/"
@@ -687,6 +688,18 @@ class ClassifyTest(unittest.TestCase):
             (
                 "Could not GET 'https://repo.maven.apache.org/x.pom'. Received status code 404"
                 " from server: Not Found"
+            ),
+            # Gradle searched only the Gradle Plugin Portal for an artifact, but with
+            # `--continue`, it also reported a test failure.
+            (
+                f"{RESOLUTION_FAILED}\n"
+                "   > Could not find org.slf4j:slf4j-api:1.7.36.\n"
+                "     Searched in the following locations:\n"
+                "       - https://plugins.gradle.org/m2/org/slf4j/slf4j-api/1.7.36/"
+                "slf4j-api-1.7.36.pom\n"
+                "* What went wrong:\n"
+                "Execution failed for task ':other:test'.\n"
+                "> There were failing tests. See the report at: file:///a/index.html"
             ),
             # Gradle searched a repository other than the Gradle Plugin Portal, too.
             (
@@ -857,6 +870,24 @@ class ClassifyTest(unittest.TestCase):
                 (OPTIONS_POM,),
                 (0, f"{OPTIONS_POM} exists now."),
             ),
+            # Gradle says that it omits a failure with an identical cause.
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "> There is 1 more failure with an identical cause.\n"
+                    "* Try:\n"
+                    "> Run with --stacktrace option to get the stack trace."
+                ),
+                (OPTIONS_POM,),
+                (0, f"{OPTIONS_POM} exists now."),
+            ),
+            # Gradle did not list where it searched for one of two artifacts.
+            (
+                f"{RESOLUTION_FAILED}\n   > Could not find com.example:bar:1.0.\n"
+                + OPTIONS_NOT_FOUND.removeprefix(f"{RESOLUTION_FAILED}\n"),
+                (OPTIONS_POM,),
+                (1, ""),
+            ),
             # Gradle reports the failure to find an artifact under another cause.
             (
                 (
@@ -908,6 +939,20 @@ class ClassifyTest(unittest.TestCase):
                 ("http://192.168.1.1/com/example/foo/1.0/foo-1.0.pom",),
                 (1, ""),
             ),
+            # No version satisfies a dynamic version, although a version that a rule
+            # rejected exists.
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find any version that matches com.example:foo:2.+.\n"
+                    "     Searched in the following locations:\n"
+                    "       - https://repo.maven.apache.org/maven2/com/example/foo/"
+                    "maven-metadata.xml\n"
+                    "       - https://repo.maven.apache.org/maven2/com/example/foo/2.1/foo-2.1.pom"
+                ),
+                ("https://repo.maven.apache.org/maven2/com/example/foo/2.1/foo-2.1.pom",),
+                (1, ""),
+            ),
             # No version satisfies a dynamic version, although the artifact's list of
             # versions exists.
             (
@@ -944,6 +989,23 @@ class ClassifyTest(unittest.TestCase):
         ]:
             with self.subTest(log=log, existing=existing):
                 self.assertEqual(self.classify(log, existing), expected)
+
+    def test_serves_file_unreachable(self) -> None:
+        """A server that could not be reached is asked again the next time."""
+        rerun_failed_ci.server_serves_file.cache_clear()
+        responses: list[Any] = [TimeoutError("timed out"), b""]
+
+        def http(*_args: Any, **_kwargs: Any) -> bytes:
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        with mock.patch.object(request_util, "http", http):
+            self.assertFalse(rerun_failed_ci.serves_file(OPTIONS_POM))
+            self.assertTrue(rerun_failed_ci.serves_file(OPTIONS_POM))
+            self.assertTrue(rerun_failed_ci.serves_file(OPTIONS_POM))
+        self.assertEqual(responses, [])
 
     def test_standard_input(self) -> None:
         """--classify reads standard input when no file is given."""
