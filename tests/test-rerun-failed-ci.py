@@ -938,6 +938,15 @@ class AzureTest(RerunTestCase):
         )
         output = self.assert_reruns([self.stage_retry("s2")], self.BUILD, status=1)
         self.assertIn(f"cancelled jobs of build {self.BUILD}: b;", output)
+        # A rerun job of another stage that has the same name is not the cancelled job.
+        self.server.azure_timeline(
+            500, ("s1", 1, "a", "failed", "Read timed out"), ("s2", 1, "b", "canceled", None)
+        )
+        for record in self.server.urls[f"{AZURE}/500/timeline"]["records"]:
+            if record["type"] == "Job":
+                record["name"] = "Job"
+        output = self.assert_reruns([self.RETRY], self.BUILD, status=1)
+        self.assertIn(f"cancelled jobs of build {self.BUILD}: Job;", output)
         self.server.azure_reruns_cancelled = True
         self.server.azure_timeline(
             500, ("s1", 1, "a", "failed", "Read timed out"), ("s1", 1, "b", "canceled", None)
@@ -1313,7 +1322,7 @@ class GithubActionsTest(RerunTestCase):
 
     @staticmethod
     def newer_run(run_id: int) -> dict[str, Any]:
-        """Return a run of run 100's workflow for run 100's branch, no older than run 100.
+        """Return the run, no older than run 100, with the given id of run 100's workflow.
 
         Args:
             run_id: a run's id.
@@ -1333,22 +1342,34 @@ class GithubActionsTest(RerunTestCase):
         }
 
     def test_user_cancelled_unreadable_annotations(self) -> None:
-        """If a cancelled job's annotations cannot be read, a newer run prevents a rerun."""
+        """A cancelled job whose annotations cannot be read is not rerun.
+
+        Its annotations would show whether it ran longer than its time limit, and
+        whether its run's concurrency group cancelled the run.
+        """
         s = self.server
         self.user_cancelled_run()
         del s.gh["repos/org/repo/check-runs/101/annotations?per_page=100"]
-        output = self.assert_reruns(["gh run rerun --repo org/repo --failed 100"], self.RUN)
-        self.assertIn("canary: cancelled", output)
+        output = self.assert_reruns([], self.RUN, status=1)
+        for message in [
+            "cannot read the annotations of cancelled GitHub Actions job canary (101)",
+            "all_green: transient: started after the run was cancelled",
+            (
+                "Not rerunning job all_green:  only rerunning every failed job would rerun the"
+                " cancelled jobs that it needs, and the annotations of canary cannot be read."
+            ),
+        ]:
+            self.assertIn(message, output)
         # The concurrency group might have cancelled the run in favor of a newer run.
         s.gh[NEWER_RUNS][0]["workflow_runs"].append(self.newer_run(103))
-        output = self.assert_reruns([], self.RUN)
+        output = self.assert_reruns([], self.RUN, status=1)
         self.assertIn(
             "Its concurrency group might have cancelled it in favor of a newer run, because the"
             " annotations of a cancelled job cannot be read:"
             " https://github.com/org/repo/actions/runs/103",
             output,
         )
-        self.assertIn("canary: cancelled, not rerun", output)
+        self.assertIn("all_green: not transient", output)
         del s.gh[NEWER_RUNS]
         output = self.assert_reruns([], self.RUN, status=1)
         self.assertIn("cannot read the newer runs", output)
@@ -1384,6 +1405,36 @@ class GithubActionsTest(RerunTestCase):
             ),
         ]:
             self.assertIn(message, output)
+
+    def test_user_cancelled_unexamined_at_limit(self) -> None:
+        """The attempt limit applies to a failed job that is not rerun for another reason.
+
+        Rerunning every failed job would rerun it too.
+        """
+        s = self.server
+        stuck = {
+            "id": 104,
+            "name": "stuck",
+            "conclusion": "failure",
+            "started_at": "2026-11-26T21:16:24Z",
+            "completed_at": "2026-11-26T21:20:00Z",
+        }
+        self.user_cancelled_run(stuck)
+        # Job stuck's log cannot be read, and an earlier attempt ran it too.
+        s.gha_job(104, None)
+        s.gh["repos/org/repo/actions/runs/100/jobs?filter=all&per_page=100"].append(
+            {"jobs": [{**stuck, "id": 4, "started_at": "2026-11-26T20:00:00Z"}]}
+        )
+        output = self.assert_reruns(
+            ["gh run rerun --repo org/repo --job 101"], "--max-attempts", "2", self.RUN, status=1
+        )
+        self.assertIn("cannot read the log of the failed steps of GitHub Actions job stuck", output)
+        self.assertIn(
+            "Not rerunning job all_green:  only rerunning every failed job would rerun the"
+            " cancelled jobs that it needs, and stuck has already been run the maximum number"
+            " of times.",
+            output,
+        )
 
     def test_timed_out(self) -> None:
         """A job that ran longer than its time limit is examined like a failed job."""
@@ -1519,6 +1570,14 @@ class GithubActionsTest(RerunTestCase):
         self.assertIn("a: cancelled, not rerun", output)
         self.assertIn("b: cancelled, not rerun", output)
         self.assertIn("all_green: not transient", output)
+        # No job of a run that a newer run replaces is rerun, even one that failed
+        # transiently.
+        serve(*cancelled, job(104, "d", "failure", "2026-11-24T22:40:04Z"))
+        s.gha_job(104, "Connection reset")
+        output = self.assert_reruns([], self.RUN)
+        self.assertIn("d: transient: Connection reset", output)
+        self.assertIn("Not rerunning any job:  a newer run replaces the run", output)
+        serve(*cancelled)
 
         # The newer runs cannot be read.
         del s.gh[NEWER_RUNS]

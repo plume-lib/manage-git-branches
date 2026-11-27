@@ -68,7 +68,9 @@ rerun only if the repository has no newer workflow run for the same branch, so t
 waiting request never became a run and the branch was left with no CI result.  (A run of
 another workflow for the same commit is not considered newer.)  The same holds for a
 cancelled workflow run if the annotations of one of its cancelled jobs cannot be read,
-because its concurrency group might have cancelled it.
+because its concurrency group might have cancelled it.  A GitHub Actions job whose
+annotations cannot be read is not rerun itself, because they would show whether it ran
+longer than its time limit.
 
 For each build (Azure Pipelines), workflow (CircleCI), or workflow run (GitHub
 Actions) that has a job to rerun (one that failed transiently or was cancelled), this
@@ -535,7 +537,7 @@ def transient_reason(log: str) -> str | None:
 
 
 def rerun_label(reason: str | Cancelled) -> str:
-    """Return the text that describes the given reason to rerun a job.
+    """Return the text that describes the given reason to rerun the job that it names.
 
     The text is printed after the job's name and a colon.
 
@@ -742,7 +744,7 @@ class Rerunner:
                 print(f"  Not rerunning:  the build has already been run {attempts} times.")
                 return
             url, body, what = f"{api}?retry=true&api-version=7.1", {}, "the failed jobs"
-            rerun_cancelled = [job for _, job in cancelled_jobs]
+            rerun_cancelled = cancelled_jobs
         else:
             stages = []
             for name, results in sorted(stage_results.items()):
@@ -779,7 +781,7 @@ class Rerunner:
             what = f"the failed jobs of stage {stages[0]}"
             if len(stages) > 1:
                 what += " (rerun the other stages after the build finishes)"
-            rerun_cancelled = [job for name, job in cancelled_jobs if name == stages[0]]
+            rerun_cancelled = [(name, job) for name, job in cancelled_jobs if name == stages[0]]
 
         def rerunning() -> None:
             ci_build.azure_request("PATCH", url, ci_build.azure_headers(), body)
@@ -799,20 +801,24 @@ class Rerunner:
         if rerun_cancelled and not self.dry_run:
             self.azure_check_reran(api, build_url, rerun_cancelled)
 
-    def azure_check_reran(self, api: str, build_url: str, jobs: list[dict[str, Any]]) -> None:
+    def azure_check_reran(
+        self, api: str, build_url: str, jobs: list[tuple[str, dict[str, Any]]]
+    ) -> None:
         """Warn about each of the given cancelled jobs that Azure Pipelines did not rerun.
 
         Azure Pipelines does not document whether rerunning the failed jobs of a build,
         or retrying a stage, reruns its cancelled jobs.  A job has been rerun if the
-        build's timeline has a job of the same id or name with a higher attempt number.
-        The timeline is read several times, because Azure Pipelines might start a rerun
-        some time after the request.
+        build's timeline has a job with a higher attempt number and either the same id,
+        or the same name in the same stage.  (Jobs in different stages can have the same
+        name, such as "Job".)  The timeline is read several times, because Azure
+        Pipelines might start a rerun some time after the request.
 
         Args:
             api: the URL of a build in the Azure DevOps API.
             build_url: the URL of the build on the web; used for diagnostics.
-            jobs: the records, in the build's timeline before the rerun was requested, of
-                cancelled jobs whose rerun was requested, as for azure_stage.
+            jobs: the cancelled jobs whose rerun was requested:  for each, the identifier
+                of its stage, such as "s1" (or "" if it has none), and its record in the
+                build's timeline before the rerun was requested, as for azure_stage.
         """
         for i in range(AZURE_RERUN_CHECKS):
             if i:
@@ -825,21 +831,25 @@ class Rerunner:
                     f" {build_url}: {request_util.failure(e)}"
                 )
                 return
+            by_id = {r["id"]: r for r in records}
+            # The highest attempt number of each job, by its id and by its stage and name.
+            attempts: dict[str | tuple[str, str], int] = {}
+            for r in records:
+                if r["type"] == "Job":
+                    stage = azure_stage(r, by_id).get("identifier") or ""
+                    for key in [r["id"], (stage, r.get("name") or "")]:
+                        attempts[key] = max(attempts.get(key, 0), r.get("attempt") or 1)
             jobs = [
-                j
-                for j in jobs
-                if not any(
-                    r["type"] == "Job"
-                    and (r["id"] == j["id"] or r.get("name") == j["name"])
-                    and (r.get("attempt") or 1) > (j.get("attempt") or 1)
-                    for r in records
-                )
+                (stage, j)
+                for stage, j in jobs
+                if max(attempts.get(j["id"], 0), attempts.get((stage, j["name"]), 0))
+                <= (j.get("attempt") or 1)
             ]
             if not jobs:
                 return
         self.warn(
             f"Azure Pipelines did not rerun the cancelled jobs of build {build_url}:"
-            f" {', '.join(j['name'] for j in jobs)}; rerun them by hand"
+            f" {', '.join(j['name'] for _, j in jobs)}; rerun them by hand"
         )
 
     def azure_rerun_failed_url(self, url: str) -> None:
@@ -1107,9 +1117,24 @@ class Rerunner:
         # The ids of the jobs to rerun that failed because the jobs that they need were
         # cancelled.
         started_after_ids = set()
-        # The name of the first failed job that is not rerun because it has already been
-        # run the maximum number of times, or None if there is none.
-        at_limit = None
+        # The name of the first failed or cancelled job of the run that has already been
+        # run the maximum number of times, or None if there is none.  Rerunning every
+        # failed job would rerun it, whether or not this command examines it.
+        at_limit = next(
+            (
+                j["name"]
+                for j in latest_jobs
+                if j["conclusion"] in {*GITHUB_FAILED, GITHUB_CANCELLED}
+                and len(runs_of_job.get(j["name"], ())) >= self.max_attempts
+            ),
+            None,
+        )
+        # The name of the first cancelled job whose annotations cannot be read, or None if
+        # there is none.  Rerunning every failed job would rerun it, although it might
+        # have run longer than its time limit.
+        unknown_timeout = None
+        # True if a cancelled job is not rerun because a newer run might replace the run.
+        superseded = False
         for job in failed_jobs:
             log = gha_job_log(repo, job["id"], job_annotations(job["id"]))
             reason: str | Cancelled | None = transient_reason(log.text)
@@ -1117,6 +1142,19 @@ class Rerunner:
             # A job that ran longer than its time limit is examined like a failed one,
             # because the hang is usually a problem with the code.
             timed_out = job["conclusion"] == GITHUB_CANCELLED and JOB_TIMEOUT_RE.search(log.text)
+            if (
+                reason is None
+                and job["conclusion"] == GITHUB_CANCELLED
+                and job_annotations(job["id"]) is None
+            ):
+                # Its annotations would show whether it ran longer than its time limit.
+                self.warn(
+                    f"cannot read the annotations of cancelled GitHub Actions job"
+                    f" {job['name']} ({job['id']})"
+                )
+                all_transient = False
+                unknown_timeout = unknown_timeout or job["name"]
+                continue
             if reason is None and job["conclusion"] == GITHUB_CANCELLED and not timed_out:
                 reason = cancellation()
                 cancelled_ids.add(job["id"])
@@ -1138,6 +1176,7 @@ class Rerunner:
                     # A cancelled job has no failed steps, so the only part of its log
                     # is its failure annotations, and an empty log is not a problem.
                     print(f"  {job['name']}: cancelled, not rerun")
+                    superseded = True
                     continue
                 # The annotation that shows that a job timed out is a readable log.
                 if log.read or timed_out:
@@ -1155,23 +1194,33 @@ class Rerunner:
             if attempts >= self.max_attempts:
                 print(f"  Not rerunning {job['name']}:  it has already been run {attempts} times.")
                 all_transient = False
-                at_limit = at_limit or job["name"]
                 continue
             rerun_ids.append(job["id"])
             if started_after:
                 started_after_ids.add(job["id"])
                 needs_cancelled = needs_cancelled or job["name"]
 
+        if superseded and rerun_ids:
+            # Rerunning every failed job would rerun the cancelled jobs, and rerunning
+            # another job of the run is pointless, because a newer run replaces it.
+            print(
+                "  Not rerunning any job:  a newer run replaces the run, or the newer runs"
+                " cannot be read."
+            )
+            return
         if real_failure is not None and cancelled_ids & set(rerun_ids):
             print(f"  Not rerunning the cancelled jobs:  {real_failure} did not fail transiently.")
             rerun_ids = [i for i in rerun_ids if i not in cancelled_ids]
             needs_cancelled = None
-        if needs_cancelled is not None and at_limit is not None:
-            # Rerunning the failed jobs would rerun job at_limit too.
+        if needs_cancelled is not None and (at_limit or unknown_timeout) is not None:
+            why = (
+                f"{at_limit} has already been run the maximum number of times"
+                if at_limit is not None
+                else f"the annotations of {unknown_timeout} cannot be read"
+            )
             print(
                 f"  Not rerunning job {needs_cancelled}:  only rerunning every failed job would"
-                f" rerun the cancelled jobs that it needs, and {at_limit} has already been run"
-                " the maximum number of times."
+                f" rerun the cancelled jobs that it needs, and {why}."
             )
             rerun_ids = [i for i in rerun_ids if i not in started_after_ids]
             needs_cancelled = None

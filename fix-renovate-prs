@@ -557,10 +557,10 @@ while IFS="${tab}" read -r slug clone url head_branch head_oid <&3; do
     continue
   fi
 
-  # Rerun the transient failures and the cancelled jobs.  GitHub might not show a rerun job as
-  # running until some time after the rerun, so skip the pull request if a
-  # job was rerun, whatever its checks say.  Then skip it if its CI is
-  # running, as it might be after a rerun by someone else.
+  # Rerun the transient failures and the cancelled jobs.  GitHub might not
+  # show a rerun job as running until some time after the rerun, so skip the
+  # pull request if a job was rerun, whatever its checks say.  Then skip it
+  # if its CI is running, as it might be after a rerun by someone else.
   "${SCRIPT_DIR}/rerun-failed-ci" --exit-3-if-reran "${url}" < /dev/null
   case "$?" in
     0) ;;
