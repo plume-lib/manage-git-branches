@@ -89,6 +89,11 @@ failed job of the run has already been run the maximum number of times (see
 `--max-attempts`), then this command does not rerun such a job, because rerunning every
 failed job would rerun that one too.
 
+Azure Pipelines does not document whether rerunning the failed jobs of a build, or
+retrying a stage, reruns its cancelled jobs.  So after it reruns a build or stage that
+has a cancelled job, this command reads the build's timeline again, for up to 15
+seconds, and reports each cancelled job that Azure Pipelines did not rerun.
+
 This command does nothing to a build, workflow, or workflow run that is still in
 progress or that has been rerun since the failure.  It also does not rerun an Azure
 Pipelines stage, a CircleCI workflow, or a GitHub Actions job that has already been run
@@ -127,6 +132,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -283,6 +289,11 @@ AZURE_FAILED = ("failed", "abandoned")
 AZURE_CANCELLED = "canceled"
 # The statuses of a failed CircleCI job.
 CIRCLECI_FAILED = ("failed", "infrastructure_fail", "timedout")
+# How many times, and how many seconds apart, this command reads the timeline of an Azure
+# Pipelines build after rerunning it, to see whether Azure Pipelines reran its cancelled
+# jobs.
+AZURE_RERUN_CHECKS = 4
+AZURE_RERUN_CHECK_INTERVAL = 5
 # The status of a cancelled CircleCI job or workflow.
 CIRCLECI_CANCELLED = "canceled"
 # The conclusions of a failed GitHub Actions job.
@@ -682,6 +693,8 @@ class Rerunner:
         # whether it has a cancelled job.
         stage_results: dict[str, set[str]] = {}
         stage_attempts: dict[str, int] = {}
+        # The stage and the record of each cancelled job to rerun.
+        cancelled_jobs: list[tuple[str, dict[str, Any]]] = []
         by_id = {r["id"]: r for r in records}
         for job in (
             r
@@ -705,6 +718,8 @@ class Rerunner:
             if reason is not None:
                 print(f"  {job['name']}: {rerun_label(reason)}")
                 result = "cancelled" if reason is CANCELLED else "transient"
+                if reason is CANCELLED:
+                    cancelled_jobs.append((name, job))
             elif log.read:
                 print(f"  {job['name']}: not transient")
                 result = "not transient"
@@ -727,6 +742,7 @@ class Rerunner:
                 print(f"  Not rerunning:  the build has already been run {attempts} times.")
                 return
             url, body, what = f"{api}?retry=true&api-version=7.1", {}, "the failed jobs"
+            rerun_cancelled = [job for _, job in cancelled_jobs]
         else:
             stages = []
             for name, results in sorted(stage_results.items()):
@@ -763,6 +779,7 @@ class Rerunner:
             what = f"the failed jobs of stage {stages[0]}"
             if len(stages) > 1:
                 what += " (rerun the other stages after the build finishes)"
+            rerun_cancelled = [job for name, job in cancelled_jobs if name == stages[0]]
 
         def rerunning() -> None:
             ci_build.azure_request("PATCH", url, ci_build.azure_headers(), body)
@@ -778,6 +795,52 @@ class Rerunner:
             self.warn(
                 f"cannot rerun Azure Pipelines build {build_url}: {request_util.failure(e)}; {hint}"
             )
+            return
+        if rerun_cancelled and not self.dry_run:
+            self.azure_check_reran(api, build_url, rerun_cancelled)
+
+    def azure_check_reran(self, api: str, build_url: str, jobs: list[dict[str, Any]]) -> None:
+        """Warn about each of the given cancelled jobs that Azure Pipelines did not rerun.
+
+        Azure Pipelines does not document whether rerunning the failed jobs of a build,
+        or retrying a stage, reruns its cancelled jobs.  A job has been rerun if the
+        build's timeline has a job of the same id or name with a higher attempt number.
+        The timeline is read several times, because Azure Pipelines might start a rerun
+        some time after the request.
+
+        Args:
+            api: the URL of a build in the Azure DevOps API.
+            build_url: the URL of the build on the web; used for diagnostics.
+            jobs: the records, in the build's timeline before the rerun was requested, of
+                cancelled jobs whose rerun was requested, as for azure_stage.
+        """
+        for i in range(AZURE_RERUN_CHECKS):
+            if i:
+                time.sleep(AZURE_RERUN_CHECK_INTERVAL)
+            try:
+                records = ci_build.azure_get(f"{api}/timeline?api-version=7.1")["records"]
+            except request_util.REQUEST_ERRORS as e:
+                self.warn(
+                    "cannot tell whether Azure Pipelines reran the cancelled jobs of build"
+                    f" {build_url}: {request_util.failure(e)}"
+                )
+                return
+            jobs = [
+                j
+                for j in jobs
+                if not any(
+                    r["type"] == "Job"
+                    and (r["id"] == j["id"] or r.get("name") == j["name"])
+                    and (r.get("attempt") or 1) > (j.get("attempt") or 1)
+                    for r in records
+                )
+            ]
+            if not jobs:
+                return
+        self.warn(
+            f"Azure Pipelines did not rerun the cancelled jobs of build {build_url}:"
+            f" {', '.join(j['name'] for j in jobs)}; rerun them by hand"
+        )
 
     def azure_rerun_failed_url(self, url: str) -> None:
         """Rerun the transiently failed or cancelled jobs of the Azure build that url names.

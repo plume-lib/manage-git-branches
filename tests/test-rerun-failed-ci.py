@@ -127,6 +127,10 @@ class FakeServer:
             of `gh repo view`, with keys "owner" and "parent".
         reruns: the rerun requests, as strings.
         gh_requests: the paths of the `gh api` requests, in order.
+        azure_reruns_cancelled: True if a request to rerun an Azure Pipelines build's
+            failed jobs, or to retry one of its stages, reruns its cancelled jobs too.
+            Such a request reruns each failed job of the build, by increasing its
+            attempt number in the build's timeline.
     """
 
     def __init__(self) -> None:
@@ -140,6 +144,7 @@ class FakeServer:
         self.repo: dict[str, Any] = {"owner": {"login": "org"}, "parent": None}
         self.reruns: list[str] = []
         self.gh_requests: list[str] = []
+        self.azure_reruns_cancelled = True
 
     def http(
         self,
@@ -161,6 +166,14 @@ class FakeServer:
             if not headers:
                 raise urllib.error.HTTPError(url, 401, "Unauthorized", Message(), None)
             self.reruns.append(f"{method} {url} {json.dumps(body)}")
+            if url.startswith(f"{AZURE}/"):
+                build = url.removeprefix(f"{AZURE}/").partition("?")[0].partition("/")[0]
+                rerun_results = {"failed", "abandoned"}
+                if self.azure_reruns_cancelled:
+                    rerun_results.add("canceled")
+                for record in self.urls[f"{AZURE}/{build}/timeline"]["records"]:
+                    if record["type"] == "Job" and record["result"] in rerun_results:
+                        record["attempt"] += 1
             return b'{"workflow_id": "new-workflow"}' if "circleci" in url else b"{}"
         path, _, query = url.partition("?")
         if "page-token=" in query:
@@ -417,6 +430,7 @@ class RerunTestCase(unittest.TestCase):
                 ci_build, "azure_headers", return_value={"Authorization": "Basic token"}
             ),
             mock.patch.object(rerun_failed_ci.shutil, "which", return_value="/usr/bin/gh"),
+            mock.patch.object(rerun_failed_ci, "AZURE_RERUN_CHECK_INTERVAL", 0),
         ]:
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -905,6 +919,26 @@ class AzureTest(RerunTestCase):
         )
         output = self.assert_reruns([self.RETRY], self.BUILD)
         self.assertIn("b: cancelled", output)
+        self.assertNotIn("did not rerun", output)
+        # Azure Pipelines does not document whether it reruns a cancelled job.
+        self.server.azure_reruns_cancelled = False
+        output = self.assert_reruns([self.RETRY], self.BUILD, status=1)
+        self.assertIn(
+            f"Azure Pipelines did not rerun the cancelled jobs of build {self.BUILD}: b;"
+            " rerun them by hand",
+            output,
+        )
+        self.assert_reruns([], "--dry-run", self.BUILD)
+        # Only the cancelled jobs of a retried stage are checked.
+        self.server.azure_timeline(
+            500,
+            ("s1", 1, "a", "failed", None),
+            ("s2", 1, "b", "canceled", None),
+            ("s3", 1, "c", "canceled", None),
+        )
+        output = self.assert_reruns([self.stage_retry("s2")], self.BUILD, status=1)
+        self.assertIn(f"cancelled jobs of build {self.BUILD}: b;", output)
+        self.server.azure_reruns_cancelled = True
         self.server.azure_timeline(
             500, ("s1", 1, "a", "failed", "Read timed out"), ("s1", 1, "b", "canceled", None)
         )
