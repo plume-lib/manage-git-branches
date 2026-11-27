@@ -51,21 +51,23 @@ Bats or Perl's `prove`, and the first lines of a Java virtual machine's fatal er
 report, which name the signal that crashed the JVM.  A GitHub API response that a
 script of plume-lib/plume-scripts, such as `set-ci-org-and-branch`, prints after a
 warning that the response yields no answer is ignored, because after such a warning the
-script continues, so a message in the response, such as "API rate limit exceeded", did
-not cause a failure.  An Azure Pipelines job that was abandoned, such as one whose agent
-stopped responding, is examined like a failed one.  A CircleCI job whose status is
-`infrastructure_fail` is transient.  A cancelled GitHub Actions job is examined too,
-because GitHub Actions cancels a job whose runner shuts down.  A GitHub Actions job also
-failed transiently if
-the concurrency group of its workflow run cancelled the run in favor of a waiting
-request, as an annotation of the job such as "Canceling since a higher priority waiting
-request for CI-8598 exists" shows, and the repository has no newer workflow run for the
-same branch, so that the waiting request never became a run and the branch was left
-with no CI result.  (A run of another workflow for the same commit is not considered
-newer.)  So did a job of such a run that started after the cancellation, such as a job
-that runs `if: always()` and fails because the jobs that it needs were cancelled.  A
-cancelled job that did not fail transiently, such as one that a user or the failure of
-another job cancelled, is ignored.
+script usually finds the answer elsewhere and continues, so a message in the response,
+such as "API rate limit exceeded", did not cause a failure.  The response is examined
+if the script then reports that it cannot determine the branch, because then the
+response caused the failure.  An Azure Pipelines job that was abandoned, such as one
+whose agent stopped responding, is examined like a failed one.  A CircleCI job whose
+status is `infrastructure_fail` is transient.  A cancelled GitHub Actions job is
+examined too, because GitHub Actions cancels a job whose runner shuts down.  A GitHub
+Actions job also failed transiently if the concurrency group of its workflow run
+cancelled the run in favor of a waiting request, as an annotation of the job such as
+"Canceling since a higher priority waiting request for CI-8598 exists" shows, and the
+repository has no newer workflow run for the same branch, so that the waiting request
+never became a run and the branch was left with no CI result.  (A run of another
+workflow for the same commit is not considered newer.)  So did a job of such a run that
+started after the cancellation, such as a job that runs `if: always()` and fails
+because the jobs that it needs were cancelled.  A cancelled job that did not fail
+transiently, such as one that a user or the failure of another job cancelled, is
+ignored.
 
 For each build (Azure Pipelines), workflow (CircleCI), or workflow run (GitHub
 Actions) that has a job that failed transiently, this command reruns:
@@ -273,21 +275,35 @@ ECHOED_SCRIPTS = [
 #   ---- start of curl output ----
 #   {"message":"API rate limit exceeded for 203.0.113.7. ..."}
 #   ---- end of curl output ----
-# A line "auth_token is set." can come between the first two lines.  After a warning, the
-# script finds the answer elsewhere and continues, so the response did not cause a
-# failure.  After an error, as in "ci-info error: bad output for URL", the script exits,
-# so the response can show a transient failure.  These expressions match the messages of
-# those scripts, so a change to their wording requires a change here.
+# A line "auth_token is set." can come between the first two lines.  The response is one
+# line, because the scripts delete its control characters.  Under `set -x` or `set -o
+# verbose`, the shell also prints, before each of those lines, the command that prints
+# it.  After a warning, the script usually finds the answer elsewhere and continues, so
+# the response did not cause a failure.  If the script finds no branch elsewhere, it
+# prints a line such as "set-ci-org-and-branch: cannot determine the branch of URL" and
+# fails, so the response can show a transient failure.  So does a response after an
+# error, as in "ci-info error: bad output for URL", after which the script exits.  These
+# expressions match the messages of those scripts, so a change to their wording requires
+# a change here.
 #
 # Matches the line in which such a script warns that a response yields no answer, such
 # as "set-ci-org-and-branch warning: bad output for https://api.github.com/repos/ORG/REPO".
-BAD_OUTPUT_WARNING_RE = re.compile(r"\s*\S+ warning: bad output for \S+$")
+# Group 1 is the script's name, and group 2 is the URL.
+BAD_OUTPUT_WARNING_RE = re.compile(r"\s*(\S+) warning: bad output for (\S+)$")
 # Matches the line that such a script can print between that warning and the response.
 AUTH_TOKEN_SET_RE = re.compile(r"\s*auth_token is set\.$")
 # Matches the line that starts the response, such as "---- start of curl output ----".
 RESPONSE_START_RE = re.compile(r"\s*---- start of \S+ output ----$")
 # Matches the line that ends the response, such as "---- end of curl output ----".
 RESPONSE_END_RE = re.compile(r"\s*---- end of \S+ output ----$")
+# Matches a command that `ci-info` writes for its client to `eval`, as a shell echoes it
+# under `set -o verbose` before running it, such as "echo 'auth_token is set.';".
+EMITTED_ECHO_RE = re.compile(r"\s*echo '.*';$")
+# The line in which such a script reports that, after such a warning, it failed because
+# it found no branch elsewhere, such as "set-ci-org-and-branch: cannot determine the
+# branch of https://api.github.com/repos/ORG/REPO/pulls/5".  The fields are the script's
+# name and the URL.
+BAD_OUTPUT_FAILURE = "{}: cannot determine the branch of {}"
 
 # The results of a failed Azure Pipelines job or task.  Azure Pipelines abandons a job
 # whose agent stops responding.
@@ -352,7 +368,11 @@ def examined_lines(log: str) -> list[str]:
     lines, such as another process's output, can come between the lines of the report.
     A response that a script of plume-lib/plume-scripts prints after a warning that
     BAD_OUTPUT_WARNING_RE matches is omitted, from the line that RESPONSE_START_RE
-    matches through the line that RESPONSE_END_RE matches.
+    matches through the line that RESPONSE_END_RE matches, as are the commands that a
+    shell echoes, under `set -x` or `set -o verbose`, among those lines.  Only one line
+    of a response is omitted, so a line other than RESPONSE_END_RE that follows the
+    response is examined.  If the script later reports that it failed, in the line that
+    BAD_OUTPUT_FAILURE gives, then the response is examined, just before that line.
 
     Args:
         log: a log of the failed steps of a CI job.
@@ -368,22 +388,36 @@ def examined_lines(log: str) -> list[str]:
     # True if the line follows the start of a Java virtual machine's fatal error report
     # but does not follow the line that gives the JVM's version.
     in_jvm_report = False
-    # True if the line follows a line that BAD_OUTPUT_WARNING_RE matches, and every line
-    # since that one matches AUTH_TOKEN_SET_RE.
-    after_bad_output_warning = False
-    # True if the line is in a response that follows such a warning.
-    in_warned_response = False
+    # The match of the last line that BAD_OUTPUT_WARNING_RE matches, if the current line
+    # is part of what the script prints after that warning:  the line that
+    # AUTH_TOKEN_SET_RE matches, the response with the lines that RESPONSE_START_RE and
+    # RESPONSE_END_RE match, or a command that a shell echoes among them.  Otherwise None.
+    warning = None
+    # If warning is not None, the part of the warned response that precedes the current
+    # line:  "warning" if the line follows only the warning, "start" if it also follows
+    # the line that RESPONSE_START_RE matches, and "response" if it also follows the
+    # response.
+    warned_part = ""
+    # Maps each line that BAD_OUTPUT_FAILURE gives, to the response that precedes it.
+    failure_responses: dict[str, str] = {}
     for line in normalize_log(log).splitlines():
-        if in_warned_response:
-            in_warned_response = not RESPONSE_END_RE.match(line)
-            continue
-        if after_bad_output_warning and RESPONSE_START_RE.match(line):
-            in_warned_response = True
-            after_bad_output_warning = False
-            continue
-        after_bad_output_warning = bool(BAD_OUTPUT_WARNING_RE.match(line)) or (
-            after_bad_output_warning and bool(AUTH_TOKEN_SET_RE.match(line))
-        )
+        if warning:
+            if TRACE_LINE_RE.match(line) or EMITTED_ECHO_RE.match(line):
+                continue
+            if warned_part == "warning" and AUTH_TOKEN_SET_RE.match(line):
+                continue
+            if warned_part == "warning" and RESPONSE_START_RE.match(line):
+                warned_part = "start"
+                continue
+            if warned_part == "start":
+                failure_responses[BAD_OUTPUT_FAILURE.format(warning[1], warning[2])] = line
+                warned_part = "response"
+                continue
+            if warned_part == "response" and RESPONSE_END_RE.match(line):
+                warning = None
+                continue
+        warning = BAD_OUTPUT_WARNING_RE.match(line)
+        warned_part = "warning"
         if end_of_echo:
             if end_of_echo.match(line):
                 end_of_echo = None
@@ -399,6 +433,8 @@ def examined_lines(log: str) -> list[str]:
         if TAP_NOT_OK_RE.match(line):
             in_tap_diagnostics = True
         if not (end_of_echo or TRACE_LINE_RE.match(line) or (is_comment and not is_output)):
+            if line.strip() in failure_responses:
+                result.append(failure_responses.pop(line.strip()))
             result.append(line)
     return result
 

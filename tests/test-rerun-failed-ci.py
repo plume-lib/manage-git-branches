@@ -641,6 +641,38 @@ class ClassifyTest(unittest.TestCase):
                 ),
                 '{"message":"API rate limit exceeded for 203.0.113.7."}',
             ),
+            # A script of plume-lib/plume-scripts warned about a GitHub API response, then
+            # failed because it found the branch nowhere else.
+            (
+                (
+                    f"{SET_CI_WARNING}\n---- start of curl output ----\n"
+                    '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                    "---- end of curl output ----\n"
+                    "set-ci-org-and-branch: cannot determine the branch of"
+                    " https://api.github.com/repos/a/b/pulls/5\n"
+                    "set-ci-org-and-branch: the request may succeed if it is made again later."
+                ),
+                '{"message":"API rate limit exceeded for 203.0.113.7."}',
+            ),
+            # Likewise, for `ci-info` under `set -o verbose`, which echoes each command that
+            # `ci-info` writes for `eval`.
+            (
+                (
+                    "echo 'ci-info warning: bad output for"
+                    " https://api.github.com/repos/a/b/pulls/5';\n"
+                    "ci-info warning: bad output for https://api.github.com/repos/a/b/pulls/5\n"
+                    "echo '---- start of curl output ----';\n---- start of curl output ----\n"
+                    """echo '{"message":"API rate limit exceeded for 203.0.113.7."}';\n"""
+                    '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                    "echo '---- end of curl output ----';\n---- end of curl output ----\n"
+                    "echo 'ci-info: cannot determine the branch of"
+                    " https://api.github.com/repos/a/b/pulls/5';\n"
+                    "ci-info: cannot determine the branch of"
+                    " https://api.github.com/repos/a/b/pulls/5\n"
+                    "exit 2"
+                ),
+                '{"message":"API rate limit exceeded for 203.0.113.7."}',
+            ),
             # A transient line follows a GitHub API response that a warning precedes.
             (
                 (
@@ -649,6 +681,8 @@ class ClassifyTest(unittest.TestCase):
                 ),
                 None,
             ),
+            # Likewise, in a log that ends before the end of the response.
+            (f"{SET_CI_WARNING}\n---- start of curl output ----\n{{}}\nConnection reset", None),
             # The transient line follows a script that GitHub Actions echoed.
             ("##[group]Run ./gradlew build\n  shell: bash\n##[endgroup]\nConnection reset", None),
         ]:
@@ -783,6 +817,28 @@ class ClassifyTest(unittest.TestCase):
                 f"{SET_CI_WARNING}\nauth_token is set.\n---- start of wget output ----\n"
                 '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
                 "---- end of wget output ----\n"
+                "> Task :buildSrc:compileJava FAILED\nBUILD FAILED in 7s"
+            ),
+            # Likewise, under `set -x`, which traces the commands that print the response.
+            (
+                f"++ echo '{SET_CI_WARNING}'\n{SET_CI_WARNING}\n++ '[' -n x ']'\n"
+                "++ echo 'auth_token is set.'\nauth_token is set.\n"
+                "++ echo '---- start of curl output ----'\n---- start of curl output ----\n"
+                """++ printf '%s\\n' '{"message":"API rate limit exceeded for 203.0.113.7."}'\n"""
+                '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                "++ echo '---- end of curl output ----'\n---- end of curl output ----\n"
+                "> Task :buildSrc:compileJava FAILED\nBUILD FAILED in 7s"
+            ),
+            # Likewise, for `ci-info` under `set -o verbose`, which echoes each command that
+            # `ci-info` writes for `eval`.
+            (
+                "echo 'ci-info warning: bad output for https://api.github.com/repos/a/b/pulls/5';\n"
+                "ci-info warning: bad output for https://api.github.com/repos/a/b/pulls/5\n"
+                "echo 'auth_token is set.';\nauth_token is set.\n"
+                "echo '---- start of curl output ----';\n---- start of curl output ----\n"
+                """echo '{"message":"API rate limit exceeded for 203.0.113.7."}';\n"""
+                '{"message":"API rate limit exceeded for 203.0.113.7."}\n'
+                "echo '---- end of curl output ----';\n---- end of curl output ----\n"
                 "> Task :buildSrc:compileJava FAILED\nBUILD FAILED in 7s"
             ),
             # A script that Azure Pipelines echoes before running it.
