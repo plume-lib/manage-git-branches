@@ -193,9 +193,14 @@ COMPILER_DIAGNOSTIC_RE = re.compile(
     r"\.java:(?:\d+: (?:error|warning):|\[\d+,\d+\] )|^\s*(?:\[\w+\] )?warning: \["
 )
 
+# Matches the line in which Gradle reports an artifact that it did not find, such as
+# "> Could not find org.slf4j:slf4j-api:1.7.36." or "> Could not find any version that
+# matches com.example:foo:2.+.".
+COULD_NOT_FIND_RE = re.compile(r"Could not find ")
 # Matches the line that starts Gradle's list of the locations where it searched for an
 # artifact that it did not find.  The line follows one that names the artifact, such as
-# "> Could not find org.slf4j:slf4j-api:1.7.36.".
+# "> Could not find org.slf4j:slf4j-api:1.7.36.", or, for a dynamic version such as
+# "2.+", the list of the versions that do not match it.
 SEARCHED_LOCATIONS_RE = re.compile(r"\s*Searched in the following locations:")
 # Matches an item of that list.  Group 1 is the location, a URL such as
 # "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom".
@@ -210,6 +215,22 @@ PLUGIN_PORTAL_URL = "https://plugins.gradle.org/m2/"
 # "Plugin [id: 'org.example.x', version: '1.0'] was not found in any of the following
 # sources:".  Gradle does not list the URLs where it searched for the plugin.
 PLUGIN_NOT_FOUND_RE = re.compile(r"Plugin \[id: .*\] was not found")
+# Matches a location that holds one file of an artifact, such as
+# "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom".
+# It does not match a location of another scheme, such as "file:/home/runner/.m2/...",
+# which mavenLocal() yields, nor a location that lists an artifact's versions, such as
+# ".../org/slf4j/slf4j-api/maven-metadata.xml", which exists whenever some version
+# exists, including when no version satisfies a dynamic version such as "2.+".
+ARTIFACT_FILE_LOCATION_RE = re.compile(r"https?://\S+\.(?:jar|module|pom)")
+# Matches the line that starts Gradle's description of a failure, "* What went wrong:".
+# With `--continue`, Gradle describes each failure this way.
+WHAT_WENT_WRONG_RE = re.compile(r"\* What went wrong:")
+# Matches the line in which Gradle reports that it did not find some dependencies, such
+# as "Could not resolve all files for configuration ':compileClasspath'." or "> Could not
+# resolve all artifacts for configuration ':classpath'.".  It is the first or second line
+# after a line that matches WHAT_WENT_WRONG_RE, because it can follow a line such as
+# "Execution failed for task ':compileJava'.".
+COULD_NOT_RESOLVE_RE = re.compile(r"Could not resolve all ")
 
 # The `gradlew-retry` script of plume-lib/plume-scripts runs Gradle, and if Gradle fails
 # in a way that a retry might fix, then it prints a line about the failure, prints a line
@@ -381,8 +402,12 @@ def searched_locations(lines: list[str]) -> list[str]:
     return locations
 
 
+@functools.cache
 def serves_file(url: str) -> bool:
     """Return True if the given URL serves a file now.
+
+    The URL is requested at most once per process, because Gradle often reports the same
+    location for several configurations and projects.
 
     Args:
         url: a URL, such as
@@ -400,6 +425,27 @@ def serves_file(url: str) -> bool:
     return True
 
 
+def fails_otherwise(last_run: list[str]) -> bool:
+    """Return True if the given run of Gradle failed for a reason other than missing artifacts.
+
+    A failure is one that Gradle describes after a line that matches WHAT_WENT_WRONG_RE.
+    It is a failure to find artifacts if one of the next two lines matches
+    COULD_NOT_RESOLVE_RE.  A compiler warning does not count, because it is a failure
+    only under -Werror, which Gradle reports as a failure of the compilation task.
+
+    Args:
+        last_run: the lines of the log of a run of Gradle.
+
+    Returns:
+        True if Gradle reported a failure other than a failure to find artifacts.
+    """
+    return any(
+        WHAT_WENT_WRONG_RE.search(line)
+        and not any(COULD_NOT_RESOLVE_RE.search(next_line) for next_line in last_run[i + 1 : i + 3])
+        for i, line in enumerate(last_run)
+    )
+
+
 def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | None:
     """Return the line that shows that the artifacts that Gradle did not find exist.
 
@@ -411,8 +457,11 @@ def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | Non
     for a minute or more, to serve an artifact that it holds.  An artifact that no
     location serves, such as a misspelled one, prevents a transient failure.  So does a
     plugin that Gradle did not find, because Gradle does not report where it searched
-    for the plugin.  The locations are requested only for an artifact for which
-    `gradlew-retry` reported no location.
+    for the plugin, and a failure for which fails_otherwise returns True.  The locations
+    are requested only for an artifact for which `gradlew-retry` reported no location,
+    and only those that ARTIFACT_FILE_LOCATION_RE matches.  So an artifact that has a
+    dynamic version, such as "2.+", that no version satisfies prevents a transient
+    failure, unless `gradlew-retry` reported a location for it.
 
     Args:
         lines: the lines of a log of the failed steps of a CI job.
@@ -422,11 +471,11 @@ def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | Non
         For the first artifact that the last run did not find, the line in which
         `gradlew-retry` reported a location that serves it or, if there is none, the line
         in which Gradle reported that it did not find it, such as "> Could not find
-        org.slf4j:slf4j-api:1.7.36.".  The line is without leading whitespace and
-        truncated to 200 characters.  The result is None if the log does not show such a
-        transient failure.
+        org.slf4j:slf4j-api:1.7.36.", which matches COULD_NOT_FIND_RE.  The line is
+        without leading whitespace and truncated to 200 characters.  The result is None
+        if the log does not show such a transient failure.
     """
-    if any(PLUGIN_NOT_FOUND_RE.search(line) for line in last_run):
+    if fails_otherwise(last_run) or any(PLUGIN_NOT_FOUND_RE.search(line) for line in last_run):
         return None
     # Maps each URL that `gradlew-retry` reported to serve a file, to the first line that
     # reported it.
@@ -440,7 +489,15 @@ def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | Non
         if i > 0 and SEARCHED_LOCATIONS_RE.match(line):
             locations = searched_locations(last_run[i + 1 :])
             reason = next((existing[loc] for loc in locations if loc in existing), None)
-            if reason is None and any(serves_file(loc) for loc in locations):
+            if (
+                reason is None
+                and COULD_NOT_FIND_RE.search(last_run[i - 1])
+                and any(
+                    serves_file(loc)
+                    for loc in locations
+                    if ARTIFACT_FILE_LOCATION_RE.fullmatch(loc)
+                )
+            ):
                 reason = last_run[i - 1].lstrip()[:200]
             if reason is None:
                 return None

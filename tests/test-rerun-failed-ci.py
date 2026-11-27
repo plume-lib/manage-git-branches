@@ -455,7 +455,7 @@ class RerunTestCase(unittest.TestCase):
 
 
 class ClassifyTest(unittest.TestCase):
-    """Tests for --classify, which run the script."""
+    """Tests for --classify, which call main() with a fake server."""
 
     def classify(self, log: str, existing: tuple[str, ...] = ()) -> tuple[int, str]:
         """Run rerun-failed-ci --classify on a log containing the given text.
@@ -472,6 +472,7 @@ class ClassifyTest(unittest.TestCase):
         self.addCleanup(Path(f.name).unlink)
         server = FakeServer()
         server.urls = dict.fromkeys(existing, "")
+        rerun_failed_ci.serves_file.cache_clear()
         output = io.StringIO()
         with (
             mock.patch.object(request_util, "http", server.http),
@@ -824,6 +825,55 @@ class ClassifyTest(unittest.TestCase):
                     " the following sources:"
                 ),
                 (OPTIONS_POM,),
+                (1, ""),
+            ),
+            # Gradle describes the failure to find an artifact after "* What went wrong:".
+            (
+                (
+                    "* What went wrong:\n"
+                    "Execution failed for task ':compileJava'.\n"
+                    "> Could not resolve all files for configuration ':compileClasspath'.\n"
+                    f"{OPTIONS_NOT_FOUND}"
+                ),
+                (OPTIONS_POM,),
+                (0, "> Could not find org.plumelib:options:3.0.0."),
+            ),
+            # Gradle did not find an artifact that exists now, and with `--continue`, it also
+            # reported a test failure.
+            (
+                (
+                    "* What went wrong:\n"
+                    "Could not resolve all files for configuration ':compileClasspath'.\n"
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "* What went wrong:\n"
+                    "Execution failed for task ':other:test'.\n"
+                    "> There were failing tests. See the report at: file:///a/index.html"
+                ),
+                (OPTIONS_POM,),
+                (1, ""),
+            ),
+            # No version satisfies a dynamic version, although the artifact's list of
+            # versions exists.
+            (
+                (
+                    "   > Could not find any version that matches com.example:foo:2.+.\n"
+                    "     Versions that do not match:\n"
+                    "       - 1.0\n"
+                    "     Searched in the following locations:\n"
+                    "       - https://repo.maven.apache.org/maven2/com/example/foo/"
+                    "maven-metadata.xml"
+                ),
+                ("https://repo.maven.apache.org/maven2/com/example/foo/maven-metadata.xml",),
+                (1, ""),
+            ),
+            # A location that is not an http or https URL is not requested.
+            (
+                (
+                    "   > Could not find com.example:foo:1.0.\n"
+                    "     Searched in the following locations:\n"
+                    "       - file:/home/runner/.m2/repository/com/example/foo/1.0/foo-1.0.pom"
+                ),
+                ("file:/home/runner/.m2/repository/com/example/foo/1.0/foo-1.0.pom",),
                 (1, ""),
             ),
             # An earlier run of Gradle did not find an artifact, and the last run failed for
