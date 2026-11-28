@@ -28,9 +28,9 @@ check from any other service is reported and skipped.
 A job's failure is transient if the log of its failed steps contains a message that
 TRANSIENT_PATTERNS below lists, such as a message about a network problem, an overloaded
 or rate-limited server, or a lost CI runner.  A job's failure is also transient if
-Gradle did not find an artifact and the Gradle Plugin Portal is the only location that
-Gradle searched for it, or if Gradle failed only because it did not find some artifacts
-and, for each one, some location where Gradle searched for it serves it, or if javac
+Gradle failed only because it did not find some artifacts and, for each one, some
+location where Gradle searched for it serves it or the Gradle Plugin Portal is the only
+location that Gradle searched for it, or if javac
 failed only because of -Werror and a Checker Framework warning that type-checking was
 too slow.  A location serves an artifact if the `gradlew-retry` script of
 plume-lib/plume-scripts reported that it does, or if it is in a public repository, such
@@ -538,7 +538,8 @@ def server_serves_file(url: str) -> bool:
 
     The result for each URL is computed once per process.  If the server cannot be
     reached, as for a timeout, the exception in request_util.REQUEST_ERRORS that
-    request_util.http raises propagates, so the failure is not remembered.
+    request_util.head raises propagates, so the failure is not remembered.  The request
+    transfers no file, even after a redirect.
 
     Args:
         url: a URL, such as
@@ -549,7 +550,7 @@ def server_serves_file(url: str) -> bool:
         after following redirects; False if it responds with an error status.
     """
     try:
-        request_util.http("HEAD", url)
+        request_util.head(url)
     except urllib.error.HTTPError:
         return False
     return True
@@ -608,7 +609,8 @@ def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | Non
 
     The result shows a transient failure only if the last run of Gradle failed only
     because it did not find artifacts, and for each such artifact, some location where
-    Gradle searched for it serves it.  A location serves an artifact if `gradlew-retry`
+    Gradle searched for it serves it, or the Gradle Plugin Portal is the only location
+    that Gradle searched for it.  A location serves an artifact if `gradlew-retry`
     reported that it does, in a line that matches GRADLEW_RETRY_EXISTS_RE, or if
     serves_file returns True for it.  A repository such as Maven Central sometimes fails,
     for a minute or more, to serve an artifact that it holds.  An artifact that no
@@ -632,7 +634,9 @@ def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | Non
 
     Returns:
         For the first artifact that the last run did not find, the line in which
-        `gradlew-retry` reported a location that serves it or, if there is none, a line
+        `gradlew-retry` reported a location that serves it or, if there is none and
+        Gradle searched only the Gradle Plugin Portal, the line that reports the artifact,
+        such as "> Could not find org.slf4j:slf4j-api:1.7.36." or, otherwise, a line
         that names the first location that serves it now, such as
         "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom
         exists now.".  The line is without leading whitespace and truncated to 200
@@ -661,6 +665,12 @@ def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | Non
                 return None
             locations = searched_locations(last_run[i + 2 :])
             reason = next((existing[loc] for loc in locations if loc in existing), None)
+            if (
+                reason is None
+                and locations
+                and all(loc.startswith(PLUGIN_PORTAL_URL) for loc in locations)
+            ):
+                reason = line.lstrip()[:200]
             if reason is None:
                 served = next(
                     (
@@ -752,7 +762,11 @@ def maven_missing_artifacts_reason(lines: list[str]) -> str | None:
     the failures in the lines that follow it and that match MAVEN_ERROR_RE, other than
     those that MAVEN_ADVICE_RE matches.  Each nonempty description must match
     MAVEN_UNRESOLVED_RE or one of MAVEN_NOT_FOUND_RES, and at least one must match one of
-    MAVEN_NOT_FOUND_RES.  A description that matches MAVEN_TRANSFER_FAILED_RE prevents a
+    MAVEN_NOT_FOUND_RES.  A description that matches MAVEN_UNRESOLVED_RE but none of
+    MAVEN_NOT_FOUND_RES, such as "Plugin ... or one of its dependencies could not be
+    resolved:", must be followed immediately by a description of its cause that matches
+    one of MAVEN_NOT_FOUND_RES, so the cause of a failure of a later run of Maven with the
+    "-q" option is not taken from an earlier run.  A description that matches MAVEN_TRANSFER_FAILED_RE prevents a
     transient failure, even if it also matches MAVEN_UNRESOLVED_RE.  A description that
     lists artifacts (MAVEN_UNRESOLVED_LIST_RE) must also match one of MAVEN_NOT_FOUND_RES,
     and each listed artifact must be served now by the repository that that match names,
@@ -785,12 +799,17 @@ def maven_missing_artifacts_reason(lines: list[str]) -> str | None:
     ):
         return None
     urls: list[str] = []
+    # True if the last description matched MAVEN_UNRESOLVED_RE but named no missing
+    # artifact, so the next description must give its cause.
+    awaiting_cause = False
     for line in after_failure:
         error = MAVEN_ERROR_RE.match(line)
         if not error:
             continue
         description = MAVEN_HELP_RE.sub("", error[1]).strip()
         if not description or MAVEN_ADVICE_RE.match(description):
+            if awaiting_cause:
+                return None
             continue
         # Pairs of an artifact's coordinates and the URL of a repository that did not serve it.
         missing = [
@@ -806,8 +825,12 @@ def maven_missing_artifacts_reason(lines: list[str]) -> str | None:
         if (
             MAVEN_TRANSFER_FAILED_RE.search(description)
             or (listed and not missing)
-            or (not missing and not MAVEN_UNRESOLVED_RE.search(description))
+            or (not missing and (awaiting_cause or not MAVEN_UNRESOLVED_RE.search(description)))
         ):
+            return None
+        awaiting_cause = not missing
+        if awaiting_cause and MAVEN_HELP_RE.search(error[1]):
+            # The description ends without its cause.
             return None
         missing += [(artifact, missing[0][1]) for artifact in listed]
         for artifact, repository in missing:
@@ -816,7 +839,7 @@ def maven_missing_artifacts_reason(lines: list[str]) -> str | None:
                 return None
             if url not in urls:
                 urls.append(url)
-    if not urls or not all(serves_file(url) for url in urls):
+    if awaiting_cause or not urls or not all(serves_file(url) for url in urls):
         return None
     return f"{urls[0]} exists now."[:200]
 
@@ -827,9 +850,7 @@ def transient_reason(log: str) -> str | None:
     Only the lines from the last run of Gradle by `gradlew-retry` are examined, if the log
     shows that `gradlew-retry` ran Gradle again.  An earlier run's failure did not cause
     the job's failure, even if it was transient, because `gradlew-retry` ran Gradle again.
-    Of those lines, one shows a transient failure if it matches TRANSIENT_RE, or if it
-    names an artifact that Gradle did not find, the Gradle Plugin Portal is the only
-    location that Gradle searched for it, and only_missing_artifacts returns True.
+    Of those lines, one shows a transient failure if it matches TRANSIENT_RE.
     Otherwise, the result is as for
     slow_typechecking_reason or, if that is None, as for missing_artifacts_reason or, if
     that is None, as for maven_missing_artifacts_reason.  The lines that `examined_lines`
@@ -849,17 +870,9 @@ def transient_reason(log: str) -> str | None:
         (i for i, line in enumerate(lines) if GRADLEW_RETRY_RETRYING_RE.search(line)), default=-1
     )
     last_run = lines[last_retry + 1 :]
-    for i, line in enumerate(last_run):
+    for line in last_run:
         if TRANSIENT_RE.search(line):
             return line.lstrip()[:200]
-        if i > 0 and SEARCHED_LOCATIONS_RE.match(line):
-            locations = searched_locations(last_run[i + 1 :])
-            if (
-                locations
-                and all(loc.startswith(PLUGIN_PORTAL_URL) for loc in locations)
-                and only_missing_artifacts(last_run)
-            ):
-                return last_run[i - 1].lstrip()[:200]
     return (
         slow_typechecking_reason(last_run)
         or missing_artifacts_reason(lines, last_run)

@@ -205,6 +205,10 @@ class FakeServer:
         response = self.urls[path]
         return (response if isinstance(response, str) else json.dumps(response)).encode()
 
+    def head(self, url: str) -> None:
+        """Serve the given HTTP HEAD request, as request_util.head does."""
+        self.http("HEAD", url)
+
     def run(self, cmd: list[str]) -> str:
         """Run the given `gh` command, as request_util.run does.
 
@@ -447,6 +451,7 @@ class RerunTestCase(unittest.TestCase):
         rerun_failed_ci.server_serves_file.cache_clear()
         for patcher in [
             mock.patch.object(request_util, "http", self.server.http),
+            mock.patch.object(request_util, "head", self.server.head),
             mock.patch.object(request_util, "run", self.server.run),
             mock.patch.object(ci_build, "circleci_token", return_value="token"),
             mock.patch.object(
@@ -519,7 +524,7 @@ class ClassifyTest(unittest.TestCase):
         rerun_failed_ci.server_serves_file.cache_clear()
         output = io.StringIO()
         with (
-            mock.patch.object(request_util, "http", server.http),
+            mock.patch.object(request_util, "head", server.head),
             mock.patch.object(sys, "argv", ["rerun-failed-ci", "--classify", f.name]),
             contextlib.redirect_stdout(output),
         ):
@@ -732,6 +737,15 @@ class ClassifyTest(unittest.TestCase):
                 "Execution failed for task ':other:test'.\n"
                 "> There were failing tests. See the report at: file:///a/index.html"
             ),
+            # Gradle searched only the Gradle Plugin Portal for an artifact, but it also did
+            # not find a misspelled artifact in Maven Central.
+            (
+                f"{RESOLUTION_FAILED}\n"
+                "   > Could not find org.slf4j:slf4j-api:1.7.36.\n"
+                "     Searched in the following locations:\n"
+                "       - https://plugins.gradle.org/m2/org/slf4j/slf4j-api/1.7.36/"
+                f"slf4j-api-1.7.36.pom\n{GUAVA_NOT_FOUND}"
+            ),
             # Gradle searched a repository other than the Gradle Plugin Portal, too.
             (
                 "   > Could not find com.google.guava:guava:33.9-jre.\n"
@@ -868,6 +882,19 @@ class ClassifyTest(unittest.TestCase):
                 f"{OPTIONS_NOT_FOUND}\n{spotless_not_found}\n{OPTIONS_EXISTS}",
                 (f"https://repo.maven.apache.org/maven2/{spotless_pom}",),
                 (0, OPTIONS_EXISTS),
+            ),
+            # Gradle searched only the Gradle Plugin Portal for one artifact, and Maven
+            # Central serves the other now.
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find org.slf4j:slf4j-api:1.7.36.\n"
+                    "     Searched in the following locations:\n"
+                    "       - https://plugins.gradle.org/m2/org/slf4j/slf4j-api/1.7.36/"
+                    f"slf4j-api-1.7.36.pom\n{OPTIONS_NOT_FOUND}"
+                ),
+                (OPTIONS_POM,),
+                (0, "> Could not find org.slf4j:slf4j-api:1.7.36."),
             ),
             # No location serves an artifact that Gradle did not find.
             (f"{RESOLUTION_FAILED}\n{spotless_not_found}", (), (1, "")),
@@ -1154,6 +1181,28 @@ class ClassifyTest(unittest.TestCase):
                 (foo_jar,),
                 (1, ""),
             ),
+            # A later run of Maven, with the "-q" option, did not resolve a plugin, but its
+            # description ends before the cause.
+            (
+                (
+                    f"{CLEAN_PLUGIN_NOT_FOUND}\n"
+                    "[ERROR] Plugin org.example:x-plugin:1.0 or one of its dependencies could"
+                    " not be resolved:\n"
+                    "[ERROR] -> [Help 1]"
+                ),
+                (CLEAN_PLUGIN_JAR,),
+                (1, ""),
+            ),
+            # Likewise, and the log ends there.
+            (
+                (
+                    f"{CLEAN_PLUGIN_NOT_FOUND}\n"
+                    "[ERROR] Plugin org.example:x-plugin:1.0 or one of its dependencies could"
+                    " not be resolved:"
+                ),
+                (CLEAN_PLUGIN_JAR,),
+                (1, ""),
+            ),
             # The lines after the help reference give general advice, not failures.
             (
                 (
@@ -1174,13 +1223,12 @@ class ClassifyTest(unittest.TestCase):
         rerun_failed_ci.server_serves_file.cache_clear()
         responses: list[Any] = [TimeoutError("timed out"), b""]
 
-        def http(*_args: Any, **_kwargs: Any) -> bytes:
+        def head(*_args: Any, **_kwargs: Any) -> None:
             response = responses.pop(0)
             if isinstance(response, Exception):
                 raise response
-            return response
 
-        with mock.patch.object(request_util, "http", http):
+        with mock.patch.object(request_util, "head", head):
             self.assertFalse(rerun_failed_ci.serves_file(OPTIONS_POM))
             self.assertTrue(rerun_failed_ci.serves_file(OPTIONS_POM))
             self.assertTrue(rerun_failed_ci.serves_file(OPTIONS_POM))
