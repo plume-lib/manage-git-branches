@@ -819,6 +819,7 @@ class ClassifyTest(unittest.TestCase):
             f"       - https://repo.maven.apache.org/maven2/{spotless_pom}\n"
             "     Required by:"
         )
+        foo_jar = "https://repo.maven.apache.org/maven2/com/example/foo/1.0/foo-1.0.jar"
         for log, existing, expected in [
             # Maven Central serves an artifact now that it did not serve to Gradle.
             (
@@ -880,6 +881,40 @@ class ClassifyTest(unittest.TestCase):
                 ),
                 (OPTIONS_POM,),
                 (0, f"{OPTIONS_POM} exists now."),
+            ),
+            # Gradle says that it omits failures with identical causes.
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "> There are 2 more failures with identical causes.\n"
+                    "* Try:\n"
+                    "> Run with --stacktrace option to get the stack trace."
+                ),
+                (OPTIONS_POM,),
+                (0, f"{OPTIONS_POM} exists now."),
+            ),
+            # Gradle lists the locations of a file of an artifact without "- ".
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find foo-1.0.jar (com.example:foo:1.0).\n"
+                    "     Searched in the following locations:\n"
+                    f"         {foo_jar}\n"
+                    "* Try:"
+                ),
+                (foo_jar,),
+                (0, f"{foo_jar} exists now."),
+            ),
+            # Likewise, but no location serves the file.
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find foo-1.0.jar (com.example:foo:1.0).\n"
+                    "     Searched in the following locations:\n"
+                    f"         {foo_jar}"
+                ),
+                (),
+                (1, ""),
             ),
             # Gradle did not list where it searched for one of two artifacts.
             (

@@ -214,7 +214,12 @@ DYNAMIC_VERSION_NOT_FOUND_RE = re.compile(
 SEARCHED_LOCATIONS_RE = re.compile(r"\s*Searched in the following locations:")
 # Matches an item of that list.  Group 1 is the location, a URL such as
 # "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom".
-SEARCHED_LOCATION_RE = re.compile(r"\s*- (\S+)")
+# Gradle starts each item with "- " for a module that it did not find, as in "> Could not
+# find org.slf4j:slf4j-api:1.7.36.", but not for a file of a module that it found, as in
+# "> Could not find slf4j-api-1.7.36.jar (org.slf4j:slf4j-api:1.7.36).".  An item without
+# "- " must be a URL alone on its line, so that a later line such as "Required by:" is
+# not an item.
+SEARCHED_LOCATION_RE = re.compile(r"\s*(?:- (\S+)|([a-zA-Z][a-zA-Z0-9+.-]*:\S+)\s*$)")
 # The prefix of every location in the Gradle Plugin Portal.  The portal serves the Maven
 # Central artifacts that plugins depend on, such as slf4j-api, and it sometimes fails to
 # find them.  A Gradle failure to find an artifact is transient only if the portal is
@@ -430,7 +435,7 @@ def searched_locations(lines: list[str]) -> list[str]:
         match = SEARCHED_LOCATION_RE.match(line)
         if not match:
             break
-        locations.append(match[1])
+        locations.append(match[1] or match[2])
     return locations
 
 
