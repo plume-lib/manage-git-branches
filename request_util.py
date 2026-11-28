@@ -164,6 +164,50 @@ def http(
     return content
 
 
+class _MethodPreservingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that repeats the request's method, such as HEAD, after a redirect.
+
+    urllib.request.HTTPRedirectHandler makes a GET request after a redirect, so a HEAD
+    request that is redirected would transfer the response body.
+    """
+
+    def redirect_request(  # ruff: ignore[too-many-arguments]
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        """Return the request to make after a redirect, with the method of the given one.
+
+        Returns:
+            The request, or None if the redirect should not be followed.
+        """
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            new.method = req.get_method()
+        return new
+
+
+def head(url: str) -> None:
+    """Make an HTTP HEAD request of the given URL, following redirects with HEAD requests.
+
+    Unlike http, this reads no response body, so it transfers no file.
+
+    Args:
+        url: a URL.
+
+    Raises:
+        urllib.error.HTTPError: if the server responds with an error status.
+    """
+    opener = urllib.request.build_opener(_MethodPreservingRedirectHandler)
+    req = urllib.request.Request(url, method="HEAD")
+    with opener.open(req, timeout=HTTP_TIMEOUT):
+        pass
+
+
 def request(
     method: str,
     url: str,

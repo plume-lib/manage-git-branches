@@ -28,11 +28,16 @@ check from any other service is reported and skipped.
 A job's failure is transient if the log of its failed steps contains a message that
 TRANSIENT_PATTERNS below lists, such as a message about a network problem, an overloaded
 or rate-limited server, or a lost CI runner.  A job's failure is also transient if
-Gradle did not find an artifact and the Gradle Plugin Portal is the only location that
-Gradle searched for it, or if Gradle did not find some artifacts and, for each one, the
-`gradlew-retry` script of plume-lib/plume-scripts reported that some location where
-Gradle searched for it serves it, or if javac failed only because of -Werror and a
-Checker Framework warning that type-checking was too slow.  If the log shows that
+Gradle failed only because it did not find some artifacts and, for each one, some
+location where Gradle searched for it serves it or the Gradle Plugin Portal is the only
+location that Gradle searched for it, or if javac
+failed only because of -Werror and a Checker Framework warning that type-checking was
+too slow.  A location serves an artifact if the `gradlew-retry` script of
+plume-lib/plume-scripts reported that it does, or if it is in a public repository, such
+as Maven Central, and serves the artifact when this command requests it.  A job's
+failure is also transient if the last run of Maven failed only because it did not find
+some artifacts, and each one is in a public repository where Maven did not find it, and
+that repository serves it when this command requests it.  If the log shows that
 `gradlew-retry` ran Gradle again, then only the output of the last run of Gradle is
 examined, except for the reports of `gradlew-retry` about locations that serve
 artifacts.  The log of an Azure Pipelines or GitHub Actions job also contains the errors
@@ -92,11 +97,13 @@ even if some other build could not be examined or rerun.  A caller can use it to
 that some check of a pull request is about to run again, which GitHub might not show
 until some time after the rerun.
 
-With `--classify`, this command reruns nothing and contacts no server.  It reads each
-LOG-FILE (or standard input), and for each one that shows a transient failure, it
-prints the line that shows it.  It does not recognize a run that its concurrency group
-cancelled, because that requires asking GitHub about newer runs.  The exit status is 0
-if every LOG-FILE shows a transient failure, and 1 otherwise.
+With `--classify`, this command reruns nothing and contacts no server other than the
+public repositories, such as Maven Central, where Gradle or Maven searched for an
+artifact that it did not find.  It reads each LOG-FILE (or standard input), and for each
+one that shows a transient failure, it prints the line that shows it.  It does not
+recognize a run that its concurrency group cancelled, because that requires asking
+GitHub about newer runs.  The exit status is 0 if every LOG-FILE shows a transient
+failure, and 1 otherwise.
 
 This command requires `gh`, authenticated to GitHub.  Rerunning an Azure Pipelines
 build or a CircleCI job requires credentials, as described in `ci_build.py`.  The Azure
@@ -114,6 +121,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -191,9 +199,21 @@ COMPILER_DIAGNOSTIC_RE = re.compile(
     r"\.java:(?:\d+: (?:error|warning):|\[\d+,\d+\] )|^\s*(?:\[\w+\] )?warning: \["
 )
 
+# Matches the line in which Gradle reports an artifact that it did not find, such as
+# "> Could not find org.slf4j:slf4j-api:1.7.36." or "> Could not find any version that
+# matches com.example:foo:2.+.".
+COULD_NOT_FIND_RE = re.compile(r"Could not find ")
+# Matches the line in which Gradle reports that no version satisfies a dynamic version
+# such as "2.+", as in "> Could not find any version that matches com.example:foo:2.+."
+# or "> Could not find any matches for com.example:foo:2.+ as no versions of
+# com.example:foo are available.".
+DYNAMIC_VERSION_NOT_FOUND_RE = re.compile(
+    r"Could not find any (?:version that matches|matches for) "
+)
 # Matches the line that starts Gradle's list of the locations where it searched for an
 # artifact that it did not find.  The line follows one that names the artifact, such as
-# "> Could not find org.slf4j:slf4j-api:1.7.36.".
+# "> Could not find org.slf4j:slf4j-api:1.7.36.", or, for a dynamic version such as
+# "2.+", the list of the versions that do not match it.
 SEARCHED_LOCATIONS_RE = re.compile(r"\s*Searched in the following locations:")
 # Matches an item of that list.  Group 1 is the location, a URL such as
 # "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom".
@@ -208,6 +228,117 @@ PLUGIN_PORTAL_URL = "https://plugins.gradle.org/m2/"
 # "Plugin [id: 'org.example.x', version: '1.0'] was not found in any of the following
 # sources:".  Gradle does not list the URLs where it searched for the plugin.
 PLUGIN_NOT_FOUND_RE = re.compile(r"Plugin \[id: .*\] was not found")
+# Matches a location that this command requests:  one that holds one file of an artifact
+# in a public repository (Maven Central, the Gradle Plugin Portal, or Google's Maven
+# repository), such as
+# "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom".
+# It does not match a location in another repository, because the build of a pull
+# request can make Gradle list any URL, such as one of a host in the private network of
+# whoever runs this command.  Nor does it match a location of another scheme, such as
+# "file:/home/runner/.m2/...", which mavenLocal() yields, or a location that lists an
+# artifact's versions, such as ".../org/slf4j/slf4j-api/maven-metadata.xml", which exists
+# whenever some version exists, including when no version satisfies a dynamic version
+# such as "2.+".
+PROBED_LOCATION_RE = re.compile(
+    r"https://(?:dl\.google\.com|plugins\.gradle\.org|repo\.maven\.apache\.org|repo1\.maven\.org)"
+    r"/\S+\.(?:jar|module|pom)"
+)
+# Matches the line that starts Gradle's description of a failure, "* What went wrong:".
+# With `--continue`, Gradle describes each failure this way.
+WHAT_WENT_WRONG_RE = re.compile(r"\* What went wrong:")
+# Matches a line that starts a section of Gradle's report of a failure, such as "* What
+# went wrong:" or "* Try:".
+GRADLE_SECTION_RE = re.compile(r"\s*\* [A-Z]")
+# Matches a line in which Gradle gives a cause of a failure, such as "> Could not find
+# org.slf4j:slf4j-api:1.7.36." or "   > Could not GET '...'. Received status code 401
+# from server: Unauthorized".
+CAUSE_LINE_RE = re.compile(r"\s*> ")
+# Matches a line in which Gradle says that it omits failures like one that it reported,
+# such as "> There is 1 more failure with an identical cause." or "> There are 2 more
+# failures with identical causes.".  It reports no other cause.
+IDENTICAL_FAILURES_RE = re.compile(
+    r"There (?:is|are) \d+ more failures? with (?:an )?identical cause"
+)
+# Matches the line in which Gradle reports that it did not find some dependencies, such
+# as "Could not resolve all files for configuration ':compileClasspath'." or "> Could not
+# resolve all artifacts for configuration ':classpath'.".  It can follow lines that
+# describe what failed because of it, such as "Execution failed for task
+# ':compileJava'." and "> Error while evaluating property 'filteredArgumentsMap' of task
+# ':compileKotlin'.".
+COULD_NOT_RESOLVE_RE = re.compile(r"Could not resolve all ")
+
+# Matches the line in which Maven reports that a run failed, "[INFO] BUILD FAILURE".
+MAVEN_BUILD_FAILURE_RE = re.compile(r"\s*\[INFO\] BUILD FAILURE\s*$")
+# Matches the line in which Maven reports that a run succeeded, "[INFO] BUILD SUCCESS".
+MAVEN_BUILD_SUCCESS_RE = re.compile(r"\s*\[INFO\] BUILD SUCCESS\s*$")
+# Matches the line with which Maven starts a run, "[INFO] Scanning for projects...".
+# Maven does not print it if it is run with the "-q" option.
+MAVEN_RUN_START_RE = re.compile(r"\s*\[INFO\] Scanning for projects\.\.\.\s*$")
+# Matches a line in which Maven describes a failure, such as "[ERROR] Plugin
+# org.apache.maven.plugins:maven-clean-plugin:3.4.0 or one of its dependencies could not
+# be resolved:".  Group 1 is the description, which can be empty, as in "[ERROR] ".
+MAVEN_ERROR_RE = re.compile(r"\s*\[ERROR\](.*)")
+# Matches the reference to the help that ends Maven's description of a failure, as in
+# "[ERROR] -> [Help 1]" or "[ERROR] ... in central (https://repo.maven.apache.org/maven2)
+# -> [Help 1]".  Maven describes each failure of a run, such as each failure of a run with
+# the "-fae" option, and ends each description with its own reference.
+MAVEN_HELP_RE = re.compile(r"\s*-> \[Help \d+\]")
+# Matches the general advice that Maven gives after it describes the failures of a run,
+# without the "[ERROR]" prefix and leading whitespace, such as "To see the full stack trace
+# of the errors, re-run Maven with the '-e' switch", "[Help 1]
+# http://cwiki.apache.org/confluence/display/MAVEN/PluginResolutionException", or
+# "mvn <args> -rf :app".
+MAVEN_ADVICE_RE = re.compile(
+    r"To see the full stack trace of the errors, re-run Maven with "
+    r"|Re-run Maven using the "
+    r"|For more information about the errors and possible solutions, "
+    r"|\[Help \d+\] https?://"
+    r"|After correcting the problems, you can resume the build with the command"
+    r"|mvn .* -rf :"
+)
+# Matches Maven's description of a failure to find some artifacts, such as "Plugin
+# org.apache.maven.plugins:maven-clean-plugin:3.4.0 or one of its dependencies could not
+# be resolved:" or "Failed to execute goal on project app: Could not resolve dependencies
+# for project com.example:app:jar:1.0: ...".
+MAVEN_UNRESOLVED_RE = re.compile(
+    r"Plugin \S+ or one of its dependencies could not be resolved"
+    r"|Could not resolve dependencies for project "
+)
+# Matches Maven's list of the artifacts that one request did not resolve, such as "The
+# following artifacts could not be resolved: com.example:foo:jar:1.0 (absent),
+# com.example:bar:jar:1.0 (absent)".  Group "artifacts" is the list, such as
+# "com.example:foo:jar:1.0 (absent), com.example:bar:jar:1.0 (absent)".  Maven follows the
+# list with the reason for only the first artifact in it, such as ": Could not find
+# artifact com.example:foo:jar:1.0 in central (https://repo.maven.apache.org/maven2)".
+MAVEN_UNRESOLVED_LIST_RE = re.compile(
+    r"The following artifacts could not be resolved: "
+    r"(?P<artifacts>\S+?(?: \([^)]*\))?(?:, \S+?(?: \([^)]*\))?)*)(?=: |:?$)"
+)
+# Matches an element of a list that MAVEN_UNRESOLVED_LIST_RE matches, such as
+# "com.example:foo:jar:1.0 (absent)" or "com.example:foo:jar:1.0".  Group "artifact" is the
+# artifact's coordinates, such as "com.example:foo:jar:1.0".
+MAVEN_LISTED_ARTIFACT_RE = re.compile(r"(?P<artifact>[^\s,]+?)(?: \([^)]*\))?(?:, |$)")
+# Matches Maven's report of a request for an artifact that failed for a reason other than
+# that the repository does not hold it, such as "Could not transfer artifact
+# com.example:foo:jar:1.0 from/to private (https://repo.example.com/maven2): status code:
+# 401, reason phrase: Unauthorized (401)".  A transfer failure that is transient, such as
+# one with status 503, matches TRANSIENT_RE.
+MAVEN_TRANSFER_FAILED_RE = re.compile(r"Could not transfer artifact ")
+# Regular expressions, each of which matches Maven's report of an artifact that a
+# repository did not serve.  Group "artifact" is the artifact's coordinates, of the form
+# GROUP:ARTIFACT:EXTENSION:VERSION or GROUP:ARTIFACT:EXTENSION:CLASSIFIER:VERSION, such
+# as "com.example:foo:jar:1.0" or "com.example:foo:jar:sources:1.0".  Group "repository"
+# is the URL of the repository, such as "https://repo.maven.apache.org/maven2".
+MAVEN_NOT_FOUND_RES = [
+    # Matches a report such as "Could not find artifact com.example:foo:jar:1.0 in central
+    # (https://repo.maven.apache.org/maven2)".
+    re.compile(r"Could not find artifact (?P<artifact>\S+) in \S+ \((?P<repository>[^)\s]+)\)"),
+    # Matches a report such as "org.apache.maven.plugins:maven-clean-plugin:jar:3.4.0 was
+    # not found in https://repo.maven.apache.org/maven2 during a previous attempt.".  Maven
+    # did not request the artifact again, because its local repository records that an
+    # earlier request failed.
+    re.compile(r"(?P<artifact>\S+) was not found in (?P<repository>\S+) during a previous attempt"),
+]
 
 # The `gradlew-retry` script of plume-lib/plume-scripts runs Gradle, and if Gradle fails
 # in a way that a retry might fix, then it prints a line about the failure, prints a line
@@ -379,28 +510,143 @@ def searched_locations(lines: list[str]) -> list[str]:
     return locations
 
 
-def gradlew_retry_reason(lines: list[str], last_run: list[str]) -> str | None:
-    """Return the line in which `gradlew-retry` reports that a missing artifact exists.
+def serves_file(url: str) -> bool:
+    """Return True if the given URL serves a file now.
 
-    The result is a line that matches GRADLEW_RETRY_EXISTS_RE.  It shows a transient
-    failure only if the last run of Gradle failed only because it did not find artifacts,
-    and for each such artifact, `gradlew-retry` reported that some location where Gradle
-    searched for the artifact serves it.  A repository such as Maven Central sometimes
-    fails, for a minute or more, to serve an artifact that it holds.  `gradlew-retry`
-    reports at most one URL each time it runs Gradle again, so a last run that did not
-    find several artifacts usually does not show a transient failure.  A plugin that
-    Gradle did not find prevents a transient failure, because Gradle does not report
-    where it searched for the plugin.
+    The server's answer for the URL is requested at most once per process, because Gradle
+    often reports the same location for several configurations and projects.  A server
+    that cannot be reached is asked again the next time.
+
+    Args:
+        url: a URL, such as
+            "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom".
+
+    Returns:
+        True if the server responds to a HEAD request of the URL with a successful status,
+        after following redirects; False if it responds with an error status or cannot
+        be reached.
+    """
+    try:
+        return server_serves_file(url)
+    except request_util.REQUEST_ERRORS:
+        return False
+
+
+@functools.cache
+def server_serves_file(url: str) -> bool:
+    """Return True if the server of the given URL serves the file at it.
+
+    The result for each URL is computed once per process.  If the server cannot be
+    reached, as for a timeout, the exception in request_util.REQUEST_ERRORS that
+    request_util.head raises propagates, so the failure is not remembered.  The request
+    transfers no file, even after a redirect.
+
+    Args:
+        url: a URL, such as
+            "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom".
+
+    Returns:
+        True if the server responds to a HEAD request of the URL with a successful status,
+        after following redirects; False if it responds with an error status.
+    """
+    try:
+        request_util.head(url)
+    except urllib.error.HTTPError:
+        return False
+    return True
+
+
+def only_missing_artifacts(last_run: list[str]) -> bool:
+    """Return True if Gradle reported failures in the given run, all for missing artifacts.
+
+    Gradle describes each failure in a block that starts with a line that matches
+    WHAT_WENT_WRONG_RE and ends before the next line that matches GRADLE_SECTION_RE, such
+    as "* Try:".  The block describes only a failure to find artifacts if some line of it
+    matches COULD_NOT_RESOLVE_RE, and each later line of it that matches CAUSE_LINE_RE
+    also matches COULD_NOT_RESOLVE_RE, COULD_NOT_FIND_RE, or IDENTICAL_FAILURES_RE.  The
+    lines before the first
+    line that matches COULD_NOT_RESOLVE_RE describe what failed because of it.  A later
+    cause, such as "> Could not resolve com.example:x:1.0." followed by a 401 status, "> No
+    matching variant of ...", or "> Conflict found for ...", is another failure.  A
+    compiler warning is not a separate failure, because it is a failure only under
+    -Werror, which Gradle reports as a failure of the compilation task.
+
+    Args:
+        last_run: a run of Gradle, as the lines of its log.
+
+    Returns:
+        True if Gradle reported at least one failure, and each one is a failure to find
+        artifacts.  The result is False for a run in which Gradle reported that it did not
+        find an artifact but reported no failure, as `./gradlew dependencies` does.
+    """
+    found = False
+    for i, line in enumerate(last_run):
+        if not WHAT_WENT_WRONG_RE.search(line):
+            continue
+        end = next(
+            (j for j in range(i + 1, len(last_run)) if GRADLE_SECTION_RE.match(last_run[j])),
+            len(last_run),
+        )
+        block = last_run[i + 1 : end]
+        resolution = next(
+            (j for j, block_line in enumerate(block) if COULD_NOT_RESOLVE_RE.search(block_line)),
+            None,
+        )
+        if resolution is None or any(
+            CAUSE_LINE_RE.match(block_line)
+            and not COULD_NOT_RESOLVE_RE.search(block_line)
+            and not COULD_NOT_FIND_RE.search(block_line)
+            and not IDENTICAL_FAILURES_RE.search(block_line)
+            for block_line in block[resolution + 1 :]
+        ):
+            return False
+        found = True
+    return found
+
+
+def missing_artifacts_reason(lines: list[str], last_run: list[str]) -> str | None:
+    """Return the line that shows that the artifacts that Gradle did not find exist.
+
+    The result shows a transient failure only if the last run of Gradle failed only
+    because it did not find artifacts, and for each such artifact, some location where
+    Gradle searched for it serves it, or the Gradle Plugin Portal is the only location
+    that Gradle searched for it.  A location serves an artifact if `gradlew-retry`
+    reported that it does, in a line that matches GRADLEW_RETRY_EXISTS_RE, or if
+    serves_file returns True for it.  A repository such as Maven Central sometimes fails,
+    for a minute or more, to serve an artifact that it holds.  An artifact that no
+    location serves, such as a misspelled one, prevents a transient failure.  So does a
+    plugin that Gradle did not find, because Gradle does not report where it searched
+    for the plugin, and a run for which only_missing_artifacts returns False, such as one
+    in which Gradle also reported another failure.  A failure outside Gradle, such as a
+    failure of a later step of the CI job, is not detected.  An artifact also prevents a
+    transient failure if the line that reports it, which matches CAUSE_LINE_RE and
+    COULD_NOT_FIND_RE, is not followed by a line that matches SEARCHED_LOCATIONS_RE, or if
+    it matches DYNAMIC_VERSION_NOT_FOUND_RE.  No version satisfies such a dynamic version,
+    such as "2.+", even if a location that Gradle lists for it, such as maven-metadata.xml
+    or the .pom of a version that a rule rejected, exists.  The locations are requested
+    only for an artifact for which `gradlew-retry` reported no location, and only those
+    that PROBED_LOCATION_RE matches.  So an artifact that Gradle searched for only in a
+    repository that is not public prevents a transient failure.
 
     Args:
         lines: the lines of a log of the failed steps of a CI job.
         last_run: the lines of the log from the last run of Gradle, a suffix of lines.
 
     Returns:
-        The first line that reports a URL that serves an artifact that the last run did
-        not find, without leading whitespace and truncated to 200 characters, or None if
-        the log does not show such a transient failure.
+        For the first artifact that the last run did not find, the line in which
+        `gradlew-retry` reported a location that serves it or, if there is none and
+        Gradle searched only the Gradle Plugin Portal, the line that reports the artifact,
+        such as "> Could not find org.slf4j:slf4j-api:1.7.36." or, otherwise, a line
+        that names the first location that serves it now, such as
+        "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.pom
+        exists now.".  The line is without leading whitespace and truncated to 200
+        characters.  The result is None if the log does not show such a transient
+        failure.
     """
+    if not only_missing_artifacts(last_run) or any(
+        PLUGIN_NOT_FOUND_RE.search(line) for line in last_run
+    ):
+        return None
     # Maps each URL that `gradlew-retry` reported to serve a file, to the first line that
     # reported it.
     existing: dict[str, str] = {}
@@ -408,17 +654,35 @@ def gradlew_retry_reason(lines: list[str], last_run: list[str]) -> str | None:
         match = GRADLEW_RETRY_EXISTS_RE.search(line)
         if match:
             existing.setdefault(match[1], line.lstrip()[:200])
-    if not existing or any(PLUGIN_NOT_FOUND_RE.search(line) for line in last_run):
-        return None
     result = None
     for i, line in enumerate(last_run):
-        if SEARCHED_LOCATIONS_RE.match(line):
-            reason = next(
-                (existing[loc] for loc in searched_locations(last_run[i + 1 :]) if loc in existing),
-                None,
-            )
-            if reason is None:
+        if CAUSE_LINE_RE.match(line) and COULD_NOT_FIND_RE.search(line):
+            if (
+                DYNAMIC_VERSION_NOT_FOUND_RE.search(line)
+                or i + 1 == len(last_run)
+                or not SEARCHED_LOCATIONS_RE.match(last_run[i + 1])
+            ):
                 return None
+            locations = searched_locations(last_run[i + 2 :])
+            reason = next((existing[loc] for loc in locations if loc in existing), None)
+            if (
+                reason is None
+                and locations
+                and all(loc.startswith(PLUGIN_PORTAL_URL) for loc in locations)
+            ):
+                reason = line.lstrip()[:200]
+            if reason is None:
+                served = next(
+                    (
+                        loc
+                        for loc in locations
+                        if PROBED_LOCATION_RE.fullmatch(loc) and serves_file(loc)
+                    ),
+                    None,
+                )
+                if served is None:
+                    return None
+                reason = f"{served} exists now."[:200]
             result = result or reason
     return result
 
@@ -454,38 +718,166 @@ def slow_typechecking_reason(lines: list[str]) -> str | None:
     return result if found_werror else None
 
 
+def maven_artifact_url(artifact: str, repository: str) -> str | None:
+    """Return the URL of the given artifact's file in the given Maven repository.
+
+    Args:
+        artifact: an artifact's coordinates, of the form GROUP:ARTIFACT:EXTENSION:VERSION
+            or GROUP:ARTIFACT:EXTENSION:CLASSIFIER:VERSION, such as
+            "org.apache.maven.plugins:maven-clean-plugin:jar:3.4.0".
+        repository: the URL of a Maven repository, such as
+            "https://repo.maven.apache.org/maven2".
+
+    Returns:
+        The URL, such as "https://repo.maven.apache.org/maven2/org/apache/maven/plugins/
+        maven-clean-plugin/3.4.0/maven-clean-plugin-3.4.0.jar", or None if the
+        coordinates are not of either form.
+    """
+    parts = artifact.split(":")
+    if len(parts) == 4:
+        group, name, extension, version = parts
+        suffix = ""
+    elif len(parts) == 5:
+        group, name, extension, classifier, version = parts
+        suffix = f"-{classifier}"
+    else:
+        return None
+    path = f"{group.replace('.', '/')}/{name}/{version}/{name}-{version}{suffix}.{extension}"
+    return f"{repository.rstrip('/')}/{path}"
+
+
+def maven_missing_artifacts_reason(lines: list[str]) -> str | None:
+    """Return the line that shows that the artifacts that Maven did not find exist.
+
+    The result shows a transient failure only if the last run of Maven in the given lines
+    failed, and Maven described only failures to find artifacts, and for each such
+    artifact, the repository where Maven did not find it serves it now.  A repository
+    such as Maven Central sometimes fails, for a minute or more, to serve an artifact that
+    it holds.  Maven records such a failure in its local repository, and until the
+    record expires, a later run of Maven reports that the artifact "was not found ...
+    during a previous attempt" without requesting it again.
+
+    The last run of Maven failed if a line that matches MAVEN_BUILD_FAILURE_RE is followed
+    by no line that matches MAVEN_BUILD_SUCCESS_RE or MAVEN_RUN_START_RE.  Maven describes
+    the failures in the lines that follow it and that match MAVEN_ERROR_RE, other than
+    those that MAVEN_ADVICE_RE matches.  Each nonempty description must match
+    MAVEN_UNRESOLVED_RE or one of MAVEN_NOT_FOUND_RES, and at least one must match one of
+    MAVEN_NOT_FOUND_RES.  A description that matches MAVEN_UNRESOLVED_RE but none of
+    MAVEN_NOT_FOUND_RES, such as "Plugin ... or one of its dependencies could not be
+    resolved:", must be followed immediately by a description of its cause that matches
+    one of MAVEN_NOT_FOUND_RES, so the cause of a failure of a later run of Maven with the
+    "-q" option is not taken from an earlier run.  A description that matches MAVEN_TRANSFER_FAILED_RE prevents a
+    transient failure, even if it also matches MAVEN_UNRESOLVED_RE.  A description that
+    lists artifacts (MAVEN_UNRESOLVED_LIST_RE) must also match one of MAVEN_NOT_FOUND_RES,
+    and each listed artifact must be served now by the repository that that match names,
+    because Maven gives the reason for only the first listed artifact but searched the same
+    repositories for each.  So another failure, such as a compilation error, a 401
+    (Unauthorized) status from a repository, or a failure of a later run of Maven with the
+    "-q" option, prevents a transient failure.  A failure that prints no line that
+    MAVEN_ERROR_RE matches, such as a failure of a later step of the CI job, is not
+    detected.  Only a file that PROBED_LOCATION_RE matches is requested, so an artifact in
+    a repository that is not public prevents a transient failure.
+
+    Args:
+        lines: the lines of a log of the failed steps of a CI job.
+
+    Returns:
+        A line that names the file of the first artifact that Maven did not find, such as
+        "https://repo.maven.apache.org/maven2/com/example/foo/1.0/foo-1.0.jar exists
+        now.", truncated to 200 characters, or None if the log does not show such a
+        transient failure.
+    """
+    last_failure = max(
+        (i for i, line in enumerate(lines) if MAVEN_BUILD_FAILURE_RE.match(line)), default=None
+    )
+    if last_failure is None:
+        return None
+    after_failure = lines[last_failure + 1 :]
+    if any(
+        MAVEN_BUILD_SUCCESS_RE.match(line) or MAVEN_RUN_START_RE.match(line)
+        for line in after_failure
+    ):
+        return None
+    urls: list[str] = []
+    # True if the last description matched MAVEN_UNRESOLVED_RE but named no missing
+    # artifact, so the next description must give its cause.
+    awaiting_cause = False
+    for line in after_failure:
+        error = MAVEN_ERROR_RE.match(line)
+        if not error:
+            continue
+        description = MAVEN_HELP_RE.sub("", error[1]).strip()
+        if not description or MAVEN_ADVICE_RE.match(description):
+            if awaiting_cause:
+                return None
+            continue
+        # Pairs of an artifact's coordinates and the URL of a repository that did not serve it.
+        missing = [
+            (match["artifact"], match["repository"])
+            for regex in MAVEN_NOT_FOUND_RES
+            for match in regex.finditer(description)
+        ]
+        listed = [
+            match["artifact"]
+            for artifacts in MAVEN_UNRESOLVED_LIST_RE.finditer(description)
+            for match in MAVEN_LISTED_ARTIFACT_RE.finditer(artifacts["artifacts"])
+        ]
+        if (
+            MAVEN_TRANSFER_FAILED_RE.search(description)
+            or (listed and not missing)
+            or (not missing and (awaiting_cause or not MAVEN_UNRESOLVED_RE.search(description)))
+        ):
+            return None
+        awaiting_cause = not missing
+        if awaiting_cause and MAVEN_HELP_RE.search(error[1]):
+            # The description ends without its cause.
+            return None
+        missing += [(artifact, missing[0][1]) for artifact in listed]
+        for artifact, repository in missing:
+            url = maven_artifact_url(artifact, repository)
+            if url is None or not PROBED_LOCATION_RE.fullmatch(url):
+                return None
+            if url not in urls:
+                urls.append(url)
+    if awaiting_cause or not urls or not all(serves_file(url) for url in urls):
+        return None
+    return f"{urls[0]} exists now."[:200]
+
+
 def transient_reason(log: str) -> str | None:
-    """Return the first line of the given log that shows a transient failure.
+    """Return the line that shows that the failure in the given log is transient.
 
     Only the lines from the last run of Gradle by `gradlew-retry` are examined, if the log
     shows that `gradlew-retry` ran Gradle again.  An earlier run's failure did not cause
     the job's failure, even if it was transient, because `gradlew-retry` ran Gradle again.
-    Of those lines, one shows a transient failure if it matches TRANSIENT_RE, or if it
-    names an artifact that Gradle did not find and the Gradle Plugin Portal is the only
-    location that Gradle searched for it.  Otherwise, the result is as for
-    slow_typechecking_reason or, if that is None, as for gradlew_retry_reason.  The lines
-    that `examined_lines` omits are ignored.
+    Of those lines, one shows a transient failure if it matches TRANSIENT_RE.
+    Otherwise, the result is as for
+    slow_typechecking_reason or, if that is None, as for missing_artifacts_reason or, if
+    that is None, as for maven_missing_artifacts_reason.  The lines that `examined_lines`
+    omits are ignored.
 
     Args:
         log: a log of the failed steps of a CI job.
 
     Returns:
-        The first line that shows a transient failure, without leading whitespace and
-        truncated to 200 characters, or None if there is none.
+        The first line of the log that shows a transient failure, or the line that
+        missing_artifacts_reason or maven_missing_artifacts_reason constructs, without
+        leading whitespace and truncated to 200 characters, or None if the log shows no
+        transient failure.
     """
     lines = examined_lines(log)
     last_retry = max(
         (i for i, line in enumerate(lines) if GRADLEW_RETRY_RETRYING_RE.search(line)), default=-1
     )
     last_run = lines[last_retry + 1 :]
-    for i, line in enumerate(last_run):
+    for line in last_run:
         if TRANSIENT_RE.search(line):
             return line.lstrip()[:200]
-        if i > 0 and SEARCHED_LOCATIONS_RE.match(line):
-            locations = searched_locations(last_run[i + 1 :])
-            if locations and all(loc.startswith(PLUGIN_PORTAL_URL) for loc in locations):
-                return last_run[i - 1].lstrip()[:200]
-    return slow_typechecking_reason(last_run) or gradlew_retry_reason(lines, last_run)
+    return (
+        slow_typechecking_reason(last_run)
+        or missing_artifacts_reason(lines, last_run)
+        or maven_missing_artifacts_reason(last_run)
+    )
 
 
 def classify(files: list[str]) -> int:
@@ -1517,7 +1909,7 @@ def main() -> int:
         "--exit-3-if-reran", action="store_true", help="exit with status 3 if a job was rerun"
     )
     parser.add_argument(
-        "--classify", action="store_true", help="classify log files; contact no server"
+        "--classify", action="store_true", help="classify log files; contact no CI server"
     )
     parser.add_argument("args", nargs="*", metavar="PR | BRANCH | URL | LOG-FILE")
     args = parser.parse_args()
