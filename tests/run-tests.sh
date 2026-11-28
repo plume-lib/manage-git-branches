@@ -87,7 +87,9 @@ RUN_TEST='
 # long test that started last would leave the other processors idle while it
 # finishes.
 printf '%s' "${tests}" | while IFS= read -r test_script; do
-  printf '%s %s\n' "$(wc -c < "${TESTS_DIR}/${test_script}")" "${test_script}"
+  # The arithmetic expansion removes the blanks that some versions of `wc`, such
+  # as macOS's, print before the number.
+  printf '%s %s\n' "$(($(wc -c < "${TESTS_DIR}/${test_script}")))" "${test_script}"
 done | sort -k1,1nr -k2 | cut -d ' ' -f 2- \
   | xargs -n 1 -P "${jobs}" sh -c "${RUN_TEST}" sh "${TESTS_DIR}" "${LOG_DIR}" || true
 
