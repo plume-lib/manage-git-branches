@@ -51,8 +51,16 @@ MAVEN_CENTRAL_ARTIFACT_403 = (
 
 # A location in Maven Central of an artifact that Gradle did not find.
 OPTIONS_POM = "https://repo.maven.apache.org/maven2/org/plumelib/options/3.0.0/options-3.0.0.pom"
+# Gradle's report that it did not resolve the dependencies of a compilation, which
+# precedes its reports of the artifacts that it did not find.
+RESOLUTION_FAILED = (
+    "* What went wrong:\n"
+    "Execution failed for task ':compileJava'.\n"
+    "> Could not resolve all files for configuration ':compileClasspath'."
+)
 # Gradle's report that it did not find the artifact at OPTIONS_POM.
 OPTIONS_NOT_FOUND = (
+    f"{RESOLUTION_FAILED}\n"
     "   > Could not find org.plumelib:options:3.0.0.\n"
     "     Searched in the following locations:\n"
     f"       - {OPTIONS_POM}\n"
@@ -146,12 +154,12 @@ class FakeServer:
     ) -> bytes:
         """Serve the given HTTP request, as request_util.http does.
 
-        A request other than a GET, which reruns jobs, requires credentials.
+        A request other than a GET or a HEAD, which reruns jobs, requires credentials.
 
         Returns:
-            The response body.
+            The response body, which is empty for a HEAD request.
         """
-        if method != "GET":
+        if method not in ("GET", "HEAD"):
             if not headers:
                 raise urllib.error.HTTPError(url, 401, "Unauthorized", Message(), None)
             self.reruns.append(f"{method} {url} {json.dumps(body)}")
@@ -161,6 +169,8 @@ class FakeServer:
             path += "#" + query.split("page-token=")[1].split("&")[0]
         if path not in self.urls:
             raise urllib.error.HTTPError(url, 404, "Not Found", Message(), None)
+        if method == "HEAD":
+            return b""
         response = self.urls[path]
         return (response if isinstance(response, str) else json.dumps(response)).encode()
 
@@ -403,6 +413,7 @@ class RerunTestCase(unittest.TestCase):
     def setUp(self) -> None:
         """Create the FakeServer and install it in place of the real servers."""
         self.server = FakeServer()
+        rerun_failed_ci.server_serves_file.cache_clear()
         for patcher in [
             mock.patch.object(request_util, "http", self.server.http),
             mock.patch.object(request_util, "run", self.server.run),
@@ -453,10 +464,18 @@ class RerunTestCase(unittest.TestCase):
 
 
 class ClassifyTest(unittest.TestCase):
-    """Tests for --classify, which run the script."""
+    """Tests for --classify.
 
-    def classify(self, log: str) -> tuple[int, str]:
+    Most of the tests call main() with a fake server; test_standard_input and test_errors
+    run the script.
+    """
+
+    def classify(self, log: str, existing: tuple[str, ...] = ()) -> tuple[int, str]:
         """Run rerun-failed-ci --classify on a log containing the given text.
+
+        Args:
+            log: the text of a log.
+            existing: the URLs that serve a file; no other URL serves one.
 
         Returns:
             The exit status, and the output after the file name.
@@ -464,10 +483,17 @@ class ClassifyTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
             f.write(log + "\n")
         self.addCleanup(Path(f.name).unlink)
-        result = subprocess.run(
-            [RERUN, "--classify", f.name], capture_output=True, text=True, check=False
-        )
-        return result.returncode, result.stdout.removeprefix(f"{f.name}: ").rstrip("\n")
+        server = FakeServer()
+        server.urls = dict.fromkeys(existing, "")
+        rerun_failed_ci.server_serves_file.cache_clear()
+        output = io.StringIO()
+        with (
+            mock.patch.object(request_util, "http", server.http),
+            mock.patch.object(sys, "argv", ["rerun-failed-ci", "--classify", f.name]),
+            contextlib.redirect_stdout(output),
+        ):
+            status = rerun_failed_ci.main()
+        return status, output.getvalue().removeprefix(f"{f.name}: ").rstrip("\n")
 
     def test_transient(self) -> None:
         """A log that shows a transient failure yields the line that shows it."""
@@ -569,6 +595,7 @@ class ClassifyTest(unittest.TestCase):
             ),
             (
                 (
+                    f"{RESOLUTION_FAILED}\n"
                     "   > Could not find org.slf4j:slf4j-api:1.7.36.\n"
                     "     Searched in the following locations:\n"
                     "       - https://plugins.gradle.org/m2/org/slf4j/slf4j-api/1.7.36/"
@@ -661,6 +688,18 @@ class ClassifyTest(unittest.TestCase):
             (
                 "Could not GET 'https://repo.maven.apache.org/x.pom'. Received status code 404"
                 " from server: Not Found"
+            ),
+            # Gradle searched only the Gradle Plugin Portal for an artifact, but with
+            # `--continue`, it also reported a test failure.
+            (
+                f"{RESOLUTION_FAILED}\n"
+                "   > Could not find org.slf4j:slf4j-api:1.7.36.\n"
+                "     Searched in the following locations:\n"
+                "       - https://plugins.gradle.org/m2/org/slf4j/slf4j-api/1.7.36/"
+                "slf4j-api-1.7.36.pom\n"
+                "* What went wrong:\n"
+                "Execution failed for task ':other:test'.\n"
+                "> There were failing tests. See the report at: file:///a/index.html"
             ),
             # Gradle searched a repository other than the Gradle Plugin Portal, too.
             (
@@ -769,6 +808,239 @@ class ClassifyTest(unittest.TestCase):
         ]:
             with self.subTest(log=log):
                 self.assertEqual(self.classify(log), (1, ""))
+
+    def test_missing_artifact_exists(self) -> None:
+        """A log in which Gradle did not find artifacts that exist now is transient."""
+        spotless_pom = "com/diffplug/spotless/spotless-lib/4.12.0/spotless-lib-4.12.0.pom"
+        spotless_not_found = (
+            "   > Could not find com.diffplug.spotless:spotless-lib:4.12.0.\n"
+            "     Searched in the following locations:\n"
+            f"       - https://plugins.gradle.org/m2/{spotless_pom}\n"
+            f"       - https://repo.maven.apache.org/maven2/{spotless_pom}\n"
+            "     Required by:"
+        )
+        foo_jar = "https://repo.maven.apache.org/maven2/com/example/foo/1.0/foo-1.0.jar"
+        for log, existing, expected in [
+            # Maven Central serves an artifact now that it did not serve to Gradle.
+            (
+                f"{RESOLUTION_FAILED}\n{spotless_not_found}",
+                (f"https://repo.maven.apache.org/maven2/{spotless_pom}",),
+                (0, f"https://repo.maven.apache.org/maven2/{spotless_pom} exists now."),
+            ),
+            # Likewise, for each of two artifacts.
+            (
+                f"{OPTIONS_NOT_FOUND}\n{spotless_not_found}\nBUILD FAILED in 7s",
+                (OPTIONS_POM, f"https://plugins.gradle.org/m2/{spotless_pom}"),
+                (0, f"{OPTIONS_POM} exists now."),
+            ),
+            # `gradlew-retry` reported one artifact, and Maven Central serves the other now.
+            (
+                f"{OPTIONS_NOT_FOUND}\n{spotless_not_found}\n{OPTIONS_EXISTS}",
+                (f"https://repo.maven.apache.org/maven2/{spotless_pom}",),
+                (0, OPTIONS_EXISTS),
+            ),
+            # No location serves an artifact that Gradle did not find.
+            (f"{RESOLUTION_FAILED}\n{spotless_not_found}", (), (1, "")),
+            # Gradle reported no failure, as for `./gradlew dependencies`, so some other
+            # command failed.
+            (
+                f"{spotless_not_found}\nBUILD SUCCESSFUL in 2s\nlint: 3 problems",
+                (f"https://repo.maven.apache.org/maven2/{spotless_pom}",),
+                (1, ""),
+            ),
+            # No location serves one of two artifacts that Gradle did not find, such as a
+            # misspelled one.
+            (f"{OPTIONS_NOT_FOUND}\n{GUAVA_NOT_FOUND}", (OPTIONS_POM,), (1, "")),
+            # Gradle did not find a plugin, so the log does not show where it searched.
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "   > Plugin [id: 'org.example.x', version: '1.0'] was not found in any of"
+                    " the following sources:"
+                ),
+                (OPTIONS_POM,),
+                (1, ""),
+            ),
+            # Gradle's description of the failure ends before "* Try:".
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "* Try:\n"
+                    "> Run with --stacktrace option to get the stack trace."
+                ),
+                (OPTIONS_POM,),
+                (0, f"{OPTIONS_POM} exists now."),
+            ),
+            # Gradle says that it omits a failure with an identical cause.
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "> There is 1 more failure with an identical cause.\n"
+                    "* Try:\n"
+                    "> Run with --stacktrace option to get the stack trace."
+                ),
+                (OPTIONS_POM,),
+                (0, f"{OPTIONS_POM} exists now."),
+            ),
+            # Gradle says that it omits failures with identical causes.
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "> There are 2 more failures with identical causes.\n"
+                    "* Try:\n"
+                    "> Run with --stacktrace option to get the stack trace."
+                ),
+                (OPTIONS_POM,),
+                (0, f"{OPTIONS_POM} exists now."),
+            ),
+            # Gradle lists the locations of a file of an artifact without "- ".
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find foo-1.0.jar (com.example:foo:1.0).\n"
+                    "     Searched in the following locations:\n"
+                    f"         {foo_jar}\n"
+                    "* Try:"
+                ),
+                (foo_jar,),
+                (0, f"{foo_jar} exists now."),
+            ),
+            # Likewise, but no location serves the file.
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find foo-1.0.jar (com.example:foo:1.0).\n"
+                    "     Searched in the following locations:\n"
+                    f"         {foo_jar}"
+                ),
+                (),
+                (1, ""),
+            ),
+            # Gradle did not list where it searched for one of two artifacts.
+            (
+                f"{RESOLUTION_FAILED}\n   > Could not find com.example:bar:1.0.\n"
+                + OPTIONS_NOT_FOUND.removeprefix(f"{RESOLUTION_FAILED}\n"),
+                (OPTIONS_POM,),
+                (1, ""),
+            ),
+            # Gradle reports the failure to find an artifact under another cause.
+            (
+                (
+                    "* What went wrong:\n"
+                    "Execution failed for task ':app:compileKotlin'.\n"
+                    "> Error while evaluating property 'filteredArgumentsMap' of task"
+                    " ':app:compileKotlin'.\n"
+                    "   > Could not resolve all files for configuration ':app:compileClasspath'.\n"
+                    "      > Could not find org.plumelib:options:3.0.0.\n"
+                    "        Searched in the following locations:\n"
+                    f"          - {OPTIONS_POM}"
+                ),
+                (OPTIONS_POM,),
+                (0, f"{OPTIONS_POM} exists now."),
+            ),
+            # Gradle did not find an artifact that exists now, and with `--continue`, it also
+            # reported a test failure.
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "* What went wrong:\n"
+                    "Execution failed for task ':other:test'.\n"
+                    "> There were failing tests. See the report at: file:///a/index.html"
+                ),
+                (OPTIONS_POM,),
+                (1, ""),
+            ),
+            # Gradle also reported a cause other than an artifact that it did not find.
+            (
+                (
+                    f"{OPTIONS_NOT_FOUND}\n"
+                    "   > Could not resolve com.example:private:1.0.\n"
+                    "      > Could not GET 'https://repo.example.com/com/example/private/1.0/"
+                    "private-1.0.pom'. Received status code 401 from server: Unauthorized\n"
+                    "* Try:\n"
+                    "> Run with --stacktrace option to get the stack trace."
+                ),
+                (OPTIONS_POM,),
+                (1, ""),
+            ),
+            # A location in a repository that is not public is not requested.
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find com.example:foo:1.0.\n"
+                    "     Searched in the following locations:\n"
+                    "       - http://192.168.1.1/com/example/foo/1.0/foo-1.0.pom"
+                ),
+                ("http://192.168.1.1/com/example/foo/1.0/foo-1.0.pom",),
+                (1, ""),
+            ),
+            # No version satisfies a dynamic version, although a version that a rule
+            # rejected exists.
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find any version that matches com.example:foo:2.+.\n"
+                    "     Searched in the following locations:\n"
+                    "       - https://repo.maven.apache.org/maven2/com/example/foo/"
+                    "maven-metadata.xml\n"
+                    "       - https://repo.maven.apache.org/maven2/com/example/foo/2.1/foo-2.1.pom"
+                ),
+                ("https://repo.maven.apache.org/maven2/com/example/foo/2.1/foo-2.1.pom",),
+                (1, ""),
+            ),
+            # No version satisfies a dynamic version, although the artifact's list of
+            # versions exists.
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find any version that matches com.example:foo:2.+.\n"
+                    "     Versions that do not match:\n"
+                    "       - 1.0\n"
+                    "     Searched in the following locations:\n"
+                    "       - https://repo.maven.apache.org/maven2/com/example/foo/"
+                    "maven-metadata.xml"
+                ),
+                ("https://repo.maven.apache.org/maven2/com/example/foo/maven-metadata.xml",),
+                (1, ""),
+            ),
+            # A location that is not an http or https URL is not requested.
+            (
+                (
+                    f"{RESOLUTION_FAILED}\n"
+                    "   > Could not find com.example:foo:1.0.\n"
+                    "     Searched in the following locations:\n"
+                    "       - file:/home/runner/.m2/repository/com/example/foo/1.0/foo-1.0.pom"
+                ),
+                ("file:/home/runner/.m2/repository/com/example/foo/1.0/foo-1.0.pom",),
+                (1, ""),
+            ),
+            # An earlier run of Gradle did not find an artifact, and the last run failed for
+            # another reason.
+            (
+                f"{OPTIONS_NOT_FOUND}\n{GRADLEW_RETRYING}\nerror: cannot find symbol",
+                (OPTIONS_POM,),
+                (1, ""),
+            ),
+        ]:
+            with self.subTest(log=log, existing=existing):
+                self.assertEqual(self.classify(log, existing), expected)
+
+    def test_serves_file_unreachable(self) -> None:
+        """A server that could not be reached is asked again the next time."""
+        rerun_failed_ci.server_serves_file.cache_clear()
+        responses: list[Any] = [TimeoutError("timed out"), b""]
+
+        def http(*_args: Any, **_kwargs: Any) -> bytes:
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        with mock.patch.object(request_util, "http", http):
+            self.assertFalse(rerun_failed_ci.serves_file(OPTIONS_POM))
+            self.assertTrue(rerun_failed_ci.serves_file(OPTIONS_POM))
+            self.assertTrue(rerun_failed_ci.serves_file(OPTIONS_POM))
+        self.assertEqual(responses, [])
 
     def test_standard_input(self) -> None:
         """--classify reads standard input when no file is given."""
