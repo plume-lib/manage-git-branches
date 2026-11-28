@@ -175,6 +175,18 @@ TRANSIENT_PATTERNS = [
 # Matches a line of a log that shows a transient failure.
 TRANSIENT_RE = re.compile("|".join(f"(?:{p})" for p in TRANSIENT_PATTERNS), re.IGNORECASE)
 
+# Matches a line in which GitHub explains, through git, that it refused a request for a
+# reason that recurs on every run, such as "remote: Permission to ORG/REPO.git denied to
+# github-actions[bot].", "remote: Write access to repository not granted.", or "remote:
+# The 'ORG' organization has enabled or enforced SAML SSO.".  Git reports such a refusal
+# as status 403, which TRANSIENT_RE matches, because GitHub also responds with status 403
+# to a client that exceeds its rate limit.
+GITHUB_PERMANENT_REFUSAL_RE = re.compile(
+    r"remote: (Permission to \S+ denied|Write access to repository not granted"
+    r"|.*\bSAML SSO\b|Repository access blocked|Access to this repository has been disabled)",
+    re.IGNORECASE,
+)
+
 # Matches a line that contains the Checker Framework's warning that type-checking one
 # method or class took too long, as in "Foo.java:201: warning:
 # [compilermessages:slow.typechecking] typechecking took 48 seconds; consider making
@@ -643,12 +655,13 @@ def transient_reason(log: str) -> str | None:
     Only the lines from the last run of Gradle by `gradlew-retry` are examined, if the log
     shows that `gradlew-retry` ran Gradle again.  An earlier run's failure did not cause
     the job's failure, even if it was transient, because `gradlew-retry` ran Gradle again.
-    Of those lines, one shows a transient failure if it matches TRANSIENT_RE, or if it
-    names an artifact that Gradle did not find, the Gradle Plugin Portal is the only
-    location that Gradle searched for it, and only_missing_artifacts returns True.
-    Otherwise, the result is as for
-    slow_typechecking_reason or, if that is None, as for missing_artifacts_reason.  The
-    lines that `examined_lines` omits are ignored.
+    If one of those lines matches GITHUB_PERMANENT_REFUSAL_RE, then no line shows a
+    transient failure, because the refusal recurs on every run.  Otherwise, of those
+    lines, one shows a transient failure if it matches TRANSIENT_RE, or if it names an
+    artifact that Gradle did not find, the Gradle Plugin Portal is the only location that
+    Gradle searched for it, and only_missing_artifacts returns True.  Otherwise, the
+    result is as for slow_typechecking_reason or, if that is None, as for
+    missing_artifacts_reason.  The lines that `examined_lines` omits are ignored.
 
     Args:
         log: a log of the failed steps of a CI job.
@@ -663,6 +676,8 @@ def transient_reason(log: str) -> str | None:
         (i for i, line in enumerate(lines) if GRADLEW_RETRY_RETRYING_RE.search(line)), default=-1
     )
     last_run = lines[last_retry + 1 :]
+    if any(GITHUB_PERMANENT_REFUSAL_RE.search(line) for line in last_run):
+        return None
     for i, line in enumerate(last_run):
         if TRANSIENT_RE.search(line):
             return line.lstrip()[:200]
