@@ -600,7 +600,9 @@ options, both of which require
 ## Testing
 
 To run the tests, run `tests/run-tests.sh`.  Each test creates its
-repositories under a temporary directory and removes them afterward.
+repositories under a temporary directory and removes them afterward.  The tests
+run in parallel, one per processor; `tests/run-tests.sh -j JOBS` runs at most
+JOBS at a time.
 
 ## One branch per directory
 

@@ -14,7 +14,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # The tests take about 4 minutes on Ubuntu but 11 to 20 minutes on macOS.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
         with:
