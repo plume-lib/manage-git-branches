@@ -345,7 +345,7 @@ The commands are:
 * [`fix-renovate-prs`](fix-renovate-prs) `[--dry-run] [-C DIR]`:
   For each open pull request that Renovate opened and whose CI fails, in a
   repository that a working copy directory is a clone of, runs
-  `rerun-failed-ci` and then, unless that reran a transient failure, runs
+  `rerun-failed-ci` and then, unless that reran a job, runs
   Claude Code (with every permission) in the directory of the pull
   request's branch, which it makes with `git-checkout-branch --no-pull` if no
   working copy directory has that branch.  Claude either commits a fix, which this
@@ -449,11 +449,11 @@ The commands are:
   This command needs Python 3.11 or later, `gh`, and `pr_status.py`.
 * [`rerun-failed-ci`](rerun-failed-ci)
   `[--dry-run] [--max-attempts N] [--exit-3-if-reran] [PR | BRANCH | URL]...`:
-  For each transient failure of a CI job, reruns it.  Works on the given
-  GitHub pull request (by default, the one for the current branch).  In a
-  clone of a fork, the pull request for a branch can be one in the fork's
-  parent.  A URL names an Azure Pipelines, CircleCI, or GitHub Actions job or
-  workflow.
+  For each transient failure of a CI job, and each cancelled CI job, reruns
+  it.  Works on the given GitHub pull request (by default, the one for the
+  current branch).  In a clone of a fork, the pull request for a branch can
+  be one in the fork's parent.  A URL names an Azure Pipelines, CircleCI, or
+  GitHub Actions job or workflow.
   With `--exit-3-if-reran`, the exit status is 3 if it reran some job.
   `rerun-failed-ci --classify LOG-FILE...` prints the line of each log that
   shows a transient failure.  This command needs Python 3.9 or later and
